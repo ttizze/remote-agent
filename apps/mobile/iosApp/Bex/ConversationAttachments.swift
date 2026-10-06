@@ -127,12 +127,12 @@ private struct ConversationAttachmentTile: View {
                     Image(systemName: attachment.kind == "image" ? "photo" : "doc").frame(width: 72, height: 72)
                 }
             }.clipShape(RoundedRectangle(cornerRadius: 16)).accessibilityLabel("Open \(attachment.name)")
-            Text(attachment.name).font(T3Theme.font(11)).lineLimit(1).frame(width: 88)
+            Text(attachment.name).font(AppTheme.font(11)).lineLimit(1).frame(width: 88)
             if attachment.status == "uploading" {
                 ProgressView().controlSize(.mini)
             }
             if attachment.status == "failed", let perform {
-                Button("Retry") { perform(.retryAttachment(id: attachment.id)) }.font(T3Theme.font(11))
+                Button("Retry") { perform(.retryAttachment(id: attachment.id)) }.font(AppTheme.font(11))
                     .accessibilityHint(attachment.error ?? "Upload failed")
             }
             if let perform {
@@ -140,7 +140,7 @@ private struct ConversationAttachmentTile: View {
                     .labelStyle(.iconOnly)
             }
             if let error {
-                Text(error).font(T3Theme.font(11)).foregroundStyle(T3Theme.color("errorForeground"))
+                Text(error).font(AppTheme.font(11)).foregroundStyle(AppTheme.color("errorForeground"))
             }
         }.quickLookPreview($preview)
             .task(id: attachment.remoteId) {

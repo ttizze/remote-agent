@@ -458,7 +458,7 @@ pub enum FactBody {
         state: DeliveryState,
     },
     /// Delivery only, never stored: a tool item as clients receive it, standing in
-    /// for the fact that started or changed it (T3 WireProjection `turn-item.updated`).
+    /// for the fact that started or changed it.
     ItemProjected {
         item: Item,
     },
@@ -1586,7 +1586,7 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
             None => state.items.push(item.clone()),
         },
     }
-    // Visits and arranging the active list are not thread activity (T3).
+    // Visits and arranging the active list are not thread activity.
     if !matches!(
         fact.body,
         FactBody::ThreadVisited { .. } | FactBody::ThreadActiveReordered { .. }

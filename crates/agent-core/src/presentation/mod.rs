@@ -1,4 +1,4 @@
-//! Native presentation of T3 orchestration, with shared text and diff rendering.
+//! Native presentation of the orchestration, with shared text and diff rendering.
 mod conversation;
 pub use conversation::*;
 pub mod connections;

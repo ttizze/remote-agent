@@ -1,6 +1,5 @@
 use super::*;
 
-/// T3 ClaudeBackgroundWorkBlocksQueryReplacementError.
 pub(crate) const BACKGROUND_BLOCKS_REPLACEMENT: &str = "Claude is still running background agents or commands, and this model or setting change would end them. Wait for them to finish, or press Stop, then send the message again.";
 
 pub(crate) struct ClaudeProcess {
@@ -108,7 +107,8 @@ impl SessionManager {
                 return Ok(entry);
             }
             // Background agents and shells live in the process; replacing it for the
-            // same native session would end them (T3 refuses until they finish or Stop).
+            // same native session would end them, so it's refused until they finish or
+            // Stop.
             let same_session = launch.native_session.is_some()
                 && entry.claude.as_ref().is_some_and(|process| {
                     process.lock().expect("claude process").native == launch.native_session
@@ -189,8 +189,8 @@ impl SessionManager {
         Ok(entry)
     }
 
-    /// T3 openQuery: Claude can switch its own mode (EnterPlanMode), so the
-    /// reused process is put back in the thread's mode before the next prompt.
+    /// Claude can switch its own mode (EnterPlanMode), so the reused process
+    /// is put back in the thread's mode before the next prompt.
     pub(super) async fn restore_mode(
         &self,
         entry: &Entry,
@@ -334,8 +334,8 @@ impl SessionManager {
 }
 
 impl SessionManager {
-    /// T3 forkThread: no fork while a turn of the source runs, and the source's
-    /// live process closes before its transcript is read.
+    /// No fork while a turn of the source runs, and the source's live process
+    /// closes before its transcript is read.
     async fn close_fork_source(
         &self,
         source: &SessionKey,
@@ -415,7 +415,7 @@ pub(super) fn claude_launch(
     }
 }
 
-/// T3 reuses a live query only for the same query policy and model selection;
+/// A live query is reused only for the same query policy and model selection;
 /// any other launch replaces the process.
 fn compatible(current: &ClaudeLaunch, wanted: &ClaudeLaunch) -> bool {
     let key = |launch: &ClaudeLaunch| {

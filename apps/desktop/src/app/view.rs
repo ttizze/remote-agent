@@ -14,7 +14,7 @@ impl Desktop {
     pub(super) fn view(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let conversation = self.conversation.clone();
         h_flex()
-            .id("t3-conversation")
+            .id("conversation")
             .capture_key_down(cx.listener(|view, event: &KeyDownEvent, window, cx| {
                 if view.composer.read(cx).focus_handle(cx).is_focused(window)
                     && view.conversation.composer.can_edit

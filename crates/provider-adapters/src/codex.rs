@@ -1407,7 +1407,7 @@ for line in sys.stdin:
         server.shutdown().await.unwrap();
     }
     #[test]
-    fn runtime_modes_match_t3_without_enlarging_sandbox_permissions() {
+    fn runtime_modes_do_not_enlarge_sandbox_permissions() {
         let model = ModelSelection {
             instance_id: ProviderInstanceId::new("codex").unwrap(),
             model: "test-model".into(),

@@ -14,29 +14,29 @@ struct ConversationMarkdown: View {
                         VStack(alignment: .leading, spacing: 6) {
                             HStack {
                                 Spacer(); Button("Copy") { UIPasteboard.general.string = runs.map(\.text).joined() }
-                                    .font(T3Theme.font(11))
+                                    .font(AppTheme.font(11))
                             }
                             ScrollView(.horizontal) { Text(runs.map(\.text).joined()).font(.system(
                                 size: 13,
                                 design: .monospaced
                             )).textSelection(.enabled) }
                         }.padding(12).background(
-                            T3Theme.color("codeBackground"),
+                            AppTheme.color("codeBackground"),
                             in: RoundedRectangle(cornerRadius: 10)
                         )
-                        .overlay(RoundedRectangle(cornerRadius: 10).stroke(T3Theme.color("border")))
+                        .overlay(RoundedRectangle(cornerRadius: 10).stroke(AppTheme.color("border")))
                     } else {
                         HStack(alignment: .top, spacing: 8) {
                             if let marker = style
                                 .marker {
-                                Text(marker).font(T3Theme.font(16)).foregroundStyle(T3Theme.color("textMuted"))
+                                Text(marker).font(AppTheme.font(16)).foregroundStyle(AppTheme.color("textMuted"))
                             }
                             Text(attributed(runs, header: style.header)).lineSpacing(4).textSelection(.enabled)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                         }.padding(.leading, style.quoted ? 12 : 0)
                             .overlay(alignment: .leading) {
                                 if style.quoted {
-                                    Rectangle().fill(T3Theme.color("border")).frame(width: 2)
+                                    Rectangle().fill(AppTheme.color("border")).frame(width: 2)
                                 }
                             }
                     }
@@ -47,16 +47,16 @@ struct ConversationMarkdown: View {
                                 GridRow { ForEach(Array(cells.enumerated()), id: \.offset) { _, cell in Text(attributed(
                                     cell.runs,
                                     header: nil
-                                )).font(T3Theme.font(12)).textSelection(.enabled) } }
+                                )).font(AppTheme.font(12)).textSelection(.enabled) } }
                             }
-                        }.padding(12).background(T3Theme.color("surface"), in: RoundedRectangle(cornerRadius: 8))
+                        }.padding(12).background(AppTheme.color("surface"), in: RoundedRectangle(cornerRadius: 8))
                     }
                 case let .visualization(path):
-                    Text(path).font(T3Theme.font(12)).foregroundStyle(T3Theme.color("textMuted"))
+                    Text(path).font(AppTheme.font(12)).foregroundStyle(AppTheme.color("textMuted"))
                         .textSelection(.enabled)
                 }
             }
-        }.tint(T3Theme.color("mobileMarkdownLink"))
+        }.tint(AppTheme.color("mobileMarkdownLink"))
             .task(id: source) {
                 let parsed = await Task.detached(priority: .userInitiated) { markdownBlocks(source: source) }.value
                 guard !Task.isCancelled else { return }
@@ -69,7 +69,7 @@ struct ConversationMarkdown: View {
         let size: CGFloat = header == 1 ? 21 : header == 2 ? 19 : header == 3 ? 17 : header != nil ? 15 : 16
         for run in runs {
             var text = AttributedString(run.text)
-            text.font = run.code ? .system(size: 13, design: .monospaced) : T3Theme.font(
+            text.font = run.code ? .system(size: 13, design: .monospaced) : AppTheme.font(
                 size,
                 weight: run.strong || header != nil ? .bold : .regular
             )

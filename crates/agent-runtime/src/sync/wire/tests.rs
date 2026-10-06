@@ -1,5 +1,4 @@
-//! Ported from T3 `WireProjection.test.ts`. T3's items carry their output in
-//! fields; here command, file and tool output is the item text.
+//! Command, file and tool output is the item text.
 use super::*;
 use crate::sync::history::tests::{at, command_rows, item};
 use agent_domain::{
@@ -381,7 +380,7 @@ fn live_item(facts: &[StoredFact]) -> Item {
 }
 
 #[test]
-fn compacts_mcp_envelopes_like_t3() {
+fn compacts_mcp_envelopes() {
     assert_eq!(compact_dynamic_tool_output(&json!({ "ok": true })), None);
     assert_eq!(
         compact_dynamic_tool_output(
@@ -413,7 +412,7 @@ fn compacts_mcp_envelopes_like_t3() {
 }
 
 #[test]
-fn recognizes_failure_text_like_t3() {
+fn recognizes_failure_text() {
     for text in [
         "ENOENT: open",
         "bash: foo: command not found",

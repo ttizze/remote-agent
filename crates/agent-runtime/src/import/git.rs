@@ -1,4 +1,4 @@
-//! Git identity read from `.git` files without spawning git (T3 `@t3tools/shared/git`).
+//! Git identity read from `.git` files without spawning git.
 use super::{EntryKind, TranscriptFs, paths::resolve};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -175,7 +175,7 @@ fn azure_key(host: &str, segments: &[&str]) -> Option<String> {
     })
 }
 
-/// T3 `normalizeGitRemoteUrl`: the key every clone of one repository shares.
+/// The key every clone of one repository shares.
 pub fn normalize_remote_url(value: &str) -> String {
     let trimmed = value.trim().trim_end_matches('/');
     let trimmed = match trimmed.len().checked_sub(4) {

@@ -26,7 +26,6 @@ macro_rules! set {
     };
 }
 
-// T3 Orchestrator.ts thread.metadata.update and runtimeLayer.test.ts lifecycle.
 #[test]
 fn metadata_updates_follow_the_reference_guards() {
     let mut s = state();
@@ -112,8 +111,8 @@ fn metadata_updates_follow_the_reference_guards() {
     );
 }
 
-// T3 runtimeLayer.test.ts: automatic settlement loses to any change made after
-// its snapshot and otherwise settles like a user settle.
+// Automatic settlement loses to any change made after its snapshot and
+// otherwise settles like a user settle.
 #[test]
 fn automatic_settlement_needs_an_unchanged_thread() {
     let mut s = state();
@@ -172,8 +171,8 @@ fn automatic_settlement_needs_an_unchanged_thread() {
     ));
 }
 
-// T3 Orchestrator.ts dispatchMessage sourcePlanRef: a plan on another thread
-// of the project is completed by the run that implements it.
+// A plan on another thread of the project is completed by the run that
+// implements it.
 #[test]
 fn a_message_can_implement_another_threads_plan() {
     let mut source = state();

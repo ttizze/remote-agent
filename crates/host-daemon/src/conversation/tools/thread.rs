@@ -1,5 +1,4 @@
-//! T3's thread toolkit (toolkits/thread/handlers.ts) and the caller checks of
-//! threadAccess.ts.
+//! The thread toolkit and its caller checks.
 use super::orchestrator::{
     interaction_mode_name, latest_active_run, option_selections, resolve_interaction_mode,
     resolve_runtime_mode, runtime_mode_name,
@@ -43,7 +42,8 @@ fn source_point(value: &Value) -> Result<SourcePoint, ToolError> {
 fn run_id(value: &str) -> Result<RunId, ToolError> {
     RunId::new(value).map_err(|e| invalid(e.to_string()))
 }
-/// T3 queuedRun entry: the first `limit` characters (code points) of its text.
+/// An entry for a queued run: the first `limit` characters (code points) of
+/// its text.
 fn queue_entry(state: &State, run: &RunId, limit: usize) -> Option<Value> {
     let run = state
         .runs
@@ -57,7 +57,6 @@ fn queue_entry(state: &State, run: &RunId, limit: usize) -> Option<Value> {
         "truncated": count > limit,
     }))
 }
-/// T3 ContextTransfer.status.
 fn transfer_status(transfer: &agent_domain::Transfer) -> &'static str {
     if transfer.superseded {
         return "superseded";
@@ -426,7 +425,7 @@ impl AgentTools {
         self.command(&thread.id.clone(), command).await
     }
 
-    /// T3 readQuestion: a pending user-input request with its card.
+    /// A pending user-input request with its card.
     fn question<'a>(
         state: &'a State,
         request: &RuntimeRequestId,
@@ -588,7 +587,7 @@ impl AgentTools {
         let input: QueueInput = decode(input)?;
         let run = run_id(&input.queued_run_id)?;
         let command = match name {
-            "t3_queue_edit" => {
+            "queue_edit" => {
                 let text = input.text.ok_or_else(|| invalid("text is required"))?;
                 if text.encode_utf16().count() > 100_000 {
                     return Err(invalid("text must be at most 100000 characters"));
@@ -600,8 +599,8 @@ impl AgentTools {
                     context: None,
                 }
             }
-            "t3_queue_cancel" => Command::CancelQueued { run },
-            "t3_queue_reorder" => Command::ReorderQueued {
+            "queue_cancel" => Command::CancelQueued { run },
+            "queue_reorder" => Command::ReorderQueued {
                 run,
                 before: match input
                     .before_run_id

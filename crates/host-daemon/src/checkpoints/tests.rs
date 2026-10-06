@@ -1,9 +1,8 @@
-//! T3 `checkpointing/CheckpointStore.test.ts` and `Diffs.test.ts`, plus the restore
-//! journal cases of this Host.
+//! Checkpoint store and diff tests, plus the restore journal cases of this Host.
 use super::*;
 
-const FROM: &str = "refs/t3/test/turn/0";
-const TO: &str = "refs/t3/test/turn/1";
+const FROM: &str = "refs/test/turn/0";
+const TO: &str = "refs/test/turn/1";
 
 async fn repo() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
@@ -201,7 +200,7 @@ async fn preserves_file_paths_and_turn_ranges_without_changing_the_user_index() 
     git(cwd, &["config", "diff.renames", "copies"], None)
         .await
         .unwrap();
-    let (baseline, first, second) = (FROM, TO, "refs/t3/test/turn/2");
+    let (baseline, first, second) = (FROM, TO, "refs/test/turn/2");
     let copied: String = (0..20)
         .map(|index| format!("copy line {index}\n"))
         .collect();
@@ -394,7 +393,7 @@ async fn checkpoint_files_summarize_the_changes_between_two_refs() {
         ]
     );
     assert!(store.files(cwd, FROM, FROM).await.unwrap().is_empty());
-    assert!(store.files(cwd, "refs/t3/test/missing", TO).await.is_err());
+    assert!(store.files(cwd, "refs/test/missing", TO).await.is_err());
 }
 
 #[tokio::test]
@@ -544,7 +543,7 @@ async fn references_can_be_checked_deleted_and_captured_again() {
     store.capture(cwd, TO).await.unwrap();
     assert!(store.has(cwd, TO).await.unwrap());
     store
-        .delete(cwd, &[TO.to_owned(), "refs/t3/test/missing".into()])
+        .delete(cwd, &[TO.to_owned(), "refs/test/missing".into()])
         .await
         .unwrap();
     assert!(!store.has(cwd, TO).await.unwrap());
@@ -612,5 +611,5 @@ async fn sparse_capture_preserves_excluded_files_and_refuses_non_cone() {
     )
     .await
     .unwrap();
-    assert!(store.capture(cwd, "refs/t3/test/turn/2").await.is_err());
+    assert!(store.capture(cwd, "refs/test/turn/2").await.is_err());
 }

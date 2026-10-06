@@ -558,8 +558,8 @@ impl Replay {
             .clone()
     }
 
-    /// The user forks `parent` through the run that ended at `head`. As in T3,
-    /// the provider forks when the child sends its first message.
+    /// The user forks `parent` through the run that ended at `head`. The
+    /// provider forks when the child sends its first message.
     async fn fork(&self, parent: &ThreadId, head: Option<&str>) -> ThreadId {
         let through_run = Self::run_at(&*self.rig.state(parent).await, head);
         let target = {
@@ -1437,7 +1437,6 @@ async fn background_command_and_monitor_replays_keep_roster_notifications_and_wa
         }
     }
 }
-// T3 fixtures/tool_call_read_only_on_request/output.ts.
 #[tokio::test(flavor = "multi_thread")]
 async fn read_only_on_request_replays_ask_once_and_run_the_approved_write() {
     const PROBE_FILE: &str = ".codex-probe-write-action.txt";
@@ -1492,7 +1491,6 @@ async fn read_only_on_request_replays_ask_once_and_run_the_approved_write() {
         );
     }
 }
-// T3 fixtures/tool_call_restricted_granular/output.ts and claude_output.ts.
 #[tokio::test(flavor = "multi_thread")]
 async fn restricted_granular_replays_resolve_one_request_of_the_reference_kind() {
     for (driver, kind) in [(Driver::Codex, "file-change"), (Driver::Claude, "command")] {
@@ -1541,7 +1539,6 @@ async fn restricted_granular_replays_resolve_one_request_of_the_reference_kind()
         }
     }
 }
-// T3 fixtures/tool_call_denied_write/claude_output.ts.
 #[tokio::test(flavor = "multi_thread")]
 async fn denied_write_replay_declines_once_and_fails_the_write() {
     let replay = run("tool_call_denied_write", Driver::Claude).await;
@@ -1807,7 +1804,7 @@ async fn local_bash_task_replay_keeps_command_output_without_child_threads() {
         .find(|i| matches!(i.kind, ItemKind::CommandExecution { .. }))
         .unwrap();
     assert!(
-        matches!(&tool.kind,ItemKind::CommandExecution { command,.. } if command.contains("vp run --filter @t3tools/web typecheck"))
+        matches!(&tool.kind,ItemKind::CommandExecution { command,.. } if command.contains("vp run --filter @acme/web typecheck"))
     );
     assert!(tool.text.contains("tsgo --noEmit"));
 }
@@ -2448,8 +2445,8 @@ impl Outcome {
     }
 }
 
-// T3 ThreadFork.integration.test.ts: native forks keep the selected boundary,
-// and sibling forks keep separate deltas.
+// Native forks keep the selected boundary, and sibling forks keep separate
+// deltas.
 #[tokio::test(flavor = "multi_thread")]
 async fn native_fork_replays_preserve_the_selected_boundary_and_keep_sibling_deltas_separate() {
     for driver in [Driver::Codex, Driver::Claude] {
@@ -2503,8 +2500,7 @@ async fn native_fork_replays_preserve_the_selected_boundary_and_keep_sibling_del
     }
 }
 
-// T3 ProviderRollback / ThreadFork integration: rollback hides the discarded
-// local items and keeps the native boundary.
+// Rollback hides the discarded local items and keeps the native boundary.
 #[tokio::test(flavor = "multi_thread")]
 async fn rollback_replays_hide_discarded_local_items_and_preserve_the_native_boundary() {
     for (scenario, driver) in [
@@ -2545,8 +2541,8 @@ async fn rollback_replays_hide_discarded_local_items_and_preserve_the_native_bou
     }
 }
 
-// T3 ThreadMergeBack.integration.test.ts: each merge delivers only its fork's
-// delta and the source conversation stays intact.
+// Each merge delivers only its fork's delta and the source conversation
+// stays intact.
 #[tokio::test(flavor = "multi_thread")]
 async fn merge_back_replays_deliver_only_each_fork_delta_and_preserve_source_conversation() {
     for driver in [Driver::Codex, Driver::Claude] {
@@ -2601,7 +2597,7 @@ async fn merge_back_replays_deliver_only_each_fork_delta_and_preserve_source_con
                         .all(|m| m.thread == transfer.source.as_str())
                 );
             }
-            // T3 asserts the injected history: one fork prompt and its stored reply.
+            // Asserts the injected history: one fork prompt and its stored reply.
             if driver == Driver::Codex {
                 let injected = replay.replay.injected.lock().unwrap().clone();
                 assert_eq!(injected.len(), source.transfers.len());
@@ -2633,8 +2629,7 @@ async fn merge_back_replays_deliver_only_each_fork_delta_and_preserve_source_con
     }
 }
 
-// T3 OrchestratorMcp delegated task status integration: the original result
-// stays stable while follow-ups run and queue.
+// The original result stays stable while follow-ups run and queue.
 #[tokio::test(flavor = "multi_thread")]
 async fn delegated_task_status_replay_keeps_the_original_result_while_followups_run_and_queue() {
     let mut replay = Replay::start("delegated_task_status", Driver::Codex).await;

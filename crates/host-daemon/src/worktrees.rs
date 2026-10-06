@@ -258,8 +258,8 @@ impl Worktrees {
     }
 }
 
-/// The commit a worktree "started from origin" begins at (T3 ThreadLaunchService):
-/// the fetched origin branch, or the local `base_ref` when origin has no such branch.
+/// The commit a worktree "started from origin" begins at: the fetched origin
+/// branch, or the local `base_ref` when origin has no such branch.
 fn origin_start(cwd: &Path, base_ref: &str) -> Result<String> {
     fetch_origin(cwd, base_ref)?;
     let remote = format!("refs/remotes/origin/{base_ref}");
@@ -274,9 +274,9 @@ fn origin_start(cwd: &Path, base_ref: &str) -> Result<String> {
     .to_owned())
 }
 
-/// T3 `GitVcsDriver.fetchRemote` for `origin`: the branch, or every branch when
-/// origin has no such branch. Failures report a fixed diagnosis, never Git's output,
-/// which can contain remote credentials.
+/// Fetches `origin`: the branch, or every branch when origin has no such
+/// branch. Failures report a fixed diagnosis, never Git's output, which can
+/// contain remote credentials.
 fn fetch_origin(cwd: &Path, base_ref: &str) -> Result<()> {
     let fetch = |refspec: Option<&str>| {
         let mut command = std::process::Command::new("git");
@@ -320,7 +320,7 @@ fn fetch_origin(cwd: &Path, base_ref: &str) -> Result<()> {
     }
 }
 
-/// T3 `fetchFailureDetail`: a fixed diagnosis for recognized fetch failures.
+/// A fixed diagnosis for recognized fetch failures.
 fn fetch_failure_detail(stderr: &str) -> Option<&'static str> {
     // `prefix` followed by a word boundary (a regex `\b`).
     fn word(line: &str, prefix: &str) -> bool {
@@ -1156,8 +1156,8 @@ mod tests {
         );
     }
 
-    // T3 ThreadLaunchService: "Start from origin" fetches only when the repository
-    // has an origin, and starts from the local base when origin lacks the branch.
+    // "Start from origin" fetches only when the repository has an origin, and
+    // starts from the local base when origin lacks the branch.
     #[tokio::test]
     async fn starting_from_origin_falls_back_to_the_local_base() {
         let upstream = repository();
@@ -2089,7 +2089,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn conversation_settings_persist_with_t3_defaults_and_bounds() {
+    async fn conversation_settings_persist_with_defaults_and_bounds() {
         use agent_protocol::models::AutoSettle;
         let directory = tempfile::tempdir().unwrap();
         let state = directory.path().join("projects.json");

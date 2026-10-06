@@ -1,5 +1,5 @@
 //! `subscribeThread`: a snapshot or a bounded replay, an optional completion marker,
-//! then the facts of every later commit. Ported from T3 `ThreadStream.ts` and ws.ts.
+//! then the facts of every later commit.
 use super::history::{PagePolicy, bounded_state};
 use super::live::{LIVE_STREAM_MAX_BYTES, LIVE_STREAM_MAX_ITEMS, LiveReceiver};
 use super::wire::client_state;

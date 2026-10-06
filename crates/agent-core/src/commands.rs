@@ -1,4 +1,4 @@
-//! Pure conversion of native actions into T3 domain commands.
+//! Pure conversion of native actions into domain commands.
 use crate::state::{Draft, QuestionAnswer, ThreadAction};
 use orchestration::*;
 
@@ -150,7 +150,7 @@ pub fn attachment_mime(name: &str) -> &'static str {
 mod tests {
     use super::*;
     #[test]
-    fn plan_follow_up_matches_t3_implement_refine_and_new_thread() {
+    fn plan_follow_up_offers_implement_refine_and_new_thread() {
         assert_eq!(
             plan_follow_up(" ", " # Plan ", false),
             (

@@ -1,6 +1,5 @@
 //! What the tools read and change: the runtime's threads, the Host's projects and
-//! the live provider catalog (T3 ThreadManagementService, ProjectService and
-//! ProviderRegistry).
+//! the live provider catalog.
 use super::ModelCatalog;
 use crate::conversation::ProjectCatalog;
 use agent_domain::{Command, CommandId, Reply, State, ThreadId, ThreadShell};
@@ -13,21 +12,20 @@ use futures_util::future::BoxFuture;
 use serde_json::{Value, json};
 use std::{path::PathBuf, sync::Arc};
 
-/// A committed command: its reply and the global sequence T3 reports.
+/// A committed command: its reply and the global sequence number.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Dispatched {
     pub(crate) reply: Reply,
     pub(crate) sequence: u64,
 }
 
-/// T3 ServerProvider, reduced to what capability reporting and target
-/// resolution read.
+/// Reduced to what capability reporting and target resolution read.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ProviderSnapshot {
     pub(crate) instance: String,
     pub(crate) driver: String,
     pub(crate) display_name: Option<String>,
-    /// A V2 adapter serves the instance (T3 ProviderAdapterRegistryV2).
+    /// A V2 adapter serves the instance.
     pub(crate) adapter: bool,
     pub(crate) enabled: bool,
     pub(crate) installed: bool,
@@ -41,7 +39,7 @@ pub(crate) struct ProviderSnapshot {
 pub(crate) struct ProviderModel {
     pub(crate) slug: String,
     pub(crate) name: Option<String>,
-    /// Option descriptors; `None` skips option validation as T3 does.
+    /// Option descriptors; `None` skips option validation.
     pub(crate) options: Option<Vec<Value>>,
 }
 

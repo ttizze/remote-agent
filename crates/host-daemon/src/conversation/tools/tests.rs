@@ -1,6 +1,4 @@
-//! T3's MCP service and toolkit tests (OrchestratorMcpService.test.ts,
-//! OrchestratorMcpService.activity.test.ts, ThreadMetadataMcpService.test.ts and
-//! toolkits/*.test.ts) over a fake orchestration backend.
+//! MCP service and toolkit tests over a fake orchestration backend.
 use super::backend::{Dispatched, Orchestration, ProjectFailure, ProviderModel, ProviderSnapshot};
 use super::*;
 use agent_domain::{
@@ -969,7 +967,7 @@ async fn read_thread_prefers_the_activity_run_status_over_a_newer_cancelled_queu
         let result = call(
             &tools,
             "thread-mcp-orchestrator-parent",
-            "t3_thread_read",
+            "thread_read",
             json!({"threadId":"thread-mcp-orchestrator-parent"}),
         )
         .await;
@@ -983,7 +981,7 @@ async fn read_thread_prefers_the_activity_run_status_over_a_newer_cancelled_queu
 async fn read_thread_reaches_a_thread_the_user_attached_as_context_but_not_one_an_agent_attached() {
     let fake = Arc::new(Fake::default());
     let attaching = |id: &str, by: MessageAuthor, target: &str| {
-        let mut attached = message(id, None, Role::User, "[Attached](t3-context://v1/thread/x)");
+        let mut attached = message(id, None, Role::User, "[Attached](context://v1/thread/x)");
         attached.created_by = by;
         attached.context = Some(agent_domain::MessageContext {
             version: 1,
@@ -1034,7 +1032,7 @@ async fn read_thread_reaches_a_thread_the_user_attached_as_context_but_not_one_a
     let attached = call(
         &tools,
         "thread:parent",
-        "t3_thread_read",
+        "thread_read",
         json!({"threadId":"thread:foreign"}),
     )
     .await;
@@ -1051,7 +1049,7 @@ async fn read_thread_reaches_a_thread_the_user_attached_as_context_but_not_one_a
     let denied = call(
         &tools,
         "thread:parent",
-        "t3_thread_read",
+        "thread_read",
         json!({"threadId":"thread:agent-only"}),
     )
     .await;
@@ -1059,7 +1057,7 @@ async fn read_thread_reaches_a_thread_the_user_attached_as_context_but_not_one_a
     let write = call(
         &tools,
         "thread:parent",
-        "t3_thread_send",
+        "thread_send",
         json!({"threadId":"thread:foreign","message":"hi"}),
     )
     .await;
@@ -1108,7 +1106,7 @@ async fn thread_update_reports_an_absent_or_unreadable_calling_thread() {
     let absent = call(
         &tools,
         "thread:metadata-caller",
-        "t3_thread_update",
+        "thread_update",
         input.clone(),
     )
     .await;
@@ -1117,7 +1115,7 @@ async fn thread_update_reports_an_absent_or_unreadable_calling_thread() {
         .lock()
         .unwrap()
         .insert(ThreadId::new("thread:metadata-caller").unwrap());
-    let unreadable = call(&tools, "thread:metadata-caller", "t3_thread_update", input).await;
+    let unreadable = call(&tools, "thread:metadata-caller", "thread_update", input).await;
     assert_eq!(code(&unreadable), "orchestration_error");
     assert!(fake.commands().is_empty());
 }
@@ -1134,15 +1132,15 @@ async fn thread_update_validates_each_action_and_links_pull_requests() {
         json!({"action":"regenerate_title","title":"x"}),
         json!({"action":"link_pull_request","pullRequest":{"repository":"a/b","number":1,"url":"ftp://x/1"}}),
     ] {
-        let result = call(&tools, "thread:caller", "t3_thread_update", invalid.clone()).await;
+        let result = call(&tools, "thread:caller", "thread_update", invalid.clone()).await;
         assert_eq!(result["_tag"], "AiError", "{invalid}");
         assert_eq!(result["reason"]["_tag"], "ToolParameterValidationError");
     }
     let linked = call(
         &tools,
         "thread:caller",
-        "t3_thread_update",
-        json!({"action":"link_pull_request","pullRequest":{"repository":"pingdotgg/t3code","number":8689,"url":"https://github.com/pingdotgg/t3code/pull/8689"},"clientRequestId":"link"}),
+        "thread_update",
+        json!({"action":"link_pull_request","pullRequest":{"repository":"pingdotgg/widget","number":8689,"url":"https://github.com/pingdotgg/widget/pull/8689"},"clientRequestId":"link"}),
     )
     .await;
     assert_eq!(linked["action"], "link_pull_request");
@@ -1176,12 +1174,12 @@ fn publishes_unique_tool_names_with_reference_free_object_root_inputs() {
         );
         assert!(!tool["description"].as_str().unwrap().is_empty());
     }
-    assert!(names.contains("t3_thread_launch"));
-    assert!(!names.contains("t3_thread_start"));
+    assert!(names.contains("thread_launch"));
+    assert!(!names.contains("thread_start"));
 }
 
 #[test]
-fn orchestrator_tool_guidance_matches_t3() {
+fn orchestrator_tool_descriptions_separate_delegation_from_threads() {
     let tools = super::tools();
     let find = |name: &str| {
         tools
@@ -1212,7 +1210,7 @@ fn orchestrator_tool_guidance_matches_t3() {
     assert!(create.contains("not delegation"));
     assert!(create.contains("call delegate_task"));
     assert!(
-        find("t3_thread_send")["description"]
+        find("thread_send")["description"]
             .as_str()
             .unwrap()
             .contains("Do not use a delegated task's childThreadId to start another review round")
@@ -1236,7 +1234,7 @@ fn orchestrator_tool_guidance_matches_t3() {
             .unwrap()
             .contains("does not cancel the child")
     );
-    let update = find("t3_thread_update");
+    let update = find("thread_update");
     assert_eq!(update["inputSchema"]["type"], "object");
     let mut keys: Vec<_> = update["inputSchema"]["properties"]
         .as_object()
@@ -1272,19 +1270,97 @@ fn orchestrator_tool_guidance_matches_t3() {
         find("delegate_task")["annotations"]["destructiveHint"],
         true
     );
-    assert_eq!(find("t3_thread_read")["annotations"]["readOnlyHint"], false);
+    assert_eq!(find("thread_read")["annotations"]["readOnlyHint"], false);
 }
 
 #[test]
-fn a_read_only_claude_sandbox_pre_approves_every_read_only_tool() {
-    for tool in read_only_tools() {
-        assert!(
-            crate::conversation::sessions::CLAUDE_READ_ONLY_TOOLS.contains(&tool.as_str()),
-            "{tool}"
-        );
+fn a_read_only_claude_sandbox_pre_approves_only_read_only_served_tools() {
+    let read_only = read_only_tools();
+    for tool in ["orchestrator_capabilities", "thread_list", "queue_read"] {
+        assert!(read_only.iter().any(|name| name == tool), "{tool}");
+    }
+    for tool in ["thread_send", "delegate_task", "project_create"] {
+        assert!(!read_only.iter().any(|name| name == tool), "{tool}");
     }
 }
 
+/// Every snake_case name the provider instructions and tool descriptions
+/// mention is a served tool, a provider-native tool or a known non-tool term.
+#[test]
+fn instructions_and_descriptions_name_only_served_tools() {
+    use agent_domain::InteractionMode;
+    let mut served: HashSet<String> = super::tools()
+        .into_iter()
+        .map(|tool| tool["name"].as_str().unwrap().to_owned())
+        .collect();
+    served.insert(
+        crate::browser::mcp::tool()["name"]
+            .as_str()
+            .unwrap()
+            .to_owned(),
+    );
+    let codex_native = ["request_user_input", "update_plan"];
+    let tags = ["runtime_info", "collaboration_mode", "proposed_plan"];
+    let values = [
+        "existing_worktree",
+        "link_pull_request",
+        "unlink_pull_request",
+        "regenerate_title",
+        "waiting_for_children",
+        "result_available",
+    ];
+    let mut texts = vec![
+        agent_providers::ORCHESTRATION_INSTRUCTIONS.to_owned(),
+        agent_providers::BROWSER_TOOL_INSTRUCTIONS.to_owned(),
+        agent_providers::claude_append_system_prompt(true),
+        agent_providers::codex_additional_context("gpt-5.4", "high", true).to_string(),
+        agent_providers::codex_developer_instructions(InteractionMode::Plan).to_owned(),
+        agent_providers::codex_developer_instructions(InteractionMode::Default).to_owned(),
+    ];
+    fn descriptions(value: &Value, texts: &mut Vec<String>) {
+        match value {
+            Value::Object(map) => {
+                for (key, value) in map {
+                    match (key.as_str(), value) {
+                        ("description", Value::String(text)) => texts.push(text.clone()),
+                        _ => descriptions(value, texts),
+                    }
+                }
+            }
+            Value::Array(values) => values.iter().for_each(|value| descriptions(value, texts)),
+            _ => {}
+        }
+    }
+    for tool in super::tools() {
+        descriptions(&tool, &mut texts);
+    }
+    let names = regex::Regex::new(r"\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b").unwrap();
+    let keys = [
+        "orchestration_instructions",
+        "runtime_instructions",
+        "browser_instructions",
+    ];
+    let mut mentioned = HashSet::new();
+    for text in &texts {
+        let text = text.replace("mcp__orchestration__", "");
+        for name in names.find_iter(&text) {
+            mentioned.insert(name.as_str().to_owned());
+        }
+    }
+    for name in &mentioned {
+        assert!(
+            served.contains(name)
+                || codex_native.contains(&name.as_str())
+                || tags.contains(&name.as_str())
+                || values.contains(&name.as_str())
+                || keys.contains(&name.as_str()),
+            "{name} is not a served tool"
+        );
+    }
+    for tool in ["thread_launch", "delegate_task", "bex_browser"] {
+        assert!(mentioned.contains(tool), "{tool}");
+    }
+}
 #[tokio::test]
 async fn returns_a_bounded_public_failure_without_serializing_storage_causes() {
     let fake = Arc::new(Fake::default());
@@ -1296,7 +1372,7 @@ async fn returns_a_bounded_public_failure_without_serializing_storage_causes() {
     let result = call(
         &tools,
         "mcp-core-thread",
-        "t3_thread_organize",
+        "thread_organize",
         json!({"action":"pin"}),
     )
     .await;
@@ -1314,7 +1390,7 @@ async fn launches_threads_from_a_full_access_caller_and_scratch_threads_into_cha
     let launched = call(
         &tools,
         "source-thread",
-        "t3_thread_launch",
+        "thread_launch",
         json!({"title":"Audit","message":"Review the change"}),
     )
     .await;
@@ -1327,7 +1403,7 @@ async fn launches_threads_from_a_full_access_caller_and_scratch_threads_into_cha
     let scratch = call(
         &tools,
         "source-thread",
-        "t3_thread_launch",
+        "thread_launch",
         json!({"title":"Notes","scratch":true,"message":"Draft a list"}),
     )
     .await;
@@ -1356,7 +1432,7 @@ async fn launches_threads_from_a_full_access_caller_and_scratch_threads_into_cha
     let rejected = call(
         &tools,
         "source-thread",
-        "t3_thread_launch",
+        "thread_launch",
         json!({"title":"Notes","scratch":true,"projectId":"project"}),
     )
     .await;
@@ -1368,7 +1444,7 @@ async fn launches_threads_from_a_full_access_caller_and_scratch_threads_into_cha
     let denied = call(
         &tools,
         "source-thread",
-        "t3_thread_launch",
+        "thread_launch",
         json!({"title":"Audit"}),
     )
     .await;
@@ -1383,7 +1459,7 @@ async fn creates_projects_from_a_path_and_rejects_fields_it_cannot_apply() {
     let created = call(
         &tools,
         "source-thread",
-        "t3_project_create",
+        "project_create",
         json!({"title":"Existing","workspaceRoot":"/work/existing"}),
     )
     .await;
@@ -1395,7 +1471,7 @@ async fn creates_projects_from_a_path_and_rejects_fields_it_cannot_apply() {
     let scripted = call(
         &tools,
         "source-thread",
-        "t3_project_create",
+        "project_create",
         json!({"title":"Scripted","workspaceRoot":"/work/scripted","scripts":[script(" vp install ")]}),
     )
     .await;
@@ -1409,7 +1485,7 @@ async fn creates_projects_from_a_path_and_rejects_fields_it_cannot_apply() {
     let read = call(
         &tools,
         "source-thread",
-        "t3_project_read",
+        "project_read",
         json!({"projectId":"project:Scripted"}),
     )
     .await;
@@ -1417,7 +1493,7 @@ async fn creates_projects_from_a_path_and_rejects_fields_it_cannot_apply() {
     let blank = call(
         &tools,
         "source-thread",
-        "t3_project_create",
+        "project_create",
         json!({"title":"Blank","workspaceRoot":"/work/blank","scripts":[script(" ")]}),
     )
     .await;
@@ -1425,7 +1501,7 @@ async fn creates_projects_from_a_path_and_rejects_fields_it_cannot_apply() {
     let unkept = call(
         &tools,
         "source-thread",
-        "t3_project_create",
+        "project_create",
         json!({"title":"Modelled","workspaceRoot":"/work/modelled","defaultModelSelection":{"instanceId":"codex","model":"gpt-5"}}),
     )
     .await;
@@ -1440,14 +1516,14 @@ async fn creates_projects_from_a_path_and_rejects_fields_it_cannot_apply() {
             .as_object_mut()
             .unwrap()
             .extend(extra.as_object().unwrap().clone());
-        let rejected = call(&tools, "source-thread", "t3_project_create", input).await;
+        let rejected = call(&tools, "source-thread", "project_create", input).await;
         assert_eq!(code(&rejected), "invalid_request");
     }
     assert_eq!(fake.created.lock().unwrap().len(), 2);
 }
 
 #[tokio::test]
-async fn interrupt_picks_the_newest_interruptible_run_and_reports_t3_statuses() {
+async fn interrupt_picks_the_newest_interruptible_run_and_reports_statuses() {
     let fake = Arc::new(Fake::default());
     let mut state = thread_state("thread:target");
     state.runs = vec![
@@ -1460,7 +1536,7 @@ async fn interrupt_picks_the_newest_interruptible_run_and_reports_t3_statuses() 
     let tools = tools(&fake);
     let interrupt = |input: Value| {
         let tools = &tools;
-        async move { call(tools, "thread:caller", "t3_thread_interrupt", input).await }
+        async move { call(tools, "thread:caller", "thread_interrupt", input).await }
     };
     let requested = interrupt(json!({"threadId":"thread:target","reason":"user asked"})).await;
     assert_eq!(
@@ -1513,7 +1589,7 @@ async fn wait_selects_the_latest_run_clamps_its_budget_and_reports_timeouts() {
     let idle = call(
         &tools,
         "thread:caller",
-        "t3_thread_wait",
+        "thread_wait",
         json!({"threadId":"thread:caller"}),
     )
     .await;
@@ -1529,7 +1605,7 @@ async fn wait_selects_the_latest_run_clamps_its_budget_and_reports_timeouts() {
     let timed_out = call(
         &tools,
         "thread:caller",
-        "t3_thread_wait",
+        "thread_wait",
         json!({"threadId":"thread:caller","timeoutMs":1000}),
     )
     .await;
@@ -1540,7 +1616,7 @@ async fn wait_selects_the_latest_run_clamps_its_budget_and_reports_timeouts() {
     let missing = call(
         &tools,
         "thread:caller",
-        "t3_thread_wait",
+        "thread_wait",
         json!({"threadId":"thread:caller","runId":"run:none"}),
     )
     .await;
@@ -1555,7 +1631,7 @@ async fn wait_selects_the_latest_run_clamps_its_budget_and_reports_timeouts() {
     let finished = call(
         &tools,
         "thread:caller",
-        "t3_thread_wait",
+        "thread_wait",
         json!({"threadId":"thread:caller"}),
     )
     .await;
@@ -1596,7 +1672,7 @@ async fn read_defaults_to_fifty_messages_of_twenty_thousand_units_and_pages_long
     let read = call(
         &tools,
         "thread:caller",
-        "t3_thread_read",
+        "thread_read",
         json!({"threadId":"thread:caller"}),
     )
     .await;
@@ -1619,7 +1695,7 @@ async fn read_defaults_to_fifty_messages_of_twenty_thousand_units_and_pages_long
     let rest = call(
         &tools,
         "thread:caller",
-        "t3_thread_read",
+        "thread_read",
         json!({"threadId":"thread:caller","itemId":"item:0","textOffset":20_000}),
     )
     .await;
@@ -1636,7 +1712,7 @@ async fn read_defaults_to_fifty_messages_of_twenty_thousand_units_and_pages_long
     let next = call(
         &tools,
         "thread:caller",
-        "t3_thread_read",
+        "thread_read",
         json!({"threadId":"thread:caller","afterPosition":49}),
     )
     .await;
@@ -1654,17 +1730,17 @@ async fn archived_callers_read_but_cannot_change_threads() {
     let read = call(
         &tools,
         "thread:caller",
-        "t3_thread_read",
+        "thread_read",
         json!({"threadId":"thread:caller"}),
     )
     .await;
     assert_eq!(read["thread"]["archived"], true);
-    let listed = call(&tools, "thread:caller", "t3_thread_list", json!({})).await;
+    let listed = call(&tools, "thread:caller", "thread_list", json!({})).await;
     assert_eq!(listed["total"], 1);
     let organize = call(
         &tools,
         "thread:caller",
-        "t3_thread_organize",
+        "thread_organize",
         json!({"action":"pin"}),
     )
     .await;
@@ -1672,7 +1748,7 @@ async fn archived_callers_read_but_cannot_change_threads() {
     let send = call(
         &tools,
         "thread:caller",
-        "t3_thread_send",
+        "thread_send",
         json!({"threadId":"thread:caller","message":"hi"}),
     )
     .await;
@@ -1712,7 +1788,7 @@ async fn list_orders_newest_first_and_filters_status_settlement_title_and_subage
     other.thread.as_mut().unwrap().project = "project:other".into();
     fake.put(other);
     let tools = tools(&fake);
-    let all = call(&tools, "thread:a", "t3_thread_list", json!({"limit":2})).await;
+    let all = call(&tools, "thread:a", "thread_list", json!({"limit":2})).await;
     assert_eq!(all["projectId"], "project");
     assert_eq!(all["currentThreadId"], "thread:a");
     assert_eq!(all["total"], 3);
@@ -1726,7 +1802,7 @@ async fn list_orders_newest_first_and_filters_status_settlement_title_and_subage
     let completed = call(
         &tools,
         "thread:a",
-        "t3_thread_list",
+        "thread_list",
         json!({"statuses":["completed"]}),
     )
     .await;
@@ -1734,7 +1810,7 @@ async fn list_orders_newest_first_and_filters_status_settlement_title_and_subage
     let idle = call(
         &tools,
         "thread:a",
-        "t3_thread_list",
+        "thread_list",
         json!({"statuses":["idle"],"includeSubagents":false}),
     )
     .await;
@@ -1743,7 +1819,7 @@ async fn list_orders_newest_first_and_filters_status_settlement_title_and_subage
     let active = call(
         &tools,
         "thread:a",
-        "t3_thread_list",
+        "thread_list",
         json!({"settled":false,"titleContains":"  CHI "}),
     )
     .await;
@@ -1774,7 +1850,7 @@ async fn queue_tools_page_read_and_change_queued_messages() {
     }
     fake.put(state);
     let tools = tools(&fake);
-    let first = call(&tools, "thread:caller", "t3_queue_list", json!({"limit":1})).await;
+    let first = call(&tools, "thread:caller", "queue_list", json!({"limit":1})).await;
     assert_eq!(
         first,
         json!({"items":[{"queuedRunId":"run:q0","text":"first","truncated":false}],"nextCursor":1})
@@ -1782,7 +1858,7 @@ async fn queue_tools_page_read_and_change_queued_messages() {
     let second = call(
         &tools,
         "thread:caller",
-        "t3_queue_list",
+        "queue_list",
         json!({"cursor":1,"limit":1}),
     )
     .await;
@@ -1792,7 +1868,7 @@ async fn queue_tools_page_read_and_change_queued_messages() {
     let read = call(
         &tools,
         "thread:caller",
-        "t3_queue_read",
+        "queue_read",
         json!({"queuedRunId":"run:q1"}),
     )
     .await;
@@ -1800,7 +1876,7 @@ async fn queue_tools_page_read_and_change_queued_messages() {
     let missing = call(
         &tools,
         "thread:caller",
-        "t3_queue_read",
+        "queue_read",
         json!({"queuedRunId":"run:thread:caller:active"}),
     )
     .await;
@@ -1808,7 +1884,7 @@ async fn queue_tools_page_read_and_change_queued_messages() {
     let edited = call(
         &tools,
         "thread:caller",
-        "t3_queue_edit",
+        "queue_edit",
         json!({"queuedRunId":"run:q0","text":"changed"}),
     )
     .await;
@@ -1816,35 +1892,35 @@ async fn queue_tools_page_read_and_change_queued_messages() {
     call(
         &tools,
         "thread:caller",
-        "t3_queue_reorder",
+        "queue_reorder",
         json!({"queuedRunId":"run:q1","beforeRunId":"run:q0"}),
     )
     .await;
     call(
         &tools,
         "thread:caller",
-        "t3_queue_reorder",
+        "queue_reorder",
         json!({"queuedRunId":"run:q1","beforeRunId":null}),
     )
     .await;
     call(
         &tools,
         "thread:caller",
-        "t3_queue_cancel",
+        "queue_cancel",
         json!({"queuedRunId":"run:q1"}),
     )
     .await;
     call(
         &tools,
         "thread:caller",
-        "t3_queue_promote_to_steer",
+        "queue_promote_to_steer",
         json!({"queuedRunId":"run:q0","targetRunId":"run:thread:caller:active"}),
     )
     .await;
     let missing_before = call(
         &tools,
         "thread:caller",
-        "t3_queue_reorder",
+        "queue_reorder",
         json!({"queuedRunId":"run:q1"}),
     )
     .await;
@@ -1922,18 +1998,12 @@ async fn pending_request_tools_answer_only_open_user_questions() {
     ));
     fake.put(state);
     let tools = tools(&fake);
-    let list = call(
-        &tools,
-        "thread:caller",
-        "t3_pending_request_list",
-        json!({}),
-    )
-    .await;
+    let list = call(&tools, "thread:caller", "pending_request_list", json!({})).await;
     assert_eq!(list, json!({"requestIds":["request:question"]}));
     let read = call(
         &tools,
         "thread:caller",
-        "t3_pending_request_read",
+        "pending_request_read",
         json!({"requestId":"request:question"}),
     )
     .await;
@@ -1945,7 +2015,7 @@ async fn pending_request_tools_answer_only_open_user_questions() {
         let missing = call(
             &tools,
             "thread:caller",
-            "t3_pending_request_respond",
+            "pending_request_respond",
             json!({"requestId":other,"answers":{"scope":"All"}}),
         )
         .await;
@@ -1954,7 +2024,7 @@ async fn pending_request_tools_answer_only_open_user_questions() {
     call(
         &tools,
         "thread:caller",
-        "t3_pending_request_respond",
+        "pending_request_respond",
         json!({"requestId":"request:question","answers":{"scope":["All"]}}),
     )
     .await;
@@ -1990,7 +2060,7 @@ async fn organize_maps_each_action_and_requires_snooze_time() {
         let result = call(
             &tools,
             "thread:caller",
-            "t3_thread_organize",
+            "thread_organize",
             json!({"action":action}),
         )
         .await;
@@ -1999,7 +2069,7 @@ async fn organize_maps_each_action_and_requires_snooze_time() {
     let snooze = call(
         &tools,
         "thread:caller",
-        "t3_thread_organize",
+        "thread_organize",
         json!({"action":"snooze"}),
     )
     .await;
@@ -2007,7 +2077,7 @@ async fn organize_maps_each_action_and_requires_snooze_time() {
     call(
         &tools,
         "thread:caller",
-        "t3_thread_organize",
+        "thread_organize",
         json!({"action":"snooze","snoozedUntil":"2026-10-04T00:00:00.000Z"}),
     )
     .await;
@@ -2015,7 +2085,7 @@ async fn organize_maps_each_action_and_requires_snooze_time() {
         &tools,
         "thread:caller",
         "claude",
-        "t3_thread_organize",
+        "thread_organize",
         json!({"action":"pin"}),
     )
     .await;
@@ -2044,7 +2114,7 @@ async fn search_returns_only_matches_of_the_calling_project() {
     let result = call(
         &tools,
         "thread:caller",
-        "t3_thread_search",
+        "thread_search",
         json!({"query":"needle"}),
     )
     .await;
@@ -2054,7 +2124,7 @@ async fn search_returns_only_matches_of_the_calling_project() {
     let short = call(
         &tools,
         "thread:caller",
-        "t3_thread_search",
+        "thread_search",
         json!({"query":" n "}),
     )
     .await;
@@ -2062,7 +2132,7 @@ async fn search_returns_only_matches_of_the_calling_project() {
 }
 
 #[tokio::test]
-async fn send_maps_t3_modes_and_rejects_escalation() {
+async fn send_maps_modes_and_rejects_escalation() {
     let fake = Arc::new(Fake::default());
     let mut caller = active_state("thread:caller", "codex");
     caller.thread.as_mut().unwrap().runtime_mode = RuntimeMode::AutoAcceptEdits;
@@ -2072,7 +2142,7 @@ async fn send_maps_t3_modes_and_rejects_escalation() {
     let escalation = call(
         &tools,
         "thread:caller",
-        "t3_thread_send",
+        "thread_send",
         json!({"threadId":"thread:target","message":"hi"}),
     )
     .await;
@@ -2083,7 +2153,7 @@ async fn send_maps_t3_modes_and_rejects_escalation() {
     let steer = call(
         &tools,
         "thread:caller",
-        "t3_thread_send",
+        "thread_send",
         json!({"threadId":"thread:target","message":"hi","mode":"steer"}),
     )
     .await;
@@ -2095,7 +2165,7 @@ async fn send_maps_t3_modes_and_rejects_escalation() {
     let elsewhere = call(
         &tools,
         "thread:caller",
-        "t3_thread_send",
+        "thread_send",
         json!({"threadId":"thread:missing","message":"hi"}),
     )
     .await;
@@ -2103,7 +2173,7 @@ async fn send_maps_t3_modes_and_rejects_escalation() {
     let durable = call(
         &tools,
         "thread:caller",
-        "t3_thread_send",
+        "thread_send",
         json!({"threadId":"thread:target","message":" hi ","clientRequestId":"send-1"}),
     )
     .await;
@@ -2126,13 +2196,7 @@ async fn transfers_and_configuration_read_the_addressed_thread() {
         provider("claude", "claude", Some("claude-sonnet"), true),
     ];
     let tools = tools(&fake);
-    let configuration = call(
-        &tools,
-        "thread:caller",
-        "t3_thread_configuration",
-        json!({}),
-    )
-    .await;
+    let configuration = call(&tools, "thread:caller", "thread_configuration", json!({})).await;
     assert_eq!(
         configuration,
         json!({"threadId":"thread:caller","modelSelection":{"instanceId":"codex","model":"gpt-5.4","options":[{"id":"reasoningEffort","value":"high"}]},"runtimeMode":"full-access","interactionMode":"default"})
@@ -2140,14 +2204,14 @@ async fn transfers_and_configuration_read_the_addressed_thread() {
     call(
         &tools,
         "thread:caller",
-        "t3_thread_configure",
+        "thread_configure",
         json!({"modelSelection":{"instanceId":"codex","model":"gpt-5.5"}}),
     )
     .await;
     call(
         &tools,
         "thread:caller",
-        "t3_thread_configure",
+        "thread_configure",
         json!({"modelSelection":{"instanceId":"claude","model":"claude-sonnet"}}),
     )
     .await;
@@ -2155,7 +2219,7 @@ async fn transfers_and_configuration_read_the_addressed_thread() {
         fake.commands().as_slice(),
         [Command::SelectModel { .. }, Command::SwitchProvider { selection }] if selection.driver == Driver::Claude
     ));
-    let transfers = call(&tools, "thread:caller", "t3_thread_transfers", json!({})).await;
+    let transfers = call(&tools, "thread:caller", "thread_transfers", json!({})).await;
     assert_eq!(transfers, json!({"transfers":[]}));
 }
 
@@ -2170,7 +2234,7 @@ async fn the_bridge_authenticates_its_scope_and_revoked_tokens_stop_working() {
     let request = |token: String| BridgeRequest {
         token,
         invocation: "read".into(),
-        name: "t3_thread_read".into(),
+        name: "thread_read".into(),
         arguments: json!({"threadId":"parent"}),
     };
     assert_eq!(

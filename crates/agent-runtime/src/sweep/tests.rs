@@ -1,5 +1,4 @@
-//! Worker cases ported from T3 `ThreadSettlementService.test.ts` (without pull
-//! request state) and the sweep of `UsageLimitRecoveryWorker.ts`.
+//! Worker cases (without pull request state) and the usage-limit recovery sweep.
 use super::*;
 use crate::store::tests::{selection, temp_store};
 use crate::{ActorContext, ActorHandle};

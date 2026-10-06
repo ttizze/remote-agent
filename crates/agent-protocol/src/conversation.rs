@@ -70,7 +70,7 @@ pub struct LaunchMessage {
     pub creation_source: String,
     /// Shown as the title while a title is generated from this message.
     pub title_seed: Option<String>,
-    /// Inline context records the text links to (T3 `initialMessage.context`).
+    /// Inline context records the text links to.
     pub context: Option<MessageContext>,
 }
 
@@ -144,8 +144,8 @@ pub struct SequencedFact {
     pub fact: Fact,
 }
 
-/// Snapshots, facts and history pages carry the delivery projection (T3
-/// WireProjection): command and tool output is withheld with `output_omitted` /
+/// Snapshots, facts and history pages carry the delivery projection: command
+/// and tool output is withheld with `output_omitted` /
 /// `output_indicates_failure`, file bodies are dropped, subagent text is cut at
 /// 32 KiB, and a fact that changes a tool item arrives as `ItemProjected`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -323,7 +323,7 @@ pub struct GetTurnDiff {
     pub thread_id: ThreadId,
     pub from_run_ordinal: u64,
     pub to_run_ordinal: u64,
-    /// Defaults to true (T3 `CheckpointDiffQuery`).
+    /// Defaults to true.
     pub ignore_whitespace: Option<bool>,
 }
 
@@ -493,7 +493,6 @@ pub enum ConversationError {
     /// Storage or runtime failure; the request may or may not have taken effect.
     #[error("{0}")]
     Unavailable(String),
-    /// T3 `LiveStreamBufferError`.
     #[error("The live event buffer is full. Resume from the last received sequence.")]
     LiveBufferFull,
     /// The checkpoints could not be diffed; carries the diff tool's detail.

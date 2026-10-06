@@ -35,9 +35,9 @@ private struct NativeTerminalView: UIViewRepresentable {
         let view = HostTerminalView(frame: .zero)
         view.terminalDelegate = context.coordinator
         view.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
-        view.nativeBackgroundColor = T3Theme.uiColor("terminalBackground")
-        view.nativeForegroundColor = T3Theme.uiColor("terminalForeground")
-        view.caretColor = T3Theme.uiColor("terminalCursor")
+        view.nativeBackgroundColor = AppTheme.uiColor("terminalBackground")
+        view.nativeForegroundColor = AppTheme.uiColor("terminalForeground")
+        view.caretColor = AppTheme.uiColor("terminalCursor")
         view.accessibilityIdentifier = "terminal.screen"
         return view
     }

@@ -1,5 +1,4 @@
-//! Import of existing Codex and Claude transcripts into registered projects
-//! (T3 `AgentSessionScanner` and `AgentSessionImporter`).
+//! Import of existing Codex and Claude transcripts into registered projects.
 mod fs;
 mod git;
 mod importer;

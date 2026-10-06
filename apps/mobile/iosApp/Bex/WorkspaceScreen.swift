@@ -55,10 +55,10 @@ private struct WorkspaceToolsScreen: View {
                         .selectedThreadId {
                         WorkspaceBrowserScreen(model: model, thread: thread).id(thread)
                     } else {
-                        Text("Start a thread to open its browser.").foregroundStyle(T3Theme.color("textMuted"))
+                        Text("Start a thread to open its browser.").foregroundStyle(AppTheme.color("textMuted"))
                     }
                 } else if model.cwd.isEmpty {
-                    Text("Select a project folder.").foregroundStyle(T3Theme.color("textMuted"))
+                    Text("Select a project folder.").foregroundStyle(AppTheme.color("textMuted"))
                 } else if tab == .terminal {
                     TerminalScreen(model: model, cwd: model.cwd).id(model.cwd)
                 } else {
@@ -66,7 +66,7 @@ private struct WorkspaceToolsScreen: View {
                         .id("\(model.cwd):\(model.snapshot.selectedThreadId() ?? "new")")
                 }
             }
-        }.background(T3Theme.color("canvas")).navigationTitle(tab.label).navigationBarTitleDisplayMode(.inline)
+        }.background(AppTheme.color("canvas")).navigationTitle(tab.label).navigationBarTitleDisplayMode(.inline)
     }
 }
 

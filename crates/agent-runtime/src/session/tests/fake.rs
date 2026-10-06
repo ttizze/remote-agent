@@ -220,7 +220,7 @@ impl FakeHost {
             before_spawn: Mutex::new(None),
             context: Mutex::new(WireContext {
                 cwd: "/workspace".into(),
-                client_name: "T3 Code".into(),
+                client_name: "remote_agent_host".into(),
                 client_version: "test".into(),
                 ..WireContext::default()
             }),

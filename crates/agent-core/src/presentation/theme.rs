@@ -1,4 +1,4 @@
-//! Stock T3 color tokens, captured from the pinned shared theme palette.
+//! Stock color tokens, captured from the pinned shared theme palette.
 use std::collections::HashMap;
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]

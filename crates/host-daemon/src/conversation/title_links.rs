@@ -1,5 +1,5 @@
-//! Linked issue and pull request subjects for title generation (T3
-//! `ThreadTitleLinks.ts` with the GitHub and GitLab `resolveLink`).
+//! Linked issue and pull request subjects for title generation, resolved via
+//! the GitHub and GitLab `resolve_link`.
 use futures_util::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -20,7 +20,7 @@ pub(crate) struct Subject {
 
 /// A pending subject read; `None` output means the subject could not be read.
 pub(crate) type SubjectRead = BoxFuture<'static, Option<Subject>>;
-/// T3 `SourceControlProviderRegistry.resolveLink`: `None` for an unsupported link.
+/// `None` for an unsupported link.
 pub(crate) type ResolveLink = dyn Fn(&url::Url, &str) -> Option<SubjectRead> + Send + Sync;
 
 static GITHUB: LazyLock<regex::Regex> = LazyLock::new(|| {
@@ -45,7 +45,7 @@ fn encode_component(value: &str) -> String {
     encoded
 }
 
-/// The subject as T3 encodes it, title first.
+/// The subject, title first.
 #[derive(Serialize)]
 struct Encoded {
     title: String,
@@ -59,7 +59,7 @@ struct Fields {
     description: Option<String>,
 }
 
-/// Runs a CLI with T3's limits; any failure reads as unavailable.
+/// Runs a CLI with a bounded output size; any failure reads as unavailable.
 fn read_with(
     program: &'static str,
     args: Vec<String>,
@@ -146,9 +146,8 @@ fn utf16_prefix(text: &str, units: usize) -> String {
         .collect()
 }
 
-/// T3 `resolveThreadTitleLinks` over the runtime's link candidates: the first two
-/// links a provider supports, each `url` and its encoded subject, or
-/// `url: unavailable`.
+/// Over the runtime's link candidates: the first two links a provider
+/// supports, each `url` and its encoded subject, or `url: unavailable`.
 pub(crate) async fn title_link_context(
     cwd: &str,
     candidates: &[String],

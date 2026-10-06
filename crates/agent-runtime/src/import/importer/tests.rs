@@ -145,8 +145,8 @@ const IMPORTED: ImportCounts = ImportCounts {
     skipped: 0,
 };
 
-// T3 AgentSessionImporter.test.ts. The fake scanner yields the same transcript on
-// every run; recorded sources are rows, so the second identical record is one row.
+// The fake scanner yields the same transcript on every run; recorded sources
+// are rows, so the second identical record is one row.
 #[tokio::test]
 async fn imports_messages_once_and_preserves_the_provider_native_resume_binding() {
     let h = harness();

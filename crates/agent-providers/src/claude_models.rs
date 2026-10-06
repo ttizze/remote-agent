@@ -247,7 +247,6 @@ mod tests {
                 .collect(),
         }
     }
-    // T3 claudeModelOptions.test.ts and packages/shared model.test.ts.
     #[test]
     fn model_options_compile_suffixes_effort_and_settings() {
         let fable = claude_model_options(&selection(

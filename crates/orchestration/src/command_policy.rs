@@ -1,4 +1,3 @@
-//! Translation of T3 4ee6bfd, orchestration-v2/CommandPolicy.ts.
 use crate::contracts::*;
 
 #[derive(Debug, Clone, PartialEq)]

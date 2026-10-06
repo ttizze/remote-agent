@@ -90,8 +90,8 @@ impl ProjectStore {
         self.save(&projects).await?;
         Ok(Registration::Created(id))
     }
-    /// Applies a project update (T3 `project.update`). A `rootless` project, which
-    /// is not registered, keeps its settings in an entry without roots.
+    /// Applies a project update. A `rootless` project, which is not registered,
+    /// keeps its settings in an entry without roots.
     pub(crate) async fn update(
         &self,
         id: &str,
@@ -135,7 +135,7 @@ impl ProjectStore {
     }
 }
 
-/// Trims the scripts' text fields and rejects empty ones (T3 `TrimmedNonEmptyString`).
+/// Trims the scripts' text fields and rejects empty ones.
 pub(crate) fn valid_scripts(scripts: Vec<ProjectScript>) -> anyhow::Result<Vec<ProjectScript>> {
     let required = |value: String, field: &str| {
         let value = value.trim();
@@ -179,8 +179,8 @@ fn folder_words(text: &str) -> String {
 }
 
 /// Claims a fresh folder of its own for a chat thread under `root`, named from the
-/// UTC `date`, its first message and its id (T3 `ManagedProjectFolders.folderForThread`).
-/// Each folder is created without its parents, so creating it is the claim.
+/// UTC `date`, its first message and its id. Each folder is created without its
+/// parents, so creating it is the claim.
 pub(crate) fn claim_thread_folder(
     root: &Path,
     thread: &str,

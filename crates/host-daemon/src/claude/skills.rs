@@ -1,4 +1,4 @@
-//! The Claude Code skills a prompt can invoke (T3 ClaudeSkills): one directory
+//! The Claude Code skills a prompt can invoke: one directory
 //! per skill with a `SKILL.md`, from `<config dir>/skills` and then
 //! `<cwd>/.claude/skills`, the first of a name winning, switched off by the
 //! `skillOverrides` of the settings files Claude Code merges.
@@ -96,8 +96,8 @@ mod tests {
         std::fs::write(dir.join("SKILL.md"), lines.join("\n")).unwrap();
     }
 
-    // T3 ClaudeSkills.test.ts discovery, precedence and override cases, as the
-    // names a prompt may invoke.
+    // Discovery, precedence and override cases for the names a prompt may
+    // invoke.
     #[test]
     fn discovers_user_and_project_skills_a_prompt_may_invoke() {
         let temp = tempfile::tempdir().unwrap();

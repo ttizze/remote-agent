@@ -333,7 +333,6 @@ mod tests {
             },
         );
     }
-    // T3 ProjectionStore.test.ts shell cases.
     #[test]
     fn shell_presents_unheld_runs_errors_requests_and_activity() {
         assert_eq!(shell(&State::default()), None);

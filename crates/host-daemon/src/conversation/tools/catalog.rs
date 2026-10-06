@@ -1,8 +1,8 @@
-//! The published tool list: T3's orchestrator, thread and project toolkits with
+//! The published tool list: the orchestrator, thread and project toolkits with
 //! their descriptions, input schemas and annotations.
 use serde_json::{Map, Value, json};
 
-/// T3 `Tool` annotations; the defaults are Effect's.
+/// Tool annotations; the defaults are Effect's.
 #[derive(Clone, Copy)]
 struct Hints {
     read_only: bool,
@@ -164,7 +164,7 @@ fn orchestrator() -> Vec<Value> {
         tool(
             "orchestrator_capabilities",
             Some("Get orchestration capabilities"),
-            "List the V2 provider instances and their current models from the same live catalog as the composer, including configured custom models, inherited runtime settings, and app-owned orchestration features available to this T3 thread. For a separate top-level thread in a new or existing worktree, use t3_thread_launch with workspaceStrategy.",
+            "List the V2 provider instances and their current models from the same live catalog as the composer, including configured custom models, inherited runtime settings, and app-owned orchestration features available to this thread. For a separate top-level thread in a new or existing worktree, use thread_launch with workspaceStrategy.",
             json!({}),
             &[],
             READ,
@@ -172,7 +172,7 @@ fn orchestrator() -> Vec<Value> {
         tool(
             "delegate_task",
             Some("Delegate a child task"),
-            "Delegate one task to a T3-owned child agent/subagent of THIS thread and run it with only the supplied task prompt, without copying parent conversation history. Choose providers and models from orchestrator_capabilities, which uses the same live catalog as the composer. Prefer native subagent tools for same-provider work only when they support the chosen model. Use this for any model missing from the native tool, including same-provider work, for cross-provider work, or for explicitly T3-owned child tasks. For every T3 delegated review round, call delegate_task again with the original brief, prior findings, responses, and unresolved objections in the task prompt. Track each round by its own taskId and use a distinct clientRequestId per round, stable across retries of that round. The childThreadId is backing storage, not the target for starting another delegated review round through t3_thread_send. Provider, model, model options (see orchestrator_capabilities), runtime mode, and interaction mode inherit unless target overrides them. Prefer mode='async' for long work; mode='wait' blocks until completion or timeout. timeoutMs on mode=wait is only the parent's wait budget and does not cancel the child. waitTimedOut on that wait call means the timeout fired; keep that taskId and read status on later task_status. An async child's completion wakes this thread through a notification, steered into active turns where supported or queued otherwise, so end the turn instead of polling or spawning watchers; use task_status only when the result is needed mid-turn.",
+            "Delegate one task to a app-owned child agent/subagent of THIS thread and run it with only the supplied task prompt, without copying parent conversation history. Choose providers and models from orchestrator_capabilities, which uses the same live catalog as the composer. Prefer native subagent tools for same-provider work only when they support the chosen model. Use this for any model missing from the native tool, including same-provider work, for cross-provider work, or for explicitly app-owned child tasks. For every delegated review round, call delegate_task again with the original brief, prior findings, responses, and unresolved objections in the task prompt. Track each round by its own taskId and use a distinct clientRequestId per round, stable across retries of that round. The childThreadId is backing storage, not the target for starting another delegated review round through thread_send. Provider, model, model options (see orchestrator_capabilities), runtime mode, and interaction mode inherit unless target overrides them. Prefer mode='async' for long work; mode='wait' blocks until completion or timeout. timeoutMs on mode=wait is only the parent's wait budget and does not cancel the child. waitTimedOut on that wait call means the timeout fired; keep that taskId and read status on later task_status. An async child's completion wakes this thread through a notification, steered into active turns where supported or queued otherwise, so end the turn instead of polling or spawning watchers; use task_status only when the result is needed mid-turn.",
             json!({
                 "task": described(text(Some(120_000)), "Self-contained task for one delegated child agent/subagent."),
                 "target": target(),
@@ -193,7 +193,7 @@ fn orchestrator() -> Vec<Value> {
         tool(
             "task_status",
             Some("Get delegated task status"),
-            "Read a T3-owned delegated task created by this parent thread. childRunId identifies the original delegated run. workState distinguishes working, waiting_for_children, and result_available; a completed turn with live nested work is not a completed task. summary is the final task result, including provider errors on failure, and remains stable after publication. hasPendingChildRuns reports later queued or executing turns in the backing child thread, even after the task is terminal; it does not reopen the task or extend task_cancel to those turns. latestTerminal* provides later non-monitor turn results. Reading a terminal result acknowledges its automatic parent delivery.",
+            "Read a app-owned delegated task created by this parent thread. childRunId identifies the original delegated run. workState distinguishes working, waiting_for_children, and result_available; a completed turn with live nested work is not a completed task. summary is the final task result, including provider errors on failure, and remains stable after publication. hasPendingChildRuns reports later queued or executing turns in the backing child thread, even after the task is terminal; it does not reopen the task or extend task_cancel to those turns. latestTerminal* provides later non-monitor turn results. Reading a terminal result acknowledges its automatic parent delivery.",
             json!({"taskId": string()}),
             &["taskId"],
             Hints {
@@ -206,7 +206,7 @@ fn orchestrator() -> Vec<Value> {
         tool(
             "task_cancel",
             Some("Cancel delegated task"),
-            "Request interruption of an active T3-owned delegated task and dispose its automatic parent delivery. For a terminal task, return its existing status and dispose delivery without interrupting later child-thread runs, even when task_status reports hasPendingChildRuns=true. Published task results remain available. Use t3_thread_interrupt for a later active run.",
+            "Request interruption of an active app-owned delegated task and dispose its automatic parent delivery. For a terminal task, return its existing status and dispose delivery without interrupting later child-thread runs, even when task_status reports hasPendingChildRuns=true. Published task results remain available. Use thread_interrupt for a later active run.",
             json!({
                 "taskId": string(),
                 "reason": json!({"type":"string","maxLength":2000}),
@@ -217,8 +217,8 @@ fn orchestrator() -> Vec<Value> {
         ),
         tool(
             "create_threads",
-            Some("Create T3 threads"),
-            "Create one or more ORDINARY TOP-LEVEL T3 conversations. This is not delegation and does not create child agents/subagents. For delegated work, choose models from orchestrator_capabilities. Prefer native subagents only when they support the chosen model; otherwise call delegate_task, including for same-provider work. Use create_threads for a batch of separate top-level threads sharing this checkout. Prefer t3_thread_launch for a single thread. Both require the user to request separate/new/top-level threads or conversations. Each entry may override provider, model, options, runtime mode, and interaction mode; omitted settings inherit. Project, branch, and worktree always inherit and cannot be overridden here. For independent implementation or a PR stack in its own worktree, use t3_thread_launch with workspaceStrategy instead of asking the agent to create a worktree in its prompt.",
+            Some("Create threads"),
+            "Create one or more ORDINARY TOP-LEVEL conversations. This is not delegation and does not create child agents/subagents. For delegated work, choose models from orchestrator_capabilities. Prefer native subagents only when they support the chosen model; otherwise call delegate_task, including for same-provider work. Use create_threads for a batch of separate top-level threads sharing this checkout. Prefer thread_launch for a single thread. Both require the user to request separate/new/top-level threads or conversations. Each entry may override provider, model, options, runtime mode, and interaction mode; omitted settings inherit. Project, branch, and worktree always inherit and cannot be overridden here. For independent implementation or a PR stack in its own worktree, use thread_launch with workspaceStrategy instead of asking the agent to create a worktree in its prompt.",
             json!({
                 "threads": {
                     "type": "array",
@@ -241,9 +241,9 @@ fn orchestrator() -> Vec<Value> {
             },
         ),
         tool(
-            "t3_thread_list",
-            Some("List T3 threads"),
-            "List T3 threads in the calling thread's project, newest first. Filter by durable run status, title, or settled state (settled=true lists threads the user or auto-settlement moved out of the active list) and paginate with the returned cursor. Threads from other projects are never exposed.",
+            "thread_list",
+            Some("List threads"),
+            "List threads in the calling thread's project, newest first. Filter by durable run status, title, or settled state (settled=true lists threads the user or auto-settlement moved out of the active list) and paginate with the returned cursor. Threads from other projects are never exposed.",
             json!({
                 "statuses": {"type":"array","items":thread_status(),"maxItems":10},
                 "titleContains": text(Some(256)),
@@ -256,9 +256,9 @@ fn orchestrator() -> Vec<Value> {
             READ,
         ),
         tool(
-            "t3_thread_read",
-            Some("Read a T3 thread"),
-            "Read durable state and a paginated timeline from a T3 thread in the calling project, or from a thread the user attached to this conversation as context. The default messages view returns user messages, assistant messages, and proposed plans; activity returns all summarized timeline items. Reading an untruncated terminal assistant result from this parent thread's direct app-owned child acknowledges that child's automatic completion delivery. Continue with afterPosition=nextPosition. Recover long item text with itemId and textOffset=nextTextOffset until nextTextOffset is null; offsets count UTF-16 code units.",
+            "thread_read",
+            Some("Read a thread"),
+            "Read durable state and a paginated timeline from a thread in the calling project, or from a thread the user attached to this conversation as context. The default messages view returns user messages, assistant messages, and proposed plans; activity returns all summarized timeline items. Reading an untruncated terminal assistant result from this parent thread's direct app-owned child acknowledges that child's automatic completion delivery. Continue with afterPosition=nextPosition. Recover long item text with itemId and textOffset=nextTextOffset until nextTextOffset is null; offsets count UTF-16 code units.",
             json!({
                 "threadId": string(),
                 "itemId": string(),
@@ -278,8 +278,8 @@ fn orchestrator() -> Vec<Value> {
             },
         ),
         tool(
-            "t3_thread_update",
-            Some("Update T3 thread metadata"),
+            "thread_update",
+            Some("Update thread metadata"),
             "Update metadata for a thread in the calling project. Omit threadId to update this thread. Use action='rename' with title, action='regenerate_title' with no extra field, action='link_pull_request' with pullRequest, or action='unlink_pull_request'. Workspace and branch changes are intentionally not supported. clientRequestId makes retries idempotent.",
             json!({
                 "threadId": described(string(), "Thread in the calling project. Omit to update the calling thread."),
@@ -306,9 +306,9 @@ fn orchestrator() -> Vec<Value> {
             },
         ),
         tool(
-            "t3_thread_send",
-            Some("Send to a T3 thread"),
-            "Send a message to a T3 thread in the calling project. Do not use a delegated task's childThreadId to start another review round here; use delegate_task with the full review context and a new clientRequestId for that round. Thread messages do not create a new delegated task or reopen a completed task. mode='auto' starts an idle thread, steers a fully active turn, or queues behind a turn that is not yet steerable. Use queue for a separate follow-up turn, steer for an in-flight update, or restart to interrupt-and-restart the active turn. clientRequestId makes retries idempotent.",
+            "thread_send",
+            Some("Send to a thread"),
+            "Send a message to a thread in the calling project. Do not use a delegated task's childThreadId to start another review round here; use delegate_task with the full review context and a new clientRequestId for that round. Thread messages do not create a new delegated task or reopen a completed task. mode='auto' starts an idle thread, steers a fully active turn, or queues behind a turn that is not yet steerable. Use queue for a separate follow-up turn, steer for an in-flight update, or restart to interrupt-and-restart the active turn. clientRequestId makes retries idempotent.",
             json!({
                 "threadId": string(),
                 "message": prompt(),
@@ -322,9 +322,9 @@ fn orchestrator() -> Vec<Value> {
             },
         ),
         tool(
-            "t3_thread_wait",
-            Some("Wait for a T3 thread"),
-            "Wait for a T3 thread run to reach a terminal durable state. Without runId, the latest run at call time is selected; an idle thread returns immediately. Timeout does not interrupt work, so call again or use t3_thread_read/list after timedOut=true. Waiting reports status only and does not acknowledge a delegated result.",
+            "thread_wait",
+            Some("Wait for a thread"),
+            "Wait for a thread run to reach a terminal durable state. Without runId, the latest run at call time is selected; an idle thread returns immediately. Timeout does not interrupt work, so call again or use thread_read/list after timedOut=true. Waiting reports status only and does not acknowledge a delegated result.",
             json!({
                 "threadId": string(),
                 "runId": string(),
@@ -334,9 +334,9 @@ fn orchestrator() -> Vec<Value> {
             READ,
         ),
         tool(
-            "t3_thread_interrupt",
-            Some("Interrupt a T3 thread"),
-            "Request interruption of a running turn in a T3 thread in the calling project. Without runId, the newest interruptible run is selected. Terminal runs and threads without an active turn return without another side effect. clientRequestId makes retries idempotent.",
+            "thread_interrupt",
+            Some("Interrupt a thread"),
+            "Request interruption of a running turn in a thread in the calling project. Without runId, the newest interruptible run is selected. Terminal runs and threads without an active turn return without another side effect. clientRequestId makes retries idempotent.",
             json!({
                 "threadId": string(),
                 "runId": string(),
@@ -366,7 +366,7 @@ fn thread() -> Vec<Value> {
     };
     vec![
         tool(
-            "t3_thread_search",
+            "thread_search",
             None,
             "Search active thread titles and content with the app's existing bounded search. Returns matches in the calling project from the global top matches; other-project matches are omitted, so this may return fewer than limit. No pagination or exhaustive-result guarantee.",
             json!({
@@ -377,7 +377,7 @@ fn thread() -> Vec<Value> {
             READ_ONLY,
         ),
         tool(
-            "t3_thread_fork",
+            "thread_fork",
             None,
             "Fork this thread from a stable run or checkpoint using the existing fork command. The fork inherits the source configuration. Acceptance does not mean a provider turn has completed.",
             json!({"sourcePoint": source_point(), "title": text(None)}),
@@ -385,7 +385,7 @@ fn thread() -> Vec<Value> {
             DEFAULT,
         ),
         tool(
-            "t3_thread_merge_back",
+            "thread_merge_back",
             None,
             "Merge context from this thread back to a related thread in the same project. Existing lineage and transfer rules apply.",
             json!({"targetThreadId": string(), "sourcePoint": source_point()}),
@@ -393,7 +393,7 @@ fn thread() -> Vec<Value> {
             DEFAULT,
         ),
         tool(
-            "t3_thread_transfers",
+            "thread_transfers",
             None,
             "Read context transfer status for a thread in the calling project.",
             optional_thread(),
@@ -401,7 +401,7 @@ fn thread() -> Vec<Value> {
             READ_ONLY,
         ),
         tool(
-            "t3_thread_configuration",
+            "thread_configuration",
             None,
             "Read a thread's provider/model selection and modes in the calling project. orchestrator_capabilities lists available providers and models.",
             optional_thread(),
@@ -409,7 +409,7 @@ fn thread() -> Vec<Value> {
             READ_ONLY,
         ),
         tool(
-            "t3_thread_configure",
+            "thread_configure",
             None,
             "Set this calling thread's provider, model and options with the existing selection command. This does not change permission modes or other threads. Use orchestrator_capabilities to choose a selection.",
             json!({"modelSelection": model_selection()}),
@@ -417,7 +417,7 @@ fn thread() -> Vec<Value> {
             DEFAULT,
         ),
         tool(
-            "t3_pending_request_list",
+            "pending_request_list",
             None,
             "List pending user questions in a thread in the calling project. Approval requests are not included.",
             optional_thread(),
@@ -425,15 +425,15 @@ fn thread() -> Vec<Value> {
             READ_ONLY,
         ),
         tool(
-            "t3_pending_request_read",
+            "pending_request_read",
             None,
-            "Read a pending user question. Answer with t3_pending_request_respond; existing live or message response handling is used.",
+            "Read a pending user question. Answer with pending_request_respond; existing live or message response handling is used.",
             json!({"threadId": string(), "requestId": string()}),
             &["requestId"],
             READ_ONLY,
         ),
         tool(
-            "t3_pending_request_respond",
+            "pending_request_respond",
             None,
             "Answer a pending user-input request using the existing runtime response command. This cannot approve a permission request.",
             json!({"threadId": string(), "requestId": string(), "answers": {"type":"object"}}),
@@ -444,7 +444,7 @@ fn thread() -> Vec<Value> {
             },
         ),
         tool(
-            "t3_thread_organize",
+            "thread_organize",
             Some("Organize a thread"),
             "Pin, snooze, settle, archive, or mark a thread unread in the calling project. Omit threadId for this thread. snooze requires snoozedUntil. Existing thread lifecycle rules apply; this does not schedule a future action.",
             json!({
@@ -456,21 +456,21 @@ fn thread() -> Vec<Value> {
             DEFAULT,
         ),
         tool(
-            "t3_queue_list",
+            "queue_list",
             None,
-            "List queued messages in delivery order. Results are a live offset page; use t3_thread_read for full thread history.",
+            "List queued messages in delivery order. Results are a live offset page; use thread_read for full thread history.",
             json!({"threadId": string(), "cursor": int(0, None), "limit": int(1, Some(100))}),
             &[],
             READ_ONLY,
         ),
         with_schema(
-            "t3_queue_read",
+            "queue_read",
             "Read up to 16,000 characters of a queued message in the calling project.",
             queue_target(json!({}), &[]),
             READ_ONLY,
         ),
         with_schema(
-            "t3_queue_edit",
+            "queue_edit",
             "Replace a queued message's text, preserving its attachments. The service rejects runs that are no longer queued.",
             queue_target(
                 json!({"text": {"type":"string","maxLength":100_000}}),
@@ -479,13 +479,13 @@ fn thread() -> Vec<Value> {
             DEFAULT,
         ),
         with_schema(
-            "t3_queue_cancel",
+            "queue_cancel",
             "Cancel a queued run using the existing queue command.",
             queue_target(json!({}), &[]),
             DEFAULT,
         ),
         with_schema(
-            "t3_queue_reorder",
+            "queue_reorder",
             "Move a queued run before another queued run, or to the end with beforeRunId=null.",
             queue_target(
                 json!({"beforeRunId": {"anyOf":[string(),{"type":"null"}]}}),
@@ -494,7 +494,7 @@ fn thread() -> Vec<Value> {
             DEFAULT,
         ),
         with_schema(
-            "t3_queue_promote_to_steer",
+            "queue_promote_to_steer",
             "Deliver a queued message as steering to the specified active run. Existing provider and run-state rules apply.",
             queue_target(json!({"targetRunId": string()}), &["targetRunId"]),
             DEFAULT,
@@ -505,9 +505,9 @@ fn thread() -> Vec<Value> {
 fn project() -> Vec<Value> {
     vec![
         tool(
-            "t3_thread_launch",
+            "thread_launch",
             None,
-            "Create an ordinary TOP-LEVEL thread with an explicit workspace binding before its agent starts. Use this when the user requests independent work, a new thread, or a PR stack in its own worktree; use delegate_task for child subagents. Set workspaceStrategy to {type:\"worktree\",baseRef:\"parent-branch\",branch:\"new-branch\",startFromOrigin:false} for a new worktree based on local commits, or {type:\"existing_worktree\",worktreePath:\"/absolute/path\",branch:\"existing-branch\"} to use an existing checkout. For upstream commits, set startFromOrigin:true. Omitted workspaceStrategy means the project root, NOT the caller's worktree. Omit projectId/modelSelection/modes to inherit those settings. Set scratch:true instead of projectId for a thread without a project: it runs in a fresh folder of its own, outside any repository. Put the task in message. Do not ask the agent to create its own worktree via shell: that does not update the thread binding. Each call creates a new launch with no retry key; retain threadId and use t3_thread_read/t3_thread_wait to follow preparation. After errors or lost responses, inspect t3_thread_list before retrying. Attachments must be pending uploads. Requires a full-access/default caller.",
+            "Create an ordinary TOP-LEVEL thread with an explicit workspace binding before its agent starts. Use this when the user requests independent work, a new thread, or a PR stack in its own worktree; use delegate_task for child subagents. Set workspaceStrategy to {type:\"worktree\",baseRef:\"parent-branch\",branch:\"new-branch\",startFromOrigin:false} for a new worktree based on local commits, or {type:\"existing_worktree\",worktreePath:\"/absolute/path\",branch:\"existing-branch\"} to use an existing checkout. For upstream commits, set startFromOrigin:true. Omitted workspaceStrategy means the project root, NOT the caller's worktree. Omit projectId/modelSelection/modes to inherit those settings. Set scratch:true instead of projectId for a thread without a project: it runs in a fresh folder of its own, outside any repository. Put the task in message. Do not ask the agent to create its own worktree via shell: that does not update the thread binding. Each call creates a new launch with no retry key; retain threadId and use thread_read/thread_wait to follow preparation. After errors or lost responses, inspect thread_list before retrying. Attachments must be pending uploads. Requires a full-access/default caller.",
             json!({
                 "projectId": string(),
                 "scratch": described(json!({"type":"boolean"}), "Launch without a project, in its own folder under the environment's Scratch project. Not with projectId or workspaceStrategy."),
@@ -536,7 +536,7 @@ fn project() -> Vec<Value> {
             },
         ),
         tool(
-            "t3_project_list",
+            "project_list",
             None,
             "List registered projects in this environment. Pages use the current project snapshot and may shift between calls.",
             json!({"cursor": int(0, None), "limit": int(1, Some(100))}),
@@ -544,7 +544,7 @@ fn project() -> Vec<Value> {
             READ_ONLY,
         ),
         tool(
-            "t3_project_read",
+            "project_read",
             None,
             "Read a registered project in this environment, including its workspace and saved scripts.",
             json!({"projectId": string()}),
@@ -552,9 +552,9 @@ fn project() -> Vec<Value> {
             READ_ONLY,
         ),
         tool(
-            "t3_project_create",
+            "project_create",
             None,
-            "Register a project directory through the existing project service. Set createWorkspaceRootIfMissing to create a directory. Omit workspaceRoot to start a new project from just its title: the app makes a Git repository for it in its own projects folder, with a README, an icon, and a first commit (commitError says why a commit failed; the project exists either way). Each call creates a new request; an existing registered workspace is rejected. Clone separately with t3_project_clone when needed.",
+            "Register a project directory through the existing project service. Set createWorkspaceRootIfMissing to create a directory. Omit workspaceRoot to start a new project from just its title: the app makes a Git repository for it in its own projects folder, with a README, an icon, and a first commit (commitError says why a commit failed; the project exists either way). Each call creates a new request; an existing registered workspace is rejected.",
             json!({
                 "title": text(None),
                 "workspaceRoot": text(None),
@@ -568,13 +568,12 @@ fn project() -> Vec<Value> {
     ]
 }
 
-/// Every tool in T3's registration order.
+/// Every served tool.
 pub(crate) fn tools() -> Vec<Value> {
     [orchestrator(), thread(), project()].concat()
 }
 
-/// Tools T3 marks read-only, which a read-only Claude sandbox pre-approves.
-#[cfg(test)]
+/// The tools annotated read-only, which a read-only Claude sandbox pre-approves.
 pub(crate) fn read_only_tools() -> Vec<String> {
     tools()
         .into_iter()

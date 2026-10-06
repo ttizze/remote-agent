@@ -56,7 +56,6 @@ fn is_root(value: &str) -> bool {
         || (value.len() == 3 && is_windows_drive(value) && value.as_bytes()[2] != b':')
 }
 
-/// T3 `normalizeProjectPathForComparison`.
 pub(crate) fn comparison_key(path: &Path) -> String {
     let value = path.to_string_lossy();
     let value = value.trim();

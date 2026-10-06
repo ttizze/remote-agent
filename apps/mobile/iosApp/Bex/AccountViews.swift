@@ -10,7 +10,7 @@ struct AccountUsageView: View {
             if let usage {
                 if let error = usage.error {
                     Label(accountErrorMessage(message: error), systemImage: "exclamationmark.circle")
-                        .font(.caption).foregroundStyle(T3Theme.color("warningForeground"))
+                        .font(.caption).foregroundStyle(AppTheme.color("warningForeground"))
                 }
                 ForEach(Array(usage.windows.enumerated()), id: \.offset) { _, window in
                     UsageWindowView(window: window)
@@ -32,13 +32,13 @@ private struct UsageWindowView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
             HStack { Text(window.label); Spacer(); Text("残り \(window.remainingPercent)%").monospacedDigit() }
-                .font(T3Theme.font(12))
+                .font(AppTheme.font(12))
             ProgressView(value: Double(window.remainingPercent), total: 100)
-                .tint(T3Theme.color(window.remainingPercent <= 20 ? "warningForeground" : "successForeground"))
+                .tint(AppTheme.color(window.remainingPercent <= 20 ? "warningForeground" : "successForeground"))
             if let reset = window.resetsAt {
                 let date = Date(timeIntervalSince1970: Double(reset))
                 Text("リセット: \(date.formatted(date: .abbreviated, time: .shortened))")
-                    .font(T3Theme.font(11)).foregroundStyle(T3Theme.color("textMuted"))
+                    .font(AppTheme.font(11)).foregroundStyle(AppTheme.color("textMuted"))
             }
         }
     }
@@ -106,7 +106,7 @@ struct AccountLoginSection: View {
             }
             if let error = loginError {
                 Text(accountErrorMessage(message: error)).font(.caption)
-                    .foregroundStyle(T3Theme.color("errorForeground"))
+                    .foregroundStyle(AppTheme.color("errorForeground"))
                 Button("認証状態を再確認", action: retry)
             }
         }

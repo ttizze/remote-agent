@@ -57,7 +57,7 @@ async fn deletion_cleans_up_terminals_and_attachments_of_the_thread() {
     }
 }
 
-// T3 ResourceCleanupService.ts closes terminals by thread, whatever directory they share.
+// Terminals close by thread, whatever directory they share.
 #[tokio::test(flavor = "multi_thread")]
 async fn only_the_threads_own_terminals_close_when_another_thread_shares_its_directory() {
     let rig = rig();

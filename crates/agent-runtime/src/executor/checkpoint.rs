@@ -21,11 +21,11 @@ fn sha256_hex(value: &str) -> String {
         .collect()
 }
 
-/// The hidden Git ref of a scope's checkpoint (T3 `checkpointRefForScopeOrdinal`).
+/// The hidden Git ref of a scope's checkpoint.
 pub fn checkpoint_reference(scope: &CheckpointScopeId, ordinal: u64) -> String {
     let key = &sha256_hex(scope.as_str())[..32];
     format!(
-        "refs/t3/orchestration-v2/checkpoints/{}/ordinal/{ordinal}",
+        "refs/orchestration/checkpoints/{}/ordinal/{ordinal}",
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(key)
     )
 }
@@ -110,7 +110,7 @@ impl Store {
 }
 
 /// Captures the workspace before a provider turn into the scope's baseline
-/// `max(0, ordinal - 1)` unless it exists (T3 `captureBaseline`), then starts the turn.
+/// `max(0, ordinal - 1)` unless it exists, then starts the turn.
 pub(crate) struct BaselineBeforeStart {
     pub(crate) context: ExecutorContext,
     pub(crate) inner: Arc<dyn EffectHandler>,
@@ -255,8 +255,8 @@ impl EffectHandler for CaptureCheckpoint {
             let ordinal = target.ordinal;
             let mut baselines = Vec::new();
             for baseline in BTreeSet::from([0, ordinal.saturating_sub(1)]) {
-                // A missing, failed or stale baseline is materialized again (T3
-                // CheckpointCaptureService skips only ready ones).
+                // A missing, failed or stale baseline is materialized again;
+                // only ready ones are skipped.
                 let ready = state.checkpoints.iter().any(|checkpoint| {
                     checkpoint.scope.as_ref() == Some(scope)
                         && checkpoint.run_ordinal == baseline
@@ -291,7 +291,7 @@ impl EffectHandler for CaptureCheckpoint {
 }
 
 impl CaptureCheckpoint {
-    /// T3 `materializeBaselineCheckpoint`: ready when its ref exists.
+    /// Ready when its ref exists.
     async fn materialize(
         &self,
         scope: &CheckpointScope,
@@ -340,9 +340,8 @@ impl CaptureCheckpoint {
     }
 }
 
-/// T3 `CheckpointService.capture`: the summary diffs against the previous
-/// ordinal's ref (itself for ordinal 0) and is empty when that ref or the diff
-/// is unavailable.
+/// The summary diffs against the previous ordinal's ref (itself for ordinal 0)
+/// and is empty when that ref or the diff is unavailable.
 async fn capture(
     context: &ExecutorContext,
     scope: &CheckpointScope,
@@ -391,7 +390,7 @@ pub const SHARED_WORKSPACE_RESTORE_MESSAGE: &str = "File restore requires an iso
 
 /// A checkpoint snapshots the whole checkout, so files are restored only in the
 /// thread's own worktree that no other live thread's workspace, checkpoint scope
-/// or provider session overlaps (T3 `isCheckpointRestoreIsolated`).
+/// or provider session overlaps.
 pub(crate) async fn restore_isolated(
     context: &ExecutorContext,
     thread: &ThreadId,
@@ -441,7 +440,7 @@ pub(crate) async fn restore_isolated(
             .and_then(|workspace| workspace.worktree_path.clone())
         {
             Some(worktree) => paths.push(worktree),
-            // T3 includes deleted projects; the Host never unregisters one.
+            // Includes deleted projects; the Host never unregisters one.
             None => match ops.project(&other.project) {
                 Some(project) => paths.push(project.root),
                 None => return Ok(false),

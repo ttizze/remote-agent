@@ -1,4 +1,4 @@
-//! Capability records from the pinned T3 adapters.
+//! Capability records from the pinned adapters.
 use crate::contracts::*;
 
 pub fn capabilities(driver: Driver) -> ProviderCapabilities {

@@ -1,7 +1,6 @@
-//! Host sweeps over the thread list: automatic settlement every minute (T3
-//! ThreadSettlementService) and usage-limit recovery on the shared five-second
-//! scheduler tick (T3 UsageLimitRecoveryWorker). Both derive their work from
-//! durable rows, so a restart needs no timers.
+//! Host sweeps over the thread list: automatic settlement every minute and
+//! usage-limit recovery on the shared five-second scheduler tick. Both derive
+//! their work from durable rows, so a restart needs no timers.
 use crate::{
     ActorRegistry, Clock, CommandOrigin, ConversationSettings, HostOperations, Store, StoreError,
 };
@@ -21,7 +20,7 @@ pub(crate) struct Sweeps {
     pub registry: Arc<ActorRegistry>,
     pub ops: Arc<dyn HostOperations>,
     pub clock: Arc<dyn Clock>,
-    /// Settings changed: settle again now (T3 settings change stream).
+    /// Settings changed: settle again now.
     pub settings_changed: Arc<Notify>,
 }
 
@@ -48,7 +47,7 @@ pub fn settlement_command(
 
 type SweepCommand = (ThreadId, CommandId, Command);
 
-/// T3 ThreadSettlementService's inactivity settlement for every row.
+/// Inactivity settlement for every row.
 pub fn settlement_commands(
     threads: &[ThreadShell],
     settings: impl Fn(&str) -> ConversationSettings,
@@ -64,7 +63,7 @@ pub fn settlement_commands(
         .collect()
 }
 
-/// T3 UsageLimitRecoveryWorker's sweep.
+/// Usage-limit recovery sweep.
 pub fn limit_recovery_commands(
     threads: &[ThreadShell],
     settings: impl Fn(&str) -> ConversationSettings,

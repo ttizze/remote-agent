@@ -752,8 +752,8 @@ async fn shutdown_stops_running_executors_before_recording_the_shutdown() {
     );
 }
 
-// T3 ThreadLaunchService.ts owns background preparation in a scope: shutdown
-// stops it, and the next start resumes the recorded launch.
+// Background preparation runs in a scope: shutdown stops it, and the next
+// start resumes the recorded launch.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_background_preparation_stops_at_shutdown_and_resumes_after_restart() {
     let host = host();
@@ -918,8 +918,7 @@ async fn import_waits_for_startup_and_is_refused_after_shutdown() {
     ));
 }
 
-// T3 userInputAttachments.ts: an answer whose attachment is gone is refused
-// before the request resolves.
+// An answer whose attachment is gone is refused before the request resolves.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_answer_with_an_unavailable_attachment_is_rejected() {
     let host = host();
@@ -972,9 +971,9 @@ async fn an_answer_with_an_unavailable_attachment_is_rejected() {
     runtime.shutdown().await;
 }
 
-// T3 Orchestrator thread.metadata.update keeps a thread without a worktree in
-// its project root when only the branch changes, and a retried command replays
-// its first result although the Host filled in the project root.
+// Updating thread metadata keeps a thread without a worktree in its project
+// root when only the branch changes, and a retried command replays its first
+// result although the Host filled in the project root.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_branch_update_keeps_the_project_root_and_replays_on_retry() {
     let host = host();
@@ -1038,8 +1037,8 @@ async fn a_branch_update_keeps_the_project_root_and_replays_on_retry() {
     runtime.shutdown().await;
 }
 
-// T3 ProviderRuntimeRecoveryService.test.ts: "cancels a stale waiting run when no
-// checkpoint capture can finish it", through a restarted Host.
+// Cancels a stale waiting run when no checkpoint capture can finish it,
+// through a restarted Host.
 #[tokio::test(flavor = "multi_thread")]
 async fn startup_cancels_a_waiting_run_whose_capture_failed_for_good() {
     let host = host();

@@ -1,5 +1,4 @@
-//! Ports of T3 ProviderSessionManager, ProviderTurnStartService and
-//! ProviderTurnControlService behavior tests, plus the frame ordering rule.
+//! Session behavior tests, plus the frame ordering rule.
 pub(crate) mod fake;
 mod replay;
 
@@ -896,7 +895,7 @@ async fn a_late_open_failure_does_not_overwrite_a_stopped_run() {
 
 // "fails a starting run when its last start attempt cannot load the thread":
 // a failed native resume continues the run on a fresh native session instead
-// (ARCHITECTURE 判断 2026-10-06, the T3 resume fallback).
+// (ARCHITECTURE 判断 2026-10-06).
 #[tokio::test(flavor = "multi_thread")]
 async fn a_failed_resume_continues_the_run_on_a_fresh_native_session() {
     let rig = rig(SessionOptions::default(), 5);
@@ -1096,8 +1095,8 @@ async fn commits_a_reply_before_writing_the_next_frame() {
     assert_eq!(*observed.lock().unwrap(), Some(true));
 }
 
-// T3 ClaudeAdapterV2 openQuery: a live query is reused only for the same
-// policy and selection; a new model or mode replaces it with a resume.
+// A live query is reused only for the same policy and selection; a new
+// model or mode replaces it with a resume.
 #[tokio::test(flavor = "multi_thread")]
 async fn claude_replaces_its_process_for_another_model_or_mode() {
     let rig = rig(SessionOptions::default(), 5);
@@ -1121,8 +1120,8 @@ async fn claude_replaces_its_process_for_another_model_or_mode() {
     process.emit(json!({"type":"assistant","uuid":"a-1","session_id":session,"message":{"id":"m-1","role":"assistant","model":"claude-sonnet-4-6","content":[{"type":"text","text":"done"}]}}));
     process.emit(json!({"type":"result","subtype":"success","is_error":false,"num_turns":1,"result":"done","session_id":session,"uuid":"r-1"}));
     rig.until_status(&id, RunStatus::Completed).await;
-    // Runtime mode changes detach Claude (T3), so this changes the
-    // interaction mode; both apply when the next turn starts.
+    // Runtime mode changes detach Claude, so this changes the interaction
+    // mode; both apply when the next turn starts.
     rig.command(
         &id,
         Command::InteractionMode {
@@ -1240,7 +1239,7 @@ async fn claude_respawns_when_launch_flags_change_and_ignores_the_old_process() 
     old.emit(json!({"type":"system","subtype":"init","session_id":session,"uuid":"init-1"}));
     old.emit(json!({"type":"result","subtype":"success","is_error":false,"num_turns":1,"result":"done","session_id":session,"uuid":"r-1"}));
     rig.until_status(&id, RunStatus::Completed).await;
-    // T3 detaches the Claude session when the runtime mode changes.
+    // The Claude session detaches when the runtime mode changes.
     rig.command(
         &id,
         Command::RuntimeMode {
@@ -1395,7 +1394,7 @@ async fn a_codex_native_fork_binds_the_child_to_the_forked_thread() {
         .await;
     assert_eq!(reply, Reply::Thread(child.clone()));
     rig.drain().await;
-    // T3 forks natively when the child sends its first message.
+    // The fork is native when the child sends its first message.
     rig.send(&child, "child", DispatchMode::StartImmediately)
         .await;
     rig.drain().await;
@@ -1444,7 +1443,7 @@ async fn a_rejected_codex_fork_fails_the_childs_first_run() {
     rig.send(&child, "child", DispatchMode::StartImmediately)
         .await;
     rig.drain().await;
-    // T3 ProviderTurnStartService.ts: the failed fork fails the run.
+    // The failed fork fails the run.
     let state = rig.state(&child).await;
     assert_eq!(state.runs[0].status, RunStatus::Failed);
     assert!(state.native_sessions.is_empty());
@@ -1507,7 +1506,7 @@ async fn a_claude_native_fork_copies_the_transcript_through_the_head() {
     assert_ne!(forked, session);
     let copy = rig.host.transcripts.lock().unwrap()[&forked].clone();
     assert!(copy.contains("\"a-1\"") || copy.contains("done"));
-    // T3 forkThread closes the source's live query before reading its transcript.
+    // The source's live query closes before its transcript is read.
     assert!(process.exited());
 }
 
@@ -2022,7 +2021,7 @@ async fn a_first_codex_compaction_starts_a_native_thread() {
     );
 }
 
-// T3 applies a model selection from the next turn: the running query gets no
+// A model selection applies from the next turn: the running query gets no
 // set_model, and the next turn on the new selection replaces the process.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_claude_model_change_during_a_turn_applies_from_the_next_turn() {
@@ -2395,9 +2394,9 @@ fn replies(state: &State) -> Vec<String> {
         .collect()
 }
 
-// T3 Orchestrator providerSessionIdFor: Codex supports several provider threads
-// per session, so an instance's threads share one app-server and JSON-RPC id
-// space; each native thread's output reaches its own thread.
+// Codex supports several provider threads per session, so an instance's
+// threads share one app-server and JSON-RPC id space; each native thread's
+// output reaches its own thread.
 #[tokio::test(flavor = "multi_thread")]
 async fn codex_threads_share_one_app_server_and_keep_their_own_output() {
     let rig = rig(SessionOptions::default(), 5);
@@ -2432,8 +2431,8 @@ async fn codex_threads_share_one_app_server_and_keep_their_own_output() {
     assert_eq!(replies(&*rig.state(&b).await), ["reply for b"]);
 }
 
-// T3 ProviderSwitchService: selecting another instance releases the thread's
-// session of the previous one; the shared app-server keeps the other thread.
+// Selecting another instance releases the thread's session of the previous
+// one; the shared app-server keeps the other thread.
 #[tokio::test(flavor = "multi_thread")]
 async fn switching_provider_releases_only_that_threads_previous_session() {
     let rig = rig(SessionOptions::default(), 5);
@@ -2464,9 +2463,8 @@ async fn switching_provider_releases_only_that_threads_previous_session() {
     assert_eq!(rig.run_status(&b).await, RunStatus::Running);
 }
 
-// T3 CodexAdapterV2 account/rateLimits/updated: the app-server's account
-// snapshot reaches every thread it serves, and fills the reset of a turn a
-// usage limit already stopped.
+// The app-server's account snapshot reaches every thread it serves, and
+// fills the reset of a turn a usage limit already stopped.
 #[tokio::test(flavor = "multi_thread")]
 async fn shared_rate_limits_reach_every_thread_and_fill_a_stopped_turns_reset() {
     let rig = rig(SessionOptions::default(), 5);
@@ -2491,8 +2489,8 @@ async fn shared_rate_limits_reach_every_thread_and_fill_a_stopped_turns_reset() 
     assert_eq!(rig.run_status(&b).await, RunStatus::Running);
 }
 
-// T3 CodexAdapterV2 turn.terminal: a usage-limit failure takes its reset from
-// the app-server's snapshot even for a thread that attached after it arrived.
+// A usage-limit failure takes its reset from the app-server's snapshot even
+// for a thread that attached after it arrived.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_thread_attaching_after_the_rate_limit_snapshot_still_gets_its_reset() {
     let rig = rig(SessionOptions::default(), 5);
@@ -2518,8 +2516,8 @@ async fn a_thread_attaching_after_the_rate_limit_snapshot_still_gets_its_reset()
     )));
 }
 
-// T3 CodexAdapterV2 trackRunningDynamicTool: a persistent tool outlives its
-// completed turn, and its later completion stays with the run that started it.
+// A persistent tool outlives its completed turn, and its later completion
+// stays with the run that started it.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_persistent_tool_completes_under_the_turn_that_started_it() {
     let rig = rig(SessionOptions::default(), 5);
@@ -2527,7 +2525,7 @@ async fn a_persistent_tool_completes_under_the_turn_that_started_it() {
     let id = thread("thread-persistent-tool");
     let (native, first) = rig.shared_turn(&id).await;
     let process = rig.host.process(0);
-    let tool = |status: &str| json!({"type":"dynamicToolCall","id":"monitor","namespace":"t3","tool":"watch","arguments":{"persistent":true},"status":status});
+    let tool = |status: &str| json!({"type":"dynamicToolCall","id":"monitor","namespace":"orchestration","tool":"watch","arguments":{"persistent":true},"status":status});
     let other = json!({"type":"dynamicToolCall","id":"lookup","tool":"lookup","arguments":{},"status":"inProgress"});
     for item in [tool("inProgress"), other] {
         process.emit(json!({"method":"item/started","params":{"threadId":native,"turnId":first,"item":item}}));
@@ -2579,8 +2577,8 @@ async fn a_persistent_tool_completes_under_the_turn_that_started_it() {
     );
 }
 
-// T3 ProviderSessionManager: the shared session is busy while any thread's
-// turn runs, and is released once every thread is idle.
+// The shared session is busy while any thread's turn runs, and is released
+// once every thread is idle.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_shared_app_server_stays_while_any_thread_runs() {
     let rig = rig(options(150, 60_000), 5);
@@ -2603,9 +2601,9 @@ async fn a_shared_app_server_stays_while_any_thread_runs() {
     assert!(rig.sessions.sessions().is_empty());
 }
 
-// T3 ProviderSessionManager.detach for a multi-thread session: the thread's
-// running turn is interrupted and its native thread unloaded, while the
-// app-server keeps serving the other thread. Only a terminal detach revokes.
+// Detaching from a multi-thread session interrupts the thread's running turn
+// and unloads its native thread, while the app-server keeps serving the
+// other thread. Only a terminal detach revokes.
 #[tokio::test(flavor = "multi_thread")]
 async fn detaching_from_the_shared_app_server_interrupts_and_unloads_only_that_thread() {
     let rig = rig(short_interrupt(), 5);
@@ -2615,7 +2613,7 @@ async fn detaching_from_the_shared_app_server_interrupts_and_unloads_only_that_t
     rig.shared_turn(&b).await;
     let process = rig.host.process(0);
     rig.sessions.detach(&a, false).await;
-    // T3 finalizes a turn its app-server did not end after the interrupt.
+    // A turn its app-server did not end is finalized after the interrupt.
     rig.until_status(&a, RunStatus::Interrupted).await;
     assert_eq!(rig.run_status(&b).await, RunStatus::Running);
     let interrupts = written_methods(&process, "turn/interrupt");
@@ -2651,8 +2649,8 @@ fn short_interrupt() -> SessionOptions {
     }
 }
 
-// T3 interruptThread awaits the interrupted turn before the thread lets go of
-// the app-server, so the turn's own completion is recorded.
+// The interrupted turn is awaited before the thread lets go of the
+// app-server, so the turn's own completion is recorded.
 #[tokio::test(flavor = "multi_thread")]
 async fn detaching_from_the_shared_app_server_waits_for_the_interrupted_turn() {
     let rig = rig(SessionOptions::default(), 5);
@@ -2680,8 +2678,8 @@ async fn detaching_from_the_shared_app_server_waits_for_the_interrupted_turn() {
     assert_eq!(replies(&*rig.state(&a).await), ["stopped here"]);
 }
 
-// T3 CodexAdapterV2 resolveRuntime: a new app-server runs as the selected
-// managed account, and its token refreshes are answered from that account.
+// A new app-server runs as the selected managed account, and its token
+// refreshes are answered from that account.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_new_app_server_signs_in_with_the_managed_account_and_refreshes_its_token() {
     let rig = rig(SessionOptions::default(), 5);
@@ -2785,10 +2783,9 @@ async fn a_rejected_account_selection_fails_and_signs_in_before_the_next_turn() 
     assert_eq!(written_methods(&process, "account/login/start").len(), 3);
 }
 
-// T3 ClaudeAdapterV2 query options: the app's MCP tools are pre-approved after
-// the policy's own allowed tools, the workspace and attachments are added
-// directories, and the runtime and orchestration instructions are appended to
-// the system prompt.
+// The app's MCP tools are pre-approved after the policy's own allowed tools,
+// the workspace and attachments are added directories, and the runtime and
+// orchestration instructions are appended to the system prompt.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_claude_launch_pre_approves_the_app_tools_and_appends_the_instructions() {
     let rig = rig(SessionOptions::default(), 5);
@@ -2839,8 +2836,8 @@ async fn a_claude_launch_pre_approves_the_app_tools_and_appends_the_instructions
     );
 }
 
-// T3 claudeMcpQueryOverrides: a read-only sandbox pre-approves only the
-// annotated read-only tools, after the sandbox's own read tools.
+// A read-only sandbox pre-approves only the annotated read-only tools, after
+// the sandbox's own read tools.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_read_only_claude_sandbox_pre_approves_only_read_only_app_tools() {
     let rig = rig(SessionOptions::default(), 5);
@@ -2852,7 +2849,7 @@ async fn a_read_only_claude_sandbox_pre_approves_only_read_only_app_tools() {
         mcp_allowed_tools: vec!["mcp__orchestration__*".into()],
         mcp_read_only_tools: vec![
             "mcp__orchestration__orchestrator_capabilities".into(),
-            "mcp__orchestration__t3_thread_list".into(),
+            "mcp__orchestration__thread_list".into(),
         ],
         ..ClaudeSettings::default()
     };
@@ -2866,7 +2863,7 @@ async fn a_read_only_claude_sandbox_pre_approves_only_read_only_app_tools() {
     assert_eq!(
         allowed.as_deref(),
         Some(
-            "Read,Glob,Grep,mcp__orchestration__orchestrator_capabilities,mcp__orchestration__t3_thread_list"
+            "Read,Glob,Grep,mcp__orchestration__orchestrator_capabilities,mcp__orchestration__thread_list"
         )
     );
 }

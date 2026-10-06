@@ -1,4 +1,3 @@
-//! Translation of T3 4ee6bfd, orchestration-v2/QueuedRunOrder.ts.
 use crate::contracts::*;
 use std::collections::BTreeSet;
 
@@ -34,7 +33,7 @@ pub fn queued_runs_in_delivery_order<'a>(
 mod tests {
     use super::*;
     use crate::test_support::*;
-    // T3 QueuedRunOrder.test.ts: keeps automatic completion delivery ahead of visible queued messages.
+    // Keeps automatic completion delivery ahead of visible queued messages.
     #[test]
     fn keeps_automatic_completion_delivery_ahead_of_visible_queued_messages() {
         let mut p = running();

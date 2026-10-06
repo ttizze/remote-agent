@@ -19,16 +19,16 @@ struct ConversationRequest: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text(row.title).font(T3Theme.font(14, weight: .medium))
+            Text(row.title).font(AppTheme.font(14, weight: .medium))
             if !row.text.isEmpty {
-                Text(row.text).font(T3Theme.font(13)).textSelection(.enabled)
+                Text(row.text).font(AppTheme.font(13)).textSelection(.enabled)
             }
             if let request = row.requestId {
                 ForEach(row.choices, id: \.decision) { choice in
                     VStack(alignment: .leading, spacing: 5) {
                         if let warning = choice
                             .warning {
-                            Text(warning).font(T3Theme.font(12)).foregroundStyle(T3Theme.color("warningForeground"))
+                            Text(warning).font(AppTheme.font(12)).foregroundStyle(AppTheme.color("warningForeground"))
                         }
                         Button(choice.label) { model.perform(.respondApproval(
                             requestId: request,
@@ -39,8 +39,8 @@ struct ConversationRequest: View {
                 }
                 ForEach(row.questions, id: \.id) { question in
                     VStack(alignment: .leading, spacing: 7) {
-                        Text(question.header).font(T3Theme.font(13, weight: .medium))
-                        Text(question.question).font(T3Theme.font(14))
+                        Text(question.header).font(AppTheme.font(13, weight: .medium))
+                        Text(question.question).font(AppTheme.font(14))
                         ForEach(question.options, id: \.value) { option in
                             Button {
                                 if question.multiSelect {
@@ -61,11 +61,11 @@ struct ConversationRequest: View {
                                         value: option.value
                                     ) ? "checkmark.circle.fill" : "circle")
                                     VStack(alignment: .leading, spacing: 3) {
-                                        Text(option.label).font(T3Theme.font(14))
+                                        Text(option.label).font(AppTheme.font(14))
                                         if !option.description
                                             .isEmpty {
-                                            Text(option.description).font(T3Theme.font(12))
-                                                .foregroundStyle(T3Theme.color("textMuted"))
+                                            Text(option.description).font(AppTheme.font(12))
+                                                .foregroundStyle(AppTheme.color("textMuted"))
                                         }
                                     }
                                 }.frame(maxWidth: .infinity, alignment: .leading)
@@ -77,31 +77,31 @@ struct ConversationRequest: View {
                                 text: Binding(get: { custom[question.id] ?? "" }, set: { custom[question.id] = $0 }),
                                 axis: .vertical
                             )
-                            .font(T3Theme.font(14)).textFieldStyle(.roundedBorder).disabled(!row.actionable)
+                            .font(AppTheme.font(14)).textFieldStyle(.roundedBorder).disabled(!row.actionable)
                         }
                     }
                 }
                 if row.responseModeMessage {
-                    Text("Reply in the composer").font(T3Theme.font(12)).foregroundStyle(T3Theme.color("textMuted"))
+                    Text("Reply in the composer").font(AppTheme.font(12)).foregroundStyle(AppTheme.color("textMuted"))
                 } else if !row.questions.isEmpty {
                     let error = questionError(questions: row.questions, answers: answers)
                     Button("Submit answers") { model.perform(.respondQuestions(requestId: request, answers: answers)) }
                         .buttonStyle(.borderedProminent).disabled(!row.actionable || error != nil)
                     if let error {
-                        Text(error).font(T3Theme.font(12)).foregroundStyle(T3Theme.color("textMuted"))
+                        Text(error).font(AppTheme.font(12)).foregroundStyle(AppTheme.color("textMuted"))
                     }
                 }
                 if row
                     .responseModeMessage {
                     Button("Dismiss without answering") { model.perform(.dismissInput(requestId: request)) }
-                        .font(T3Theme.font(12)).disabled(!row.actionable)
+                        .font(AppTheme.font(12)).disabled(!row.actionable)
                 }
             } else {
-                Text(row.status).font(T3Theme.font(12)).foregroundStyle(T3Theme.color("textMuted"))
+                Text(row.status).font(AppTheme.font(12)).foregroundStyle(AppTheme.color("textMuted"))
             }
         }
         .padding(14).frame(maxWidth: .infinity, alignment: .leading)
-        .background(T3Theme.color("mobileGroupedCard"), in: RoundedRectangle(cornerRadius: 12))
-        .overlay(RoundedRectangle(cornerRadius: 12).stroke(T3Theme.color("border")))
+        .background(AppTheme.color("mobileGroupedCard"), in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(AppTheme.color("border")))
     }
 }

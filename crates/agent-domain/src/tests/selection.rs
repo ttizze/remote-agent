@@ -18,9 +18,8 @@ fn provider_commands(step: &Step) -> usize {
         .count()
 }
 
-// T3 ProviderSessionTransitionPolicy.ts / ProviderSwitchService.ts: a model
-// change applies on the next turn, and moving to another instance releases
-// the sessions of the instances it leaves, even during a run.
+// A model change applies on the next turn, and moving to another instance
+// releases the sessions of the instances it leaves, even during a run.
 #[test]
 fn selection_changes_apply_next_turn_and_release_left_instances() {
     let mut s = state();
@@ -51,8 +50,8 @@ fn selection_changes_apply_next_turn_and_release_left_instances() {
     assert_eq!(s.thread.as_ref().unwrap().selection.instance, "claude");
 }
 
-// T3 Orchestrator.ts thread.runtime-mode.set detaches sessions that cannot
-// switch modes in place (Claude); Codex takes the mode on its next turn.
+// Detaches sessions that cannot switch modes in place (Claude); Codex takes
+// the mode on its next turn.
 #[test]
 fn runtime_mode_changes_detach_only_claude_sessions() {
     let mut s = state();
@@ -97,7 +96,6 @@ fn runtime_mode_changes_detach_only_claude_sessions() {
     );
 }
 
-// T3 Orchestrator.ts dispatchProviderSessionDetach.
 #[test]
 fn a_client_can_detach_a_session_the_thread_owns() {
     let mut s = state();
@@ -189,8 +187,6 @@ fn provider_handoffs(s: &State) -> usize {
         .count()
 }
 
-// T3 SelectionRestart.integration.test.ts "detaches the old provider session
-// after an active provider handoff".
 #[test]
 fn detaches_the_old_provider_session_after_an_active_provider_handoff() {
     let mut s = state();
@@ -238,9 +234,9 @@ fn detaches_the_old_provider_session_after_an_active_provider_handoff() {
     assert_eq!(provider_handoffs(&s), 1);
 }
 
-// T3 Orchestrator.ts dispatchSteerIntoRun: a steer whose selection names another
-// instance must apply now, so it restarts the run there with the thread's history
-// through the running run, and the steer becomes the restarted turn's input.
+// A steer whose selection names another instance must apply now, so it
+// restarts the run there with the thread's history through the running run,
+// and the steer becomes the restarted turn's input.
 #[test]
 fn a_steer_onto_another_instance_restarts_the_run_with_a_full_handoff() {
     let mut s = state();
@@ -331,8 +327,8 @@ fn a_steer_onto_another_instance_restarts_the_run_with_a_full_handoff() {
     assert_eq!(s, before);
 }
 
-// T3 CommandPolicy.ts decideSteeringExecution: the running session must restart
-// to change instance, which Claude cannot do.
+// The running session must restart to change instance, which Claude cannot
+// do.
 #[test]
 fn a_claude_run_cannot_be_steered_onto_another_instance() {
     let mut s = state();
@@ -361,8 +357,8 @@ fn a_claude_run_cannot_be_steered_onto_another_instance() {
     }
 }
 
-// T3 Orchestrator.ts dispatchQueuedMessagePromoteToSteer: promotion steers on the
-// thread's selection, so after a provider switch it restarts the run there.
+// Promotion steers on the thread's selection, so after a provider switch it
+// restarts the run there.
 #[test]
 fn promoting_to_steer_after_a_provider_switch_restarts_on_the_new_instance() {
     let mut s = state();

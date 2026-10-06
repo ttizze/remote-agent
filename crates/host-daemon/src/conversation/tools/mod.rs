@@ -1,4 +1,4 @@
-//! Thread-scoped MCP tools for provider sessions: T3's orchestrator, thread and
+//! Thread-scoped MCP tools for provider sessions: the orchestrator, thread and
 //! project toolkits. Tools send the same commands as clients and read the
 //! committed thread state.
 mod backend;
@@ -11,7 +11,6 @@ mod tests;
 mod thread;
 
 pub(crate) use backend::HostOrchestration;
-#[cfg(test)]
 pub(crate) use catalog::read_only_tools;
 pub(crate) use catalog::tools;
 
@@ -245,7 +244,7 @@ async fn bridge(address: SocketAddr, request: BridgeRequest) -> Result<Value, St
     serde_json::from_str(&line).map_err(|_| "Invalid orchestration response".to_owned())?
 }
 
-/// T3 OrchestratorMcpFailure, or a parameter validation failure.
+/// An orchestration failure, or a parameter validation failure.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ToolError {
     Failure { code: &'static str, message: String },
@@ -259,7 +258,6 @@ pub(crate) fn failure(code: &'static str, message: impl Into<String>) -> ToolErr
         message: message.into(),
     }
 }
-/// T3 threadAccess `unavailable`.
 pub(crate) fn unavailable() -> ToolError {
     failure(
         "orchestration_error",
@@ -299,7 +297,7 @@ pub(crate) struct Scope<'a> {
     pub(crate) instance: &'a str,
 }
 
-/// T3 `requestKey`: the client's retry key, or a fresh one.
+/// The client's retry key, or a fresh one.
 pub(crate) fn request_key(client: Option<&str>) -> String {
     client.map_or_else(|| uuid::Uuid::new_v4().to_string(), str::to_owned)
 }
@@ -327,7 +325,6 @@ fn session(scope: Scope<'_>) -> String {
         &digest.finish().as_ref()[..12],
     )
 }
-/// T3 stableCommandId.
 pub(crate) fn stable_command(
     scope: Scope<'_>,
     operation: &str,
@@ -344,13 +341,11 @@ pub(crate) fn stable_command(
     parts.extend(index.map(|index| index.to_string()));
     CommandId::new(parts.join(":")).expect("derived id")
 }
-/// T3 stableThreadId / stableMessageId / stableOperationMessageId.
 pub(crate) fn stable_id(kind: &str, scope: Scope<'_>, parts: &[&str]) -> String {
     let mut all = vec![kind.to_owned(), "mcp".into(), session(scope)];
     all.extend(parts.iter().map(|part| component(part)));
     all.join(":")
 }
-/// T3 threadAccess `newCommandId`.
 pub(crate) fn new_command() -> CommandId {
     CommandId::new(format!("mcp:{}", uuid::Uuid::new_v4())).expect("derived id")
 }
@@ -363,7 +358,7 @@ pub(crate) fn decode<T: DeserializeOwned>(input: &Value) -> Result<T, ToolError>
     };
     serde_json::from_value(value).map_err(|error| invalid(error.to_string()))
 }
-/// T3 TrimmedNonEmptyString with an optional UTF-16 length cap.
+/// Trims the value and rejects empty, with an optional UTF-16 length cap.
 pub(crate) fn trimmed(field: &str, value: &str, max: Option<usize>) -> Result<String, ToolError> {
     let value = value.trim();
     if value.is_empty() {
@@ -416,32 +411,31 @@ impl AgentTools {
             "task_status" => self.task_status(scope, &input).await,
             "task_cancel" => self.task_cancel(scope, &input).await,
             "create_threads" => self.create_threads(scope, &input).await,
-            "t3_thread_list" => self.list_threads(scope, &input).await,
-            "t3_thread_read" => self.read_thread(scope, &input).await,
-            "t3_thread_update" => self.update_thread(scope, &input).await,
-            "t3_thread_send" => self.send_to_thread(scope, &input).await,
-            "t3_thread_wait" => self.wait_for_thread(scope, &input).await,
-            "t3_thread_interrupt" => self.interrupt_thread(scope, &input).await,
-            "t3_thread_search" => self.search(scope, &input).await,
-            "t3_thread_fork" => self.fork(scope, &input).await,
-            "t3_thread_merge_back" => self.merge_back(scope, &input).await,
-            "t3_thread_transfers" => self.transfers(scope, &input).await,
-            "t3_thread_configuration" => self.configuration(scope, &input).await,
-            "t3_thread_configure" => self.configure(scope, &input).await,
-            "t3_pending_request_list" => self.pending_requests(scope, &input).await,
-            "t3_pending_request_read" => self.pending_request(scope, &input).await,
-            "t3_pending_request_respond" => self.respond(scope, &input).await,
-            "t3_thread_organize" => self.organize(scope, &input).await,
-            "t3_queue_list" => self.queue_list(scope, &input).await,
-            "t3_queue_read" => self.queue_read(scope, &input).await,
-            "t3_queue_edit"
-            | "t3_queue_cancel"
-            | "t3_queue_reorder"
-            | "t3_queue_promote_to_steer" => self.queue_command(scope, name, &input).await,
-            "t3_thread_launch" => self.launch(scope, &input).await,
-            "t3_project_list" => self.project_list(scope, &input).await,
-            "t3_project_read" => self.project_read(scope, &input).await,
-            "t3_project_create" => self.project_create(scope, &input).await,
+            "thread_list" => self.list_threads(scope, &input).await,
+            "thread_read" => self.read_thread(scope, &input).await,
+            "thread_update" => self.update_thread(scope, &input).await,
+            "thread_send" => self.send_to_thread(scope, &input).await,
+            "thread_wait" => self.wait_for_thread(scope, &input).await,
+            "thread_interrupt" => self.interrupt_thread(scope, &input).await,
+            "thread_search" => self.search(scope, &input).await,
+            "thread_fork" => self.fork(scope, &input).await,
+            "thread_merge_back" => self.merge_back(scope, &input).await,
+            "thread_transfers" => self.transfers(scope, &input).await,
+            "thread_configuration" => self.configuration(scope, &input).await,
+            "thread_configure" => self.configure(scope, &input).await,
+            "pending_request_list" => self.pending_requests(scope, &input).await,
+            "pending_request_read" => self.pending_request(scope, &input).await,
+            "pending_request_respond" => self.respond(scope, &input).await,
+            "thread_organize" => self.organize(scope, &input).await,
+            "queue_list" => self.queue_list(scope, &input).await,
+            "queue_read" => self.queue_read(scope, &input).await,
+            "queue_edit" | "queue_cancel" | "queue_reorder" | "queue_promote_to_steer" => {
+                self.queue_command(scope, name, &input).await
+            }
+            "thread_launch" => self.launch(scope, &input).await,
+            "project_list" => self.project_list(scope, &input).await,
+            "project_read" => self.project_read(scope, &input).await,
+            "project_create" => self.project_create(scope, &input).await,
             _ => {
                 return error_content(&format!("Tool {name} not found"));
             }

@@ -1,6 +1,6 @@
 # Native mobile fonts
 
-The native clients use DM Sans Regular, Medium and Bold, matching the pinned T3 mobile configuration. The bundled static TTF files come from [Expo Google Fonts](https://github.com/expo/google-fonts/tree/a289ae7354d2b4cdbb6eafbf9ad4be42518785ae/font-packages/dm-sans); their SIL Open Font License is in `native-font-license.txt`.
+The native clients use DM Sans Regular, Medium and Bold, matching the pinned mobile design configuration. The bundled static TTF files come from [Expo Google Fonts](https://github.com/expo/google-fonts/tree/a289ae7354d2b4cdbb6eafbf9ad4be42518785ae/font-packages/dm-sans); their SIL Open Font License is in `native-font-license.txt`.
 
 | File | Upstream file | SHA-256 |
 | --- | --- | --- |

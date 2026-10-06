@@ -1,5 +1,5 @@
-//! Ported from T3 `RepositoryIdentityResolver.test.ts` (the resolution cases; the
-//! cache cases do not apply, since the Host resolves when it lists projects).
+//! The resolution cases apply; the cache cases do not, since the Host
+//! resolves when it lists projects.
 use super::*;
 
 fn git(cwd: &Path, args: &[&str]) {
@@ -18,28 +18,23 @@ fn normalizes_equivalent_github_remotes_into_a_stable_repository_identity() {
     let (_directory, root) = repository();
     git(
         &root,
-        &[
-            "remote",
-            "add",
-            "origin",
-            "git@github.com:T3Tools/t3code.git",
-        ],
+        &["remote", "add", "origin", "git@github.com:Acme/widget.git"],
     );
     let identity = resolve(&root).unwrap();
-    assert_eq!(identity.canonical_key, "github.com/t3tools/t3code");
+    assert_eq!(identity.canonical_key, "github.com/acme/widget");
     assert_eq!(
         dunce::canonicalize(identity.root_path.as_deref().unwrap()).unwrap(),
         root
     );
-    assert_eq!(identity.display_name.as_deref(), Some("t3tools/t3code"));
+    assert_eq!(identity.display_name.as_deref(), Some("acme/widget"));
     assert_eq!(identity.provider.as_deref(), Some("github"));
-    assert_eq!(identity.owner.as_deref(), Some("t3tools"));
-    assert_eq!(identity.name.as_deref(), Some("t3code"));
+    assert_eq!(identity.owner.as_deref(), Some("acme"));
+    assert_eq!(identity.name.as_deref(), Some("widget"));
     assert_eq!(identity.locator.source, "git-remote");
     assert_eq!(identity.locator.remote_name, "origin");
     assert_eq!(
         identity.locator.remote_url,
-        "git@github.com:T3Tools/t3code.git"
+        "git@github.com:Acme/widget.git"
     );
 }
 
@@ -48,17 +43,12 @@ fn returns_the_git_top_level_root_path_when_resolving_from_a_nested_workspace() 
     let (_directory, root) = repository();
     git(
         &root,
-        &[
-            "remote",
-            "add",
-            "origin",
-            "git@github.com:T3Tools/t3code.git",
-        ],
+        &["remote", "add", "origin", "git@github.com:Acme/widget.git"],
     );
     let nested = root.join("apps/web");
     std::fs::create_dir_all(&nested).unwrap();
     let identity = resolve(&nested).unwrap();
-    assert_eq!(identity.canonical_key, "github.com/t3tools/t3code");
+    assert_eq!(identity.canonical_key, "github.com/acme/widget");
     assert_eq!(
         dunce::canonicalize(identity.root_path.as_deref().unwrap()).unwrap(),
         root
@@ -82,7 +72,7 @@ fn prefers_upstream_over_origin() {
             "remote",
             "add",
             "origin",
-            "git@github.com:julius/t3code.git",
+            "git@github.com:julius/widget.git",
         ],
     );
     git(
@@ -91,13 +81,13 @@ fn prefers_upstream_over_origin() {
             "remote",
             "add",
             "upstream",
-            "git@github.com:T3Tools/t3code.git",
+            "git@github.com:Acme/widget.git",
         ],
     );
     let identity = resolve(&root).unwrap();
     assert_eq!(identity.locator.remote_name, "upstream");
-    assert_eq!(identity.canonical_key, "github.com/t3tools/t3code");
-    assert_eq!(identity.display_name.as_deref(), Some("t3tools/t3code"));
+    assert_eq!(identity.canonical_key, "github.com/acme/widget");
+    assert_eq!(identity.display_name.as_deref(), Some("acme/widget"));
 }
 
 #[test]
@@ -109,21 +99,20 @@ fn uses_the_last_remote_path_segment_as_the_repository_name_for_nested_groups() 
             "remote",
             "add",
             "origin",
-            "git@gitlab.com:T3Tools/platform/t3code.git",
+            "git@gitlab.com:Acme/platform/widget.git",
         ],
     );
     let identity = resolve(&root).unwrap();
-    assert_eq!(identity.canonical_key, "gitlab.com/t3tools/platform/t3code");
+    assert_eq!(identity.canonical_key, "gitlab.com/acme/platform/widget");
     assert_eq!(
         identity.display_name.as_deref(),
-        Some("t3tools/platform/t3code")
+        Some("acme/platform/widget")
     );
-    assert_eq!(identity.owner.as_deref(), Some("t3tools"));
-    assert_eq!(identity.name.as_deref(), Some("t3code"));
+    assert_eq!(identity.owner.as_deref(), Some("acme"));
+    assert_eq!(identity.name.as_deref(), Some("widget"));
     assert_eq!(identity.provider.as_deref(), Some("gitlab"));
 }
 
-// T3 sourceControl.ts detectSourceControlProviderFromRemoteUrl.
 #[test]
 fn detects_the_provider_from_the_remote_host() {
     for (remote, kind) in [

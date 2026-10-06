@@ -1,4 +1,4 @@
-//! T3 threadSort.ts: fractional pinned keys and hidden-row reservations.
+//! Fractional pinned keys and hidden-row reservations.
 use std::collections::{BTreeMap, BTreeSet};
 fn valid(key: &str) -> bool {
     !key.is_empty() && key.bytes().all(|b| b.is_ascii_lowercase()) && !key.ends_with('a')

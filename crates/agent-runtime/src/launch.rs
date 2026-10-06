@@ -1,5 +1,5 @@
-//! Thread launch (T3 `ThreadLaunchService`): create the thread, send its first
-//! message as a preparing run, and let `PrepareWorkspace` provision the workspace.
+//! Thread launch: create the thread, send its first message as a preparing run,
+//! and let `PrepareWorkspace` provision the workspace.
 use crate::{
     CommandOrigin, Committed, ExecutorContext, PrepareError, Store, StoreError, derived_uuid,
     prepare_workspace,

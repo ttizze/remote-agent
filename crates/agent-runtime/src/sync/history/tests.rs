@@ -1,5 +1,4 @@
-//! Ported from T3 `threadHistoryPaging.test.ts`; expectations are unchanged. T3
-//! projected rows become visible items of a folded `State`.
+//! Projected rows become visible items of a folded `State`.
 use super::*;
 use crate::store::tests::selection;
 use agent_domain::{
@@ -554,8 +553,7 @@ fn retains_all_interrupt_requests_even_when_no_result_is_in_the_initial_window()
     );
 }
 
-/// T3 charges a local row twice because its item is duplicated into `turnItems`.
-/// Here an item appears once, so the snapshot charges each row with its message and
+/// An item appears once, so the snapshot charges each row with its message and
 /// the control state, which history pages do not carry.
 #[test]
 fn charges_control_state_and_messages_when_measuring_bounded_timeline_bytes() {
@@ -620,7 +618,7 @@ fn does_not_carry_the_full_duplicated_message_table_into_a_bounded_snapshot() {
     assert!(json_len(&bounded.state) < HISTORY_MAX_ENCODED_BYTES + 100_000);
 }
 
-/// T3 uses 2 MiB per plan and handoff; 20 KiB still exceeds the budget many times over.
+/// 20 KiB still exceeds the budget many times over.
 #[test]
 fn omits_historical_control_details_that_remain_available_from_history_items() {
     let mut populated = command_rows(200);
@@ -768,7 +766,7 @@ fn stops_a_turn_window_at_the_frame_budget_so_every_thread_opens() {
     assert!(json_len(&bounded.state) <= HISTORY_FRAME_MAX_BYTES);
     assert!(bounded.has_more_history);
 
-    // Within the frame budget, whole user turns still decide the window (T3).
+    // Within the frame budget, whole user turns still decide the window.
     let light = heavy_turns(12, 2, 1024);
     assert_eq!(
         recent_history(&light, 1, PagePolicy::RECENT).rows.len(),

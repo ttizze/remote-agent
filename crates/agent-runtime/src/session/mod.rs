@@ -32,8 +32,8 @@ use std::time::Duration;
 use task::{Expect, Mail, Op, Protocol, Ran, Run, Task, holds_background};
 use tokio::sync::{mpsc, oneshot};
 
-/// T3 bounds unloading a detached thread so a wedged provider cannot hold up
-/// the thread's next attach.
+/// Bounds unloading a detached thread so a wedged provider cannot hold up the
+/// thread's next attach.
 const UNLOAD_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// A thread's use of a provider instance.
@@ -43,8 +43,8 @@ pub struct SessionKey {
     pub instance: String,
 }
 
-/// A provider process: the Codex app-server an instance shares across threads
-/// (T3 `supportsMultipleProviderThreadsPerSession`), or one thread's Claude CLI.
+/// A provider process: the Codex app-server an instance shares across threads,
+/// or one thread's Claude CLI.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum Slot {
     Shared(String),
@@ -96,8 +96,8 @@ pub struct ClaudeSettings {
     pub additional_directories: Vec<String>,
     pub disallowed_tools: Vec<String>,
     pub mcp_servers: BTreeMap<String, Value>,
-    /// Tools of the app's MCP servers the CLI runs without asking (T3
-    /// claudeMcpQueryOverrides), added to the policy's allowed tools.
+    /// Tools of the app's MCP servers the CLI runs without asking, added to
+    /// the policy's allowed tools.
     pub mcp_allowed_tools: Vec<String>,
     /// The read-only tools a read-only sandbox pre-approves instead.
     pub mcp_read_only_tools: Vec<String>,
@@ -177,7 +177,7 @@ pub struct SessionOptions {
     /// Background work keeps an idle session at most this long.
     pub max_idle_pin: Duration,
     pub reply_timeout: Duration,
-    /// T3 waits this long for a stopped Claude turn before closing its query.
+    /// Waits this long for a stopped Claude turn before closing its query.
     pub interrupt_timeout: Duration,
     pub close_grace: Duration,
     /// A frame the provider does not accept on stdin within this ends the session.
@@ -281,7 +281,7 @@ struct Table {
     routes: HashMap<RunAttemptId, (Slot, u64)>,
     generation: u64,
     /// Credentials handed to a process being prepared must survive another
-    /// process's release (T3 MCP credential reservations).
+    /// process's release.
     reserved: HashMap<SessionKey, usize>,
 }
 
@@ -415,9 +415,9 @@ impl SessionManager {
         keys
     }
 
-    /// The working directories of the thread's own live provider processes.
-    /// As in T3 CheckpointRestoreSafety, a shared app-server is left out: each
-    /// turn runs in its thread's workspace, which the caller already checks.
+    /// The working directories of the thread's own live provider processes. A
+    /// shared app-server is left out: each turn runs in its thread's
+    /// workspace, which the caller already checks.
     pub fn session_cwds(&self, thread: &ThreadId) -> Vec<String> {
         self.entries(|slot| matches!(slot, Slot::Thread(_)))
             .into_iter()
@@ -618,8 +618,8 @@ impl SessionManager {
         }
     }
 
-    /// T3 ClaudeAdapterV2 interruptTurn: interrupt, then close the process, which
-    /// also ends its background shells; the closure terminalizes the attempt.
+    /// Interrupt, then close the process, which also ends its background
+    /// shells; the closure terminalizes the attempt.
     async fn stop_claude(
         &self,
         entry: &Entry,
@@ -778,7 +778,7 @@ impl SessionManager {
                 message,
             }))
         };
-        // T3 reads the source run again at the first message: one rolled back
+        // The source run is read again at the first message: one rolled back
         // since the fork no longer has its native boundary.
         if let Some(transfer) = state.transfers.iter().find(|transfer| {
             transfer.kind == TransferKind::Fork
@@ -834,16 +834,16 @@ impl SessionManager {
     }
 
     /// Detaches the thread from its provider processes, as for archive, delete
-    /// or settle (T3 ProviderSessionManager.detach). A thread's own Claude
-    /// process closes; the shared Codex app-server interrupts the thread's turn,
+    /// or settle. A thread's own Claude process closes; the shared Codex
+    /// app-server interrupts the thread's turn,
     /// unloads its native thread and stays up for other threads until idle.
     /// Terminal detaches revoke the thread's credentials even without a process.
     pub async fn detach(&self, thread: &ThreadId, revoke_credentials: bool) {
         self.detach_instance(thread, None, revoke_credentials).await;
     }
 
-    /// `detach` for one provider instance, as T3 releases the previous
-    /// instance's session after a provider switch.
+    /// `detach` for one provider instance: releases the previous instance's
+    /// session after a provider switch.
     pub async fn detach_instance(
         &self,
         thread: &ThreadId,
@@ -895,8 +895,8 @@ impl SessionManager {
             }
             Err(_) => tracing::warn!(%thread, "interrupting a detached thread timed out"),
         }
-        // T3 waits for the interrupted turn and then finalizes it itself, so
-        // the run ends even when the app-server never reports it.
+        // The interrupted turn is awaited and then finalized, so the run ends
+        // even when the app-server never reports it.
         let (done, settled) = oneshot::channel();
         let sent = entry.mail.send(Mail::Settled {
             thread: thread.clone(),
@@ -1078,8 +1078,8 @@ impl SessionManager {
         Ok(())
     }
 
-    /// T3 ProviderTurnStartService: after any preparation, the attempt must
-    /// still be the run's current one right before its turn is sent.
+    /// After any preparation, the attempt must still be the run's current one
+    /// right before its turn is sent.
     async fn still_current(
         &self,
         thread: &ThreadId,
@@ -1093,9 +1093,8 @@ impl SessionManager {
             }))
     }
 
-    /// Waits (bounded, as T3 interruptAndAwaitTerminal) until the thread's
-    /// previous root turn on the process ends, so its late events stay with its
-    /// own attempt.
+    /// Waits (bounded) until the thread's previous root turn on the process
+    /// ends, so its late events stay with its own attempt.
     async fn settled(
         &self,
         entry: &Entry,
@@ -1204,7 +1203,7 @@ impl SessionManager {
 
     /// Called by a session task once its process is gone. Every credential the
     /// process recorded is revoked unless another process holds it or a process
-    /// being prepared reserved it (T3 releaseEntry).
+    /// being prepared reserved it.
     fn closed(&self, slot: &Slot, generation: u64, members: &Mutex<Members>) {
         {
             let mut table = self.table.lock().expect("session table");
@@ -1485,9 +1484,9 @@ fn unwrap_failure(result: Result<Ran, Failure>) -> Result<(), ExecError> {
     }
 }
 
-/// T3 countTerminalTurnsAfterBoundary: the native thread's terminal turns after
-/// the one that ended at `head`. A head the thread's own turns do not hold (a
-/// fork's inherited boundary) or no head discards every turn of the thread.
+/// The native thread's terminal turns after the one that ended at `head`. A
+/// head the thread's own turns do not hold (a fork's inherited boundary) or no
+/// head discards every turn of the thread.
 fn turns_after(state: &State, native_thread: &str, head: Option<&str>) -> u64 {
     let turns: Vec<_> = state
         .attempts

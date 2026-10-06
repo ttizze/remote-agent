@@ -1,4 +1,4 @@
-//! GPUI rendering of the shared T3 conversation presentation.
+//! GPUI rendering of the shared conversation presentation.
 mod attachments;
 mod dictation;
 mod hosts;

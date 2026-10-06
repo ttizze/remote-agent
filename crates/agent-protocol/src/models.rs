@@ -49,7 +49,7 @@ pub struct Project {
     #[serde(default)]
     pub repository_identity: Option<RepositoryIdentity>,
 }
-/// T3 `RepositoryIdentity`: the repository a project's checkout belongs to.
+/// The repository a project's checkout belongs to.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RepositoryIdentity {
@@ -71,8 +71,7 @@ pub struct RepositoryLocator {
     pub remote_name: String,
     pub remote_url: String,
 }
-/// A project action (T3 `ProjectScript`). The first one that runs on worktree
-/// creation is the project's setup script.
+/// A project action. The first one that runs on worktree creation is the project's setup script.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectScript {
@@ -154,7 +153,7 @@ pub struct FileContent {
     pub text: String,
     pub size: u64,
 }
-/// When a project's threads settle on their own (T3 `sidebarAutoSettleAfterDays`).
+/// When a project's threads settle on their own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum AutoSettle {
@@ -171,12 +170,12 @@ pub struct ProjectConversationSettings {
     pub continue_after_restart: Option<bool>,
 }
 
-/// Host conversation settings with T3's defaults.
+/// Host conversation settings.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct ConversationSettings {
     pub auto_settle: AutoSettle,
-    /// Continue turns a Host restart cut (T3 `continueThreadsAfterServerUpdate`).
+    /// Continue turns a Host restart cut.
     pub continue_after_restart: bool,
     pub snooze_limited_threads: bool,
     pub auto_resume_limited_threads: bool,

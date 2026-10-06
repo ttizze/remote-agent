@@ -1,7 +1,6 @@
-//! Host sweep decisions over a thread's list row: automatic settlement (T3
-//! ThreadSettlementService.ts) and usage-limit recovery (T3
-//! UsageLimitRecoveryWorker.ts). The Host runs them on a schedule and
-//! dispatches the command they return.
+//! Host sweep decisions over a thread's list row: automatic settlement and
+//! usage-limit recovery. The Host runs them on a schedule and dispatches the
+//! command they return.
 use crate::*;
 
 const DAY_MS: i64 = 24 * 60 * 60 * 1000;
@@ -33,7 +32,7 @@ pub fn thread_has_queued_turn_start(thread: &ThreadShell, now_ms: i64) -> bool {
     .all(|at| millis(at).is_none_or(|at| at < message_at))
 }
 
-/// T3 isAutoSettlementCandidate: cheap checks before any source control lookup.
+/// Cheap checks before any source control lookup.
 pub fn is_auto_settlement_candidate(thread: &ThreadShell, now_ms: i64) -> bool {
     if thread.archived_at.is_some()
         || thread.settled.is_some()
@@ -61,8 +60,8 @@ pub fn is_auto_settlement_candidate(thread: &ThreadShell, now_ms: i64) -> bool {
     woke_on_error || after_snooze
 }
 
-/// T3 resolveAutoSettlementAt for a thread without pull request state: the
-/// latest activity, once it is older than `after_days`.
+/// For a thread without pull request state: the latest activity, once it is
+/// older than `after_days`.
 pub fn auto_settlement_at(
     thread: &ThreadShell,
     now_ms: i64,
@@ -86,8 +85,8 @@ pub fn auto_settlement_at(
         .flatten()
 }
 
-/// T3 limitRecoveryCommand: arm a recovery for a fresh usage-limit stop, or
-/// resume the limited run once its armed reset has passed.
+/// Arm a recovery for a fresh usage-limit stop, or resume the limited run
+/// once its armed reset has passed.
 pub fn limit_recovery_command(
     thread: &ThreadShell,
     auto_resume: bool,
@@ -173,7 +172,6 @@ pub fn limit_recovery_command(
     ))
 }
 
-// T3 ThreadSettlementService.test.ts.
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1,6 +1,5 @@
 //! `subscribeShell`: the thread list as a snapshot or a replay of changed rows, then
-//! live changes batched (50 ms / 512) and coalesced per thread. Ported from T3
-//! `ShellStream.ts` and ws.ts.
+//! live changes batched (50 ms / 512) and coalesced per thread.
 use super::history::json_len;
 use super::live::{
     LIVE_STREAM_MAX_BYTES, LIVE_STREAM_MAX_ITEMS, LiveReceiver, LiveSender, live_channel,
@@ -280,7 +279,7 @@ impl ShellHub {
     }
 
     /// A project change takes its own global sequence, so a client that applies
-    /// only changes after its snapshot (T3 `applyShellStreamEvent`) keeps it.
+    /// only changes after its snapshot keeps it.
     pub async fn project_changed(&self, project: &str) -> Result<(), StoreError> {
         let (changes, project) = (self.changes.clone(), project.to_owned());
         self.store

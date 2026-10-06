@@ -1,4 +1,4 @@
-//! Which checkpoints a turn diff compares (T3 `CheckpointDiffQuery`).
+//! Which checkpoints a turn diff compares.
 use agent_domain::{CheckpointStatus, RunStatus, State};
 use agent_runtime::checkpoint_reference;
 
@@ -88,7 +88,7 @@ pub(crate) fn diff_refs(state: &State, from: u64, to: u64) -> Result<DiffRefs, D
 
 #[cfg(test)]
 mod tests {
-    //! T3 `CheckpointDiffQuery.test.ts` over the domain projection.
+    //! Tests over the domain projection.
     use super::*;
     use agent_domain::{
         Checkpoint, CheckpointId, CheckpointScope, CheckpointScopeId, Driver, MessageId,
@@ -145,7 +145,7 @@ mod tests {
     fn projection() -> State {
         State {
             runs: vec![run("run:1", 1, "scope:1"), run("run:2", 2, "scope:2")],
-            checkpoints: vec![checkpoint("run:2", 2, "scope:2", "refs/t3/test/second")],
+            checkpoints: vec![checkpoint("run:2", 2, "scope:2", "refs/test/second")],
             ..State::default()
         }
     }
@@ -157,7 +157,7 @@ mod tests {
             Ok(DiffRefs {
                 cwd: "/repo".into(),
                 from: checkpoint_reference(&CheckpointScopeId::new("scope:1").unwrap(), 0),
-                to: "refs/t3/test/second".into(),
+                to: "refs/test/second".into(),
             })
         );
     }
@@ -179,7 +179,7 @@ mod tests {
         state.runs[1].status = RunStatus::RolledBack;
         state
             .checkpoints
-            .insert(0, checkpoint("run:1", 1, "scope:1", "refs/t3/test/first"));
+            .insert(0, checkpoint("run:1", 1, "scope:1", "refs/test/first"));
         assert_eq!(
             diff_refs(&state, 0, 2),
             Err(DiffUnavailable::Range {

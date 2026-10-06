@@ -1,5 +1,4 @@
-//! What clients receive, ported from T3 `WireProjection.ts` and `toolOutput.ts`.
-//! Storage keeps everything; delivery withholds tool output, file bodies and
+//! What clients receive. Storage keeps everything; delivery withholds tool output, file bodies and
 //! transfer transcripts, and bounds long detail text. `getTurnItem` reads the
 //! withheld parts with a larger bound.
 use crate::StoredFact;
@@ -31,7 +30,7 @@ const FILE_BODY_KEYS: [&str; 6] = [
     "new_source",
 ];
 
-/// JavaScript `\s`, which `trim` and T3's summaries use.
+/// JavaScript `\s`, which `trim` and summaries use.
 pub fn js_space(c: char) -> bool {
     c == '\u{feff}' || (c != '\u{85}' && c.is_whitespace())
 }
@@ -52,8 +51,8 @@ fn prefix(text: &str, max_units: usize, max_bytes: usize) -> &str {
     text
 }
 
-/// T3 `truncateDetail`: at most `max_bytes` UTF-8 bytes on a character boundary,
-/// followed by the transport marker.
+/// At most `max_bytes` UTF-8 bytes on a character boundary, followed by the
+/// transport marker.
 pub fn truncate_detail(value: &str, max_bytes: usize) -> Cow<'_, str> {
     if value.len() <= max_bytes {
         return Cow::Borrowed(value);
@@ -64,7 +63,7 @@ pub fn truncate_detail(value: &str, max_bytes: usize) -> Cow<'_, str> {
     ))
 }
 
-/// T3 `summarizeDynamicValue`: a large input becomes its first nonblank line.
+/// A large input becomes its first nonblank line.
 pub fn summarize_dynamic_value(value: &Value) -> Cow<'_, Value> {
     let serialized: Cow<str> = match value {
         Value::String(text) if utf16_len(text) > MAX_DYNAMIC_VALUE_BYTES => Cow::Borrowed(text),
@@ -134,7 +133,7 @@ struct Envelope<'a> {
     failed: bool,
 }
 
-/// T3 `readResult`: walks MCP result envelopes for the data object and failure flags.
+/// Walks MCP result envelopes for the data object and failure flags.
 fn read_result<'a>(
     value: Option<&'a Value>,
     budget: &mut ReadBudget,
@@ -223,7 +222,7 @@ fn bounded_id(value: Option<&Value>) -> Option<String> {
     (utf16_len(id) <= MAX_ID_LENGTH && !id.trim_matches(js_space).is_empty()).then(|| id.into())
 }
 
-/// T3 `compactDynamicToolOutput`: only result identities and failure metadata.
+/// Only result identities and failure metadata.
 pub fn compact_dynamic_tool_output(value: &Value) -> Option<Value> {
     let mut budget = ReadBudget {
         remaining_bytes: MAX_PARSED_BYTES,
@@ -302,8 +301,7 @@ static FAILURE_PATTERNS: LazyLock<[Regex; 4]> = LazyLock::new(|| {
     .map(|pattern| Regex::new(pattern).expect("failure pattern compiles"))
 });
 
-/// T3 `toolOutputIndicatesFailure`: some providers report completion even when the
-/// output describes a failure.
+/// Some providers report completion even when the output describes a failure.
 pub fn tool_output_indicates_failure(text: &str) -> bool {
     let lower = text.to_lowercase();
     FAILURE_PATTERNS
@@ -313,7 +311,6 @@ pub fn tool_output_indicates_failure(text: &str) -> bool {
         || (lower.contains("is not recognized") && lower.contains("the term '"))
 }
 
-/// T3 `hasDynamicValue`.
 fn has_dynamic_value(value: &Value) -> bool {
     match value {
         Value::Null => false,
@@ -394,7 +391,7 @@ fn with_text(item: &Item, kind: ItemKind, text: String) -> Item {
     }
 }
 
-/// T3 `projectTurnItemForWire`.
+/// The item as delivered to clients.
 pub fn wire_item(item: &Item) -> Cow<'_, Item> {
     let projected = match &item.kind {
         ItemKind::CommandExecution { exit_code, .. } => {
@@ -441,8 +438,8 @@ fn bound_dynamic_value(value: &Value) -> Value {
     }
 }
 
-/// T3 `projectTurnItemForDetail`: the input and output the timeline withholds,
-/// bounded so a huge result cannot stall the connection.
+/// The input and output the timeline withholds, bounded so a huge result
+/// cannot stall the connection.
 pub fn detail_item(item: &Item) -> Item {
     let text = truncate_detail(&item.text, MAX_ON_DEMAND_BYTES).into_owned();
     match &item.kind {
@@ -531,7 +528,7 @@ fn needs_projection(state: &State) -> bool {
         || state.tasks.iter().any(|task| wire_task(task).is_some())
 }
 
-/// The projection a client folds (T3 `projectThreadProjectionForWire`).
+/// The projection a client folds.
 pub fn client_state(state: &Arc<State>) -> Arc<State> {
     if !needs_projection(state) {
         return state.clone();
@@ -637,8 +634,8 @@ fn client_fact(state: &State, body: &FactBody) -> Option<FactBody> {
     }
 }
 
-/// Facts as clients receive them (T3 `projectDomainEventForWire`). `state` is the
-/// thread after the facts; a fact that changed a tool item carries that item.
+/// Facts as clients receive them. `state` is the thread after the facts; a
+/// fact that changed a tool item carries that item.
 pub fn client_facts(state: &State, facts: &Arc<[StoredFact]>) -> Arc<[StoredFact]> {
     let projected: Vec<Option<FactBody>> = facts
         .iter()

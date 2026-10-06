@@ -1,5 +1,4 @@
-//! T3's project toolkit (toolkits/project/handlers.ts): thread launch and the
-//! registered projects.
+//! The project toolkit: thread launch and the registered projects.
 use super::backend::ProjectFailure;
 use super::orchestrator::{parse_interaction_mode, parse_runtime_mode};
 use super::thread::{SelectionInput, model_selection_json};
@@ -13,7 +12,7 @@ use agent_runtime::{HostProject, InitialMessage, LaunchThread, WorkspaceStrategy
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-/// T3 Project; the Host keeps no project timestamps or default model.
+/// The Host keeps no project timestamps or default model.
 fn project_json(project: &HostProject, scripts: Vec<ProjectScript>) -> Value {
     json!({
         "id": project.id,
@@ -252,7 +251,7 @@ impl AgentTools {
             {
                 return Err(failure(
                     "invalid_request",
-                    "A project started from its title takes only a title; set scripts or defaultModelSelection afterwards with t3_project_update.",
+                    "A project started from its title takes only a title.",
                 ));
             }
             return Err(failure(

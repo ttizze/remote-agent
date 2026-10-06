@@ -288,13 +288,12 @@ mod tests {
             other => panic!("{other:?}"),
         }
     }
-    // T3 CodexAdapterV2.test.ts dynamic and MCP tool projections.
     #[test]
     fn tools_keep_qualified_names_native_results_and_presentation() {
         let (name, output, _) = tool(
-            json!({"type":"mcpToolCall","server":"t3-code","tool":"create_threads","arguments":{"threads":[]},"result":{"content":[{"type":"text"}],"structuredContent":{"threads":[{"threadId":"thread:mcp:fixture:0"}]}}}),
+            json!({"type":"mcpToolCall","server":"orchestration","tool":"create_threads","arguments":{"threads":[]},"result":{"content":[{"type":"text"}],"structuredContent":{"threads":[{"threadId":"thread:mcp:fixture:0"}]}}}),
         );
-        assert_eq!(name, "t3-code.create_threads");
+        assert_eq!(name, "orchestration.create_threads");
         assert_eq!(
             output,
             Some(json!({"threads":[{"threadId":"thread:mcp:fixture:0"}]}))

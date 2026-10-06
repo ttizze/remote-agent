@@ -25,8 +25,8 @@ fn rejected(reason: &str) -> Reply {
     }
 }
 
-// T3 Orchestrator.ts dispatchThreadMutation: sidebar commands on an archived
-// thread are rejected, while message.dispatch is still accepted.
+// Sidebar commands on an archived thread are rejected, while message.dispatch
+// is still accepted.
 #[test]
 fn an_archived_thread_rejects_sidebar_changes_but_accepts_messages() {
     let mut s = state();
@@ -95,8 +95,6 @@ fn an_archived_thread_rejects_sidebar_changes_but_accepts_messages() {
     );
 }
 
-// T3 Orchestrator.ts thread.pin / thread.unpin / thread.pin.reorder /
-// thread.active.reorder.
 #[test]
 fn pins_keep_their_slot_and_reorders_need_the_right_list() {
     let mut s = state();
@@ -189,8 +187,8 @@ fn pins_keep_their_slot_and_reorders_need_the_right_list() {
     );
 }
 
-// T3 ThreadDeletion.ts: deleting a deleted thread repeats only its cleanup,
-// and delegated children are left to their own threads.
+// Deleting a deleted thread repeats only its cleanup, and delegated children
+// are left to their own threads.
 #[test]
 fn deleting_is_idempotent_and_leaves_delegated_children_running() {
     let mut s = state();
@@ -216,8 +214,8 @@ fn deleting_is_idempotent_and_leaves_delegated_children_running() {
     );
 }
 
-// T3 Orchestrator.ts dispatchMessage queues defer_start behind an active run,
-// and its message.dispatch schema has no text length or emptiness bound.
+// Queues defer_start behind an active run, and its message.dispatch schema
+// has no text length or emptiness bound.
 #[test]
 fn deferred_starts_queue_behind_active_runs_and_text_is_not_bounded() {
     let mut s = state();
@@ -259,8 +257,6 @@ fn attachment(kind: AttachmentKind, mime: &str, size: u64) -> Attachment {
     }
 }
 
-// T3 chatAttachment.ts ChatImageAttachment / ChatFileAttachment schemas and
-// getProviderAttachmentLimitError.
 #[test]
 fn attachments_follow_the_reference_schemas_and_image_budget() {
     let image = |size| attachment(AttachmentKind::Image, "image/png", size);

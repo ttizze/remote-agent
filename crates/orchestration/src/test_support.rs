@@ -140,7 +140,7 @@ pub fn checkpoint(run: &Run, status: CheckpointStatus) -> Checkpoint {
         parent_checkpoint_id: None,
         ordinal_within_scope: run.ordinal,
         app_run_ordinal: Some(run.ordinal),
-        reference: CheckpointRef::new(format!("refs/t3/test/{}", run.id)).unwrap(),
+        reference: CheckpointRef::new(format!("refs/test/{}", run.id)).unwrap(),
         status,
         files: vec![],
         captured_at: now(),

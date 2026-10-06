@@ -144,13 +144,12 @@ pub struct Thread {
     pub limit_recovery: Option<LimitRecovery>,
     pub linked_pull_request: Option<LinkedPullRequest>,
 }
-/// T3 ThreadTitleRegeneration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TitleRequest {
     pub id: CommandId,
     pub started_at: Timestamp,
 }
-/// What to do once a usage limit resets (T3 OrchestrationV2LimitRecovery).
+/// What to do once a usage limit resets.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LimitRecovery {
     /// The metadata command that set it; an automatic resume names it.
@@ -168,7 +167,6 @@ pub struct LimitRecoveryUpdate {
     pub auto_resume: Option<bool>,
     pub snooze: Option<bool>,
 }
-/// T3 ThreadLinkedPullRequest.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LinkedPullRequest {
     pub project: String,
@@ -189,7 +187,7 @@ pub struct ResolvedPlan {
     pub kind: PlanKind,
     pub implemented: bool,
 }
-/// T3 message.dispatch continuations of a stopped run.
+/// Continuations of a stopped run.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Continuation {
     /// The user continues an interrupted or usage-limited run.
@@ -200,8 +198,7 @@ pub enum Continuation {
         recovery: Option<CommandId>,
     },
 }
-/// Sidebar state a fork or delegated child copies from its parent thread
-/// (T3 ThreadForkService and makeSubagentChildThread spread the parent row).
+/// Sidebar state a fork or delegated child copies from its parent thread.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ThreadArrangement {
     pub pinned_at: Option<Timestamp>,
@@ -247,7 +244,7 @@ pub struct Message {
     pub creation_source: String,
     pub created_at: Timestamp,
     pub updated_at: Timestamp,
-    /// Inline context records the text links to (T3 message `context`).
+    /// Inline context records the text links to.
     pub context: Option<MessageContext>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -370,7 +367,7 @@ pub enum ItemKind {
         code: Option<String>,
         class: Option<String>,
         retryable: Option<bool>,
-        /// When a usage limit resets (T3 ProviderFailure resetAt).
+        /// When a usage limit resets.
         reset_at: Option<Timestamp>,
     },
     SystemNotice {
@@ -379,7 +376,7 @@ pub enum ItemKind {
     Notification {
         notification: Notification,
     },
-    /// T3 thread_created: a thread an agent created from this run.
+    /// A thread an agent created from this run.
     ThreadCreated {
         thread: ThreadId,
         run: Option<RunId>,
@@ -407,15 +404,14 @@ pub struct Item {
     pub text: String,
     pub started_at: Timestamp,
     pub completed_at: Option<Timestamp>,
-    /// Set only on delivery (T3 WireProjection): the output stays on the Host and
-    /// `getTurnItem` reads it.
+    /// Set only on delivery: the output stays on the Host and `getTurnItem`
+    /// reads it.
     pub output_omitted: bool,
     /// Set only on delivery: the exit code or the withheld output shows a failure.
     pub output_indicates_failure: bool,
 }
 impl Item {
-    /// A running tool call that asked to outlive its turn (T3
-    /// isPersistentCodexDynamicTool).
+    /// A running tool call that asked to outlive its turn.
     pub fn persistent_tool(&self) -> bool {
         !self.status.terminal()
             && matches!(&self.kind, ItemKind::DynamicTool { input, .. } if input.0["persistent"] == true)
@@ -546,8 +542,7 @@ pub struct Checkpoint {
     pub file_ref: String,
     pub files: Vec<CheckpointFile>,
 }
-/// One file a checkpoint changed since the scope's previous checkpoint (T3
-/// `OrchestrationV2CheckpointFileSummary`).
+/// One file a checkpoint changed since the scope's previous checkpoint.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CheckpointFile {
     pub path: String,
@@ -593,7 +588,7 @@ pub struct Transfer {
     /// The provider instance it is for; a fork or merge-back takes the
     /// instance of the turn that consumes it.
     pub instance: Option<String>,
-    /// The run a delegated result was handed to (T3 targetRunId).
+    /// The run a delegated result was handed to.
     pub target_run: Option<RunId>,
     pub delivery: Option<ContextDelivery>,
     pub id: ContextTransferId,
@@ -742,7 +737,7 @@ impl State {
         });
         runs
     }
-    /// A delegated completion delivery; T3 delivers only these ahead of the queue.
+    /// A delegated completion delivery, delivered ahead of the queue.
     pub fn delegated_delivery(&self, message: &MessageId) -> bool {
         self.message(message)
             .and_then(|m| m.notification.as_ref())
@@ -820,7 +815,7 @@ pub enum DispatchMode {
     RestartActive { run: RunId },
 }
 values! { DeliveryIntent { Auto, Steer, Restart } }
-/// T3 thread fork and merge-back source points.
+/// Thread fork and merge-back source points.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SourcePoint {
     LatestStable,
@@ -862,8 +857,8 @@ pub enum Command {
         title: String,
     },
     RegenerateTitle,
-    /// T3 thread.metadata.update. `project_root` is filled by the Host and
-    /// becomes the working directory when the worktree is cleared.
+    /// `project_root` is filled by the Host and becomes the working directory
+    /// when the worktree is cleared.
     UpdateMetadata {
         title: Option<String>,
         regenerate_title: Option<bool>,
@@ -875,7 +870,7 @@ pub enum Command {
         linked_pull_request: Option<Option<LinkedPullRequest>>,
         project_root: Option<String>,
     },
-    /// T3 thread.auto-settle from the Host's settlement sweep.
+    /// Automatic settlement from the Host's settlement sweep.
     SettleAutomatically {
         snapshot_at: Timestamp,
         settled_at: Option<Timestamp>,
@@ -925,7 +920,7 @@ pub enum Command {
     SwitchProvider {
         selection: ModelSelection,
     },
-    /// T3 provider-session.detach: stop this thread's session of an instance.
+    /// Stop this thread's session of an instance.
     DetachProviderSession {
         instance: String,
         reason: Option<String>,
@@ -1075,7 +1070,7 @@ pub enum Command {
     },
     Compact,
     Stop,
-    /// T3 thread.created.record: a top-level thread the agent of `run` created.
+    /// A top-level thread the agent of `run` created.
     RecordCreatedThread {
         run: RunId,
         thread: ThreadId,
@@ -1202,7 +1197,7 @@ pub enum ProviderItem {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ProviderEvent {
     /// The account's usage-limit reset (Unix seconds), when every exhausted
-    /// window reports one (T3 codexUsageLimitResetAt).
+    /// window reports one.
     RateLimits {
         resets_at: Option<i64>,
     },
@@ -1468,8 +1463,8 @@ pub enum EffectResult {
         attempt: RunAttemptId,
         message: String,
     },
-    /// The fork's source run no longer has a stable native boundary (T3
-    /// decideForkExecution reads the source run again at the first message).
+    /// The fork's source run no longer has a stable native boundary: it is
+    /// read again at the first message.
     ForkSourceChanged {
         attempt: RunAttemptId,
     },

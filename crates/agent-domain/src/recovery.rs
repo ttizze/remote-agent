@@ -40,7 +40,7 @@ pub fn compact_restart_label(text: &str) -> String {
     }
 }
 pub fn restart_background_note(work: &[CancelledBackgroundWork]) -> String {
-    let mut lines = vec!["Note: the T3 server restarted, and this background work was cancelled before it finished. It will not report back:".into()];
+    let mut lines = vec!["Note: the server restarted, and this background work was cancelled before it finished. It will not report back:".into()];
     lines.extend(
         work.iter()
             .take(10)

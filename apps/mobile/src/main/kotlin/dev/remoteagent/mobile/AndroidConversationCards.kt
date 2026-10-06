@@ -58,7 +58,7 @@ internal fun ProviderIcon(provider: dev.remoteagent.core.ProviderKind, modifier:
         ),
         provider.name,
         modifier,
-        tint = T3.color("textMuted"),
+        tint = AppTheme.color("textMuted"),
     )
 }
 
@@ -88,9 +88,9 @@ internal fun ConversationBody(body: String) {
                 is MarkdownBlock.Paragraph -> {
                     if (block.style.code)
                         Surface(
-                            color = T3.color("codeBackground"),
+                            color = AppTheme.color("codeBackground"),
                             shape = androidx.compose.foundation.shape.RoundedCornerShape(10.dp),
-                            border = BorderStroke(1.dp, T3.color("border")),
+                            border = BorderStroke(1.dp, AppTheme.color("border")),
                         ) {
                             Column(Modifier.fillMaxWidth().padding(12.dp)) {
                                 CopyButton(block.runs.joinToString("") { it.text })
@@ -122,13 +122,13 @@ internal fun ConversationBody(body: String) {
                                         null -> 16.sp
                                         else -> 15.sp
                                     },
-                                fontFamily = T3.fonts,
+                                fontFamily = AppTheme.fonts,
                                 modifier = Modifier.padding(start = if (block.style.quoted) 12.dp else 0.dp),
                             )
                         }
                 }
                 is MarkdownBlock.Visualization ->
-                    Text(block.path, color = T3.color("textMuted"), style = MaterialTheme.typography.bodySmall)
+                    Text(block.path, color = AppTheme.color("textMuted"), style = MaterialTheme.typography.bodySmall)
                 is MarkdownBlock.Table -> MarkdownTable(block, index)
             }
         }

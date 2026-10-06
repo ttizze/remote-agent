@@ -1,5 +1,3 @@
-//! Ported from T3 `ThreadStream.test.ts` (every case), the bounded-snapshot case of
-//! ws.test.ts and the handoff case of `WireProjection.test.ts`.
 use super::*;
 use crate::store::tests::{selection, temp_store};
 use crate::sync::client_facts;

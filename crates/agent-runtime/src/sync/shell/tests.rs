@@ -1,6 +1,4 @@
-//! Ported from T3 `ShellStream.test.ts` (snapshot, coalescing, shell-to-item and
-//! archive cases) and the shell-row case of `WireProjection.test.ts`. Repository
-//! identity enrichment is not part of this runtime.
+//! Repository identity enrichment is not part of this runtime.
 use super::*;
 use crate::store::tests::{selection, temp_store, thread_shell};
 use crate::sync::history::tests::{created, fold_into};
@@ -602,9 +600,9 @@ async fn measures_the_replay_budget_in_utf8_bytes() {
     ));
 }
 
-// T3 ws.ts replays durable project events on resume; projects here live outside the
-// fact log, so a resumed stream starts from the complete live project list. Each
-// project change still takes a global sequence.
+// Projects here live outside the fact log, so a resumed stream starts from the
+// complete live project list. Each project change still takes a global
+// sequence.
 #[tokio::test]
 async fn resumes_with_project_changes_made_while_disconnected() {
     let (_dir, store) = temp_store();
@@ -660,7 +658,7 @@ async fn reports_project_changes_from_the_directory() {
     assert_eq!(snapshot.projects, [project("project-a")]);
     projects.0.lock().unwrap().clear();
     hub.project_changed("project-a").await.unwrap();
-    // T3 shellReducer drops a change at or below the snapshot sequence.
+    // A change at or below the snapshot sequence is dropped.
     assert_eq!(
         next(&mut subscription).await,
         ShellUpdate::ProjectRemoved {
@@ -712,7 +710,7 @@ async fn orders_project_changes_between_thread_commits() {
     );
 }
 
-// T3 ProjectionStore lists shell rows by `updated_at`, then thread id.
+// Shell rows are listed by `updated_at`, then thread id.
 #[tokio::test]
 async fn lists_snapshot_rows_by_update_time_then_thread_id() {
     let (_dir, store) = temp_store();

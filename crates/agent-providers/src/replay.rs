@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::path::Path;
 
 #[test]
-fn every_reference_transcript_is_unchanged_and_all_native_frames_decode() {
+fn every_transcript_matches_its_digest_and_all_native_frames_decode() {
     use sha2::{Digest, Sha256};
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/fixtures");
     let manifest: Vec<Value> =
@@ -102,7 +102,7 @@ impl Replay {
             pending: VecDeque::new(),
             context: WireContext {
                 cwd: "<workspace>".into(),
-                client_name: "T3 Code".into(),
+                client_name: "remote_agent_host".into(),
                 client_version: "<ignored>".into(),
                 ..WireContext::default()
             },
@@ -964,7 +964,6 @@ fn background_command_and_monitor_replays_keep_roster_notifications_and_wake_own
         }
     }
 }
-// T3 fixtures/tool_call_read_only_on_request/output.ts.
 #[test]
 fn read_only_on_request_replays_ask_once_and_run_the_approved_write() {
     const PROBE_FILE: &str = ".codex-probe-write-action.txt";
@@ -1019,7 +1018,6 @@ fn read_only_on_request_replays_ask_once_and_run_the_approved_write() {
         );
     }
 }
-// T3 fixtures/tool_call_restricted_granular/output.ts and claude_output.ts.
 #[test]
 fn restricted_granular_replays_resolve_one_request_of_the_reference_kind() {
     for (driver, kind) in [(Driver::Codex, "file-change"), (Driver::Claude, "command")] {
@@ -1068,7 +1066,6 @@ fn restricted_granular_replays_resolve_one_request_of_the_reference_kind() {
         }
     }
 }
-// T3 fixtures/tool_call_denied_write/claude_output.ts.
 #[test]
 fn denied_write_replay_declines_once_and_fails_the_write() {
     let replay = Replay::run("tool_call_denied_write", Driver::Claude);
@@ -1284,7 +1281,7 @@ fn local_bash_task_replay_keeps_command_output_without_child_threads() {
         .find(|i| matches!(i.kind, ItemKind::CommandExecution { .. }))
         .unwrap();
     assert!(
-        matches!(&tool.kind,ItemKind::CommandExecution { command,.. } if command.contains("vp run --filter @t3tools/web typecheck"))
+        matches!(&tool.kind,ItemKind::CommandExecution { command,.. } if command.contains("vp run --filter @acme/web typecheck"))
     );
     assert!(tool.text.contains("tsgo --noEmit"));
 }

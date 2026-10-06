@@ -1,6 +1,6 @@
-//! Live worktree setup progress per thread (T3 `WorktreeSetupTracker`). Memory
-//! only: a setup is tracked from `begin` until its turn starts or it fails, plus
-//! a short retention so a late subscriber still sees the outcome.
+//! Live worktree setup progress per thread. Memory only: a setup is tracked
+//! from `begin` until its turn starts or it fails, plus a short retention so a
+//! late subscriber still sees the outcome.
 use crate::Clock;
 use agent_domain::{
     ThreadId, WORKTREE_SETUP_DETAIL_MAX_LENGTH, WORKTREE_SETUP_ERROR_MAX_LENGTH,

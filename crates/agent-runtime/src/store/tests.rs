@@ -225,7 +225,7 @@ async fn paginates_catch_up_beyond_the_read_limit() {
     );
 }
 
-// T3 OrchestrationEventStore.ts getAgentReplayStats: octet_length over replay limit + 1.
+// octet_length over the replay limit plus 1.
 #[tokio::test]
 async fn measures_a_replay_gap_in_utf8_bytes_within_the_replay_limit() {
     let (_dir, store) = temp_store();

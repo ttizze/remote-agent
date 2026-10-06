@@ -17,8 +17,8 @@ fn later_provider() -> ModelSelection {
     later
 }
 
-// T3 CheckpointRollbackService.ts rewinds the active provider thread, and
-// later turns use the replacement native identity it reports.
+// Rewinds the active provider thread, and later turns use the replacement
+// native identity it reports.
 #[test]
 fn rollback_rewinds_the_active_provider_and_uses_its_replacement_identity() {
     let mut s = state();
@@ -72,8 +72,8 @@ fn rollback_rewinds_the_active_provider_and_uses_its_replacement_identity() {
             if thread == "native-replacement")));
 }
 
-// T3 Orchestrator.ts dispatchCheckpointRollback: a rollback needs an active
-// provider thread, and its target turn must belong to that thread.
+// A rollback needs an active provider thread, and its target turn must
+// belong to that thread.
 #[test]
 fn rollback_targets_must_belong_to_the_active_provider_thread() {
     let mut s = state();
@@ -108,8 +108,8 @@ fn rollback_targets_must_belong_to_the_active_provider_thread() {
     );
 }
 
-// T3 CheckpointRollbackService.ts: once the selection names another instance
-// than the active provider thread, the rollback fails without rewinding.
+// Once the selection names another instance than the active provider thread,
+// the rollback fails without rewinding.
 #[test]
 fn rollback_fails_when_the_selection_left_the_active_provider() {
     let mut s = state();
@@ -139,9 +139,8 @@ fn rollback_fails_when_the_selection_left_the_active_provider() {
     assert_eq!(s.runs[1].status, RunStatus::Completed);
 }
 
-// T3 Orchestrator.ts dispatchCheckpointRollback: a file restore the Host found
-// unsafe is rejected at admission, after the target checks; a rewind without
-// files ignores it.
+// A file restore the Host found unsafe is rejected at admission, after the
+// target checks; a rewind without files ignores it.
 #[test]
 fn a_restore_the_host_refused_is_rejected_at_admission() {
     let refusal = "File restore requires an isolated worktree.";
@@ -207,9 +206,9 @@ fn the_host_refusal_is_not_part_of_the_rollback_identity() {
     assert_eq!(replay.receipt, first.receipt);
 }
 
-// T3 CheckpointRollbackService asks the provider to rewind whenever later runs
-// exist: after a failed rewind dropped the native thread, a new rollback fails
-// instead of hiding the later runs without rewinding anything.
+// Asks the provider to rewind whenever later runs exist: after a failed
+// rewind dropped the native thread, a new rollback fails instead of hiding
+// the later runs without rewinding anything.
 #[test]
 fn rollback_without_a_native_thread_to_rewind_fails() {
     let mut s = state();

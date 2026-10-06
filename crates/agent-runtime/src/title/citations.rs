@@ -3,7 +3,7 @@ use super::{is_js_space, js_trim, utf16_len};
 use url::Url;
 
 const LABEL: &str = "[Assistant quote](";
-pub(super) const HREF_PREFIX: &str = "t3-citation://v1/";
+pub(super) const HREF_PREFIX: &str = "citation://v1/";
 pub(super) const MAX_TEXT: usize = 8_000;
 pub(super) const MAX_COMMENT: usize = 8_000;
 pub(super) const CONTEXT: usize = 32;
@@ -70,7 +70,7 @@ pub(super) fn parse_citation_href(href: &str) -> Option<Citation> {
     }
     let url = Url::parse(href).ok()?;
     let parts: Vec<&str> = url.path().get(1..)?.split('/').collect();
-    if url.scheme() != "t3-citation"
+    if url.scheme() != "citation"
         || url.host_str() != Some("v1")
         || parts.len() != 3
         || !url.username().is_empty()

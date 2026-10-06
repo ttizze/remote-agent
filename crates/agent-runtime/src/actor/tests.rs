@@ -758,11 +758,11 @@ async fn closes_a_subscriber_that_falls_behind() {
         received += 1;
     }
     assert_eq!(received, 4);
-    // T3 LiveStreamBudget ends the stream with LiveStreamBufferError.
+    // The stream ends with LiveStreamBufferError.
     assert!(slow.updates.overflowed());
 }
 
-// T3 LiveStreamBudget.ts: retained serialized bytes close a stream regardless of count.
+// Retained serialized bytes close a stream regardless of count.
 #[tokio::test]
 async fn closes_a_subscriber_whose_undelivered_facts_exceed_the_byte_budget() {
     let h = harness();
@@ -1011,8 +1011,7 @@ impl HandoffCatalog for Catalog {
     }
 }
 
-// T3 ContextHandoffBudget: the default token cap, and the window only the
-// Claude catalog knows (ClaudeAdapterV2 getModelContextWindow).
+// The default token cap, and the window only the Claude catalog knows.
 #[test]
 fn the_provider_catalog_has_the_reference_handoff_limits() {
     let selection = |driver, model: &str, window: Option<&str>| ModelSelection {
@@ -1088,8 +1087,8 @@ impl HandoffCatalog for Windows {
     }
 }
 
-// T3 ProviderTurnStartService reads the selected run's model window before
-// budgeting delivery, so a message that selects another window starts with it.
+// The selected run's model window is read before budgeting delivery, so a
+// message that selects another window starts with it.
 #[tokio::test]
 async fn a_run_starts_with_the_model_window_its_message_selects() {
     let mut h = harness();

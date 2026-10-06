@@ -16,7 +16,7 @@ struct ThreadScreen: View {
         let conversation = model.conversation
         VStack(spacing: 0) {
             if let notice = model.notice {
-                BexNotice(text: notice).font(T3Theme.font(12)).padding(.horizontal, 20).padding(
+                BexNotice(text: notice).font(AppTheme.font(12)).padding(.horizontal, 20).padding(
                     .vertical,
                     6
                 )
@@ -25,7 +25,7 @@ struct ThreadScreen: View {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 14) {
                         if conversation.hasMoreHistory {
-                            Button("Load earlier messages") { model.loadOlderHistory() }.font(T3Theme.font(13))
+                            Button("Load earlier messages") { model.loadOlderHistory() }.font(AppTheme.font(13))
                                 .frame(maxWidth: .infinity)
                         }
                         if conversation.loading, conversation.rows.isEmpty {
@@ -91,13 +91,13 @@ struct ThreadScreen: View {
             }
             ConversationComposer(model: model, showQueue: { showingQueue = true }, showAgents: { showingAgents = true })
         }
-        .background(T3Theme.color("canvas")).foregroundStyle(T3Theme.color("text"))
+        .background(AppTheme.color("canvas")).foregroundStyle(AppTheme.color("text"))
         .navigationTitle(conversation.title).navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .principal) {
                 VStack(spacing: 2) {
-                    Text(conversation.project).font(T3Theme.font(11)).foregroundStyle(T3Theme.color("textMuted"))
-                    Text(conversation.title).font(T3Theme.font(14, weight: .medium)).lineLimit(1)
+                    Text(conversation.project).font(AppTheme.font(11)).foregroundStyle(AppTheme.color("textMuted"))
+                    Text(conversation.title).font(AppTheme.font(14, weight: .medium)).lineLimit(1)
                 }.onTapGesture { title = conversation.title; renaming = conversation.threadId != nil }
             }
             ToolbarItem(placement: .topBarTrailing) {
@@ -151,13 +151,13 @@ struct ThreadScreen: View {
                                 }
                             } label: {
                                 VStack(alignment: .leading, spacing: 5) {
-                                    Text(agent.title).font(T3Theme.font(14, weight: .medium))
-                                    Text(agent.metadata).font(T3Theme.font(12))
-                                        .foregroundStyle(T3Theme.color("textMuted"))
+                                    Text(agent.title).font(AppTheme.font(14, weight: .medium))
+                                    Text(agent.metadata).font(AppTheme.font(12))
+                                        .foregroundStyle(AppTheme.color("textMuted"))
                                     if !agent.detail
                                         .isEmpty {
-                                        Text(agent.detail).font(T3Theme.font(13))
-                                            .foregroundStyle(T3Theme.color("textMuted"))
+                                        Text(agent.detail).font(AppTheme.font(13))
+                                            .foregroundStyle(AppTheme.color("textMuted"))
                                     }
                                 }.frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 14)
                             }.buttonStyle(.plain).disabled(agent.childThreadId == nil)

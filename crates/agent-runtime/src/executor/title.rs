@@ -7,12 +7,12 @@ use crate::{
 use agent_domain::{EffectBody, EffectResult, Role, State};
 use futures_util::future::BoxFuture;
 
-/// Attempts of an initial title (T3 retries it twice); a regeneration runs once.
+/// Attempts of an initial title (retried twice); a regeneration runs once.
 const INITIAL_TITLE_ATTEMPTS: u32 = 3;
 const FALLBACK_TITLE: &str = "New thread";
 
-/// T3 `ThreadTitleRegenerationService`: titles the thread from its first message,
-/// or regenerates the title from the conversation. Any failure keeps the title.
+/// Titles the thread from its first message, or regenerates the title from the
+/// conversation. Any failure keeps the title.
 pub(crate) struct GenerateTitle(pub(crate) ExecutorContext);
 
 enum Outcome {

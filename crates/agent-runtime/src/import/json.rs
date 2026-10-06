@@ -1,5 +1,5 @@
 //! One JSONL record read incrementally. Only selected fields are assembled; other
-//! values are validated and skipped without allocation (T3 `AgentSessionJson`).
+//! values are validated and skipped without allocation.
 use serde_json::{Map, Value};
 
 pub(crate) const MAX_DEPTH: usize = 128;

@@ -576,7 +576,7 @@ async fn a_worktree_launch_runs_the_projects_setup_script() {
     };
 
     let _: Empty = host
-        .call(set_setup("touch \"$T3CODE_WORKTREE_PATH/setup-ran\""))
+        .call(set_setup("touch \"$WORKTREE_PATH/setup-ran\""))
         .await
         .unwrap();
     let projects: Vec<Project> = host.call(Call::ListProjects(Empty {})).await.unwrap();
@@ -626,7 +626,7 @@ async fn a_worktree_launch_runs_the_projects_setup_script() {
         error.as_deref(),
         Some("Workspace preparation failed during run setup script: Setup script exited with 1.")
     );
-    // The setup card keeps the outcome for late subscribers (T3 subscribeWorktreeSetup).
+    // The setup card keeps the outcome for late subscribers.
     let card = host
         .reply(Call::SetupStream(wire::SubscribeSetup {
             thread_id: launched.thread_id.clone(),
@@ -882,7 +882,7 @@ async fn conversation_calls_answer_with_typed_errors() {
             request_completion_marker: false,
             accept_bounded_snapshot: false,
         }),
-        // T3 `CheckpointDiffQuery`: the typed missing-thread contract.
+        // The typed missing-thread contract.
         Call::TurnDiff(wire::GetTurnDiff {
             thread_id: missing.clone(),
             from_run_ordinal: 0,
@@ -997,7 +997,7 @@ async fn agent_tools_read_a_thread_of_their_own_project() {
     let read = tool(
         &host,
         &thread,
-        "t3_thread_read",
+        "thread_read",
         json!({"threadId": thread, "limit": 1}),
     )
     .await;
@@ -1009,7 +1009,7 @@ async fn agent_tools_read_a_thread_of_their_own_project() {
     let next = tool(
         &host,
         &thread,
-        "t3_thread_read",
+        "thread_read",
         json!({"threadId": thread, "afterPosition": read["nextPosition"]}),
     )
     .await;
@@ -1018,7 +1018,7 @@ async fn agent_tools_read_a_thread_of_their_own_project() {
     let elsewhere = tool(
         &host,
         &thread,
-        "t3_thread_read",
+        "thread_read",
         json!({"threadId": "thread:elsewhere"}),
     )
     .await;
@@ -1158,22 +1158,16 @@ async fn agent_tools_delegate_create_queue_and_interrupt_through_the_runtime() {
     let parent = launched.thread_id;
     eventually(&host, &parent, running).await;
 
-    let pinned = tool(
-        &host,
-        &parent,
-        "t3_thread_organize",
-        json!({"action": "pin"}),
-    )
-    .await;
+    let pinned = tool(&host, &parent, "thread_organize", json!({"action": "pin"})).await;
     assert!(pinned["sequence"].is_u64(), "{pinned}");
     tool(
         &host,
         &parent,
-        "t3_thread_organize",
+        "thread_organize",
         json!({"action": "unpin"}),
     )
     .await;
-    let listed = tool(&host, &parent, "t3_thread_list", json!({})).await;
+    let listed = tool(&host, &parent, "thread_list", json!({})).await;
     assert_eq!(listed["currentThreadId"], json!(parent));
     assert_eq!(listed["threads"][0]["status"], "running");
 
@@ -1199,13 +1193,13 @@ async fn agent_tools_delegate_create_queue_and_interrupt_through_the_runtime() {
         ),
         (agent_domain::MessageAuthor::Agent, "mcp")
     );
-    let child_read = tool(&host, &parent, "t3_thread_read", json!({"threadId": child})).await;
+    let child_read = tool(&host, &parent, "thread_read", json!({"threadId": child})).await;
     assert_eq!(child_read["thread"]["relationshipToParent"], "subagent");
     assert_eq!(child_read["items"][0]["text"], "[hold] child work");
     let timed_out = tool(
         &host,
         &parent,
-        "t3_thread_wait",
+        "thread_wait",
         json!({"threadId": child, "timeoutMs": 300}),
     )
     .await;
@@ -1220,7 +1214,7 @@ async fn agent_tools_delegate_create_queue_and_interrupt_through_the_runtime() {
     )
     .await;
     assert_eq!(cancelled["status"], "cancel_requested");
-    let finished = tool(&host, &parent, "t3_thread_wait", json!({"threadId": child})).await;
+    let finished = tool(&host, &parent, "thread_wait", json!({"threadId": child})).await;
     assert_eq!(finished["status"], "interrupted");
     eventually(&host, &parent, |state| {
         state.tasks.iter().any(|t| t.status.terminal())
@@ -1246,7 +1240,7 @@ async fn agent_tools_delegate_create_queue_and_interrupt_through_the_runtime() {
     let done = tool(
         &host,
         &parent,
-        "t3_thread_wait",
+        "thread_wait",
         json!({"threadId": created_thread}),
     )
     .await;
@@ -1254,7 +1248,7 @@ async fn agent_tools_delegate_create_queue_and_interrupt_through_the_runtime() {
     let activity = tool(
         &host,
         &parent,
-        "t3_thread_read",
+        "thread_read",
         json!({"threadId": parent, "view": "activity"}),
     )
     .await;
@@ -1283,7 +1277,7 @@ async fn agent_tools_delegate_create_queue_and_interrupt_through_the_runtime() {
     let followup = tool(
         &host,
         &parent,
-        "t3_thread_send",
+        "thread_send",
         json!({"threadId": created_thread, "message": "follow up"}),
     )
     .await;
@@ -1291,7 +1285,7 @@ async fn agent_tools_delegate_create_queue_and_interrupt_through_the_runtime() {
     let renamed = tool(
         &host,
         &parent,
-        "t3_thread_update",
+        "thread_update",
         json!({"threadId": created_thread, "action": "rename", "title": "Renamed"}),
     )
     .await;
@@ -1301,37 +1295,31 @@ async fn agent_tools_delegate_create_queue_and_interrupt_through_the_runtime() {
     let queued = tool(
         &host,
         &parent,
-        "t3_thread_send",
+        "thread_send",
         json!({"threadId": parent, "message": "[hold] later", "mode": "queue"}),
     )
     .await;
     assert_eq!(queued["delivery"], "queued", "{queued}");
-    let queue = tool(&host, &parent, "t3_queue_list", json!({})).await;
+    let queue = tool(&host, &parent, "queue_list", json!({})).await;
     assert_eq!(queue["items"][0]["text"], "[hold] later");
     let run = queue["items"][0]["queuedRunId"].clone();
     tool(
         &host,
         &parent,
-        "t3_queue_edit",
+        "queue_edit",
         json!({"queuedRunId": run, "text": "[hold] edited"}),
     )
     .await;
-    let edited = tool(&host, &parent, "t3_queue_read", json!({"queuedRunId": run})).await;
+    let edited = tool(&host, &parent, "queue_read", json!({"queuedRunId": run})).await;
     assert_eq!(edited["text"], "[hold] edited");
-    tool(
-        &host,
-        &parent,
-        "t3_queue_cancel",
-        json!({"queuedRunId": run}),
-    )
-    .await;
-    let empty = tool(&host, &parent, "t3_queue_list", json!({})).await;
+    tool(&host, &parent, "queue_cancel", json!({"queuedRunId": run})).await;
+    let empty = tool(&host, &parent, "queue_list", json!({})).await;
     assert_eq!(empty["items"], json!([]));
 
     let interrupted = tool(
         &host,
         &parent,
-        "t3_thread_interrupt",
+        "thread_interrupt",
         json!({"threadId": parent}),
     )
     .await;
@@ -1342,7 +1330,7 @@ async fn agent_tools_delegate_create_queue_and_interrupt_through_the_runtime() {
     let stopped = tool(
         &host,
         &parent,
-        "t3_thread_wait",
+        "thread_wait",
         json!({"threadId": parent, "runId": interrupted["runId"]}),
     )
     .await;
@@ -1350,7 +1338,7 @@ async fn agent_tools_delegate_create_queue_and_interrupt_through_the_runtime() {
     let idle = tool(
         &host,
         &parent,
-        "t3_thread_interrupt",
+        "thread_interrupt",
         json!({"threadId": parent}),
     )
     .await;
@@ -1361,18 +1349,13 @@ async fn agent_tools_delegate_create_queue_and_interrupt_through_the_runtime() {
     host.conversation.shutdown().await;
 }
 
-// T3 ShellStream: projects carry their repository identity.
+// Projects carry their repository identity.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn shell_projects_carry_their_repository_identity() {
     let host = host().await;
     git(
         &host.project_root,
-        &[
-            "remote",
-            "add",
-            "origin",
-            "git@github.com:T3Tools/t3code.git",
-        ],
+        &["remote", "add", "origin", "git@github.com:Acme/widget.git"],
     );
     let _: agent_protocol::models::Empty = host
         .call(Call::UpdateProject(
@@ -1402,7 +1385,7 @@ async fn shell_projects_carry_their_repository_identity() {
         .find(|project| project.id == host.project)
         .unwrap();
     let identity = project.repository_identity.as_ref().unwrap();
-    assert_eq!(identity.canonical_key, "github.com/t3tools/t3code");
+    assert_eq!(identity.canonical_key, "github.com/acme/widget");
     assert_eq!(identity.provider.as_deref(), Some("github"));
     host.conversation.shutdown().await;
 }

@@ -449,7 +449,7 @@ pub fn portable(
         status: HandoffStatus::Ready,
         summary_message_id: None,
         summary_text: format!(
-            "{}\nRecover omitted history with t3_thread_read({{threadId:\"{}\",view:\"activity\",limit:20,maxCharsPerItem:4000}}); paginate with afterPosition=nextPosition. For long items use itemId/textOffset=nextTextOffset.",
+            "{}\nRecover omitted history with thread_read({{threadId:\"{}\",view:\"activity\",limit:20,maxCharsPerItem:4000}}); paginate with afterPosition=nextPosition. For long items use itemId/textOffset=nextTextOffset.",
             history_text(
                 &source.visible_turn_items,
                 from,

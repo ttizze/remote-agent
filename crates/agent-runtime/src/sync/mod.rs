@@ -1,4 +1,4 @@
-//! Client synchronization with the T3 contract: snapshot, replay after a sequence,
+//! Client synchronization with the contract: snapshot, replay after a sequence,
 //! the synchronized marker and paging of long histories. Clients receive facts.
 pub(crate) mod history;
 mod live;

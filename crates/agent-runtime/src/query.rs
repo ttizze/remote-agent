@@ -43,7 +43,7 @@ impl ActorHandle {
 }
 
 /// One visible item with its message and plan, at its timeline position, with the
-/// detail the timeline withholds (T3 `getTurnItem`).
+/// detail the timeline withholds.
 pub fn turn_item(state: &State, item: &TurnItemId) -> Option<HistoryRow> {
     timeline(state)
         .iter()
@@ -78,7 +78,7 @@ pub struct SearchMatch {
     pub project: String,
     pub source: SearchSource,
     pub snippet: String,
-    /// T3 allows a message without a creation time.
+    /// A message may lack a creation time.
     pub message_created_at: Option<Timestamp>,
 }
 
@@ -98,7 +98,7 @@ fn collapse_space(text: &str) -> String {
         .join(" ")
 }
 
-/// T3 `buildSearchSnippet`: at most 240 UTF-16 units, centred near the first match.
+/// At most 240 UTF-16 units, centred near the first match.
 pub fn search_snippet(text: &str, query: &str) -> String {
     let normalized = collapse_space(text);
     let units: Vec<u16> = normalized.encode_utf16().collect();
@@ -132,9 +132,9 @@ pub fn search_snippet(text: &str, query: &str) -> String {
 
 type SearchRowData = (String, String, String, String, Option<String>);
 
-/// The best match per thread, ordered and limited in SQL like T3 `ThreadSearch.ts`:
-/// user messages outrank assistant ones, then the newest wins; threads order by
-/// match kind, then the thread's activity time, which visits do not change.
+/// The best match per thread, ordered and limited in SQL: user messages outrank
+/// assistant ones, then the newest wins; threads order by match kind, then the
+/// thread's activity time, which visits do not change.
 pub(crate) fn search_rows(
     c: &rusqlite::Connection,
     pattern: &str,

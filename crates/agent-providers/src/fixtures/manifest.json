@@ -9,7 +9,7 @@
     "scenario": "claude_background_subagent_after_root",
     "driver": "claude",
     "file": "claude_background_subagent_after_root/claude_transcript.ndjson",
-    "sha256": "98a0c0ed452af2c094fab3a92770b49dbac843bb6760f4441438bda6fcb52015"
+    "sha256": "04850b8a7461f6bd0704a255d0819a73d6c7182bd5f118f3354b82855924d6eb"
   },
   {
     "scenario": "claude_background_subagent_lifecycle",
@@ -27,7 +27,7 @@
     "scenario": "claude_background_task_interrupt",
     "driver": "claude",
     "file": "claude_background_task_interrupt/claude_transcript.ndjson",
-    "sha256": "9c81933e5f142bb252e2735ff52b4650c2682bd4c0e29aed3430bb2ae6737c9b"
+    "sha256": "e71df92a9d36c0a9fd9ffead83bc01395460598c10a815498decbf6af09c2f7a"
   },
   {
     "scenario": "claude_background_task_wake",
@@ -75,7 +75,7 @@
     "scenario": "claude_local_bash_task",
     "driver": "claude",
     "file": "claude_local_bash_task/claude_transcript.ndjson",
-    "sha256": "edde4ed0805057f90d53f8af1b4d2041b2aa60493aadf6dc9c120a2fbcbc4983"
+    "sha256": "c78e9f1701e9314292c56795d1fb47fcda7bcff4059f34dbd9e8b6948fa37524"
   },
   {
     "scenario": "claude_mcp_tool_presentation",
@@ -87,13 +87,13 @@
     "scenario": "claude_nested_background_subagent_wake",
     "driver": "claude",
     "file": "claude_nested_background_subagent_wake/claude_transcript.ndjson",
-    "sha256": "2ee8717d6b69acbc24b7f81d3a49183c505cedbc04f4a51cd8cda030842f334a"
+    "sha256": "35f4c0d4c51c2ce222fc70e5937314282a80cc84d0be774dd5124cb92fd7e346"
   },
   {
     "scenario": "claude_nested_subagent_model",
     "driver": "claude",
     "file": "claude_nested_subagent_model/claude_transcript.ndjson",
-    "sha256": "b1d3ef9535e85624968e09747ec64d1f5a2e7f7f77978d7aedc999b654b56305"
+    "sha256": "8b43ba9c4afe18650e97916116d0399f78f6a3ace89305f44471587fda80fd5e"
   },
   {
     "scenario": "claude_result_is_error",
@@ -111,7 +111,7 @@
     "scenario": "delegated_task_status",
     "driver": "codex",
     "file": "delegated_task_status/codex_transcript.ndjson",
-    "sha256": "c53d40949d7b24383eabd12d0328129d587317bb14374c2d4fb0583e56d1365c"
+    "sha256": "0398f7b87b3c631c40e78d945b15d2945c9e26a943e127838ba7de792a4d4234"
   },
   {
     "scenario": "message_steering",
@@ -123,7 +123,7 @@
     "scenario": "message_steering",
     "driver": "codex",
     "file": "message_steering/codex_transcript.ndjson",
-    "sha256": "4fa62a6108994d75157a7a41fb32b1c82c08edbb4c56147a9f6d457ab32f77be"
+    "sha256": "dd955b6c16a6c2816c636d84d564ec93669bbb3b3a39004c3ff7ee9f69fd6fe7"
   },
   {
     "scenario": "multi_turn",
@@ -135,7 +135,7 @@
     "scenario": "multi_turn",
     "driver": "codex",
     "file": "multi_turn/codex_transcript.ndjson",
-    "sha256": "2b5e7af6ddf46855f5da6e4686970c45aa20045443def2d5c777a2ece363a9eb"
+    "sha256": "68d896c08232e105880c8a39b830a249cee955f6dda5d099667d1be67c6d01e7"
   },
   {
     "scenario": "multi_turn_restart",
@@ -147,19 +147,19 @@
     "scenario": "plan_questions",
     "driver": "codex",
     "file": "plan_questions/codex_transcript.ndjson",
-    "sha256": "05dba29f0e22f9f2a339d55dee03c0cf1b0e22511cf40d6ffed612c86f01a39e"
+    "sha256": "afbeaadcdb155abeff2f86021efe0d3ab0f286aafd8c6bc1ec1d16bdc288fd61"
   },
   {
     "scenario": "proposed_plan",
     "driver": "codex",
     "file": "proposed_plan/codex_transcript.ndjson",
-    "sha256": "9fe7c911501a2c96efe2967520e18ac79d0c2c3d7a3d294a18f993317bebbaec"
+    "sha256": "e88eed6e4aa0afcc22423a56585c9d805056ccaa85454107c6602e8e77871021"
   },
   {
     "scenario": "provider_thread_resume",
     "driver": "codex",
     "file": "provider_thread_resume/codex_transcript.ndjson",
-    "sha256": "e4df2b5068fcbf9c48d8ee034fbaf663cc5e9548eafa1aa6e68e4433581dfeda"
+    "sha256": "533d84ab8d21f44bc91c023671d8148a169372f3dd14de29ab96efea82f17145"
   },
   {
     "scenario": "queued_turn",
@@ -171,7 +171,7 @@
     "scenario": "queued_turn",
     "driver": "codex",
     "file": "queued_turn/codex_transcript.ndjson",
-    "sha256": "5bb730a348a7b86949b7031e929e87e01ca56aa52f047c1adcc1124d182fe8e4"
+    "sha256": "fc010d0d5a8d6f1e3703d23e8b653440f123a41a627efa4aff16a7fc791a12e5"
   },
   {
     "scenario": "simple",
@@ -183,49 +183,49 @@
     "scenario": "simple",
     "driver": "codex",
     "file": "simple/codex_transcript.ndjson",
-    "sha256": "f4188c96133d551c5c9f704ae07fc014fd9fa87ceb1eac9a94660e38e70c4dcd"
+    "sha256": "7aba8bcbd5c4ed36337fbf737a756ac3ff8671c3052b5e655a2acab252c98d6f"
   },
   {
     "scenario": "subagent",
     "driver": "claude",
     "file": "subagent/claude_transcript.ndjson",
-    "sha256": "8d0ab6896db2e957cea2077735f742313ce4a747ad087636fda811c60a5cb6a0"
+    "sha256": "cac110aa5c48efc36a0a6ce39c479e80dc9af18d93ae17807713a42fcd0fb6b7"
   },
   {
     "scenario": "subagent",
     "driver": "codex",
     "file": "subagent/codex_transcript.ndjson",
-    "sha256": "4554c9dc19357f42707728d43e3a3000251aa3a79901a453a427aae71615cd59"
+    "sha256": "2f5eed6b4b30074895b6d4905b44178a6b425661f1b6db6be149e8520655482a"
   },
   {
     "scenario": "subagent_continue",
     "driver": "codex",
     "file": "subagent_continue/codex_transcript.ndjson",
-    "sha256": "0c3de4e6b631059602bcb9d833fea441eaa3bd62e4d562946ee681dcc04aff9a"
+    "sha256": "a62cbb07117b00fd6f5f003f399691c91af71bd78d6884561effc2b0461639bd"
   },
   {
     "scenario": "subagent_v2",
     "driver": "codex",
     "file": "subagent_v2/codex_transcript.ndjson",
-    "sha256": "6f3250e5f6cc3e0cc2edd791faced4fba8007ddbca96c2e86715f514de4188cc"
+    "sha256": "1c09eaf1bdbab8b05c288541dfefd7e6ecdabc874486c897c60462f245e7e1c5"
   },
   {
     "scenario": "subagent_v2_approval",
     "driver": "codex",
     "file": "subagent_v2_approval/codex_transcript.ndjson",
-    "sha256": "16c95c6e81cc2519544a2b8350f184905ec5e42be258ee654e76de1e1ec1b484"
+    "sha256": "ae357fbd20af3fdecae19abeb96cd887c7cc78a9fe14f66fce9fb3c39d75d65c"
   },
   {
     "scenario": "subagent_v2_nested",
     "driver": "codex",
     "file": "subagent_v2_nested/codex_transcript.ndjson",
-    "sha256": "985aafd1b41e4bfb651151fd0850cdb1e778a49ad37d6bf43446802062bacd36"
+    "sha256": "1ec48dd1014164bf957375a1caa7579c2b57f0df9c25d8ad0e629e31599ccbfc"
   },
   {
     "scenario": "subagent_v2_nested_approval",
     "driver": "codex",
     "file": "subagent_v2_nested_approval/codex_transcript.ndjson",
-    "sha256": "abfeeb998c64fe72cced89685a85de371c68417b45245c1a2dadc8d807d29103"
+    "sha256": "1e484bdb8855133e23b2934b221a1a80c6194c2d8fd7efdc2f2f5f70b072ae74"
   },
   {
     "scenario": "thread_fork_native",
@@ -237,7 +237,7 @@
     "scenario": "thread_fork_native",
     "driver": "codex",
     "file": "thread_fork_native/codex_transcript.ndjson",
-    "sha256": "216f4014036dc7753adf8f0981b433ca8a51dae77df0a97f2f45aa66fd2bcfbf"
+    "sha256": "062ed531ea947a86e13a45205b10a8d8cbbfd7a5ca48a10a3603e4f1a30203ad"
   },
   {
     "scenario": "thread_fork_native_continue",
@@ -249,13 +249,13 @@
     "scenario": "thread_fork_native_continue",
     "driver": "codex",
     "file": "thread_fork_native_continue/codex_transcript.ndjson",
-    "sha256": "87b81d487981683e150639925ca47b9304cdaac9b90b52d8b7a358fa72bbe8b4"
+    "sha256": "a6815c2f22898cca8da4aba170d98966af23b2cbbd563364286f64f2c911a788"
   },
   {
     "scenario": "thread_fork_native_fork_local_rollback",
     "driver": "claude",
     "file": "thread_fork_native_fork_local_rollback/claude_transcript.ndjson",
-    "sha256": "3f7074b8f80112af7681229d50330d2dcf5aa1e35c9514cb129feb3213ae0362"
+    "sha256": "4c244ea376cebb53e2d323cfd9959ec9cd0e5a45c2517664dbf3e6eae66a5f32"
   },
   {
     "scenario": "thread_fork_native_prior_turn",
@@ -267,7 +267,7 @@
     "scenario": "thread_fork_native_prior_turn",
     "driver": "codex",
     "file": "thread_fork_native_prior_turn/codex_transcript.ndjson",
-    "sha256": "0fe5a607a1e06531770fac7a30d5a559253ee1756bd5dc390187e8e6e1543d8d"
+    "sha256": "f3c36edd8d2694a27ce83077a6b49add9f3209099fc9d8301880d2b1e50a93de"
   },
   {
     "scenario": "thread_fork_native_siblings",
@@ -279,7 +279,7 @@
     "scenario": "thread_fork_native_siblings",
     "driver": "codex",
     "file": "thread_fork_native_siblings/codex_transcript.ndjson",
-    "sha256": "264e7198f46687963e17b80c4a394fbe10d0c6cb75764737646e05a91bdad0ff"
+    "sha256": "d18aca208d500c70041ab1819a03ad39b1c64670198b9497c38fd650be775cc4"
   },
   {
     "scenario": "thread_merge_back_continue",
@@ -291,7 +291,7 @@
     "scenario": "thread_merge_back_continue",
     "driver": "codex",
     "file": "thread_merge_back_continue/codex_transcript.ndjson",
-    "sha256": "1cb19a54430041ef540f536f76658bfb6873c55fe0907af1a5e17a07c2f35b5b"
+    "sha256": "739013a85a8d42ad39bc85530ca3b5c0dd306a81d0feb15edcc88a1ced447951"
   },
   {
     "scenario": "thread_merge_back_siblings",
@@ -303,7 +303,7 @@
     "scenario": "thread_merge_back_siblings",
     "driver": "codex",
     "file": "thread_merge_back_siblings/codex_transcript.ndjson",
-    "sha256": "f34475131ede5fc0223200b9e608d4d93b82755dc2ed69d6678f47d394cf6d4d"
+    "sha256": "db4e0e2c73907079c428c545876ac5cfdb6f4b603f1d3bf679c7fe0b7a256086"
   },
   {
     "scenario": "thread_rollback",
@@ -315,25 +315,25 @@
     "scenario": "thread_rollback",
     "driver": "codex",
     "file": "thread_rollback/codex_transcript.ndjson",
-    "sha256": "ac4b7bfced54918110cc456c00555a03fa38d71b30efb1dc012945325866a161"
+    "sha256": "ade0cf5d72d9319dc518bd0a6b70aedc41701d1471ac5bae895b1238f8fd96b2"
   },
   {
     "scenario": "thread_rollback_after_restart",
     "driver": "codex",
     "file": "thread_rollback_after_restart/codex_transcript.ndjson",
-    "sha256": "f3738400345bce331f6c1d48f5bfd62035eed4fc73498da732cf21fae01526c1"
+    "sha256": "a1e510d677d917b4c8fd4835c283785ba22b4301e93b114a0309c882f07cc6cd"
   },
   {
     "scenario": "thread_rollback_to_stopped_turn",
     "driver": "codex",
     "file": "thread_rollback_to_stopped_turn/codex_transcript.ndjson",
-    "sha256": "a6955741836183081241050dc19be7f9ee34ca0c7e8d38b777636468c0811f30"
+    "sha256": "3e77e7ea354c6841ae368b4d44bb2e608fe2c09d79e567054657b0406ce46e05"
   },
   {
     "scenario": "todo_list",
     "driver": "codex",
     "file": "todo_list/codex_transcript.ndjson",
-    "sha256": "bfcf8fcb9a54704d569733f21c875e996677985c0dd28b43ee128deae50856e4"
+    "sha256": "dcb609f0bb1e58ff2b0ddff19dd671ca6b853337ce1ce1a743f978c16f032975"
   },
   {
     "scenario": "tool_call_denied_write",
@@ -351,25 +351,25 @@
     "scenario": "tool_call_read_only_on_request",
     "driver": "claude",
     "file": "tool_call_read_only_on_request/claude_transcript.ndjson",
-    "sha256": "4656125ba1ebfc3c54ab7bc6eb6eaa2f66fbf098a9a236c6dacb572903c748dc"
+    "sha256": "b953c22a87e9cc631c44b9a1fae5792f4794254c35ce953fa3303a4704e74094"
   },
   {
     "scenario": "tool_call_read_only_on_request",
     "driver": "codex",
     "file": "tool_call_read_only_on_request/codex_transcript.ndjson",
-    "sha256": "5c14852fadb317a42363f0337cbd7891d014caf64d9ebdf60d97c5fee342ef44"
+    "sha256": "acc65d1370939db87809e47cad52efde273f9e576c25d77a9981333100694aa8"
   },
   {
     "scenario": "tool_call_restricted_granular",
     "driver": "claude",
     "file": "tool_call_restricted_granular/claude_transcript.ndjson",
-    "sha256": "249c6eb1b8a69117e19e62a8d7b18dff9fd83371a3635a50977b5bbbb7aba66f"
+    "sha256": "d96ccce383f992c63f026c80fe35b3ba2f5872abc2ff0ed503630b12b5cbb030"
   },
   {
     "scenario": "tool_call_restricted_granular",
     "driver": "codex",
     "file": "tool_call_restricted_granular/codex_transcript.ndjson",
-    "sha256": "8b1df55872dc8041b269b2d2e7b6cf7d5f22baa95b0c8efdd2900ca34f6f9540"
+    "sha256": "83af9c8422eb02a520c6bf0fd050aa7d9501a9fc64ec289d2332f5599e2fd51c"
   },
   {
     "scenario": "tool_call_workspace_never",
@@ -381,7 +381,7 @@
     "scenario": "tool_call_workspace_never",
     "driver": "codex",
     "file": "tool_call_workspace_never/codex_transcript.ndjson",
-    "sha256": "654ad7b2976c235044f343638e802253c5b45eadbf9aa16d23fa27861a0789f0"
+    "sha256": "9b86620f9af4042a182705e214d8865a6e5052df51230a3644d0dc250d4de0db"
   },
   {
     "scenario": "turn_interrupt",
@@ -393,7 +393,7 @@
     "scenario": "turn_interrupt",
     "driver": "codex",
     "file": "turn_interrupt/codex_transcript.ndjson",
-    "sha256": "36bdf250632fc154cc63033280411c271534f11b84c02f9449f2dc15789d22b5"
+    "sha256": "802afdf5650687feee343cb9ac06ed08b732a27ff0e2ff48c4f977dc587868a1"
   },
   {
     "scenario": "turn_interrupt_mid_tool",
@@ -405,7 +405,7 @@
     "scenario": "turn_interrupt_mid_tool",
     "driver": "codex",
     "file": "turn_interrupt_mid_tool/codex_transcript.ndjson",
-    "sha256": "72e0e4c50b64189b78eaba8139973954b2dbcecae3c984e92170dc0aceb16b4b"
+    "sha256": "ce0bd4a128d8e492e0cd5d39889a48e7f69192996774f3e9e41566897dbf1c35"
   },
   {
     "scenario": "turn_interrupt_restart",
@@ -423,6 +423,6 @@
     "scenario": "web_search",
     "driver": "codex",
     "file": "web_search/codex_transcript.ndjson",
-    "sha256": "dffcf7bb6af67c1b1f4b7ad89ee44c226229c9ce5a029852374424967a92c25b"
+    "sha256": "5f3ff8781aecc99f7f832e6c378e21967178282b73b139e1715abf1622510ccc"
   }
 ]

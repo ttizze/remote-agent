@@ -27,7 +27,7 @@ impl WireContext {
         }
         params
     }
-    /// T3's provider-thread load key: a thread loaded for another selection or
+    /// Provider-thread load key: a thread loaded for another selection or
     /// runtime policy is resumed with the new parameters before its turn.
     fn load_key(
         &self,
@@ -77,7 +77,7 @@ enum Pending {
     Restore,
     /// Drops this connection's subscription to a thread another route no longer uses.
     Unload,
-    /// T3 revertCodexThread: at most `turns` newest turns after the target's
+    /// At most `turns` newest turns after the target's
     /// boundary are discarded.
     RevertRead {
         target: RevertTarget,
@@ -285,7 +285,7 @@ impl CodexProtocol {
         state.thread = Some(thread.into());
         state.load_key = load_key;
     }
-    /// Stops using the route's native thread in this process (T3 unloadThread):
+    /// Stops using the route's native thread in this process:
     /// the app-server may shut it down, and a later turn resumes it.
     pub fn unload(&mut self, route: &str) -> Translation {
         let Some(thread) = self.routes.get_mut(route).and_then(|r| {
@@ -305,7 +305,7 @@ impl CodexProtocol {
             ..Translation::default()
         }
     }
-    /// Interrupts the route's running root turn, as T3 does for a thread that
+    /// Interrupts the route's running root turn for a thread that
     /// detaches from a shared app-server.
     pub fn interrupt_active_turn(&mut self, route: &str) -> Translation {
         let Some(thread) = self.native_thread(route).map(str::to_owned) else {
@@ -326,8 +326,8 @@ impl CodexProtocol {
             ..Translation::default()
         }
     }
-    /// Ends the route's root turn as interrupted when the app-server did not
-    /// (T3 finalizeRemainingInterruptLineage after its interrupt timeout).
+    /// Ends the route's root turn as interrupted when the app-server did not,
+    /// after its interrupt timeout.
     pub fn abandon_turn(&mut self, route: &str) -> Translation {
         let mut output = Translation {
             route: Some(route.into()),
@@ -727,8 +727,7 @@ impl CodexProtocol {
             .find(|(_, command)| command.process.as_deref() == Some(process))
             .map(|(item, _)| item.clone())
     }
-    /// T3 CodexAdapterV2 rollbackThread: discards the `turns` newest turns of
-    /// the native thread. No turn to discard sends nothing.
+    /// Discards the `turns` newest turns of the native thread. No turn to discard sends nothing.
     /// Reverts to just after the `boundary` turn. Listing the boundary ends the
     /// count, so repeating a rollback leaves an already rewound thread as it is.
     pub fn rollback(
@@ -816,8 +815,8 @@ impl CodexProtocol {
             Pending::Operation("thread/compact/start".into()),
         )
     }
-    /// T3 restoreAdditionalContext: Codex drops client developer messages when it
-    /// compacts but resends additional context only when it changes.
+    /// Codex drops client developer messages when it compacts but resends additional context
+    /// only when it changes.
     fn restore_additional_context(&mut self, thread: &str) -> Option<Value> {
         let context = self.additional_context.get(thread)?.as_object()?.clone();
         let route = self.route_of(Some(thread)).unwrap_or_default();
@@ -1276,7 +1275,7 @@ impl CodexProtocol {
                             )
                         }
                     };
-                    // T3 reads the process-wide snapshot for each usage-limit
+                    // Reads the process-wide snapshot for each usage-limit
                     // failure, including a thread that attached after it arrived.
                     if class == "usage_limit" && self.rate_limits.is_some() {
                         events.push(ProviderEvent::RateLimits {
@@ -1927,8 +1926,8 @@ fn codex_runtime(mode: RuntimeMode) -> (&'static str, &'static str, &'static str
         RuntimeMode::FullAccess => ("never", "user", "dangerFullAccess"),
     }
 }
-/// T3 mergeCodexRateLimits: a model-specific snapshot never replaces the main
-/// one, and fields an update omits keep their earlier value.
+/// A model-specific snapshot never replaces the main one, and fields an update omits keep
+/// their earlier value.
 fn merge_rate_limits(previous: Option<Value>, update: &Value) -> Option<Value> {
     if update["limitId"]
         .as_str()
@@ -1952,8 +1951,7 @@ fn merge_rate_limits(previous: Option<Value>, update: &Value) -> Option<Value> {
     }
     Some(merged)
 }
-/// T3 codexUsageLimitResetAt: the latest reset of the exhausted windows, when
-/// each of them reports one (Unix seconds).
+/// The latest reset of the exhausted windows, when each of them reports one (Unix seconds).
 fn usage_limit_reset(snapshot: Option<&Value>) -> Option<i64> {
     let snapshot = snapshot?;
     if snapshot["limitId"]
@@ -2132,7 +2130,7 @@ impl CodexProtocol {
         }
     }
 }
-/// T3's `/\bsession \S+ is archived\b|\bcodex unarchive\b/i`.
+/// Matches `/\bsession \S+ is archived\b|\bcodex unarchive\b/i`.
 fn archived_session(message: &str) -> bool {
     let word = |c: char| c.is_alphanumeric() || c == '_';
     let message = message.to_lowercase();
@@ -2175,7 +2173,6 @@ pub fn native_image_mime(mime: &str) -> bool {
     )
 }
 
-// T3 codexUsageLimits.test.ts.
 #[cfg(test)]
 mod rate_limit_tests {
     use super::*;

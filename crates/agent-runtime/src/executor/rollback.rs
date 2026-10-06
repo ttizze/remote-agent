@@ -11,10 +11,10 @@ use futures_util::future::BoxFuture;
 
 pub use agent_domain::ROLLBACK_FAILED_MESSAGE;
 
-/// One rollback request (T3 `CheckpointRollbackService`): the restored files are
-/// staged with the originals kept aside and every provider rewinds to its absolute
-/// head. Only once the rollback is recorded are the originals discarded and the
-/// stale checkpoint refs deleted; any earlier failure puts the original files back.
+/// One rollback request: the restored files are staged with the originals kept
+/// aside and every provider rewinds to its absolute head. Only once the rollback
+/// is recorded are the originals discarded and the stale checkpoint refs
+/// deleted; any earlier failure puts the original files back.
 pub(crate) struct Rollback(pub(crate) ExecutorContext);
 
 impl EffectHandler for Rollback {
@@ -63,8 +63,8 @@ impl EffectHandler for Rollback {
                     message: message.into(),
                 }))
             };
-            // T3 CheckpointRollbackService: the selection may have moved to
-            // another instance while the rollback waited.
+            // The selection may have moved to another instance while the
+            // rollback waited.
             if let Some(thread) = &state.thread
                 && latest_executed_run(&state).map(|run| &run.selection.instance)
                     != Some(&thread.selection.instance)
@@ -80,7 +80,7 @@ impl EffectHandler for Rollback {
                     let Some(scope) = &scope else {
                         return failed(ROLLBACK_FAILED_MESSAGE);
                     };
-                    // T3 fails the attempt; the last one reports ROLLBACK_FAILED_MESSAGE.
+                    // Fails the attempt; the last one reports ROLLBACK_FAILED_MESSAGE.
                     if !restore_isolated(context, &job.thread, &state, &scope.cwd)
                         .await
                         .map_err(retry)?
@@ -214,8 +214,7 @@ impl Rollback {
 }
 
 /// Fills in why a client's file-restoring rollback cannot restore files now, which
-/// the thread's state machine rejects at admission (T3 `dispatchCheckpointRollback`
-/// checks `isCheckpointRestoreIsolated` before accepting the command).
+/// the thread's state machine rejects at admission.
 pub(crate) async fn with_restore_refusal(
     context: &ExecutorContext,
     thread: &ThreadId,

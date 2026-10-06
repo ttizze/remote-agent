@@ -508,7 +508,7 @@ impl Task {
         });
         let mut carried = None;
         for event in events {
-            // T3 keeps one account snapshot per app-server and fills the
+            // One account snapshot is kept per app-server and fills the
             // stopped turns of every thread it served.
             if matches!(event, ProviderEvent::RateLimits { .. }) {
                 let served: Vec<_> = self
@@ -797,8 +797,8 @@ impl Task {
         }
     }
 
-    /// T3 ProviderSessionManager: busy while a turn of any thread runs on the
-    /// process; background work pins an idle process up to `max_idle_pin`.
+    /// Busy while a turn of any thread runs on the process; background work
+    /// pins an idle process up to `max_idle_pin`.
     async fn idle_due(&mut self) -> bool {
         if !self.mail.is_empty() {
             self.touch();
@@ -1063,7 +1063,7 @@ pub(crate) enum Activity {
     Busy,
 }
 
-/// T3 counts running turns as busy; a pending request alone does not keep the
+/// Running turns count as busy; a pending request alone does not keep the
 /// session, and its release expires the request.
 pub(crate) fn activity(state: &State, instance: &str, attempts: &[RunAttemptId]) -> Activity {
     if state

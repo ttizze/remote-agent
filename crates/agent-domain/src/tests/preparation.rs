@@ -44,9 +44,7 @@ fn kinds(s: &State, run: &RunId) -> Vec<&'static str> {
         .collect()
 }
 
-// T3 Orchestrator.ts message dispatch with defer_start and
-// ThreadLaunchService.test.ts "returns a visible preparing message while
-// provisioning is still blocked".
+// Returns a visible preparing message while provisioning is still blocked.
 #[test]
 fn a_deferred_run_shows_its_message_and_a_running_preparation_row() {
     let mut s = state();
@@ -100,10 +98,8 @@ fn a_deferred_run_shows_its_message_and_a_running_preparation_row() {
     );
 }
 
-// T3 Orchestrator.ts dispatchPreparedRunFail / dispatchPreparedRunRetry and
-// ThreadLaunchService.test.ts "%s failure keeps the thread and message visible
-// and emits failure items" and "retries a failed workspace preparation on the
-// same run".
+// A failure keeps the thread and message visible and emits failure items; a
+// retry runs a failed workspace preparation again on the same run.
 #[test]
 fn a_failed_preparation_row_fails_and_a_retry_runs_it_again() {
     let mut s = state();
@@ -155,7 +151,7 @@ fn a_failed_preparation_row_fails_and_a_retry_runs_it_again() {
     assert_eq!(row(&s, &run).status, ItemStatus::Completed);
 }
 
-// T3 Orchestrator.ts dispatchRunInterrupt before the provider turn starts.
+// An interrupt before the provider turn starts.
 #[test]
 fn interrupting_a_preparing_run_interrupts_its_preparation_row() {
     let mut s = state();
@@ -192,9 +188,8 @@ fn interrupting_a_preparing_run_interrupts_its_preparation_row() {
     assert_eq!(result.text, "Run interrupted before provider start");
 }
 
-// T3 runtimeLayer.test.ts "interrupts a pending provider start without
-// launching provider work". The provider interrupt effect that cancels the
-// in-flight start is this runtime's own mechanism.
+// The provider interrupt effect that cancels the in-flight start is this
+// runtime's own mechanism.
 #[test]
 fn interrupts_a_pending_provider_start() {
     let mut s = state();
@@ -228,7 +223,6 @@ fn interrupts_a_pending_provider_start() {
     );
 }
 
-// T3 RunExecutionService.ts makeInterruptResultTurnItem.
 #[test]
 fn a_confirmed_stop_records_the_default_request_and_result_messages() {
     let mut s = state();

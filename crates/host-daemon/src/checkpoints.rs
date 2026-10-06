@@ -1,4 +1,4 @@
-//! Git checkpoints in hidden refs (T3 `CheckpointStore` over the Git driver).
+//! Git checkpoints in hidden refs.
 //! Private indexes leave the user's index and HEAD untouched.
 use anyhow::{Context, Result, anyhow};
 use std::{
@@ -541,7 +541,7 @@ impl Checkpoints {
         Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     }
 
-    /// The files changed from `from` to `to` (T3 `CheckpointService.capture`).
+    /// The files changed from `from` to `to`.
     pub(crate) async fn files(
         &self,
         cwd: &Path,
@@ -565,7 +565,7 @@ impl Checkpoints {
     }
 }
 
-/// T3 `parseTurnDiffFilesFromNumstat`: Git's NUL-delimited numstat as
+/// Git's NUL-delimited numstat as
 /// `(path, additions, deletions)`, destination paths for renames and copies,
 /// zero counts for binary files, sorted like `localeCompare`.
 pub(crate) fn turn_diff_files(numstat: &str) -> Vec<(String, u64, u64)> {

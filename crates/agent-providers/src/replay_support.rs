@@ -19,7 +19,7 @@ pub fn transcript(scenario: &str, driver: Driver) -> Vec<Value> {
     .map(|line| serde_json::from_str(line).unwrap())
     .collect()
 }
-/// T3 replay.ts normalization: values that vary per machine or recorder.
+/// Normalization for values that vary per machine or recorder.
 pub fn normalized_frame(frame: &Value, ignored_config: &[String]) -> Value {
     fn walk(value: &Value) -> Value {
         match value {

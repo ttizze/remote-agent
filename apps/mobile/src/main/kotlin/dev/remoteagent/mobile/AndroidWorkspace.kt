@@ -113,7 +113,7 @@ internal fun SettingsDialog(model: AndroidAppModel, dismiss: () -> Unit) {
                             )
                         }
                         account.usage?.error?.let {
-                            Text(accountErrorMessage(it), color = T3.color("warningForeground"))
+                            Text(accountErrorMessage(it), color = AppTheme.color("warningForeground"))
                         }
                         Row {
                             TextButton(
@@ -297,7 +297,7 @@ private fun WorkspaceFiles(model: AndroidAppModel, modifier: Modifier) {
             }
             TextButton(onClick = { upload.launch(arrayOf("*/*")) }) { Text("Upload") }
         }
-        error?.let { Text(it, color = T3.color("errorForeground")) }
+        error?.let { Text(it, color = AppTheme.color("errorForeground")) }
         val files = model.snapshot.directory()?.takeIf { it.path == directory }
         if (files?.truncated == true)
             Text("Showing the first 2,000 entries", style = MaterialTheme.typography.bodySmall)
@@ -339,7 +339,7 @@ private fun WorkspaceFiles(model: AndroidAppModel, modifier: Modifier) {
                         Text(entry.name, Modifier.weight(1f))
                         TextButton(onClick = { selected = null }) { Text("Close") }
                     }
-                    model.snapshot.error()?.let { Text(it, color = T3.color("errorForeground")) }
+                    model.snapshot.error()?.let { Text(it, color = AppTheme.color("errorForeground")) }
                     val file = model.snapshot.file()?.takeIf { it.path == entry.path }
                     var text by remember(entry.path) { mutableStateOf("") }
                     var pending by remember(entry.path) { mutableStateOf<Long?>(null) }
@@ -432,7 +432,7 @@ private fun WorkspaceDiff(model: AndroidAppModel, modifier: Modifier) {
                                     fontFamily = FontFamily.Monospace,
                                     style = MaterialTheme.typography.bodySmall,
                                     color =
-                                        T3.color(
+                                        AppTheme.color(
                                             when (row.kind) {
                                                 "+" -> "successForeground"
                                                 "-" -> "errorForeground"
@@ -521,7 +521,7 @@ private fun WorkspaceBrowser(model: AndroidAppModel, modifier: Modifier) {
                 }
             }
         }
-        error?.let { Text(it, color = T3.color("errorForeground")) }
+        error?.let { Text(it, color = AppTheme.color("errorForeground")) }
         frame?.dialog?.let { dialog ->
             Text(dialog.message)
             if (dialog.prompt) OutlinedTextField(dialogText, { dialogText = it })

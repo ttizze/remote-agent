@@ -1162,7 +1162,7 @@ mod tests {
             parent_checkpoint_id: None,
             ordinal_within_scope: 0,
             app_run_ordinal: Some(0),
-            reference: CheckpointRef::new("refs/t3/test").unwrap(),
+            reference: CheckpointRef::new("refs/test").unwrap(),
             status: CheckpointStatus::Ready,
             files: vec![],
             captured_at: crate::now(),

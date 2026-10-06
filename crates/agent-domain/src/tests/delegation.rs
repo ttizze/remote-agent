@@ -14,8 +14,7 @@ fn accepted(step: &Step) -> Command {
         .unwrap()
 }
 
-// T3 Orchestrator.ts dispatchDelegatedTaskRequest and SubagentProjection.ts:
-// the child runs with the requested modes, takes the title, and copies the
+// The child runs with the requested modes, takes the title, and copies the
 // parent's sidebar arrangement.
 #[test]
 fn a_delegated_child_uses_the_requested_modes_and_title() {
@@ -72,8 +71,8 @@ fn a_delegated_child_uses_the_requested_modes_and_title() {
     assert_eq!(child.runs[0].status, RunStatus::Starting);
 }
 
-// T3 orchestrationV2.ts decodes the title as a trimmed non-empty string and
-// subagentThreadTitle falls back to the prompt.
+// Decodes the title as a trimmed non-empty string and falls back to the
+// prompt.
 #[test]
 fn a_blank_title_is_rejected_and_an_untitled_child_takes_the_prompt() {
     let mut s = state();

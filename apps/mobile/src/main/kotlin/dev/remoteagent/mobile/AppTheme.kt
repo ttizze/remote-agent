@@ -13,7 +13,7 @@ import androidx.compose.ui.unit.sp
 import dev.remoteagent.core.StatusTone
 import dev.remoteagent.core.theme
 
-internal object T3 {
+internal object AppTheme {
     private val palette = theme(true)
     val fonts =
         FontFamily(
@@ -55,7 +55,7 @@ internal object T3 {
     private fun style(size: Int, line: Int, weight: FontWeight = FontWeight.Normal) =
         TextStyle(fontFamily = fonts, fontWeight = weight, fontSize = size.sp, lineHeight = line.sp)
 
-    // These sizes and line heights are the fixed T3 typography specification.
+    // These sizes and line heights are the fixed typography specification.
     @Suppress("MagicNumber")
     val typography =
         Typography(
@@ -74,6 +74,6 @@ internal object T3 {
 }
 
 @Composable
-internal fun T3Theme(content: @Composable () -> Unit) {
-    MaterialTheme(colorScheme = T3.colors, typography = T3.typography, content = content)
+internal fun AppMaterialTheme(content: @Composable () -> Unit) {
+    MaterialTheme(colorScheme = AppTheme.colors, typography = AppTheme.typography, content = content)
 }

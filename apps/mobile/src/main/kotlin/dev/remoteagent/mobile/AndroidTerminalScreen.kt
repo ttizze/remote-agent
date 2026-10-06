@@ -106,9 +106,9 @@ private fun TerminalBody(
                                 } else currentPerform(Intent.ResizeTerminal(handle, size.cols, size.rows)) {}
                             }
                         },
-                        T3.color("terminalBackground").toArgb(),
-                        T3.color("terminalForeground").toArgb(),
-                        T3.color("terminalCursor").toArgb(),
+                        AppTheme.color("terminalBackground").toArgb(),
+                        AppTheme.color("terminalForeground").toArgb(),
+                        AppTheme.color("terminalCursor").toArgb(),
                         TERMINAL_FONT_SIZE,
                     )
                     .let { terminal ->

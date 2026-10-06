@@ -2,7 +2,7 @@ import AgentCore
 import SwiftUI
 import UIKit
 
-enum T3Theme {
+enum AppTheme {
     static let palette = theme(dark: true)
     static func color(_ role: String) -> Color {
         Color(uiColor: uiColor(role))
@@ -43,7 +43,7 @@ struct SettingsSheet: View {
             List {
                 Section("Connection") {
                     Button(model.selectedProfileName ?? "Hosts") { dismiss(); model.showProfiles() }
-                    Text(model.isConnected ? "Connected" : "Offline").foregroundStyle(T3Theme.color("textMuted"))
+                    Text(model.isConnected ? "Connected" : "Offline").foregroundStyle(AppTheme.color("textMuted"))
                     Button("Reconnect") { model.connect(afterForeground: true) }
                 }
                 Section("Provider accounts") {
@@ -91,12 +91,12 @@ struct SettingsSheet: View {
                 }
                 Section { PrivacyPolicyButton() }
             }
-            .scrollContentBackground(.hidden).background(T3Theme.color("canvas"))
+            .scrollContentBackground(.hidden).background(AppTheme.color("canvas"))
             .navigationTitle("Settings").navigationBarTitleDisplayMode(.inline)
             .toolbar { Button("Done") { dismiss() } }
             .onAppear { model.perform(.loadAccounts) }
         }
-        .tint(T3Theme.color("mobilePrimaryText")).font(T3Theme.font(14))
+        .tint(AppTheme.color("mobilePrimaryText")).font(AppTheme.font(14))
     }
 }
 

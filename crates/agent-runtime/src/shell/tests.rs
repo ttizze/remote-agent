@@ -156,7 +156,7 @@ fn flags_only_threads_whose_recovery_changes_something() {
     assert_flag_matches_recovery(state, false);
 }
 
-// T3 ProviderRuntimeRecoveryService.ts recovers background items on settled runs.
+// Recovers background items on settled runs.
 #[test]
 fn flags_background_work_that_outlives_a_completed_run() {
     let mut state = created();

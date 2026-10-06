@@ -1,5 +1,4 @@
-//! Search cases ported from T3 `ThreadSearch.test.ts`; history and item reads
-//! through a thread actor.
+//! History and item reads through a thread actor.
 use super::*;
 use crate::store::tests::{selection, temp_store};
 use crate::{
@@ -250,7 +249,7 @@ async fn limits_matches_in_sql_after_leaving_out_removed_projects() {
     );
 }
 
-// T3 Orchestrator.ts keeps visits from changing activity; search sorts by activity.
+// Visits don't change activity; search sorts by activity.
 #[tokio::test]
 async fn orders_matching_threads_by_activity_not_by_their_latest_fact() {
     let (_dir, store) = temp_store();
@@ -280,7 +279,7 @@ async fn orders_matching_threads_by_activity_not_by_their_latest_fact() {
     );
 }
 
-/// A corrupt timestamp stands in for T3's non-text payload, which a STRICT table rejects.
+/// A corrupt timestamp stands in for a non-text payload, which a STRICT table rejects.
 #[tokio::test]
 async fn reports_an_unreadable_match_as_a_decode_failure() {
     let (_dir, store) = temp_store();
@@ -329,7 +328,7 @@ fn validates_the_query_and_limit() {
     let long = "x".repeat(SEARCH_MAX_QUERY_CHARS + 1);
     assert!(store.search(&long, None, &projects).is_err());
     assert_eq!(store.search(" ok ", Some(50), &projects).unwrap(), []);
-    // T3 measures the query in UTF-16 units.
+    // The query is measured in UTF-16 units.
     assert_eq!(store.search("😀", None, &projects).unwrap(), []);
     let astral = "😀".repeat(SEARCH_MAX_QUERY_CHARS / 2 + 1);
     assert!(matches!(
@@ -433,7 +432,7 @@ async fn reads_history_pages_and_single_items_from_the_actor() {
     ));
 }
 
-/// T3 `getTurnItem` returns the output the timeline withholds, bounded at 256 KiB.
+/// Returns the output the timeline withholds, bounded at 256 KiB.
 #[test]
 fn reads_withheld_command_output_on_demand_within_its_bound() {
     use crate::sync::history::tests::{command_row, created};

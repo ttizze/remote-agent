@@ -1,5 +1,5 @@
-// T3 AgentSessionScanner.test.ts. The harness passes resolved instance homes, a
-// stand-in user home and the Host's managed directories instead of server settings.
+// The harness passes resolved instance homes, a stand-in user home and the
+// Host's managed directories instead of server settings.
 use super::*;
 use crate::ManualClock;
 use crate::import::fs::{OsFs, TranscriptFile};
@@ -694,7 +694,7 @@ fn excludes_the_home_directory_temporary_root_and_data_directory() {
 fn excludes_managed_worktree_sandboxes() {
     let mut temps = Temps::default();
     let setup = Setup::new(&mut temps);
-    let worktree = setup.claude.join(".worktree/t3code/wt-1");
+    let worktree = setup.claude.join(".worktree/widget/wt-1");
     std::fs::create_dir_all(&worktree).unwrap();
     write_transcript(
         &setup.claude.join("projects/-slug/a.jsonl"),
@@ -743,7 +743,7 @@ fn skips_linked_git_worktrees_and_reports_the_origin_of_real_checkouts() {
     std::fs::create_dir(repo.join(".git")).unwrap();
     std::fs::write(
         repo.join(".git/config"),
-        "[core]\n\tbare = false\n[remote \"origin\"]\n\turl = git@github.com:pingdotgg/t3code.git\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n",
+        "[core]\n\tbare = false\n[remote \"origin\"]\n\turl = git@github.com:pingdotgg/widget.git\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n",
     )
     .unwrap();
     std::fs::write(
@@ -803,8 +803,8 @@ fn skips_linked_git_worktrees_and_reports_the_origin_of_real_checkouts() {
             (
                 repo,
                 git(
-                    Some("github.com/pingdotgg/t3code"),
-                    Some("pingdotgg/t3code")
+                    Some("github.com/pingdotgg/widget"),
+                    Some("pingdotgg/widget")
                 )
             ),
         ]
@@ -815,7 +815,7 @@ fn skips_linked_git_worktrees_and_reports_the_origin_of_real_checkouts() {
 fn excludes_sandboxes_under_the_configured_worktrees_dir() {
     let mut temps = Temps::default();
     let setup = Setup::new(&mut temps);
-    let worktree = setup.config_base.join("worktrees/t3code/wt-2");
+    let worktree = setup.config_base.join("worktrees/widget/wt-2");
     std::fs::create_dir_all(&worktree).unwrap();
     write_transcript(
         &setup.claude.join("projects/-slug/a.jsonl"),
@@ -831,7 +831,7 @@ fn excludes_sandboxes_reached_through_a_symlink_into_the_worktrees_dir() {
     let mut temps = Temps::default();
     let setup = Setup::new(&mut temps);
     // The recorded cwd's own spelling looks harmless; only its realpath reveals the sandbox.
-    let worktree = setup.config_base.join("worktrees/t3code/wt-3");
+    let worktree = setup.config_base.join("worktrees/widget/wt-3");
     std::fs::create_dir_all(&worktree).unwrap();
     let link = temps.dir("scanner-links-").join("innocent-project");
     std::os::unix::fs::symlink(&worktree, &link).unwrap();
@@ -1924,7 +1924,7 @@ fn does_not_read_the_second_transcript_when_the_consumer_takes_one_thread() {
 fn does_not_import_sessions_from_a_managed_worktree() {
     let mut temps = Temps::default();
     let setup = Setup::new(&mut temps);
-    let workspace = setup.config_base.join("worktrees/t3code/managed-worktree");
+    let workspace = setup.config_base.join("worktrees/widget/managed-worktree");
     std::fs::create_dir_all(&workspace).unwrap();
     write_transcript(
         &rollout(&setup.codex, ["2026", "08", "24"], "rollout-managed.jsonl"),

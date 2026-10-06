@@ -1,6 +1,5 @@
-//! Project setup scripts (T3 `ProjectSetupScriptRunner`), run as supervised
-//! processes in the thread's workspace until they exit or the thread's terminals
-//! are cleaned up.
+//! Project setup scripts, run as supervised processes in the thread's
+//! workspace until they exit or the thread's terminals are cleaned up.
 use agent_domain::ThreadId;
 use agent_protocol::models::ProjectScript;
 use agent_runtime::{SetupEvent, SetupProgress};
@@ -15,7 +14,7 @@ const OUTPUT_LINE_MAX_LENGTH: usize = 400;
 /// A partial line longer than this is a byte stream; only its tail is kept.
 const PARTIAL_LINE_MAX_LENGTH: usize = 4_096;
 
-/// T3 `setupProjectScript`: the first script that runs on worktree creation.
+/// The first script that runs on worktree creation.
 pub(crate) fn setup_script(scripts: &[ProjectScript]) -> Option<&ProjectScript> {
     scripts.iter().find(|script| script.run_on_worktree_create)
 }
@@ -27,7 +26,7 @@ static TERMINAL_CONTROL: LazyLock<regex::Regex> = LazyLock::new(|| {
     .expect("pattern compiles")
 });
 
-/// T3 `stripTerminalControl` and the line filter of `observeTerminalCompletion`.
+/// Strips terminal control sequences and drops empty lines, capping length.
 fn output_line(raw: &str) -> Option<String> {
     let cleaned = TERMINAL_CONTROL.replace_all(raw, "");
     let cleaned = cleaned.trim_end();
@@ -121,7 +120,7 @@ impl SetupScripts {
     }
 
     /// Starts `script` in `cwd`. An observed run forwards the script's output
-    /// lines and returns its completion (T3 `observeCompletion`).
+    /// lines and returns its completion.
     pub(crate) fn start(
         &self,
         thread: &ThreadId,
@@ -148,8 +147,8 @@ impl SetupScripts {
             .args(&self.shell[1..])
             .arg(&script.command)
             .current_dir(cwd)
-            .env("T3CODE_PROJECT_ROOT", project_root)
-            .env("T3CODE_WORKTREE_PATH", cwd)
+            .env("PROJECT_ROOT", project_root)
+            .env("WORKTREE_PATH", cwd)
             // Nobody can answer a terminal's color probes while the script runs.
             .env("COLORTERM", "")
             .env("NO_COLOR", "1")
@@ -312,8 +311,8 @@ mod tests {
         let worktree = dunce::canonicalize(directory.path()).unwrap();
         let cwd = worktree.to_str().unwrap();
         let thread = ThreadId::new("thread-1").unwrap();
-        let command = "printf '%s|%s|%s|%s|%s|%s' \"$PWD\" \"$T3CODE_PROJECT_ROOT\" \
-                       \"$T3CODE_WORKTREE_PATH\" \"${COLORTERM-unset}\" \"$NO_COLOR\" \
+        let command = "printf '%s|%s|%s|%s|%s|%s' \"$PWD\" \"$PROJECT_ROOT\" \
+                       \"$WORKTREE_PATH\" \"${COLORTERM-unset}\" \"$NO_COLOR\" \
                        \"$FORCE_COLOR\" > environment.txt";
         let runner = scripts();
         let (progress, _) = lines();

@@ -1,4 +1,3 @@
-// T3 AgentSessionScanner.test.ts, `parseAgentSessionTranscript`.
 use super::*;
 use serde_json::json;
 

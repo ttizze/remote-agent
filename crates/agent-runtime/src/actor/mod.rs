@@ -71,8 +71,8 @@ impl HandoffCatalog for NoHandoffCatalog {
     }
 }
 
-/// T3's handoff limits: the default 16k token cap, and the context window the
-/// bundled Claude catalog knows (T3 getModelContextWindow); Codex reports none.
+/// Handoff limits: the default 16k token cap, and the context window the
+/// bundled Claude catalog knows; Codex reports none.
 pub struct ProviderHandoffCatalog;
 impl HandoffCatalog for ProviderHandoffCatalog {
     fn policy(&self, selection: &ModelSelection) -> Option<HandoffValue> {
@@ -537,8 +537,7 @@ impl Actor {
     }
 
     /// Records the handoff limits of the selection the next step may start a
-    /// run with, so its start budgets with that model's window (T3 reads the
-    /// run's model window before budgeting delivery).
+    /// run with, so its start budgets with that model's window.
     async fn align_handoff(&mut self, command: Option<&Command>) {
         let Some(thread) = &self.state.thread else {
             return;

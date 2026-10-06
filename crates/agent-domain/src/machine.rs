@@ -2,7 +2,7 @@ use crate::*;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
-/// The error code of a run whose workspace preparation failed (T3 contracts).
+/// The error code of a run whose workspace preparation failed.
 pub const WORKSPACE_PREPARATION_FAILURE_CODE: &str = "workspace_preparation_failed";
 /// The command row that stands for a deferred run's workspace preparation.
 pub const WORKSPACE_PREPARATION_INPUT: &str = "Preparing workspace";
@@ -397,7 +397,7 @@ impl Decision {
         });
     }
     fn start_run(&mut self, id: &RunId) {
-        // T3 consumes fork and merge-back transfers only on a direct dispatch,
+        // Fork and merge-back transfers are consumed only on a direct dispatch,
         // never when a queued run starts.
         let direct = self
             .state
@@ -473,7 +473,7 @@ impl Decision {
             self.fact(FactBody::ModelSelected {
                 selection: run.selection.clone(),
             });
-            // T3 applies the provider-switch release plan when a queued run
+            // The provider-switch release plan applies when a queued run
             // takes another instance.
             if previous.instance != run.selection.instance {
                 self.release_other_instances(&run.selection.instance);
@@ -903,7 +903,7 @@ impl Decision {
         }
     }
     /// Cancelling a delegated completion delivery disposes its whole parent-run
-    /// cohort, so siblings still running never wake the parent (T3).
+    /// cohort, so siblings still running never wake the parent.
     fn cancel_queued_run(&mut self, run: &RunId) {
         let cohort = self
             .state
@@ -988,7 +988,7 @@ impl Decision {
     }
     /// Message-capable questions outlive their turn; the user answers them
     /// later. Retained background work keeps its row until it reports, as does
-    /// a persistent Codex tool after a completed turn (T3 CodexAdapterV2).
+    /// a persistent Codex tool after a completed turn.
     fn close_attempt_items(&mut self, attempt: &RunAttemptId, status: ItemStatus) {
         let keeps_tools =
             status == ItemStatus::Completed && self.attempt_driver(attempt) == Some(Driver::Codex);
@@ -1018,7 +1018,7 @@ impl Decision {
         }
     }
     /// Ends the provider's native subagents of an attempt. Delegated children
-    /// run in their own threads and outlive the parent turn (T3).
+    /// run in their own threads and outlive the parent turn.
     fn stop_tasks(&mut self, attempt: &RunAttemptId, status: ItemStatus, confirmed: bool) {
         let tasks = self
             .state
@@ -1082,9 +1082,8 @@ impl Decision {
             });
         }
     }
-    /// T3 dispatchSteerIntoRun's provider handoff for a restart onto another
-    /// instance: the thread's history through the running run, taken before the
-    /// steer is recorded.
+    /// The provider handoff for a restart onto another instance: the thread's
+    /// history through the running run, taken before the steer is recorded.
     fn restart_handoff(&self, target: &Run) -> HistoricalContext {
         let mut items = self
             .state
@@ -1103,9 +1102,9 @@ impl Decision {
         items.sort_by(|a, b| (a.ordinal, &a.id).cmp(&(b.ordinal, &b.id)));
         prepare_history_covering(&self.state, &items, 1, target.ordinal)
     }
-    /// Supersedes the running attempt and starts the run again with `message`
-    /// (T3 interrupt_restart). With a handoff the run moves to `selection`'s
-    /// instance, and the session it leaves is detached.
+    /// Supersedes the running attempt and starts the run again with `message`.
+    /// With a handoff the run moves to `selection`'s instance, and the session
+    /// it leaves is detached.
     fn restart_run(
         &mut self,
         target: &Run,
@@ -1204,7 +1203,7 @@ impl Decision {
             }),
         );
     }
-    /// The run's interrupt request and, once known, its result (T3 run signal items).
+    /// The run's interrupt request and, once known, its result.
     fn interrupt_item(
         &mut self,
         run: &RunId,
@@ -1246,8 +1245,7 @@ impl Decision {
             }
         }
     }
-    /// T3 message.dispatch usageLimitContinuationOfRunId: `None` when the
-    /// limit recovery may resume the run now.
+    /// `None` when the limit recovery may resume the run now.
     fn usage_limit_continuation(
         &mut self,
         command: &CommandId,
@@ -1296,7 +1294,7 @@ impl Decision {
         }
         Some(Reply::Ignored)
     }
-    /// T3's usage-limit reset for a failure of `attempt`: Claude's latest
+    /// The usage-limit reset for a failure of `attempt`: Claude's latest
     /// rejected window when every one reports a reset, Codex's account snapshot.
     fn usage_limit_reset(&self, attempt: &RunAttemptId) -> Option<Timestamp> {
         let record = self.state.attempts.iter().find(|a| &a.id == attempt)?;
@@ -1319,7 +1317,6 @@ impl Decision {
         };
         Timestamp::from_millis(seconds.saturating_mul(1000)).ok()
     }
-    /// T3 runForSourcePoint.
     fn source_run(&self, source: &SourcePoint) -> Option<&Run> {
         match source {
             SourcePoint::LatestStable => latest_stable_run(&self.state),
@@ -1347,7 +1344,7 @@ impl Decision {
         })
     }
     /// Releases the sessions of every instance but `kept` when the thread moves
-    /// to another instance (T3 ProviderSwitchService create_with_handoff).
+    /// to another instance.
     fn release_other_instances(&mut self, kept: &str) {
         for instance in self
             .used_instances(None)
@@ -1422,7 +1419,7 @@ impl Decision {
             })
             .cloned()
     }
-    /// Settles a running preparation row with T3's title, output and exit code.
+    /// Settles a running preparation row with its title, output and exit code.
     fn end_preparation(
         &mut self,
         run: &RunId,
@@ -1626,7 +1623,6 @@ impl Decision {
                 return reject("plan-not-active");
             }
         }
-        // T3 message.dispatch manualContinuationOfRunId.
         if let Some(Continuation::Manual { run }) = &message.continuation {
             let source = self.state.runs.iter().find(|r| &r.id == run);
             let resumable = source.is_some_and(|source| {
@@ -1651,7 +1647,7 @@ impl Decision {
             .selection
             .clone()
             .unwrap_or_else(|| thread.selection.clone());
-        // T3 does not consume a merge-back from the queue, and one direct turn
+        // A merge-back is not consumed from the queue, and one direct turn
         // takes merge-backs from a single fork.
         let merge_backs = self
             .state
@@ -1762,7 +1758,7 @@ impl Decision {
             {
                 return reject("maintenance-in-progress");
             }
-            // The running session decides how it can be steered (T3 decideSteeringExecution);
+            // The running session decides how it can be steered;
             // another instance can only take over by restarting the run.
             let support = TurnSupport::for_driver(target.selection.driver);
             let moves = selection.instance != target.selection.instance;
@@ -1809,7 +1805,7 @@ impl Decision {
         let held = self.state.queued_runs().iter().any(|r| r.queue_held);
         let queued =
             active.is_some() || !self.state.captures.is_empty() || self.state.rollback.is_some();
-        // T3 queues a deferred start behind an active run without preparation.
+        // A deferred start is queued behind an active run without preparation.
         let deferred = matches!(mode, DispatchMode::DeferStart) && !queued;
         let id = RunId::new(format!("run:{}:{}", message.id.as_str().len(), message.id)).unwrap();
         let ordinal = self.state.runs.iter().map(|r| r.ordinal).max().unwrap_or(0) + 1;
@@ -1898,7 +1894,7 @@ impl Decision {
                 return reject("thread-deleted");
             }
         }
-        // T3 accepts commands while a rollback runs: new messages wait behind it
+        // Commands are accepted while a rollback runs: new messages wait behind it
         // and the rollback checks the active provider when it executes. Its
         // results carry only the rollback identity and never overwrite metadata.
         if self.state.rollback.is_some()
@@ -2330,7 +2326,7 @@ impl Decision {
                     .flat_map(|m| &m.attachments)
                     .map(|a| a.path.clone())
                     .collect::<Vec<_>>();
-                // T3 ThreadDeletion.ts: deleting again repeats only the cleanup.
+                // Deleting again repeats only the cleanup.
                 if self
                     .state
                     .thread
@@ -2455,7 +2451,7 @@ impl Decision {
                 for run in wakes {
                     self.cancel_queued_run(&run);
                 }
-                // Settling a settled, unpinned thread again changes nothing (T3).
+                // Settling a settled, unpinned thread again changes nothing.
                 if !(thread.settled == Some(true) && thread.pinned_at.is_none()) {
                     self.fact(FactBody::ThreadSettled {
                         settled: true,
@@ -2495,7 +2491,7 @@ impl Decision {
                         until: until.clone(),
                     });
                 }
-                // A manual snooze takes over from a recovery's snooze (T3).
+                // A manual snooze takes over from a recovery's snooze.
                 if until.is_some()
                     && let Some(mut recovery) = self
                         .state
@@ -2605,7 +2601,7 @@ impl Decision {
             RuntimeMode { mode } => {
                 self.fact(FactBody::RuntimeModeChanged { mode: *mode });
                 // Codex takes the mode on its next turn; a Claude session cannot
-                // switch in place, so T3 detaches it (ProviderSessionTransitionPolicy).
+                // switch in place, so it is detached.
                 for instance in self.used_instances(Some(Driver::Claude)) {
                     self.effect(
                         None,
@@ -2794,7 +2790,7 @@ impl Decision {
                     self.fact(FactBody::WorkspaceBound {
                         workspace: Some(workspace),
                     });
-                    // T3 detaches the provider sessions when the worktree moves.
+                    // The provider sessions are detached when the worktree moves.
                     if worktree_path
                         .as_ref()
                         .is_some_and(|path| *path != current_worktree)
@@ -2834,8 +2830,8 @@ impl Decision {
                 }
                 Reply::Accepted
             }
-            // T3 thread.auto-settle: any change after the sweep's snapshot, or
-            // an explicit settle or un-settle, wins over the sweep.
+            // Any change after the sweep's snapshot, or an explicit settle or
+            // un-settle, wins over the sweep.
             SettleAutomatically {
                 snapshot_at,
                 settled_at,
@@ -3174,7 +3170,6 @@ impl Decision {
                 {
                     return reject("thread-not-active");
                 }
-                // T3 dispatchQueuedMessagePromoteToSteer and dispatchSteerIntoRun.
                 let Some(run) = self
                     .state
                     .runs
@@ -3210,7 +3205,7 @@ impl Decision {
                 if target.status != RunStatus::Running {
                     return reject("run-not-active");
                 }
-                // T3 promotes on the thread's selection, so another instance restarts the run.
+                // Promotion uses the thread's selection, so another instance restarts the run.
                 let selection = self.state.thread.as_ref().unwrap().selection.clone();
                 let handoff = if selection.instance != target.selection.instance {
                     let support = TurnSupport::for_driver(target.selection.driver);
@@ -3397,8 +3392,8 @@ impl Decision {
                 {
                     return reject("provider-work-active");
                 }
-                // T3 rolls back the active provider thread: the instance of the
-                // latest run that left the queue.
+                // Rolling back targets the active provider thread: the instance
+                // of the latest run that left the queue.
                 let Some(active) =
                     latest_executed_run(&self.state).map(|run| run.selection.instance.clone())
                 else {
@@ -3416,7 +3411,7 @@ impl Decision {
                 if cp.status != CheckpointStatus::Ready {
                     return reject("checkpoint-not-ready");
                 }
-                // T3 Orchestrator checks restore isolation at admission too.
+                // Restore isolation is checked at admission too.
                 if *restore_files && let Some(refusal) = restore_refusal {
                     return reject(refusal);
                 }
@@ -3443,8 +3438,8 @@ impl Decision {
                     checkpoint: checkpoint.clone(),
                     restore_files: *restore_files,
                 });
-                // T3 CheckpointRollbackService fails the request when the
-                // selection moved to another instance than the active one.
+                // The rollback request fails when the selection moved to
+                // another instance than the active one.
                 let thread = self.state.thread.as_ref().unwrap();
                 if thread.selection.instance != active {
                     let message = rollback_provider_changed(checkpoint, &thread.id);
@@ -3459,7 +3454,7 @@ impl Decision {
                         && run.status.terminal()
                         && run.status != RunStatus::RolledBack
                 });
-                // T3 asks the provider to rewind whenever later runs exist,
+                // The provider is asked to rewind whenever later runs exist,
                 // which fails without a native thread to rewind.
                 if rewinds && !self.state.native_sessions.contains_key(&active) {
                     self.fact(FactBody::RollbackFailed {
@@ -3522,8 +3517,8 @@ impl Decision {
                 let Some(run) = self.source_run(source).cloned() else {
                     return reject("no-stable-source-run");
                 };
-                // T3 ThreadForkService.ts: provider-finished and unsuccessful
-                // runs fork; in-progress and rolled-back runs do not.
+                // Provider-finished and unsuccessful runs fork; in-progress and
+                // rolled-back runs do not.
                 if !matches!(
                     run.status,
                     RunStatus::Completed
@@ -3535,9 +3530,8 @@ impl Decision {
                     return reject("fork-source-not-ready");
                 }
                 let thread = self.state.thread.as_ref().unwrap().clone();
-                // T3 ProjectionStore.ts visibleTurnItemsThroughRun inherits the
-                // source's own inheritance and its items through the boundary run,
-                // whatever those runs' status.
+                // History inherits the source's own inheritance and its items
+                // through the boundary run, whatever those runs' status.
                 let mut history = self
                     .state
                     .inherited_items
@@ -3680,7 +3674,7 @@ impl Decision {
                 });
                 // The first direct message resolves the transfer against its own
                 // provider: a native fork on the source's provider, otherwise
-                // the portable history (T3 decideForkExecution).
+                // the portable history.
                 self.fact(FactBody::TransferOpened {
                     native_source: native.clone(),
                     id: ContextTransferId::new(self.key("transfer", id.as_str())).unwrap(),
@@ -3801,7 +3795,7 @@ impl Decision {
                 {
                     return reject("task-already-exists");
                 }
-                // T3 decodes the task and title as trimmed non-empty strings.
+                // The task and title are decoded as trimmed non-empty strings.
                 let prompt = prompt.trim().to_owned();
                 if prompt.is_empty() {
                     return reject("task-required");
@@ -3962,9 +3956,9 @@ impl Decision {
                     return Reply::Ignored;
                 }
                 if let Some(context) = context {
-                    // T3 hands the result to the spawning run's provider thread; a
+                    // The result is handed to the spawning run's provider thread; a
                     // later turn receives it only after that run failed or was
-                    // interrupted (ProviderTurnStartService.ts).
+                    // interrupted.
                     let spawning = existing
                         .run
                         .as_ref()
@@ -4642,7 +4636,7 @@ impl Decision {
                         resets_at: *resets_at,
                     });
                 }
-                // T3 fills a stopped turn's missing reset once.
+                // A stopped turn's missing reset is filled once.
                 let reset = resets_at.and_then(|at| Timestamp::from_millis(at * 1000).ok());
                 let unfilled = self
                     .state
@@ -4676,7 +4670,7 @@ impl Decision {
                 unreachable!("native output is routed before applying its events")
             }
             SessionClosed { error } => {
-                // The process that could answer them is gone (T3 release expiry).
+                // The process that could answer them is gone.
                 let expired = self
                     .state
                     .requests
@@ -5780,7 +5774,7 @@ impl Decision {
                 };
                 let source = transfer.native_source.clone().unwrap();
                 // A Claude fork's transcript ends at the head, so its first
-                // query resumes without one (T3 forkThread).
+                // query resumes without one.
                 self.fact(FactBody::NativeSessionBound {
                     instance: run.selection.instance.clone(),
                     native_thread: native_thread.clone(),
@@ -5807,8 +5801,8 @@ impl Decision {
                 self.dispatch_start(&run.id, attempt, true);
                 return Reply::Accepted;
             }
-            // T3 decideForkExecution: a source run that is no longer completed
-            // or waiting is handed over as portable context instead.
+            // A source run that is no longer completed or waiting is handed
+            // over as portable context instead.
             EffectResult::ForkSourceChanged { attempt } => {
                 let Some((run, transfer)) = self.awaiting_fork(attempt) else {
                     return Reply::Ignored;
@@ -5828,8 +5822,8 @@ impl Decision {
                 self.dispatch_start(&run.id, attempt, true);
                 return Reply::Accepted;
             }
-            // T3 ProviderTurnStartService.ts: a native fork that fails on the
-            // last attempt fails the run; the transfer stays pending.
+            // A native fork that fails on the last attempt fails the run; the
+            // transfer stays pending.
             EffectResult::ForkFailed { attempt, message } => {
                 let Some((run, _)) = self.awaiting_fork(attempt) else {
                     return Reply::Ignored;
@@ -6469,8 +6463,8 @@ pub fn maintenance(text: &str, attachments: &[Attachment]) -> Option<Maintenance
         _ => None,
     }
 }
-/// T3 usageLimitBlockedRun and its latestRootProviderFailure: the latest
-/// executed run when it failed on a usage limit, with the limit's reset.
+/// The latest executed run when it failed on a usage limit, with the limit's
+/// reset.
 pub fn usage_limit_failure(state: &State) -> Option<(&Run, Option<Timestamp>)> {
     let run = latest_executed_run(state).filter(|run| run.status == RunStatus::Failed)?;
     let failure = state
@@ -6486,7 +6480,7 @@ pub fn usage_limit_failure(state: &State) -> Option<(&Run, Option<Timestamp>)> {
         .next_back()?;
     (failure.0 == Some("usage_limit")).then_some((run, failure.1))
 }
-/// T3 latestStableRun: the highest completed run with a checkpoint.
+/// The highest completed run with a checkpoint.
 pub fn latest_stable_run(state: &State) -> Option<&Run> {
     state
         .runs
@@ -6494,8 +6488,8 @@ pub fn latest_stable_run(state: &State) -> Option<&Run> {
         .filter(|run| run.status == RunStatus::Completed && run.checkpoint.is_some())
         .max_by_key(|run| run.ordinal)
 }
-/// T3 CheckpointRollbackService's failure when the selection left the active
-/// provider before the rollback executed.
+/// The failure message when the selection left the active provider before
+/// the rollback executed.
 pub fn rollback_provider_changed(checkpoint: &CheckpointId, thread: &ThreadId) -> String {
     format!(
         "Active provider changed before rollback target {checkpoint} could execute on thread {thread}."
@@ -6562,8 +6556,7 @@ pub fn usage_limited(state: &State) -> bool {
             && failure_class(state, &run.id).as_deref() == Some("usage_limit")
     })
 }
-/// T3 SubagentProjection.ts subagentThreadTitle: the trimmed title or prompt,
-/// clipped past 72 UTF-16 units.
+/// The trimmed title or prompt, clipped past 72 UTF-16 units.
 fn subagent_thread_title(
     parent_title: &str,
     title: Option<&str>,
@@ -6930,9 +6923,8 @@ impl ThreadMachine {
         }
     }
 }
-/// T3 chatAttachment.ts schemas and budgets, shared by dispatch and question
-/// uploads. The Host names attachments `chat:…`, so the id character set is
-/// not checked.
+/// Schemas and budgets, shared by dispatch and question uploads. The Host
+/// names attachments `chat:…`, so the id character set is not checked.
 pub fn validate_attachments(files: &[Attachment]) -> Result<(), &'static str> {
     if files.len() > 100 {
         return Err("too-many-attachments");

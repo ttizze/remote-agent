@@ -86,7 +86,7 @@ private struct BexScreen: View {
             .navigationBarTitleDisplayMode(.inline)
         }
         .preferredColorScheme(.dark)
-        .tint(T3Theme.color("mobilePrimaryText")).font(T3Theme.font()).background(T3Theme.color("canvas"))
+        .tint(AppTheme.color("mobilePrimaryText")).font(AppTheme.font()).background(AppTheme.color("canvas"))
     }
 
     private var pairingScreen: some View {
@@ -129,7 +129,7 @@ private struct PairingScreen: View {
                             .font(.system(size: hostName == nil ? 36 : 24, weight: .medium))
                             .foregroundStyle(Color.accentColor)
                             .frame(width: hostName == nil ? 72 : 32, height: hostName == nil ? 72 : 32)
-                            .background(T3Theme.color("surface"))
+                            .background(AppTheme.color("surface"))
                             .clipShape(RoundedRectangle(cornerRadius: 28))
                         Text("どこでも、\nこれひとつで。")
                             .font(.system(size: hostName == nil ? 34 : 28, weight: .bold))
@@ -183,7 +183,7 @@ private struct PairingScreen: View {
                         .font(.footnote)
                         .padding(16)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(T3Theme.color("surface"))
+                        .background(AppTheme.color("surface"))
                         .clipShape(RoundedRectangle(cornerRadius: 20))
                     } else {
                         VStack(spacing: 16) {
@@ -221,7 +221,7 @@ private struct PairingScreen: View {
                             }
                         }
                         .padding(16)
-                        .background(T3Theme.color("surface"))
+                        .background(AppTheme.color("surface"))
                         .clipShape(RoundedRectangle(cornerRadius: 20))
                     }
                     if connecting {
@@ -250,7 +250,7 @@ private struct PairingScreen: View {
             }
             .scrollDismissesKeyboard(.interactively)
         }
-        .background(T3Theme.color("canvas").ignoresSafeArea())
+        .background(AppTheme.color("canvas").ignoresSafeArea())
         .navigationTitle("Bex")
         .toolbar {
             ToolbarItem(placement: .cancellationAction) {
@@ -298,7 +298,7 @@ private struct ProfilesScreen: View {
                             }
                             .padding(20)
                             .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(T3Theme.color("surface"))
+                            .background(AppTheme.color("surface"))
                             .clipShape(RoundedRectangle(cornerRadius: 18))
                         }
                         .buttonStyle(.plain)
@@ -324,7 +324,7 @@ private struct ProfilesScreen: View {
                 .frame(minHeight: geometry.size.height, alignment: .top)
             }
         }
-        .background(T3Theme.color("canvas").ignoresSafeArea())
+        .background(AppTheme.color("canvas").ignoresSafeArea())
         .safeAreaInset(edge: .top, spacing: 0) {
             SettingsScopeBar { Text("すべてのプロジェクト") } environment: { Text("このiPhone") }
         }
@@ -351,7 +351,7 @@ struct BexNotice: View {
 
     var body: some View {
         Text(text)
-            .foregroundColor(T3Theme.color("errorForeground"))
+            .foregroundColor(AppTheme.color("errorForeground"))
             .accessibilityIdentifier("notice")
     }
 }

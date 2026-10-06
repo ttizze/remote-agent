@@ -352,7 +352,7 @@ pub fn prepare_history_covering(
         })
         .collect::<Vec<_>>();
     let coverage = format!(
-        "Provider context handoff. Thread: {thread}. Covered app runs: {from}-{boundary}.\nSource item range: {} through {}.\nRecover omitted history using t3_thread_read({{threadId:\"{thread}\",view:\"activity\",limit:20,maxCharsPerItem:4000}}); paginate with afterPosition=nextPosition. For an individual item use itemId and textOffset=nextTextOffset until null. Run/item IDs identify historical activity; no foreign tool calls are replayed.",
+        "Provider context handoff. Thread: {thread}. Covered app runs: {from}-{boundary}.\nSource item range: {} through {}.\nRecover omitted history using thread_read({{threadId:\"{thread}\",view:\"activity\",limit:20,maxCharsPerItem:4000}}); paginate with afterPosition=nextPosition. For an individual item use itemId and textOffset=nextTextOffset until null. Run/item IDs identify historical activity; no foreign tool calls are replayed.",
         items.first().map_or("none", |item| item.id.as_str()),
         items.last().map_or("none", |item| item.id.as_str())
     );
@@ -399,7 +399,7 @@ pub fn combine_handoffs(
             .collect::<Vec<_>>()
             .join(", ");
         coverage = format!(
-            "Context handoff ({strategies}). {} handoff records; detailed coverage references omitted. Recover history with t3_thread_read({{threadId:\"{target}\",view:\"activity\",limit:20,maxCharsPerItem:4000}}); paginate with afterPosition=nextPosition. Follow fork/handoff source references in activity. For long items use itemId and textOffset=nextTextOffset until null.",
+            "Context handoff ({strategies}). {} handoff records; detailed coverage references omitted. Recover history with thread_read({{threadId:\"{target}\",view:\"activity\",limit:20,maxCharsPerItem:4000}}); paginate with afterPosition=nextPosition. Follow fork/handoff source references in activity. For long items use itemId and textOffset=nextTextOffset until null.",
             transfers.len()
         );
     }
@@ -814,7 +814,7 @@ mod tests {
                 .contains("detailed coverage references omitted")
         );
         assert!(
-            result.context.contains("t3_thread_read") && result.context.contains("thread:handoff")
+            result.context.contains("thread_read") && result.context.contains("thread:handoff")
         );
         assert!(
             history_cost(&result.messages, &result.context) <= 2500 && !result.messages.is_empty()

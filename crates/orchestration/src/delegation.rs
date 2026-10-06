@@ -738,7 +738,7 @@ pub fn offer(
 }
 fn delivery_text(tasks: &[Subagent], ids: &[NodeId]) -> String {
     let mut text = String::from(
-        "Delegated task results are available. Use task_status or t3_thread_read to inspect the child threads before continuing.\n",
+        "Delegated task results are available. Use task_status or thread_read to inspect the child threads before continuing.\n",
     );
     for task in tasks.iter().filter(|t| ids.contains(&t.id)) {
         text.push_str(&format!(

@@ -114,8 +114,8 @@ fn limited(queued: bool) -> (Thread, RunId) {
     )
 }
 
-// T3 runtimeLayer.test.ts "guards a scheduled usage-limit continuation
-// against %s" (the scenarios this domain can express).
+// Guards a scheduled usage-limit continuation against each scenario this
+// domain can express.
 #[test]
 fn a_scheduled_usage_limit_continuation_is_guarded() {
     let scenarios = [
@@ -371,8 +371,8 @@ fn a_scheduled_usage_limit_continuation_is_guarded() {
     }
 }
 
-// T3 runtimeLayer.test.ts "resumes a stopped run manually once" for an
-// interrupted and a usage-limited run.
+// Resumes a stopped run manually once for an interrupted and a usage-limited
+// run.
 #[test]
 fn a_stopped_run_is_resumed_manually_once() {
     for reason in ["interrupted", "usage_limit"] {

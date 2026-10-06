@@ -1,5 +1,5 @@
-//! Provider failure text as T3 ProviderFailure.ts records it: credentials and
-//! unsafe control characters removed, trimmed, and bounded in UTF-16 units.
+//! Provider failure text with credentials and unsafe control characters
+//! removed, trimmed, and bounded in UTF-16 units.
 use regex::{Captures, Regex};
 use std::sync::LazyLock;
 
@@ -83,7 +83,6 @@ pub fn provider_failure_code(code: &str) -> Option<String> {
     .filter(|code| !code.is_empty())
 }
 
-// T3 ProviderFailure.test.ts.
 #[cfg(test)]
 mod tests {
     use super::*;

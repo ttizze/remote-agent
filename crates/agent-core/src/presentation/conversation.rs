@@ -1,4 +1,4 @@
-//! T3 presentation rules shared by GPUI, SwiftUI and Compose.
+//! Presentation rules shared by GPUI, SwiftUI and Compose.
 use crate::state::{Draft, SendBehavior, Snapshot, TerminalPhase, TerminalView};
 use orchestration::*;
 
@@ -1458,7 +1458,7 @@ mod tests {
         assert!(!thread_row(&shell, None, ShelfKind::Active, &now(), false).unread);
     }
     #[test]
-    fn t3_snooze_and_settle_take_precedence_over_pinning() {
+    fn snooze_and_settle_take_precedence_over_pinning() {
         let mut shell = projector::shell(&projection());
         shell.thread.pinned_at = Some(now());
         shell.thread.settled_override = Some(SettledOverride::Settled);
@@ -1888,7 +1888,7 @@ mod review_presentation_tests {
         assert_eq!(idle.rows[0].metadata, "model · Idle");
     }
     #[test]
-    fn runtime_labels_match_t3() {
+    fn runtime_labels_name_each_mode() {
         assert_eq!(runtime_mode_choices()[0].label, "Supervised");
     }
 }

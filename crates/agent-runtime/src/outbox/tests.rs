@@ -1,6 +1,3 @@
-//! Ports of T3 EffectWorker.test.ts and the outbox cases of FoundationPersistence.test.ts.
-//! T3 `terminal.cleanup` maps to `DeleteAttachments`, `provider-turn.start` to a
-//! process-bound provider effect, `provider-runtime.continue` to `SendToThread`.
 use super::*;
 use crate::actor::tests::{command_id, create, send};
 use crate::store::tests::{at, temp_store, thread};
@@ -69,7 +66,7 @@ const START: &str = "Provider.Start";
 const CLEANUP: &str = "DeleteAttachments";
 const TITLE: &str = "GenerateTitle";
 const FORWARD: &str = "SendToThread";
-/// Every test kind runs `run`, with T3's durability for the kind it stands for.
+/// Every test kind runs `run`, with the durability for the kind it stands for.
 fn handlers(run: Run) -> EffectHandlers {
     let mut handlers = EffectHandlers::default();
     for (kind, durability) in [
@@ -698,10 +695,10 @@ async fn backs_off_briefly_when_a_due_deadline_loses_a_claim_race() {
     await_claims(&f.queue, 2).await;
 }
 
-// T3's "safely retries after replacement cleanup succeeds and start fails" and "settles
-// a delegated child once its restart continuation fails for good" test the effect
-// executor (session replacement, ContinueRestart delivery) and are ported with it. The
-// worker's part, attempt numbering and the last-attempt flag, is checked here.
+// The behaviors "safely retries after replacement cleanup succeeds and start fails" and
+// "settles a delegated child once its restart continuation fails for good" test the
+// effect executor (session replacement, ContinueRestart delivery) and are ported with
+// it. The worker's part, attempt numbering and the last-attempt flag, is checked here.
 
 #[tokio::test]
 async fn reruns_a_failed_process_bound_effect_with_its_next_attempt() {

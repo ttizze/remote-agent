@@ -18,8 +18,8 @@ struct ThreadsScreen: View {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
                     HStack(spacing: 8) {
-                        Image(systemName: "magnifyingglass").foregroundStyle(T3Theme.color("textMuted"))
-                        TextField("Search threads", text: $search).font(T3Theme.font(14))
+                        Image(systemName: "magnifyingglass").foregroundStyle(AppTheme.color("textMuted"))
+                        TextField("Search threads", text: $search).font(AppTheme.font(14))
                             .onChange(of: search) { _, query in model.perform(.search(query: query)) }
                         Menu {
                             Button("All projects") { model.perform(.filterProject(projectId: nil)) }
@@ -31,7 +31,7 @@ struct ThreadsScreen: View {
                         Button { model.openNewThread() } label: { Image(systemName: "square.and.pencil") }
                     }
                     .padding(10).background(
-                        T3Theme.color("sidebarControlSurface"),
+                        AppTheme.color("sidebarControlSurface"),
                         in: RoundedRectangle(cornerRadius: 8)
                     )
                     .padding(.vertical, 10)
@@ -41,7 +41,7 @@ struct ThreadsScreen: View {
                                 (model.snapshot.projects().first { $0.id == id }?.name ?? "Chats")); Button("Clear") {
                                     model.perform(.filterProject(projectId: nil))
                                 }
-                        }.font(T3Theme.font(12))
+                        }.font(AppTheme.font(12))
                     }
                     if let error = model.notice {
                         BexNotice(text: error).padding(.vertical, 8)
@@ -58,16 +58,16 @@ struct ThreadsScreen: View {
                             HStack {
                                 Image(systemName: collapsed.contains(shelf.kind) ? "chevron.right" : "chevron.down")
                                     .font(.system(size: 10))
-                                Text(shelf.title).font(T3Theme.font(13, weight: .medium))
-                                Text("\(shelf.total)").font(T3Theme.font(11))
-                                    .foregroundStyle(T3Theme.color("textMuted"))
+                                Text(shelf.title).font(AppTheme.font(13, weight: .medium))
+                                Text("\(shelf.total)").font(AppTheme.font(11))
+                                    .foregroundStyle(AppTheme.color("textMuted"))
                                 Spacer()
-                            }.foregroundStyle(T3Theme.color("sidebarForeground")).frame(height: 34)
+                            }.foregroundStyle(AppTheme.color("sidebarForeground")).frame(height: 34)
                         }.buttonStyle(.plain)
                         if !collapsed.contains(shelf.kind) {
                             ForEach(shelf.rows, id: \.id) { row in ThreadCard(model: model, row: row) }
                             if shelf.hasMore {
-                                Button("Load 25 more") { settledLimit += 25 }.font(T3Theme.font(13)).padding(
+                                Button("Load 25 more") { settledLimit += 25 }.font(AppTheme.font(13)).padding(
                                     .vertical,
                                     12
                                 )
@@ -81,11 +81,11 @@ struct ThreadsScreen: View {
                                 row: row
                             )
                         }
-                    }.font(T3Theme.font(13)).padding(.vertical, 12)
+                    }.font(AppTheme.font(13)).padding(.vertical, 12)
                 }.padding(.horizontal, 20).padding(.bottom, 28)
             }
         }
-        .background(T3Theme.color("sidebar")).foregroundStyle(T3Theme.color("text"))
+        .background(AppTheme.color("sidebar")).foregroundStyle(AppTheme.color("text"))
         .navigationTitle(model.selectedProfileName ?? "Bex").navigationBarTitleDisplayMode(.inline)
         .toolbar { Button { showingSettings = true } label: { Image(systemName: "gearshape") } }
         .sheet(isPresented: $showingSettings) { SettingsSheet(model: model) }
@@ -107,43 +107,43 @@ private struct ThreadCard: View {
                 let icon = row.providerKind == .claude ? "claude" : "openai"
                 Image(icon).resizable().scaledToFit().frame(width: 16, height: 16)
                 VStack(alignment: .leading, spacing: 5) {
-                    Text(row.title).font(T3Theme.font(14, weight: row.unread ? .bold : .medium)).lineLimit(1)
+                    Text(row.title).font(AppTheme.font(14, weight: row.unread ? .bold : .medium)).lineLimit(1)
                     if !row.slim {
-                        Text(row.preview).font(T3Theme.font(12)).foregroundStyle(T3Theme.color("textMuted"))
+                        Text(row.preview).font(AppTheme.font(12)).foregroundStyle(AppTheme.color("textMuted"))
                             .lineLimit(1)
                         HStack(spacing: 6) {
-                            Text(row.status).foregroundStyle(T3Theme.status(row.tone))
+                            Text(row.status).foregroundStyle(AppTheme.status(row.tone))
                             if let duration = row
                                 .durationMs {
                                 Text("\(duration / 1000)s").monospacedDigit()
-                                    .foregroundStyle(T3Theme.color("textMuted"))
+                                    .foregroundStyle(AppTheme.color("textMuted"))
                             }
                             if let wake = row.wakeLabel {
-                                Text(wake).foregroundStyle(T3Theme.color("textMuted"))
+                                Text(wake).foregroundStyle(AppTheme.color("textMuted"))
                             }
                             Spacer()
                             Text(model.snapshot.projects().first { $0.id == row.projectId }?.name ?? "")
-                                .foregroundStyle(T3Theme.color("textMuted"))
-                        }.font(T3Theme.font(11))
+                                .foregroundStyle(AppTheme.color("textMuted"))
+                        }.font(AppTheme.font(11))
                         if let branch = row
                             .branch {
                             Text(branch).font(.system(size: 11, design: .monospaced))
-                                .foregroundStyle(T3Theme.color("textMuted")).lineLimit(1)
+                                .foregroundStyle(AppTheme.color("textMuted")).lineLimit(1)
                         }
                     }
                 }
                 Spacer(minLength: 0)
                 if row.unread {
-                    Circle().fill(T3Theme.color("accent")).frame(width: 5, height: 5)
+                    Circle().fill(AppTheme.color("accent")).frame(width: 5, height: 5)
                 }
             }
-            .foregroundStyle(T3Theme.color("sidebarForeground")).padding(.horizontal, 12).padding(
+            .foregroundStyle(AppTheme.color("sidebarForeground")).padding(.horizontal, 12).padding(
                 .vertical,
                 row.slim ? 8 : 12
             )
             .frame(maxWidth: .infinity, minHeight: row.slim ? 36 : 82, alignment: .leading)
             .background(
-                T3Theme.color(row.selected ? "mobileSelected" : "surface"),
+                AppTheme.color(row.selected ? "mobileSelected" : "surface"),
                 in: RoundedRectangle(cornerRadius: 10)
             )
         }

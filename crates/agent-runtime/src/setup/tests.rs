@@ -1,4 +1,3 @@
-//! Ported from T3 `WorktreeSetupTracker.test.ts`.
 use super::*;
 use crate::SystemClock;
 use WorktreeSetupStageId::{Agent, Checkout, Fetch, SetupScript};

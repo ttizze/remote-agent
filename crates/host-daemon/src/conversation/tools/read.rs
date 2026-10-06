@@ -1,5 +1,5 @@
-//! T3 readThread and the projections the list and read tools share: thread
-//! detail, list items and the summarized timeline text of each item.
+//! The projections the list and read tools share: thread detail, list items
+//! and the summarized timeline text of each item.
 use super::orchestrator::{latest_active_run, latest_run, runtime_mode_name};
 use super::{AgentTools, Outcome, Scope, bounded, decode, failure, invalid, thread_id};
 use agent_domain::{
@@ -35,7 +35,6 @@ pub(crate) fn actor(author: MessageAuthor) -> &'static str {
         MessageAuthor::Agent => "agent",
     }
 }
-/// T3 lineage.relationshipToParent.
 pub(crate) fn relationship(
     parent: Option<&ThreadId>,
     fork_boundary: Option<u64>,
@@ -54,7 +53,7 @@ fn status_name(status: RunStatus) -> String {
         .and_then(|value| value.as_str().map(str::to_owned))
         .unwrap_or_default()
 }
-/// T3 `activityRunStatus ?? status`, `idle` without runs.
+/// `activity_run_status`, falling back to `status`, or `idle` without runs.
 pub(crate) fn shell_status(shell: &ThreadShell) -> String {
     shell
         .activity_run_status
@@ -77,7 +76,6 @@ pub(crate) fn title_regeneration(thread: &Thread) -> Value {
     )
 }
 
-/// T3 listItemFromShell.
 pub(crate) fn list_item(shell: &ThreadShell) -> Value {
     let (settled, settled_at) = settlement(shell.settled, shell.settled_at.as_ref());
     json!({
@@ -102,7 +100,6 @@ pub(crate) fn list_item(shell: &ThreadShell) -> Value {
     })
 }
 
-/// T3 threadDetail.
 fn thread_detail(state: &State, item_count: usize) -> Value {
     let thread = state.thread.as_ref().expect("loaded");
     let latest = latest_run(state);
@@ -138,7 +135,6 @@ fn thread_detail(state: &State, item_count: usize) -> Value {
     })
 }
 
-/// T3 threadRun.
 fn thread_run(run: &Run) -> Value {
     json!({
         "runId": run.id,
@@ -160,7 +156,7 @@ fn notification_of(row: &HistoryRow) -> Option<&agent_domain::Notification> {
     }
 }
 
-/// T3 turn item types.
+/// Turn item types.
 pub(crate) fn item_type(row: &HistoryRow) -> &'static str {
     if notification_of(row).is_some() {
         return "notification";
@@ -194,7 +190,6 @@ fn json_text(value: &Value) -> String {
     serde_json::to_string_pretty(value).unwrap_or_default()
 }
 
-/// T3 OrchestrationV2UserInputQuestion.
 pub(crate) fn questions(body: &RequestBody) -> Option<Vec<Value>> {
     let RequestBody::Questions { questions } = body else {
         return None;
@@ -240,7 +235,7 @@ fn file_changes(changes: &Value) -> String {
     }
 }
 
-/// T3 turnItemText and the item's title.
+/// The item's text and title.
 fn item_text(state: &State, row: &HistoryRow) -> (Option<String>, Option<String>) {
     if let Some(notification) = notification_of(row) {
         let text = [
@@ -407,7 +402,6 @@ pub(crate) fn utf16_window(text: &str, offset: usize, max: usize) -> (String, bo
     (window, units > end, end)
 }
 
-/// T3 timelineItem.
 fn timeline_item(state: &State, row: &HistoryRow, max: usize, offset: usize) -> Value {
     let (text, title) = item_text(state, row);
     let message = match &row.item.kind {
@@ -444,7 +438,7 @@ fn timeline_item(state: &State, row: &HistoryRow, max: usize, offset: usize) -> 
     })
 }
 
-/// T3 subagentResultForRun's message and item.
+/// The message and item location of a subagent's result for a run.
 fn result_location(
     target: &State,
     run: &Run,
@@ -509,8 +503,8 @@ struct ReadInput {
 }
 
 impl AgentTools {
-    /// T3 loadReadableThread: the caller itself, a thread of its project, or a
-    /// thread the user attached to the caller as context.
+    /// The caller itself, a thread of its project, or a thread the user
+    /// attached to the caller as context.
     async fn load_readable(
         &self,
         scope: Scope<'_>,
@@ -627,7 +621,6 @@ impl AgentTools {
         }))
     }
 
-    /// T3 pageIncludesTerminalTaskResult.
     fn page_has_terminal_result(
         &self,
         parent: &State,

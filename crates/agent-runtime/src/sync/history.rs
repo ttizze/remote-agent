@@ -1,5 +1,5 @@
-//! Timeline windows and history pages, ported from T3 `threadHistoryPaging.ts`.
-//! A row is one visible item (local or inherited) with the message and plan it shows.
+//! Timeline windows and history pages. A row is one visible item (local or
+//! inherited) with the message and plan it shows.
 use super::wire::{TRUNCATION_MARKER, truncate_detail};
 use agent_domain::{
     InputIntent, Item, ItemKind, Message, MessageAuthor, MessageId, Plan, RunAttemptId, RunId,
@@ -18,8 +18,7 @@ pub const OLDER_HISTORY_USER_TURNS: usize = 20;
 pub const HISTORY_MAX_RAW_TURNS: usize = 150;
 pub const HISTORY_CURSOR_MAX_LEN: usize = 4_096;
 /// Rows one page or window may carry whatever its turn count, so every thread
-/// opens within a transport frame. T3's websocket has no frame limit; this only
-/// binds where T3 would send more.
+/// opens within a transport frame.
 pub const HISTORY_FRAME_MAX_BYTES: u64 = 8 * 1_048_576;
 /// Room kept for the snapshot envelope around the timeline and control state.
 const SNAPSHOT_ENVELOPE_BYTES: u64 = 1_024;
@@ -366,10 +365,10 @@ fn retained_runs(state: &State) -> HashSet<&RunId> {
         .collect()
 }
 
-/// Bounds the client projection like T3's `buildBoundedThreadProjection`. Beyond the recent
-/// window it keeps every item a later fact can still touch (non-terminal items and
-/// the items of live attempts), every interrupt request, and the messages of those
-/// items and of the latest, active and queued runs.
+/// Bounds the client projection. Beyond the recent window it keeps every item
+/// a later fact can still touch (non-terminal items and the items of live
+/// attempts), every interrupt request, and the messages of those items and of
+/// the latest, active and queued runs.
 pub fn bounded_state(state: &State, snapshot_seq: u64, policy: PagePolicy) -> BoundedState {
     let latest_local_ordinal = state.items.iter().map(|item| item.ordinal).max();
     let live: HashSet<&RunAttemptId> = state

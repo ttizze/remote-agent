@@ -87,14 +87,14 @@ pub fn claude_skill_dispatch(text: &str, skills: &[String]) -> Option<ClaudeSkil
     })
 }
 
-/// What a Claude skill's `SKILL.md` says about invoking it (T3 ClaudeSkills).
+/// What a Claude skill's `SKILL.md` says about invoking it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ClaudeSkillFrontmatter {
     pub user_invocation_only: bool,
     pub user_invocable: bool,
 }
 /// Claude Code accepts the YAML 1.1 boolean spellings, which the YAML 1.2
-/// core schema leaves as strings and numbers (T3 parseFrontmatterBoolean).
+/// core schema leaves as strings and numbers.
 fn frontmatter_boolean(value: Option<&serde_yaml::Value>) -> Option<bool> {
     match value? {
         serde_yaml::Value::Bool(value) => Some(*value),
@@ -117,8 +117,8 @@ fn frontmatter_boolean(value: Option<&serde_yaml::Value>) -> Option<bool> {
         _ => None,
     }
 }
-/// The text between the opening `---` line and the next `---` line, as T3's
-/// `^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)` captures it.
+/// The text between the opening `---` line and the next `---` line, matched by
+/// `^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)`.
 fn frontmatter_block(contents: &str) -> Option<&str> {
     let rest = contents
         .strip_prefix("---\n")
@@ -133,7 +133,7 @@ fn frontmatter_block(contents: &str) -> Option<&str> {
             .then(|| &rest[..index])
     })
 }
-/// Claude Code accepts plain scalars containing `: `; T3 quotes only those
+/// Claude Code accepts plain scalars containing `: `; this quotes only those
 /// and leaves comments and YAML structure to the full-document parser.
 fn quote_plain_colon_scalars(frontmatter: &str) -> String {
     let mut repaired = String::with_capacity(frontmatter.len());
@@ -370,7 +370,6 @@ mod tests {
             None
         );
     }
-    // T3 ClaudeSkills.test.ts frontmatter cases.
     #[test]
     fn skill_frontmatter_reads_invocation_and_rejects_what_the_cli_rejects() {
         let skill = |lines: &[&str]| claude_skill_frontmatter(&lines.join("\n"));
@@ -428,8 +427,8 @@ mod tests {
         }
     }
 
-    // T3 parses the whole frontmatter as YAML, so quoted keys, tags and block
-    // scalars count, and what its parser rejects drops the skill.
+    // The whole frontmatter parses as YAML, so quoted keys, tags and block
+    // scalars count, and what the parser rejects drops the skill.
     #[test]
     fn skill_frontmatter_is_read_as_a_yaml_document() {
         let skill = |lines: &[&str]| claude_skill_frontmatter(&lines.join("\n"));
@@ -489,7 +488,6 @@ mod tests {
         }
     }
 
-    // T3 ClaudeSkills.test.ts skillOverrides cases.
     #[test]
     fn skill_overrides_follow_the_cli() {
         assert_eq!(

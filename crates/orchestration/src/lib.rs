@@ -1,5 +1,5 @@
-//! T3 orchestration-v2: shared contracts and pure decisions/projections, with
-//! transactional persistence and an independently owned provider effect worker.
+//! Shared contracts and pure decisions/projections, with transactional
+//! persistence and an independently owned provider effect worker.
 #[cfg(feature = "adapter")]
 pub mod adapter;
 pub mod attachments;

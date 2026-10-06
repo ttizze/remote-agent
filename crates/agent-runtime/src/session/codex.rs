@@ -98,7 +98,7 @@ impl SessionManager {
             .await
     }
 
-    /// T3 resolveRuntime: a new app-server runs as the selected managed account.
+    /// A new app-server runs as the selected managed account.
     pub(super) async fn codex_sign_in(
         &self,
         entry: &Entry,

@@ -1,4 +1,4 @@
-//! Native contracts for T3 Code 4ee6bfd's orchestration-v2. No retired formats.
+//! Native contracts for orchestration-v2. No retired formats.
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, fmt};
 

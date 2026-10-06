@@ -1,6 +1,5 @@
-//! A project's repository identity from its Git remotes (T3
-//! `RepositoryIdentityResolver` with `detectSourceControlProviderFromRemoteUrl`),
-//! so clients group checkouts of one repository across Hosts.
+//! A project's repository identity from its Git remotes, so clients group
+//! checkouts of one repository across Hosts.
 use agent_protocol::models::{RepositoryIdentity, RepositoryLocator};
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -50,7 +49,7 @@ fn remote_host(remote: &str) -> Option<String> {
     })
 }
 
-/// T3 `detectSourceControlProviderFromRemoteUrl`: the provider kind.
+/// The provider kind.
 fn provider_kind(remote: &str) -> Option<&'static str> {
     let host = remote_host(remote)?;
     let name = host
@@ -78,7 +77,6 @@ fn provider_kind(remote: &str) -> Option<&'static str> {
     )
 }
 
-/// T3 `buildRepositoryIdentity`.
 pub(crate) fn identity(remote_name: &str, remote_url: &str, root_path: &str) -> RepositoryIdentity {
     let canonical_key = agent_runtime::normalize_remote_url(remote_url);
     let path = canonical_key

@@ -1,5 +1,5 @@
-//! T3 OrchestratorMcpService and ThreadMetadataMcpService: capabilities,
-//! delegated tasks, thread creation and the cross-thread list/send/wait/interrupt.
+//! Capabilities, delegated tasks, thread creation and the cross-thread
+//! list/send/wait/interrupt.
 use super::backend::ProviderSnapshot;
 use super::{
     AgentTools, Outcome, Scope, ToolError, bounded, decode, failure, invalid, request_key,
@@ -68,7 +68,7 @@ fn runtime_rank(mode: RuntimeMode) -> u8 {
         RuntimeMode::FullAccess => 3,
     }
 }
-/// T3 resolveRuntimeMode: a requested mode may only narrow the parent's.
+/// A requested mode may only narrow the parent's.
 pub(crate) fn resolve_runtime_mode(
     parent: RuntimeMode,
     requested: Option<&str>,
@@ -89,7 +89,7 @@ pub(crate) fn resolve_runtime_mode(
     }
     Ok(resolved)
 }
-/// T3 resolveInteractionMode: plan is narrower than default.
+/// Plan is narrower than default.
 pub(crate) fn resolve_interaction_mode(
     parent: InteractionMode,
     requested: Option<&str>,
@@ -113,20 +113,16 @@ pub(crate) fn resolve_interaction_mode(
     Ok(resolved)
 }
 
-/// T3 isActiveRun.
 pub(crate) fn latest_active_run(state: &State) -> Option<&Run> {
     state.active_run()
 }
-/// T3 latestRun.
 pub(crate) fn latest_run(state: &State) -> Option<&Run> {
     state.runs.iter().max_by_key(|run| run.ordinal)
 }
-/// T3 isTerminalRunStatus.
 pub(crate) fn terminal(status: RunStatus) -> bool {
     status.terminal()
 }
 
-/// T3 OrchestratorMcpTarget.
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Target {
@@ -136,7 +132,7 @@ pub(crate) struct Target {
     options: Option<Value>,
 }
 
-/// T3 ProviderOptionSelection values in request order.
+/// Provider option selection values in request order.
 pub(crate) fn option_selections(value: &Value) -> Result<Vec<(String, Value)>, ToolError> {
     let selection = |id: &str, value: &Value| -> Result<(String, Value), ToolError> {
         let id = super::trimmed("option id", id, None)?;
@@ -166,7 +162,6 @@ pub(crate) fn option_selections(value: &Value) -> Result<Vec<(String, Value)>, T
     }
 }
 
-/// T3 invalidOptionSelections.
 fn invalid_options(
     selections: &[(String, Value)],
     descriptors: Option<&Vec<Value>>,
@@ -215,7 +210,6 @@ fn invalid_options(
     problems
 }
 
-/// T3 providerConstraints.
 pub(crate) fn provider_constraints(provider: &ProviderSnapshot) -> Vec<String> {
     let mut constraints = vec![];
     if !provider.adapter {
@@ -253,7 +247,6 @@ fn option_text(value: &Value) -> String {
     }
 }
 
-/// T3 resolveTarget.
 pub(crate) fn resolve_target(
     parent: &ModelSelection,
     target: Option<&Target>,
@@ -381,7 +374,6 @@ pub(crate) fn resolve_target(
     })
 }
 
-/// T3 taskStatusForRun.
 fn task_status_for_run(run: Option<RunStatus>) -> &'static str {
     match run {
         Some(RunStatus::Queued) => "queued",
@@ -408,7 +400,7 @@ fn monitor_runs(state: &State) -> Vec<&RunId> {
         .filter_map(|message| message.run.as_ref())
         .collect()
 }
-/// T3 delegatedTaskProgress: the child's state once its delegated turn settled.
+/// The child's state once its delegated turn settled.
 pub(crate) fn delegated_task_progress(child: &State) -> &'static str {
     let monitors = monitor_runs(child);
     let work: Vec<_> = child
@@ -537,7 +529,7 @@ fn max_utf16(field: &str, value: Option<&String>, max: usize) -> Result<(), Tool
     }
     Ok(())
 }
-/// T3 threadTitle for create_threads.
+/// The thread title for create_threads.
 fn created_title(parent: &str, prompt: Option<&str>, title: Option<&str>, index: usize) -> String {
     let detail = title
         .map(str::trim)
@@ -567,7 +559,7 @@ fn iso(value: &agent_domain::Timestamp) -> Value {
 }
 
 impl AgentTools {
-    /// T3 loadProjection: the caller's full projection.
+    /// The caller's full projection.
     pub(crate) async fn load_caller(&self, scope: Scope<'_>) -> Result<Arc<State>, ToolError> {
         let unreadable = |error: String| {
             failure(
@@ -584,7 +576,6 @@ impl AgentTools {
         }
         Ok(state)
     }
-    /// T3 getProjectThreadRecords.
     pub(crate) async fn load_project_thread(
         &self,
         project: &str,
@@ -604,7 +595,6 @@ impl AgentTools {
             )),
         }
     }
-    /// T3 loadScopedThread.
     async fn load_scoped(
         &self,
         scope: Scope<'_>,
@@ -667,7 +657,6 @@ impl AgentTools {
         }))
     }
 
-    /// T3 readTask.
     pub(crate) async fn read_task(
         &self,
         scope: Scope<'_>,
@@ -1133,7 +1122,6 @@ impl AgentTools {
         }))
     }
 
-    /// T3 ThreadMetadataMcpService.update.
     pub(crate) async fn update_thread(&self, scope: Scope<'_>, input: &Value) -> Outcome {
         let input: UpdateInput = decode(input)?;
         let title = input
@@ -1508,7 +1496,7 @@ impl AgentTools {
     }
 }
 
-/// T3 latestSteerableRun: a running run whose provider turn is running.
+/// A running run whose provider turn is running.
 pub(crate) fn steerable_run(state: &State) -> Option<&Run> {
     state
         .runs
@@ -1525,7 +1513,7 @@ pub(crate) fn steerable_run(state: &State) -> Option<&Run> {
         .max_by_key(|run| run.ordinal)
 }
 
-/// The delegated task's status record as T3 readTask reports it.
+/// The delegated task's status record.
 fn task_response(parent: &State, task: &Task, child: &State, wait_timed_out: bool) -> Value {
     let status = delegated_task_status(
         task,

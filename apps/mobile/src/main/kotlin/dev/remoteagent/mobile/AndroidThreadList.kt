@@ -164,7 +164,7 @@ private fun ThreadCard(model: AndroidAppModel, row: ThreadRow, settled: Boolean)
         Surface(
             Modifier.fillMaxWidth()
                 .combinedClickable(onClick = { model.openThread(row.id) }, onLongClick = { menu = true }),
-            color = T3.color(if (row.selected) "mobileSelected" else "surface"),
+            color = AppTheme.color(if (row.selected) "mobileSelected" else "surface"),
             shape = androidx.compose.foundation.shape.RoundedCornerShape(10.dp),
         ) {
             Row(
@@ -184,26 +184,26 @@ private fun ThreadCard(model: AndroidAppModel, row: ThreadRow, settled: Boolean)
                         Text(
                             row.preview,
                             style = MaterialTheme.typography.bodySmall,
-                            color = T3.color("textMuted"),
+                            color = AppTheme.color("textMuted"),
                             maxLines = 1,
                         )
                         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            Text(row.status, style = MaterialTheme.typography.labelSmall, color = T3.status(row.tone))
+                            Text(row.status, style = MaterialTheme.typography.labelSmall, color = AppTheme.status(row.tone))
                             row.durationMs?.let {
                                 Text(
                                     "${it / 1000u}s",
                                     style = MaterialTheme.typography.labelSmall,
-                                    color = T3.color("textMuted"),
+                                    color = AppTheme.color("textMuted"),
                                 )
                             }
                             row.wakeLabel?.let {
-                                Text(it, style = MaterialTheme.typography.labelSmall, color = T3.color("textMuted"))
+                                Text(it, style = MaterialTheme.typography.labelSmall, color = AppTheme.color("textMuted"))
                             }
                             Spacer(Modifier.weight(1f))
                             Text(
                                 model.snapshot.projects().firstOrNull { it.id == row.projectId }?.name ?: "",
                                 style = MaterialTheme.typography.labelSmall,
-                                color = T3.color("textMuted"),
+                                color = AppTheme.color("textMuted"),
                             )
                         }
                         row.branch?.let {
@@ -211,13 +211,13 @@ private fun ThreadCard(model: AndroidAppModel, row: ThreadRow, settled: Boolean)
                                 it,
                                 fontFamily = FontFamily.Monospace,
                                 style = MaterialTheme.typography.labelSmall,
-                                color = T3.color("textMuted"),
+                                color = AppTheme.color("textMuted"),
                                 maxLines = 1,
                             )
                         }
                     }
                 }
-                if (row.unread) Text("•", color = T3.color("accent"))
+                if (row.unread) Text("•", color = AppTheme.color("accent"))
             }
         }
         DropdownMenu(menu, { menu = false }) {
@@ -276,7 +276,7 @@ internal fun ThreadActionItems(
         onClick = { action(if (archived) ThreadAction.Unarchive else ThreadAction.Archive) },
     )
     DropdownMenuItem(
-        text = { Text("Delete", color = T3.color("errorForeground")) },
+        text = { Text("Delete", color = AppTheme.color("errorForeground")) },
         onClick = { action(ThreadAction.Delete) },
     )
 }

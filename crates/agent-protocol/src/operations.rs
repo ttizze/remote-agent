@@ -212,7 +212,7 @@ pub struct AddProject {
     pub cwd: String,
 }
 
-/// T3 `project.update`; omitted fields stay unchanged.
+/// Omitted fields stay unchanged.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateProject {

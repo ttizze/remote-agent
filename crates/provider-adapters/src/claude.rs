@@ -1303,7 +1303,7 @@ for line in sys.stdin:
                 .iter()
                 .any(|h| h.strategy == HandoffStrategy::FullThreadSummary)
         );
-        // T3 has no global eight-process cap. All nine remain actively owned.
+        // There is no global eight-process cap. All nine remain actively owned.
         for index in 0..9 {
             let thread = ThreadId::new(format!("concurrent-{index}")).unwrap();
             let mut model = p.thread.model_selection.clone();

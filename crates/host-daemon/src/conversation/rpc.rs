@@ -230,7 +230,7 @@ impl Conversation {
     }
 
     /// Claims uploads into the thread's storage and rebinds the context records
-    /// that named them (T3 `remapComposerContextAttachments`).
+    /// that named them.
     fn claim(
         &self,
         thread: &ThreadId,
@@ -480,8 +480,7 @@ impl Conversation {
         ))
     }
 
-    /// T3 subscribeWorktreeSetup: whole snapshots, so a slow client only holds the
-    /// newest.
+    /// Whole snapshots, so a slow client only holds the newest.
     fn subscribe_setup(
         &self,
         params: &wire::SubscribeSetup,
@@ -553,7 +552,7 @@ impl Conversation {
             .collect())
     }
 
-    /// T3 `CheckpointDiffQuery.getTurnDiff`; equal ordinals are an empty diff.
+    /// Equal ordinals are an empty diff.
     pub(crate) async fn turn_diff(&self, params: &wire::GetTurnDiff) -> Result<wire::TurnDiff> {
         let result = |diff: String| wire::TurnDiff {
             thread_id: params.thread_id.clone(),

@@ -296,7 +296,6 @@ fn appends_trimmed_additional_instructions_only_when_present() {
         ..Default::default()
     });
     assert!(!blank.contains("Additional instructions:"));
-    assert!(!blank.contains("T3"));
 }
 
 // TextGenerationPrompts.test.ts, sanitizeThreadTitle
@@ -500,7 +499,7 @@ fn citation() -> Citation {
 }
 
 const PLAIN_HREF: &str =
-    "t3-citation://v1/a/b/c?text=A+quote+%26+a+newline.%0A&start=0&end=21&prefix=&suffix=+Next.";
+    "citation://v1/a/b/c?text=A+quote+%26+a+newline.%0A&start=0&end=21&prefix=&suffix=+Next.";
 
 fn plain_citation() -> Citation {
     Citation {
@@ -526,9 +525,7 @@ fn parses_v1_link_bytes_without_adding_a_comment() {
 fn round_trips_complete_quote_data_without_a_server_origin() {
     let href = format_href(&citation());
     assert_eq!(parse_citation_href(&href), Some(citation()));
-    assert!(
-        href.starts_with("t3-citation://v1/environment%2Fremote/thread%3Aone/assistant%3Fone?")
-    );
+    assert!(href.starts_with("citation://v1/environment%2Fremote/thread%3Aone/assistant%3Fone?"));
     assert!(!href.contains("localhost"));
 }
 
@@ -552,21 +549,21 @@ fn round_trips_an_explicitly_supplied_comment_without_changing_it() {
 fn leaves_invalid_or_unsupported_references_unchanged() {
     for href in [
         "https://example.com/quote",
-        "t3-citation://v2/a/b/c?text=quote&start=0&end=5&prefix=&suffix=",
-        "t3-citation://v1/%ZZ/b/c?text=quote&start=0&end=5&prefix=&suffix=",
-        "t3-citation://v1/a/b/c?text=quote&start=NaN&end=5&prefix=&suffix=",
-        "t3-citation://v1/a/b/c?text=quote&start=5&end=0&prefix=&suffix=",
-        "t3-citation://v1/a/b/c?text=quote&start=0&end=9007199254740992&prefix=&suffix=",
-        "t3-citation://v1/a/b/c?text=quote&start=0&end=5&prefix=&suffix=&text=other",
-        "t3-citation://v1/a/b/c?text=quote&start=0&end=5&prefix=&suffix=&unknown=value",
-        "t3-citation://v1/a/b/c?text=quote&start=0&end=5&prefix=&suffix=&comment=note&unknown=value",
-        "t3-citation://v1/a/b/c?text=quote&start=0&end=5&prefix=&suffix=&comment=one&comment=two",
-        "t3-citation://v1/a/b/c?text=quote&start=0&end=5&prefix=&suffix=&comment=&comment=",
-        "t3-citation://v1/a/b/c?text=quote&start=0&end=5&prefix=&suffix=&comment=one&%63omment=two",
-        "t3-citation://v1/a/b/c?text=quote&start=0&end=5&prefix=&comment=note",
-        "t3-citation://v1/a/b/c?text=quote&start=0&end=5&prefix=&suffix=&text=other&comment=note",
-        "t3-citation://v1/a/b/c?text=&start=0&end=5&prefix=&suffix=",
-        "t3-citation://v1/a/b/c?text=quote&start=0&end=5&prefix=&suffix=#unexpected",
+        "citation://v2/a/b/c?text=quote&start=0&end=5&prefix=&suffix=",
+        "citation://v1/%ZZ/b/c?text=quote&start=0&end=5&prefix=&suffix=",
+        "citation://v1/a/b/c?text=quote&start=NaN&end=5&prefix=&suffix=",
+        "citation://v1/a/b/c?text=quote&start=5&end=0&prefix=&suffix=",
+        "citation://v1/a/b/c?text=quote&start=0&end=9007199254740992&prefix=&suffix=",
+        "citation://v1/a/b/c?text=quote&start=0&end=5&prefix=&suffix=&text=other",
+        "citation://v1/a/b/c?text=quote&start=0&end=5&prefix=&suffix=&unknown=value",
+        "citation://v1/a/b/c?text=quote&start=0&end=5&prefix=&suffix=&comment=note&unknown=value",
+        "citation://v1/a/b/c?text=quote&start=0&end=5&prefix=&suffix=&comment=one&comment=two",
+        "citation://v1/a/b/c?text=quote&start=0&end=5&prefix=&suffix=&comment=&comment=",
+        "citation://v1/a/b/c?text=quote&start=0&end=5&prefix=&suffix=&comment=one&%63omment=two",
+        "citation://v1/a/b/c?text=quote&start=0&end=5&prefix=&comment=note",
+        "citation://v1/a/b/c?text=quote&start=0&end=5&prefix=&suffix=&text=other&comment=note",
+        "citation://v1/a/b/c?text=&start=0&end=5&prefix=&suffix=",
+        "citation://v1/a/b/c?text=quote&start=0&end=5&prefix=&suffix=#unexpected",
     ] {
         assert_eq!(parse_citation_href(href), None, "{href}");
         let prompt = format!("[Assistant quote]({href})");

@@ -49,8 +49,8 @@ impl ProjectCatalog {
         &self.store
     }
     /// The chats folder, offered only when the Host's data directory is outside any
-    /// Git work tree, whose status and checkpoints its folders would inherit (T3
-    /// `ManagedProjectFolders.scratchRoot`). Probed once.
+    /// Git work tree, whose status and checkpoints its folders would inherit.
+    /// Probed once.
     pub(crate) async fn chats_root(&self) -> Option<PathBuf> {
         let chats = self.store.chat_directory();
         let data = chats.parent()?.to_path_buf();
@@ -161,10 +161,10 @@ pub(crate) struct TextGenerator {
     pub(crate) claude: Option<(ClaudeProgram, Arc<dyn super::ClaudeCredentials>)>,
 }
 
-/// T3 `DEFAULT_TEXT_GENERATION_MODEL` and its reasoning effort.
+/// The default Codex text-generation model and its reasoning effort.
 const CODEX_TEXT_MODEL: &str = "gpt-6-luna";
 const CODEX_TEXT_EFFORT: &str = "low";
-/// T3 `DEFAULT_TEXT_GENERATION_MODEL_BY_PROVIDER` for Claude.
+/// The default Claude text-generation model.
 const CLAUDE_TEXT_MODEL: &str = "claude-haiku-4-5";
 const TEXT_TIMEOUT: Duration = Duration::from_secs(180);
 
@@ -179,7 +179,7 @@ impl TextGenerator {
         Err("No provider can generate text.".into())
     }
 
-    /// T3 `CodexTextGeneration`: `codex exec` with an output schema, prompt on stdin.
+    /// `codex exec` with an output schema, prompt on stdin.
     async fn codex(
         &self,
         program: &Path,
@@ -227,7 +227,7 @@ impl TextGenerator {
         std::fs::read_to_string(&output).map_err(|_| "Failed to read Codex output file.".into())
     }
 
-    /// T3 `ClaudeTextGeneration`: `claude -p` with a JSON schema and no tools.
+    /// `claude -p` with a JSON schema and no tools.
     async fn claude(
         program: &ClaudeProgram,
         credentials: &dyn super::ClaudeCredentials,
@@ -326,7 +326,7 @@ impl PreparedRestore for Restore {
     }
 }
 
-/// T3 `resolveProjectSettings`: a project's overrides over the Host's values.
+/// A project's overrides over the Host's values.
 fn resolve_settings(
     saved: &agent_protocol::models::ConversationSettings,
     project: &str,
@@ -542,8 +542,8 @@ impl HostOperations for HostIo {
     ) -> BoxFuture<'_, Result<(), String>> {
         Box::pin(async move { self.files.delete_claimed(paths).await.map_err(error) })
     }
-    /// T3 runs the project's setup script in a terminal of the thread; this Host runs
-    /// it as a process of the thread that its terminal cleanup stops.
+    /// Runs the setup script as a process of the thread that its terminal
+    /// cleanup stops.
     fn run_setup(&self, request: SetupRequest) -> BoxFuture<'_, Result<SetupRun, String>> {
         Box::pin(async move {
             let scripts = self.projects.scripts(&request.project);

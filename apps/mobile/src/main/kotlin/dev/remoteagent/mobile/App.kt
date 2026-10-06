@@ -518,7 +518,7 @@ internal fun RemoteAgentApp(
     BackHandler(model.screen != Screen.Hosts) {
         if (model.screen == Screen.Conversation) model.showThreads() else model.showHosts()
     }
-    T3Theme {
+    AppMaterialTheme {
         model.deleteThreadId?.let { id ->
             AlertDialog(
                 onDismissRequest = { model.deleteThreadId = null },
@@ -569,7 +569,7 @@ internal fun RemoteAgentApp(
         ) { padding ->
             Column(Modifier.padding(padding).fillMaxSize()) {
                 (model.notice ?: model.snapshot.error())?.let {
-                    Text(it, color = T3.color("errorForeground"), modifier = Modifier.padding(12.dp))
+                    Text(it, color = AppTheme.color("errorForeground"), modifier = Modifier.padding(12.dp))
                 }
                 if (model.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
                 if (!model.snapshot.connected() && model.profileId != null && model.screen != Screen.Pairing)

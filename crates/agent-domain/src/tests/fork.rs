@@ -56,9 +56,8 @@ fn completed(s: &mut State, key: &str, text: &str) -> RunId {
     run
 }
 
-// T3 Orchestrator.ts dispatchThreadFork and dispatchMessage: the fork creates
-// the child at once and the child's first message forks natively on the
-// source's provider; the inherited history is fixed.
+// The fork creates the child at once and the child's first message forks
+// natively on the source's provider; the inherited history is fixed.
 #[test]
 fn a_native_fork_happens_when_the_child_sends_its_first_message() {
     let mut s = state();
@@ -108,9 +107,8 @@ fn a_native_fork_happens_when_the_child_sends_its_first_message() {
     assert_eq!(child.thread.unwrap().title, "Thread fork");
 }
 
-// T3 Orchestrator.ts dispatchMessage resolves a pending fork against the
-// first message's own selection: on another provider the fork is portable
-// (full_thread_summary).
+// Resolves a pending fork against the first message's own selection: on
+// another provider the fork is portable (full_thread_summary).
 #[test]
 fn a_fork_switched_to_another_provider_hands_over_its_history() {
     let mut s = state();
@@ -137,8 +135,8 @@ fn a_fork_switched_to_another_provider_hands_over_its_history() {
     assert_eq!(child.transfers[0].instance.as_deref(), Some("claude"));
 }
 
-// T3 ProviderTurnStartService.ts: a native fork that fails fails the run, and
-// the pending fork is resolved again by the next message.
+// A native fork that fails fails the run, and the pending fork is resolved
+// again by the next message.
 #[test]
 fn a_failed_native_fork_fails_the_run_and_the_next_message_retries_it() {
     let mut s = state();
@@ -182,8 +180,7 @@ fn a_failed_native_fork_fails_the_run_and_the_next_message_retries_it() {
     assert!(native_fork(&retry).is_some());
 }
 
-// T3 ProjectionStore.ts: a fork of a fork keeps the inherited prefix and its
-// message fields.
+// A fork of a fork keeps the inherited prefix and its message fields.
 #[test]
 fn forking_a_fork_keeps_the_ancestor_conversation_and_its_messages() {
     let mut s = state();
@@ -232,8 +229,7 @@ fn forking_a_fork_keeps_the_ancestor_conversation_and_its_messages() {
     assert!(render_history(history).contains("ancestor request"));
 }
 
-// T3 CommandPolicy.ts decideForkExecution: unsuccessful sources fork from the
-// bounded portable history; ThreadForkService.ts forkable statuses.
+// Unsuccessful sources fork from the bounded portable history.
 #[test]
 fn unsuccessful_and_cancelled_runs_fork_from_bounded_portable_history() {
     let mut s = state();
@@ -288,8 +284,8 @@ fn unsuccessful_and_cancelled_runs_fork_from_bounded_portable_history() {
     ));
 }
 
-// T3 ProjectionStore.ts isTurnItemAtOrBeforeRun: a fork inherits every item
-// through its boundary run, including runs a rollback discarded.
+// A fork inherits every item through its boundary run, including runs a
+// rollback discarded.
 #[test]
 fn a_fork_inherits_rolled_back_runs_through_its_boundary() {
     let mut s = state();
@@ -329,8 +325,6 @@ fn a_fork_inherits_rolled_back_runs_through_its_boundary() {
     );
 }
 
-// T3 Orchestrator.ts runForSourcePoint / latestStableRun and
-// orchestrationV2.ts TrimmedNonEmptyString titles.
 #[test]
 fn fork_sources_follow_the_reference_source_points() {
     let mut s = state();
@@ -384,8 +378,8 @@ fn fork_sources_follow_the_reference_source_points() {
     );
 }
 
-// T3 ThreadForkService.ts: the fork copies the parent row, including its pin
-// and automatic settlement.
+// The fork copies the parent row, including its pin and automatic
+// settlement.
 #[test]
 fn a_fork_copies_the_parent_sidebar_arrangement() {
     let mut s = state();
@@ -428,10 +422,9 @@ fn merged(s: &mut State, child: &mut State, key: &str, source: SourcePoint) -> R
     reply
 }
 
-// T3 Orchestrator.ts dispatchThreadMergeBack and dispatchMessage: merge-back
-// takes the latest stable fork run, is delivered by the next direct turn with
-// whatever provider it uses, and queued messages are rejected while it is
-// pending.
+// Merge-back takes the latest stable fork run, is delivered by the next
+// direct turn with whatever provider it uses, and queued messages are
+// rejected while it is pending.
 #[test]
 fn merge_back_waits_for_a_direct_turn_on_any_provider() {
     let mut parent = state();
@@ -497,9 +490,9 @@ fn merge_back_waits_for_a_direct_turn_on_any_provider() {
     assert_eq!(parent.transfers[0].instance.as_deref(), Some("claude"));
 }
 
-// T3 ProviderTurnStartService.ts selects only handoffs for the starting run or
-// carried from a failed or interrupted run on the same provider thread; a
-// delegated result is handed to its spawning run.
+// Selects only handoffs for the starting run or carried from a failed or
+// interrupted run on the same provider thread; a delegated result is handed
+// to its spawning run.
 #[test]
 fn delegated_results_reach_a_later_turn_only_after_the_spawning_run_failed() {
     for (spawning_status, delivered) in [(RunStatus::Completed, false), (RunStatus::Failed, true)] {

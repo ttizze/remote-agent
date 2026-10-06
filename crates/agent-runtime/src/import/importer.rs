@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
-/// Models for transcripts that never name one (T3 `DEFAULT_MODEL_BY_PROVIDER`).
+/// Models for transcripts that never name one.
 pub const DEFAULT_CODEX_MODEL: &str = "gpt-6-astra";
 pub const DEFAULT_CLAUDE_MODEL: &str = "claude-fable-5-1";
 

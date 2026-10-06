@@ -1,5 +1,5 @@
-//! Live progress of a launch that prepares a worktree (T3 `worktreeSetup.ts`).
-//! The Host keeps it in memory only; clients render it as the setup card.
+//! Live progress of a launch that prepares a worktree. The Host keeps it in
+//! memory only; clients render it as the setup card.
 use crate::{ThreadId, Timestamp};
 use serde::{Deserialize, Serialize};
 
@@ -16,7 +16,6 @@ pub enum WorktreeSetupStageId {
     SetupScript,
     Agent,
 }
-/// T3 `WORKTREE_SETUP_STAGE_ORDER`.
 pub const WORKTREE_SETUP_STAGE_ORDER: [WorktreeSetupStageId; 5] = [
     WorktreeSetupStageId::Fetch,
     WorktreeSetupStageId::Checkout,
@@ -63,8 +62,8 @@ pub enum WorktreeSetupPhase {
 pub struct WorktreeSetupScript {
     pub name: String,
     pub command: String,
-    /// T3 runs the script in a thread terminal; this Host runs it as a process,
-    /// so there is none to open.
+    /// The script runs as a process, not a thread terminal, so there is none
+    /// to open.
     pub terminal_id: Option<String>,
 }
 

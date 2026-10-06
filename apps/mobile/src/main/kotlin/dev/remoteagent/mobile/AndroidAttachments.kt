@@ -284,7 +284,7 @@ private fun AttachmentTile(model: AndroidAppModel, attachment: DraftAttachment, 
             TextButton(onClick = { model.perform(Intent.RetryAttachment(attachment.id)) }) { Text("Retry") }
         if (editing) TextButton(onClick = { model.perform(Intent.RemoveAttachment(attachment.id)) }) { Text("Remove") }
         (failure ?: attachment.error)?.let {
-            Text(it, style = MaterialTheme.typography.labelSmall, color = T3.color("errorForeground"))
+            Text(it, style = MaterialTheme.typography.labelSmall, color = AppTheme.color("errorForeground"))
         }
     }
     if (preview && bitmap != null)

@@ -154,9 +154,9 @@ async fn a_failed_capture_records_an_error_checkpoint_and_finishes_the_run() {
     assert_eq!(rig.run(&id, &run).await.status, RunStatus::Completed);
 }
 
-// T3 CheckpointService.capture: a turn's checkpoint lists the files changed
-// since the scope's previous checkpoint; an unavailable previous ref, diff or
-// capture leaves the list empty and the run still finishes.
+// A turn's checkpoint lists the files changed since the scope's previous
+// checkpoint; an unavailable previous ref, diff or capture leaves the list
+// empty and the run still finishes.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_captured_turn_records_the_files_changed_since_the_previous_checkpoint() {
     let file = agent_domain::CheckpointFile {
@@ -315,8 +315,8 @@ async fn does_not_capture_a_stopped_run_that_a_rollback_already_discarded() {
     );
 }
 
-// T3 CheckpointCaptureService.ts skips only ready baselines: one that was missing
-// because its lookup failed becomes ready once the ref can be read again.
+// Only ready baselines are skipped: one that was missing because its lookup
+// failed becomes ready once the ref can be read again.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_missing_baseline_is_materialized_again_by_a_later_capture() {
     let rig = rig();
@@ -347,8 +347,8 @@ async fn a_missing_baseline_is_materialized_again_by_a_later_capture() {
     );
 }
 
-// T3 Orchestrator.ts prepares a root scope for every root run: a thread that never
-// went through workspace preparation (imported, forked or delegated) still
+// A root scope is prepared for every root run: a thread that never went
+// through workspace preparation (imported, forked or delegated) still
 // checkpoints its runs in a scope of its own.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_run_without_a_prepared_scope_checkpoints_in_its_threads_own_scope() {

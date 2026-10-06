@@ -984,8 +984,8 @@ async fn a_launch_that_loses_the_create_leaves_the_winners_record_and_strategy()
     }
 }
 
-// T3 ThreadLaunchService.ts derives a replay from the accepted create: a launch
-// whose create landed but whose process stopped before anything else resumes.
+// Derives a replay from the accepted create: a launch whose create landed but
+// whose process stopped before anything else resumes.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_launch_interrupted_after_its_create_is_resumed_by_a_retry() {
     let rig = rig();

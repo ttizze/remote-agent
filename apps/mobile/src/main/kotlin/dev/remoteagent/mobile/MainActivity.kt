@@ -54,7 +54,7 @@ class MainActivity : ComponentActivity() {
                 val requestQrScan = rememberAndroidQrScanner(this)
                 RemoteAgentApp(activity = this, model = model, requestQrScan = requestQrScan)
             } else {
-                T3Theme {
+                AppMaterialTheme {
                     Column(Modifier.safeDrawingPadding().padding(24.dp)) {
                         Text("同じネットワークのPCへ接続するには、付近のデバイスへのアクセスを許可してください。")
                         Button(onClick = { requestNetwork.launch(Manifest.permission.ACCESS_LOCAL_NETWORK) }) {

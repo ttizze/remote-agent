@@ -252,7 +252,7 @@ impl EffectWorker {
     }
 
     /// After execution, an unsettled replay-safe row runs again; a process-bound
-    /// one ends failed and is left to restart recovery, like T3.
+    /// one ends failed and is left to restart recovery.
     async fn release_executed(&self, row: &OutboxRow, cause: &OutboxError) {
         if self.handlers.durability(&row.kind) == Some(Durability::ReplaySafe) {
             self.requeue(row, cause).await;

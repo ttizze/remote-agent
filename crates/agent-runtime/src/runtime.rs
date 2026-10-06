@@ -180,8 +180,7 @@ impl Runtime {
         })
     }
 
-    /// The thread's worktree setup card: the current snapshot, then every change
-    /// (T3 subscribeWorktreeSetup).
+    /// The thread's worktree setup card: the current snapshot, then every change.
     pub fn subscribe_setup(
         &self,
         thread: &ThreadId,
@@ -189,8 +188,8 @@ impl Runtime {
         self.executors.setups.subscribe(thread)
     }
 
-    /// Stops a setup before its turn starts and waits until it rolled back (T3
-    /// worktreeSetupCancel). False when nothing can be cancelled.
+    /// Stops a setup before its turn starts and waits until it rolled back.
+    /// False when nothing can be cancelled.
     pub async fn cancel_setup(&self, thread: &ThreadId) -> bool {
         self.executors.setups.cancel(thread).await
     }
@@ -407,8 +406,8 @@ impl Runtime {
     }
 
     /// An answer attachment that no longer exists reaches the state machine
-    /// without a path, which it rejects (T3 `appendUserInputAttachmentPaths`). A
-    /// replayed command keeps its first result.
+    /// without a path, which it rejects. A replayed command keeps its first
+    /// result.
     async fn checked_attachments(
         &self,
         id: &CommandId,

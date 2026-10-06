@@ -18,7 +18,7 @@ struct ConversationComposer: View {
         let draft = model.snapshot.draft()
         VStack(spacing: 8) {
             if let label = model.conversation.agents.pillLabel {
-                Button("Agents \(label)", action: showAgents).font(T3Theme.font(12))
+                Button("Agents \(label)", action: showAgents).font(AppTheme.font(12))
                     .accessibilityLabel(model.conversation.agents.accessibilityLabel ?? "Agents")
             }
             if composer.queueCount > 0 {
@@ -28,21 +28,21 @@ struct ConversationComposer: View {
                             "\(composer.queueCount) queued\(composer.queueHeld ? " · paused" : "")"
                         ); Spacer(); Image(systemName: "chevron.up")
                     }
-                    .font(T3Theme.font(12)).foregroundStyle(T3Theme.color("textMuted"))
+                    .font(AppTheme.font(12)).foregroundStyle(AppTheme.color("textMuted"))
                 }.padding(.horizontal, 4)
             }
             if composer.editing {
                 HStack {
-                    Text("Editing queued message").font(T3Theme.font(12))
+                    Text("Editing queued message").font(AppTheme.font(12))
                     Spacer()
-                    Button("Cancel") { model.perform(.queue(action: .cancelEdit)) }.font(T3Theme.font(12))
+                    Button("Cancel") { model.perform(.queue(action: .cancelEdit)) }.font(AppTheme.font(12))
                 }
             }
             ForEach(composer.pendingDeliveries, id: \.self) { id in
                 Button("Delivery unconfirmed · Stop retrying") { model.perform(.discardPending(commandId: id)) }
             }
             if let notice = composer.notice {
-                Text(notice).font(T3Theme.font(12)).foregroundStyle(T3Theme.color("textMuted"))
+                Text(notice).font(AppTheme.font(12)).foregroundStyle(AppTheme.color("textMuted"))
             }
             VStack(alignment: .leading, spacing: 12) {
                 if !draft.attachments.isEmpty {
@@ -57,7 +57,7 @@ struct ConversationComposer: View {
                     text: Binding(get: { model.composerText }, set: { model.editDraft($0) }),
                     axis: .vertical
                 )
-                .lineLimit(2 ... 8).font(T3Theme.font(16)).focused($focused).textInputAutocapitalization(.sentences)
+                .lineLimit(2 ... 8).font(AppTheme.font(16)).focused($focused).textInputAutocapitalization(.sentences)
                 .accessibilityIdentifier("composer.text").disabled(!composer.canEdit)
                 HStack(spacing: 12) {
                     ComposerAttachmentButton(model: model)
@@ -101,7 +101,7 @@ struct ConversationComposer: View {
                                 )
                             Text(selectedModel?.displayName ?? draft.model).lineLimit(1)
                             Image(systemName: "chevron.down").font(.system(size: 8))
-                        }.font(T3Theme.font(12))
+                        }.font(AppTheme.font(12))
                     }
                     Menu {
                         ForEach(runtimeModeChoices(), id: \.id) { mode in
@@ -152,18 +152,18 @@ struct ConversationComposer: View {
                         width: 32,
                         height: 32
                     ) }
-                    .background(T3Theme.color("text"), in: Circle()).foregroundStyle(T3Theme.color("canvas"))
+                    .background(AppTheme.color("text"), in: Circle()).foregroundStyle(AppTheme.color("canvas"))
                     .disabled(!composer.enabled).opacity(composer.enabled ? 1 : 0.35)
                     .accessibilityLabel(composer.sendLabel)
-                }.foregroundStyle(T3Theme.color("textMuted"))
+                }.foregroundStyle(AppTheme.color("textMuted"))
             }
             .padding(14).background(
-                T3Theme.color("mobileComposer").opacity(0.9),
+                AppTheme.color("mobileComposer").opacity(0.9),
                 in: RoundedRectangle(cornerRadius: 18)
             )
-            .overlay(RoundedRectangle(cornerRadius: 18).stroke(T3Theme.color("border").opacity(0.8)))
+            .overlay(RoundedRectangle(cornerRadius: 18).stroke(AppTheme.color("border").opacity(0.8)))
         }
-        .padding(.horizontal, 14).padding(.vertical, 10).background(T3Theme.color("canvas"))
+        .padding(.horizontal, 14).padding(.vertical, 10).background(AppTheme.color("canvas"))
         .onChange(of: model.selectedThreadId) { _, _ in recorder.cancel(); preparation = nil }
         .onDisappear { recorder.cancel(); preparation = nil }
     }
@@ -208,8 +208,8 @@ struct QueueSheet: View {
                 }
                 ForEach(model.conversation.queue, id: \.runId) { row in
                     VStack(alignment: .leading, spacing: 8) {
-                        Text(row.text).font(T3Theme.font(14)).lineLimit(5)
-                        Text(row.model).font(T3Theme.font(11)).foregroundStyle(T3Theme.color("textMuted"))
+                        Text(row.text).font(AppTheme.font(14)).lineLimit(5)
+                        Text(row.model).font(AppTheme.font(11)).foregroundStyle(AppTheme.color("textMuted"))
                         HStack {
                             if row
                                 .canEdit {
@@ -222,7 +222,7 @@ struct QueueSheet: View {
                             Button("Cancel", role: .destructive) {
                                 model.perform(.queue(action: .cancel(runId: row.runId)))
                             }
-                        }.font(T3Theme.font(12)).buttonStyle(.borderless)
+                        }.font(AppTheme.font(12)).buttonStyle(.borderless)
                     }
                 }.onMove { offsets, destination in
                     var ids = model.conversation.queue.map(\.runId)
@@ -230,7 +230,7 @@ struct QueueSheet: View {
                     model.perform(.queue(action: .reorder(runIds: ids)))
                 }
             }
-            .scrollContentBackground(.hidden).background(T3Theme.color("canvas"))
+            .scrollContentBackground(.hidden).background(AppTheme.color("canvas"))
             .navigationTitle("Queue").navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) { EditButton() }; ToolbarItem(placement: .topBarTrailing) {

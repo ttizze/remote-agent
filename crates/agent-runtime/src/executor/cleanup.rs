@@ -3,7 +3,7 @@ use crate::{Durability, EffectError, EffectHandler, EffectJob};
 use agent_domain::{EffectBody, EffectResult};
 use futures_util::future::BoxFuture;
 
-/// Deletes the thread's message attachments (T3 `attachment.cleanup`).
+/// Deletes the thread's message attachments.
 pub(crate) struct DeleteAttachments(pub(crate) ExecutorContext);
 
 impl EffectHandler for DeleteAttachments {
@@ -27,7 +27,7 @@ impl EffectHandler for DeleteAttachments {
     }
 }
 
-/// Closes the thread's terminals (T3 `ResourceCleanupService`).
+/// Closes the thread's terminals.
 pub(crate) struct CleanupTerminals(pub(crate) ExecutorContext);
 
 impl EffectHandler for CleanupTerminals {

@@ -350,7 +350,7 @@ struct Kept {
     response_user: bool,
 }
 
-/// Parses a whole transcript's contents (T3 `parseAgentSessionTranscript`).
+/// Parses a whole transcript's contents.
 pub fn parse_session_transcript(meta: &TranscriptMeta, contents: &str) -> Option<SessionThread> {
     let contents = contents.strip_suffix('\n').unwrap_or(contents);
     let lines: Vec<&str> = contents.split('\n').take(MAX_IMPORT_RECORDS + 1).collect();

@@ -147,7 +147,7 @@ impl Conversation {
         self.runtime.shutdown().await;
     }
 
-    /// The conversation settings changed: automatic settlement sweeps again (T3).
+    /// The conversation settings changed: automatic settlement sweeps again.
     pub(crate) fn settings_changed(&self) {
         self.runtime.settings_changed();
     }

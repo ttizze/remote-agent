@@ -42,9 +42,9 @@ internal fun RequestCard(model: AndroidAppModel, row: TimelineRow) {
             QuestionAnswer(question.id, values)
         }
     Surface(
-        color = T3.color("mobileGroupedCard"),
+        color = AppTheme.color("mobileGroupedCard"),
         shape = RoundedCornerShape(12.dp),
-        border = BorderStroke(1.dp, T3.color("border")),
+        border = BorderStroke(1.dp, AppTheme.color("border")),
     ) {
         Column(Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text(row.title, style = MaterialTheme.typography.titleSmall)
@@ -55,7 +55,7 @@ internal fun RequestCard(model: AndroidAppModel, row: TimelineRow) {
             row.requestId?.let { request ->
                 row.choices.forEach { choice ->
                     choice.warning?.let {
-                        Text(it, color = T3.color("warningForeground"), style = MaterialTheme.typography.bodySmall)
+                        Text(it, color = AppTheme.color("warningForeground"), style = MaterialTheme.typography.bodySmall)
                     }
                     OutlinedButton(
                         onClick = { model.perform(Intent.RespondApproval(request, choice.decision)) },
@@ -105,7 +105,7 @@ internal fun RequestCard(model: AndroidAppModel, row: TimelineRow) {
                                         if (option.description.isNotEmpty())
                                             Text(
                                                 option.description,
-                                                color = T3.color("textMuted"),
+                                                color = AppTheme.color("textMuted"),
                                                 style = MaterialTheme.typography.bodySmall,
                                             )
                                     }
@@ -125,7 +125,7 @@ internal fun RequestCard(model: AndroidAppModel, row: TimelineRow) {
                 if (row.responseModeMessage) {
                     Text(
                         "Reply in the composer",
-                        color = T3.color("textMuted"),
+                        color = AppTheme.color("textMuted"),
                         style = MaterialTheme.typography.bodySmall,
                     )
                     TextButton(onClick = { model.perform(Intent.DismissInput(request)) }, enabled = row.actionable) {
@@ -139,9 +139,9 @@ internal fun RequestCard(model: AndroidAppModel, row: TimelineRow) {
                     ) {
                         Text("Submit answers")
                     }
-                    error?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = T3.color("textMuted")) }
+                    error?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = AppTheme.color("textMuted")) }
                 }
-            } ?: Text(row.status, style = MaterialTheme.typography.bodySmall, color = T3.color("textMuted"))
+            } ?: Text(row.status, style = MaterialTheme.typography.bodySmall, color = AppTheme.color("textMuted"))
         }
     }
 }

@@ -106,7 +106,7 @@ internal fun ThreadDetailScreen(model: AndroidAppModel, modifier: Modifier = Mod
             Text(
                 conversation.project,
                 Modifier.weight(1f),
-                color = T3.color("textMuted"),
+                color = AppTheme.color("textMuted"),
                 style = MaterialTheme.typography.labelSmall,
             )
             Box {
@@ -212,7 +212,7 @@ internal fun ThreadDetailScreen(model: AndroidAppModel, modifier: Modifier = Mod
             dismissButton = { TextButton(onClick = { rename = false }) { Text("Cancel") } },
         )
     if (agents)
-        ModalBottomSheet(onDismissRequest = { agents = false }, containerColor = T3.color("canvas")) {
+        ModalBottomSheet(onDismissRequest = { agents = false }, containerColor = AppTheme.color("canvas")) {
             Text("Agents", Modifier.padding(horizontal = 20.dp), style = MaterialTheme.typography.titleMedium)
             LazyColumn(contentPadding = PaddingValues(horizontal = 20.dp, vertical = 14.dp)) {
                 items(conversation.agents.rows, key = { it.id }) { agent ->
@@ -230,7 +230,7 @@ internal fun ThreadDetailScreen(model: AndroidAppModel, modifier: Modifier = Mod
                             Text(
                                 agent.metadata,
                                 style = MaterialTheme.typography.bodySmall,
-                                color = T3.color("textMuted"),
+                                color = AppTheme.color("textMuted"),
                             )
                             if (agent.detail.isNotEmpty())
                                 Text(agent.detail, style = MaterialTheme.typography.bodySmall)
@@ -257,11 +257,11 @@ internal fun TimelineCard(model: AndroidAppModel, row: TimelineRow) {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
                 Column(
                     Modifier.widthIn(max = 600.dp)
-                        .background(T3.color("mobileUserBubble"), RoundedCornerShape(14.dp))
+                        .background(AppTheme.color("mobileUserBubble"), RoundedCornerShape(14.dp))
                         .padding(12.dp)
                 ) {
                     if (row.title.isNotEmpty())
-                        Text(row.title, style = MaterialTheme.typography.labelSmall, color = T3.color("textMuted"))
+                        Text(row.title, style = MaterialTheme.typography.labelSmall, color = AppTheme.color("textMuted"))
                     androidx.compose.foundation.text.selection.SelectionContainer { Text(row.text) }
                     if (row.attachments.isNotEmpty()) ConversationAttachmentStrip(model, row.attachments)
                 }
@@ -283,7 +283,7 @@ internal fun TimelineCard(model: AndroidAppModel, row: TimelineRow) {
         RowKind.QUESTION -> RequestCard(model, row)
         RowKind.WORK -> {
             var expanded by remember(row.id) { mutableStateOf(false) }
-            Surface(color = T3.color("mobileGroupedCard"), shape = RoundedCornerShape(10.dp)) {
+            Surface(color = AppTheme.color("mobileGroupedCard"), shape = RoundedCornerShape(10.dp)) {
                 Column(Modifier.fillMaxWidth().padding(10.dp)) {
                     TextButton(onClick = { expanded = !expanded }) {
                         Text(
@@ -311,7 +311,7 @@ internal fun TimelineCard(model: AndroidAppModel, row: TimelineRow) {
                                 Text(
                                     work.status,
                                     style = MaterialTheme.typography.labelSmall,
-                                    color = T3.color("textMuted"),
+                                    color = AppTheme.color("textMuted"),
                                 )
                             }
                         }
@@ -319,7 +319,7 @@ internal fun TimelineCard(model: AndroidAppModel, row: TimelineRow) {
             }
         }
         RowKind.PLAN ->
-            Surface(color = T3.color("mobileGroupedCard"), shape = RoundedCornerShape(12.dp)) {
+            Surface(color = AppTheme.color("mobileGroupedCard"), shape = RoundedCornerShape(12.dp)) {
                 Column(Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Text(row.title.ifEmpty { "Proposed plan" }, style = MaterialTheme.typography.titleSmall)
                     ConversationBody(row.text)
@@ -344,7 +344,7 @@ internal fun TimelineCard(model: AndroidAppModel, row: TimelineRow) {
                 Text(
                     row.text,
                     style = MaterialTheme.typography.bodyMedium,
-                    color = T3.color(if (row.kind == RowKind.ERROR) "errorForeground" else "textMuted"),
+                    color = AppTheme.color(if (row.kind == RowKind.ERROR) "errorForeground" else "textMuted"),
                 )
             }
     }
@@ -387,11 +387,11 @@ private fun ThreadComposer(model: AndroidAppModel, queue: () -> Unit, agents: ()
                 Text("Delivery unconfirmed · Stop retrying")
             }
         }
-        composer.notice?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = T3.color("textMuted")) }
+        composer.notice?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = AppTheme.color("textMuted")) }
         Surface(
-            color = T3.color("mobileComposer").copy(alpha = .9f),
+            color = AppTheme.color("mobileComposer").copy(alpha = .9f),
             shape = RoundedCornerShape(18.dp),
-            border = androidx.compose.foundation.BorderStroke(1.dp, T3.color("border")),
+            border = androidx.compose.foundation.BorderStroke(1.dp, AppTheme.color("border")),
         ) {
             Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 if (draft.attachments.isNotEmpty())
@@ -400,14 +400,14 @@ private fun ThreadComposer(model: AndroidAppModel, queue: () -> Unit, agents: ()
                     model.composerText,
                     model::editDraft,
                     Modifier.fillMaxWidth(),
-                    textStyle = MaterialTheme.typography.bodyLarge.copy(color = T3.color("text")),
+                    textStyle = MaterialTheme.typography.bodyLarge.copy(color = AppTheme.color("text")),
                     enabled = composer.canEdit,
                     minLines = 2,
                     maxLines = 8,
-                    cursorBrush = androidx.compose.ui.graphics.SolidColor(T3.color("text")),
+                    cursorBrush = androidx.compose.ui.graphics.SolidColor(AppTheme.color("text")),
                     decorationBox = { input ->
                         Box {
-                            if (model.composerText.isEmpty()) Text(composer.placeholder, color = T3.color("textMuted"))
+                            if (model.composerText.isEmpty()) Text(composer.placeholder, color = AppTheme.color("textMuted"))
                             input()
                         }
                     },
@@ -527,8 +527,8 @@ private fun ThreadComposer(model: AndroidAppModel, queue: () -> Unit, agents: ()
                         enabled = composer.enabled,
                         colors =
                             IconButtonDefaults.filledIconButtonColors(
-                                containerColor = T3.color("text"),
-                                contentColor = T3.color("canvas"),
+                                containerColor = AppTheme.color("text"),
+                                contentColor = AppTheme.color("canvas"),
                             ),
                     ) {
                         Text("↑")
@@ -542,7 +542,7 @@ private fun ThreadComposer(model: AndroidAppModel, queue: () -> Unit, agents: ()
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun QueueSheet(model: AndroidAppModel, dismiss: () -> Unit) {
-    ModalBottomSheet(onDismissRequest = dismiss, containerColor = T3.color("canvas")) {
+    ModalBottomSheet(onDismissRequest = dismiss, containerColor = AppTheme.color("canvas")) {
         LazyColumn(contentPadding = PaddingValues(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             item { Text("Queue", style = MaterialTheme.typography.titleLarge) }
             if (model.conversation.composer.queueHeld)
@@ -550,7 +550,7 @@ private fun QueueSheet(model: AndroidAppModel, dismiss: () -> Unit) {
             items(model.conversation.queue, key = { it.runId }) { row ->
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     Text(row.text, maxLines = 5)
-                    Text(row.model, style = MaterialTheme.typography.labelSmall, color = T3.color("textMuted"))
+                    Text(row.model, style = MaterialTheme.typography.labelSmall, color = AppTheme.color("textMuted"))
                     Row {
                         if (row.canEdit)
                             TextButton(

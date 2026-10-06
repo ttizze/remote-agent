@@ -1,4 +1,4 @@
-//! CLI control protocol from claude-agent-sdk 0.3.276 (locked by T3 4ee6bfd).
+//! CLI control protocol from claude-agent-sdk 0.3.276.
 use crate::*;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -298,8 +298,7 @@ pub fn claude_request_kind(tool: &str) -> &'static str {
         _ => "command",
     }
 }
-/// T3 CLAUDE_T3_MCP_TOOL_TIMEOUT_MS: the app's wait tools block for up to an
-/// hour, so the budget sits just above it.
+/// The app's wait tools block for up to an hour, so the budget sits just above it.
 pub const CLAUDE_MCP_TOOL_TIMEOUT_MS: u64 = 65 * 60 * 1_000;
 pub fn claude_permission_mode(runtime: RuntimeMode, interaction: InteractionMode) -> &'static str {
     if interaction == InteractionMode::Plan {

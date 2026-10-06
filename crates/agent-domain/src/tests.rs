@@ -162,7 +162,7 @@ fn recover(s: &mut State) {
     *s = fold(s, &r.facts).unwrap();
 }
 
-// T3 fixtures/queued_turn/codex_output.ts: the accepted queued turn becomes run 2.
+// The accepted queued turn becomes run 2.
 #[test]
 fn queued_turn_starts_after_active_turn_and_only_then_enters_the_timeline() {
     let mut s = state();
@@ -180,7 +180,7 @@ fn queued_turn_starts_after_active_turn_and_only_then_enters_the_timeline() {
     assert_eq!(s.messages[1].intent, InputIntent::QueuedTurn);
     assert_eq!(s.visible_items().len(), 2);
 }
-// T3 fixtures/message_steering/claude_output.ts: steering attaches to one run and turn.
+// Steering attaches to one run and turn.
 #[test]
 fn steering_preserves_run_and_attempt_and_records_the_input_intent() {
     let mut s = state();
@@ -200,8 +200,7 @@ fn steering_preserves_run_and_attempt_and_records_the_input_intent() {
         EffectBody::Provider(ProviderCommand::Steer { .. })
     ));
 }
-// T3 SelectionRestart.integration.test.ts and RunExecutionService.test.ts: a superseded
-// attempt gets no interrupt rows and no subagent cascade.
+// A superseded attempt gets no interrupt rows and no subagent cascade.
 #[test]
 fn restart_supersedes_attempt_and_leaves_native_children_to_their_provider() {
     let mut s = state();
@@ -279,8 +278,8 @@ fn claude_selection() -> ModelSelection {
         options: BTreeMap::new(),
     }
 }
-// T3 Orchestrator start-queued: a queued run that takes another instance
-// applies the provider-switch release plan to the previous instance.
+// A queued run that takes another instance applies the provider-switch
+// release plan to the previous instance.
 #[test]
 fn a_queued_run_on_another_instance_releases_the_previous_instance() {
     let mut s = state();
@@ -317,7 +316,7 @@ fn a_queued_run_on_another_instance_releases_the_previous_instance() {
         }]
     );
 }
-// T3 CommandPolicy.test.ts: providers without interrupt-and-restart reject a required restart.
+// Providers without interrupt-and-restart reject a required restart.
 #[test]
 fn restart_and_steering_respect_capabilities_and_maintenance_turns() {
     let mut s = state();
@@ -468,7 +467,7 @@ fn failed_control_operation_keeps_live_native_work_authoritative() {
     );
     assert_eq!(s.runs[0].status, RunStatus::Running);
 }
-// T3 ProviderRuntimeRecoveryService.test.ts: queued identities survive; live questions expire.
+// Queued identities survive; live questions expire.
 #[test]
 fn recovery_holds_queued_work_finishes_streaming_and_preserves_async_questions() {
     let mut s = state();
@@ -728,7 +727,7 @@ fn rollback_is_absolute_holds_new_runs_and_preserves_new_metadata() {
             reason: "rollback-pending".into()
         }
     );
-    // T3 accepts a message during a rollback; its turn starts after it.
+    // Accepts a message during a rollback; its turn starts after it.
     assert_eq!(
         command(&mut s, "resume", Command::ResumeQueue).reply,
         Reply::Accepted
@@ -839,7 +838,7 @@ fn recovery_keeps_lost_work_for_its_provider_until_a_completed_non_compact_turn(
         "after-compact",
         send_message("continue", DispatchMode::StartImmediately),
     );
-    assert!(start.effects.iter().any(|effect| matches!(&effect.body, EffectBody::Provider(ProviderCommand::Start { text, note, .. }) if provider_prompt(text, note.as_deref(), None) == "Note: the T3 server restarted, and this background work was cancelled before it finished. It will not report back:\n- subagent: Background subagent test\n\nUser message:\ncontinue")));
+    assert!(start.effects.iter().any(|effect| matches!(&effect.body, EffectBody::Provider(ProviderCommand::Start { text, note, .. }) if provider_prompt(text, note.as_deref(), None) == "Note: the server restarted, and this background work was cancelled before it finished. It will not report back:\n- subagent: Background subagent test\n\nUser message:\ncontinue")));
     let delivered = s.active_run().unwrap().attempt.clone().unwrap();
     provider(
         &mut s,
@@ -928,7 +927,7 @@ fn recovery_preserves_distinct_work_ids_and_shutdown_reason() {
     );
     assert!(s.tasks.iter().all(|task| task.result.as_deref()
         == Some("Cancelled because the server shut down before the provider work completed.")));
-    // T3 prepareForShutdown: the cut root turn continues after the next start.
+    // The cut root turn continues after the next start.
     assert!(recovered.effects.iter().any(|effect| matches!(effect.body, EffectBody::SendToThread { command: ref next, .. } if matches!(**next, Command::ContinueRestart { .. }))));
     recover(&mut s);
     assert_eq!(s.runs[0].restart_cancelled_work.len(), 2);
@@ -1609,7 +1608,7 @@ fn native_subagent_followup_reopens_completed_task() {
     assert_eq!(s.tasks.len(), 1);
     assert_eq!(s.tasks[0].status, ItemStatus::Running);
 }
-// T3 client-runtime orchestrationV2Projection.test.ts: terminal updates retain usage.
+// Terminal updates retain usage.
 #[test]
 fn terminal_updates_keep_usage_and_streaming_appends_have_no_full_entity() {
     let mut s = state();
@@ -1651,8 +1650,8 @@ fn terminal_updates_keep_usage_and_streaming_appends_have_no_full_entity() {
     assert_eq!(s.attempts[0].usage.as_ref(), Some(&usage));
     assert_eq!(s.messages[1].text, "Hello world");
 }
-// T3 Orchestrator.ts thread.mark-unread reads the last run's completion and
-// runtimeLayer.test.ts rejects it while there is none.
+// Thread.mark-unread reads the last run's completion and rejects it while
+// there is none.
 #[test]
 fn unread_uses_the_last_run_and_needs_its_completion() {
     let mut s = state();
@@ -1786,7 +1785,7 @@ proptest! {
         prop_assert!(s.active_run().is_none());
     }
 }
-// T3 CommandPolicy.test.ts: unchanged capability and delivery precedence matrix.
+// Unchanged capability and delivery precedence matrix.
 #[test]
 fn automatic_delivery_obeys_negotiated_turn_capabilities() {
     let run = RunId::new("command-policy-active-run").unwrap();
@@ -1969,7 +1968,7 @@ fn visible_items_sort_by_authoritative_ordinal_and_keep_inherited_rows() {
     );
 }
 
-// T3 CheckpointCaptureService.test.ts: a capture without a readable workspace still settles the run.
+// A capture without a readable workspace still settles the run.
 #[test]
 fn failed_capture_settles_the_run_and_stopped_capture_keeps_its_terminal_status() {
     let mut s = state();
@@ -2057,7 +2056,7 @@ fn failed_capture_settles_the_run_and_stopped_capture_keeps_its_terminal_status(
         }
     );
 }
-// T3 CheckpointRollbackService.ts: rolled-back captures are discarded and later checkpoints become stale.
+// Rolled-back captures are discarded and later checkpoints become stale.
 #[test]
 fn rollback_discards_pending_captures_and_invalidates_later_checkpoints() {
     let mut s = state();
@@ -2313,7 +2312,7 @@ fn async_question_answer_steers_the_current_turn_and_rejects_blank_answers_atomi
 }
 
 #[test]
-// T3 ProviderTurnStartService.ts: an uncertain native delivery continues in a fresh native thread.
+// An uncertain native delivery continues in a fresh native thread.
 fn context_delivery_is_pending_until_acceptance_and_ambiguous_delivery_is_not_repeated() {
     let mut s = state();
     let (_, a) = running(&mut s, "original");
@@ -2651,8 +2650,8 @@ fn delegated_notifications_report_the_original_count_labels_and_child_links() {
     );
 }
 
-// T3 Orchestrator.ts:8722 and :7333: a queued sibling joins the parent run's wake, and
-// cancelling that wake disposes the whole cohort.
+// A queued sibling joins the parent run's wake, and cancelling that wake
+// disposes the whole cohort.
 #[test]
 fn queued_siblings_share_one_wake_and_cancelling_it_disposes_the_cohort() {
     let mut s = state();
@@ -2836,8 +2835,8 @@ fn first_scoped_capture_requires_a_baseline_and_late_capture_uses_its_original_s
     assert!(rollback.effects.iter().any(|effect|matches!(&effect.body,EffectBody::Rollback {restore:Some(RestoreFiles {scope:Some(scope),file_ref,..}),..} if scope.cwd=="/workspace/one" && file_ref=="before")));
 }
 
-// T3 CheckpointService.ts: a captured turn carries the files changed since the
-// previous checkpoint; materialized baselines carry none.
+// A captured turn carries the files changed since the previous checkpoint;
+// materialized baselines carry none.
 #[test]
 fn a_captured_checkpoint_records_its_file_summary_and_baselines_record_none() {
     let file = |path: &str, additions| CheckpointFile {
@@ -2943,8 +2942,8 @@ fn interrupt_failure_keeps_the_root_and_children_live_until_provider_confirmatio
     ));
 }
 
-// T3 accepts selection and mode changes while a rollback runs; the rollback
-// checks the active provider when it executes (CheckpointRollbackService).
+// Accepts selection and mode changes while a rollback runs; the rollback
+// checks the active provider when it executes.
 #[test]
 fn provider_selection_and_runtime_changes_are_accepted_during_rollback() {
     let mut s = state();
@@ -3190,7 +3189,7 @@ fn start_context(step: &Step) -> Option<(Option<String>, String)> {
         _ => None,
     })
 }
-// T3 ProviderTurnStartService.ts: a failed native resume continues in a fresh session with full history.
+// A failed native resume continues in a fresh session with full history.
 #[test]
 fn lost_native_session_restarts_the_attempt_with_portable_history() {
     let mut s = state();
@@ -3245,7 +3244,7 @@ fn lost_native_session_restarts_the_attempt_with_portable_history() {
     assert!(step.effects.is_empty());
     assert_eq!(s.runs[1].status, RunStatus::Failed);
 }
-// T3 ContextHandoffDelivery.ts: only a delivery recorded for a concrete native thread is uncertain.
+// Only a delivery recorded for a concrete native thread is uncertain.
 #[test]
 fn a_handoff_that_failed_before_a_native_thread_existed_is_delivered_again() {
     let mut s = state();
@@ -3283,7 +3282,7 @@ fn a_handoff_that_failed_before_a_native_thread_existed_is_delivered_again() {
     assert_eq!(native, None);
     assert!(history.contains("original"));
 }
-// T3 ProviderTurnStartService.ts: inputs the provider never accepted are handed to the same session.
+// Inputs the provider never accepted are handed to the same session.
 #[test]
 fn inputs_that_never_reached_the_native_session_are_handed_back_to_it() {
     let mut s = state();
@@ -3332,7 +3331,7 @@ fn inputs_that_never_reached_the_native_session_are_handed_back_to_it() {
     );
     assert_eq!(start_context(&next).unwrap().1, "");
 }
-// T3 ProviderTurnStartService.ts: without telemetry, prior native attachments count against the window.
+// Without telemetry, prior native attachments count against the window.
 #[test]
 fn native_occupancy_estimate_counts_inputs_and_attachments_that_reached_the_session() {
     let outcome = |images: usize| {
@@ -3409,7 +3408,6 @@ fn accept_child(step: &Step) -> State {
     command(&mut child, "accept", accept);
     child
 }
-// T3 Orchestrator.ts merge-back admission.
 #[test]
 fn merge_back_requires_a_fork_of_the_target_and_a_finished_source() {
     let mut s = state();
@@ -3479,7 +3477,7 @@ fn native_root(events: Vec<ProviderEvent>) -> ProviderEvent {
         events,
     }
 }
-// T3 ClaudeAdapterV2.ts: a result after Stop finalizes the turn as interrupted.
+// A result after Stop finalizes the turn as interrupted.
 #[test]
 fn a_stopped_claude_turn_finishes_on_its_wrapped_result() {
     let mut s = state();
@@ -3553,7 +3551,7 @@ fn fail_with(s: &mut State, attempt: &RunAttemptId, key: &str, class: &str) {
         },
     );
 }
-// T3 runtimeLayer.test.ts "handles a queued message after a %s failure".
+// Handles a queued message after a %s failure.
 #[test]
 fn provider_failures_hold_the_queue_and_usage_limits_block_it() {
     let mut s = state();
@@ -3630,7 +3628,7 @@ fn complete_task(s: &mut State, key: &str, task: &NodeId) -> Step {
         },
     )
 }
-// T3 Orchestrator.ts archive: queued work and completion delivery are cancelled, sessions detach.
+// Queued work and completion delivery are cancelled, sessions detach.
 #[test]
 fn archive_cancels_queued_work_and_detaches_without_unarchive_resuming() {
     let mut s = state();
@@ -3669,7 +3667,6 @@ fn archive_cancels_queued_work_and_detaches_without_unarchive_resuming() {
     assert!(unarchive.effects.is_empty());
     assert_eq!(s.runs.len(), 2);
 }
-// T3 runtimeLayer.test.ts settle cases.
 #[test]
 fn settle_rejects_blocked_work_and_cancels_automatic_deliveries() {
     let mut s = state();
@@ -3757,7 +3754,7 @@ fn settle_rejects_blocked_work_and_cancels_automatic_deliveries() {
         }));
     assert_eq!(s.thread.as_ref().unwrap().settled, Some(true));
 }
-// T3 Orchestrator.ts dispatchMessage: a message re-engages a settled or snoozed thread.
+// A message re-engages a settled or snoozed thread.
 #[test]
 fn sending_a_message_clears_settled_and_snoozed_state() {
     let mut s = state();
@@ -3794,7 +3791,6 @@ fn sending_a_message_clears_settled_and_snoozed_state() {
     assert_eq!(thread.settled_at, None);
     assert_eq!(thread.snoozed_until, None);
 }
-// T3 SteeringCompletion.integration.test.ts:563 and :638.
 #[test]
 fn dispatch_saves_the_requested_selection_and_late_steers_use_it() {
     let mut s = state();
@@ -3868,7 +3864,7 @@ fn rollback_free_check(s: &State) {
             .is_none_or(|run| s.runs.iter().any(|r| &r.id == run))
     }));
 }
-// T3 Orchestrator.ts:4609: a proposed plan is consumed when its implementation is accepted.
+// A proposed plan is consumed when its implementation is accepted.
 #[test]
 fn a_proposed_plan_is_consumed_once_at_acceptance() {
     let mut s = state();
@@ -3922,7 +3918,7 @@ fn a_proposed_plan_is_consumed_once_at_acceptance() {
         }
     );
 }
-// T3 ThreadDeletion.test.ts: deletion cancels requests and queues session, terminal and attachment cleanup.
+// Deletion cancels requests and queues session, terminal and attachment cleanup.
 #[test]
 fn deletion_cancels_pending_requests_and_releases_thread_resources() {
     let mut s = state();
@@ -3968,7 +3964,7 @@ fn deletion_cancels_pending_requests_and_releases_thread_resources() {
         .collect::<Vec<_>>();
     assert_eq!(kinds, ["Thread deleted.", "terminals", "attachments"]);
 }
-// T3 ProviderEventIngestor.test.ts: only native questions are dismissed when their turn ends.
+// Only native questions are dismissed when their turn ends.
 #[test]
 fn message_capable_questions_stay_answerable_after_their_turn_ends() {
     for status in [
@@ -4050,7 +4046,7 @@ fn delegate_with(s: &mut State, key: &str, wake: CompletionWake) -> NodeId {
     );
     task
 }
-// T3 Orchestrator.ts:4570: an always-wake completion steers into a running parent turn.
+// An always-wake completion steers into a running parent turn.
 #[test]
 fn always_completions_steer_into_the_running_parent_and_are_delivered_with_it() {
     let mut s = state();
@@ -4079,7 +4075,7 @@ fn always_completions_steer_into_the_running_parent_and_are_delivered_with_it() 
     assert_eq!(s.tasks[0].delivery, DeliveryState::Delivered);
     assert_eq!(s.runs.len(), 1);
 }
-// T3 DelegatedCompletionDelivery.test.ts:1211: settled-only waits only for its spawning run.
+// Settled-only waits only for its spawning run.
 #[test]
 fn settled_only_completion_waits_only_for_its_spawning_run() {
     let mut s = state();
@@ -4121,7 +4117,7 @@ fn settled_only_completion_waits_only_for_its_spawning_run() {
     assert_eq!(s.tasks[0].delivery, DeliveryState::Claimed);
     assert_eq!(s.runs.last().unwrap().status, RunStatus::Queued);
 }
-// T3 SubagentProjection.test.ts: the failure wins over progress messages.
+// The failure wins over progress messages.
 #[test]
 fn delegated_results_use_the_failure_or_latest_answer() {
     let mut s = state();
@@ -4166,8 +4162,8 @@ fn delegated_results_use_the_failure_or_latest_answer() {
         "Child task ended with status interrupted."
     );
 }
-// T3 ClaudeAdapterV2.ts:4166 and :4315: a resumed native task reopens its card, and a
-// result of the previous generation cannot complete it.
+// A resumed native task reopens its card, and a result of the previous
+// generation cannot complete it.
 #[test]
 fn a_resumed_native_task_reopens_its_card_and_rejects_stale_results() {
     let mut s = state();
@@ -4237,7 +4233,6 @@ fn a_resumed_native_task_reopens_its_card_and_rejects_stale_results() {
     assert_eq!(s.tasks[0].status, ItemStatus::Completed);
     assert_eq!(s.tasks[0].result.as_deref(), Some("second"));
 }
-// T3 Orchestrator.ts:7402, :7228 and :7077.
 #[test]
 fn queued_edits_are_validated_and_automatic_deliveries_are_fixed() {
     let mut s = state();
@@ -4334,7 +4329,7 @@ fn queued_edits_are_validated_and_automatic_deliveries_are_fixed() {
         }
     );
 }
-// T3 Orchestrator.ts:6866 and :7022: cancel needs no answers and closes the card as cancelled.
+// Cancel needs no answers and closes the card as cancelled.
 #[test]
 fn declined_requests_and_dismissed_questions_close_their_cards_as_cancelled() {
     let mut s = state();
@@ -4452,7 +4447,7 @@ fn declined_requests_and_dismissed_questions_close_their_cards_as_cancelled() {
     assert_eq!(cards, [ItemStatus::Cancelled; 3]);
     assert_eq!(s.messages.len(), 1);
 }
-// T3 orchestrationV2.ts:2878 and SubagentProjection.ts:28: a delegation needs a task.
+// A delegation needs a task.
 #[test]
 fn delegation_requires_a_task_and_titles_the_child_from_it() {
     let mut s = state();
@@ -4551,7 +4546,6 @@ fn title_effect(step: &Step) -> Option<(CommandId, Option<MessageId>)> {
         _ => None,
     })
 }
-// T3 ThreadLaunchService.test.ts and ThreadTitleRegenerationService.test.ts.
 #[test]
 fn titles_are_generated_once_and_a_rename_supersedes_the_request() {
     let mut s = state();
@@ -4667,7 +4661,6 @@ fn import(thread: &str) -> Command {
         },
     }
 }
-// T3 AgentSessionImporter.test.ts.
 #[test]
 fn imported_sessions_keep_message_times_and_resume_their_native_session() {
     let mut s = State::default();
@@ -4870,7 +4863,7 @@ fn wire_encodings_round_trip_imports_titles_rollbacks_and_workspaces() {
     round_trip(&s);
     assert_eq!(STATE_FORMAT, 2);
 }
-// T3 CodexAdapterV2.test.ts:3805: a command outliving its turn reports back and wakes the thread.
+// A command outliving its turn reports back and wakes the thread.
 #[test]
 fn a_retained_command_keeps_its_row_and_wakes_the_thread_when_it_finishes() {
     const COMMAND: &str = "sleep 20 && echo CODEX_BG_WAKE_DONE";
@@ -4967,7 +4960,7 @@ fn a_retained_command_keeps_its_row_and_wakes_the_thread_when_it_finishes() {
     );
     assert!(s.wake_reports.is_empty());
 }
-// T3 ClaudeAdapterV2.ts:5309: a roster snapshot replaces the session's background work.
+// A roster snapshot replaces the session's background work.
 #[test]
 fn background_rosters_replace_work_and_usage_limits_render_their_wait() {
     let mut s = state();
@@ -5016,7 +5009,7 @@ fn background_rosters_replace_work_and_usage_limits_render_their_wait() {
         if message == "Claude usage limit reached. This turn is paused until the 5-hour limit resets in 2h.")));
 }
 
-// T3 Orchestrator.ts dispatchPreparedRunRetry: only a recorded preparation failure is retried.
+// Only a recorded preparation failure is retried.
 #[test]
 fn only_a_failed_workspace_preparation_returns_to_preparing() {
     let mut s = state();
@@ -5097,7 +5090,7 @@ fn only_a_failed_workspace_preparation_returns_to_preparing() {
     ));
 }
 
-// T3 ThreadMessageIntake.ts: the follow-up of a message-capable answer carries its attachments.
+// The follow-up of a message-capable answer carries its attachments.
 #[test]
 fn a_message_capable_answer_sends_its_attachment_references() {
     let mut s = state();
@@ -5190,8 +5183,7 @@ fn a_fork_child_does_not_share_its_parents_checkpoint_scope() {
     assert_eq!(child.active_run().unwrap().checkpoint_scope, None);
 }
 
-// T3 ProviderRuntimeRecoveryService.test.ts: "cancels a stale waiting run when no
-// checkpoint capture can finish it".
+// Cancels a stale waiting run when no checkpoint capture can finish it.
 #[test]
 fn recovery_cancels_a_waiting_run_whose_capture_can_no_longer_run() {
     for queued in [true, false] {
@@ -5448,7 +5440,7 @@ mod rollback;
 mod selection;
 mod thread;
 
-// T3 ProviderTurnStartService / ProviderTurnControlService send the message's
+// ProviderTurnStartService / ProviderTurnControlService send the message's
 // context projected into its text; Orchestrator queued-run.edit replaces it.
 #[test]
 fn a_message_reaches_the_provider_with_its_context_projected() {
@@ -5461,7 +5453,7 @@ fn a_message_reaches_the_provider_with_its_context_projected() {
         let Command::Send(mut message) = send_message(key, mode) else {
             unreachable!()
         };
-        message.text = "use [$x](t3-context://v1/skill/ctx_s)".into();
+        message.text = "use [$x](context://v1/skill/ctx_s)".into();
         message.context = Some(MessageContext {
             version: 1,
             records,
@@ -5479,13 +5471,13 @@ fn a_message_reaches_the_provider_with_its_context_projected() {
         ),
     );
     let expected = project_context_for_provider(
-        "use [$x](t3-context://v1/skill/ctx_s)",
+        "use [$x](context://v1/skill/ctx_s)",
         s.messages[0].context.as_ref(),
     );
     assert!(expected.contains("name: pinchtab"));
     assert!(start.effects.iter().any(|effect| matches!(&effect.body,
         EffectBody::Provider(ProviderCommand::Start { text, .. }) if *text == expected)));
-    assert_eq!(s.messages[0].text, "use [$x](t3-context://v1/skill/ctx_s)");
+    assert_eq!(s.messages[0].text, "use [$x](context://v1/skill/ctx_s)");
 
     let duplicate = command(
         &mut s,
@@ -5519,7 +5511,7 @@ fn a_message_reaches_the_provider_with_its_context_projected() {
         "edit",
         Command::EditQueued {
             run: queued,
-            text: "use [$x](t3-context://v1/skill/ctx_s) again".into(),
+            text: "use [$x](context://v1/skill/ctx_s) again".into(),
             attachments: None,
             context: Some(MessageContext {
                 version: 1,

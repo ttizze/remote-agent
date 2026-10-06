@@ -1,4 +1,3 @@
-// T3 AgentSessionJson.test.ts.
 use super::*;
 
 fn everything(_: &[Seg]) -> bool {

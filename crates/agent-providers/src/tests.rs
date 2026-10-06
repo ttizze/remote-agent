@@ -236,7 +236,7 @@ fn codex_turn_selection_is_explicit_and_managed_sessions_omit_service_tiers() {
             "Use `delegate_task` with a structured object, never as JSON text.".into(),
         ),
         additional_context: Some(Json(
-            json!({"t3_code_orchestration":{"value":"Use `delegate_task` with a structured object, never as JSON text."}}),
+            json!({"orchestration_instructions":{"value":"Use `delegate_task` with a structured object, never as JSON text."}}),
         )),
         ..wire_context()
     };
@@ -726,7 +726,7 @@ fn native_history_injection_preserves_roles_and_only_explicit_unsupported_uses_i
     }
 }
 
-// T3 ProviderTurnStartService.ts: context, then the restart note, then "User message:".
+// Context, then the restart note, then "User message:".
 #[test]
 fn inline_history_and_restart_notes_precede_the_labelled_user_message() {
     let history = select_history(&[], "Recover source history", 0, 16_000);
@@ -760,7 +760,7 @@ fn inline_history_and_restart_notes_precede_the_labelled_user_message() {
         "Note: work was cancelled\n\nUser message:\nhello"
     );
 }
-// T3 CodexAdapterV2.ts toCodexInput: start and steer send text, then image data URLs.
+// Start and steer send text, then image data URLs.
 #[test]
 fn codex_start_and_steer_send_prepared_images_after_the_text() {
     let image = Attachment {
@@ -978,7 +978,6 @@ fn mcp_metadata_trims_names_limits_utf16_and_accepts_only_web_icons() {
 
 #[test]
 fn rollback_finds_the_revert_boundary_across_pages_of_newest_first_turns() {
-    // T3 CodexThreadRevert.test.ts "finds the revert boundary across pages".
     let mut protocol = CodexProtocol::default();
     let read = protocol
         .rollback("thread", 3, None, &wire_context())
@@ -1057,7 +1056,6 @@ fn rollback_finds_the_revert_boundary_across_pages_of_newest_first_turns() {
 
 #[test]
 fn rollback_rejects_repeated_cursors_instead_of_reverting_incomplete_history() {
-    // T3 CodexThreadRevert.test.ts "rejects repeated cursors".
     let mut protocol = CodexProtocol::default();
     let read = protocol
         .rollback("thread", 3, None, &wire_context())
@@ -1265,7 +1263,6 @@ fn stop_while_the_thread_is_starting_suppresses_its_prompt_even_after_thread_sta
         .unwrap();
     assert!(reply.outbound.is_empty());
 }
-// T3 CodexAdapterV2.test.ts:3805 and :4004.
 #[test]
 fn commands_running_at_turn_end_report_later_and_stop_without_a_turn_interrupt() {
     const COMMAND: &str = "sleep 20 && echo CODEX_BG_WAKE_DONE";
@@ -1393,7 +1390,6 @@ fn commands_running_at_turn_end_report_later_and_stop_without_a_turn_interrupt()
             .any(|event| matches!(event, ProviderEvent::Wake { .. }))
     );
 }
-// T3 CodexAdapterV2.test.ts:2242.
 #[test]
 fn asynchronous_codex_questions_become_message_requests_without_prose() {
     let mut codex = codex_ready();
@@ -1430,7 +1426,6 @@ fn asynchronous_codex_questions_become_message_requests_without_prose() {
         ["main", "dev"]
     );
 }
-// T3 CodexAdapterV2.ts codexItemStatus and CodexAdapterV2.test.ts:6670.
 #[test]
 fn codex_item_and_subagent_states_use_the_reference_mapping() {
     let mut codex = codex_ready();
@@ -1479,7 +1474,7 @@ fn codex_item_and_subagent_states_use_the_reference_mapping() {
         ]
     );
 }
-// T3 CodexAdapterV2.ts:2685: only a spawn assigns a child's parent.
+// Only a spawn assigns a child's parent.
 #[test]
 fn collaboration_calls_do_not_reparent_existing_children() {
     let mut codex = codex_ready();
@@ -1509,7 +1504,6 @@ fn collaboration_calls_do_not_reparent_existing_children() {
     assert_eq!(key, "a");
     assert!(matches!(event.as_ref(), ProviderEvent::Child { key, .. } if key == "b"));
 }
-// T3 CodexAdapterV2.test.ts:5719 and :2837.
 #[test]
 fn codex_failures_and_retries_keep_their_reference_classification_and_lifecycle() {
     let mut codex = codex_ready();
@@ -1556,7 +1550,6 @@ fn codex_failures_and_retries_keep_their_reference_classification_and_lifecycle(
         ProviderEvent::ItemFinished { key, status: ItemStatus::Completed, .. } if key == "terminal-failure:turn"
     ));
 }
-// T3 CodexAdapterV2.test.ts final-answer cases (3348-3687).
 #[test]
 fn final_answers_drop_repeats_and_late_empty_completions() {
     let answers = |messages: &[(&str, Option<&str>)]| {
@@ -1602,7 +1595,6 @@ fn final_answers_drop_repeats_and_late_empty_completions() {
     assert_eq!(answers(&[("OK", None), ("", None)]), ["OK"]);
     assert_eq!(answers(&[("", fa), ("OK", fa)]), ["", "OK"]);
 }
-// T3 CodexAdapterV2.test.ts:6455.
 #[test]
 fn rerouted_child_models_update_the_child() {
     let mut codex = codex_ready();
@@ -1642,7 +1634,7 @@ fn rerouted_child_models_update_the_child() {
         .is_empty()
     );
 }
-// T3 takes a fork's identity from its correlated reply: a forked thread's
+// A fork's identity comes from its correlated reply: a forked thread's
 // announcement never binds the route that is starting a thread meanwhile.
 #[test]
 fn a_forked_threads_announcement_does_not_bind_a_starting_route() {
@@ -1712,7 +1704,7 @@ fn native_rollback_and_fork_report_completion() {
             native_thread: "forked".into()
         })
     );
-    // T3 rollbackThread: no turn to discard sends nothing.
+    // No turn to discard sends nothing.
     let reached = codex.rollback("root", 0, None, &wire_context());
     assert!(reached.outbound.is_empty());
     assert_eq!(
@@ -1757,7 +1749,6 @@ fn inner(output: Translation) -> Vec<ProviderEvent> {
 fn claude_receive(claude: &mut ClaudeProtocol, frame: Value) -> Vec<ProviderEvent> {
     inner(claude.receive(&frame).unwrap())
 }
-// T3 ClaudeAdapterV2.test.ts:3326 and :5351.
 #[test]
 fn claude_rosters_replace_background_work_and_foreground_tasks_stay_foreground() {
     let mut claude = ClaudeProtocol::default();
@@ -1796,7 +1787,6 @@ fn claude_rosters_replace_background_work_and_foreground_tasks_stay_foreground()
         matches!(&done[0], ProviderEvent::BackgroundTask { description, status: Some(ItemStatus::Completed), .. } if description == "Sleep")
     );
 }
-// T3 ClaudeAdapterV2.ts:1976 and :2059.
 #[test]
 fn claude_server_tools_and_typed_results_are_tool_activity() {
     let mut claude = ClaudeProtocol::default();
@@ -1836,7 +1826,6 @@ fn claude_server_tools_and_typed_results_are_tool_activity() {
         matches!(&unknown[1], ProviderEvent::ItemFinished { key, text: Some(text), .. } if key == "lost" && text == "output")
     );
 }
-// T3 ClaudeAdapterV2.test.ts:4328.
 #[test]
 fn claude_bash_output_joins_stdout_and_stderr() {
     let mut claude = ClaudeProtocol::default();
@@ -1852,7 +1841,6 @@ fn claude_bash_output_joins_stdout_and_stderr() {
         matches!(&events[0], ProviderEvent::ItemFinished { text: Some(text), .. } if text == "On branch main\nwarning: dirty")
     );
 }
-// T3 ClaudeAdapterV2.test.ts:3130 and :3204.
 #[test]
 fn claude_api_retries_update_one_item_until_recovery_or_failure() {
     let mut claude = ClaudeProtocol::default();
@@ -1896,7 +1884,7 @@ fn claude_api_retries_update_one_item_until_recovery_or_failure() {
         ProviderEvent::ItemFinished { key, kind: ProviderItem::Error { retry: Some(RetryProgress { attempt: 10, .. }), code: Some(code), .. }, status: ItemStatus::Failed, .. }
             if key == "terminal-failure" && code == "api_error_529")));
 }
-// T3 ClaudeAdapterV2.ts:6298: a success result marked as an error is neither an answer nor a failure.
+// A success result marked as an error is neither an answer nor a failure.
 #[test]
 fn claude_success_results_marked_as_errors_add_no_answer_or_failure() {
     let mut claude = ClaudeProtocol::default();
@@ -1917,7 +1905,6 @@ fn claude_success_results_marked_as_errors_add_no_answer_or_failure() {
         }
     )));
 }
-// T3 ClaudeAdapterV2.test.ts:2691 and ClaudeAdapterV2.ts:2097.
 #[test]
 fn claude_refusal_fallbacks_and_mcp_names_use_the_reference_fields() {
     let mut claude = ClaudeProtocol::default();
@@ -1945,7 +1932,6 @@ fn claude_refusal_fallbacks_and_mcp_names_use_the_reference_fields() {
         "GitHub App"
     );
 }
-// T3 ClaudeAdapterV2.test.ts:2376 and :2441.
 #[test]
 fn claude_rate_limits_announce_rejected_windows_unless_overage_is_allowed() {
     let mut claude = ClaudeProtocol::default();
@@ -1999,7 +1985,6 @@ fn claude_rate_limits_announce_rejected_windows_unless_overage_is_allowed() {
     assert!(failed.iter().any(|event| matches!(event,
         ProviderEvent::ItemFinished { kind: ProviderItem::Error { class: Some(class), .. }, .. } if class == "usage_limit")));
 }
-// T3 ClaudeSkillDispatch.ts and ClaudeAdapterV2.ts:7175.
 #[test]
 fn claude_prompts_run_known_skills_and_request_ultrathink_effort() {
     let mut claude = ClaudeProtocol::default();
@@ -2050,9 +2035,9 @@ fn shared_start(codex: &mut CodexProtocol, route: &str, native: &str, turn: &str
         .receive(&json!({"id":ready.outbound[0]["id"],"result":{"turn":{"id":turn}}}))
         .unwrap();
 }
-// T3 CodexAdapterV2 serves every provider thread of a session from one
-// app-server: native threads of different app threads share the id space and
-// each notification belongs to the route of its native thread.
+// Every provider thread of a session is served from one app-server: native
+// threads of different app threads share the id space and each notification
+// belongs to the route of its native thread.
 #[test]
 fn one_app_server_routes_each_native_thread_to_its_own_route() {
     let mut codex = CodexProtocol::default();
@@ -2110,9 +2095,9 @@ fn one_app_server_routes_each_native_thread_to_its_own_route() {
     );
     assert!(codex.turn_in_flight("thread-a") && !codex.turn_in_flight("thread-b"));
 }
-// T3 ProviderTurnStartService: a fork's thread is loaded for the child's first
-// turn, a thread loaded for another selection or policy is resumed again, and
-// a stop while starting suppresses only that route's prompt.
+// A fork's thread is loaded for the child's first turn, a thread loaded for
+// another selection or policy is resumed again, and a stop while starting
+// suppresses only that route's prompt.
 #[test]
 fn a_shared_translator_loads_threads_per_route() {
     let mut codex = CodexProtocol::default();
@@ -2194,8 +2179,7 @@ fn a_shared_translator_loads_threads_per_route() {
         .unwrap();
     assert!(other_ready.outbound.is_empty());
 }
-// T3 restoreAdditionalContext: compaction drops client developer messages, so
-// the thread's additional context is injected again.
+// Compaction drops client developer messages, so the thread's additional context is injected again.
 #[test]
 fn a_compaction_restores_the_threads_additional_context() {
     let mut codex = CodexProtocol::default();

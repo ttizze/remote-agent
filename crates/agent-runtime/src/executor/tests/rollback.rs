@@ -176,7 +176,7 @@ async fn rewinds_safely() {
 
         let case = format!("{restore_files} {shared:?} {target}");
         if restore_files && shared != Shared::None {
-            // T3 Orchestrator rejects it at admission.
+            // Rejected at admission.
             assert_eq!(
                 admitted_rollback(&rig, &id, &scope, target, restore_files).await,
                 shared_rejection(),
@@ -321,9 +321,8 @@ async fn a_provider_that_cannot_rewind_fails_the_rollback_and_puts_the_files_bac
     assert!(rolled_back(&state).is_empty());
 }
 
-// T3 CheckpointRollbackService rewinds the provider for every later run, even a
-// failed one, and that fails without a native thread (CodexAdapterV2
-// getNativeThreadId).
+// Rewinds the provider for every later run, even a failed one, and that fails
+// without a native thread.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_rollback_without_a_native_session_to_rewind_fails() {
     let rig = rig();
@@ -679,7 +678,7 @@ async fn a_failed_rewind_resets_only_the_active_native_session() {
     assert_eq!(rollback(&rig, &id, &scope, 0, true).await, Reply::Accepted);
     rig.drain().await;
 
-    // T3 rewinds only the active provider thread.
+    // Rewinds only the active provider thread.
     assert_eq!(rollback_calls(&rig.ops), ["prepare", "provider", "undo"]);
     assert_eq!(reverts.load(Ordering::SeqCst), 1);
     let state = rig.state(&id).await;
@@ -763,8 +762,8 @@ async fn a_launch_into_the_restored_worktree_waits_for_the_restore() {
     assert_eq!(rig.state(&id).await.rollback_failure, None);
 }
 
-// T3 checks isolation again in CheckpointRollbackService, and EffectWorker.ts
-// reports ROLLBACK_FAILED_MESSAGE only once the retries are spent.
+// Isolation is checked again, and ROLLBACK_FAILED_MESSAGE is reported only
+// once the retries are spent.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_workspace_shared_after_admission_fails_the_rollback_after_its_retries() {
     let rig = rig();
@@ -801,9 +800,9 @@ async fn a_workspace_shared_after_admission_fails_the_rollback_after_its_retries
     assert!(rolled_back(&state).is_empty());
 }
 
-// T3 Orchestrator reads the fork source again at the child's first message
-// (CommandPolicy decideForkExecution): a source turn rolled back since the fork
-// is handed over as portable context instead of a native fork.
+// The fork source is read again at the child's first message: a source turn
+// rolled back since the fork is handed over as portable context instead of a
+// native fork.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_fork_whose_source_turn_was_rolled_back_starts_from_portable_context() {
     let rig = rig();
@@ -853,8 +852,8 @@ async fn a_fork_whose_source_turn_was_rolled_back_starts_from_portable_context()
     );
 }
 
-// T3 accepts a provider switch while a rollback waits, and the rollback then
-// fails because the active provider changed (CheckpointRollbackService).
+// A provider switch is accepted while a rollback waits, and the rollback then
+// fails because the active provider changed.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_provider_switch_while_a_rollback_waits_fails_the_rollback() {
     let rig = rig();

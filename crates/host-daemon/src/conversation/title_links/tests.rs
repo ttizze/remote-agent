@@ -1,4 +1,4 @@
-//! Ported from T3 `ThreadTitleLinks.test.ts`; the runtime extracts the candidates.
+//! The runtime extracts the candidates.
 use super::*;
 use agent_runtime::title_link_candidates;
 use std::sync::{Arc, Mutex};
@@ -92,7 +92,6 @@ async fn keeps_lookup_failure_out_of_generation_and_skips_unlinked_messages() {
     );
 }
 
-// T3 GitHubSourceControlProvider / GitLabSourceControlProvider `resolveLink`.
 #[test]
 fn resolves_only_issue_and_change_links_on_the_public_hosts() {
     let supported = |link: &str| resolve_link(&url::Url::parse(link).unwrap(), "/tmp").is_some();

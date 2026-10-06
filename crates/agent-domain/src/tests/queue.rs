@@ -1,7 +1,6 @@
 use super::*;
 
-// T3 Orchestrator.ts dispatchQueuedMessagePromoteToSteer / dispatchSteerIntoRun:
-// native maintenance never joins a running turn and a maintenance turn takes
+// Native maintenance never joins a running turn and a maintenance turn takes
 // no steering.
 #[test]
 fn promoting_to_steer_keeps_maintenance_separate() {
@@ -94,9 +93,8 @@ fn order(s: &State) -> Vec<RunId> {
     s.queued_runs().iter().map(|run| run.id.clone()).collect()
 }
 
-// T3 runtimeLayer.test.ts "starts a wake's work clock from the run that ran
-// before it": a background wake keeps its queue position and a queued message
-// can be reordered behind it.
+// A background wake keeps its queue position and a queued message can be
+// reordered behind it.
 #[test]
 fn background_wakes_keep_their_queue_position_and_can_be_passed() {
     let mut s = state();
@@ -120,7 +118,6 @@ fn background_wakes_keep_their_queue_position_and_can_be_passed() {
     assert_eq!(order(&s), [early, first, late]);
 }
 
-// T3 Orchestrator.ts dispatchQueuedRunReorder.
 #[test]
 fn reordering_follows_the_reference_rules() {
     let mut s = state();
@@ -221,9 +218,8 @@ fn complete(s: &mut State, task: &NodeId) -> Step {
     )
 }
 
-// T3 Orchestrator.ts dispatchQueuedRunCancel: cancelling a queued delegated
-// completion disposes the parent run's whole cohort, so a sibling that is
-// still running never wakes the parent.
+// Cancelling a queued delegated completion disposes the parent run's whole
+// cohort, so a sibling that is still running never wakes the parent.
 #[test]
 fn cancelling_a_completion_delivery_disposes_running_siblings() {
     let mut s = state();
@@ -254,8 +250,8 @@ fn cancelling_a_completion_delivery_disposes_running_siblings() {
     ));
 }
 
-// T3 Orchestrator.ts dispatchRunInterrupt: Stop disposes the run's cohort but
-// leaves delegated children running in their own threads.
+// Stop disposes the run's cohort but leaves delegated children running in
+// their own threads.
 #[test]
 fn stopping_the_parent_leaves_delegated_children_running() {
     let mut s = state();

@@ -656,7 +656,7 @@ impl HostRpcService {
                 tracing::warn!(operation = "conversation.codex_account", message = %error);
                 return Err(Failure::new("account_operation_failed", error));
             }
-            // T3 closes an instance's sessions when it signs out.
+            // Closes an instance's sessions when it signs out.
             if logout && self.inner.resources.codex.signed_out() {
                 sessions.close_instance("codex").await;
             }

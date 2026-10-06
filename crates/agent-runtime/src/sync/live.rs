@@ -1,5 +1,5 @@
-//! Live delivery with T3 `LiveStreamBudget` limits: a subscriber that falls behind
-//! by more than its item or serialized-byte budget is closed, never waited for, and
+//! Live delivery with budget limits: a subscriber that falls behind by more
+//! than its item or serialized-byte budget is closed, never waited for, and
 //! resumes from the last sequence it applied.
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -11,7 +11,6 @@ use tokio::sync::mpsc::error::TryRecvError;
 pub const LIVE_STREAM_MAX_BYTES: u64 = 8 * 1024 * 1024;
 /// Updates a subscription may hold undelivered.
 pub const LIVE_STREAM_MAX_ITEMS: usize = 1_000;
-/// T3 `LiveStreamBufferError`.
 pub const LIVE_BUFFER_FULL: &str =
     "The live event buffer is full. Resume from the last received sequence.";
 

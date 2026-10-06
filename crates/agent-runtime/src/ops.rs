@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::io;
 use std::sync::Arc;
 
-/// What the Host reports while it prepares a worktree (T3 WorktreeSetupTracker).
+/// What the Host reports while it prepares a worktree.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SetupEvent {
     Stage(WorktreeSetupStageId, WorktreeSetupStageStatus),
@@ -83,7 +83,7 @@ pub struct SetupRequest {
     pub project_root: String,
     pub cwd: String,
     /// Set for a launch that prepares a worktree: the Host forwards the script's
-    /// output and returns its completion (T3 `observeCompletion`).
+    /// output and returns its completion.
     pub observe: SetupProgress,
 }
 
@@ -91,7 +91,7 @@ pub struct SetupRequest {
 pub struct StartedSetup {
     pub name: String,
     pub command: String,
-    /// False when the agent waits for the script (T3 `async: false`).
+    /// False when the agent waits for the script.
     pub run_async: bool,
     /// Observed runs only: the exit code, `None` when the script was stopped.
     /// Dropping it before the script exits stops the script.
@@ -103,20 +103,17 @@ pub enum SetupRun {
     Started(StartedSetup),
 }
 
-/// Conversation settings for one project, with project overrides applied (T3
-/// `resolveProjectSettings`).
+/// Conversation settings for one project, with project overrides applied.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConversationSettings {
-    /// Settle a thread this many days after its last activity; `None` never
-    /// (T3 `sidebarAutoSettleAfterDays`).
+    /// Settle a thread this many days after its last activity; `None` never.
     pub auto_settle_after_days: Option<u64>,
-    /// Continue a turn a Host restart cut (T3 `continueThreadsAfterServerUpdate`).
+    /// Continue a turn a Host restart cut.
     pub continue_after_restart: bool,
     pub snooze_limited_threads: bool,
     pub auto_resume_limited_threads: bool,
 }
 impl Default for ConversationSettings {
-    /// T3's defaults.
     fn default() -> Self {
         Self {
             auto_settle_after_days: Some(3),
@@ -179,8 +176,7 @@ pub trait HostOperations: Send + Sync {
     ) -> BoxFuture<'_, Result<(), String>>;
     fn has_checkpoint(&self, cwd: String, reference: String)
     -> BoxFuture<'_, Result<bool, String>>;
-    /// Files changed from `from` to `to`, sorted by path (T3 `diffCheckpoints`
-    /// as numstat, read by `parseTurnDiffFilesFromNumstat`).
+    /// Files changed from `from` to `to`, sorted by path.
     fn checkpoint_files(
         &self,
         cwd: String,
@@ -216,8 +212,8 @@ pub trait HostOperations: Send + Sync {
         path: String,
     ) -> BoxFuture<'_, Result<(), String>>;
     /// Claims a new folder of its own for a thread launched at the root of a project
-    /// whose threads each get one (T3 `ManagedProjectFolders.folderForThread`), named
-    /// from `text`. `None` for every other project.
+    /// whose threads each get one, named from `text`. `None` for every other
+    /// project.
     fn thread_folder(
         &self,
         _project: String,

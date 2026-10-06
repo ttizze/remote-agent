@@ -23,7 +23,7 @@ pub enum PrepareError {
         operation: LaunchOperation,
         cause: String,
     },
-    /// The setup was cancelled from its card (T3 worktreeSetupCancel).
+    /// The setup was cancelled from its card.
     #[error("Worktree setup cancelled.")]
     Cancelled,
     /// The runtime could not record progress; retrying is safe.
@@ -107,7 +107,7 @@ fn exit_detail(code: Option<i32>) -> String {
     format!("exited with {}", exit_code(code))
 }
 
-/// Shows the preparation phase on the run's preparation row (T3 prepared-run.progress).
+/// Shows the preparation phase on the run's preparation row.
 async fn progress(
     context: &ExecutorContext,
     thread: &ThreadId,
@@ -153,7 +153,7 @@ struct Checkout {
 /// Provisions the thread's workspace for its launch (reusing a worktree an earlier
 /// attempt recorded), binds it and its checkpoint scope, and runs the project
 /// setup. A launch that prepares a worktree is tracked on its setup card and can
-/// be cancelled from it until the turn starts (T3 ThreadLaunchService).
+/// be cancelled from it until the turn starts.
 pub async fn prepare_workspace(
     context: &ExecutorContext,
     thread: &ThreadId,
