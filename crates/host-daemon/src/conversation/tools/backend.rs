@@ -19,6 +19,15 @@ pub(crate) struct Dispatched {
     pub(crate) sequence: u64,
 }
 
+/// A handled command's durable receipt: its thread, reply and global sequence
+/// number.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CommandReceipt {
+    pub(crate) thread: ThreadId,
+    pub(crate) reply: Reply,
+    pub(crate) sequence: u64,
+}
+
 /// Reduced to what capability reporting and target resolution read.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ProviderSnapshot {
@@ -58,6 +67,8 @@ pub(crate) trait Orchestration: Send + Sync {
         id: CommandId,
         command: Command,
     ) -> BoxFuture<'_, Result<Dispatched, String>>;
+    /// The receipt of a command already handled.
+    fn receipt(&self, id: &CommandId) -> BoxFuture<'_, Result<Option<CommandReceipt>, String>>;
     /// Every thread that is not deleted.
     fn shells(&self) -> BoxFuture<'_, Result<Vec<ThreadShell>, String>>;
     fn search(
@@ -113,6 +124,24 @@ impl Orchestration for HostOrchestration {
                 .map(|committed| Dispatched {
                     reply: committed.reply,
                     sequence: committed.global_seq,
+                })
+                .map_err(|error| error.to_string())
+        })
+    }
+
+    fn receipt(&self, id: &CommandId) -> BoxFuture<'_, Result<Option<CommandReceipt>, String>> {
+        let id = id.clone();
+        Box::pin(async move {
+            self.runtime
+                .store()
+                .blocking(move |store| store.receipt(&id))
+                .await
+                .map(|stored| {
+                    stored.map(|stored| CommandReceipt {
+                        thread: stored.thread,
+                        reply: stored.receipt.reply,
+                        sequence: stored.global_seq,
+                    })
                 })
                 .map_err(|error| error.to_string())
         })

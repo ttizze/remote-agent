@@ -25,6 +25,7 @@ struct Fake {
     unreadable: Mutex<HashSet<ThreadId>>,
     dispatched: Mutex<Vec<(ThreadId, CommandId, Command)>>,
     hook: Mutex<Option<Hook>>,
+    receipts: Mutex<HashMap<CommandId, (ThreadId, Command, Reply, u64)>>,
     providers: Mutex<Vec<ProviderSnapshot>>,
     projects: Mutex<Vec<HostProject>>,
     launches: Mutex<Vec<LaunchThread>>,
@@ -90,13 +91,56 @@ impl Orchestration for Fake {
         command: Command,
     ) -> BoxFuture<'_, Result<Dispatched, String>> {
         let mut dispatched = self.dispatched.lock().unwrap();
-        dispatched.push((thread.clone(), id, command.clone()));
+        dispatched.push((thread.clone(), id.clone(), command.clone()));
         let sequence = dispatched.len() as u64;
-        let reply = match self.hook.lock().unwrap().as_ref() {
-            Some(hook) => hook(thread, &command),
-            None => Ok(Reply::Accepted),
+        // Like the Host's actor, a resent command replays only when it is the
+        // same command for the same thread.
+        let mut receipts = self.receipts.lock().unwrap();
+        let reply = match receipts.get(&id) {
+            Some((receipt_thread, first, reply, sequence))
+                if receipt_thread == thread && *first == command =>
+            {
+                Ok(Dispatched {
+                    reply: reply.clone(),
+                    sequence: *sequence,
+                })
+            }
+            Some(_) => Ok(Dispatched {
+                reply: Reply::Rejected {
+                    reason: "command-id-conflict".into(),
+                },
+                sequence,
+            }),
+            None => {
+                let reply = match self.hook.lock().unwrap().as_ref() {
+                    Some(hook) => hook(thread, &command),
+                    None => Ok(Reply::Accepted),
+                };
+                if let Ok(reply) = &reply {
+                    receipts.insert(id, (thread.clone(), command, reply.clone(), sequence));
+                }
+                reply.map(|reply| Dispatched { reply, sequence })
+            }
         };
-        Box::pin(async move { reply.map(|reply| Dispatched { reply, sequence }) })
+        Box::pin(async move { reply })
+    }
+    fn receipt(
+        &self,
+        id: &CommandId,
+    ) -> BoxFuture<'_, Result<Option<super::backend::CommandReceipt>, String>> {
+        let receipt = self
+            .receipts
+            .lock()
+            .unwrap()
+            .get(id)
+            .map(
+                |(thread, _, reply, sequence)| super::backend::CommandReceipt {
+                    thread: thread.clone(),
+                    reply: reply.clone(),
+                    sequence: *sequence,
+                },
+            );
+        Box::pin(async move { Ok(receipt) })
     }
     fn shells(&self) -> BoxFuture<'_, Result<Vec<ThreadShell>, String>> {
         let shells = self
@@ -2182,6 +2226,63 @@ async fn send_maps_modes_and_rejects_escalation() {
         fake.commands().as_slice(),
         [Command::Send(message)] if message.mode == agent_domain::DispatchMode::StartImmediately && message.text == "hi" && message.created_by == MessageAuthor::Agent && message.creation_source == "mcp"
     ));
+}
+
+#[tokio::test]
+async fn a_retried_send_replays_its_receipt_after_the_target_starts_running() {
+    let fake = Arc::new(Fake::default());
+    fake.put(active_state("thread:caller", "codex"));
+    fake.put(thread_state("thread:target"));
+    let weak = Arc::downgrade(&fake);
+    fake.on_dispatch(move |thread, command| {
+        if let (Some(fake), Command::Send(sent)) = (weak.upgrade(), command) {
+            fake.edit(thread.as_str(), |state| {
+                let mut started = run("run:sent", 1, RunStatus::Starting, "codex");
+                started.message = sent.id.clone();
+                state.runs.push(started);
+                let mut message = message(sent.id.as_str(), Some("run:sent"), Role::User, "");
+                message.text = sent.text.clone();
+                state.messages.push(message);
+            });
+        }
+        Ok(Reply::Accepted)
+    });
+    let tools = tools(&fake);
+    let send = json!({"threadId":"thread:target","message":"Run the loop.","clientRequestId":"loop-send-1"});
+    let sent = call(&tools, "thread:caller", "thread_send", send.clone()).await;
+    assert_eq!(sent["delivery"], "started");
+    assert_eq!(sent["runId"], "run:sent");
+    // The response was lost and the run started before the retry: the retry now
+    // resolves to a steer, yet it is the same request.
+    fake.edit("thread:target", |state| {
+        state.runs[0].status = RunStatus::Running;
+        let attempt = attempt_for(&state.runs[0], AttemptStatus::Running);
+        state.attempts.push(attempt);
+    });
+    let retried = call(&tools, "thread:caller", "thread_send", send).await;
+    assert_eq!(retried["messageId"], sent["messageId"]);
+    assert_eq!(retried["runId"], sent["runId"]);
+    assert_eq!(retried["delivery"], "started");
+    assert_eq!(retried["status"], "running");
+    assert_eq!(fake.commands().len(), 1);
+    let mut runs = 0;
+    fake.edit("thread:target", |state| runs = state.runs.len());
+    assert_eq!(runs, 1);
+    // The receipt proves nothing for another thread.
+    fake.put(thread_state("thread:other"));
+    let elsewhere = call(
+        &tools,
+        "thread:caller",
+        "thread_send",
+        json!({"threadId":"thread:other","message":"Run the loop.","clientRequestId":"loop-send-1"}),
+    )
+    .await;
+    assert_eq!(code(&elsewhere), "orchestration_error");
+    assert_eq!(
+        elsewhere["message"],
+        "Unable to send to thread thread:other: command-id-conflict"
+    );
+    assert_eq!(fake.commands().len(), 1);
 }
 
 #[tokio::test]

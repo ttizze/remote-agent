@@ -446,12 +446,25 @@ impl AgentTools {
     async fn state(&self, thread: &ThreadId) -> Result<Arc<State>, String> {
         self.backend.state(thread).await
     }
+    /// A command already handled replays its receipt whatever it now carries: a
+    /// retry resolves its dispatch mode or target run from the current state,
+    /// which may have moved on since the first attempt. A receipt for another
+    /// thread is a conflict.
     async fn dispatch(
         &self,
         thread: &ThreadId,
         id: CommandId,
         command: agent_domain::Command,
     ) -> Result<u64, String> {
+        if let Some(receipt) = self.backend.receipt(&id).await? {
+            if receipt.thread != *thread {
+                return Err("command-id-conflict".into());
+            }
+            return match receipt.reply {
+                Reply::Rejected { reason } => Err(reason),
+                _ => Ok(receipt.sequence),
+            };
+        }
         let dispatched = self.backend.dispatch(thread, id, command).await?;
         match dispatched.reply {
             Reply::Rejected { reason } => Err(reason),
