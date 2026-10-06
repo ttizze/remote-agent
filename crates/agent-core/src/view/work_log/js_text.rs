@@ -27,6 +27,19 @@ pub(crate) fn utf16_len(value: &str) -> usize {
     value.chars().map(char::len_utf16).sum()
 }
 
+/// The longest prefix of at most `units` UTF-16 code units, like `slice(0, units)`
+/// except that a surrogate pair is never split.
+pub(crate) fn utf16_prefix(value: &str, units: usize) -> &str {
+    let mut count = 0;
+    for (index, c) in value.char_indices() {
+        count += c.len_utf16();
+        if count > units {
+            return &value[..index];
+        }
+    }
+    value
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -36,5 +49,7 @@ mod tests {
         assert_eq!(js_trim("\u{FEFF} a \u{3000}"), "a");
         assert_eq!(js_trim("\u{85}a"), "\u{85}a");
         assert_eq!(utf16_len("😄a"), 3);
+        assert_eq!(utf16_prefix("a😄b", 2), "a");
+        assert_eq!(utf16_prefix("a😄b", 3), "a😄");
     }
 }
