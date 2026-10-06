@@ -69,6 +69,54 @@ fn parse(source: &str) -> Node {
     ::markdown::to_mdast(source, &ParseOptions::gfm()).expect("GFM is infallible")
 }
 
+/// Markdown as one line of plain text: images keep their alt text, raw HTML
+/// and definitions drop, and blocks join with spaces. Empty text reads `fallback`.
+pub fn plain_text_preview(source: &str, fallback: &str) -> String {
+    fn plain(node: &Node) -> String {
+        match node {
+            Node::Html(_) | Node::Definition(_) => String::new(),
+            Node::Image(image) => image.alt.clone(),
+            Node::ImageReference(image) => image.alt.clone(),
+            Node::Break(_) => " ".into(),
+            Node::Text(text) => text.value.clone(),
+            Node::InlineCode(code) => code.value.clone(),
+            Node::Code(code) => code.value.clone(),
+            Node::InlineMath(math) => math.value.clone(),
+            Node::Math(math) => math.value.clone(),
+            node => {
+                let separator = match node {
+                    Node::Root(_)
+                    | Node::Blockquote(_)
+                    | Node::List(_)
+                    | Node::ListItem(_)
+                    | Node::Table(_)
+                    | Node::TableRow(_) => " ",
+                    _ => "",
+                };
+                node.children()
+                    .map(|children| {
+                        children
+                            .iter()
+                            .map(plain)
+                            .collect::<Vec<_>>()
+                            .join(separator)
+                    })
+                    .unwrap_or_default()
+            }
+        }
+    }
+    let text = plain(&parse(source))
+        .split(|c: char| c == '\u{feff}' || (c != '\u{85}' && c.is_whitespace()))
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    if text.is_empty() {
+        fallback.into()
+    } else {
+        text
+    }
+}
+
 fn definitions(node: &Node) -> HashMap<&str, &str> {
     fn collect<'a>(node: &'a Node, result: &mut HashMap<&'a str, &'a str>) {
         if let Node::Definition(def) = node {
@@ -520,5 +568,30 @@ mod tests {
         let (rendered, images) = markdown_without_images(TABLE);
         assert_eq!(rendered, TABLE);
         assert!(images.is_empty());
+    }
+
+    #[test]
+    fn shows_plain_text_for_a_reasoning_preview() {
+        for (markdown, expected) in [
+            (
+                "**Viewing image first** with *care*, ~~old~~ `code` and [context](https://example.com)",
+                "Viewing image first with care, old code and context",
+            ),
+            (
+                "first paragraph\n\nsecond paragraph",
+                "first paragraph second paragraph",
+            ),
+            ("- first\n- second", "first second"),
+            ("first  \nsecond", "first second"),
+            ("![image description](image.png)", "image description"),
+            ("![](image.png)", "Thought"),
+            ("---", "Thought"),
+        ] {
+            assert_eq!(
+                plain_text_preview(markdown, "Thought"),
+                expected,
+                "{markdown}"
+            );
+        }
     }
 }

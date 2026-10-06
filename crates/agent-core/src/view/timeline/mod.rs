@@ -5,6 +5,7 @@ pub mod desktop;
 mod desktop_folds;
 pub mod desktop_labels;
 pub mod desktop_layout;
+pub mod desktop_work_row;
 pub mod entries;
 pub mod lifecycle;
 pub mod message;
