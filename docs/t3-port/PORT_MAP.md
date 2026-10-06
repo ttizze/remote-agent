@@ -1144,7 +1144,7 @@ R3 O6/O8/O9/O13 の再発検証を追加した。control RPC の失敗は run/at
 | archive / settle / delete（`runtimeLayer.test.ts:2730, 2795, 2920`、`ThreadDeletion.test.ts`） | `archive_cancels_queued_work_and_detaches_without_unarchive_resuming`、`settle_rejects_blocked_work_and_cancels_automatic_deliveries`、`deletion_cancels_pending_requests_and_releases_thread_resources`、`sending_a_message_clears_settled_and_snoozed_state`。 |
 | `SteeringCompletion.integration.test.ts:563, 638` | `dispatch_saves_the_requested_selection_and_late_steers_use_it`。遅れた steer は同じ発言・timeline 行のまま新しい turn に移る。 |
 | `CheckpointRollbackService.test.ts`、`runtimeLayer.test.ts` の rollback | `rollback_discards_pending_captures_and_invalidates_later_checkpoints`、`rollback_without_provider_rewind_or_file_restore_still_reports_one_result`、`rollback_resets_post_boundary_sessions_and_uses_replacement_native_identity`。 |
-| `ThreadForkService.test.ts:129`、`ThreadFork.execution.test.ts:57`、`ProjectionStore.test.ts`（継承） | `unsuccessful_and_cancelled_runs_fork_from_bounded_portable_history`、`forking_a_fork_keeps_the_ancestor_conversation_and_its_messages`、`a_failed_native_fork_still_creates_the_fork_with_portable_history`。 |
+| `ThreadForkService.test.ts:129`、`ThreadFork.execution.test.ts:57`、`ProjectionStore.test.ts`（継承） | `tests::fork::unsuccessful_and_cancelled_runs_fork_from_bounded_portable_history`、`forking_a_fork_keeps_the_ancestor_conversation_and_its_messages`、`a_failed_native_fork_fails_the_run_and_the_next_message_retries_it`。 |
 | merge back の受付（`Orchestrator.ts:3442`） | `merge_back_requires_a_fork_of_the_target_and_a_finished_source`。 |
 | `ContextHandoffBudget.test.ts:621`、`ProviderSwitch.integration.test.ts:891, 2504`、`ProviderTurnStartService.ts:1032, 1070` | `context_delivery_is_pending_until_acceptance_and_ambiguous_delivery_is_not_repeated`（新しい native thread へ fallback）、`lost_native_session_restarts_the_attempt_with_portable_history`、`a_handoff_that_failed_before_a_native_thread_existed_is_delivered_again`、`inputs_that_never_reached_the_native_session_are_handed_back_to_it`、`native_occupancy_estimate_counts_inputs_and_attachments_that_reached_the_session`、`inline_history_and_restart_notes_precede_the_labelled_user_message`。 |
 | `DelegatedCompletionDelivery.test.ts:296, 1211`、`Orchestrator.ts:4570, 7333, 8722` | `always_completions_steer_into_the_running_parent_and_are_delivered_with_it`、`settled_only_completion_waits_only_for_its_spawning_run`、`queued_siblings_share_one_wake_and_cancelling_it_disposes_the_cohort`。 |
@@ -1154,7 +1154,7 @@ R3 O6/O8/O9/O13 の再発検証を追加した。control RPC の失敗は run/at
 | `ThreadTitleRegenerationService.test.ts`、`ThreadLaunchService.test.ts`（title） | `titles_are_generated_once_and_a_rename_supersedes_the_request`。 |
 | `AgentSessionImporter.test.ts` | `imported_sessions_keep_message_times_and_resume_their_native_session`。 |
 | `ProjectionStore.ts` の `threadShellFromProjection`、`ProjectionStore.test.ts` の shell | `agent-domain/src/shell.rs` のテスト。 |
-| `ProviderFailure.ts` の上限 | `large_text_is_split_across_facts_without_truncation`。 |
+| `ProviderFailure.ts` の上限 | `large_text_is_split_across_facts_without_truncation`、`failure::tests`。 |
 | `CodexAdapterV2.test.ts:3805, 4004, 2242, 6670, 5719, 2837, 3348–3687, 6455, 1321, 806–936` | `commands_running_at_turn_end_report_later_and_stop_without_a_turn_interrupt`、`a_retained_command_keeps_its_row_and_wakes_the_thread_when_it_finishes`、`asynchronous_codex_questions_become_message_requests_without_prose`、`codex_item_and_subagent_states_use_the_reference_mapping`、`collaboration_calls_do_not_reparent_existing_children`、`codex_failures_and_retries_keep_their_reference_classification_and_lifecycle`、`final_answers_drop_repeats_and_late_empty_completions`、`rerouted_child_models_update_the_child`、`skills::tests`、`codex_tools::tests`、`codex_start_and_steer_send_prepared_images_after_the_text`。 |
 | `ClaudeAdapterV2.test.ts:3326, 3130, 3204, 4328, 2376, 2441, 2691`、`ClaudeSkillDispatch.test.ts`、`claudeModelOptions.test.ts`、`model.test.ts:227` | `claude_rosters_replace_background_work_and_foreground_tasks_stay_foreground`、`claude_server_tools_and_typed_results_are_tool_activity`、`claude_bash_output_joins_stdout_and_stderr`、`claude_api_retries_update_one_item_until_recovery_or_failure`、`claude_success_results_marked_as_errors_add_no_answer_or_failure`、`claude_refusal_fallbacks_and_mcp_names_use_the_reference_fields`、`claude_rate_limits_announce_rejected_windows_unless_overage_is_allowed`、`claude_prompts_run_known_skills_and_request_ultrathink_effort`、`claude_models::tests`、`background_rosters_replace_work_and_usage_limits_render_their_wait`。 |
 | SDK `forkSession` | `claude_fork::tests`。境界までの main chain、progress を飛ばした親子関係、新 session ID への付け替え、fork title、境界が見つからない場合のエラー、project key。 |
@@ -1189,13 +1189,34 @@ graph replay（fork / rollback / merge back / delegated_task_status）は記録�
 
 - `CheckpointService.test.ts` の interrupt、`ThreadTitleRegenerationService.test.ts` の interrupted: Effect fiber の割込みを確かめる。本設計では実行中の effect は未確定のまま残り、再起動で再実行される。
 - `CheckpointCaptureService.test.ts` の delegatedCompletion の上書きと履歴を読まない確認: T3 の projection store の内部形を確かめる。保存結果は actor の状態から決める。
-- `CheckpointRollbackService.test.ts` の active provider thread / selection の変更による拒否: 境界より後に run がある instance をすべて巻き戻す設計（2026-10-06 の決定）。
 - `CheckpointRestoreSafety.test.ts` の shared-provider: session は thread ごとで、複数 thread が共有しない。errored-provider は provider と同じく生きているプロセスとして扱う。
-- `ThreadTitleRegenerationService.test.ts` の `regenerateTitle: false` による解除: 対応する command がない。rename と新しい要求による無効化は確認する。
-- `ThreadLaunchService.test.ts` の branch 名の生成と rename（M3）、scratch folder、setup の進捗表示と取消、非同期 setup、`reuseExistingThread`、自動化・送信元の属性、import した native session（`Command::Import` で取り込む）、attachment の取り込み（RPC の責務）、記録前に失敗した worktree の削除（部分的な checkout の削除は Host の `create_worktree` が行う。runtime は記録に失敗した worktree を削除する）。
+- `ThreadLaunchService.test.ts` の branch 名の生成と rename（M3）、scratch folder、setup の取消、非同期 setup、`reuseExistingThread`、自動化・送信元の属性、import した native session（`Command::Import` で取り込む）、attachment の取り込み（RPC の責務）、記録前に失敗した worktree の削除（部分的な checkout の削除は Host の `create_worktree` が行う。runtime は記録に失敗した worktree を削除する）。
 - `ProviderRuntimeRecoveryService.test.ts:522`（取り消すしかない waiting run）: 保存の失敗は結果として run を確定するので、保存を待ったまま残る run は生じない。
 - `EffectWorker.test.ts:728`（置換 session の restart）: restart は domain が attempt を superseded にし、Start は独立した effect になるため複合 effect がない。
 - `RunFinalizationService.test.ts` の pull request 状態の更新 4 件: この Host は pull request の状態を持たない。保存後の通知（`run_finalized`）だけを受け取る。
+
+### T3 の外部挙動への揃え直し（2026-10-06）
+
+| T3 の原本 | 新設計の検証 |
+| --- | --- |
+| `ProviderFailure.test.ts`（redaction、制御文字、上限、surrogate） | `agent-domain` の `failure::tests`。 |
+| `QueuedRunOrder.test.ts`、`runtimeLayer.test.ts:3203`（wake の位置と並べ替え）、`Orchestrator.ts:7217` | `tests::queue::background_wakes_keep_their_queue_position_and_can_be_passed`、`reordering_follows_the_reference_rules`。 |
+| `Orchestrator.ts:7308, 2014`（配送の cancel と cohort）、`:8000`（Stop と cohort） | `cancelling_a_completion_delivery_disposes_running_siblings`、`stopping_the_parent_leaves_delegated_children_running`。 |
+| `Orchestrator.ts:7077, 3585`（promote-to-steer） | `promoting_to_steer_keeps_maintenance_separate`。 |
+| `runtimeLayer.test.ts:3767`（開始前の interrupt）、`RunExecutionService.ts` の結果文言 | `tests::preparation::interrupts_a_pending_provider_start`、`a_confirmed_stop_records_the_default_request_and_result_messages`。provider の interrupt effect は進行中の Start を取り消す本設計の仕組みなので、「effect がない」の確認だけは持ち込まない。 |
+| `Orchestrator.ts` の defer_start と prepared-run.*、`ThreadLaunchService.test.ts:375, 1302, 1468` | `tests::preparation::*` と `launch::tests` の準備行の確認（running、Preparing worktree、Starting setup script、failed、retry 後の completed と cancelled）。 |
+| `Orchestrator.ts:2311`（thread mutation の guard）、`ThreadDeletion.ts`、`runtimeLayer.test.ts:3981`（mark unread） | `tests::thread::*`、`unread_uses_the_last_run_and_needs_its_completion`。 |
+| `ProviderSessionTransitionPolicy.ts`、`ProviderSwitchService.ts`、`Orchestrator.ts:3301` | `tests::selection::*`。 |
+| `CheckpointRollbackService.ts:145`、`Orchestrator.ts:8393` | `tests::rollback::*`、`executor::tests::rollback::a_failed_rewind_resets_only_the_active_native_session`。 |
+| `Orchestrator.ts:3354, 5361`、`ProviderTurnStartService.ts:605`、`ProjectionStore.ts:1213`、`ThreadForkService.ts` | `tests::fork::*`、`session::tests` の fork 3 件（子の最初の発言で fork する）、graph replay。 |
+| `Orchestrator.ts:3442, 4694`（merge back） | `merge_back_waits_for_a_direct_turn_on_any_provider`。 |
+| `ProviderTurnStartService.ts:240`、`Orchestrator.ts:8990`（委任結果の handoff） | `delegated_results_reach_a_later_turn_only_after_the_spawning_run_failed`。 |
+| `Orchestrator.ts:6318`、`SubagentProjection.ts`、`OrchestratorMcpService.ts:1368` | `tests::delegation::*`。 |
+| `runtimeLayer.test.ts:4100, 4282`（手動と自動の継続） | `tests::recovery::*`。`invalid-snooze`（不正な日付）は型で表せず、`replacement` は失敗項目の class を直接書き換える操作が domain の入力にないため対象外。 |
+| `ThreadSettlementService.test.ts`（候補、queued turn start、非活動） | `settlement::tests`。pull request の状態による判定は Host が pull request を持たないため対象外。 |
+| `runtimeLayer.test.ts:1773`（auto-settle）、`Orchestrator.ts:2361`（metadata.update）、`:4606`（sourcePlanRef） | `tests::metadata::*`。 |
+| `codexUsageLimits.test.ts`（merge と reset） | `agent-providers` の `codex::rate_limit_tests`。 |
+| contracts `chatAttachment.ts` | `attachments_follow_the_reference_schemas_and_image_budget`。添付 ID の文字種は Host の `chat:` 形式と合わないため確かめない。 |
 
 ### 段階 3: Host への接続（2026-10-06）
 

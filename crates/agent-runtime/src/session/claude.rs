@@ -284,7 +284,7 @@ impl SessionManager {
         &self,
         target: &LaunchTarget,
         effect_id: &str,
-        command: &CommandId,
+        attempt: &RunAttemptId,
         provider: &ProviderCommand,
     ) -> Result<Option<String>, ForkError> {
         let directive = ClaudeProtocol::default()
@@ -321,7 +321,7 @@ impl SessionManager {
             .input(
                 &target.key.thread,
                 agent_domain::Input::NativeForkReserved {
-                    command: command.clone(),
+                    attempt: attempt.clone(),
                     native_thread: forked.session_id.clone(),
                 },
             )

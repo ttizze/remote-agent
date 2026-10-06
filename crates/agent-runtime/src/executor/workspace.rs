@@ -5,7 +5,8 @@ use crate::{
     WorkspaceStrategy, WorktreeRequest,
 };
 use agent_domain::{
-    Command, EffectBody, EffectResult, Input, RunId, RunStatus, ThreadId, Workspace,
+    Command, CommandId, EffectBody, EffectResult, Input, PreparationPhase, RunId, RunStatus,
+    ThreadId, Workspace,
 };
 use futures_util::future::BoxFuture;
 
@@ -27,13 +28,57 @@ fn failed(operation: LaunchOperation) -> impl FnOnce(String) -> PrepareError {
     move |cause| PrepareError::Failed { operation, cause }
 }
 
+/// The deferred run a preparation reports its phases to, and the effect that
+/// runs it (which names each progress command).
+pub struct PreparedRun<'a> {
+    pub run: &'a RunId,
+    pub effect: &'a str,
+}
+
+/// Shows the preparation phase on the run's preparation row (T3 prepared-run.progress).
+async fn progress(
+    context: &ExecutorContext,
+    thread: &ThreadId,
+    prepared: Option<&PreparedRun<'_>>,
+    phase: PreparationPhase,
+) -> Result<(), PrepareError> {
+    let Some(prepared) = prepared else {
+        return Ok(());
+    };
+    let id = CommandId::new(format!(
+        "{}:progress:{}",
+        effect_command_id(prepared.effect),
+        match phase {
+            PreparationPhase::Worktree => "worktree",
+            PreparationPhase::Setup => "setup",
+        }
+    ))
+    .expect("derived id");
+    context
+        .dispatch(
+            thread,
+            id,
+            Command::PreparedRunProgress {
+                run: prepared.run.clone(),
+                phase,
+            },
+        )
+        .await
+        .map(|_| ())
+        .map_err(|error| PrepareError::Failed {
+            operation: LaunchOperation::UpdateThread,
+            cause: error.to_string(),
+        })
+}
+
 /// Provisions the thread's workspace for its launch (reusing a worktree an earlier
 /// attempt recorded), binds it and its checkpoint scope, and runs the project setup.
 pub async fn prepare_workspace(
     context: &ExecutorContext,
     thread: &ThreadId,
-    run: Option<&RunId>,
+    prepared: Option<PreparedRun<'_>>,
 ) -> Result<(), PrepareError> {
+    let run = prepared.as_ref().map(|prepared| prepared.run);
     let retry = |error: crate::RuntimeError| PrepareError::Retry(error.to_string());
     let state = context.registry.state(thread).await.map_err(retry)?;
     let current = state
@@ -74,6 +119,13 @@ pub async fn prepare_workspace(
                 start_from_origin,
             },
         ) => {
+            progress(
+                context,
+                thread,
+                prepared.as_ref(),
+                PreparationPhase::Worktree,
+            )
+            .await?;
             let created = context
                 .ops
                 .create_worktree(WorktreeRequest {
@@ -176,6 +228,7 @@ pub async fn prepare_workspace(
     if record.as_ref().is_some_and(|record| record.prepared) {
         return Ok(());
     }
+    progress(context, thread, prepared.as_ref(), PreparationPhase::Setup).await?;
     context
         .ops
         .run_setup(SetupRequest {
@@ -220,7 +273,11 @@ impl EffectHandler for PrepareWorkspace {
             {
                 return Ok(None);
             }
-            let command = match prepare_workspace(context, &job.thread, Some(run)).await {
+            let prepared = PreparedRun {
+                run,
+                effect: &job.effect.id,
+            };
+            let command = match prepare_workspace(context, &job.thread, Some(prepared)).await {
                 Ok(()) => Command::ReleasePrepared { run: run.clone() },
                 Err(PrepareError::Retry(error)) if job.will_retry => {
                     return Err(EffectError::Retryable(error));

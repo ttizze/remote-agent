@@ -529,7 +529,7 @@ async fn a_retry_after_a_failed_commit_finishes_the_recorded_restore() {
 // A provider that rewound before another one failed no longer matches the kept
 // conversation, so its native session is replaced by portable history.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_partially_rewound_rollback_resets_the_rewound_native_sessions() {
+async fn a_failed_rewind_resets_only_the_active_native_session() {
     let rig = rig_with(RigOptions {
         max_attempts: 1,
         ..RigOptions::default()
@@ -540,11 +540,8 @@ async fn a_partially_rewound_rollback_resets_the_rewound_native_sessions() {
         if frame["method"] == "thread/revert" {
             let id = frame["id"].clone();
             ops.record("provider");
-            return if counter.fetch_add(1, Ordering::SeqCst) == 0 {
-                vec![json!({"id":id,"result":{}})]
-            } else {
-                vec![json!({"id":id,"error":{"code":-32000,"message":"revert failed"}})]
-            };
+            counter.fetch_add(1, Ordering::SeqCst);
+            return vec![json!({"id":id,"error":{"code":-32000,"message":"revert failed"}})];
         }
         revert_replies(ops.clone(), false)(frame)
     });
@@ -564,18 +561,18 @@ async fn a_partially_rewound_rollback_resets_the_rewound_native_sessions() {
     assert_eq!(rollback(&rig, &id, &scope, 0, true).await, Reply::Accepted);
     rig.drain().await;
 
-    assert_eq!(
-        rollback_calls(&rig.ops),
-        ["prepare", "provider", "provider", "undo"]
-    );
+    // T3 rewinds only the active provider thread.
+    assert_eq!(rollback_calls(&rig.ops), ["prepare", "provider", "undo"]);
+    assert_eq!(reverts.load(Ordering::SeqCst), 1);
     let state = rig.state(&id).await;
     assert_eq!(
         state.rollback_failure.as_deref(),
         Some(ROLLBACK_FAILED_MESSAGE)
     );
     assert!(rolled_back(&state).is_empty());
-    assert!(
-        state.native_sessions.is_empty(),
+    assert_eq!(
+        state.native_sessions.keys().collect::<Vec<_>>(),
+        ["codex"],
         "{:?}",
         state.native_sessions
     );

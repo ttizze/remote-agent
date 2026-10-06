@@ -1629,6 +1629,8 @@ async fn native_subagent_threads_refuse_messages_with_the_reference_error_and_no
                     mode: DispatchMode::StartImmediately,
                     intent: None,
                     source_plan: None,
+                    resolved_plan: None,
+                    continuation: None,
                     title_seed: None,
                 }),
             )

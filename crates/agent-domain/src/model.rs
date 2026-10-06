@@ -138,6 +138,80 @@ pub struct Thread {
     /// The pending title generation; a rename or a newer request supersedes it.
     pub title_request: Option<CommandId>,
     pub imported: bool,
+    pub snoozed_at: Option<Timestamp>,
+    pub limit_recovery: Option<LimitRecovery>,
+    pub linked_pull_request: Option<LinkedPullRequest>,
+}
+/// What to do once a usage limit resets (T3 OrchestrationV2LimitRecovery).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LimitRecovery {
+    /// The metadata command that set it; an automatic resume names it.
+    pub request: Option<CommandId>,
+    pub run: RunId,
+    pub reset_at: Timestamp,
+    pub auto_resume: bool,
+    pub snooze: bool,
+}
+/// A recovery choice; omitted options keep their value for the same run and reset.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LimitRecoveryUpdate {
+    pub run: RunId,
+    pub reset_at: Timestamp,
+    pub auto_resume: Option<bool>,
+    pub snooze: Option<bool>,
+}
+/// T3 ThreadLinkedPullRequest.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinkedPullRequest {
+    pub project: String,
+    pub repository: String,
+    pub number: u64,
+    pub url: String,
+}
+/// A proposed plan a message implements, possibly on another thread.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlanRef {
+    pub thread: ThreadId,
+    pub plan: PlanId,
+}
+/// Another thread's plan as the Host read it before dispatch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedPlan {
+    pub project: String,
+    pub kind: PlanKind,
+    pub implemented: bool,
+}
+/// T3 message.dispatch continuations of a stopped run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Continuation {
+    /// The user continues an interrupted or usage-limited run.
+    Manual { run: RunId },
+    /// The limit recovery resumes the limited run once its reset passed.
+    UsageLimit {
+        run: RunId,
+        recovery: Option<CommandId>,
+    },
+}
+/// Sidebar state a fork or delegated child copies from its parent thread
+/// (T3 ThreadForkService and makeSubagentChildThread spread the parent row).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThreadArrangement {
+    pub pinned_at: Option<Timestamp>,
+    pub pin_order: Option<String>,
+    pub active_order: Option<String>,
+    pub auto_settle: bool,
+    pub title_request: Option<CommandId>,
+}
+impl ThreadArrangement {
+    pub fn of(thread: &Thread) -> Self {
+        Self {
+            pinned_at: thread.pinned_at.clone(),
+            pin_order: thread.pin_order.clone(),
+            active_order: thread.active_order.clone(),
+            auto_settle: thread.auto_settle,
+            title_request: thread.title_request.clone(),
+        }
+    }
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Workspace {
@@ -183,7 +257,7 @@ pub struct Run {
     pub requested_at: Timestamp,
     pub started_at: Option<Timestamp>,
     pub completed_at: Option<Timestamp>,
-    pub source_plan: Option<PlanId>,
+    pub source_plan: Option<PlanRef>,
     pub checkpoint: Option<CheckpointId>,
     pub continuation: bool,
 }
@@ -203,6 +277,8 @@ pub struct Attempt {
     pub turn_usage: Option<TurnTokenUsage>,
     pub usage_accumulator: Option<UsageCounters>,
     pub usage_observed: bool,
+    /// Usage windows the provider rejected during this turn, with their resets.
+    pub rejected_limits: BTreeMap<String, Option<i64>>,
     pub started_at: Timestamp,
     pub completed_at: Option<Timestamp>,
 }
@@ -244,6 +320,7 @@ pub enum ItemKind {
         command: String,
         cwd: Option<String>,
         exit_code: Option<i64>,
+        title: Option<String>,
     },
     FileChange {
         changes: Json,
@@ -283,6 +360,8 @@ pub enum ItemKind {
         code: Option<String>,
         class: Option<String>,
         retryable: Option<bool>,
+        /// When a usage limit resets (T3 ProviderFailure resetAt).
+        reset_at: Option<Timestamp>,
     },
     SystemNotice {
         message: String,
@@ -467,8 +546,14 @@ impl Task {
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Transfer {
-    pub native_fork: Option<String>,
-    pub instance: String,
+    /// A fork's source native thread and boundary, forked natively when the
+    /// consuming turn runs on the same instance.
+    pub native_source: Option<NativeBinding>,
+    /// The provider instance it is for; a fork or merge-back takes the
+    /// instance of the turn that consumes it.
+    pub instance: Option<String>,
+    /// The run a delegated result was handed to (T3 targetRunId).
+    pub target_run: Option<RunId>,
     pub delivery: Option<ContextDelivery>,
     pub id: ContextTransferId,
     pub kind: TransferKind,
@@ -497,13 +582,6 @@ pub struct PendingRollback {
     /// Provider instances whose native history the rollback may already have
     /// rewound; a failed rollback resets their native sessions.
     pub rewinding: BTreeSet<String>,
-}
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct PendingFork {
-    pub target: ThreadId,
-    pub child_command: Box<Command>,
-    pub instance: String,
-    pub head: Option<String>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NativeBinding {
@@ -587,11 +665,12 @@ pub struct State {
     pub background_work: BTreeMap<String, BackgroundWork>,
     pub wake_reports: Vec<WakeReport>,
     pub prompt_ordinal: u64,
-    pub pending_forks: BTreeMap<CommandId, PendingFork>,
     pub native_sessions: BTreeMap<String, String>,
     pub handoff_token_cap: Option<u64>,
     pub context_windows: BTreeMap<String, u64>,
     pub usage_baselines: BTreeMap<String, UsageCounters>,
+    /// The latest account usage-limit reset each provider instance reported.
+    pub rate_limit_resets: BTreeMap<String, Option<i64>>,
 }
 impl State {
     /// A local message, or one referenced by an inherited fork item.
@@ -615,15 +694,18 @@ impl State {
             .collect();
         runs.sort_by_key(|r| {
             (
-                !self
-                    .messages
-                    .iter()
-                    .any(|m| m.id == r.message && m.created_by == MessageAuthor::Agent),
+                !self.delegated_delivery(&r.message),
                 r.queue_position.unwrap_or(r.ordinal),
                 r.ordinal,
             )
         });
         runs
+    }
+    /// A delegated completion delivery; T3 delivers only these ahead of the queue.
+    pub fn delegated_delivery(&self, message: &MessageId) -> bool {
+        self.message(message)
+            .and_then(|m| m.notification.as_ref())
+            .is_some_and(|n| matches!(n.source, NotificationSource::Delegated { .. }))
     }
     pub fn visible_items(&self) -> Vec<&Item> {
         let visible_runs: BTreeSet<_> = self
@@ -647,25 +729,27 @@ impl State {
     pub fn activity_items(&self) -> Vec<std::borrow::Cow<'_, Item>> {
         self.visible_items()
             .into_iter()
-            .map(|item| {
-                if let ItemKind::UserMessage { message } = &item.kind
-                    && let Some(notification) = self
-                        .messages
-                        .iter()
-                        .find(|candidate| &candidate.id == message)
-                        .and_then(|message| message.notification.as_ref())
-                {
-                    let mut item = item.clone();
-                    item.kind = ItemKind::Notification {
-                        notification: notification.clone(),
-                    };
-                    item.text.clear();
-                    std::borrow::Cow::Owned(item)
-                } else {
-                    std::borrow::Cow::Borrowed(item)
-                }
-            })
+            .map(|item| self.notification_card(item))
             .collect()
+    }
+    /// A user item that carries a notification shows as its notification card.
+    pub fn notification_card<'a>(&self, item: &'a Item) -> std::borrow::Cow<'a, Item> {
+        if let ItemKind::UserMessage { message } = &item.kind
+            && let Some(notification) = self
+                .messages
+                .iter()
+                .find(|candidate| &candidate.id == message)
+                .and_then(|message| message.notification.as_ref())
+        {
+            let mut item = item.clone();
+            item.kind = ItemKind::Notification {
+                notification: notification.clone(),
+            };
+            item.text.clear();
+            std::borrow::Cow::Owned(item)
+        } else {
+            std::borrow::Cow::Borrowed(item)
+        }
     }
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -678,7 +762,10 @@ pub struct SendMessage {
     pub selection: Option<ModelSelection>,
     pub mode: DispatchMode,
     pub intent: Option<DeliveryIntent>,
-    pub source_plan: Option<PlanId>,
+    pub source_plan: Option<PlanRef>,
+    /// Filled by the Host for a plan on another thread.
+    pub resolved_plan: Option<ResolvedPlan>,
+    pub continuation: Option<Continuation>,
     /// Shown as the title while the first message's title is generated.
     pub title_seed: Option<String>,
 }
@@ -691,6 +778,14 @@ pub enum DispatchMode {
     RestartActive { run: RunId },
 }
 values! { DeliveryIntent { Auto, Steer, Restart } }
+/// T3 thread fork and merge-back source points.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SourcePoint {
+    LatestStable,
+    Run(RunId),
+    Checkpoint(CheckpointId),
+}
+values! { PreparationPhase { Worktree, Setup } }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Command {
     ContinueRestart {
@@ -723,6 +818,29 @@ pub enum Command {
         title: String,
     },
     RegenerateTitle,
+    /// T3 thread.metadata.update. `project_root` is filled by the Host and
+    /// becomes the working directory when the worktree is cleared.
+    UpdateMetadata {
+        title: Option<String>,
+        regenerate_title: Option<bool>,
+        branch: Option<Option<String>>,
+        worktree_path: Option<Option<String>>,
+        expected_worktree_path: Option<Option<String>>,
+        expected_empty: bool,
+        limit_recovery: Option<Option<LimitRecoveryUpdate>>,
+        linked_pull_request: Option<Option<LinkedPullRequest>>,
+        project_root: Option<String>,
+    },
+    /// T3 thread.auto-settle from the Host's settlement sweep.
+    SettleAutomatically {
+        snapshot_at: Timestamp,
+        settled_at: Option<Timestamp>,
+    },
+    /// Another thread's run implements this thread's proposed plan.
+    ImplementPlan {
+        plan: PlanId,
+        run: RunId,
+    },
     Archive {
         archived: bool,
     },
@@ -737,6 +855,9 @@ pub enum Command {
     Pin {
         pinned: bool,
         order: Option<String>,
+    },
+    ReorderPinned {
+        order: String,
     },
     ReorderActive {
         order: String,
@@ -760,9 +881,18 @@ pub enum Command {
     SwitchProvider {
         selection: ModelSelection,
     },
+    /// T3 provider-session.detach: stop this thread's session of an instance.
+    DetachProviderSession {
+        instance: String,
+        reason: Option<String>,
+    },
     Send(SendMessage),
     ReleasePrepared {
         run: RunId,
+    },
+    PreparedRunProgress {
+        run: RunId,
+        phase: PreparationPhase,
     },
     FailPrepared {
         run: RunId,
@@ -774,6 +904,7 @@ pub enum Command {
     Interrupt {
         run: RunId,
         hold_queue: bool,
+        reason: Option<String>,
     },
     ResumeQueue,
     ReorderQueued {
@@ -807,9 +938,10 @@ pub enum Command {
     },
     Fork {
         target: ThreadId,
-        through_run: RunId,
+        source: SourcePoint,
         title: Option<String>,
     },
+    /// `native` is the source's native thread and boundary, if it has one.
     AcceptFork {
         thread: ThreadId,
         parent: ThreadId,
@@ -822,13 +954,13 @@ pub enum Command {
         history: Vec<Item>,
         messages: Vec<Message>,
         workspace: Option<Workspace>,
+        arrangement: Box<ThreadArrangement>,
         context: HistoricalContext,
         native: Option<NativeBinding>,
     },
-    /// Without `through_run`, the latest completed run is the boundary.
     MergeBack {
         target: ThreadId,
-        through_run: Option<RunId>,
+        source: SourcePoint,
     },
     AcceptTransfer {
         id: ContextTransferId,
@@ -841,7 +973,10 @@ pub enum Command {
         task: NodeId,
         child: ThreadId,
         prompt: String,
+        title: Option<String>,
         selection: ModelSelection,
+        runtime_mode: RuntimeMode,
+        interaction_mode: InteractionMode,
         wake: CompletionWake,
     },
     AcceptDelegation {
@@ -852,8 +987,9 @@ pub enum Command {
         runtime_mode: RuntimeMode,
         interaction_mode: InteractionMode,
         workspace: Option<Workspace>,
+        arrangement: Box<ThreadArrangement>,
         origin: Delegation,
-        message: SendMessage,
+        message: Box<SendMessage>,
     },
     TaskProgress {
         task: NodeId,
@@ -911,15 +1047,20 @@ pub fn host_only_command(command: &Command) -> bool {
         | Command::AcceptTaskWake { .. }
         | Command::ContinueRestart { .. }
         | Command::ReleasePrepared { .. }
+        | Command::PreparedRunProgress { .. }
+        | Command::SettleAutomatically { .. }
+        | Command::ImplementPlan { .. }
         | Command::FailPrepared { .. } => true,
         Command::Create { .. }
         | Command::Rename { .. }
         | Command::RegenerateTitle
+        | Command::UpdateMetadata { .. }
         | Command::Archive { .. }
         | Command::Delete
         | Command::Settle { .. }
         | Command::Snooze { .. }
         | Command::Pin { .. }
+        | Command::ReorderPinned { .. }
         | Command::ReorderActive { .. }
         | Command::Visit { .. }
         | Command::MarkUnread
@@ -928,6 +1069,7 @@ pub fn host_only_command(command: &Command) -> bool {
         | Command::InteractionMode { .. }
         | Command::SelectModel { .. }
         | Command::SwitchProvider { .. }
+        | Command::DetachProviderSession { .. }
         | Command::Send(_)
         | Command::RetryPrepared { .. }
         | Command::Interrupt { .. }
@@ -994,6 +1136,11 @@ pub enum ProviderItem {
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ProviderEvent {
+    /// The account's usage-limit reset (Unix seconds), when every exhausted
+    /// window reports one (T3 codexUsageLimitResetAt).
+    RateLimits {
+        resets_at: Option<i64>,
+    },
     UsageTotals {
         native_thread: String,
         native_turn: String,
@@ -1197,8 +1344,9 @@ pub struct Effect {
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum EffectBody {
+    /// Forks a source native thread for the attempt that consumes a fork.
     ForkNative {
-        command: CommandId,
+        instance: String,
         provider: ProviderCommand,
     },
     Provider(ProviderCommand),
@@ -1226,10 +1374,12 @@ pub enum EffectBody {
     DeleteAttachments {
         paths: Vec<String>,
     },
-    /// Detach this thread's provider sessions, which stops their background work.
+    /// Detach this thread's provider sessions, or those of one instance, which
+    /// stops their background work.
     DetachSessions {
         reason: String,
         revoke_credentials: bool,
+        instance: Option<String>,
     },
     CleanupTerminals,
     /// Generate a title from the initial message, or from the conversation
@@ -1253,11 +1403,11 @@ pub struct RestoreFiles {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum EffectResult {
     NativeForked {
-        command: CommandId,
+        attempt: RunAttemptId,
         native_thread: String,
     },
     ForkFailed {
-        command: CommandId,
+        attempt: RunAttemptId,
         message: String,
     },
     ProviderFailed {
@@ -1328,7 +1478,7 @@ pub enum Input {
     /// The native session a pending fork will create, recorded before its
     /// transcript exists so no import can adopt it.
     NativeForkReserved {
-        command: CommandId,
+        attempt: RunAttemptId,
         native_thread: String,
     },
     Workspace {

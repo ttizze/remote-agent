@@ -65,7 +65,7 @@ struct Replay {
     owner: Option<RunAttemptId>,
     facts: Vec<Fact>,
     provider_commands: Vec<(ThreadId, ProviderCommand)>,
-    native_forks: Vec<(ThreadId, CommandId, ProviderCommand)>,
+    native_forks: Vec<(ThreadId, RunAttemptId, ProviderCommand)>,
     /// Outbound frames the translators generated and the transcript has not
     /// matched yet. Only the strict single-session harness fills it.
     strict: bool,
@@ -178,10 +178,11 @@ impl Replay {
                             .push((thread.clone(), rollback.command.clone()));
                     }
                 }
-                EffectBody::ForkNative { command, provider } => {
-                    self.native_forks
-                        .push((thread.clone(), command.clone(), provider.clone()))
-                }
+                EffectBody::ForkNative { provider, .. } => self.native_forks.push((
+                    thread.clone(),
+                    effect.attempt.clone().unwrap(),
+                    provider.clone(),
+                )),
                 _ => {}
             }
             match effect.body {
@@ -302,6 +303,8 @@ impl Replay {
                 mode,
                 intent: None,
                 source_plan: None,
+                resolved_plan: None,
+                continuation: None,
                 title_seed: None,
             }),
         );
@@ -1649,6 +1652,8 @@ fn native_subagent_threads_refuse_messages_with_the_reference_error_and_no_proje
                 mode: DispatchMode::StartImmediately,
                 intent: None,
                 source_plan: None,
+                resolved_plan: None,
+                continuation: None,
                 title_seed: None,
             }),
         );

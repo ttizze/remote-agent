@@ -10,7 +10,7 @@ pub use process::*;
 
 use crate::{ActorRegistry, KeyedSerial, Residency, RuntimeError};
 use agent_domain::{
-    Attachment, AttachmentKind, AttemptStatus, CommandId, Driver, EffectResult, InteractionMode,
+    Attachment, AttachmentKind, AttemptStatus, Driver, EffectResult, InteractionMode,
     ModelSelection, NativeBinding, ProviderCommand, ProviderEvent, ProviderOperation, Reply,
     RunAttemptId, RunStatus, RuntimeMode, State, ThreadId, Workspace,
 };
@@ -684,32 +684,34 @@ impl SessionManager {
             .await
     }
 
-    /// Runs a `ForkNative` effect: the fork's native thread, or `ForkFailed`.
+    /// Runs a `ForkNative` effect for the attempt consuming a fork: the
+    /// forked native thread, or `ForkFailed`.
     pub async fn fork_native(
         &self,
         thread: &ThreadId,
         effect_id: &str,
-        command: &CommandId,
+        attempt: Option<&RunAttemptId>,
+        instance: &str,
         provider: &ProviderCommand,
     ) -> Result<Option<EffectResult>, ExecError> {
-        let state = self.state(thread).await?;
-        let Some(pending) = state.pending_forks.get(command) else {
+        let Some(attempt) = attempt else {
             return Ok(None);
         };
+        let state = self.state(thread).await?;
         let failed = |message: String| {
             Ok(Some(EffectResult::ForkFailed {
-                command: command.clone(),
+                attempt: attempt.clone(),
                 message,
             }))
         };
-        let target = match instance_target(&state, thread, &pending.instance) {
+        let target = match instance_target(&state, thread, instance) {
             Ok(target) => target,
             Err(ExecError::Retry(message)) => return failed(message),
             Err(error) => return Err(error),
         };
         let forked = match target.selection.driver {
             Driver::Claude => {
-                self.fork_claude(&target, effect_id, command, provider)
+                self.fork_claude(&target, effect_id, attempt, provider)
                     .await
             }
             Driver::Codex => self.fork_codex(&target, provider).await.map(Some),
@@ -717,7 +719,7 @@ impl SessionManager {
         match forked {
             Ok(None) => Ok(None),
             Ok(Some(native_thread)) => Ok(Some(EffectResult::NativeForked {
-                command: command.clone(),
+                attempt: attempt.clone(),
                 native_thread,
             })),
             Err(ForkError::Rejected(message)) => failed(message),
@@ -728,6 +730,18 @@ impl SessionManager {
     /// Closes the thread's sessions, as for archive or delete.
     pub async fn detach(&self, thread: &ThreadId, revoke_credentials: bool) {
         for entry in self.entries(|key| &key.thread == thread) {
+            self.close_entry(&entry, true, revoke_credentials).await;
+        }
+    }
+
+    /// Closes the thread's session of one provider instance.
+    pub async fn detach_instance(
+        &self,
+        thread: &ThreadId,
+        instance: &str,
+        revoke_credentials: bool,
+    ) {
+        for entry in self.entries(|key| &key.thread == thread && key.instance == instance) {
             self.close_entry(&entry, true, revoke_credentials).await;
         }
     }

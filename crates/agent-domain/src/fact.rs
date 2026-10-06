@@ -59,18 +59,8 @@ pub enum FactBody {
         id: NodeId,
         title: String,
     },
-    ForkPrepared {
-        command: CommandId,
-        target: ThreadId,
-        child_command: Box<Command>,
-        instance: String,
-        head: Option<String>,
-    },
-    ForkResolved {
-        command: CommandId,
-    },
     ForkSessionReserved {
-        command: CommandId,
+        attempt: RunAttemptId,
         native_thread: String,
     },
     NativeSessionBound {
@@ -147,6 +137,22 @@ pub enum FactBody {
     ThreadRenamed {
         title: String,
     },
+    ThreadArranged(ThreadArrangement),
+    LimitRecoveryChanged {
+        recovery: Option<LimitRecovery>,
+    },
+    PullRequestLinked {
+        pull_request: Option<LinkedPullRequest>,
+    },
+    RateLimitRejected {
+        attempt: RunAttemptId,
+        limit: String,
+        resets_at: Option<i64>,
+    },
+    RateLimitsReported {
+        instance: String,
+        resets_at: Option<i64>,
+    },
     ThreadUnsettled,
     ThreadImported,
     WorkspaceBound {
@@ -182,6 +188,9 @@ pub enum FactBody {
     ThreadPinned {
         pinned: bool,
         order: Option<String>,
+    },
+    ThreadPinReordered {
+        order: String,
     },
     ThreadActiveReordered {
         order: String,
@@ -236,7 +245,7 @@ pub enum FactBody {
         status: RunStatus,
         queue_position: Option<u64>,
         held: bool,
-        source_plan: Option<PlanId>,
+        source_plan: Option<PlanRef>,
     },
     RunStarted {
         checkpoint_scope: Option<CheckpointScope>,
@@ -311,6 +320,9 @@ pub enum FactBody {
         id: TurnItemId,
         status: ItemStatus,
     },
+    ItemReopened {
+        id: TurnItemId,
+    },
     RequestOpened {
         owner_path: Vec<String>,
         id: RuntimeRequestId,
@@ -382,12 +394,13 @@ pub enum FactBody {
         messages: Vec<Message>,
     },
     TransferOpened {
-        native_fork: Option<String>,
+        native_source: Option<NativeBinding>,
         id: ContextTransferId,
         kind: TransferKind,
         source: ThreadId,
         target: ThreadId,
-        instance: String,
+        instance: Option<String>,
+        target_run: Option<RunId>,
         boundary: u64,
         history: HistoricalContext,
     },
@@ -557,26 +570,6 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
         TaskNamed { id, title } => {
             find_mut(&mut state.tasks, "task", |t| &t.id == id)?.title = Some(title.clone())
         }
-        ForkPrepared {
-            command,
-            target,
-            child_command,
-            instance,
-            head,
-        } => {
-            state.pending_forks.insert(
-                command.clone(),
-                PendingFork {
-                    target: target.clone(),
-                    child_command: child_command.clone(),
-                    instance: instance.clone(),
-                    head: head.clone(),
-                },
-            );
-        }
-        ForkResolved { command } => {
-            state.pending_forks.remove(command);
-        }
         ForkSessionReserved { .. } => {}
         NativeSessionBound {
             instance,
@@ -710,6 +703,9 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
                 workspace: None,
                 title_request: None,
                 imported: false,
+                snoozed_at: None,
+                limit_recovery: None,
+                linked_pull_request: None,
             });
         }
         ChildEventDeferred { key, event } => state
@@ -749,6 +745,43 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
             let thread = state.thread.as_mut().ok_or(FoldError::Missing("thread"))?;
             thread.title = title.clone();
             thread.title_request = None;
+        }
+        LimitRecoveryChanged { recovery } => {
+            state
+                .thread
+                .as_mut()
+                .ok_or(FoldError::Missing("thread"))?
+                .limit_recovery = recovery.clone()
+        }
+        PullRequestLinked { pull_request } => {
+            state
+                .thread
+                .as_mut()
+                .ok_or(FoldError::Missing("thread"))?
+                .linked_pull_request = pull_request.clone()
+        }
+        RateLimitRejected {
+            attempt,
+            limit,
+            resets_at,
+        } => {
+            find_mut(&mut state.attempts, "attempt", |a| &a.id == attempt)?
+                .rejected_limits
+                .insert(limit.clone(), *resets_at);
+        }
+        RateLimitsReported {
+            instance,
+            resets_at,
+        } => {
+            state.rate_limit_resets.insert(instance.clone(), *resets_at);
+        }
+        ThreadArranged(arrangement) => {
+            let t = state.thread.as_mut().ok_or(FoldError::Missing("thread"))?;
+            t.pinned_at = arrangement.pinned_at.clone();
+            t.pin_order = arrangement.pin_order.clone();
+            t.active_order = arrangement.active_order.clone();
+            t.auto_settle = arrangement.auto_settle;
+            t.title_request = arrangement.title_request.clone();
         }
         ThreadImported => {
             state
@@ -823,23 +856,36 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
             }
         }
         ThreadSnoozed { until } => {
-            state
-                .thread
-                .as_mut()
-                .ok_or(FoldError::Missing("thread"))?
-                .snoozed_until = until.clone()
+            let t = state.thread.as_mut().ok_or(FoldError::Missing("thread"))?;
+            t.snoozed_until = until.clone();
+            t.snoozed_at = until.as_ref().map(|_| at.clone());
         }
         ThreadPinned { pinned, order } => {
             let t = state.thread.as_mut().ok_or(FoldError::Missing("thread"))?;
-            t.pinned_at = pinned.then(|| at.clone());
-            t.pin_order = order.clone();
+            if !pinned {
+                t.pinned_at = None;
+                t.pin_order = None;
+            } else if t.pinned_at.is_none() {
+                t.pinned_at = Some(at.clone());
+                if order.is_some() {
+                    t.pin_order = order.clone();
+                }
+            }
             if *pinned {
                 if t.settled == Some(true) {
                     t.settled = Some(false);
                     t.settled_at = None;
                 }
                 t.snoozed_until = None;
+                t.snoozed_at = None;
             }
+        }
+        ThreadPinReordered { order } => {
+            state
+                .thread
+                .as_mut()
+                .ok_or(FoldError::Missing("thread"))?
+                .pin_order = Some(order.clone())
         }
         ThreadActiveReordered { order } => {
             state
@@ -1044,6 +1090,7 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
                 turn_usage: None,
                 usage_accumulator: None,
                 usage_observed: false,
+                rejected_limits: BTreeMap::new(),
                 started_at: at.clone(),
                 completed_at: None,
             });
@@ -1147,6 +1194,11 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
                 m.streaming = false;
                 m.updated_at = at.clone();
             }
+        }
+        ItemReopened { id } => {
+            let item = find_mut(&mut state.items, "item", |i| &i.id == id)?;
+            item.status = ItemStatus::Running;
+            item.completed_at = None;
         }
         RequestOpened {
             owner_path,
@@ -1338,12 +1390,13 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
             state.inherited_messages = messages.clone();
         }
         TransferOpened {
-            native_fork,
+            native_source,
             id,
             kind,
             source,
             target,
             instance,
+            target_run,
             boundary,
             history,
         } => {
@@ -1368,12 +1421,13 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
                 }
             }
             state.transfers.push(Transfer {
-                native_fork: native_fork.clone(),
+                native_source: native_source.clone(),
                 id: id.clone(),
                 kind: *kind,
                 source: source.clone(),
                 target: target.clone(),
                 instance: instance.clone(),
+                target_run: target_run.clone(),
                 boundary: *boundary,
                 history: history.clone(),
                 delivery: None,
@@ -1381,10 +1435,18 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
             });
         }
         TransferDeliveryChanged { id, delivery } => {
-            find_mut(&mut state.transfers, "transfer", |transfer| {
+            let instance = state
+                .runs
+                .iter()
+                .find(|run| run.id == delivery.run)
+                .map(|run| run.selection.instance.clone());
+            let transfer = find_mut(&mut state.transfers, "transfer", |transfer| {
                 &transfer.id == id
-            })?
-            .delivery = Some(delivery.clone());
+            })?;
+            transfer.delivery = Some(delivery.clone());
+            if transfer.instance.is_none() {
+                transfer.instance = instance;
+            }
         }
         TaskNativeBound { id, native_task } => {
             find_mut(&mut state.tasks, "task", |t| &t.id == id)?.native_task =
@@ -1493,8 +1555,11 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
             state: delivery,
         } => find_mut(&mut state.tasks, "task", |t| &t.id == id)?.delivery = *delivery,
     }
-    if !matches!(fact.body, FactBody::ThreadVisited { .. })
-        && let Some(thread) = &mut state.thread
+    // Visits and arranging the active list are not thread activity (T3).
+    if !matches!(
+        fact.body,
+        FactBody::ThreadVisited { .. } | FactBody::ThreadActiveReordered { .. }
+    ) && let Some(thread) = &mut state.thread
     {
         thread.updated_at = at.clone();
     }
@@ -1527,18 +1592,6 @@ pub fn bounded_json(value: &Json) -> Json {
     } else {
         value.clone()
     }
-}
-/// Reference failure text bounds: UTF-16 units, cut with an ellipsis.
-pub fn bounded_failure_text(text: &str, max: usize) -> String {
-    let units = text.encode_utf16().collect::<Vec<_>>();
-    if units.len() <= max {
-        return text.to_owned();
-    }
-    let mut end = max - 1;
-    if (0xDC00..=0xDFFF).contains(&units[end]) {
-        end -= 1;
-    }
-    String::from_utf16_lossy(&units[..end]) + "…"
 }
 /// Version of the folded `State` and `Fact` encodings. Stored snapshots with
 /// another value are rebuilt from facts.

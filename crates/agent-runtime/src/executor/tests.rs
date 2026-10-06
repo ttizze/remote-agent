@@ -423,6 +423,8 @@ pub(crate) fn message(id: &str, text: &str, mode: DispatchMode) -> SendMessage {
         mode,
         intent: None,
         source_plan: None,
+        resolved_plan: None,
+        continuation: None,
         title_seed: None,
     }
 }

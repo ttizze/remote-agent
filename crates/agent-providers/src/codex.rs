@@ -152,6 +152,8 @@ pub struct CodexProtocol {
     async_messages: BTreeSet<String>,
     retries: BTreeMap<String, RetryProgress>,
     failures: BTreeMap<String, (String, Option<String>, String)>,
+    /// The account's rate-limit snapshot, merged across partial updates.
+    rate_limits: Option<Value>,
 }
 impl CodexProtocol {
     fn request(&mut self, method: &str, params: Value, pending: Pending) -> Value {
@@ -1049,6 +1051,12 @@ impl CodexProtocol {
                     })
                     .collect(),
             }),
+            "account/rateLimits/updated" => {
+                self.rate_limits = merge_rate_limits(self.rate_limits.take(), &p["rateLimits"]);
+                events.push(ProviderEvent::RateLimits {
+                    resets_at: usage_limit_reset(self.rate_limits.as_ref()),
+                });
+            }
             "thread/tokenUsage/updated" => {
                 let counters = |usage: &Value| UsageCounters {
                     input: usage["inputTokens"].as_u64().unwrap_or(0),
@@ -1562,6 +1570,56 @@ fn codex_runtime(mode: RuntimeMode) -> (&'static str, &'static str, &'static str
         RuntimeMode::FullAccess => ("never", "user", "dangerFullAccess"),
     }
 }
+/// T3 mergeCodexRateLimits: a model-specific snapshot never replaces the main
+/// one, and fields an update omits keep their earlier value.
+fn merge_rate_limits(previous: Option<Value>, update: &Value) -> Option<Value> {
+    if update["limitId"]
+        .as_str()
+        .is_some_and(|limit| !limit.is_empty() && limit != "codex")
+    {
+        return previous;
+    }
+    let Some(mut merged) = previous else {
+        return Some(update.clone());
+    };
+    for key in [
+        "limitId",
+        "planType",
+        "rateLimitReachedType",
+        "primary",
+        "secondary",
+    ] {
+        if let Some(value) = update.get(key) {
+            merged[key] = value.clone();
+        }
+    }
+    Some(merged)
+}
+/// T3 codexUsageLimitResetAt: the latest reset of the exhausted windows, when
+/// each of them reports one (Unix seconds).
+fn usage_limit_reset(snapshot: Option<&Value>) -> Option<i64> {
+    let snapshot = snapshot?;
+    if snapshot["limitId"]
+        .as_str()
+        .is_some_and(|limit| !limit.is_empty() && limit != "codex")
+    {
+        return None;
+    }
+    let exhausted = [&snapshot["primary"], &snapshot["secondary"]]
+        .into_iter()
+        .filter(|window| {
+            window["usedPercent"]
+                .as_f64()
+                .is_some_and(|used| used.is_finite() && used >= 100.0)
+        })
+        .map(|window| {
+            window["resetsAt"]
+                .as_f64()
+                .filter(|at| at.is_finite() && *at > 0.0)
+        })
+        .collect::<Option<Vec<_>>>()?;
+    exhausted.into_iter().map(|at| at as i64).max()
+}
 fn codex_error_code(info: &Value) -> Option<String> {
     match info {
         Value::String(code) => Some(code.clone()),
@@ -1755,4 +1813,76 @@ pub fn native_image_mime(mime: &str) -> bool {
         mime.to_lowercase().as_str(),
         "image/png" | "image/jpeg" | "image/webp" | "image/gif"
     )
+}
+
+// T3 codexUsageLimits.test.ts.
+#[cfg(test)]
+mod rate_limit_tests {
+    use super::*;
+
+    #[test]
+    fn keeps_windows_an_update_does_not_carry() {
+        let merged = merge_rate_limits(
+            Some(
+                json!({"limitId":"codex","planType":"business","primary":{"usedPercent":100,"resetsAt":1_800_000_000,"windowDurationMins":300}}),
+            ),
+            &json!({"rateLimitReachedType":"rate_limit_reached"}),
+        );
+        assert_eq!(
+            merged,
+            Some(
+                json!({"limitId":"codex","planType":"business","rateLimitReachedType":"rate_limit_reached","primary":{"usedPercent":100,"resetsAt":1_800_000_000,"windowDurationMins":300}})
+            )
+        );
+    }
+
+    #[test]
+    fn ignores_a_model_specific_snapshot_so_it_cannot_replace_the_main_allowance() {
+        let main = json!({"limitId":"codex","primary":{"usedPercent":100,"resetsAt":1_800_000_000,"windowDurationMins":300}});
+        assert_eq!(
+            merge_rate_limits(
+                Some(main.clone()),
+                &json!({"limitId":"spark","primary":{"usedPercent":3,"resetsAt":1_800_000_000,"windowDurationMins":300}}),
+            ),
+            Some(main)
+        );
+    }
+
+    #[test]
+    fn waits_for_every_exhausted_window_and_never_invents_an_unknown_reset() {
+        let reset = |snapshot: Value| usage_limit_reset(Some(&snapshot));
+        assert_eq!(
+            reset(
+                json!({"primary":{"usedPercent":100,"resetsAt":2000000000},"secondary":{"usedPercent":100,"resetsAt":2000100000}})
+            ),
+            Some(2_000_100_000)
+        );
+        assert_eq!(reset(json!({"primary":{"usedPercent":100}})), None);
+        assert_eq!(
+            reset(json!({"primary":{"usedPercent":50,"resetsAt":2000000000}})),
+            None
+        );
+    }
+
+    #[test]
+    fn rate_limit_updates_report_the_merged_reset() {
+        let mut codex = CodexProtocol::default();
+        let update = |rate_limits: Value| json!({"method":"account/rateLimits/updated","params":{"rateLimits":rate_limits}});
+        codex
+            .receive(&update(
+                json!({"limitId":"codex","primary":{"usedPercent":100,"resetsAt":2000000000}}),
+            ))
+            .unwrap();
+        let output = codex
+            .receive(&update(
+                json!({"rateLimitReachedType":"rate_limit_reached"}),
+            ))
+            .unwrap();
+        assert_eq!(
+            output.events,
+            vec![ProviderEvent::RateLimits {
+                resets_at: Some(2_000_000_000)
+            }]
+        );
+    }
 }

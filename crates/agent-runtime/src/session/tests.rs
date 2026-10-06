@@ -178,6 +178,8 @@ impl Rig {
                 mode,
                 intent: None,
                 source_plan: None,
+                resolved_plan: None,
+                continuation: None,
                 title_seed: None,
             }),
         )
@@ -362,7 +364,7 @@ fn registered_kinds_are_the_outbox_kinds_of_the_effects() {
     assert_eq!(kinds, PROCESS_BOUND_PROVIDER_KINDS);
     assert_eq!(
         effect_kind(&EffectBody::ForkNative {
-            command: CommandId::new("c").unwrap(),
+            instance: "codex".into(),
             provider: ProviderCommand::Fork {
                 native_thread: "t".into(),
                 through_turn: None,
@@ -375,6 +377,7 @@ fn registered_kinds_are_the_outbox_kinds_of_the_effects() {
         effect_kind(&EffectBody::DetachSessions {
             reason: String::new(),
             revoke_credentials: false,
+            instance: None,
         })
         .unwrap(),
         DETACH_SESSIONS_KIND
@@ -1044,10 +1047,12 @@ async fn claude_reuses_its_process_after_aligning_model_and_mode() {
     process.emit(json!({"type":"assistant","uuid":"a-1","session_id":session,"message":{"id":"m-1","role":"assistant","model":"claude-sonnet-4-6","content":[{"type":"text","text":"done"}]}}));
     process.emit(json!({"type":"result","subtype":"success","is_error":false,"num_turns":1,"result":"done","session_id":session,"uuid":"r-1"}));
     rig.until_status(&id, RunStatus::Completed).await;
+    // A runtime mode change detaches a Claude session (T3); the interaction
+    // mode applies on the next turn.
     rig.command(
         &id,
-        Command::RuntimeMode {
-            mode: RuntimeMode::AutoAcceptEdits,
+        Command::InteractionMode {
+            mode: agent_domain::InteractionMode::Plan,
         },
     )
     .await;
@@ -1077,7 +1082,7 @@ async fn claude_reuses_its_process_after_aligning_model_and_mode() {
         process.written()[2]["request"]["model"],
         "claude-opus-4-6[1m]"
     );
-    assert_eq!(process.written()[3]["request"]["mode"], "acceptEdits");
+    assert_eq!(process.written()[3]["request"]["mode"], "plan");
 }
 
 /// A rejection settles the waiter of its own request id, not another request
@@ -1303,18 +1308,19 @@ async fn a_codex_native_fork_binds_the_child_to_the_forked_thread() {
             &id,
             Command::Fork {
                 target: child.clone(),
-                through_run: run,
+                source: agent_domain::SourcePoint::Run(run),
                 title: None,
             },
         )
         .await;
     assert_eq!(reply, Reply::Thread(child.clone()));
     rig.drain().await;
-    let fork = rig
-        .host
-        .process(0)
-        .written()
-        .into_iter()
+    // T3 forks natively when the child sends its first message.
+    rig.send(&child, "child", DispatchMode::StartImmediately)
+        .await;
+    rig.drain().await;
+    let fork = (0..rig.host.spawned())
+        .flat_map(|index| rig.host.process(index).written())
         .find(|frame| frame["method"] == "thread/fork")
         .unwrap();
     assert_eq!(fork["params"]["threadId"], "native-thread");
@@ -1326,7 +1332,7 @@ async fn a_codex_native_fork_binds_the_child_to_the_forked_thread() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_rejected_codex_fork_still_creates_the_child_with_portable_context() {
+async fn a_rejected_codex_fork_fails_the_childs_first_run() {
     let rig = rig(SessionOptions::default(), 5);
     let id = thread("thread-fork-rejected");
     rig.codex_turn(&id).await;
@@ -1346,16 +1352,21 @@ async fn a_rejected_codex_fork_still_creates_the_child_with_portable_context() {
         &id,
         Command::Fork {
             target: child.clone(),
-            through_run: run,
+            source: agent_domain::SourcePoint::Run(run),
             title: None,
         },
     )
     .await;
     rig.drain().await;
+    assert!(rig.state(&child).await.thread.is_some());
+    rig.send(&child, "child", DispatchMode::StartImmediately)
+        .await;
+    rig.drain().await;
+    // T3 ProviderTurnStartService.ts: the failed fork fails the run.
     let state = rig.state(&child).await;
-    assert!(state.thread.is_some());
+    assert_eq!(state.runs[0].status, RunStatus::Failed);
     assert!(state.native_sessions.is_empty());
-    assert!(rig.state(&id).await.pending_forks.is_empty());
+    assert!(state.transfers[0].delivery.is_none());
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1393,11 +1404,14 @@ async fn a_claude_native_fork_copies_the_transcript_through_the_head() {
         &id,
         Command::Fork {
             target: child.clone(),
-            through_run: run,
+            source: agent_domain::SourcePoint::Run(run),
             title: None,
         },
     )
     .await;
+    rig.drain().await;
+    rig.send(&child, "child", DispatchMode::StartImmediately)
+        .await;
     rig.drain().await;
     let forked = rig
         .state(&child)
@@ -2172,25 +2186,40 @@ async fn a_new_claude_session_is_bound_before_its_prompt_is_sent() {
     assert_eq!(*observed.lock().unwrap(), Some(session));
 }
 
-// The forked Claude session is reserved by the source thread before its
-// transcript is written.
+// The forked Claude session is reserved by the consuming child thread before
+// its transcript is written.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_claude_fork_reserves_its_session_before_writing_the_transcript() {
     let rig = rig(SessionOptions::default(), 5);
     rig.host.respond(claude_replies);
     let id = thread("thread-claude-fork-reserve");
-    let process = rig.claude_turn(&id, RuntimeMode::FullAccess).await;
+    rig.create(
+        &id,
+        selection(Driver::Claude, "claude-sonnet-4-6"),
+        RuntimeMode::FullAccess,
+    )
+    .await;
+    rig.send(&id, "first", DispatchMode::StartImmediately).await;
+    rig.drain().await;
+    let process = rig.host.process(0);
     let session = process.request.claude.clone().unwrap().new_session.unwrap();
+    let prompt = process.written()[1]["uuid"].as_str().unwrap().to_owned();
+    process.emit(json!({"type":"system","subtype":"init","session_id":session,"uuid":"init-1"}));
+    process.emit(json!({"type":"user","uuid":prompt,"session_id":session,"message":{"role":"user","content":"first"}}));
+    process.emit(json!({"type":"assistant","uuid":"a-1","session_id":session,"message":{"id":"m-1","role":"assistant","model":"claude-sonnet-4-6","content":[{"type":"text","text":"done"}]}}));
+    process.emit(json!({"type":"result","subtype":"success","is_error":false,"num_turns":1,"result":"done","session_id":session,"uuid":"r-1"}));
+    rig.until_status(&id, RunStatus::Completed).await;
+    let lines = [
+        json!({"type":"user","uuid":prompt,"parentUuid":null,"sessionId":session,"message":{"role":"user","content":"first"},"timestamp":"2026-10-06T00:00:00Z"}),
+        json!({"type":"assistant","uuid":"a-1","parentUuid":prompt,"sessionId":session,"message":{"role":"assistant","content":[{"type":"text","text":"done"}]},"timestamp":"2026-10-06T00:00:01Z"}),
+    ];
     rig.host.transcripts.lock().unwrap().insert(
         session.clone(),
-        format!(
-            "{}\n",
-            json!({"type":"user","uuid":"u-1","parentUuid":null,"sessionId":session,"message":{"role":"user","content":"first"},"timestamp":"2026-10-06T00:00:00Z"})
-        ),
+        lines.iter().map(|line| format!("{line}\n")).collect(),
     );
     let child = thread("thread-claude-fork-reserve-child");
     let owners = Arc::new(Mutex::new(vec![]));
-    let (store, seen, other) = (rig.store.clone(), owners.clone(), child.clone());
+    let (store, seen, other) = (rig.store.clone(), owners.clone(), id.clone());
     *rig.host.before_session_write.lock().unwrap() = Some(Arc::new(move |session: &str| {
         let owner = store
             .read(|c| crate::store::native_session_owner(c, session, &other))
@@ -2202,13 +2231,16 @@ async fn a_claude_fork_reserves_its_session_before_writing_the_transcript() {
         &id,
         Command::Fork {
             target: child.clone(),
-            through_run: run,
+            source: agent_domain::SourcePoint::Run(run),
             title: None,
         },
     )
     .await;
     rig.drain().await;
-    assert_eq!(*owners.lock().unwrap(), [Some(id.clone())]);
+    rig.send(&child, "child", DispatchMode::StartImmediately)
+        .await;
+    rig.drain().await;
+    assert_eq!(*owners.lock().unwrap(), [Some(child.clone())]);
     assert!(
         rig.state(&child)
             .await

@@ -383,6 +383,8 @@ async fn reads_history_pages_and_single_items_from_the_actor() {
             mode: DispatchMode::StartImmediately,
             intent: None,
             source_plan: None,
+            resolved_plan: None,
+            continuation: None,
         }),
     )
     .await;
