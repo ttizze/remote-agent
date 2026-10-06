@@ -326,6 +326,31 @@ impl CodexProtocol {
             ..Translation::default()
         }
     }
+    /// Ends the route's root turn as interrupted when the app-server did not
+    /// (T3 finalizeRemainingInterruptLineage after its interrupt timeout).
+    pub fn abandon_turn(&mut self, route: &str) -> Translation {
+        let mut output = Translation {
+            route: Some(route.into()),
+            ..Translation::default()
+        };
+        let thread = self.native_thread(route).map(str::to_owned);
+        if let Some(thread) = thread
+            && let Some(turn) = self.turns.get(&thread).cloned()
+        {
+            let completed = json!({"method":"turn/completed","params":{"threadId":thread,"turn":{"id":turn,"status":"interrupted"}}});
+            output.events = self
+                .receive(&completed)
+                .map(|translation| translation.events)
+                .unwrap_or_default();
+        } else if self.turn_in_flight(route) {
+            self.pending.retain(|_, (owner, _)| owner != route);
+            output.events.push(ProviderEvent::TurnFinished {
+                status: RunStatus::Interrupted,
+                native_head: None,
+            });
+        }
+        output
+    }
     /// Image bytes are prepared by the resource owner; paths are never sent.
     pub fn command(
         &mut self,

@@ -97,10 +97,11 @@ pub(crate) struct Ran {
 }
 pub(crate) enum Mail {
     Run(Run),
-    /// Answered once no root turn of another attempt of the thread is in flight.
+    /// Answered once no root turn of the thread is in flight, other than one
+    /// of `attempt`.
     Settled {
         thread: ThreadId,
-        attempt: RunAttemptId,
+        attempt: Option<RunAttemptId>,
         done: oneshot::Sender<()>,
     },
     /// The thread no longer uses this process; its late output still reaches it.
@@ -268,7 +269,7 @@ impl Task {
                     done,
                 })) => {
                     let member = self.members.entry(thread).or_default();
-                    if member.owner.as_ref() == Some(&attempt) {
+                    if attempt.is_some() && member.owner == attempt {
                         let _ = done.send(());
                     } else {
                         member.settled.push(done);

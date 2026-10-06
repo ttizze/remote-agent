@@ -873,6 +873,32 @@ impl SessionManager {
             }
             Err(_) => tracing::warn!(%thread, "interrupting a detached thread timed out"),
         }
+        // T3 waits for the interrupted turn and then finalizes it itself, so
+        // the run ends even when the app-server never reports it.
+        let (done, settled) = oneshot::channel();
+        let sent = entry.mail.send(Mail::Settled {
+            thread: thread.clone(),
+            attempt: None,
+            done,
+        });
+        if sent.is_ok()
+            && !matches!(
+                tokio::time::timeout(self.options.interrupt_timeout, settled).await,
+                Ok(Ok(()))
+            )
+        {
+            tracing::warn!(%thread, "a detached thread's turn did not finish after its interrupt");
+            let route = thread.as_str().to_owned();
+            if let Err(error) = self
+                .send(
+                    entry,
+                    Request::new(thread, move |p| Ok(p.codex()?.abandon_turn(&route))),
+                )
+                .await
+            {
+                tracing::warn!(%thread, %error, "could not end a detached thread's turn");
+            }
+        }
         let detached = {
             let mut members = entry.members.lock().expect("session members");
             members.attached.remove(thread).is_some()
@@ -1054,7 +1080,7 @@ impl SessionManager {
             .mail
             .send(Mail::Settled {
                 thread: thread.clone(),
-                attempt: attempt.clone(),
+                attempt: Some(attempt.clone()),
                 done,
             })
             .map_err(|_| Failure::Gone)?;

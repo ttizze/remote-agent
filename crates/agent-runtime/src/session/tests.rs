@@ -610,7 +610,7 @@ async fn a_stopped_provider_commits_its_last_frames_then_releases_the_session() 
 // "terminal detach revokes the thread's MCP credential".
 #[tokio::test(flavor = "multi_thread")]
 async fn configures_before_spawning_and_revokes_credentials_on_detach() {
-    let rig = rig(SessionOptions::default(), 5);
+    let rig = rig(short_interrupt(), 5);
     let id = thread("thread-credentials");
     rig.codex_turn(&id).await;
     let log = rig.host.logged();
@@ -2596,13 +2596,16 @@ async fn a_shared_app_server_stays_while_any_thread_runs() {
 // app-server keeps serving the other thread. Only a terminal detach revokes.
 #[tokio::test(flavor = "multi_thread")]
 async fn detaching_from_the_shared_app_server_interrupts_and_unloads_only_that_thread() {
-    let rig = rig(SessionOptions::default(), 5);
+    let rig = rig(short_interrupt(), 5);
     rig.host.respond(shared_replies);
     let (a, b) = (thread("thread-detach-a"), thread("thread-detach-b"));
     let (native_a, turn_a) = rig.shared_turn(&a).await;
     rig.shared_turn(&b).await;
     let process = rig.host.process(0);
     rig.sessions.detach(&a, false).await;
+    // T3 finalizes a turn its app-server did not end after the interrupt.
+    rig.until_status(&a, RunStatus::Interrupted).await;
+    assert_eq!(rig.run_status(&b).await, RunStatus::Running);
     let interrupts = written_methods(&process, "turn/interrupt");
     assert_eq!(interrupts.len(), 1);
     assert_eq!(interrupts[0]["params"]["threadId"], native_a.as_str());
@@ -2627,6 +2630,42 @@ async fn detaching_from_the_shared_app_server_interrupts_and_unloads_only_that_t
     rig.sessions.detach(&b, true).await;
     assert!(rig.host.logged().contains(&format!("revoked:{b}:*")));
     assert!(rig.sessions.sessions().is_empty());
+}
+
+fn short_interrupt() -> SessionOptions {
+    SessionOptions {
+        interrupt_timeout: Duration::from_millis(300),
+        ..SessionOptions::default()
+    }
+}
+
+// T3 interruptThread awaits the interrupted turn before the thread lets go of
+// the app-server, so the turn's own completion is recorded.
+#[tokio::test(flavor = "multi_thread")]
+async fn detaching_from_the_shared_app_server_waits_for_the_interrupted_turn() {
+    let rig = rig(SessionOptions::default(), 5);
+    rig.host.respond(shared_replies);
+    let (a, b) = (
+        thread("thread-detach-wait-a"),
+        thread("thread-detach-wait-b"),
+    );
+    let (native_a, turn_a) = rig.shared_turn(&a).await;
+    rig.shared_turn(&b).await;
+    let process = rig.host.process(0);
+    let (sessions, detached) = (rig.sessions.clone(), a.clone());
+    let detach = tokio::spawn(async move { sessions.detach(&detached, false).await });
+    rig.until("the interrupt is sent", async || {
+        !written_methods(&process, "turn/interrupt").is_empty()
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(written_methods(&process, "thread/unsubscribe").is_empty());
+    complete(&process, &native_a, &turn_a, "stopped here");
+    detach.await.unwrap();
+    assert_eq!(written_methods(&process, "thread/unsubscribe").len(), 1);
+    rig.until("a settles", async || rig.run_status(&a).await.terminal())
+        .await;
+    assert_eq!(replies(&*rig.state(&a).await), ["stopped here"]);
 }
 
 // T3 CodexAdapterV2 resolveRuntime: a new app-server runs as the selected
