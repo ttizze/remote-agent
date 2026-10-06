@@ -59,16 +59,6 @@ pub enum FactBody {
         id: NodeId,
         title: String,
     },
-    ForkPrepared {
-        command: CommandId,
-        target: ThreadId,
-        child_command: Box<Command>,
-        instance: String,
-        head: Option<String>,
-    },
-    ForkResolved {
-        command: CommandId,
-    },
     NativeSessionBound {
         instance: String,
         native_thread: String,
@@ -385,12 +375,13 @@ pub enum FactBody {
         messages: Vec<Message>,
     },
     TransferOpened {
-        native_fork: Option<String>,
+        native_source: Option<NativeBinding>,
         id: ContextTransferId,
         kind: TransferKind,
         source: ThreadId,
         target: ThreadId,
-        instance: String,
+        instance: Option<String>,
+        target_run: Option<RunId>,
         boundary: u64,
         history: HistoricalContext,
     },
@@ -559,26 +550,6 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
 
         TaskNamed { id, title } => {
             find_mut(&mut state.tasks, "task", |t| &t.id == id)?.title = Some(title.clone())
-        }
-        ForkPrepared {
-            command,
-            target,
-            child_command,
-            instance,
-            head,
-        } => {
-            state.pending_forks.insert(
-                command.clone(),
-                PendingFork {
-                    target: target.clone(),
-                    child_command: child_command.clone(),
-                    instance: instance.clone(),
-                    head: head.clone(),
-                },
-            );
-        }
-        ForkResolved { command } => {
-            state.pending_forks.remove(command);
         }
         NativeSessionBound {
             instance,
@@ -1367,12 +1338,13 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
             state.inherited_messages = messages.clone();
         }
         TransferOpened {
-            native_fork,
+            native_source,
             id,
             kind,
             source,
             target,
             instance,
+            target_run,
             boundary,
             history,
         } => {
@@ -1397,12 +1369,13 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
                 }
             }
             state.transfers.push(Transfer {
-                native_fork: native_fork.clone(),
+                native_source: native_source.clone(),
                 id: id.clone(),
                 kind: *kind,
                 source: source.clone(),
                 target: target.clone(),
                 instance: instance.clone(),
+                target_run: target_run.clone(),
                 boundary: *boundary,
                 history: history.clone(),
                 delivery: None,
@@ -1410,10 +1383,18 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
             });
         }
         TransferDeliveryChanged { id, delivery } => {
-            find_mut(&mut state.transfers, "transfer", |transfer| {
+            let instance = state
+                .runs
+                .iter()
+                .find(|run| run.id == delivery.run)
+                .map(|run| run.selection.instance.clone());
+            let transfer = find_mut(&mut state.transfers, "transfer", |transfer| {
                 &transfer.id == id
-            })?
-            .delivery = Some(delivery.clone());
+            })?;
+            transfer.delivery = Some(delivery.clone());
+            if transfer.instance.is_none() {
+                transfer.instance = instance;
+            }
         }
         TaskNativeBound { id, native_task } => {
             find_mut(&mut state.tasks, "task", |t| &t.id == id)?.native_task =

@@ -361,7 +361,7 @@ fn registered_kinds_are_the_outbox_kinds_of_the_effects() {
     assert_eq!(kinds, PROCESS_BOUND_PROVIDER_KINDS);
     assert_eq!(
         effect_kind(&EffectBody::ForkNative {
-            command: CommandId::new("c").unwrap(),
+            instance: "codex".into(),
             provider: ProviderCommand::Fork {
                 native_thread: "t".into(),
                 through_turn: None,
@@ -1299,18 +1299,19 @@ async fn a_codex_native_fork_binds_the_child_to_the_forked_thread() {
             &id,
             Command::Fork {
                 target: child.clone(),
-                through_run: run,
+                source: agent_domain::SourcePoint::Run(run),
                 title: None,
             },
         )
         .await;
     assert_eq!(reply, Reply::Thread(child.clone()));
     rig.drain().await;
-    let fork = rig
-        .host
-        .process(0)
-        .written()
-        .into_iter()
+    // T3 forks natively when the child sends its first message.
+    rig.send(&child, "child", DispatchMode::StartImmediately)
+        .await;
+    rig.drain().await;
+    let fork = (0..rig.host.spawned())
+        .flat_map(|index| rig.host.process(index).written())
         .find(|frame| frame["method"] == "thread/fork")
         .unwrap();
     assert_eq!(fork["params"]["threadId"], "native-thread");
@@ -1322,7 +1323,7 @@ async fn a_codex_native_fork_binds_the_child_to_the_forked_thread() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_rejected_codex_fork_still_creates_the_child_with_portable_context() {
+async fn a_rejected_codex_fork_fails_the_childs_first_run() {
     let rig = rig(SessionOptions::default(), 5);
     let id = thread("thread-fork-rejected");
     rig.codex_turn(&id).await;
@@ -1342,16 +1343,21 @@ async fn a_rejected_codex_fork_still_creates_the_child_with_portable_context() {
         &id,
         Command::Fork {
             target: child.clone(),
-            through_run: run,
+            source: agent_domain::SourcePoint::Run(run),
             title: None,
         },
     )
     .await;
     rig.drain().await;
+    assert!(rig.state(&child).await.thread.is_some());
+    rig.send(&child, "child", DispatchMode::StartImmediately)
+        .await;
+    rig.drain().await;
+    // T3 ProviderTurnStartService.ts: the failed fork fails the run.
     let state = rig.state(&child).await;
-    assert!(state.thread.is_some());
+    assert_eq!(state.runs[0].status, RunStatus::Failed);
     assert!(state.native_sessions.is_empty());
-    assert!(rig.state(&id).await.pending_forks.is_empty());
+    assert!(state.transfers[0].delivery.is_none());
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1389,11 +1395,14 @@ async fn a_claude_native_fork_copies_the_transcript_through_the_head() {
         &id,
         Command::Fork {
             target: child.clone(),
-            through_run: run,
+            source: agent_domain::SourcePoint::Run(run),
             title: None,
         },
     )
     .await;
+    rig.drain().await;
+    rig.send(&child, "child", DispatchMode::StartImmediately)
+        .await;
     rig.drain().await;
     let forked = rig
         .state(&child)

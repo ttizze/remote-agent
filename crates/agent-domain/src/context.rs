@@ -363,12 +363,12 @@ pub fn combine_handoffs(
     budget: usize,
 ) -> Result<HistoricalContext, &'static str> {
     let strategy = |kind| match kind {
-        TransferKind::Fork => "manual_context",
+        TransferKind::Fork => "full_thread_summary",
         TransferKind::MergeBack => "merge_back / fork_delta_summary",
         TransferKind::ProviderHandoff => "full_thread_summary",
         TransferKind::ProviderHandoffDelta => "delta_since_target_last_seen",
         TransferKind::SubagentSpawn => "subagent_spawn",
-        TransferKind::SubagentResult => "subagent_result",
+        TransferKind::SubagentResult => "manual_context",
     };
     let mut coverage = transfers
         .iter()
@@ -740,12 +740,13 @@ mod tests {
     }
     fn transfer(id: &str, messages: Vec<HistoricalMessage>) -> Transfer {
         Transfer {
-            native_fork: None,
+            native_source: None,
+            target_run: None,
             id: ContextTransferId::new(id).unwrap(),
             kind: TransferKind::ProviderHandoff,
             source: ThreadId::new("source").unwrap(),
             target: ThreadId::new("thread:handoff").unwrap(),
-            instance: "codex".into(),
+            instance: Some("codex".into()),
             boundary: 1,
             history: HistoricalContext {
                 messages,

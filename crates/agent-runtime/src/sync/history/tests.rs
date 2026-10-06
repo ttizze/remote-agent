@@ -632,8 +632,9 @@ fn omits_historical_control_details_that_remain_available_from_history_items() {
         .collect();
     populated.transfers = (0..120)
         .map(|index| agent_domain::Transfer {
-            native_fork: None,
-            instance: "codex".into(),
+            native_source: None,
+            instance: Some("codex".into()),
+            target_run: None,
             delivery: None,
             id: agent_domain::ContextTransferId::new(format!("handoff-{index}")).unwrap(),
             kind: TransferKind::ProviderHandoff,

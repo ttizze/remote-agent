@@ -489,8 +489,14 @@ impl Task {
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Transfer {
-    pub native_fork: Option<String>,
-    pub instance: String,
+    /// A fork's source native thread and boundary, forked natively when the
+    /// consuming turn runs on the same instance.
+    pub native_source: Option<NativeBinding>,
+    /// The provider instance it is for; a fork or merge-back takes the
+    /// instance of the turn that consumes it.
+    pub instance: Option<String>,
+    /// The run a delegated result was handed to (T3 targetRunId).
+    pub target_run: Option<RunId>,
     pub delivery: Option<ContextDelivery>,
     pub id: ContextTransferId,
     pub kind: TransferKind,
@@ -519,13 +525,6 @@ pub struct PendingRollback {
     /// Provider instances whose native history the rollback may already have
     /// rewound; a failed rollback resets their native sessions.
     pub rewinding: BTreeSet<String>,
-}
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct PendingFork {
-    pub target: ThreadId,
-    pub child_command: Box<Command>,
-    pub instance: String,
-    pub head: Option<String>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NativeBinding {
@@ -609,7 +608,6 @@ pub struct State {
     pub background_work: BTreeMap<String, BackgroundWork>,
     pub wake_reports: Vec<WakeReport>,
     pub prompt_ordinal: u64,
-    pub pending_forks: BTreeMap<CommandId, PendingFork>,
     pub native_sessions: BTreeMap<String, String>,
     pub handoff_token_cap: Option<u64>,
     pub context_windows: BTreeMap<String, u64>,
@@ -672,25 +670,27 @@ impl State {
     pub fn activity_items(&self) -> Vec<std::borrow::Cow<'_, Item>> {
         self.visible_items()
             .into_iter()
-            .map(|item| {
-                if let ItemKind::UserMessage { message } = &item.kind
-                    && let Some(notification) = self
-                        .messages
-                        .iter()
-                        .find(|candidate| &candidate.id == message)
-                        .and_then(|message| message.notification.as_ref())
-                {
-                    let mut item = item.clone();
-                    item.kind = ItemKind::Notification {
-                        notification: notification.clone(),
-                    };
-                    item.text.clear();
-                    std::borrow::Cow::Owned(item)
-                } else {
-                    std::borrow::Cow::Borrowed(item)
-                }
-            })
+            .map(|item| self.notification_card(item))
             .collect()
+    }
+    /// A user item that carries a notification shows as its notification card.
+    pub fn notification_card<'a>(&self, item: &'a Item) -> std::borrow::Cow<'a, Item> {
+        if let ItemKind::UserMessage { message } = &item.kind
+            && let Some(notification) = self
+                .messages
+                .iter()
+                .find(|candidate| &candidate.id == message)
+                .and_then(|message| message.notification.as_ref())
+        {
+            let mut item = item.clone();
+            item.kind = ItemKind::Notification {
+                notification: notification.clone(),
+            };
+            item.text.clear();
+            std::borrow::Cow::Owned(item)
+        } else {
+            std::borrow::Cow::Borrowed(item)
+        }
     }
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -716,6 +716,13 @@ pub enum DispatchMode {
     RestartActive { run: RunId },
 }
 values! { DeliveryIntent { Auto, Steer, Restart } }
+/// T3 thread fork and merge-back source points.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SourcePoint {
+    LatestStable,
+    Run(RunId),
+    Checkpoint(CheckpointId),
+}
 values! { PreparationPhase { Worktree, Setup } }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Command {
@@ -846,9 +853,10 @@ pub enum Command {
     },
     Fork {
         target: ThreadId,
-        through_run: RunId,
+        source: SourcePoint,
         title: Option<String>,
     },
+    /// `native` is the source's native thread and boundary, if it has one.
     AcceptFork {
         thread: ThreadId,
         parent: ThreadId,
@@ -861,13 +869,13 @@ pub enum Command {
         history: Vec<Item>,
         messages: Vec<Message>,
         workspace: Option<Workspace>,
+        arrangement: Box<ThreadArrangement>,
         context: HistoricalContext,
         native: Option<NativeBinding>,
     },
-    /// Without `through_run`, the latest completed run is the boundary.
     MergeBack {
         target: ThreadId,
-        through_run: Option<RunId>,
+        source: SourcePoint,
     },
     AcceptTransfer {
         id: ContextTransferId,
@@ -1243,8 +1251,9 @@ pub struct Effect {
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum EffectBody {
+    /// Forks a source native thread for the attempt that consumes a fork.
     ForkNative {
-        command: CommandId,
+        instance: String,
         provider: ProviderCommand,
     },
     Provider(ProviderCommand),
@@ -1301,11 +1310,11 @@ pub struct RestoreFiles {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum EffectResult {
     NativeForked {
-        command: CommandId,
+        attempt: RunAttemptId,
         native_thread: String,
     },
     ForkFailed {
-        command: CommandId,
+        attempt: RunAttemptId,
         message: String,
     },
     ProviderFailed {

@@ -6,8 +6,11 @@ struct GraphReplay {
     replay: Replay,
     roots: BTreeMap<String, ThreadId>,
     requests: BTreeMap<u64, (ThreadId, String)>,
-    forks: BTreeMap<u64, (ThreadId, CommandId, ThreadId)>,
-    claude_fork: Option<(ThreadId, CommandId, ThreadId)>,
+    forks: BTreeMap<u64, ThreadId>,
+    claude_fork: Option<ThreadId>,
+    /// Forks whose child has not sent its first message: the recorded boundary
+    /// and, once the provider answered, the forked native thread.
+    unconsumed: BTreeMap<ThreadId, (Option<String>, Option<String>)>,
     fork_order: Vec<ThreadId>,
     merges: usize,
 }
@@ -19,6 +22,7 @@ impl GraphReplay {
             requests: BTreeMap::new(),
             forks: BTreeMap::new(),
             claude_fork: None,
+            unconsumed: BTreeMap::new(),
             fork_order: vec![],
             merges: 0,
         }
@@ -92,7 +96,8 @@ impl GraphReplay {
             assert_eq!(reply, Reply::Accepted);
         }
     }
-    fn fork(&mut self, parent: ThreadId, head: Option<&str>) -> (ThreadId, CommandId, ThreadId) {
+    /// T3 creates the fork at once; the child's first message forks natively.
+    fn fork(&mut self, parent: ThreadId, head: Option<&str>) -> ThreadId {
         self.capture();
         self.select(&parent);
         let state = self.replay.state();
@@ -114,17 +119,31 @@ impl GraphReplay {
             .id
             .clone();
         let target = ThreadId::new(format!("fork-{}", self.fork_order.len())).unwrap();
+        let forks = self.replay.native_forks.len();
         let reply = self.replay.command(
             &parent,
             Command::Fork {
                 target: target.clone(),
-                through_run: through,
+                source: SourcePoint::Run(through),
                 title: Some("Forked thread".into()),
             },
         );
         assert_eq!(reply, Reply::Thread(target.clone()));
-        let (_, command, provider) = self.replay.native_forks.last().unwrap();
-        let command = command.clone();
+        assert_eq!(self.replay.native_forks.len(), forks);
+        self.unconsumed
+            .insert(target.clone(), (head.map(str::to_owned), None));
+        self.fork_order.push(target.clone());
+        target
+    }
+    /// The child's first message resolved the fork natively at the recorded boundary.
+    fn consume_fork(&mut self, child: &ThreadId) {
+        let Some((head, Some(native))) = self.unconsumed.remove(child) else {
+            return;
+        };
+        let head = head.as_deref();
+        let (thread, attempt, provider) = self.replay.native_forks.last().unwrap().clone();
+        assert_eq!(&thread, child);
+        let provider = &provider;
         assert!(
             matches!(provider,ProviderCommand::Fork{through_turn,..} if head.is_none_or(|head|through_turn.as_deref()==Some(head)))
         );
@@ -144,22 +163,20 @@ impl GraphReplay {
                 assert_eq!(wire[0]["params"]["lastTurnId"], head);
             }
         }
-        self.fork_order.push(target.clone());
-        (parent, command, target)
-    }
-    fn forked(&mut self, pending: (ThreadId, CommandId, ThreadId), native: String) {
-        let (parent, command, target) = pending;
         assert_eq!(
             self.replay.apply(
-                &parent,
+                child,
                 Input::Effect(EffectResult::NativeForked {
-                    command,
-                    native_thread: native.clone()
+                    attempt,
+                    native_thread: native,
                 })
             ),
             Reply::Accepted
         );
-        self.roots.insert(native, target.clone());
+    }
+    fn forked(&mut self, child: ThreadId, native: String) {
+        self.unconsumed.get_mut(&child).unwrap().1 = Some(native.clone());
+        self.roots.insert(native, child);
     }
     fn rollback_to(&mut self, thread: &ThreadId, head: Option<&str>) {
         self.capture();
@@ -300,7 +317,7 @@ impl GraphReplay {
                         &source,
                         Command::MergeBack {
                             target: thread.clone(),
-                            through_run: None,
+                            source: SourcePoint::LatestStable,
                         }
                     ),
                     Reply::Accepted
@@ -310,6 +327,7 @@ impl GraphReplay {
                 text
             };
             self.replay.send(text, false);
+            self.consume_fork(&thread);
             if self.replay.driver == Driver::Codex {
                 let owner = self.replay.owner.clone().unwrap();
                 self.replay.apply(

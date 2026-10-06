@@ -78,9 +78,15 @@ impl EffectHandler for SessionEffects {
                     )
                     .await
                     .map(|()| None),
-                EffectBody::ForkNative { command, provider } => {
+                EffectBody::ForkNative { instance, provider } => {
                     self.sessions
-                        .fork_native(&job.thread, &job.effect.id, command, provider)
+                        .fork_native(
+                            &job.thread,
+                            &job.effect.id,
+                            job.effect.attempt.as_ref(),
+                            instance,
+                            provider,
+                        )
                         .await
                 }
                 EffectBody::DetachSessions {
@@ -125,8 +131,8 @@ impl EffectHandler for SessionEffects {
                 turn_completed: false,
                 session_lost: false,
             }),
-            EffectBody::ForkNative { command, .. } => Some(EffectResult::ForkFailed {
-                command: command.clone(),
+            EffectBody::ForkNative { .. } => Some(EffectResult::ForkFailed {
+                attempt: effect.attempt.clone()?,
                 message: error.into(),
             }),
             _ => None,

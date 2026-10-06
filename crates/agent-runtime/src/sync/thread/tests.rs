@@ -23,12 +23,13 @@ fn head(global_seq: u64) -> ThreadHead {
 }
 fn transfer_opened(transcript: String) -> FactBody {
     FactBody::TransferOpened {
-        native_fork: None,
+        native_source: None,
         id: ContextTransferId::new("handoff:wire").unwrap(),
         kind: TransferKind::ProviderHandoff,
         source: thread_id(),
         target: thread_id(),
-        instance: "codex".into(),
+        instance: Some("codex".into()),
+        target_run: None,
         boundary: 1,
         history: HistoricalContext {
             messages: vec![],
@@ -221,66 +222,6 @@ fn keeps_copied_handoff_transcripts_out_of_activity_items_and_live_events() {
     assert!(!contains(&client_facts(&live)));
     assert!(contains(&live));
     assert!(contains(&state));
-}
-
-fn fork_prepared(transcript: &str) -> FactBody {
-    let mut inherited = command_rows(1).items;
-    inherited[0].text = transcript.into();
-    FactBody::ForkPrepared {
-        command: CommandId::new("fork:wire").unwrap(),
-        target: ThreadId::new("thread:fork").unwrap(),
-        child_command: Box::new(Command::AcceptFork {
-            thread: ThreadId::new("thread:fork").unwrap(),
-            parent: thread_id(),
-            project: "project-1".into(),
-            title: "Fork".into(),
-            selection: selection(),
-            runtime_mode: RuntimeMode::FullAccess,
-            interaction_mode: InteractionMode::Default,
-            boundary: 1,
-            history: inherited,
-            messages: vec![],
-            workspace: None,
-            context: HistoricalContext {
-                messages: vec![],
-                context: transcript.into(),
-                omitted_items: 0,
-                omitted_item_ids: vec![],
-            },
-            native: None,
-        }),
-        instance: "codex".into(),
-        head: Some("native-head".into()),
-    }
-}
-
-#[test]
-fn keeps_pinned_fork_transcripts_out_of_client_facts_and_snapshots() {
-    let transcript = "PRIVATE_FORK_TRANSCRIPT";
-    let mut state = command_rows(3);
-    fold_into(&mut state, fork_prepared(transcript));
-    let state = Arc::new(state);
-    let contains = |value: &dyn erased::Json| value.json().contains(transcript);
-
-    for bounded in [false, true] {
-        let snapshot = ThreadSnapshot::build(&state, head(4), bounded).state;
-        assert!(!contains(&snapshot));
-        let fork = snapshot.pending_forks.values().next().unwrap();
-        assert_eq!(fork.target.as_str(), "thread:fork");
-        assert_eq!(fork.head.as_deref(), Some("native-head"));
-    }
-    let live = stored(4, fork_prepared(transcript));
-    let projected = client_facts(&live);
-    assert!(!contains(&projected));
-    assert!(contains(&live));
-    assert!(contains(&state));
-    // Clients fold the projected fact to the same pending fork, minus the transcript.
-    let mut client = command_rows(3);
-    fold_into(&mut client, projected[0].fact.body.clone());
-    assert_eq!(
-        Arc::new(client).pending_forks,
-        client_state(&state).pending_forks
-    );
 }
 
 mod erased {

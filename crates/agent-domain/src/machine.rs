@@ -253,7 +253,7 @@ impl Decision {
         let boundary = latest.map_or(0, |latest| latest.ordinal);
         if self.state.transfers.iter().any(|transfer| {
             !transfer.superseded
-                && transfer.instance == target_run.selection.instance
+                && transfer.instance.as_deref() == Some(target_run.selection.instance.as_str())
                 && matches!(
                     transfer.kind,
                     TransferKind::ProviderHandoff | TransferKind::ProviderHandoffDelta
@@ -305,7 +305,8 @@ impl Decision {
         }
         let thread = self.state.thread.as_ref().unwrap().id.clone();
         self.fact(FactBody::TransferOpened {
-            native_fork: None,
+            native_source: None,
+            target_run: None,
             id: ContextTransferId::new(self.key("provider-handoff", target_run.id.as_str()))
                 .unwrap(),
             kind: if native_thread.is_some() {
@@ -316,7 +317,7 @@ impl Decision {
             source: thread.clone(),
             target: thread,
             boundary,
-            instance: target_run.selection.instance.clone(),
+            instance: Some(target_run.selection.instance.clone()),
             history: prepare_history(&self.state, &items, boundary),
         });
     }
@@ -348,7 +349,7 @@ impl Decision {
             .state
             .transfers
             .iter()
-            .filter(|transfer| &transfer.instance == instance)
+            .filter(|transfer| transfer.instance.as_ref() == Some(instance))
             .filter_map(|transfer| transfer.delivery.as_ref())
             .filter(|delivery| {
                 delivery.native_thread.as_deref() == Some(native)
@@ -372,7 +373,7 @@ impl Decision {
         if items.is_empty()
             || self.state.transfers.iter().any(|transfer| {
                 !transfer.superseded
-                    && &transfer.instance == instance
+                    && transfer.instance.as_ref() == Some(instance)
                     && transfer.kind == TransferKind::ProviderHandoffDelta
                     && transfer.boundary == boundary
                     && transfer.delivery.is_none()
@@ -382,17 +383,25 @@ impl Decision {
         }
         let thread = self.state.thread.as_ref().unwrap().id.clone();
         self.fact(FactBody::TransferOpened {
-            native_fork: None,
+            native_source: None,
+            target_run: None,
             id: ContextTransferId::new(self.key("missed-inputs", target_run.id.as_str())).unwrap(),
             kind: TransferKind::ProviderHandoffDelta,
             source: thread.clone(),
             target: thread,
             boundary,
-            instance: instance.clone(),
+            instance: Some(instance.clone()),
             history: prepare_history(&self.state, &items, boundary),
         });
     }
     fn start_run(&mut self, id: &RunId) {
+        // T3 consumes fork and merge-back transfers only on a direct dispatch,
+        // never when a queued run starts.
+        let direct = self
+            .state
+            .runs
+            .iter()
+            .any(|r| &r.id == id && r.status != RunStatus::Queued);
         let checkpoint_scope = self
             .state
             .runs
@@ -444,6 +453,19 @@ impl Decision {
             }
             return;
         }
+        self.dispatch_start(id, &attempt, direct);
+    }
+    /// Sends a started attempt to its provider, after a native fork when the
+    /// run resolves a pending fork on the source's provider.
+    fn dispatch_start(&mut self, id: &RunId, attempt: &RunAttemptId, direct: bool) {
+        let attempt = attempt.clone();
+        let run = self
+            .state
+            .runs
+            .iter()
+            .find(|run| &run.id == id)
+            .unwrap()
+            .clone();
         if self
             .state
             .thread
@@ -462,6 +484,26 @@ impl Decision {
             .find(|m| m.id == run.message)
             .unwrap()
             .clone();
+        if direct
+            && let Some(source) = self.pending_fork().and_then(|transfer| {
+                transfer
+                    .native_source
+                    .clone()
+                    .filter(|source| source.instance == run.selection.instance)
+            })
+        {
+            self.effect(
+                Some(attempt),
+                EffectBody::ForkNative {
+                    instance: run.selection.instance.clone(),
+                    provider: ProviderCommand::Fork {
+                        native_thread: source.thread,
+                        through_turn: source.head,
+                    },
+                },
+            );
+            return;
+        }
         let mut native_thread = self
             .state
             .native_sessions
@@ -471,7 +513,7 @@ impl Decision {
             && self.state.transfers.iter().any(|transfer| {
                 !transfer.superseded
                     && transfer.target == thread.id
-                    && transfer.instance == run.selection.instance
+                    && transfer.instance.as_deref() == Some(run.selection.instance.as_str())
                     && transfer.delivery.as_ref().is_some_and(|delivery| {
                         delivery.native_thread == native_thread
                             && delivery.status == ContextDeliveryStatus::Pending
@@ -492,36 +534,6 @@ impl Decision {
             &self.state.messages,
         );
         let note = (!restart_work.is_empty()).then(|| restart_background_note(&restart_work));
-        let native_forks = self
-            .state
-            .transfers
-            .iter()
-            .filter(|transfer| {
-                !transfer.superseded
-                    && transfer.instance == run.selection.instance
-                    && transfer.native_fork.is_some()
-                    && transfer.native_fork == native_thread
-                    && transfer.delivery.is_none()
-            })
-            .map(|transfer| (transfer.id.clone(), transfer.history.clone()))
-            .collect::<Vec<_>>();
-        for (id, history) in native_forks {
-            self.fact(FactBody::TransferDeliveryChanged {
-                id,
-                delivery: ContextDelivery {
-                    attempt: attempt.clone(),
-                    run: run.id.clone(),
-                    native_thread: native_thread.clone(),
-                    status: ContextDeliveryStatus::NativeFork,
-                    item_ids: history
-                        .messages
-                        .iter()
-                        .map(|message| message.item.clone())
-                        .collect(),
-                    omitted_item_ids: history.omitted_item_ids,
-                },
-            });
-        }
         // Native compaction defers portable context until the next ordinary input.
         if message.text.trim() == "/compact" {
             self.effect(
@@ -537,7 +549,7 @@ impl Decision {
             .filter(|transfer| {
                 !transfer.superseded
                     && transfer.target == thread.id
-                    && transfer.instance == run.selection.instance
+                    && consumable(&self.state, transfer, &run, direct)
                     && transfer.delivery.as_ref().is_none_or(|delivery| {
                         delivery.native_thread != native_thread
                             || delivery.status == ContextDeliveryStatus::Pending
@@ -582,7 +594,9 @@ impl Decision {
                 .state
                 .transfers
                 .iter()
-                .filter(|transfer| transfer.instance == run.selection.instance)
+                .filter(|transfer| {
+                    transfer.instance.as_deref() == Some(run.selection.instance.as_str())
+                })
                 .filter_map(|transfer| transfer.delivery.as_ref())
                 .filter(|delivery| {
                     delivery.native_thread == native_thread
@@ -1106,6 +1120,45 @@ impl Decision {
             }
         }
     }
+    /// T3 runForSourcePoint.
+    fn source_run(&self, source: &SourcePoint) -> Option<&Run> {
+        match source {
+            SourcePoint::LatestStable => latest_stable_run(&self.state),
+            SourcePoint::Run(id) => self.state.runs.iter().find(|run| &run.id == id),
+            SourcePoint::Checkpoint(id) => self
+                .state
+                .checkpoints
+                .iter()
+                .find(|checkpoint| &checkpoint.id == id)
+                .and_then(|checkpoint| checkpoint.run.as_ref())
+                .and_then(|run| {
+                    self.state
+                        .runs
+                        .iter()
+                        .find(|candidate| &candidate.id == run)
+                }),
+        }
+    }
+    /// The fork transfer no direct turn has consumed yet.
+    fn pending_fork(&self) -> Option<&Transfer> {
+        self.state.transfers.iter().find(|transfer| {
+            transfer.kind == TransferKind::Fork
+                && !transfer.superseded
+                && transfer.delivery.is_none()
+        })
+    }
+    /// The starting run waiting on a native fork from `attempt`.
+    fn awaiting_fork(&self, attempt: &RunAttemptId) -> Option<(Run, Transfer)> {
+        let run = self.state.runs.iter().find(|run| {
+            run.attempt.as_ref() == Some(attempt) && run.status == RunStatus::Starting
+        })?;
+        let transfer = self.pending_fork()?;
+        transfer
+            .native_source
+            .as_ref()
+            .filter(|source| source.instance == run.selection.instance)?;
+        Some((run.clone(), transfer.clone()))
+    }
     /// Provider instances this thread has run or holds a native session for,
     /// optionally only those of one driver.
     fn used_instances(&self, driver: Option<Driver>) -> BTreeSet<String> {
@@ -1329,6 +1382,34 @@ impl Decision {
             .selection
             .clone()
             .unwrap_or_else(|| thread.selection.clone());
+        // T3 does not consume a merge-back from the queue, and one direct turn
+        // takes merge-backs from a single fork.
+        let merge_backs = self
+            .state
+            .transfers
+            .iter()
+            .filter(|t| t.kind == TransferKind::MergeBack && !t.superseded && t.delivery.is_none())
+            .map(|t| &t.source)
+            .collect::<BTreeSet<_>>();
+        if !merge_backs.is_empty() {
+            let active = self.state.active_run();
+            let steers = matches!(
+                resolve_dispatch(
+                    active.map(|r| (&r.id, r.status)),
+                    &message.mode,
+                    message.intent,
+                    TurnSupport::for_driver(selection.driver),
+                ),
+                DispatchMode::SteerActive { run } | DispatchMode::RestartActive { run }
+                    if self.state.runs.iter().any(|r| r.id == run && r.status == RunStatus::Running)
+            );
+            if !steers && (active.is_some() || !self.state.captures.is_empty()) {
+                return reject("merge-back-pending");
+            }
+            if !steers && merge_backs.len() > 1 {
+                return reject("merge-backs-from-multiple-forks");
+            }
+        }
         let thread_selection = thread.selection.clone();
         let settled = thread.settled.is_some();
         let earlier_users = self
@@ -2886,50 +2967,47 @@ impl Decision {
             }
             Fork {
                 target,
-                through_run,
+                source,
                 title,
             } => {
-                let Some(run) = self
-                    .state
-                    .runs
-                    .iter()
-                    .find(|r| {
-                        &r.id == through_run
-                            && matches!(
-                                r.status,
-                                RunStatus::Completed
-                                    | RunStatus::Waiting
-                                    | RunStatus::Interrupted
-                                    | RunStatus::Failed
-                                    | RunStatus::Cancelled
-                            )
-                    })
-                    .cloned()
-                else {
-                    return reject("fork-source-not-ready");
+                let title = title.as_deref().map(str::trim);
+                if title.is_some_and(str::is_empty) {
+                    return reject("title-required");
+                }
+                let Some(run) = self.source_run(source).cloned() else {
+                    return reject("no-stable-source-run");
                 };
+                // T3 ThreadForkService.ts: provider-finished and unsuccessful
+                // runs fork; in-progress and rolled-back runs do not.
+                if !matches!(
+                    run.status,
+                    RunStatus::Completed
+                        | RunStatus::Waiting
+                        | RunStatus::Interrupted
+                        | RunStatus::Failed
+                        | RunStatus::Cancelled
+                ) {
+                    return reject("fork-source-not-ready");
+                }
                 let thread = self.state.thread.as_ref().unwrap().clone();
-                let inherited = self
+                // T3 ProjectionStore.ts visibleTurnItemsThroughRun inherits the
+                // source's own inheritance and its items through the boundary run,
+                // whatever those runs' status.
+                let mut history = self
                     .state
                     .inherited_items
                     .iter()
-                    .map(|item| &item.id)
-                    .collect::<std::collections::BTreeSet<_>>();
-                let history = self
-                    .state
-                    .activity_items()
-                    .into_iter()
-                    .filter(|i| {
-                        inherited.contains(&i.id)
-                            || i.run.as_ref().is_none_or(|id| {
-                                self.state
-                                    .runs
-                                    .iter()
-                                    .any(|r| &r.id == id && r.ordinal <= run.ordinal)
-                            })
-                    })
-                    .map(|item| item.into_owned())
+                    .chain(self.state.items.iter().filter(|item| {
+                        item.run.as_ref().is_none_or(|id| {
+                            self.state
+                                .runs
+                                .iter()
+                                .any(|r| &r.id == id && r.ordinal <= run.ordinal)
+                        })
+                    }))
+                    .map(|item| self.state.notification_card(item).into_owned())
                     .collect::<Vec<_>>();
+                history.sort_by(|a, b| (a.ordinal, &a.id).cmp(&(b.ordinal, &b.id)));
                 let messages = history
                     .iter()
                     .filter_map(|item| match &item.kind {
@@ -2941,33 +3019,12 @@ impl Decision {
                     })
                     .collect();
                 let context = prepare_history(&self.state, &history, run.ordinal);
-                let fork_instance = thread.selection.instance.clone();
-                let child_command = Box::new(AcceptFork {
-                    thread: target.clone(),
-                    parent: thread.id,
-                    project: thread.project,
-                    title: title
-                        .clone()
-                        .unwrap_or_else(|| format!("{} fork", thread.title)),
-                    selection: thread.selection,
-                    runtime_mode: thread.runtime_mode,
-                    interaction_mode: thread.interaction_mode,
-                    boundary: run.ordinal,
-                    history,
-                    messages,
-                    workspace: thread.workspace.clone(),
-                    context,
-                    native: None,
-                });
                 // Only a provider-finished run has a stable native boundary.
                 let native = run
                     .attempt
                     .as_ref()
                     .and_then(|id| self.state.attempts.iter().find(|a| &a.id == id))
-                    .filter(|_| {
-                        matches!(run.status, RunStatus::Completed | RunStatus::Waiting)
-                            && run.selection.instance == fork_instance
-                    })
+                    .filter(|_| matches!(run.status, RunStatus::Completed | RunStatus::Waiting))
                     .and_then(|a| {
                         let latest = !self.state.runs.iter().any(|later| {
                             later.ordinal > run.ordinal
@@ -2983,35 +3040,36 @@ impl Decision {
                         a.native_thread
                             .clone()
                             .filter(|_| latest || a.native_head.is_some())
-                            .map(|thread| (thread, a.native_head.clone()))
+                            .map(|native| NativeBinding {
+                                instance: run.selection.instance.clone(),
+                                thread: native,
+                                head: a.native_head.clone(),
+                            })
                     });
-                if let Some((native_thread, head)) = native {
-                    self.fact(FactBody::ForkPrepared {
-                        command: id.clone(),
-                        target: target.clone(),
-                        child_command,
-                        instance: run.selection.instance,
-                        head: head.clone(),
-                    });
-                    self.effect(
-                        run.attempt,
-                        EffectBody::ForkNative {
-                            command: id.clone(),
-                            provider: ProviderCommand::Fork {
-                                native_thread,
-                                through_turn: head,
-                            },
-                        },
-                    );
-                } else {
-                    self.effect(
-                        None,
-                        EffectBody::SendToThread {
+                self.effect(
+                    None,
+                    EffectBody::SendToThread {
+                        thread: target.clone(),
+                        command: Box::new(AcceptFork {
                             thread: target.clone(),
-                            command: child_command,
-                        },
-                    );
-                }
+                            parent: thread.id.clone(),
+                            project: thread.project.clone(),
+                            title: title
+                                .map(str::to_owned)
+                                .unwrap_or_else(|| format!("{} fork", thread.title)),
+                            selection: thread.selection.clone(),
+                            runtime_mode: thread.runtime_mode,
+                            interaction_mode: thread.interaction_mode,
+                            boundary: run.ordinal,
+                            history,
+                            messages,
+                            workspace: thread.workspace.clone(),
+                            arrangement: Box::new(ThreadArrangement::of(&thread)),
+                            context,
+                            native,
+                        }),
+                    },
+                );
                 Reply::Thread(target.clone())
             }
             AcceptFork {
@@ -3026,6 +3084,7 @@ impl Decision {
                 history,
                 messages,
                 workspace,
+                arrangement,
                 context,
                 native,
             } => {
@@ -3040,6 +3099,7 @@ impl Decision {
                     runtime_mode: *runtime_mode,
                     interaction_mode: *interaction_mode,
                 });
+                self.fact(FactBody::ThreadArranged(arrangement.as_ref().clone()));
                 if workspace.is_some() {
                     self.fact(FactBody::WorkspaceBound {
                         workspace: workspace.clone(),
@@ -3067,43 +3127,28 @@ impl Decision {
                     id: marker,
                     status: ItemStatus::Completed,
                 });
+                // The first direct message resolves the transfer against its own
+                // provider: a native fork on the source's provider, otherwise
+                // the portable history (T3 decideForkExecution).
                 self.fact(FactBody::TransferOpened {
-                    native_fork: native.as_ref().map(|binding| binding.thread.clone()),
+                    native_source: native.clone(),
                     id: ContextTransferId::new(self.key("transfer", id.as_str())).unwrap(),
                     kind: TransferKind::Fork,
                     source: parent.clone(),
                     target: thread.clone(),
                     boundary: *boundary,
-                    instance: selection.instance.clone(),
+                    instance: None,
+                    target_run: None,
                     history: context.clone(),
                 });
-                if let Some(native) = native {
-                    self.fact(FactBody::NativeSessionBound {
-                        instance: native.instance.clone(),
-                        native_thread: native.thread.clone(),
-                        head: native.head.clone(),
-                    });
-                }
                 Reply::Thread(thread.clone())
             }
-            MergeBack {
-                target,
-                through_run,
-            } => {
+            MergeBack { target, source } => {
                 let thread = self.state.thread.as_ref().unwrap();
                 if thread.parent.as_ref() != Some(target) || thread.fork_boundary.is_none() {
                     return reject("not-a-fork-of-target");
                 }
-                let source = match through_run {
-                    Some(id) => self.state.runs.iter().find(|run| &run.id == id),
-                    None => self
-                        .state
-                        .runs
-                        .iter()
-                        .filter(|run| run.status == RunStatus::Completed)
-                        .max_by_key(|run| run.ordinal),
-                };
-                let Some(source) = source else {
+                let Some(source) = self.source_run(source) else {
                     return reject("no-stable-source-run");
                 };
                 if !matches!(source.status, RunStatus::Completed | RunStatus::Waiting) {
@@ -3167,21 +3212,16 @@ impl Decision {
                 }) {
                     return Reply::Accepted;
                 }
+                // The next direct message consumes it with its own provider.
                 self.fact(FactBody::TransferOpened {
-                    native_fork: None,
+                    native_source: None,
                     id: id.clone(),
                     kind: *kind,
                     source: source.clone(),
                     target: self.state.thread.as_ref().unwrap().id.clone(),
                     boundary: *boundary,
-                    instance: self
-                        .state
-                        .thread
-                        .as_ref()
-                        .unwrap()
-                        .selection
-                        .instance
-                        .clone(),
+                    instance: None,
+                    target_run: None,
                     history: history.clone(),
                 });
                 Reply::Accepted
@@ -3362,20 +3402,32 @@ impl Decision {
                     return Reply::Ignored;
                 }
                 if let Some(context) = context {
+                    // T3 hands the result to the spawning run's provider thread; a
+                    // later turn receives it only after that run failed or was
+                    // interrupted (ProviderTurnStartService.ts).
+                    let spawning = existing
+                        .run
+                        .as_ref()
+                        .and_then(|id| self.state.runs.iter().find(|run| &run.id == id));
                     self.fact(FactBody::TransferOpened {
-                        native_fork: None,
+                        native_source: None,
                         id: ContextTransferId::new(self.key("task-result", task.as_str())).unwrap(),
                         kind: TransferKind::SubagentResult,
                         source: existing.child_thread,
                         target: self.state.thread.as_ref().unwrap().id.clone(),
-                        instance: self
-                            .state
-                            .thread
-                            .as_ref()
-                            .unwrap()
-                            .selection
-                            .instance
-                            .clone(),
+                        instance: Some(spawning.map_or_else(
+                            || {
+                                self.state
+                                    .thread
+                                    .as_ref()
+                                    .unwrap()
+                                    .selection
+                                    .instance
+                                    .clone()
+                            },
+                            |run| run.selection.instance.clone(),
+                        )),
+                        target_run: existing.run.clone(),
                         boundary: context.boundary,
                         history: context.history.clone(),
                     });
@@ -5052,47 +5104,45 @@ impl Decision {
     fn effect_result(&mut self, result: &EffectResult) -> Reply {
         match result {
             EffectResult::NativeForked {
-                command,
+                attempt,
                 native_thread,
             } => {
-                let Some(pending) = self.state.pending_forks.get(command).cloned() else {
+                let Some((run, transfer)) = self.awaiting_fork(attempt) else {
                     return Reply::Ignored;
                 };
-                let mut child_command = pending.child_command;
-                if let Command::AcceptFork { native, .. } = child_command.as_mut() {
-                    *native = Some(NativeBinding {
-                        instance: pending.instance,
-                        thread: native_thread.clone(),
-                        head: pending.head,
-                    });
-                }
-                self.fact(FactBody::ForkResolved {
-                    command: command.clone(),
+                let source = transfer.native_source.clone().unwrap();
+                self.fact(FactBody::NativeSessionBound {
+                    instance: run.selection.instance.clone(),
+                    native_thread: native_thread.clone(),
+                    head: source.head,
                 });
-                self.effect(
-                    None,
-                    EffectBody::SendToThread {
-                        thread: pending.target,
-                        command: child_command,
+                self.fact(FactBody::TransferDeliveryChanged {
+                    id: transfer.id.clone(),
+                    delivery: ContextDelivery {
+                        attempt: attempt.clone(),
+                        run: run.id.clone(),
+                        native_thread: Some(native_thread.clone()),
+                        status: ContextDeliveryStatus::NativeFork,
+                        item_ids: transfer
+                            .history
+                            .messages
+                            .iter()
+                            .map(|message| message.item.clone())
+                            .collect(),
+                        omitted_item_ids: transfer.history.omitted_item_ids.clone(),
                     },
-                );
+                });
+                self.dispatch_start(&run.id, attempt, true);
                 return Reply::Accepted;
             }
-            EffectResult::ForkFailed { command, .. } => {
-                let Some(pending) = self.state.pending_forks.get(command).cloned() else {
+            // T3 ProviderTurnStartService.ts: a native fork that fails on the
+            // last attempt fails the run; the transfer stays pending.
+            EffectResult::ForkFailed { attempt, message } => {
+                let Some((run, _)) = self.awaiting_fork(attempt) else {
                     return Reply::Ignored;
                 };
-                // The fork keeps its fixed history as portable context.
-                self.fact(FactBody::ForkResolved {
-                    command: command.clone(),
-                });
-                self.effect(
-                    None,
-                    EffectBody::SendToThread {
-                        thread: pending.target,
-                        command: pending.child_command,
-                    },
-                );
+                self.error_item_with_class(&run.id, message, Some("provider_error"));
+                self.finish(&run.id, RunStatus::Failed, false);
             }
             EffectResult::ProviderFailed {
                 attempt,
@@ -5720,6 +5770,39 @@ pub fn maintenance(text: &str, attachments: &[Attachment]) -> Option<Maintenance
         "/compact" => Some(Maintenance::Compact),
         "/logout" => Some(Maintenance::Logout),
         _ => None,
+    }
+}
+/// T3 latestStableRun: the highest completed run with a checkpoint.
+pub fn latest_stable_run(state: &State) -> Option<&Run> {
+    state
+        .runs
+        .iter()
+        .filter(|run| run.status == RunStatus::Completed && run.checkpoint.is_some())
+        .max_by_key(|run| run.ordinal)
+}
+/// Whether a run's start takes a transfer. Fork and merge-back transfers take
+/// the provider of the direct turn that consumes them; handoffs keep their
+/// instance; a delegated result reaches only a turn after its spawning run
+/// failed or was interrupted.
+fn consumable(state: &State, transfer: &Transfer, run: &Run, direct: bool) -> bool {
+    let instance = transfer.instance.as_deref();
+    match transfer.kind {
+        TransferKind::Fork | TransferKind::MergeBack if transfer.delivery.is_none() => {
+            direct && instance.is_none_or(|instance| instance == run.selection.instance)
+        }
+        TransferKind::SubagentResult => {
+            instance == Some(run.selection.instance.as_str())
+                && transfer.target_run.as_ref().is_some_and(|spawning| {
+                    state.runs.iter().any(|candidate| {
+                        &candidate.id == spawning
+                            && matches!(
+                                candidate.status,
+                                RunStatus::Failed | RunStatus::Interrupted
+                            )
+                    })
+                })
+        }
+        _ => instance == Some(run.selection.instance.as_str()),
     }
 }
 /// The latest run that executed, by completion order.

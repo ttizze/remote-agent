@@ -10,7 +10,7 @@ pub use process::*;
 
 use crate::{ActorRegistry, KeyedSerial, Residency, RuntimeError};
 use agent_domain::{
-    Attachment, AttachmentKind, AttemptStatus, CommandId, Driver, EffectResult, InteractionMode,
+    Attachment, AttachmentKind, AttemptStatus, Driver, EffectResult, InteractionMode,
     ModelSelection, NativeBinding, ProviderCommand, ProviderEvent, ProviderOperation, RunAttemptId,
     RuntimeMode, State, ThreadId, Workspace,
 };
@@ -637,25 +637,27 @@ impl SessionManager {
             .await
     }
 
-    /// Runs a `ForkNative` effect: the fork's native thread, or `ForkFailed`.
+    /// Runs a `ForkNative` effect for the attempt consuming a fork: the
+    /// forked native thread, or `ForkFailed`.
     pub async fn fork_native(
         &self,
         thread: &ThreadId,
         effect_id: &str,
-        command: &CommandId,
+        attempt: Option<&RunAttemptId>,
+        instance: &str,
         provider: &ProviderCommand,
     ) -> Result<Option<EffectResult>, ExecError> {
-        let state = self.state(thread).await?;
-        let Some(pending) = state.pending_forks.get(command) else {
+        let Some(attempt) = attempt else {
             return Ok(None);
         };
+        let state = self.state(thread).await?;
         let failed = |message: String| {
             Ok(Some(EffectResult::ForkFailed {
-                command: command.clone(),
+                attempt: attempt.clone(),
                 message,
             }))
         };
-        let target = match instance_target(&state, thread, &pending.instance) {
+        let target = match instance_target(&state, thread, instance) {
             Ok(target) => target,
             Err(ExecError::Retry(message)) => return failed(message),
             Err(error) => return Err(error),
@@ -666,7 +668,7 @@ impl SessionManager {
         };
         match forked {
             Ok(native_thread) => Ok(Some(EffectResult::NativeForked {
-                command: command.clone(),
+                attempt: attempt.clone(),
                 native_thread,
             })),
             Err(ForkError::Rejected(message)) => failed(message),

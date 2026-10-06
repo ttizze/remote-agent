@@ -52,7 +52,6 @@ pub fn needs_recovery(state: &State) -> bool {
     state.runs.iter().any(|run| run.status.blocking())
         || !state.captures.is_empty()
         || state.rollback.is_some()
-        || !state.pending_forks.is_empty()
         || state.native_owner.is_some()
         || !state.background_work.is_empty()
         || state.messages.iter().any(|message| message.streaming)
