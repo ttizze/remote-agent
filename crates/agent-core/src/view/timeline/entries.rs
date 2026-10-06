@@ -2,6 +2,7 @@
 //! work-log entries and lifecycle events, plus messages this device sent that
 //! the thread has not folded yet.
 use crate::commands::outbox::PendingMessage;
+use crate::view::timeline::lifecycle::{HandoffDivider, handoff_dividers};
 use crate::view::work_log::{
     ItemType, QuestionAnswer, SourceActivity, ToolLifecycleStatus, WorkLogEntry, WorkTone,
     presentation::context_compaction_label,
@@ -13,9 +14,9 @@ use crate::view::work_log::{
     turn_item::turn_item_is_workspace_preparation,
 };
 use agent_domain::{
-    Attachment, AttemptStatus, Checkpoint, CheckpointStatus, ContextTransferId, InputIntent, Item,
-    ItemKind, ItemStatus, Json, MessageAuthor, MessageContext, MessageId, PlanId, RequestBody,
-    Role, RunAttemptId, RunId, State, Timestamp,
+    Attachment, AttemptStatus, Checkpoint, CheckpointStatus, InputIntent, Item, ItemKind,
+    ItemStatus, Json, MessageAuthor, MessageContext, MessageId, PlanId, RequestBody, Role,
+    RunAttemptId, RunId, State, Timestamp,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -71,11 +72,8 @@ pub enum TimelineEntryKind {
     Work(Box<WorkLogEntry>),
     /// A lifecycle item drawn on its own: interrupt, fork, subagent.
     Event(Arc<Item>),
-    /// A provider handoff delivered to the run it precedes.
-    Handoff {
-        transfer: ContextTransferId,
-        run: RunId,
-    },
+    /// A context handoff drawn before the run that received it.
+    Handoff(Box<HandoffDivider>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -105,7 +103,7 @@ impl TimelineEntry {
             TimelineEntryKind::Message { item, .. } => item.as_ref(),
             TimelineEntryKind::Work(entry) => entry.item.as_ref(),
             TimelineEntryKind::Event(item) => Some(item),
-            TimelineEntryKind::ProposedPlan(_) | TimelineEntryKind::Handoff { .. } => None,
+            TimelineEntryKind::ProposedPlan(_) | TimelineEntryKind::Handoff(_) => None,
         }
     }
 }
@@ -530,6 +528,31 @@ pub fn derive_timeline_entries(state: &State, input: &EntriesInput<'_>) -> Vec<T
             attempt,
             kind,
         });
+    }
+    for divider in handoff_dividers(state) {
+        let entry_run = |entry: &TimelineEntry| match &entry.kind {
+            TimelineEntryKind::Message { message, .. } => message.run.clone(),
+            TimelineEntryKind::ProposedPlan(plan) => plan.run.clone(),
+            TimelineEntryKind::Work(work) => work.run.clone(),
+            TimelineEntryKind::Event(item) => item.run.clone(),
+            TimelineEntryKind::Handoff(_) => None,
+        };
+        let Some(index) = entries
+            .iter()
+            .position(|entry| entry_run(entry).as_ref() == Some(&divider.run))
+        else {
+            continue;
+        };
+        let created_at = entries[index].created_at.clone();
+        entries.insert(
+            index,
+            TimelineEntry {
+                id: format!("handoff:{}", divider.run),
+                created_at,
+                attempt: None,
+                kind: TimelineEntryKind::Handoff(Box::new(divider)),
+            },
+        );
     }
     for pending in input.pending {
         if pending.queued || !retained.insert(pending.id.to_string()) {

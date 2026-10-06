@@ -262,9 +262,16 @@ pub fn assistant_copy_state(
     streaming: bool,
 ) -> AssistantCopyState {
     let text = text.filter(|text| !text.trim_matches(js_space).is_empty());
+    let visible = show_copy_button && text.is_some() && !streaming;
     AssistantCopyState {
-        visible: show_copy_button && text.is_some() && !streaming,
-        text: text.map(str::to_owned),
+        visible,
+        text: text.map(|text| {
+            if visible {
+                crate::presentation::markdown::directives::render_directives_for_copy(text)
+            } else {
+                text.to_owned()
+            }
+        }),
     }
 }
 
@@ -629,5 +636,25 @@ mod tests {
         empty.streaming = true;
         assert_eq!(assistant_display_text(&empty), "");
         assert!(!assistant_meta(None, &empty, true, false).show_timestamp);
+    }
+
+    #[test]
+    fn copies_the_rendered_representation_of_directives() {
+        let text = [
+            r#"Created :codex-file-citation{path="outputs/report.xlsx" purpose="output"}."#,
+            "",
+            r#"::artifact-template{skill_name="artifact-template-hello-world" skill_directory="/Users/test/.codex/skills/artifact-template-hello-world" display_name="Hello World" artifact_kind="document"}"#,
+        ]
+        .join("\n");
+        assert_eq!(
+            assistant_copy_state(Some(&text), true, false),
+            AssistantCopyState {
+                text: Some(
+                    "Created [report.xlsx](<outputs/report.xlsx>).\n\nHello World (Document template)"
+                        .into()
+                ),
+                visible: true,
+            }
+        );
     }
 }

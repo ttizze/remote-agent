@@ -382,7 +382,7 @@ static SUBAGENT_PREFIX: LazyLock<Regex> =
 
 /// Codex task paths read as their last segment in title case.
 /// A private copy of the agents view helper of the same name.
-fn format_subagent_display_title(title: &str) -> String {
+pub(crate) fn format_subagent_display_title(title: &str) -> String {
     let display = SUBAGENT_PREFIX.replace(title, "").into_owned();
     let Some(name) = TASK_PATH.captures(&display).map(|path| path[1].to_owned()) else {
         return display;
