@@ -39,6 +39,30 @@ pub struct SetupRequest {
     pub cwd: String,
 }
 
+/// Conversation settings for one project, with project overrides applied (T3
+/// `resolveProjectSettings`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConversationSettings {
+    /// Settle a thread this many days after its last activity; `None` never
+    /// (T3 `sidebarAutoSettleAfterDays`).
+    pub auto_settle_after_days: Option<u64>,
+    /// Continue a turn a Host restart cut (T3 `continueThreadsAfterServerUpdate`).
+    pub continue_after_restart: bool,
+    pub snooze_limited_threads: bool,
+    pub auto_resume_limited_threads: bool,
+}
+impl Default for ConversationSettings {
+    /// T3's defaults.
+    fn default() -> Self {
+        Self {
+            auto_settle_after_days: Some(3),
+            continue_after_restart: false,
+            snooze_limited_threads: false,
+            auto_resume_limited_threads: false,
+        }
+    }
+}
+
 /// One structured text generation call (thread titles).
 #[derive(Debug, Clone, PartialEq)]
 pub struct TextGenerationRequest {
@@ -68,8 +92,14 @@ pub trait HostOperations: Send + Sync {
     fn project(&self, id: &str) -> Option<HostProject> {
         self.projects().into_iter().find(|project| project.id == id)
     }
+    /// The settings that apply to threads of `project`.
+    fn settings(&self, _project: &str) -> ConversationSettings {
+        ConversationSettings::default()
+    }
     /// Whether a run cut by a Host restart continues afterwards.
-    fn continue_after_restart(&self, project: &str) -> bool;
+    fn continue_after_restart(&self, project: &str) -> bool {
+        self.settings(project).continue_after_restart
+    }
 
     /// The canonical path, or `None` when nothing exists there.
     fn real_path(&self, path: String) -> BoxFuture<'_, io::Result<Option<String>>>;

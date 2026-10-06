@@ -266,11 +266,6 @@ impl HostOperations for HostIo {
     fn projects(&self) -> Vec<HostProject> {
         self.projects.list()
     }
-    /// T3 `continueThreadsAfterServerUpdate`, which defaults to off; the Host has no
-    /// setting to turn it on.
-    fn continue_after_restart(&self, _project: &str) -> bool {
-        false
-    }
     fn real_path(&self, path: String) -> BoxFuture<'_, io::Result<Option<String>>> {
         Box::pin(async move {
             match tokio::fs::canonicalize(&path).await {

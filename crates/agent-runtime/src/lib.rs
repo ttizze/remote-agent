@@ -13,6 +13,7 @@ mod runtime;
 mod session;
 mod shell;
 mod store;
+mod sweep;
 mod sync;
 mod title;
 
@@ -30,6 +31,7 @@ pub use runtime::*;
 pub use session::*;
 pub use shell::*;
 pub use store::*;
+pub use sweep::*;
 pub use sync::*;
 pub use title::*;
 

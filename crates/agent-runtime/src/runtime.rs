@@ -103,6 +103,7 @@ pub struct Runtime {
     /// Held while `start` recovers, so a shutdown waits for it.
     lifecycle: tokio::sync::Mutex<()>,
     background: Mutex<Background>,
+    sweeps: crate::sweep::Sweeps,
 }
 
 impl Runtime {
@@ -139,6 +140,13 @@ impl Runtime {
             config.clock.clone(),
             config.worker.clone(),
         ));
+        let sweeps = crate::sweep::Sweeps {
+            store: store.clone(),
+            registry: registry.clone(),
+            ops: ops.clone(),
+            clock: config.clock.clone(),
+            settings_changed: Arc::default(),
+        };
         let projects = Arc::new(HostProjects(ops));
         let shell = ShellHub::new(store, projects.clone())?;
         let importer = config.import.map(|settings| {
@@ -167,7 +175,13 @@ impl Runtime {
             admission: RwLock::new(()),
             lifecycle: tokio::sync::Mutex::new(()),
             background: Mutex::new(Background::default()),
+            sweeps,
         })
+    }
+
+    /// Conversation settings changed; automatic settlement runs again now.
+    pub fn settings_changed(&self) {
+        self.sweeps.settings_changed.notify_one();
     }
 
     pub fn store(&self) -> &Store {
@@ -233,6 +247,9 @@ impl Runtime {
         for (command, thread) in unprepared {
             self.preparations.schedule(&self.executors, command, thread);
         }
+        background
+            .tasks
+            .push(tokio::spawn(self.sweeps.clone().run()));
         if let Some((importer, _)) = &self.importer {
             let (importer, projects) = (importer.clone(), self.projects.clone());
             background.tasks.push(tokio::spawn(async move {
