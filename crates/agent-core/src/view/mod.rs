@@ -1,7 +1,9 @@
 //! View models: pure functions of the published snapshot and the clock that
 //! native clients render without re-deriving them.
 pub mod archived;
+pub mod attachments;
 pub mod inbox;
+pub mod projects;
 pub mod search;
 pub mod sidebar;
 pub mod snooze;
