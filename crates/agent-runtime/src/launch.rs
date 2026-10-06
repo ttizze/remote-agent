@@ -520,7 +520,65 @@ pub(crate) async fn launch(
             thread
         }
     };
-    let workspace = initial_workspace(&request.workspace, &project.root);
+    // A thread launched at the root of a project whose threads each get a folder
+    // runs in its own. Only the first attempt claims one; a retry replays the create
+    // that bound it.
+    let strategy = match (&request.workspace, &record, &receipt) {
+        (WorkspaceStrategy::Root { .. }, Some(record), _)
+            if matches!(record.strategy, WorkspaceStrategy::ExistingWorktree { .. }) =>
+        {
+            record.strategy.clone()
+        }
+        (WorkspaceStrategy::Root { .. }, None, Some(_)) => {
+            let state = context.registry.state(&thread).await.map_err(|e| {
+                error(
+                    LaunchFailure::Unavailable,
+                    LaunchOperation::CreateThread,
+                    Some(&thread),
+                    e.to_string(),
+                )
+            })?;
+            match state
+                .thread
+                .as_ref()
+                .and_then(|thread| thread.workspace.as_ref())
+            {
+                Some(Workspace {
+                    worktree_path: Some(path),
+                    branch,
+                    ..
+                }) => WorkspaceStrategy::ExistingWorktree {
+                    path: path.clone(),
+                    branch: branch.clone(),
+                },
+                _ => request.workspace.clone(),
+            }
+        }
+        (WorkspaceStrategy::Root { .. }, None, None) => {
+            let text = request
+                .initial_message
+                .as_ref()
+                .map_or(&request.title, |message| &message.text);
+            let folder = context
+                .ops
+                .thread_folder(request.project.clone(), thread.clone(), text.clone())
+                .await
+                .map_err(|cause| {
+                    error(
+                        LaunchFailure::Unavailable,
+                        LaunchOperation::ProvisionWorktree,
+                        Some(&thread),
+                        cause,
+                    )
+                })?;
+            match folder {
+                Some(path) => WorkspaceStrategy::ExistingWorktree { path, branch: None },
+                None => request.workspace.clone(),
+            }
+        }
+        _ => request.workspace.clone(),
+    };
+    let workspace = initial_workspace(&strategy, &project.root);
     let binding = match workspace {
         Some(_) => Some(context.workspaces.bind().await),
         None => None,
@@ -571,7 +629,7 @@ pub(crate) async fn launch(
                 command: request.command.clone(),
                 thread: thread.clone(),
                 project: request.project.clone(),
-                strategy: request.workspace.clone(),
+                strategy,
                 worktree_path: None,
                 branch: None,
                 prepared: false,

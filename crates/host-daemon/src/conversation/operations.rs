@@ -21,13 +21,14 @@ use std::{
 };
 use tokio::io::AsyncWriteExt;
 
-/// The always-present project for conversations outside a repository.
+/// The project for conversations outside a repository; each thread gets a folder.
 pub(crate) const CHATS_PROJECT: &str = "chats";
 
 /// Registered projects, cached for the runtime's synchronous reads.
 pub(crate) struct ProjectCatalog {
     store: ProjectStore,
     projects: RwLock<Vec<HostProject>>,
+    chats: tokio::sync::OnceCell<bool>,
 }
 
 impl ProjectCatalog {
@@ -35,10 +36,22 @@ impl ProjectCatalog {
         Self {
             store,
             projects: RwLock::new(vec![]),
+            chats: tokio::sync::OnceCell::new(),
         }
     }
     pub(crate) fn store(&self) -> &ProjectStore {
         &self.store
+    }
+    /// The chats folder, offered only when the Host's data directory is outside any
+    /// Git work tree, whose status and checkpoints its folders would inherit (T3
+    /// `ManagedProjectFolders.scratchRoot`). Probed once.
+    pub(crate) async fn chats_root(&self) -> Option<PathBuf> {
+        let chats = self.store.chat_directory();
+        let data = chats.parent()?.to_path_buf();
+        self.chats
+            .get_or_init(|| async move { !Checkpoints::is_git_repository(&data).await })
+            .await
+            .then_some(chats)
     }
     pub(crate) fn list(&self) -> Vec<HostProject> {
         self.projects
@@ -48,8 +61,7 @@ impl ProjectCatalog {
     }
     /// Rereads the registered projects; the first root is the project's root.
     pub(crate) async fn refresh(&self) -> anyhow::Result<Vec<HostProject>> {
-        let chats = self.store.chat_directory();
-        crate::platform::create_state_directory(&chats)?;
+        let chats = self.chats_root().await;
         let mut projects: Vec<HostProject> = self
             .store
             .load()
@@ -63,11 +75,14 @@ impl ProjectCatalog {
                 })
             })
             .collect();
-        projects.push(HostProject {
-            id: CHATS_PROJECT.into(),
-            name: "Chats".into(),
-            root: chats.to_string_lossy().into_owned(),
-        });
+        if let Some(chats) = chats {
+            crate::platform::create_state_directory(&chats)?;
+            projects.push(HostProject {
+                id: CHATS_PROJECT.into(),
+                name: "Chats".into(),
+                root: chats.to_string_lossy().into_owned(),
+            });
+        }
         *self
             .projects
             .write()
@@ -371,6 +386,35 @@ impl HostOperations for HostIo {
     ) -> BoxFuture<'_, Result<(), String>> {
         Box::pin(async move { self.worktrees.remove(path, false).await.map_err(error) })
     }
+    fn thread_folder(
+        &self,
+        project: String,
+        thread: ThreadId,
+        text: String,
+    ) -> BoxFuture<'_, Result<Option<String>, String>> {
+        Box::pin(async move {
+            if project != CHATS_PROJECT {
+                return Ok(None);
+            }
+            let Some(root) = self.projects.chats_root().await else {
+                return Ok(None);
+            };
+            let date = chrono::DateTime::<chrono::Utc>::from(std::time::SystemTime::now())
+                .format("%Y-%m-%d")
+                .to_string();
+            let claimed = tokio::task::spawn_blocking(move || {
+                crate::projects::claim_thread_folder(&root, thread.as_str(), &text, &date)
+            })
+            .await;
+            match claimed {
+                Ok(Ok(folder)) => Ok(Some(folder.to_string_lossy().into_owned())),
+                failure => {
+                    tracing::warn!(?failure, "could not create a chat thread folder");
+                    Err("Failed to create the folder for threads without a project.".into())
+                }
+            }
+        })
+    }
     fn delete_attachments(
         &self,
         _thread: ThreadId,
@@ -407,5 +451,66 @@ impl HostOperations for HostIo {
             super::title_links::title_link_context(&cwd, &links, &super::title_links::resolve_link)
                 .await
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn git(cwd: &Path, args: &[&str]) {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(cwd)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+    }
+
+    // ManagedProjectFolders.test.ts "offers a Scratch folder under the data dir when
+    // it is outside a checkout" and "creates one Scratch project".
+    #[tokio::test]
+    async fn offers_chats_under_the_data_directory_outside_a_checkout() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = dunce::canonicalize(directory.path()).unwrap();
+        let catalog = Arc::new(ProjectCatalog::new(ProjectStore::new(
+            state.join("worktrees.json"),
+        )));
+        let refreshed = futures_util::future::join_all((0..8).map(|_| {
+            let catalog = catalog.clone();
+            async move { catalog.refresh().await.unwrap() }
+        }))
+        .await;
+        for projects in refreshed.into_iter().chain([catalog.list()]) {
+            let chats: Vec<_> = projects
+                .iter()
+                .filter(|project| project.id == CHATS_PROJECT)
+                .collect();
+            assert_eq!(chats.len(), 1);
+            assert_eq!(Path::new(&chats[0].root), state.join("chats"));
+        }
+        assert!(state.join("chats").is_dir());
+    }
+
+    // "offers nothing when the data dir sits inside a Git checkout"
+    #[tokio::test]
+    async fn offers_no_chats_when_the_data_directory_sits_inside_a_checkout() {
+        let directory = tempfile::tempdir().unwrap();
+        let checkout = dunce::canonicalize(directory.path()).unwrap();
+        git(&checkout, &["init", "--quiet"]);
+        let state = checkout.join(".state");
+        std::fs::create_dir(&state).unwrap();
+        let catalog = ProjectCatalog::new(ProjectStore::new(state.join("worktrees.json")));
+        assert_eq!(catalog.chats_root().await, None);
+        assert!(
+            catalog
+                .refresh()
+                .await
+                .unwrap()
+                .iter()
+                .all(|project| project.id != CHATS_PROJECT)
+        );
+        assert!(!state.join("chats").exists());
     }
 }

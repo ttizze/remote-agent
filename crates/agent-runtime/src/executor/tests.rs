@@ -41,6 +41,9 @@ pub(crate) struct FakeOps {
     pub(crate) real_files: AtomicBool,
     pub(crate) worktree: Mutex<Option<Hook<WorktreeRequest, Result<CreatedWorktree, String>>>>,
     pub(crate) setup: Mutex<Option<Hook<SetupRequest, Result<(), String>>>>,
+    /// Folders claimed for threads, by project, thread and text.
+    pub(crate) folder:
+        Mutex<Option<Hook<(String, ThreadId, String), Result<Option<String>, String>>>>,
     pub(crate) on_restore: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     pub(crate) on_real_path: Mutex<Option<Hook<String, ()>>>,
     /// Record each read of the restart-continuation setting.
@@ -66,6 +69,7 @@ impl FakeOps {
             real_files: AtomicBool::new(false),
             worktree: Mutex::new(None),
             setup: Mutex::new(None),
+            folder: Mutex::new(None),
             on_restore: Mutex::new(None),
             on_real_path: Mutex::new(None),
             log_settings: AtomicBool::new(false),
@@ -251,6 +255,20 @@ impl HostOperations for Ops {
         Box::pin(async move {
             self.0.record(format!("remove-worktree {path}"));
             Ok(())
+        })
+    }
+    fn thread_folder(
+        &self,
+        project: String,
+        thread: ThreadId,
+        text: String,
+    ) -> BoxFuture<'_, Result<Option<String>, String>> {
+        Box::pin(async move {
+            let hook = self.0.folder.lock().unwrap().clone();
+            match hook {
+                Some(hook) => hook((project, thread, text)).await,
+                None => Ok(None),
+            }
         })
     }
     fn run_setup(&self, request: SetupRequest) -> BoxFuture<'_, Result<(), String>> {

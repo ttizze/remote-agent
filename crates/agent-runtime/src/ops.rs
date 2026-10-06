@@ -151,6 +151,17 @@ pub trait HostOperations: Send + Sync {
         project_root: String,
         path: String,
     ) -> BoxFuture<'_, Result<(), String>>;
+    /// Claims a new folder of its own for a thread launched at the root of a project
+    /// whose threads each get one (T3 `ManagedProjectFolders.folderForThread`), named
+    /// from `text`. `None` for every other project.
+    fn thread_folder(
+        &self,
+        _project: String,
+        _thread: ThreadId,
+        _text: String,
+    ) -> BoxFuture<'_, Result<Option<String>, String>> {
+        Box::pin(async { Ok(None) })
+    }
     fn run_setup(&self, _request: SetupRequest) -> BoxFuture<'_, Result<(), String>> {
         Box::pin(async { Ok(()) })
     }

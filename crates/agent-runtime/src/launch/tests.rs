@@ -442,6 +442,84 @@ async fn a_retry_reuses_a_recorded_worktree() {
     assert_eq!(retried.thread.as_ref().unwrap().workspace, Some(workspace));
 }
 
+// "runs a Scratch thread launched at the root in its own folder"
+#[tokio::test(flavor = "multi_thread")]
+async fn runs_a_chat_thread_launched_at_the_root_in_its_own_folder() {
+    let rig = rig();
+    rig.ops
+        .projects
+        .lock()
+        .unwrap()
+        .push(crate::executor::tests::project("other", "/other"));
+    // Only `project` stands in for the chats project here.
+    let claimed = Arc::new(std::sync::Mutex::new(Vec::<(ThreadId, String)>::new()));
+    let claims = claimed.clone();
+    *rig.ops.folder.lock().unwrap() = Some(Arc::new(move |(project, thread, text)| {
+        let claims = claims.clone();
+        Box::pin(async move {
+            if project != "project" {
+                return Ok(None);
+            }
+            let mut claims = claims.lock().unwrap();
+            claims.push((thread, text));
+            Ok(Some(format!("/scratch/folder-{}", claims.len())))
+        })
+    }));
+    let worktree_path = |state: &State| {
+        state
+            .thread
+            .as_ref()
+            .unwrap()
+            .workspace
+            .as_ref()
+            .and_then(|workspace| workspace.worktree_path.clone())
+    };
+    let input = request(
+        "command:launch:scratch",
+        Some("thread:launch:scratch"),
+        Some("Convert these PNGs"),
+        root(),
+    );
+    let launched = launch_on(&rig, input.clone()).await.unwrap();
+    assert_eq!(
+        *claimed.lock().unwrap(),
+        [(launched.thread.clone(), "Convert these PNGs".to_owned())]
+    );
+    assert_eq!(
+        worktree_path(&*state(&rig, &launched.thread).await).as_deref(),
+        Some("/scratch/folder-1")
+    );
+    rig.drain().await;
+    assert_eq!(rig.ops.logged_with("setup"), ["setup /scratch/folder-1"]);
+    assert!(rig.ops.logged_with("worktree").is_empty());
+
+    // A retry replays the first attempt and claims no second folder.
+    let retried = launch_on(&rig, input).await.unwrap();
+    assert!(retried.resumed);
+    assert_eq!(claimed.lock().unwrap().len(), 1);
+    assert_eq!(
+        worktree_path(&*state(&rig, &launched.thread).await).as_deref(),
+        Some("/scratch/folder-1")
+    );
+
+    let other = launch_on(
+        &rig,
+        LaunchThread {
+            project: "other".into(),
+            ..request(
+                "command:launch:scratch-other",
+                Some("thread:launch:scratch-other"),
+                Some("Elsewhere"),
+                root(),
+            )
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(claimed.lock().unwrap().len(), 1);
+    assert_eq!(worktree_path(&*state(&rig, &other.thread).await), None);
+}
+
 fn without_thread(command: &str, message: Option<&str>) -> LaunchThread {
     request(command, None, message, root())
 }

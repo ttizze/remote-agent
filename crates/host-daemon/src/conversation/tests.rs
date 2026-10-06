@@ -477,6 +477,57 @@ async fn a_stream_resumed_at_its_head_answers_without_replaying() {
     assert_eq!(replayed.state.thread.unwrap().title, "Chat");
 }
 
+// ThreadLaunchService.test.ts "runs a Scratch thread launched at the root in its own
+// folder" against the Host's chats folder.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_chat_launched_at_the_root_runs_in_a_folder_of_its_own() {
+    let host = host().await;
+    let chats = host.project_root.parent().unwrap().join("state/chats");
+    let mut folders = vec![];
+    for (id, text) in [
+        ("chat-1", "Convert these PNGs"),
+        ("chat-2", "Convert these PNGs"),
+    ] {
+        let mut call = launch(&host, id, text);
+        if let Call::Launch(launch) = &mut call {
+            launch.project_id = CHATS_PROJECT.into();
+        }
+        let launched: wire::Launched = host.call(call).await.unwrap();
+        let snapshot: wire::ThreadSnapshot = host
+            .call(Call::GetThread(wire::GetThread {
+                thread_id: launched.thread_id,
+                bounded: false,
+            }))
+            .await
+            .unwrap();
+        let workspace = snapshot.state.thread.clone().unwrap().workspace.unwrap();
+        let folder = std::path::PathBuf::from(workspace.worktree_path.unwrap());
+        assert_eq!(workspace.cwd, folder.to_string_lossy());
+        assert_eq!(folder.parent(), Some(chats.as_path()));
+        assert!(folder.is_dir());
+        let name = folder.file_name().unwrap().to_str().unwrap().to_owned();
+        let (date, words) = name.split_at(10);
+        assert!(
+            date.bytes()
+                .enumerate()
+                .all(|(index, byte)| if index == 4 || index == 7 {
+                    byte == b'-'
+                } else {
+                    byte.is_ascii_digit()
+                }),
+            "{name}"
+        );
+        let id = words.strip_prefix("-convert-these-pngs-").unwrap();
+        assert!(
+            id.len() == 8 && id.bytes().all(|byte| byte.is_ascii_alphanumeric()),
+            "{name}"
+        );
+        folders.push(folder);
+    }
+    assert_ne!(folders[0], folders[1]);
+    host.conversation.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_turn_cut_by_shutdown_is_settled_when_the_host_starts_again() {
     let unfinished: &'static str = SIMPLE
