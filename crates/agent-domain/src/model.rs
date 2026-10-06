@@ -894,6 +894,59 @@ pub enum Command {
         event: Box<ProviderEvent>,
     },
 }
+/// Commands only the Host itself (sagas, sessions, executors, import) may send.
+/// Every variant is listed so a new command must be classified.
+pub fn host_only_command(command: &Command) -> bool {
+    match command {
+        Command::NativeInput { .. }
+        | Command::BindNativeChild { .. }
+        | Command::Import { .. }
+        | Command::AcceptFork { .. }
+        | Command::AcceptDelegation { .. }
+        | Command::AcceptTransfer { .. }
+        | Command::TaskResult { .. }
+        | Command::TaskProgress { .. }
+        | Command::AcceptTaskWake { .. }
+        | Command::ContinueRestart { .. }
+        | Command::ReleasePrepared { .. }
+        | Command::FailPrepared { .. } => true,
+        Command::Create { .. }
+        | Command::Rename { .. }
+        | Command::RegenerateTitle
+        | Command::Archive { .. }
+        | Command::Delete
+        | Command::Settle { .. }
+        | Command::Snooze { .. }
+        | Command::Pin { .. }
+        | Command::ReorderActive { .. }
+        | Command::Visit { .. }
+        | Command::MarkUnread
+        | Command::AutoSettle { .. }
+        | Command::RuntimeMode { .. }
+        | Command::InteractionMode { .. }
+        | Command::SelectModel { .. }
+        | Command::SwitchProvider { .. }
+        | Command::Send(_)
+        | Command::RetryPrepared { .. }
+        | Command::Interrupt { .. }
+        | Command::ResumeQueue
+        | Command::ReorderQueued { .. }
+        | Command::CancelQueued { .. }
+        | Command::EditQueued { .. }
+        | Command::PromoteToSteer { .. }
+        | Command::Respond { .. }
+        | Command::DismissQuestion { .. }
+        | Command::Rollback { .. }
+        | Command::Fork { .. }
+        | Command::MergeBack { .. }
+        | Command::Delegate { .. }
+        | Command::SetTaskWake { .. }
+        | Command::AcknowledgeTask { .. }
+        | Command::DisposeTask { .. }
+        | Command::Compact
+        | Command::Stop => false,
+    }
+}
 /// Provider keys are native identifiers, never application entity IDs.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ProviderItem {

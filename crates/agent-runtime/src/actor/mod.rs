@@ -17,6 +17,7 @@ use crate::{
 use agent_domain::{
     Command, CommandId, EffectResult, FactBody, Input, InputEnvelope, ModelSelection,
     ProviderEvent, Reply, RunAttemptId, State, Step, ThreadId, ThreadMachine, Timestamp, apply,
+    host_only_command,
 };
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -41,24 +42,6 @@ pub struct Committed {
 pub enum CommandOrigin {
     Client,
     Internal,
-}
-
-/// Commands that only the Host itself (sagas, sessions, executors) may send.
-pub fn internal_command(command: &Command) -> bool {
-    matches!(
-        command,
-        Command::NativeInput { .. }
-            | Command::BindNativeChild { .. }
-            | Command::AcceptFork { .. }
-            | Command::AcceptDelegation { .. }
-            | Command::AcceptTransfer { .. }
-            | Command::TaskResult { .. }
-            | Command::TaskProgress { .. }
-            | Command::AcceptTaskWake { .. }
-            | Command::ContinueRestart { .. }
-            | Command::ReleasePrepared { .. }
-            | Command::FailPrepared { .. }
-    )
 }
 
 fn created_thread(command: &Command) -> Option<&ThreadId> {
@@ -486,7 +469,7 @@ impl Actor {
         command: Box<Command>,
         origin: CommandOrigin,
     ) -> Result<Committed, RuntimeError> {
-        if origin == CommandOrigin::Client && internal_command(&command) {
+        if origin == CommandOrigin::Client && host_only_command(&command) {
             return Ok(self.unpersisted(rejected("internal-command")));
         }
         if created_thread(&command).is_some_and(|thread| thread != &self.thread) {

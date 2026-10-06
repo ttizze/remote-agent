@@ -250,7 +250,7 @@ impl Importer {
             if shell.project != project.id {
                 return Err(format!("the thread belongs to project {}", shell.project));
             }
-            if shell.payload.get("imported") != Some(&serde_json::Value::Bool(true)) {
+            if !shell.summary.imported {
                 return Err("the thread already has non-imported activity".into());
             }
             return record_source(self.store(), &id, &project.root, source)

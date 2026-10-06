@@ -2,7 +2,7 @@
 //! archive cases) and the shell-row case of `WireProjection.test.ts`. Repository
 //! identity enrichment is not part of this runtime.
 use super::*;
-use crate::store::tests::{selection, temp_store};
+use crate::store::tests::{selection, temp_store, thread_shell};
 use crate::sync::history::tests::{created, fold_into};
 use crate::{ActorContext, ActorHandle, CommandOrigin, ShellProjector, ThreadShellProjector};
 use agent_domain::{Command, CommandId, InteractionMode, Role, RuntimeMode};
@@ -16,7 +16,7 @@ fn shell(id: &str, archived: bool, deleted: bool) -> ShellThread {
             archived,
             deleted,
             needs_recovery: false,
-            payload: serde_json::json!({ "id": id }),
+            summary: thread_shell(id, id),
         },
     }
 }
@@ -197,16 +197,17 @@ fn keeps_transcript_bodies_out_of_shell_rows() {
 }
 
 #[derive(Default)]
-struct Projects(Mutex<Vec<ProjectShell>>);
+struct Projects(Mutex<Vec<HostProject>>);
 impl ProjectDirectory for Projects {
-    fn projects(&self) -> Vec<ProjectShell> {
+    fn projects(&self) -> Vec<HostProject> {
         self.0.lock().unwrap().clone()
     }
 }
-fn project(id: &str) -> ProjectShell {
-    ProjectShell {
+fn project(id: &str) -> HostProject {
+    HostProject {
         id: id.into(),
-        payload: serde_json::json!({ "title": id }),
+        name: id.into(),
+        root: format!("/work/{id}"),
     }
 }
 
@@ -286,7 +287,7 @@ async fn closes_a_subscriber_that_falls_behind_the_hub() {
 fn changes_for(changes: &broadcast::Sender<ShellChange>, threads: usize, payload: &str) {
     for sequence in 1..=threads {
         let mut thread = shell(&format!("thread-{sequence}"), false, false);
-        thread.row.payload = serde_json::json!({ "title": payload });
+        thread.row.summary.title = payload.into();
         changes
             .send(ShellChange::Thread {
                 sequence: sequence as u64,
@@ -328,7 +329,7 @@ async fn closes_a_slow_subscriber_instead_of_waiting_for_it() {
 async fn closes_a_subscriber_whose_undelivered_rows_exceed_the_byte_budget() {
     let (changes, live) = broadcast::channel(64);
     let mut row = shell("thread-1", false, false);
-    row.row.payload = serde_json::json!({ "title": "x".repeat(250) });
+    row.row.summary.title = "x".repeat(250);
     let row_bytes = ShellUpdate::ThreadUpdated {
         sequence: 1,
         thread: row,
@@ -537,8 +538,12 @@ async fn falls_back_to_a_snapshot_when_the_replay_is_too_large() {
                 tx.execute(
                     "INSERT INTO thread_shells
                          (thread_id, global_seq, project, archived, deleted, needs_recovery, payload)
-                     VALUES (?1, ?2, 'project', 0, 0, 0, '{}')",
-                    params![format!("thread-{index}"), index as i64 + 1],
+                     VALUES (?1, ?2, 'project', 0, 0, 0, ?3)",
+                    params![
+                        format!("thread-{index}"),
+                        index as i64 + 1,
+                        serde_json::to_string(&thread_shell(&format!("thread-{index}"), "")).unwrap()
+                    ],
                 )?;
             }
             Ok(())
@@ -565,7 +570,7 @@ async fn measures_the_replay_budget_in_utf8_bytes() {
     // Under the byte budget in characters, over it in UTF-8 bytes.
     let title = "é".repeat(SHELL_REPLAY_MAX_BYTES as usize / 2 + 1);
     assert!(title.chars().count() < SHELL_REPLAY_MAX_BYTES as usize);
-    let payload = serde_json::json!({ "title": title }).to_string();
+    let payload = serde_json::to_string(&thread_shell("thread-wide", &title)).unwrap();
     h.store
         .write(move |tx| {
             tx.execute(
@@ -611,7 +616,7 @@ async fn resumes_with_project_changes_made_while_disconnected() {
     drop(first);
 
     let mut renamed = project("project-a");
-    renamed.payload = serde_json::json!({ "title": "Renamed" });
+    renamed.name = "Renamed".into();
     *projects.0.lock().unwrap() = vec![renamed.clone(), project("project-c")];
     for id in ["project-a", "project-b", "project-c"] {
         hub.project_changed(id);

@@ -5,6 +5,7 @@ use crate::models::Project;
 use agent_domain::{
     Attachment, Command, CommandId, Driver, Fact, InteractionMode, Item, Message, MessageId,
     ModelSelection, Plan, Reply, RuntimeMode, State, ThreadId, ThreadShell, Timestamp, TurnItemId,
+    host_only_command,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -23,64 +24,10 @@ pub struct Dispatch {
 impl Dispatch {
     /// Host-only commands are refused before they reach the thread.
     pub fn validate(&self) -> Result<(), ConversationError> {
-        if internal_command(&self.command) {
+        if host_only_command(&self.command) {
             return Err(ConversationError::InternalCommand);
         }
         Ok(())
-    }
-}
-
-/// Commands only the Host itself (sagas, sessions, executors) may send. Mirrors the
-/// runtime's check; every variant is listed so a new command must be classified.
-pub fn internal_command(command: &Command) -> bool {
-    match command {
-        Command::NativeInput { .. }
-        | Command::BindNativeChild { .. }
-        | Command::AcceptFork { .. }
-        | Command::AcceptDelegation { .. }
-        | Command::AcceptTransfer { .. }
-        | Command::TaskResult { .. }
-        | Command::TaskProgress { .. }
-        | Command::AcceptTaskWake { .. }
-        | Command::ContinueRestart { .. }
-        | Command::ReleasePrepared { .. }
-        | Command::FailPrepared { .. } => true,
-        Command::Create { .. }
-        | Command::Import { .. }
-        | Command::Rename { .. }
-        | Command::RegenerateTitle
-        | Command::Archive { .. }
-        | Command::Delete
-        | Command::Settle { .. }
-        | Command::Snooze { .. }
-        | Command::Pin { .. }
-        | Command::ReorderActive { .. }
-        | Command::Visit { .. }
-        | Command::MarkUnread
-        | Command::AutoSettle { .. }
-        | Command::RuntimeMode { .. }
-        | Command::InteractionMode { .. }
-        | Command::SelectModel { .. }
-        | Command::SwitchProvider { .. }
-        | Command::Send(_)
-        | Command::RetryPrepared { .. }
-        | Command::Interrupt { .. }
-        | Command::ResumeQueue
-        | Command::ReorderQueued { .. }
-        | Command::CancelQueued { .. }
-        | Command::EditQueued { .. }
-        | Command::PromoteToSteer { .. }
-        | Command::Respond { .. }
-        | Command::DismissQuestion { .. }
-        | Command::Rollback { .. }
-        | Command::Fork { .. }
-        | Command::MergeBack { .. }
-        | Command::Delegate { .. }
-        | Command::SetTaskWake { .. }
-        | Command::AcknowledgeTask { .. }
-        | Command::DisposeTask { .. }
-        | Command::Compact
-        | Command::Stop => false,
     }
 }
 

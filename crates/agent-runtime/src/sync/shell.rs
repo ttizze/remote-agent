@@ -3,7 +3,7 @@
 //! `ShellStream.ts` and ws.ts.
 use super::history::json_len;
 use super::live::{LIVE_STREAM_MAX_BYTES, LiveReceiver, LiveSender, live_channel};
-use crate::{CommitListener, CommitNotice, RuntimeError, ShellRow, Store, StoreError};
+use crate::{CommitListener, CommitNotice, HostProject, RuntimeError, ShellRow, Store, StoreError};
 use agent_domain::{FactBody, ThreadId};
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
@@ -19,17 +19,10 @@ pub const SHELL_REPLAY_MAX_ROWS: usize = 1_000;
 pub const SHELL_REPLAY_MAX_BYTES: u64 = 8 * 1024 * 1024;
 const SHELL_HUB_BUFFER: usize = 4_096;
 
-/// A project row; projects are owned outside the conversation runtime.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ProjectShell {
-    pub id: String,
-    pub payload: serde_json::Value,
-}
-
 /// Live projects. Threads of other projects are left out of search.
 pub trait ProjectDirectory: Send + Sync {
-    fn projects(&self) -> Vec<ProjectShell>;
-    fn project(&self, id: &str) -> Option<ProjectShell> {
+    fn projects(&self) -> Vec<HostProject>;
+    fn project(&self, id: &str) -> Option<HostProject> {
         self.projects().into_iter().find(|project| project.id == id)
     }
 }
@@ -73,7 +66,7 @@ pub struct ShellThread {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ShellSnapshot {
     pub snapshot_seq: u64,
-    pub projects: Vec<ProjectShell>,
+    pub projects: Vec<HostProject>,
     pub threads: Vec<ShellThread>,
 }
 
@@ -90,7 +83,7 @@ pub enum ShellUpdate {
     },
     ProjectUpdated {
         sequence: u64,
-        project: ProjectShell,
+        project: HostProject,
     },
     ProjectRemoved {
         sequence: u64,
@@ -100,7 +93,7 @@ pub enum ShellUpdate {
     /// Opens a resumed stream, since project changes are not replayed.
     Projects {
         sequence: u64,
-        projects: Vec<ProjectShell>,
+        projects: Vec<HostProject>,
     },
     Synchronized,
 }
@@ -169,7 +162,7 @@ pub fn coalesce_shell_changes(changes: Vec<ShellChange>) -> Vec<ShellChange> {
 pub fn shell_snapshot(
     location: ShellLocation,
     snapshot_seq: u64,
-    projects: Vec<ProjectShell>,
+    projects: Vec<HostProject>,
     threads: Vec<ShellThread>,
 ) -> ShellSnapshot {
     ShellSnapshot {
@@ -431,7 +424,7 @@ fn shell_thread(raw: RawShell) -> Result<(u64, ShellThread), StoreError> {
                 archived,
                 deleted,
                 needs_recovery,
-                payload: serde_json::from_str(&payload)?,
+                summary: serde_json::from_str(&payload)?,
             },
         },
     ))

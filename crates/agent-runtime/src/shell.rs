@@ -1,18 +1,18 @@
 use agent_domain::{
     Fact, FactBody, ItemKind, MessageId, NodeId, RequestStatus, ResponseCapability,
-    RuntimeRequestId, State,
+    RuntimeRequestId, State, ThreadShell,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
-/// One `thread_shells` row. The payload is the list summary sent to clients.
+/// One `thread_shells` row with the list summary sent to clients.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ShellRow {
     pub project: String,
     pub archived: bool,
     pub deleted: bool,
     pub needs_recovery: bool,
-    pub payload: serde_json::Value,
+    pub summary: ThreadShell,
 }
 
 /// Computes the list summary of a thread from its projection.
@@ -24,13 +24,12 @@ pub struct ThreadShellProjector;
 impl ShellProjector for ThreadShellProjector {
     fn project(&self, state: &State) -> Option<ShellRow> {
         let thread = state.thread.as_ref()?;
-        let shell = agent_domain::shell(state)?;
         Some(ShellRow {
             project: thread.project.clone(),
             archived: thread.archived_at.is_some(),
             deleted: thread.deleted_at.is_some(),
             needs_recovery: needs_recovery(state),
-            payload: serde_json::to_value(shell).ok()?,
+            summary: agent_domain::shell(state)?,
         })
     }
 }

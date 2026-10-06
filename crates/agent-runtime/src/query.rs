@@ -50,6 +50,15 @@ pub fn turn_item(state: &State, item: &TurnItemId) -> Option<HistoryRow> {
         .map(|(position, row)| row.owned(position))
 }
 
+/// Every visible item in timeline order, positioned as history pages position them.
+pub fn timeline_rows(state: &State) -> Vec<HistoryRow> {
+    timeline(state)
+        .iter()
+        .enumerate()
+        .map(|(position, row)| row.owned(position))
+        .collect()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SearchSource {

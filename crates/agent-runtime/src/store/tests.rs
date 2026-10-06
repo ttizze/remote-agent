@@ -38,6 +38,14 @@ fn created(id: &ThreadId) -> Fact {
         },
     }
 }
+/// The list summary of a freshly created thread with this title.
+pub(crate) fn thread_shell(id: &str, title: &str) -> agent_domain::ThreadShell {
+    let mut state = State::default();
+    agent_domain::apply(&mut state, &created(&thread(id))).unwrap();
+    let mut shell = agent_domain::shell(&state).unwrap();
+    shell.title = title.into();
+    shell
+}
 fn renamed(title: String) -> Fact {
     Fact {
         at: at(),

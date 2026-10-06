@@ -3,12 +3,12 @@
 use crate::{
     ActorContext, ActorRegistry, Clock, CommandOrigin, Committed, DaemonOptions, EffectDaemon,
     EffectHandlers, EffectWorker, ExecutorContext, HandoffCatalog, HistoryPage, HostOperations,
-    IDLE_EVICTION, ImportCounts, ImportError, ImportProject, Importer, LaunchError, LaunchReply,
-    LaunchThread, LiveSessions, NoHandoffCatalog, ProjectDirectory, ProjectRoots, ProjectShell,
-    QueryError, RuntimeError, ScanConfig, Scanner, SearchMatch, SessionHost, SessionManager,
-    SessionOptions, ShellHub, ShellSubscribe, ShellSubscription, SqliteOutbox, Store, SystemClock,
-    ThreadSubscribe, ThreadSubscription, ThreadView, TranscriptFs, WorkerOptions,
-    with_runtime_handlers,
+    HostProject, IDLE_EVICTION, ImportCounts, ImportError, ImportProject, Importer, LaunchError,
+    LaunchReply, LaunchThread, LiveSessions, NoHandoffCatalog, ProjectDirectory, ProjectRoots,
+    QueryError, RuntimeError, ScanConfig, ScanResult, Scanner, SearchMatch, SessionHost,
+    SessionManager, SessionOptions, ShellHub, ShellSubscribe, ShellSubscription, SqliteOutbox,
+    Store, SystemClock, ThreadSubscribe, ThreadSubscription, ThreadView, TranscriptFs,
+    WorkerOptions, with_runtime_handlers,
 };
 use agent_domain::{Command, CommandId, Input, RecoveryTrigger, ThreadId};
 use std::path::{Path, PathBuf};
@@ -68,15 +68,8 @@ struct Background {
 /// Projects the Host owns, seen by the shell stream, search and import.
 struct HostProjects(Arc<dyn HostOperations>);
 impl ProjectDirectory for HostProjects {
-    fn projects(&self) -> Vec<ProjectShell> {
-        self.0
-            .projects()
-            .into_iter()
-            .map(|project| ProjectShell {
-                id: project.id,
-                payload: project.payload,
-            })
-            .collect()
+    fn projects(&self) -> Vec<HostProject> {
+        self.0.projects()
     }
 }
 impl ProjectRoots for HostProjects {
@@ -99,7 +92,7 @@ pub struct Runtime {
     worker: Arc<EffectWorker>,
     shell: Arc<ShellHub>,
     projects: Arc<HostProjects>,
-    importer: Option<Arc<Importer>>,
+    importer: Option<(Arc<Importer>, Arc<Scanner>)>,
     daemon: DaemonOptions,
     eviction: Option<Duration>,
     phase: watch::Sender<Phase>,
@@ -142,14 +135,15 @@ impl Runtime {
         let projects = Arc::new(HostProjects(ops));
         let shell = ShellHub::new(store, projects.clone())?;
         let importer = config.import.map(|settings| {
-            Arc::new(Importer::new(
-                registry.clone(),
-                Arc::new(Scanner::new(
-                    settings.scan,
-                    settings.fs,
-                    config.clock.clone(),
-                )),
-            ))
+            let scanner = Arc::new(Scanner::new(
+                settings.scan,
+                settings.fs,
+                config.clock.clone(),
+            ));
+            (
+                Arc::new(Importer::new(registry.clone(), scanner.clone())),
+                scanner,
+            )
         });
         Ok(Self {
             executors,
@@ -206,7 +200,7 @@ impl Runtime {
                 .tasks
                 .push(self.registry().spawn_eviction(every, IDLE_EVICTION));
         }
-        if let Some(importer) = &self.importer {
+        if let Some((importer, _)) = &self.importer {
             let handle = importer.clone().spawn_first_run(self.projects.clone());
             background.tasks.push(tokio::spawn(async move {
                 match handle.await {
@@ -281,6 +275,7 @@ impl Runtime {
     pub async fn launch(&self, request: LaunchThread) -> Result<LaunchReply, LaunchError> {
         if let Err(error) = self.ready().await {
             return Err(LaunchError {
+                kind: crate::LaunchFailure::Unavailable,
                 operation: crate::LaunchOperation::CreateThread,
                 command: request.command,
                 project: request.project,
@@ -342,13 +337,27 @@ impl Runtime {
         expected_root: Option<&Path>,
     ) -> Result<ImportCounts, ImportError> {
         match &self.importer {
-            Some(importer) => {
+            Some((importer, _)) => {
                 importer
                     .import(self.projects.as_ref(), project, expected_root)
                     .await
             }
             None => Err(ImportError::Scan("import is not configured".into())),
         }
+    }
+
+    /// Directories with Codex or Claude transcripts, matched to registered projects.
+    pub async fn scan(&self) -> Result<ScanResult, ImportError> {
+        let Some((_, scanner)) = &self.importer else {
+            return Err(ImportError::Scan("import is not configured".into()));
+        };
+        let (scanner, projects) = (
+            scanner.clone(),
+            ProjectRoots::projects(self.projects.as_ref()),
+        );
+        tokio::task::spawn_blocking(move || scanner.scan(&projects))
+            .await
+            .map_err(|error| ImportError::Scan(error.to_string()))
     }
 
     /// A project was added, renamed or removed.

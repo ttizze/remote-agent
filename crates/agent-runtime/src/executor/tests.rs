@@ -79,8 +79,8 @@ impl FakeOps {
 pub(crate) fn project(id: &str, root: &str) -> HostProject {
     HostProject {
         id: id.into(),
+        name: id.into(),
         root: root.into(),
-        payload: serde_json::json!({ "id": id, "root": root }),
     }
 }
 

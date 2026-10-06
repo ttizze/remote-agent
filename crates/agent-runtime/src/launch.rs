@@ -84,9 +84,22 @@ impl LaunchOperation {
     }
 }
 
+/// Why a launch failed, for callers that answer with typed errors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LaunchFailure {
+    ProjectNotFound,
+    /// The command id belongs to another thread, project or command.
+    Conflict,
+    ThreadNotFound,
+    /// The thread rejected the command.
+    Rejected,
+    Unavailable,
+}
+
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 #[error("Thread launch {command} failed during {}: {cause}", operation.as_str())]
 pub struct LaunchError {
+    pub kind: LaunchFailure,
     pub operation: LaunchOperation,
     pub command: CommandId,
     pub project: String,
@@ -260,7 +273,8 @@ pub(crate) async fn launch(
     context: &ExecutorContext,
     request: LaunchThread,
 ) -> Result<LaunchReply, LaunchError> {
-    let error = |operation, thread: Option<&ThreadId>, cause: String| LaunchError {
+    let error = |kind, operation, thread: Option<&ThreadId>, cause: String| LaunchError {
+        kind,
         operation,
         command: request.command.clone(),
         project: request.project.clone(),
@@ -269,6 +283,7 @@ pub(crate) async fn launch(
     };
     let Some(project) = context.ops.project(&request.project) else {
         return Err(error(
+            LaunchFailure::ProjectNotFound,
             LaunchOperation::ResolveProject,
             None,
             "Project not found.".into(),
@@ -281,6 +296,7 @@ pub(crate) async fn launch(
         .await
         .map_err(|e| {
             error(
+                LaunchFailure::Unavailable,
                 LaunchOperation::ReadReceipt,
                 request.thread.as_ref(),
                 e.to_string(),
@@ -298,6 +314,7 @@ pub(crate) async fn launch(
                 && requested != &record.thread
             {
                 return Err(error(
+                    LaunchFailure::Conflict,
                     LaunchOperation::CreateThread,
                     Some(requested),
                     replay(requested),
@@ -305,6 +322,7 @@ pub(crate) async fn launch(
             }
             if record.project != request.project {
                 return Err(error(
+                    LaunchFailure::Conflict,
                     LaunchOperation::ResolveProject,
                     Some(&record.thread),
                     "Project identity changed.".into(),
@@ -312,6 +330,7 @@ pub(crate) async fn launch(
             }
             let state = context.registry.state(&record.thread).await.map_err(|e| {
                 error(
+                    LaunchFailure::Unavailable,
                     LaunchOperation::CreateThread,
                     Some(&record.thread),
                     e.to_string(),
@@ -323,6 +342,7 @@ pub(crate) async fn launch(
                 .is_none_or(|thread| thread.deleted_at.is_some())
             {
                 return Err(error(
+                    LaunchFailure::ThreadNotFound,
                     LaunchOperation::CreateThread,
                     Some(&record.thread),
                     "Thread not found.".into(),
@@ -341,6 +361,7 @@ pub(crate) async fn launch(
                     || receipt.receipt.reply != Reply::Thread(thread.clone()))
             {
                 return Err(error(
+                    LaunchFailure::Conflict,
                     LaunchOperation::CreateThread,
                     Some(&thread),
                     replay(&thread),
@@ -365,7 +386,14 @@ pub(crate) async fn launch(
                 context.registry.context().clock.now().millis(),
             )
             .await
-            .map_err(|e| error(LaunchOperation::CreateThread, Some(&thread), e.to_string()))?,
+            .map_err(|e| {
+                error(
+                    LaunchFailure::Unavailable,
+                    LaunchOperation::CreateThread,
+                    Some(&thread),
+                    e.to_string(),
+                )
+            })?,
     };
     let mut resumed = !inserted || receipt.is_some();
     let created = context
@@ -385,17 +413,29 @@ pub(crate) async fn launch(
             CommandOrigin::Client,
         )
         .await
-        .map_err(|e| error(LaunchOperation::CreateThread, Some(&thread), e.to_string()))?;
+        .map_err(|e| {
+            error(
+                LaunchFailure::Unavailable,
+                LaunchOperation::CreateThread,
+                Some(&thread),
+                e.to_string(),
+            )
+        })?;
     if let Reply::Rejected { reason } = &created.reply {
         if inserted {
             let _ = store.delete_launch(&request.command).await;
         }
-        let cause = if reason == "command-id-conflict" {
-            replay(&thread)
+        let (kind, cause) = if reason == "command-id-conflict" {
+            (LaunchFailure::Conflict, replay(&thread))
         } else {
-            reason.clone()
+            (LaunchFailure::Rejected, reason.clone())
         };
-        return Err(error(LaunchOperation::CreateThread, Some(&thread), cause));
+        return Err(error(
+            kind,
+            LaunchOperation::CreateThread,
+            Some(&thread),
+            cause,
+        ));
     }
     let Some(message) = &request.initial_message else {
         if inserted {
@@ -418,7 +458,14 @@ pub(crate) async fn launch(
     resumed |= store
         .blocking(move |store| store.receipt(&lookup))
         .await
-        .map_err(|e| error(LaunchOperation::ReadReceipt, Some(&thread), e.to_string()))?
+        .map_err(|e| {
+            error(
+                LaunchFailure::Unavailable,
+                LaunchOperation::ReadReceipt,
+                Some(&thread),
+                e.to_string(),
+            )
+        })?
         .is_some();
     let sent = context
         .registry
@@ -445,6 +492,7 @@ pub(crate) async fn launch(
         .await
         .map_err(|e| {
             error(
+                LaunchFailure::Unavailable,
                 LaunchOperation::DispatchMessage,
                 Some(&thread),
                 e.to_string(),
@@ -457,11 +505,13 @@ pub(crate) async fn launch(
             resumed,
         }),
         Reply::Rejected { reason } => Err(error(
+            LaunchFailure::Rejected,
             LaunchOperation::DispatchMessage,
             Some(&thread),
             reason.clone(),
         )),
         other => Err(error(
+            LaunchFailure::Unavailable,
             LaunchOperation::DispatchMessage,
             Some(&thread),
             format!("Initial message was accepted without a durable run: {other:?}"),

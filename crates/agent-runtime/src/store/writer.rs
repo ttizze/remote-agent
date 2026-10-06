@@ -338,7 +338,7 @@ fn write_batch(
                 shell.archived,
                 shell.deleted,
                 shell.needs_recovery,
-                shell.payload.to_string(),
+                serde_json::to_string(&shell.summary)?,
             ],
         )?;
     }

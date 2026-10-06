@@ -3,7 +3,7 @@
 use super::*;
 use crate::store::tests::{selection, temp_store};
 use crate::{
-    ActorContext, CommandOrigin, CommitBatch, ProjectShell, ShellProjector, ThreadHead,
+    ActorContext, CommandOrigin, CommitBatch, HostProject, ShellProjector, ThreadHead,
     ThreadShellProjector, search_changes,
 };
 use agent_domain::{
@@ -13,12 +13,13 @@ use agent_domain::{
 
 struct Projects(Vec<&'static str>);
 impl ProjectDirectory for Projects {
-    fn projects(&self) -> Vec<ProjectShell> {
+    fn projects(&self) -> Vec<HostProject> {
         self.0
             .iter()
-            .map(|id| ProjectShell {
+            .map(|id| HostProject {
                 id: (*id).into(),
-                payload: serde_json::json!({}),
+                name: (*id).into(),
+                root: format!("/work/{id}"),
             })
             .collect()
     }

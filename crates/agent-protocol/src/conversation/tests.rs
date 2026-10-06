@@ -642,6 +642,21 @@ fn clients_cannot_dispatch_host_only_commands() {
             result: "done".into(),
         },
         Command::AcceptTaskWake { task_ids: vec![] },
+        Command::Import {
+            thread: id("thread"),
+            project: "project".into(),
+            title: "Imported".into(),
+            selection: selection(),
+            workspace: None,
+            created_at: at(),
+            updated_at: at(),
+            messages: vec![],
+            native: agent_domain::NativeBinding {
+                instance: "codex".into(),
+                thread: "native".into(),
+                head: None,
+            },
+        },
         Command::ContinueRestart {
             source: run.clone(),
             enabled: true,
@@ -652,7 +667,7 @@ fn clients_cannot_dispatch_host_only_commands() {
             message: "failed".into(),
         },
     ] {
-        assert!(internal_command(&command));
+        assert!(host_only_command(&command));
         assert_eq!(
             dispatch(command).validate(),
             Err(ConversationError::InternalCommand)
@@ -677,7 +692,7 @@ fn clients_cannot_dispatch_host_only_commands() {
         },
         Command::Stop,
     ] {
-        assert!(!internal_command(&command));
+        assert!(!host_only_command(&command));
         assert_eq!(dispatch(command).validate(), Ok(()));
     }
 }

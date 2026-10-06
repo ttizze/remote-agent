@@ -300,7 +300,7 @@ impl Store {
                             archived,
                             deleted,
                             needs_recovery,
-                            payload: serde_json::from_str(&payload)?,
+                            summary: serde_json::from_str(&payload)?,
                         },
                     ))
                 },

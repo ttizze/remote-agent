@@ -1,15 +1,15 @@
 //! Host I/O the runtime's effect executors, recovery and launch depend on.
 use agent_domain::{Attachment, RunId, ThreadId};
 use futures_util::future::BoxFuture;
+use serde::{Deserialize, Serialize};
 use std::io;
 
-/// A registered project.
-#[derive(Debug, Clone, PartialEq)]
+/// A registered project, as shell subscribers see it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HostProject {
     pub id: String,
+    pub name: String,
     pub root: String,
-    /// The project row sent to shell subscribers.
-    pub payload: serde_json::Value,
 }
 
 /// A worktree the Host checks out for a launch.
