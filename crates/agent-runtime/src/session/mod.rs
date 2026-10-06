@@ -729,12 +729,13 @@ impl SessionManager {
                     }
                 };
                 let turns = turns_after(&state, native_thread, absolute_head.as_deref());
-                let native = native_thread.clone();
+                let (native, boundary) = (native_thread.clone(), absolute_head.clone());
                 let completed = self
                     .request_completion(
                         &entry,
                         Request::new(thread, move |p| {
-                            Ok(p.codex()?.rollback(&native, turns, &context))
+                            Ok(p.codex()?
+                                .rollback(&native, turns, boundary.as_deref(), &context))
                         }),
                     )
                     .await

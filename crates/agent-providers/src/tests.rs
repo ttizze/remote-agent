@@ -311,7 +311,7 @@ fn codex_thread_configuration_is_shared_by_start_resume_fork_and_rollback_resume
         .outbound;
     assert_eq!(fork[0]["params"]["config"], expected);
     assert_eq!(fork[0]["params"]["model"], "gpt-5.4");
-    let revert = protocol.rollback("resumed", 1, &context).outbound;
+    let revert = protocol.rollback("resumed", 1, None, &context).outbound;
     let resume = protocol.receive(&json!({"id":revert[0]["id"],"result":{"thread":{"historyMode":"paginated","status":{"type":"notLoaded"}}}})).unwrap();
     assert_eq!(resume.outbound[0]["params"]["config"], expected);
     assert_eq!(resume.outbound[0]["params"]["model"], "gpt-5.4");
@@ -981,7 +981,7 @@ fn rollback_finds_the_revert_boundary_across_pages_of_newest_first_turns() {
     // T3 CodexThreadRevert.test.ts "finds the revert boundary across pages".
     let mut protocol = CodexProtocol::default();
     let read = protocol
-        .rollback("thread", 3, &wire_context())
+        .rollback("thread", 3, None, &wire_context())
         .outbound
         .remove(0);
     assert_eq!(read["method"], "thread/read");
@@ -1034,7 +1034,7 @@ fn rollback_finds_the_revert_boundary_across_pages_of_newest_first_turns() {
     );
     // An empty history reads the thread instead of reverting.
     let read = protocol
-        .rollback("empty", 2, &wire_context())
+        .rollback("empty", 2, None, &wire_context())
         .outbound
         .remove(0);
     let page = protocol.receive(&json!({"id":read["id"],"result":{"thread":{"historyMode":"paginated","status":{"type":"idle"}}}})).unwrap().outbound.remove(0);
@@ -1060,7 +1060,7 @@ fn rollback_rejects_repeated_cursors_instead_of_reverting_incomplete_history() {
     // T3 CodexThreadRevert.test.ts "rejects repeated cursors".
     let mut protocol = CodexProtocol::default();
     let read = protocol
-        .rollback("thread", 3, &wire_context())
+        .rollback("thread", 3, None, &wire_context())
         .outbound
         .remove(0);
     let page = protocol
@@ -1080,6 +1080,41 @@ fn rollback_rejects_repeated_cursors_instead_of_reverting_incomplete_history() {
     assert_eq!(
         error,
         ProtocolError::Invalid("Thread history pagination repeated a cursor.".into())
+    );
+}
+
+// A rollback retried after its revert landed must not discard the kept turns.
+#[test]
+fn a_repeated_rollback_reverts_only_the_turns_after_its_boundary() {
+    let mut protocol = CodexProtocol::default();
+    let mut page = |turns: Value| {
+        let read = protocol
+            .rollback("thread", 2, Some("kept"), &wire_context())
+            .outbound
+            .remove(0);
+        let list = protocol
+            .receive(&json!({"id":read["id"],"result":{"thread":{"historyMode":"paginated"}}}))
+            .unwrap()
+            .outbound
+            .remove(0);
+        assert_eq!(list["params"]["limit"], 2);
+        protocol
+            .receive(&json!({"id":list["id"],"result":{"data":turns,"nextCursor":"older"}}))
+            .unwrap()
+            .outbound
+            .remove(0)
+    };
+    let revert = page(json!([{"id":"third"},{"id":"second"}]));
+    assert_eq!(
+        revert["params"],
+        json!({"threadId":"thread","beforeTurnId":"second"})
+    );
+    let rewound = page(json!([{"id":"kept"},{"id":"first"}]));
+    assert_eq!(rewound["method"], "thread/read");
+    let partly = page(json!([{"id":"second"},{"id":"kept"}]));
+    assert_eq!(
+        partly["params"],
+        json!({"threadId":"thread","beforeTurnId":"second"})
     );
 }
 
@@ -1630,7 +1665,7 @@ fn native_rollback_and_fork_report_completion() {
         })
     );
     // T3 rollbackThread: no turn to discard sends nothing.
-    let reached = codex.rollback("root", 0, &wire_context());
+    let reached = codex.rollback("root", 0, None, &wire_context());
     assert!(reached.outbound.is_empty());
     assert_eq!(
         reached.completion,
@@ -1638,7 +1673,7 @@ fn native_rollback_and_fork_report_completion() {
             native_thread: "root".into()
         })
     );
-    let read = codex.rollback("root", 1, &wire_context());
+    let read = codex.rollback("root", 1, None, &wire_context());
     let page = codex
         .receive(&json!({"id":read.outbound[0]["id"],"result":{"thread":{"historyMode":"paginated","status":{"type":"idle"}}}}))
         .unwrap();
