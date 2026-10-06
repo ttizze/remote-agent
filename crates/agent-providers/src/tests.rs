@@ -1642,6 +1642,54 @@ fn rerouted_child_models_update_the_child() {
         .is_empty()
     );
 }
+// T3 takes a fork's identity from its correlated reply: a forked thread's
+// announcement never binds the route that is starting a thread meanwhile.
+#[test]
+fn a_forked_threads_announcement_does_not_bind_a_starting_route() {
+    for announce_before_reply in [false, true] {
+        let mut codex = CodexProtocol::default();
+        let route = |route: &str| WireContext {
+            route: route.into(),
+            ..wire_context()
+        };
+        let start = codex
+            .command(&codex_start(), &route("a"), &[])
+            .unwrap()
+            .outbound;
+        let fork = codex
+            .command(
+                &ProviderCommand::Fork {
+                    native_thread: "source".into(),
+                    through_turn: None,
+                },
+                &route("b"),
+                &[],
+            )
+            .unwrap()
+            .outbound;
+        let announce = |codex: &mut CodexProtocol| {
+            notify(codex, "thread/started", json!({"thread":{"id":"forked"}}))
+        };
+        let announced = if announce_before_reply {
+            let announced = announce(&mut codex);
+            codex
+                .receive(&json!({"id":fork[0]["id"],"result":{"thread":{"id":"forked"}}}))
+                .unwrap();
+            announced
+        } else {
+            codex
+                .receive(&json!({"id":fork[0]["id"],"result":{"thread":{"id":"forked"}}}))
+                .unwrap();
+            announce(&mut codex)
+        };
+        assert!(announced.events.is_empty());
+        assert_eq!(codex.native_thread("a"), None);
+        codex
+            .receive(&json!({"id":start[0]["id"],"result":{"thread":{"id":"root"}}}))
+            .unwrap();
+        assert_eq!(codex.native_thread("a"), Some("root"));
+    }
+}
 #[test]
 fn native_rollback_and_fork_report_completion() {
     let mut codex = CodexProtocol::default();

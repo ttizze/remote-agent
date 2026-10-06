@@ -1158,9 +1158,13 @@ impl CodexProtocol {
         match method.as_str() {
             "thread/started" => {
                 let thread = required(&p["thread"], "id")?;
-                if !self.is_root(&thread) && !self.child_roots.contains_key(&thread) {
+                if !self.is_root(&thread)
+                    && !self.child_roots.contains_key(&thread)
+                    && !self.unclaimed.contains(&thread)
+                {
                     // A new thread announced before its `thread/start` reply
-                    // belongs to the only route starting one.
+                    // belongs to the only route starting one, unless a pending
+                    // fork may have created it instead.
                     let mut starting =
                         self.pending
                             .values()
@@ -1169,10 +1173,14 @@ impl CodexProtocol {
                                     resume: None,
                                     load_key,
                                     ..
-                                } => Some((route.clone(), load_key.clone())),
+                                } => Some(Some((route.clone(), load_key.clone()))),
+                                Pending::Operation(operation) if operation == "thread/fork" => {
+                                    Some(None)
+                                }
                                 _ => None,
                             });
-                    if let (Some((route, load_key)), None) = (starting.next(), starting.next())
+                    if let (Some(Some((route, load_key))), None) =
+                        (starting.next(), starting.next())
                         && self.native_thread(&route).is_none()
                     {
                         self.bind_root(&route, &thread, load_key);
