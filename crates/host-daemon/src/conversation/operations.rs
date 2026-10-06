@@ -366,6 +366,7 @@ impl HostOperations for HostIo {
             let (path, branch) = self
                 .worktrees
                 .create(
+                    request.thread.as_str(),
                     &request.project_root,
                     &request.base_ref,
                     request.branch,

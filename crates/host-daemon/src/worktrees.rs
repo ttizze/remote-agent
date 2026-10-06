@@ -13,6 +13,8 @@ use std::{
 struct State {
     settings: WorktreeSettings,
     workspace_roots: HashMap<String, String>,
+    /// Each thread's checkout, recorded before it is created.
+    threads: HashMap<String, ThreadCheckout>,
 }
 
 pub(crate) struct Worktrees {
@@ -131,7 +133,7 @@ impl Worktrees {
                 root,
                 destination,
                 &branch,
-                "refs/heads/main",
+                Some("refs/heads/main"),
                 if state.settings.copy_on_create {
                     &state.settings.copy_paths
                 } else {
@@ -167,11 +169,13 @@ impl Worktrees {
         ?
     }
 
-    /// A new checkout of `cwd`'s repository for one thread, from `base_ref` or,
-    /// with `start_from_origin`, from its origin branch. Returns the working
-    /// directory and the branch.
+    /// The checkout of `cwd`'s repository for `thread`, from `base_ref` or, with
+    /// `start_from_origin`, from its origin branch when the repository has one.
+    /// Returns the working directory and the branch. The same thread always gets
+    /// the same checkout, so a retry after a crash finds the one it created.
     pub(crate) async fn create(
         &self,
+        thread: &str,
         cwd: &str,
         base_ref: &str,
         branch: Option<String>,
@@ -179,29 +183,207 @@ impl Worktrees {
     ) -> Result<(PathBuf, String)> {
         let _guard = self.lock.lock().await;
         let path = self.path.clone();
-        let cwd = PathBuf::from(cwd);
-        let base_ref = base_ref.to_owned();
+        let (thread, cwd, base_ref) = (thread.to_owned(), PathBuf::from(cwd), base_ref.to_owned());
         tokio::task::spawn_blocking(move || {
             let mut state = read(&path)?;
-            let base = if start_from_origin {
-                crate::git::text(&cwd, &["fetch", "--quiet", "origin", &base_ref])
-                    .with_context(|| format!("Could not fetch {base_ref} from origin"))?;
-                format!("origin/{base_ref}")
-            } else {
-                base_ref
+            let base = || {
+                if start_from_origin {
+                    origin_start(&cwd, &base_ref)
+                } else {
+                    Ok(base_ref.clone())
+                }
             };
-            checkout(&path, &mut state, &cwd, &base, branch)
+            checkout(&path, &mut state, &thread, &cwd, base, branch)
         })
         .await?
     }
 }
 
-/// Creates a managed checkout of the repository containing `cwd` and records it.
+/// The commit a worktree "started from origin" begins at (T3 ThreadLaunchService):
+/// the fetched origin branch, or the local `base_ref` when the repository has no
+/// `origin` remote or origin has no such branch.
+fn origin_start(cwd: &Path, base_ref: &str) -> Result<String> {
+    if crate::git::output(cwd, &["remote", "get-url", "origin"]).is_err() {
+        return Ok(base_ref.to_owned());
+    }
+    fetch_origin(cwd, base_ref)?;
+    let remote = format!("refs/remotes/origin/{base_ref}");
+    if crate::git::output(cwd, &["show-ref", "--verify", "--quiet", &remote]).is_err() {
+        return Ok(base_ref.to_owned());
+    }
+    Ok(crate::git::text(
+        cwd,
+        &["rev-parse", "--verify", &format!("{remote}^{{commit}}")],
+    )?
+    .trim()
+    .to_owned())
+}
+
+/// T3 `GitVcsDriver.fetchRemote` for `origin`: the branch, or every branch when
+/// origin has no such branch. Failures report a fixed diagnosis, never Git's output,
+/// which can contain remote credentials.
+fn fetch_origin(cwd: &Path, base_ref: &str) -> Result<()> {
+    let fetch = |refspec: Option<&str>| {
+        let mut command = std::process::Command::new("git");
+        command
+            .args(["fetch", "--quiet", "origin"])
+            .args(refspec)
+            .current_dir(cwd)
+            .env("LC_ALL", "C")
+            .env("GCM_INTERACTIVE", "never")
+            .env("GIT_ASKPASS", "")
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env("SSH_ASKPASS", "")
+            .env("SSH_ASKPASS_REQUIRE", "never");
+        let output = command.output().context("failed to run git")?;
+        Ok::<_, anyhow::Error>((
+            output.status.success(),
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        ))
+    };
+    let failed = |stderr: &str| {
+        anyhow!(
+            "Git command failed in GitVcsDriver.fetchRemote ({}): {}",
+            cwd.display(),
+            fetch_failure_detail(stderr).unwrap_or("git fetch origin failed")
+        )
+    };
+    let branch = base_ref.strip_prefix("origin/").unwrap_or(base_ref);
+    let (fetched, stderr) = fetch(Some(&format!(
+        "+refs/heads/{branch}:refs/remotes/origin/{branch}"
+    )))?;
+    if fetched {
+        return Ok(());
+    }
+    let missing = format!("fatal: couldn't find remote ref refs/heads/{branch}");
+    if !stderr.lines().any(|line| line == missing) {
+        return Err(failed(&stderr));
+    }
+    match fetch(None)? {
+        (true, _) => Ok(()),
+        (false, stderr) => Err(failed(&stderr)),
+    }
+}
+
+/// T3 `fetchFailureDetail`: a fixed diagnosis for recognized fetch failures.
+fn fetch_failure_detail(stderr: &str) -> Option<&'static str> {
+    // `prefix` followed by a word boundary (a regex `\b`).
+    fn word(line: &str, prefix: &str) -> bool {
+        line.strip_prefix(prefix)
+            .is_some_and(|rest| !rest.starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_'))
+    }
+    let authentication = |line: &str| {
+        word(line, "fatal: authentication failed")
+            || word(line, "fatal: could not read username")
+            || word(line, "fatal: could not read password")
+            || line
+                .split_once(": permission denied (publickey")
+                .is_some_and(|(host, _)| !host.is_empty() && !host.contains(char::is_whitespace))
+    };
+    let unreachable = |line: &str| {
+        ["fatal: ", "ssh: ", ""].iter().any(|lead| {
+            word(line, &format!("{lead}could not resolve host"))
+                || word(line, &format!("{lead}could not resolve hostname"))
+        }) || (line.starts_with("fatal: unable to access ")
+            && [": could not resolve host", ": failed to connect"]
+                .iter()
+                .any(|reason| line.contains(reason)))
+            || (line.starts_with("ssh: connect to host ")
+                && line.contains(" port ")
+                && [
+                    ": connection timed out",
+                    ": connection refused",
+                    ": network is unreachable",
+                ]
+                .iter()
+                .any(|reason| line.contains(reason)))
+    };
+    let inaccessible = |line: &str| {
+        line == "remote: repository not found."
+            || line == "remote: repository not found"
+            || (line.starts_with("fatal: repository ") && line.ends_with(" not found"))
+            || (line.starts_with("fatal: ")
+                && line.ends_with(" does not appear to be a git repository"))
+    };
+    let locked = |line: &str| {
+        word(line, "error: cannot lock ref")
+            || word(line, "fatal: cannot lock ref")
+            || ((line.starts_with("fatal: unable to create '")
+                || line.starts_with("fatal: unable to create \""))
+                && (line.contains(".lock':") || line.contains(".lock\":")))
+    };
+    let lines: Vec<String> = stderr
+        .lines()
+        .map(|line| line.trim().to_ascii_lowercase())
+        .collect();
+    let checks: [(&dyn Fn(&str) -> bool, &'static str); 4] = [
+        (
+            &authentication,
+            "Git could not authenticate with the remote. Check Git credentials or SSH access on the server, then retry.",
+        ),
+        (
+            &unreachable,
+            "Git could not reach the remote. Check the server's network connection and remote host, then retry.",
+        ),
+        (
+            &inaccessible,
+            "Git could not access the remote repository. Check the remote URL and repository permissions on the server.",
+        ),
+        (
+            &locked,
+            "Git could not update a local reference. Another Git operation or a stale lock may be blocking the fetch; check the repository on the server, then retry.",
+        ),
+    ];
+    checks
+        .into_iter()
+        .find(|(matches, _)| lines.iter().any(|line| matches(line)))
+        .map(|(_, detail)| detail)
+}
+
+/// A checkout's directory and default branch derive from its thread, so a retried
+/// creation finds what an earlier attempt left.
+#[derive(Clone, Serialize, Deserialize)]
+struct ThreadCheckout {
+    path: String,
+    branch: String,
+}
+
+fn thread_key(thread: &str) -> String {
+    uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, thread.as_bytes())
+        .simple()
+        .to_string()[..12]
+        .to_owned()
+}
+
+fn branch_exists(root: &Path, branch: &str) -> bool {
+    crate::git::output(
+        root,
+        &[
+            "show-ref",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{branch}"),
+        ],
+    )
+    .is_ok()
+}
+
+fn registered(root: &Path, destination: &Path) -> Result<bool> {
+    Ok(
+        crate::git::text(root, &["worktree", "list", "--porcelain", "-z"])?
+            .split("\0\0")
+            .any(|entry| worktree_path(entry) == Some(destination)),
+    )
+}
+
+/// Creates the managed checkout of the repository containing `cwd` for `thread`
+/// and records it; returns the one recorded or left by an earlier attempt.
 fn checkout(
     path: &Path,
     state: &mut State,
+    thread: &str,
     cwd: &Path,
-    base: &str,
+    base: impl FnOnce() -> Result<String>,
     branch: Option<String>,
 ) -> Result<(PathBuf, String)> {
     let cwd = dunce::canonicalize(cwd)?;
@@ -221,6 +403,99 @@ fn checkout(
             .context("Git did not return the original repository")?,
         )?,
     };
+    let (destination, branch) = match state.threads.get(thread) {
+        Some(existing) => (PathBuf::from(&existing.path), existing.branch.clone()),
+        None => {
+            let parent = checkout_parent(state, &root, &original)?;
+            let key = thread_key(thread);
+            let destination = parent.join(format!("session-{key}")).join(
+                original
+                    .file_name()
+                    .context("repository has no folder name")?,
+            );
+            let branch = branch.unwrap_or_else(|| format!("agent/session-{key}"));
+            if branch_exists(&root, &branch) {
+                return Err(anyhow!("fatal: a branch named '{branch}' already exists"));
+            }
+            state.threads.insert(
+                thread.to_owned(),
+                ThreadCheckout {
+                    path: destination
+                        .to_str()
+                        .context("worktree path is not UTF-8")?
+                        .to_owned(),
+                    branch: branch.clone(),
+                },
+            );
+            save(path, state)?;
+            (destination, branch)
+        }
+    };
+    let key = destination
+        .to_str()
+        .context("worktree path is not UTF-8")?
+        .to_owned();
+    if registered(&root, &destination)? {
+        if state.workspace_roots.contains_key(&key) {
+            return Ok((working_directory(&destination, relative_cwd)?, branch));
+        }
+        // An attempt that stopped before recording it may have left it incomplete.
+        crate::git::text(&root, &["worktree", "remove", "--force", &key])?;
+    }
+    if fs::symlink_metadata(&destination).is_ok() {
+        fs::remove_dir_all(&destination)?;
+    }
+    let session = destination
+        .parent()
+        .context("worktree has no session folder")?
+        .to_path_buf();
+    scopeguard::defer! { let _ = fs::remove_dir(&session); }
+    // A branch left by an earlier attempt for this thread is reused.
+    let created = (|| {
+        let base = match branch_exists(&root, &branch) {
+            true => None,
+            false => Some(base()?),
+        };
+        let target = create_checkout(
+            &root,
+            &destination,
+            &branch,
+            base.as_deref(),
+            if state.settings.copy_on_create {
+                &state.settings.copy_paths
+            } else {
+                &[]
+            },
+            relative_cwd,
+        )?;
+        Ok::<_, anyhow::Error>((target, base.is_some()))
+    })();
+    let (target, created_branch) = match created {
+        Ok(created) => created,
+        Err(error) => {
+            if !branch_exists(&root, &branch) {
+                state.threads.remove(thread);
+                let _ = save(path, state);
+            }
+            return Err(error);
+        }
+    };
+    state
+        .workspace_roots
+        .insert(key, original.to_string_lossy().into_owned());
+    save(path, state).map_err(|error| {
+        discard_checkout(
+            &root,
+            &destination,
+            created_branch.then_some(branch.as_str()),
+            error,
+        )
+    })?;
+    Ok((target, branch))
+}
+
+/// Where new checkouts of the repository at `root` go.
+fn checkout_parent(state: &State, root: &Path, original: &Path) -> Result<PathBuf> {
     let parent = if state.settings.worktree_directory.is_empty() {
         let exclude = PathBuf::from(
             crate::git::text(
@@ -253,37 +528,7 @@ fn checkout(
     };
     fs::create_dir_all(&parent)?;
     // Resolve aliases such as /tmp before checking copy destination ancestors.
-    let parent = dunce::canonicalize(&parent)?;
-    let session = crate::platform::worktree_directory(&parent)?.keep();
-    scopeguard::defer! { let _ = fs::remove_dir(&session); }
-    let destination = session.join(
-        original
-            .file_name()
-            .context("repository has no folder name")?,
-    );
-    let branch = branch
-        .unwrap_or_else(|| format!("agent/{}", session.file_name().unwrap().to_string_lossy()));
-    let target = create_checkout(
-        &root,
-        &destination,
-        &branch,
-        base,
-        if state.settings.copy_on_create {
-            &state.settings.copy_paths
-        } else {
-            &[]
-        },
-        relative_cwd,
-    )?;
-    state.workspace_roots.insert(
-        destination
-            .to_str()
-            .context("worktree path is not UTF-8")?
-            .to_owned(),
-        original.to_string_lossy().into_owned(),
-    );
-    save(path, state).map_err(|error| discard_checkout(&root, &destination, &branch, error))?;
-    Ok((target, branch))
+    Ok(dunce::canonicalize(&parent)?)
 }
 
 #[derive(Clone, Eq, Hash, PartialEq)]
@@ -533,12 +778,13 @@ fn save(path: &Path, state: &State) -> Result<()> {
         .map_err(Into::into)
 }
 
-/// Fresh and recreated worktrees share checkout, copy and rollback rules.
+/// Fresh and recreated worktrees share checkout, copy and rollback rules. Without
+/// a `base` the existing `branch` is checked out and kept on failure.
 fn create_checkout(
     source: &Path,
     destination: &Path,
     branch: &str,
-    base: &str,
+    base: Option<&str>,
     copy_paths: &[String],
     relative_cwd: &Path,
 ) -> Result<PathBuf> {
@@ -547,10 +793,13 @@ fn create_checkout(
         crate::platform::create_state_directory(parent)?;
     }
     crate::platform::create_state_directory(destination)?;
-    if let Err(error) = crate::git::text(source, &["branch", branch, base]) {
+    if let Some(base) = base
+        && let Err(error) = crate::git::text(source, &["branch", branch, base])
+    {
         let _ = fs::remove_dir(destination);
         return Err(error);
     }
+    let created = base.is_some().then_some(branch);
     // Create the branch separately so a locked/missing checkout cannot leak it.
     // One --force replaces a missing registration but continues to respect locks.
     if let Err(error) = crate::git::text(
@@ -558,6 +807,9 @@ fn create_checkout(
         &["worktree", "add", "--force", destination_text, branch],
     ) {
         let _ = fs::remove_dir(destination);
+        let Some(branch) = created else {
+            return Err(error);
+        };
         return Err(match crate::git::text(source, &["branch", "-D", branch]) {
             Ok(_) => error,
             Err(cleanup) => error.context(format!("branch cleanup failed: {cleanup:#}")),
@@ -575,23 +827,28 @@ fn create_checkout(
             no_symlinks(source, relative)?;
             copy(&path, &destination.join(relative))?;
         }
-        let target = if relative_cwd.as_os_str().is_empty() {
-            destination.to_path_buf()
-        } else {
-            destination.join(relative_cwd)
-        };
-        if !target.is_dir() {
-            return Err(anyhow!("working directory does not exist in the checkout"));
-        }
-        Ok(target)
+        working_directory(destination, relative_cwd)
     })();
-    prepared.map_err(|error| discard_checkout(source, destination, branch, error))
+    prepared.map_err(|error| discard_checkout(source, destination, created, error))
 }
 
+fn working_directory(destination: &Path, relative_cwd: &Path) -> Result<PathBuf> {
+    let target = if relative_cwd.as_os_str().is_empty() {
+        destination.to_path_buf()
+    } else {
+        destination.join(relative_cwd)
+    };
+    if !target.is_dir() {
+        return Err(anyhow!("working directory does not exist in the checkout"));
+    }
+    Ok(target)
+}
+
+/// Removes the checkout and the branch it created, if any.
 fn discard_checkout(
     source: &Path,
     destination: &Path,
-    branch: &str,
+    branch: Option<&str>,
     error: anyhow::Error,
 ) -> anyhow::Error {
     let cleanup = (|| -> Result<()> {
@@ -604,7 +861,9 @@ fn discard_checkout(
                 destination.to_str().context("worktree path is not UTF-8")?,
             ],
         )?;
-        crate::git::text(source, &["branch", "-D", branch])?;
+        if let Some(branch) = branch {
+            crate::git::text(source, &["branch", "-D", branch])?;
+        }
         Ok(())
     })();
     match cleanup {
@@ -743,6 +1002,230 @@ mod tests {
         directory
     }
 
+    fn new_thread() -> String {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        format!(
+            "thread:{}",
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        )
+    }
+
+    fn commit(cwd: &Path, file: &str, contents: &str) -> String {
+        fs::write(cwd.join(file), contents).unwrap();
+        crate::git::text(cwd, &["add", file]).unwrap();
+        crate::git::text(
+            cwd,
+            &[
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "--quiet",
+                "-m",
+                contents,
+            ],
+        )
+        .unwrap();
+        crate::git::text(cwd, &["rev-parse", "HEAD"])
+            .unwrap()
+            .trim()
+            .to_owned()
+    }
+
+    fn head(cwd: &Path) -> String {
+        crate::git::text(cwd, &["rev-parse", "HEAD"])
+            .unwrap()
+            .trim()
+            .to_owned()
+    }
+
+    #[tokio::test]
+    async fn a_thread_keeps_its_checkout_when_its_creation_is_retried() {
+        let repository = repository();
+        let root = dunce::canonicalize(repository.path()).unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let projects = directory.path().join("projects.json");
+        let store = Worktrees::new(&projects);
+        let create = |thread: &'static str| {
+            store.create(thread, root.to_str().unwrap(), "HEAD", None, false)
+        };
+        let first = create("thread:retried").await.unwrap();
+        assert_eq!(create("thread:retried").await.unwrap(), first);
+        let other = create("thread:other").await.unwrap();
+        assert_ne!(other.0, first.0);
+        assert_ne!(other.1, first.1);
+        let listing = || {
+            (
+                crate::git::text(&root, &["worktree", "list", "--porcelain"]).unwrap(),
+                crate::git::text(&root, &["branch", "--list"]).unwrap(),
+            )
+        };
+        let listed = listing();
+        let state = projects.with_file_name("bex-worktrees.json");
+        let forget = || {
+            let mut saved = read(&state).unwrap();
+            saved.workspace_roots.remove(first.0.to_str().unwrap());
+            save(&state, &saved).unwrap();
+        };
+
+        // Stopped after the checkout, before recording it.
+        forget();
+        assert_eq!(create("thread:retried").await.unwrap(), first);
+        assert_eq!(listing(), listed);
+
+        // Stopped after creating the branch, before the checkout.
+        crate::git::text(
+            &root,
+            &["worktree", "remove", "--force", first.0.to_str().unwrap()],
+        )
+        .unwrap();
+        forget();
+        assert_eq!(create("thread:retried").await.unwrap(), first);
+        assert_eq!(listing(), listed);
+        assert!(
+            workspace_roots(&projects)
+                .await
+                .unwrap()
+                .contains_key(first.0.to_str().unwrap())
+        );
+    }
+
+    // T3 ThreadLaunchService: "Start from origin" fetches only when the repository
+    // has an origin, and starts from the local base when origin lacks the branch.
+    #[tokio::test]
+    async fn starting_from_origin_falls_back_to_the_local_base() {
+        let upstream = repository();
+        let directory = tempfile::tempdir().unwrap();
+        let clone = directory.path().join("clone");
+        crate::git::text(
+            directory.path(),
+            &[
+                "clone",
+                "--quiet",
+                upstream.path().to_str().unwrap(),
+                clone.to_str().unwrap(),
+            ],
+        )
+        .unwrap();
+        let clone = dunce::canonicalize(clone).unwrap();
+        let upstream_head = commit(upstream.path(), "tracked.txt", "upstream");
+        let local_head = commit(&clone, "local.txt", "local");
+        crate::git::text(&clone, &["branch", "feature"]).unwrap();
+        let store = Worktrees::new(&directory.path().join("projects.json"));
+        let create = |thread: &'static str, base: &'static str| {
+            store.create(thread, clone.to_str().unwrap(), base, None, true)
+        };
+
+        let (from_origin, _) = create("thread:origin", "main").await.unwrap();
+        assert_eq!(head(&from_origin), upstream_head);
+        let (missing_remote_branch, _) = create("thread:local", "feature").await.unwrap();
+        assert_eq!(head(&missing_remote_branch), local_head);
+        crate::git::text(&clone, &["remote", "remove", "origin"]).unwrap();
+        let (without_origin, _) = create("thread:no-origin", "main").await.unwrap();
+        assert_eq!(head(&without_origin), local_head);
+    }
+
+    // ThreadLaunchService.test.ts "shows the fetch diagnosis when preparing a worktree
+    // from origin fails": nothing is checked out and Git's output stays out.
+    #[tokio::test]
+    async fn a_failed_origin_fetch_reports_its_diagnosis_and_checks_out_nothing() {
+        let repository = repository();
+        let root = dunce::canonicalize(repository.path()).unwrap();
+        crate::git::text(
+            &root,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "/missing/secret-token/repository",
+            ],
+        )
+        .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let projects = directory.path().join("projects.json");
+        let store = Worktrees::new(&projects);
+        let branches = crate::git::text(&root, &["branch", "--list"]).unwrap();
+        let error = store
+            .create("thread:fetch", root.to_str().unwrap(), "main", None, true)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            format!("{error:#}"),
+            format!(
+                "Git command failed in GitVcsDriver.fetchRemote ({}): Git could not access the remote repository. Check the remote URL and repository permissions on the server.",
+                root.display()
+            )
+        );
+        assert_eq!(
+            crate::git::text(&root, &["branch", "--list"]).unwrap(),
+            branches
+        );
+        assert_eq!(fs::read_dir(root.join(".worktree")).unwrap().count(), 0);
+        assert!(workspace_roots(&projects).await.unwrap().is_empty());
+    }
+
+    // GitVcsDriverCore.test.ts "reports $name during fetch without retaining remote output"
+    #[test]
+    fn fetch_failures_report_a_fixed_diagnosis() {
+        let secret = "secret-fetch-token";
+        for (stderr, expected) in [
+            ("fatal: Authentication failed for", "could not authenticate"),
+            (
+                "git@example.com: Permission denied (publickey).",
+                "could not authenticate",
+            ),
+            (
+                "fatal: could not read Username: terminal prompts disabled",
+                "could not authenticate",
+            ),
+            (
+                "fatal: Could not resolve host: example.com",
+                "could not reach the remote",
+            ),
+            (
+                "ssh: connect to host example.com port 22: Connection refused",
+                "could not reach the remote",
+            ),
+            (
+                "remote: Repository not found.",
+                "could not access the remote repository",
+            ),
+            (
+                "fatal: remote does not appear to be a git repository",
+                "could not access the remote repository",
+            ),
+            (
+                "error: cannot lock ref 'refs/remotes/origin/main': is at abc but expected def",
+                "could not update a local reference",
+            ),
+            (
+                "fatal: Unable to create '/repo/.git/FETCH_HEAD.lock': File exists.",
+                "could not update a local reference",
+            ),
+            (
+                "remote: Help: authentication failed, connection refused, cannot lock ref\nremote: unrelated service error",
+                "git fetch origin failed",
+            ),
+            (
+                "fatal: unable to access 'https://example.com/repo.git/': Could not resolve host: example.com",
+                "could not reach the remote",
+            ),
+            (
+                "fatal: unexpected remote failure",
+                "git fetch origin failed",
+            ),
+        ] {
+            let stderr =
+                format!("{stderr}\nhttps://user:{secret}@example.com/private?token={secret}");
+            let detail = fetch_failure_detail(&stderr).unwrap_or("git fetch origin failed");
+            assert!(detail.contains(expected), "{stderr}: {detail}");
+            assert!(!detail.contains(secret));
+        }
+    }
+
     #[tokio::test]
     async fn deleted_worktrees_are_recreated_on_send_even_when_creation_is_disabled() {
         for removal in ["managed", "git", "filesystem"] {
@@ -756,7 +1239,7 @@ mod tests {
                 .await
                 .unwrap();
             let cwd = store
-                .create(root.to_str().unwrap(), "HEAD", None, false)
+                .create(&new_thread(), root.to_str().unwrap(), "HEAD", None, false)
                 .await
                 .unwrap()
                 .0;
@@ -918,7 +1401,7 @@ mod tests {
         };
         store.settings(Some(settings.clone())).await.unwrap();
         let cwd = store
-            .create(root.to_str().unwrap(), "HEAD", None, false)
+            .create(&new_thread(), root.to_str().unwrap(), "HEAD", None, false)
             .await
             .unwrap()
             .0;
@@ -988,12 +1471,12 @@ mod tests {
             .await
             .unwrap();
         let first = worktrees
-            .create(root.to_str().unwrap(), "HEAD", None, false)
+            .create(&new_thread(), root.to_str().unwrap(), "HEAD", None, false)
             .await
             .unwrap()
             .0;
         let other = worktrees
-            .create(root.to_str().unwrap(), "HEAD", None, false)
+            .create(&new_thread(), root.to_str().unwrap(), "HEAD", None, false)
             .await
             .unwrap()
             .0;
@@ -1095,7 +1578,7 @@ mod tests {
         let loaded = Worktrees::new(&projects);
         assert_eq!(loaded.configure(None).await.unwrap(), settings);
         let first = loaded
-            .create(root.to_str().unwrap(), "HEAD", None, false)
+            .create(&new_thread(), root.to_str().unwrap(), "HEAD", None, false)
             .await
             .unwrap()
             .0;
@@ -1151,7 +1634,7 @@ mod tests {
             .await
             .unwrap();
         let second = store
-            .create(root.to_str().unwrap(), "HEAD", None, false)
+            .create(&new_thread(), root.to_str().unwrap(), "HEAD", None, false)
             .await
             .unwrap()
             .0;
@@ -1193,7 +1676,7 @@ mod tests {
                 .unwrap();
             assert!(
                 store
-                    .create(root.to_str().unwrap(), "HEAD", None, false)
+                    .create(&new_thread(), root.to_str().unwrap(), "HEAD", None, false)
                     .await
                     .is_err(),
                 "{path} must be rejected"
@@ -1263,7 +1746,7 @@ mod tests {
         store.configure(Some(settings.clone())).await.unwrap();
         let restarted = Worktrees::new(&projects);
         let first = restarted
-            .create(root.to_str().unwrap(), "HEAD", None, false)
+            .create(&new_thread(), root.to_str().unwrap(), "HEAD", None, false)
             .await
             .unwrap()
             .0;
@@ -1284,7 +1767,7 @@ mod tests {
         settings["worktreeDirectory"] = json!(real_parent.join("second"));
         store.configure(Some(settings)).await.unwrap();
         let second = restarted
-            .create(first.to_str().unwrap(), "HEAD", None, false)
+            .create(&new_thread(), first.to_str().unwrap(), "HEAD", None, false)
             .await
             .unwrap()
             .0;
@@ -1353,6 +1836,7 @@ mod tests {
             let store = Worktrees::new(&projects);
             let first = store
                 .create(
+                    &new_thread(),
                     legacy.join("packages/app").to_str().unwrap(),
                     "HEAD",
                     None,
@@ -1381,7 +1865,7 @@ mod tests {
             );
             assert!(!root.join("packages/app/source.txt").exists());
             let second = Worktrees::new(&projects)
-                .create(first.to_str().unwrap(), "HEAD", None, false)
+                .create(&new_thread(), first.to_str().unwrap(), "HEAD", None, false)
                 .await
                 .unwrap()
                 .0;
@@ -1429,14 +1913,26 @@ mod tests {
             .unwrap();
         assert!(
             store
-                .create(directory.path().to_str().unwrap(), "HEAD", None, false)
+                .create(
+                    &new_thread(),
+                    directory.path().to_str().unwrap(),
+                    "HEAD",
+                    None,
+                    false
+                )
                 .await
                 .is_err()
         );
         crate::git::text(directory.path(), &["init", "--quiet"]).unwrap();
         assert!(
             store
-                .create(directory.path().to_str().unwrap(), "HEAD", None, false)
+                .create(
+                    &new_thread(),
+                    directory.path().to_str().unwrap(),
+                    "HEAD",
+                    None,
+                    false
+                )
                 .await
                 .is_err()
         );
