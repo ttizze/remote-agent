@@ -642,7 +642,7 @@ impl Replay {
             self.rollback(&thread, Some(head)).await;
             self.settle(index).await;
             assert!(
-                self.rig.state(&thread).await.rollback.is_none(),
+                self.rig.state(&thread).await.rollbacks.is_empty(),
                 "{}",
                 self.context(index)
             );
@@ -2517,7 +2517,7 @@ async fn rollback_replays_hide_discarded_local_items_and_preserve_the_native_bou
         } else {
             &replay.states[&ThreadId::new("root").unwrap()]
         };
-        assert!(state.rollback.is_none());
+        assert!(state.rollbacks.is_empty());
         assert_eq!(
             state
                 .runs

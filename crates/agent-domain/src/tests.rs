@@ -712,37 +712,36 @@ fn rollback_is_absolute_holds_new_runs_and_preserves_new_metadata() {
             restore_refusal: None,
         },
     );
-    assert_eq!(
-        command(
-            &mut s,
-            "rollback-again",
-            Command::Rollback {
-                checkpoint: CheckpointId::new("cp-first").unwrap(),
-                restore_files: false,
-                restore_refusal: None,
-            },
-        )
-        .reply,
-        Reply::Rejected {
-            reason: "rollback-pending".into()
-        }
+    // A second rollback runs after the first one.
+    let again = command(
+        &mut s,
+        "rollback-again",
+        Command::Rollback {
+            checkpoint: CheckpointId::new("cp-first").unwrap(),
+            restore_files: false,
+            restore_refusal: None,
+        },
     );
-    // Accepts a message during a rollback; its turn starts after it.
+    assert_eq!(again.reply, Reply::Accepted);
+    assert!(again.effects.is_empty());
+    assert_eq!(s.rollbacks.len(), 2);
     assert_eq!(
         command(&mut s, "resume", Command::ResumeQueue).reply,
         Reply::Accepted
     );
-    let Reply::Run(new) = command(
+    // A message sent during the rollbacks is a starting run that waits for them.
+    let sent = command(
         &mut s,
         "send",
         send_message("new", DispatchMode::StartImmediately),
-    )
-    .reply
-    else {
+    );
+    let Reply::Run(new) = sent.reply else {
         panic!()
     };
-    let status = |s: &State| s.runs.iter().find(|run| run.id == new).unwrap().status;
-    assert_eq!(status(&s), RunStatus::Queued);
+    assert!(sent.effects.is_empty());
+    let run = |s: &State| s.runs.iter().find(|run| run.id == new).unwrap().clone();
+    assert_eq!(run(&s).status, RunStatus::Starting);
+    assert!(run(&s).attempt.is_none());
     command(
         &mut s,
         "rename",
@@ -750,7 +749,7 @@ fn rollback_is_absolute_holds_new_runs_and_preserves_new_metadata() {
             title: "Renamed while restoring".into(),
         },
     );
-    result(
+    let first_done = result(
         &mut s,
         "done",
         EffectResult::RollbackFinished {
@@ -759,8 +758,153 @@ fn rollback_is_absolute_holds_new_runs_and_preserves_new_metadata() {
         },
     );
     assert_eq!(s.runs[1].status, RunStatus::RolledBack);
-    assert_eq!(status(&s), RunStatus::Starting);
+    assert!(matches!(
+        &first_done.effects[..],
+        [Effect { body: EffectBody::Rollback { command, restore: None, .. }, .. }]
+            if command.as_str() == "rollback-again"
+    ));
+    assert_eq!(run(&s).status, RunStatus::Starting);
+    assert!(run(&s).attempt.is_none());
+    let second_done = result(
+        &mut s,
+        "done-again",
+        EffectResult::RollbackFinished {
+            bindings: vec![],
+            command: CommandId::new("rollback-again").unwrap(),
+        },
+    );
+    assert!(s.rollbacks.is_empty());
+    assert!(run(&s).attempt.is_some());
+    assert!(second_done.effects.iter().any(|effect| matches!(
+        effect.body,
+        EffectBody::Provider(ProviderCommand::Start { .. })
+    )));
+    assert_eq!(run(&s).status, RunStatus::Starting);
     assert_eq!(s.thread.unwrap().title, "Renamed while restoring");
+}
+#[test]
+fn only_the_newest_rollback_records_its_failure() {
+    let mut s = state();
+    let (first, a) = running(&mut s, "first");
+    finish(&mut s, &a);
+    let cp = checkpoint(&mut s, &first, &a, "cp-first");
+    let (second, b) = running(&mut s, "second");
+    finish(&mut s, &b);
+    let later = checkpoint(&mut s, &second, &b, "cp-second");
+    for (key, checkpoint) in [("older", cp), ("newer", later)] {
+        let rollback = Command::Rollback {
+            checkpoint,
+            restore_files: false,
+            restore_refusal: None,
+        };
+        assert_eq!(command(&mut s, key, rollback).reply, Reply::Accepted);
+    }
+    let failure = |message: &str, command: &str| EffectResult::RollbackFailed {
+        command: CommandId::new(command).unwrap(),
+        message: message.into(),
+    };
+    // The superseded rollback's failure is not recorded; the newer one runs.
+    let older = result(&mut s, "older-failed", failure("older", "older"));
+    assert!(s.rollback_failure.is_none());
+    assert_eq!(s.rollbacks.len(), 1);
+    assert!(matches!(
+        &older.effects[..],
+        [Effect { body: EffectBody::Rollback { command, .. }, .. }] if command.as_str() == "newer"
+    ));
+    result(&mut s, "newer-failed", failure("newer", "newer"));
+    assert!(s.rollbacks.is_empty());
+    assert_eq!(s.rollback_failure.as_deref(), Some("newer"));
+}
+#[test]
+fn a_rollback_whose_target_went_stale_behind_another_fails() {
+    let mut s = state();
+    let (first, a) = running(&mut s, "first");
+    finish(&mut s, &a);
+    let cp = checkpoint(&mut s, &first, &a, "cp-first");
+    let (second, b) = running(&mut s, "second");
+    finish(&mut s, &b);
+    let later = checkpoint(&mut s, &second, &b, "cp-second");
+    for (key, checkpoint) in [("older", cp), ("newer", later)] {
+        let rollback = Command::Rollback {
+            checkpoint,
+            restore_files: false,
+            restore_refusal: None,
+        };
+        assert_eq!(command(&mut s, key, rollback).reply, Reply::Accepted);
+    }
+    let done = result(
+        &mut s,
+        "older-done",
+        EffectResult::RollbackFinished {
+            bindings: vec![],
+            command: CommandId::new("older").unwrap(),
+        },
+    );
+    assert!(done.effects.is_empty());
+    assert!(s.rollbacks.is_empty());
+    assert_eq!(s.rollback_failure.as_deref(), Some(ROLLBACK_FAILED_MESSAGE));
+}
+#[test]
+fn a_run_waiting_for_a_rollback_can_be_interrupted_and_later_messages_queue() {
+    let mut s = state();
+    let (first, a) = running(&mut s, "first");
+    finish(&mut s, &a);
+    let cp = checkpoint(&mut s, &first, &a, "cp-first");
+    let (second, b) = running(&mut s, "second");
+    finish(&mut s, &b);
+    checkpoint(&mut s, &second, &b, "cp-second");
+    command(
+        &mut s,
+        "rollback",
+        Command::Rollback {
+            checkpoint: cp,
+            restore_files: false,
+            restore_refusal: None,
+        },
+    );
+    let Reply::Run(waiting) = command(
+        &mut s,
+        "send",
+        send_message("waiting", DispatchMode::StartImmediately),
+    )
+    .reply
+    else {
+        panic!()
+    };
+    let Reply::Run(queued) = command(
+        &mut s,
+        "send-later",
+        send_message("later", DispatchMode::StartImmediately),
+    )
+    .reply
+    else {
+        panic!()
+    };
+    let status = |s: &State, id: &RunId| s.runs.iter().find(|run| &run.id == id).unwrap().status;
+    assert_eq!(status(&s, &queued), RunStatus::Queued);
+    let stop = command(
+        &mut s,
+        "stop",
+        Command::Interrupt {
+            run: waiting.clone(),
+            hold_queue: false,
+            reason: None,
+        },
+    );
+    assert!(!stop.effects.iter().any(|effect| matches!(
+        effect.body,
+        EffectBody::Provider(ProviderCommand::Interrupt { .. })
+    )));
+    assert_eq!(status(&s, &waiting), RunStatus::Interrupted);
+    result(
+        &mut s,
+        "done",
+        EffectResult::RollbackFinished {
+            bindings: vec![],
+            command: CommandId::new("rollback").unwrap(),
+        },
+    );
+    assert_eq!(status(&s, &queued), RunStatus::Starting);
 }
 #[test]
 fn waiting_capture_survives_recovery_without_releasing_the_queue() {
@@ -2180,7 +2324,7 @@ fn rollback_without_provider_rewind_or_file_restore_still_reports_one_result() {
             bindings: vec![],
         },
     );
-    assert!(s.rollback.is_none());
+    assert!(s.rollbacks.is_empty());
 }
 
 #[test]
@@ -2987,7 +3131,7 @@ fn provider_selection_and_runtime_changes_are_accepted_during_rollback() {
     assert_eq!(thread.selection, model);
     assert_eq!(thread.runtime_mode, RuntimeMode::Auto);
     assert_eq!(thread.interaction_mode, InteractionMode::Plan);
-    assert!(s.rollback.is_some());
+    assert!(!s.rollbacks.is_empty());
 }
 
 proptest! {
@@ -3793,16 +3937,24 @@ fn sending_a_message_clears_settled_and_snoozed_state() {
 }
 #[test]
 fn dispatch_saves_the_requested_selection_and_late_steers_use_it() {
+    // Claude cannot restart a turn, so a changed model applies on the next turn.
     let mut s = state();
-    let mut other = selection();
-    other.model = "gpt-6-sol".into();
+    command(
+        &mut s,
+        "switch",
+        Command::SwitchProvider {
+            selection: claude_selection(),
+        },
+    );
+    let mut other = claude_selection();
+    other.model = "claude-opus-4-7".into();
     let (run, a) = running(&mut s, "first");
     let mut steer = send_message("steer", DispatchMode::SteerActive { run: run.clone() });
     if let Command::Send(message) = &mut steer {
         message.selection = Some(other.clone());
     }
     command(&mut s, "steer", steer);
-    assert_eq!(s.runs[0].selection, selection());
+    assert_eq!(s.runs[0].selection, claude_selection());
     assert_eq!(s.thread.as_ref().unwrap().selection, other);
     finish(&mut s, &a);
     result(
@@ -3834,6 +3986,8 @@ fn dispatch_saves_the_requested_selection_and_late_steers_use_it() {
     );
     rollback_free_check(&s);
 
+    let mut other = selection();
+    other.model = "gpt-6-sol".into();
     let mut s = state();
     let mut start = send_message("start", DispatchMode::StartImmediately);
     if let Command::Send(message) = &mut start {

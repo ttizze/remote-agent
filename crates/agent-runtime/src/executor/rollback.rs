@@ -37,8 +37,8 @@ impl EffectHandler for Rollback {
             let state = context.state(&job.thread).await?;
             let scope = rollback_scope(&state, restore.as_ref(), stale_file_refs);
             let Some(pending) = state
-                .rollback
-                .as_ref()
+                .rollbacks
+                .first()
                 .filter(|pending| &pending.command == command)
             else {
                 // A previous attempt recorded the rollback and then stopped.
@@ -276,8 +276,8 @@ fn rollback_scope(
     match restore {
         Some(RestoreFiles { scope, .. }) => scope.clone(),
         None => state
-            .rollback
-            .as_ref()
+            .rollbacks
+            .first()
             .and_then(|pending| {
                 state
                     .checkpoints

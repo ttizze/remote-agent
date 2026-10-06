@@ -456,3 +456,131 @@ fn promoting_to_steer_after_a_provider_switch_restarts_on_the_new_instance() {
     );
     assert_eq!(s, before);
 }
+
+// A Codex run restarts on the same native thread when a steer changes its
+// model or options; the steer is the restarted turn's only input.
+#[test]
+fn a_codex_steer_with_another_model_restarts_the_run_on_the_same_thread() {
+    let mut sol = selection();
+    sol.model = "gpt-6-sol".into();
+    let mut effort = selection();
+    effort
+        .options
+        .insert("reasoningEffort".into(), "high".into());
+    for changed in [sol, effort] {
+        let mut s = state();
+        let (run, first) = running(&mut s, "first");
+        let step = steer_on(
+            &mut s,
+            "steer",
+            DispatchMode::SteerActive { run: run.clone() },
+            changed.clone(),
+        );
+        assert_eq!(step.reply, Reply::Run(run.clone()));
+        assert_eq!(effect_kinds(&step), ["interrupt", "start"]);
+        assert_eq!(step.effects[0].attempt.as_ref(), Some(&first));
+        let [started] = starts(&step).try_into().ok().unwrap();
+        assert_eq!(started.selection, changed);
+        assert_eq!(started.text, "steer");
+        assert_eq!(started.native_thread.as_deref(), Some("native-thread"));
+        assert!(started.context.is_none());
+        assert_eq!(
+            attempt_statuses(&s),
+            [AttemptStatus::Superseded, AttemptStatus::Pending]
+        );
+        assert_eq!(s.runs[0].selection, changed);
+        assert_eq!(s.thread.as_ref().unwrap().selection, changed);
+        assert_eq!(provider_handoffs(&s), 0);
+    }
+}
+
+// A plain steer or a promotion uses the thread's selection, so a model chosen
+// during the run restarts it as well.
+#[test]
+fn a_model_chosen_during_a_codex_run_restarts_it_on_the_next_steer() {
+    let mut sol = selection();
+    sol.model = "gpt-6-sol".into();
+    let mut s = state();
+    let (run, _) = running(&mut s, "first");
+    command(
+        &mut s,
+        "select",
+        Command::SelectModel {
+            selection: sol.clone(),
+        },
+    );
+    let step = command(
+        &mut s,
+        "steer",
+        send_message("steer", DispatchMode::SteerActive { run: run.clone() }),
+    );
+    assert_eq!(effect_kinds(&step), ["interrupt", "start"]);
+    assert_eq!(s.runs[0].selection, sol);
+
+    let mut s = state();
+    let (active, _) = running(&mut s, "first");
+    let Reply::Run(queued) = command(
+        &mut s,
+        "queued",
+        send_message("queued", DispatchMode::QueueAfterActive),
+    )
+    .reply
+    else {
+        panic!()
+    };
+    command(
+        &mut s,
+        "select",
+        Command::SelectModel {
+            selection: sol.clone(),
+        },
+    );
+    let step = command(
+        &mut s,
+        "promote",
+        Command::PromoteToSteer {
+            queued,
+            active: active.clone(),
+        },
+    );
+    assert_eq!(step.reply, Reply::Run(active));
+    assert_eq!(effect_kinds(&step), ["interrupt", "start"]);
+    assert_eq!(s.runs[0].selection, sol);
+    assert_eq!(provider_handoffs(&s), 0);
+}
+
+// Claude cannot restart a turn: a steer with another model steers the running
+// turn, keeps the run's model, and saves the choice for the next turn.
+// Steering back with the run's model reverts that choice.
+#[test]
+fn a_claude_steer_with_another_model_steers_and_saves_it_for_the_next_turn() {
+    let mut s = state();
+    command(
+        &mut s,
+        "switch",
+        Command::SwitchProvider {
+            selection: claude_selection(),
+        },
+    );
+    let mut opus = claude_selection();
+    opus.model = "claude-opus-4-7".into();
+    let (run, _) = running(&mut s, "first");
+    let step = steer_on(
+        &mut s,
+        "steer",
+        DispatchMode::SteerActive { run: run.clone() },
+        opus.clone(),
+    );
+    assert_eq!(effect_kinds(&step), ["steer"]);
+    assert_eq!(s.attempts.len(), 1);
+    assert_eq!(s.runs[0].selection, claude_selection());
+    assert_eq!(s.thread.as_ref().unwrap().selection, opus);
+    let step = steer_on(
+        &mut s,
+        "steer-back",
+        DispatchMode::SteerActive { run },
+        claude_selection(),
+    );
+    assert_eq!(effect_kinds(&step), ["steer"]);
+    assert_eq!(s.thread.as_ref().unwrap().selection, claude_selection());
+}

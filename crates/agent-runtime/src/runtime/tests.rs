@@ -920,7 +920,7 @@ async fn import_waits_for_startup_and_is_refused_after_shutdown() {
 
 // An answer whose attachment is gone is refused before the request resolves.
 #[tokio::test(flavor = "multi_thread")]
-async fn an_answer_with_an_unavailable_attachment_is_rejected() {
+async fn an_answer_with_an_unavailable_attachment_is_rejected_and_replays_on_retry() {
     let host = host();
     host.ops.real_files.store(true, Ordering::SeqCst);
     let runtime = host.open().await;
@@ -938,10 +938,11 @@ async fn an_answer_with_an_unavailable_attachment_is_rejected() {
     let dir = tempfile::tempdir().unwrap();
     let missing = dir.path().join("missing.txt");
 
+    let refused_id = host.id();
     let refused = runtime
         .dispatch(
             thread.clone(),
-            host.id(),
+            refused_id.clone(),
             answer_with(request_id.clone(), &missing.to_string_lossy()),
         )
         .await
@@ -959,15 +960,38 @@ async fn an_answer_with_an_unavailable_attachment_is_rejected() {
 
     let present = dir.path().join("notes.txt");
     std::fs::write(&present, "note").unwrap();
-    let accepted = runtime
+    // A retry replays the first result although the Host now fills the path.
+    let retried = runtime
         .dispatch(
             thread.clone(),
-            host.id(),
+            refused_id,
             answer_with(request_id.clone(), &present.to_string_lossy()),
         )
         .await
         .unwrap();
-    assert_eq!(accepted.reply, Reply::Request(request_id));
+    assert_eq!(retried.reply, refused.reply);
+    assert!(retried.replayed);
+    let accepted_id = host.id();
+    let accepted = runtime
+        .dispatch(
+            thread.clone(),
+            accepted_id.clone(),
+            answer_with(request_id.clone(), &present.to_string_lossy()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(accepted.reply, Reply::Request(request_id.clone()));
+    std::fs::remove_file(&present).unwrap();
+    let retried = runtime
+        .dispatch(
+            thread.clone(),
+            accepted_id,
+            answer_with(request_id.clone(), &present.to_string_lossy()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(retried.reply, Reply::Request(request_id));
+    assert!(retried.replayed);
     runtime.shutdown().await;
 }
 

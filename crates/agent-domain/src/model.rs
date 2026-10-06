@@ -679,7 +679,8 @@ pub struct State {
     pub transfers: Vec<Transfer>,
     pub inherited_items: Vec<Item>,
     pub inherited_messages: Vec<Message>,
-    pub rollback: Option<PendingRollback>,
+    /// Requested rollbacks in order; the first one is executing.
+    pub rollbacks: Vec<PendingRollback>,
     /// Captures that can be replayed after process loss, including their terminal status.
     pub captures: BTreeMap<RunId, RunStatus>,
     pub native_heads: BTreeMap<String, Option<String>>,

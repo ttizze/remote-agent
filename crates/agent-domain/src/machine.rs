@@ -834,10 +834,100 @@ impl Decision {
             self.fact(FactBody::TransferDeliveryChanged { id, delivery });
         }
     }
+    /// Executes the oldest requested rollback against the current state. One
+    /// that fails at once hands over to the next; once none remains, the run
+    /// that waited for them starts.
+    fn next_rollback(&mut self) {
+        while let Some(pending) = self.state.rollbacks.first().cloned() {
+            match self.rollback_effect(&pending) {
+                Ok(effect) => {
+                    self.effect(None, effect);
+                    return;
+                }
+                Err(message) => self.fact(FactBody::RollbackFailed {
+                    command: pending.command,
+                    message,
+                }),
+            }
+        }
+        if let Some(run) = self
+            .state
+            .active_run()
+            .filter(|run| run.status == RunStatus::Starting && run.started_at.is_none())
+            .map(|run| run.id.clone())
+        {
+            self.start_run(&run);
+        }
+    }
+    fn rollback_effect(&self, pending: &PendingRollback) -> Result<EffectBody, String> {
+        let thread = self.state.thread.as_ref().unwrap();
+        // Rolling back targets the active provider thread: the instance of the
+        // latest run that left the queue.
+        let active = latest_executed_run(&self.state).map(|run| run.selection.instance.clone());
+        let cp = self
+            .state
+            .checkpoints
+            .iter()
+            .find(|c| c.id == pending.checkpoint && c.status == CheckpointStatus::Ready)
+            .cloned();
+        let (Some(active), Some(cp)) = (active, cp) else {
+            return Err(ROLLBACK_FAILED_MESSAGE.into());
+        };
+        // The request fails when the selection moved to another instance than
+        // the active one.
+        if thread.selection.instance != active {
+            return Err(rollback_provider_changed(&pending.checkpoint, &thread.id));
+        }
+        let rewinds = self.state.runs.iter().any(|run| {
+            run.ordinal > cp.run_ordinal
+                && run.status.terminal()
+                && run.status != RunStatus::RolledBack
+        });
+        // The provider is asked to rewind whenever later runs exist, which
+        // fails without a native thread to rewind.
+        if rewinds && !self.state.native_sessions.contains_key(&active) {
+            return Err(ROLLBACK_FAILED_MESSAGE.into());
+        }
+        let providers = self
+            .state
+            .native_sessions
+            .get(&active)
+            .filter(|_| rewinds)
+            .map(|native_thread| ProviderRollback {
+                instance: active.clone(),
+                command: ProviderCommand::Rollback {
+                    native_thread: native_thread.clone(),
+                    absolute_head: cp.native_heads.get(&active).cloned().flatten(),
+                },
+            })
+            .into_iter()
+            .collect();
+        let stale_file_refs = self
+            .state
+            .checkpoints
+            .iter()
+            .filter(|candidate| {
+                candidate.scope == cp.scope
+                    && candidate.run_ordinal > cp.run_ordinal
+                    && candidate.status == CheckpointStatus::Ready
+            })
+            .map(|candidate| candidate.file_ref.clone())
+            .collect();
+        Ok(EffectBody::Rollback {
+            command: pending.command.clone(),
+            providers,
+            restore: pending.restore_files.then(|| RestoreFiles {
+                scope: cp.scope.clone(),
+                checkpoint: pending.checkpoint.clone(),
+                file_ref: cp.file_ref.clone(),
+            }),
+            stale_file_refs,
+        })
+    }
     fn promote(&mut self) {
         if self.state.active_run().is_some()
             || !self.state.captures.is_empty()
-            || self.state.rollback.is_some()
+            || !self.state.rollbacks.is_empty()
             || self
                 .state
                 .thread
@@ -1759,13 +1849,18 @@ impl Decision {
                 return reject("maintenance-in-progress");
             }
             // The running session decides how it can be steered;
-            // another instance can only take over by restarting the run.
+            // another instance can only take over by restarting the run. A
+            // changed model or option restarts a session that can restart and
+            // otherwise applies on the next turn.
             let support = TurnSupport::for_driver(target.selection.driver);
             let moves = selection.instance != target.selection.instance;
             let restart = moves
                 || match mode {
                     DispatchMode::RestartActive { .. } => true,
-                    _ => !support.steer,
+                    _ => {
+                        !support.steer
+                            || selection != target.selection && support.interrupt && support.restart
+                    }
                 };
             if restart && !(support.interrupt && support.restart) {
                 return reject("restart-unsupported");
@@ -1803,10 +1898,13 @@ impl Decision {
             return Reply::Run(run.clone());
         }
         let held = self.state.queued_runs().iter().any(|r| r.queue_held);
-        let queued =
-            active.is_some() || !self.state.captures.is_empty() || self.state.rollback.is_some();
+        let defer = matches!(mode, DispatchMode::DeferStart);
+        let rolling_back = !self.state.rollbacks.is_empty();
+        let queued = active.is_some() || !self.state.captures.is_empty() || defer && rolling_back;
         // A deferred start is queued behind an active run without preparation.
-        let deferred = matches!(mode, DispatchMode::DeferStart) && !queued;
+        let deferred = defer && !queued;
+        // A direct start waits as a starting run until the rollbacks finish.
+        let awaits_rollback = !queued && !deferred && rolling_back;
         let id = RunId::new(format!("run:{}:{}", message.id.as_str().len(), message.id)).unwrap();
         let ordinal = self.state.runs.iter().map(|r| r.ordinal).max().unwrap_or(0) + 1;
         let intent = if queued {
@@ -1876,6 +1974,8 @@ impl Decision {
                 preparation_kind(WORKSPACE_PREPARATION_INPUT, None),
             );
             self.effect(None, EffectBody::PrepareWorkspace { run: id.clone() });
+        } else if awaits_rollback {
+            self.user_item(&message.id, &id);
         } else if !queued {
             self.start_run(&id);
         }
@@ -1894,16 +1994,14 @@ impl Decision {
                 return reject("thread-deleted");
             }
         }
-        // Commands are accepted while a rollback runs: new messages wait behind it
-        // and the rollback checks the active provider when it executes. Its
-        // results carry only the rollback identity and never overwrite metadata.
-        if self.state.rollback.is_some()
+        // Commands are accepted while rollbacks run: further rollbacks run in
+        // order, new messages wait behind them, and each rollback checks the
+        // active provider when it executes. Their results carry only the
+        // rollback identity and never overwrite metadata.
+        if !self.state.rollbacks.is_empty()
             && matches!(
                 command,
-                ContinueRestart { .. }
-                    | ReleasePrepared { .. }
-                    | RetryPrepared { .. }
-                    | Rollback { .. }
+                ContinueRestart { .. } | ReleasePrepared { .. } | RetryPrepared { .. }
             )
         {
             return reject("rollback-pending");
@@ -3205,17 +3303,17 @@ impl Decision {
                 if target.status != RunStatus::Running {
                     return reject("run-not-active");
                 }
-                // Promotion uses the thread's selection, so another instance restarts the run.
+                // Promotion uses the thread's selection: another instance restarts
+                // the run, and a changed model restarts a session that can restart.
                 let selection = self.state.thread.as_ref().unwrap().selection.clone();
-                let handoff = if selection.instance != target.selection.instance {
-                    let support = TurnSupport::for_driver(target.selection.driver);
-                    if !(support.interrupt && support.restart) {
-                        return reject("restart-unsupported");
-                    }
-                    Some(self.restart_handoff(&target))
-                } else {
-                    None
-                };
+                let support = TurnSupport::for_driver(target.selection.driver);
+                let moves = selection.instance != target.selection.instance;
+                let restartable = support.interrupt && support.restart;
+                if moves && !restartable {
+                    return reject("restart-unsupported");
+                }
+                let restart = moves || selection != target.selection && restartable;
+                let handoff = moves.then(|| self.restart_handoff(&target));
                 let Some(attempt) = target.attempt.clone() else {
                     return reject("run-not-active");
                 };
@@ -3229,7 +3327,7 @@ impl Decision {
                     intent: InputIntent::PromotedQueuedToSteer,
                 });
                 self.user_item(&m.id, active);
-                if handoff.is_some() {
+                if restart {
                     self.restart_run(&target, &attempt, &selection, &m.id, handoff);
                     return Reply::Run(active.clone());
                 }
@@ -3438,69 +3536,9 @@ impl Decision {
                     checkpoint: checkpoint.clone(),
                     restore_files: *restore_files,
                 });
-                // The rollback request fails when the selection moved to
-                // another instance than the active one.
-                let thread = self.state.thread.as_ref().unwrap();
-                if thread.selection.instance != active {
-                    let message = rollback_provider_changed(checkpoint, &thread.id);
-                    self.fact(FactBody::RollbackFailed {
-                        command: id.clone(),
-                        message,
-                    });
-                    return Reply::Accepted;
+                if self.state.rollbacks.len() == 1 {
+                    self.next_rollback();
                 }
-                let rewinds = self.state.runs.iter().any(|run| {
-                    run.ordinal > cp.run_ordinal
-                        && run.status.terminal()
-                        && run.status != RunStatus::RolledBack
-                });
-                // The provider is asked to rewind whenever later runs exist,
-                // which fails without a native thread to rewind.
-                if rewinds && !self.state.native_sessions.contains_key(&active) {
-                    self.fact(FactBody::RollbackFailed {
-                        command: id.clone(),
-                        message: ROLLBACK_FAILED_MESSAGE.into(),
-                    });
-                    return Reply::Accepted;
-                }
-                let providers = self
-                    .state
-                    .native_sessions
-                    .get(&active)
-                    .filter(|_| rewinds)
-                    .map(|native_thread| ProviderRollback {
-                        instance: active.clone(),
-                        command: ProviderCommand::Rollback {
-                            native_thread: native_thread.clone(),
-                            absolute_head: cp.native_heads.get(&active).cloned().flatten(),
-                        },
-                    })
-                    .into_iter()
-                    .collect();
-                let stale_file_refs = self
-                    .state
-                    .checkpoints
-                    .iter()
-                    .filter(|candidate| {
-                        candidate.scope == cp.scope
-                            && candidate.run_ordinal > cp.run_ordinal
-                            && candidate.status == CheckpointStatus::Ready
-                    })
-                    .map(|candidate| candidate.file_ref.clone())
-                    .collect();
-                self.effect(
-                    None,
-                    EffectBody::Rollback {
-                        command: id.clone(),
-                        providers,
-                        restore: restore_files.then(|| RestoreFiles {
-                            scope: cp.scope.clone(),
-                            checkpoint: checkpoint.clone(),
-                            file_ref: cp.file_ref.clone(),
-                        }),
-                        stale_file_refs,
-                    },
-                );
                 Reply::Accepted
             }
             Fork {
@@ -6057,8 +6095,8 @@ impl Decision {
             EffectResult::RollbackFinished { command, bindings } => {
                 let Some(pending) = self
                     .state
-                    .rollback
-                    .as_ref()
+                    .rollbacks
+                    .first()
                     .filter(|p| &p.command == command)
                     .cloned()
                 else {
@@ -6075,13 +6113,14 @@ impl Decision {
                         head: binding.head.clone(),
                     });
                 }
+                self.next_rollback();
                 self.promote();
             }
             EffectResult::RollbackFailed { command, message } => {
                 let Some(pending) = self
                     .state
-                    .rollback
-                    .as_ref()
+                    .rollbacks
+                    .first()
                     .filter(|p| &p.command == command)
                     .cloned()
                 else {
@@ -6099,6 +6138,7 @@ impl Decision {
                     command: command.clone(),
                     message: message.clone(),
                 });
+                self.next_rollback();
                 self.promote();
             }
             EffectResult::ThreadCommandFailed {
@@ -6527,7 +6567,8 @@ pub fn latest_executed_run(state: &State) -> Option<&Run> {
         .iter()
         .filter(|run| {
             run.status != RunStatus::Queued
-                && !(run.status == RunStatus::Cancelled && run.started_at.is_none())
+                && !(matches!(run.status, RunStatus::Cancelled | RunStatus::Starting)
+                    && run.started_at.is_none())
         })
         .reduce(|latest, run| {
             if run_ran_after(run, latest) {
@@ -6616,6 +6657,10 @@ fn command_fingerprint(command: &Command) -> String {
         } => *restore_refusal = None,
         Command::Send(message) => message.resolved_plan = None,
         Command::UpdateMetadata { project_root, .. } => *project_root = None,
+        Command::Respond { attachments, .. } => attachments
+            .values_mut()
+            .flatten()
+            .for_each(|file| file.path.clear()),
         _ => {}
     }
     serde_json::to_string(&identity).expect("domain commands serialize")
@@ -6858,8 +6903,8 @@ impl ThreadMachine {
             Input::RollbackRewindStarted { command, instances } => {
                 let rewinding = decision
                     .state
-                    .rollback
-                    .as_ref()
+                    .rollbacks
+                    .first()
                     .filter(|pending| &pending.command == command)
                     .map(|pending| &pending.rewinding);
                 match rewinding {

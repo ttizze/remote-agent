@@ -96,7 +96,7 @@ fn rollback_targets_must_belong_to_the_active_provider_thread() {
             reason: "rollback-provider-thread-mismatch".into()
         }
     );
-    assert!(s.rollback.is_none());
+    assert!(s.rollbacks.is_empty());
 
     let mut empty = state();
     let checkpoint = CheckpointId::new("none").unwrap();
@@ -129,7 +129,7 @@ fn rollback_fails_when_the_selection_left_the_active_provider() {
     let step = rollback(&mut s, "rollback", &cp);
     assert_eq!(step.reply, Reply::Accepted);
     assert!(step.effects.is_empty());
-    assert!(s.rollback.is_none());
+    assert!(s.rollbacks.is_empty());
     assert_eq!(
         s.rollback_failure.as_deref(),
         Some(
@@ -168,7 +168,7 @@ fn a_restore_the_host_refused_is_rejected_at_admission() {
         }
     );
     assert!(step.facts.is_empty() && step.effects.is_empty());
-    assert!(s.rollback.is_none());
+    assert!(s.rollbacks.is_empty());
     let step = command(&mut s, "conversation", refused(false, &cp));
     assert_eq!(step.reply, Reply::Accepted);
     assert!(matches!(
@@ -243,7 +243,47 @@ fn rollback_without_a_native_thread_to_rewind_fails() {
     let retry = rollback(&mut s, "retry", &cp);
     assert_eq!(retry.reply, Reply::Accepted);
     assert!(retry.effects.is_empty());
-    assert!(s.rollback.is_none());
+    assert!(s.rollbacks.is_empty());
     assert_eq!(s.rollback_failure.as_deref(), Some(ROLLBACK_FAILED_MESSAGE));
     assert_eq!(s.runs[1].status, RunStatus::Completed);
+}
+
+// The Host fills or clears an answer attachment's path before dispatch, so a
+// retried answer replays its first result whatever path it now carries.
+#[test]
+fn the_host_filled_answer_path_is_not_part_of_the_answer_identity() {
+    let mut s = state();
+    let respond = |path: &str| Command::Respond {
+        request: RuntimeRequestId::new("question").unwrap(),
+        decision: None,
+        answers: None,
+        attachments: BTreeMap::from([(
+            "q".to_owned(),
+            vec![Attachment {
+                kind: AttachmentKind::File,
+                source: None,
+                id: "chat:file".into(),
+                name: "notes.txt".into(),
+                mime_type: "text/plain".into(),
+                path: path.into(),
+                size: 4,
+            }],
+        )]),
+    };
+    let first = command(&mut s, "answer", respond(""));
+    assert!(matches!(first.reply, Reply::Rejected { .. }));
+    let replay = ThreadMachine::step(
+        &s,
+        &InputEnvelope {
+            at: at(),
+            key: "answer".into(),
+            input: Input::Command {
+                id: CommandId::new("answer").unwrap(),
+                command: Box::new(respond("/attachments/notes.txt")),
+                receipt: first.receipt.clone(),
+            },
+        },
+    );
+    assert_eq!(replay.reply, first.reply);
+    assert_eq!(replay.receipt, first.receipt);
 }

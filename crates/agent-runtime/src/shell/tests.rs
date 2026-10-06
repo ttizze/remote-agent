@@ -177,7 +177,7 @@ fn flags_background_work_that_outlives_a_completed_run() {
     finish(&mut state, "root:finish", &attempt);
     assert_eq!(state.runs[0].status, RunStatus::Completed);
     assert!(!state.runs.iter().any(|run| run.status.blocking()));
-    assert!(state.captures.is_empty() && state.rollback.is_none());
+    assert!(state.captures.is_empty() && state.rollbacks.is_empty());
     assert_flag_matches_recovery(state, true);
 }
 

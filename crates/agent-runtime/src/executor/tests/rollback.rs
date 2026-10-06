@@ -183,7 +183,7 @@ async fn rewinds_safely() {
                 "{case}"
             );
             let state = rig.state(&id).await;
-            assert!(state.rollback.is_none(), "{case}");
+            assert!(state.rollbacks.is_empty(), "{case}");
             assert_eq!(state.rollback_failure, None, "{case}");
             // CheckpointRollbackService fails with "shared-workspace" and the
             // worker reports its fixed message.
@@ -193,7 +193,7 @@ async fn rewinds_safely() {
             );
             rig.drain().await;
             let state = rig.state(&id).await;
-            assert!(state.rollback.is_none(), "{case}");
+            assert!(state.rollbacks.is_empty(), "{case}");
             assert_eq!(
                 state.rollback_failure.as_deref(),
                 Some(ROLLBACK_FAILED_MESSAGE),
@@ -215,7 +215,7 @@ async fn rewinds_safely() {
         rig.drain().await;
 
         let state = rig.state(&id).await;
-        assert!(state.rollback.is_none(), "{case}");
+        assert!(state.rollbacks.is_empty(), "{case}");
         assert_eq!(state.rollback_failure, None, "{case}");
         assert_eq!(
             rollback_calls(&rig.ops),
@@ -347,7 +347,7 @@ async fn a_rollback_without_a_native_session_to_rewind_fails() {
     rig.drain().await;
 
     let state = rig.state(&id).await;
-    assert!(state.rollback.is_none());
+    assert!(state.rollbacks.is_empty());
     assert_eq!(
         state.rollback_failure.as_deref(),
         Some(ROLLBACK_FAILED_MESSAGE)
@@ -775,14 +775,14 @@ async fn a_workspace_shared_after_admission_fails_the_rollback_after_its_retries
 
     rig.drain().await;
     let state = rig.state(&id).await;
-    assert!(state.rollback.is_some());
+    assert!(!state.rollbacks.is_empty());
     assert_eq!(state.rollback_failure, None);
     for _ in 0..5 {
         rig.clock.advance(30_000);
         rig.drain().await;
     }
     let state = rig.state(&id).await;
-    assert!(state.rollback.is_none());
+    assert!(state.rollbacks.is_empty());
     assert_eq!(
         state.rollback_failure.as_deref(),
         Some(ROLLBACK_FAILED_MESSAGE)
@@ -875,7 +875,7 @@ async fn a_provider_switch_while_a_rollback_waits_fails_the_rollback() {
     );
     rig.drain().await;
     let state = rig.state(&id).await;
-    assert!(state.rollback.is_none());
+    assert!(state.rollbacks.is_empty());
     assert_eq!(
         state.rollback_failure,
         Some(agent_domain::rollback_provider_changed(

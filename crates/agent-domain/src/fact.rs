@@ -1339,7 +1339,7 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
             checkpoint,
             restore_files,
         } => {
-            state.rollback = Some(PendingRollback {
+            state.rollbacks.push(PendingRollback {
                 command: command.clone(),
                 checkpoint: checkpoint.clone(),
                 restore_files: *restore_files,
@@ -1352,8 +1352,8 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
             checkpoint,
         } => {
             if state
-                .rollback
-                .as_ref()
+                .rollbacks
+                .first()
                 .is_none_or(|p| &p.command != command)
             {
                 return Err(FoldError::Conflict);
@@ -1383,26 +1383,29 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
                     checkpoint.status = CheckpointStatus::Stale;
                 }
             }
-            state.rollback = None;
+            state.rollbacks.remove(0);
         }
         RollbackRewindStarted { command, instances } => {
             let pending = state
-                .rollback
-                .as_mut()
+                .rollbacks
+                .first_mut()
                 .filter(|p| &p.command == command)
                 .ok_or(FoldError::Conflict)?;
             pending.rewinding.extend(instances.iter().cloned());
         }
         RollbackFailed { command, message } => {
             if state
-                .rollback
-                .as_ref()
+                .rollbacks
+                .first()
                 .is_none_or(|p| &p.command != command)
             {
                 return Err(FoldError::Conflict);
             }
-            state.rollback = None;
-            state.rollback_failure = Some(message.clone());
+            state.rollbacks.remove(0);
+            // Only the newest request records its failure.
+            if state.rollbacks.is_empty() {
+                state.rollback_failure = Some(message.clone());
+            }
         }
         ForkAccepted {
             parent,
