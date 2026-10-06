@@ -662,3 +662,52 @@ proptest! {
         prop_assert_eq!(whole.cursor, split.cursor);
     }
 }
+
+fn row_key(sync: &ThreadSync) -> (u64, u64, u64) {
+    (sync.cursor, sync.history_revision, sync.detail_revision)
+}
+
+#[test]
+fn the_row_key_changes_with_facts_history_pages_and_details_only() {
+    let (mut sync, _) = opened(ThreadSync::default());
+    let mut state = thread_state("Thread");
+    let mut item = command_item("command", 2);
+    item.output_omitted = true;
+    state.items.push(item.clone());
+    sync.apply(vec![snapshot(
+        state,
+        2,
+        Some(window(Some("cursor"), true, Some(2))),
+    )]);
+    let installed = row_key(&sync);
+    sync.stream_error("offline");
+    assert_eq!(row_key(&sync), installed);
+    sync.apply(vec![title_update("Renamed", 3)]);
+    assert_eq!(row_key(&sync), (3, installed.1, installed.2));
+    assert!(sync.begin_detail(&item.id));
+    let loading = row_key(&sync);
+    assert_eq!((loading.0, loading.1), (3, installed.1));
+    assert_ne!(loading.2, installed.2);
+    let LoadEarlier::Request(cursor) = sync.begin_load_earlier() else {
+        panic!("history request")
+    };
+    assert_eq!(row_key(&sync), loading);
+    assert!(sync.history_loaded(
+        &cursor,
+        HistoryPage {
+            rows: vec![HistoryRow {
+                position: 0,
+                source: thread_id(),
+                inherited: false,
+                item: command_item("older", 1),
+                message: None,
+                plan: None,
+            }],
+            next_cursor: None,
+            has_more: false,
+        }
+    ));
+    let merged = row_key(&sync);
+    assert_eq!((merged.0, merged.2), (3, loading.2));
+    assert_ne!(merged.1, loading.1);
+}
