@@ -4,7 +4,8 @@ use super::{
 };
 use crate::{ActorRegistry, RuntimeError};
 use agent_domain::{
-    EffectResult, Input, MessageId, ProviderEvent, ProviderOperation, RunAttemptId, State, ThreadId,
+    EffectResult, Input, MessageId, ProviderEvent, ProviderItem, ProviderOperation, RunAttemptId,
+    State, ThreadId,
 };
 use agent_providers::{
     ClaudeProtocol, CodexProtocol, Completion, ProtocolError, Translation, read_frame, write_frame,
@@ -593,8 +594,26 @@ impl Task {
         Ok(())
     }
 
-    /// Background work keeps the attempt that started it.
+    /// Background work, and a Codex tool that may outlive its turn, keep the
+    /// attempt that started them.
     fn retain(&mut self, event: &ProviderEvent, thread: &ThreadId, attempt: &RunAttemptId) {
+        match event {
+            ProviderEvent::ItemStarted {
+                key,
+                kind: ProviderItem::Tool { input, .. },
+            } if matches!(self.protocol, Protocol::Codex(_)) && input.0["persistent"] == true => {
+                self.background
+                    .insert(key.clone(), (thread.clone(), attempt.clone()));
+            }
+            ProviderEvent::ItemFinished {
+                key,
+                kind: ProviderItem::Tool { .. },
+                ..
+            } => {
+                self.background.remove(key);
+            }
+            _ => {}
+        }
         if let ProviderEvent::BackgroundTask {
             key, tool, status, ..
         } = event
@@ -1059,7 +1078,8 @@ pub(crate) fn activity(state: &State, instance: &str, attempts: &[RunAttemptId])
     }
 }
 
-/// Background commands or native tasks that run inside the process of these attempts.
+/// Background commands, persistent tools or native tasks that run inside the
+/// process of these attempts.
 pub(crate) fn holds_background(state: &State, attempts: &[RunAttemptId]) -> bool {
     state
         .background_work
@@ -1069,4 +1089,11 @@ pub(crate) fn holds_background(state: &State, attempts: &[RunAttemptId]) -> bool
             .tasks
             .iter()
             .any(|task| !task.status.terminal() && attempts.contains(&task.attempt))
+        || state.items.iter().any(|item| {
+            item.persistent_tool()
+                && item
+                    .attempt
+                    .as_ref()
+                    .is_some_and(|attempt| attempts.contains(attempt))
+        })
 }

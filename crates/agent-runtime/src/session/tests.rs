@@ -2506,6 +2506,67 @@ async fn a_thread_attaching_after_the_rate_limit_snapshot_still_gets_its_reset()
     )));
 }
 
+// T3 CodexAdapterV2 trackRunningDynamicTool: a persistent tool outlives its
+// completed turn, and its later completion stays with the run that started it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_persistent_tool_completes_under_the_turn_that_started_it() {
+    let rig = rig(SessionOptions::default(), 5);
+    rig.host.respond(shared_replies);
+    let id = thread("thread-persistent-tool");
+    let (native, first) = rig.shared_turn(&id).await;
+    let process = rig.host.process(0);
+    let tool = |status: &str| json!({"type":"dynamicToolCall","id":"monitor","namespace":"t3","tool":"watch","arguments":{"persistent":true},"status":status});
+    let other = json!({"type":"dynamicToolCall","id":"lookup","tool":"lookup","arguments":{},"status":"inProgress"});
+    for item in [tool("inProgress"), other] {
+        process.emit(json!({"method":"item/started","params":{"threadId":native,"turnId":first,"item":item}}));
+    }
+    complete(&process, &native, &first, "watching");
+    rig.until_status(&id, RunStatus::Completed).await;
+    let started = rig.state(&id).await;
+    let item = |state: &State, key: &str| {
+        state
+            .items
+            .iter()
+            .find(|item| item.native_key == key)
+            .cloned()
+            .unwrap()
+    };
+    assert_eq!(item(&started, "monitor").status, ItemStatus::Running);
+    assert!(item(&started, "lookup").status.terminal());
+    let first_run = item(&started, "monitor").run;
+    let starts = || written_methods(&process, "turn/start").len();
+    let before = starts();
+    rig.send(&id, "next", DispatchMode::StartImmediately).await;
+    rig.drain().await;
+    rig.until("second turn", async || starts() > before).await;
+    process.emit(
+        json!({"method":"turn/started","params":{"threadId":native,"turn":{"id":"turn-second"}}}),
+    );
+    rig.until("second turn runs", async || {
+        rig.state(&id)
+            .await
+            .runs
+            .iter()
+            .any(|run| run.status == RunStatus::Running && run.id != *first_run.as_ref().unwrap())
+    })
+    .await;
+    process.emit(json!({"method":"item/completed","params":{"threadId":native,"turnId":first,"item":tool("completed")}}));
+    rig.until("the tool completes", async || {
+        item(&*rig.state(&id).await, "monitor").status == ItemStatus::Completed
+    })
+    .await;
+    let state = rig.state(&id).await;
+    assert_eq!(item(&state, "monitor").run, first_run);
+    assert_eq!(
+        state
+            .items
+            .iter()
+            .filter(|item| item.native_key == "monitor")
+            .count(),
+        1
+    );
+}
+
 // T3 ProviderSessionManager: the shared session is busy while any thread's
 // turn runs, and is released once every thread is idle.
 #[tokio::test(flavor = "multi_thread")]

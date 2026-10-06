@@ -390,6 +390,14 @@ pub struct Item {
     pub started_at: Timestamp,
     pub completed_at: Option<Timestamp>,
 }
+impl Item {
+    /// A running tool call that asked to outlive its turn (T3
+    /// isPersistentCodexDynamicTool).
+    pub fn persistent_tool(&self) -> bool {
+        !self.status.terminal()
+            && matches!(&self.kind, ItemKind::DynamicTool { input, .. } if input.0["persistent"] == true)
+    }
+}
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum RequestBody {
     Approval {

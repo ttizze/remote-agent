@@ -965,9 +965,12 @@ impl Decision {
         }
     }
     /// Message-capable questions outlive their turn; the user answers them
-    /// later. Retained background work keeps its row until it reports.
+    /// later. Retained background work keeps its row until it reports, as does
+    /// a persistent Codex tool after a completed turn (T3 CodexAdapterV2).
     fn close_attempt_items(&mut self, attempt: &RunAttemptId, status: ItemStatus) {
-        let items=self.state.items.iter().filter(|i| i.attempt.as_ref()==Some(attempt) && !i.status.terminal() && !self.state.background_work.values().any(|w| &w.attempt==attempt && (w.key==i.native_key || w.tool==i.native_key)) && !matches!(&i.kind,ItemKind::Subagent {task} if self.state.tasks.iter().any(|candidate|&candidate.id==task && !candidate.status.terminal())) && !matches!(&i.kind,ItemKind::UserInputRequest { request } if self.state.requests.iter().any(|r| &r.id==request && r.capability==ResponseCapability::Message))).map(|i| i.id.clone()).collect::<Vec<_>>();
+        let keeps_tools =
+            status == ItemStatus::Completed && self.attempt_driver(attempt) == Some(Driver::Codex);
+        let items=self.state.items.iter().filter(|i| i.attempt.as_ref()==Some(attempt) && !i.status.terminal() && !(keeps_tools && i.persistent_tool()) &&!self.state.background_work.values().any(|w| &w.attempt==attempt && (w.key==i.native_key || w.tool==i.native_key)) && !matches!(&i.kind,ItemKind::Subagent {task} if self.state.tasks.iter().any(|candidate|&candidate.id==task && !candidate.status.terminal())) && !matches!(&i.kind,ItemKind::UserInputRequest { request } if self.state.requests.iter().any(|r| &r.id==request && r.capability==ResponseCapability::Message))).map(|i| i.id.clone()).collect::<Vec<_>>();
         for id in items {
             self.fact(FactBody::ItemCompleted { id, status });
         }
@@ -1219,6 +1222,20 @@ impl Decision {
                 && !transfer.superseded
                 && transfer.delivery.is_none()
         })
+    }
+    /// The driver of the attempt's run, or of the thread for a native child turn.
+    fn attempt_driver(&self, attempt: &RunAttemptId) -> Option<Driver> {
+        self.state
+            .runs
+            .iter()
+            .find(|run| run.attempt.as_ref() == Some(attempt))
+            .map(|run| run.selection.driver)
+            .or_else(|| {
+                self.state
+                    .thread
+                    .as_ref()
+                    .map(|thread| thread.selection.driver)
+            })
     }
     /// The starting run waiting on a native fork from `attempt`.
     fn awaiting_fork(&self, attempt: &RunAttemptId) -> Option<(Run, Transfer)> {
@@ -4317,6 +4334,11 @@ impl Decision {
                 .background_work
                 .values()
                 .any(|work| &work.attempt == attempt && (&work.key == key || &work.tool == key))
+                || self.state.items.iter().any(|item| {
+                    item.attempt.as_ref() == Some(attempt)
+                        && &item.native_key == key
+                        && item.persistent_tool()
+                })
         };
         let background = matches!(event, ProviderEvent::RequestOpened { owner_path, .. } if !owner_path.is_empty())
             || matches!(event, ProviderEvent::ItemFinished { key, .. } | ProviderEvent::TextDelta { key, .. } if retained(key))
@@ -4491,6 +4513,21 @@ impl Decision {
                 if run.as_ref().is_some_and(|run| {
                     !matches!(run.status, RunStatus::Starting | RunStatus::Running)
                 }) {
+                    let tools = self
+                        .state
+                        .items
+                        .iter()
+                        .filter(|item| {
+                            item.attempt.as_ref() == Some(attempt) && item.persistent_tool()
+                        })
+                        .map(|item| item.id.clone())
+                        .collect::<Vec<_>>();
+                    for id in tools {
+                        self.fact(FactBody::ItemCompleted {
+                            id,
+                            status: ItemStatus::Interrupted,
+                        });
+                    }
                     self.stop_tasks(
                         attempt,
                         if self.state.stopping.contains(attempt) {
