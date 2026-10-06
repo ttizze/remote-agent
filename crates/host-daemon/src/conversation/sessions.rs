@@ -1,6 +1,6 @@
 //! Provider processes for the runtime's sessions: Codex app-server and Claude CLI
 //! launches under the process supervisor, their MCP tools, images and transcripts.
-use super::{ClaudeCredentials, ProjectCatalog, tools::ToolBridge};
+use super::{ClaudeCredentials, CodexCredentials, ProjectCatalog, tools::ToolBridge};
 use crate::claude::control::ClaudeProgram;
 use crate::{workspace_files::WorkspaceFiles, worktrees::Worktrees};
 use agent_domain::{Attachment, AttachmentKind, Driver, Json, ThreadId};
@@ -59,6 +59,7 @@ impl Spawner for SupervisedSpawner {
 pub(crate) struct ProviderPrograms {
     pub(crate) codex: Option<PathBuf>,
     pub(crate) codex_home: Option<PathBuf>,
+    pub(crate) codex_accounts: Option<Arc<dyn CodexCredentials>>,
     pub(crate) claude: Option<(ClaudeProgram, Arc<dyn ClaudeCredentials>)>,
 }
 
@@ -199,10 +200,15 @@ impl SessionHost for ProviderHost {
         Box::pin(async move {
             let cwd = self.cwd(&target).await?;
             let servers = self.mcp_servers(&target.key)?;
+            let omit_service_tier = match &self.programs.codex_accounts {
+                Some(accounts) => accounts.shares_tokens().await,
+                None => false,
+            };
             Ok(WireContext {
                 cwd: cwd.to_string_lossy().into_owned(),
                 client_name: "remote_agent_host".into(),
                 client_version: env!("CARGO_PKG_VERSION").into(),
+                omit_service_tier,
                 thread_config: BTreeMap::from([(
                     "mcp_servers".to_owned(),
                     Json(Value::Object(servers.into_iter().collect())),
@@ -282,5 +288,27 @@ impl SessionHost for ProviderHost {
 
     fn revoke_credentials(&self, thread: &ThreadId, instance: Option<&str>) {
         self.tools.revoke(thread, instance);
+    }
+
+    fn codex_account(&self, _instance: String) -> BoxFuture<'_, Result<Option<Value>, String>> {
+        Box::pin(async move {
+            match &self.programs.codex_accounts {
+                Some(accounts) => accounts.login().await,
+                None => Ok(None),
+            }
+        })
+    }
+
+    fn refresh_codex_account(
+        &self,
+        _instance: String,
+        previous_account: Option<String>,
+    ) -> BoxFuture<'_, Result<Value, String>> {
+        Box::pin(async move {
+            match &self.programs.codex_accounts {
+                Some(accounts) => accounts.refresh(previous_account).await,
+                None => Err("Select an account before refreshing credentials".into()),
+            }
+        })
     }
 }
