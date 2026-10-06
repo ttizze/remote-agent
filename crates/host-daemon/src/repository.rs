@@ -1,6 +1,7 @@
 //! A project's repository identity from its Git remotes, so clients group
 //! checkouts of one repository across Hosts.
 mod enrichment;
+mod forgejo;
 
 pub(crate) use enrichment::ProjectIdentities;
 
@@ -330,9 +331,15 @@ impl Resolver {
     }
 }
 
-/// The Host's resolver.
+/// The Host's resolver: Git, refined by the configured Forgejo and Gitea logins.
 pub(crate) fn system_resolver(clock: Clock) -> Resolver {
-    Resolver::new(ResolverOptions::new(clock))
+    let logins: Arc<dyn forgejo::Logins> = Arc::new(forgejo::CliLogins::system());
+    let mut options = ResolverOptions::new(clock);
+    options.refine = Some(Arc::new(move |identity| {
+        let logins = logins.clone();
+        Box::pin(async move { Ok(forgejo::refine(identity, logins.as_ref()).await) })
+    }));
+    Resolver::new(options)
 }
 
 #[cfg(test)]
