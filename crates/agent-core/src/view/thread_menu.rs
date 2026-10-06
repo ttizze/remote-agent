@@ -2,6 +2,7 @@
 //! header, the unsent-draft row menu, and the confirmation texts of the
 //! actions that ask first.
 use super::snooze::{SnoozePreset, SnoozePresetId, can_snooze, effective_snoozed};
+use super::thread_sort::MoveDirection;
 use super::thread_summary::{SettledOverride, ThreadSummary};
 use super::time::TimestampFormat;
 use crate::state::{Snapshot, ThreadAction};
@@ -34,6 +35,9 @@ pub enum ThreadMenuItemId {
     CopyThreadId,
     Archive,
     Delete,
+    Arrange,
+    MoveUp,
+    MoveDown,
 }
 impl ThreadMenuItemId {
     pub fn key(self) -> String {
@@ -61,6 +65,9 @@ impl ThreadMenuItemId {
             Self::CopyThreadId => "copy-thread-id",
             Self::Archive => "archive",
             Self::Delete => "delete",
+            Self::Arrange => "arrange",
+            Self::MoveUp => "move-up",
+            Self::MoveDown => "move-down",
         }
         .into()
     }
@@ -104,6 +111,12 @@ pub enum ThreadMenuAction {
     CopyThreadId {
         thread_id: String,
     },
+    /// Opens the arrangement sheet.
+    Arrange,
+    /// The client plans the swap with `thread_order` and sends the order key.
+    Move {
+        direction: MoveDirection,
+    },
 }
 
 /// A question to confirm before the action runs.
@@ -122,6 +135,8 @@ pub struct ThreadMenuConfirmation {
 pub struct ThreadMenuChild {
     pub id: ThreadMenuItemId,
     pub label: String,
+    /// A secondary line, such as a preset's wake time.
+    pub detail: Option<String>,
     pub icon: Option<String>,
     pub separator_before: bool,
     /// Present on option entries; marks the current one.
@@ -251,7 +266,7 @@ fn item(id: ThreadMenuItemId, label: impl Into<String>, icon: &str) -> ThreadMen
     }
 }
 
-fn child(
+pub(crate) fn child(
     id: ThreadMenuItemId,
     label: impl Into<String>,
     action: ThreadMenuAction,
@@ -259,6 +274,7 @@ fn child(
     ThreadMenuChild {
         id,
         label: label.into(),
+        detail: None,
         icon: None,
         separator_before: false,
         checked: None,

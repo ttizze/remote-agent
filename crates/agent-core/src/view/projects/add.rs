@@ -1,6 +1,5 @@
 //! Adding a local folder as a project: the browse field and the path check
 //! before `RegisterProject`.
-use super::locale_compare;
 use super::paths::{
     browse_directory_path, browse_leaf_path_segment, browse_parent_path, can_navigate_up,
     ensure_browse_directory_path, find_project_by_path, has_trailing_path_separator,
@@ -8,6 +7,7 @@ use super::paths::{
     resolve_project_path_for_dispatch,
 };
 use crate::models::{FileEntry, Project};
+use crate::view::thread_sort::locale_compare;
 
 /// Projects are added only while the Host is connected.
 pub fn can_add_project(connected: bool) -> bool {

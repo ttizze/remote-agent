@@ -4,6 +4,14 @@ use super::thread_summary::ThreadSummary;
 use crate::ordering;
 use std::{cmp::Ordering, collections::BTreeMap};
 
+/// Approximates `localeCompare` for names: case-insensitive, lowercase first
+/// on ties.
+pub(crate) fn locale_compare(left: &str, right: &str) -> Ordering {
+    left.to_lowercase()
+        .cmp(&right.to_lowercase())
+        .then_with(|| right.cmp(left))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum ThreadSortOrder {

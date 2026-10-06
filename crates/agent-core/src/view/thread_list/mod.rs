@@ -3,9 +3,9 @@
 //! Settled shelves, with each row's status, labels, swipe actions and menu.
 mod menu;
 
+use super::thread_menu::{ThreadMenuChild, ThreadMenuItem};
 pub use menu::{
-    RowMenuContext, ThreadMenuAction, ThreadMenuItem, ThreadMenuOption, TitleRename,
-    resolve_thread_title_rename, snooze_menu_options, thread_row_menu,
+    RowMenuContext, TitleRename, resolve_thread_title_rename, snooze_menu_options, thread_row_menu,
     title_regeneration_menu_item,
 };
 
@@ -213,24 +213,9 @@ pub fn provider_drivers(
         .collect()
 }
 
-/// The texts a pull request search matches besides the title.
-pub fn pull_request_search_terms(thread: &ThreadSummary) -> Vec<String> {
-    thread
-        .linked_pull_request
-        .as_ref()
-        .map(|pr| {
-            vec![
-                format!("#{}", pr.number),
-                format!("{}#{}", pr.repository, pr.number),
-                pr.url.clone(),
-            ]
-        })
-        .unwrap_or_default()
-}
-
 fn matches_search(thread: &ThreadSummary, query: &str, matched: &BTreeSet<String>) -> bool {
     thread.title.to_lowercase().contains(query)
-        || pull_request_search_terms(thread)
+        || crate::view::search::pull_request_search_terms(thread)
             .iter()
             .any(|term| term.to_lowercase().contains(query))
         || matched.contains(&thread.id)
@@ -507,7 +492,7 @@ impl From<SwipeAction> for SwipeButton {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct ThreadRow {
     pub key: String,
@@ -543,7 +528,7 @@ pub struct ThreadRow {
     pub swipe_secondary: Option<SwipeButton>,
     /// The "Snooze until" choices of the swipe and the menu; empty when the
     /// thread cannot be snoozed now.
-    pub snooze_options: Vec<ThreadMenuOption>,
+    pub snooze_options: Vec<ThreadMenuChild>,
     /// The long-press menu.
     pub menu: Vec<ThreadMenuItem>,
 }
@@ -575,7 +560,7 @@ pub struct ShelfHeader {
 
 /// Rows cross the FFI boundary by value, so the thread row stays unboxed.
 #[allow(clippy::large_enum_variant)]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum ThreadListItem {
     Thread { row: ThreadRow },
@@ -814,7 +799,7 @@ pub struct ThreadListHolds<'a> {
     pub pending_order: Option<&'a PendingThreadOrder>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct ThreadListView {
     pub items: Vec<ThreadListItem>,

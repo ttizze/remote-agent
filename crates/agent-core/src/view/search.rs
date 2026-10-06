@@ -47,10 +47,10 @@ pub fn matches_thread_title(thread: &ThreadSummary, normalized_query: &str) -> b
 /// Narrows an ordered list to title matches, then threads whose messages
 /// matched (`content_ids`), each group in list order so lifecycle ordering
 /// stays stable while the user narrows the list. Empty for a blank query.
-pub fn search_threads<T: AsRef<ThreadSummary>>(
+pub fn search_threads<T: AsRef<ThreadSummary>, S: std::borrow::Borrow<str> + Ord>(
     threads: Vec<T>,
     query: &str,
-    content_ids: &BTreeSet<&str>,
+    content_ids: &BTreeSet<S>,
 ) -> Vec<T> {
     let query = query.trim().to_lowercase();
     if query.is_empty() {
@@ -333,19 +333,19 @@ mod tests {
 
     #[test]
     fn matches_thread_titles_case_insensitively_and_preserves_their_order() {
-        let found = search_threads(threads(), "work", &BTreeSet::new());
+        let found = search_threads(threads(), "work", &BTreeSet::<&str>::new());
         assert_eq!(ids(&found), ["thread-1", "thread-3"]);
     }
 
     #[test]
     fn does_not_match_project_metadata() {
-        let found = search_threads(threads(), "workspace", &BTreeSet::new());
+        let found = search_threads(threads(), "workspace", &BTreeSet::<&str>::new());
         assert_eq!(ids(&found), ["thread-1"]);
     }
 
     #[test]
     fn returns_no_results_for_an_empty_query() {
-        assert!(search_threads(threads(), "   ", &BTreeSet::new()).is_empty());
+        assert!(search_threads(threads(), "   ", &BTreeSet::<&str>::new()).is_empty());
     }
 
     #[test]
@@ -380,7 +380,7 @@ mod tests {
                 ids(&search_threads(
                     vec![thread.clone()],
                     query,
-                    &BTreeSet::new()
+                    &BTreeSet::<&str>::new()
                 )),
                 ["thread-1"],
                 "{query}"

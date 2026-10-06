@@ -512,7 +512,7 @@ struct RowContext<'a> {
 }
 
 fn thread_time_label(thread: &ThreadSummary, now_ms: i64) -> String {
-    sidebar_time_label(
+    crate::view::time::compact_relative_time_label(
         thread.latest_user_message_at.unwrap_or(thread.updated_at),
         now_ms,
     )
@@ -572,7 +572,10 @@ fn thread_row(
                 None if woke => status_slot(SidebarTopStatus::Woke),
                 None => SidebarRowTrailing::Time {
                     label: if section == SidebarSection::Settled {
-                        sidebar_time_label(settled_thread_timestamp(thread), now_ms)
+                        crate::view::time::compact_relative_time_label(
+                            settled_thread_timestamp(thread),
+                            now_ms,
+                        )
                     } else {
                         thread_time_label(thread, now_ms)
                     },
@@ -920,7 +923,7 @@ pub fn sidebar(
         .into_iter()
         .flatten()
         .collect();
-        let results: Vec<_> = search_sidebar_threads(searchable, query, &content)
+        let results: Vec<_> = crate::view::search::search_threads(searchable, query, &content)
             .into_iter()
             .map(|thread| {
                 let found = matches.get(&thread.id);

@@ -1,8 +1,8 @@
 //! Importing projects and their Claude Code and Codex sessions found by a
 //! Host scan: the picker, its default selection and the result message.
-use super::locale_compare;
 use super::paths::find_project_by_path;
 use crate::models::Project;
+use crate::view::thread_sort::locale_compare;
 use agent_domain::Driver;
 use agent_protocol::conversation::{ImportCounts, SessionCandidate, SessionScan};
 use std::collections::{BTreeMap, BTreeSet};

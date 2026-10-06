@@ -1,4 +1,5 @@
 use super::*;
+use crate::view::thread_menu::{ThreadMenuAction, ThreadMenuChild, ThreadMenuItemId};
 use crate::view::thread_order::MoveDestination;
 use crate::view::thread_sort::{MoveDirection, OrderAssignment, plan_pinned_move};
 use crate::view::thread_summary::{
@@ -1640,17 +1641,17 @@ fn places_the_working_shelf_after_queued_tasks_and_before_snoozed_and_settled_th
     );
 }
 
-fn actions(menu: &[ThreadMenuItem]) -> Vec<ThreadMenuAction> {
-    menu.iter().map(|item| item.action).collect()
+fn actions(menu: &[ThreadMenuItem]) -> Vec<ThreadMenuItemId> {
+    menu.iter().map(|item| item.id).collect()
 }
 
 #[test]
 fn builds_each_rows_long_press_menu() {
-    use ThreadMenuAction::*;
+    use ThreadMenuItemId::*;
     fn context(
         variant: RowVariant,
         snoozed: bool,
-        snooze_options: &[ThreadMenuOption],
+        snooze_options: &[ThreadMenuChild],
     ) -> RowMenuContext<'_> {
         RowMenuContext {
             variant,
@@ -1745,14 +1746,17 @@ fn checks_the_current_auto_settle_choice() {
     );
     let auto_settle = menu
         .iter()
-        .find(|item| item.action == ThreadMenuAction::AutoSettle)
+        .find(|item| item.id == ThreadMenuItemId::AutoSettle)
         .unwrap();
-    let checked: Vec<(&str, bool)> = auto_settle
-        .options
+    let checked: Vec<(&str, Option<bool>)> = auto_settle
+        .children
         .iter()
         .map(|option| (option.label.as_str(), option.checked))
         .collect();
-    assert_eq!(checked, [("Enabled", false), ("Disabled", true)]);
+    assert_eq!(
+        checked,
+        [("Enabled", Some(false)), ("Disabled", Some(true))]
+    );
 }
 
 #[test]
@@ -1760,11 +1764,17 @@ fn offers_title_regeneration() {
     assert_eq!(
         title_regeneration_menu_item(false),
         ThreadMenuItem {
-            action: ThreadMenuAction::RegenerateTitle,
+            id: ThreadMenuItemId::RegenerateTitle,
             label: "Regenerate title".into(),
+            icon: None,
             enabled: true,
             destructive: false,
-            options: vec![],
+            separator_before: false,
+            action: Some(ThreadMenuAction::Thread {
+                action: crate::state::ThreadAction::RegenerateTitle
+            }),
+            confirmation: None,
+            children: vec![],
         }
     );
 }

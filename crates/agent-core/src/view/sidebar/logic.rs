@@ -1,6 +1,8 @@
 //! Desktop sidebar rules: shelves and drag and drop across them, row status,
 //! recede and labels, search, bulk menus, project order and traversal.
 use crate::view::snooze::effective_snoozed;
+pub use crate::view::thread_order::DropSection;
+use crate::view::thread_sort::locale_compare;
 use crate::view::thread_sort::{
     OrderAssignment, ThreadSortOrder, plan_pinned_reorder, sort_threads, thread_sort_timestamp,
 };
@@ -8,7 +10,6 @@ use crate::view::thread_summary::{
     RuntimeStatus, SettledOverride, ThreadSummary, background_work_holds_completion,
 };
 use agent_domain::InteractionMode;
-use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Visible rows kept warm in the thread cache.
@@ -167,16 +168,6 @@ fn section_at_slot(items: &[SidebarListItem], index: usize) -> SidebarSection {
         }
     }
     section
-}
-
-/// The sections a drop can land in; the Working and Snoozed shelves are never
-/// destinations.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
-pub enum DropSection {
-    Pinned,
-    Active,
-    Settled,
 }
 
 impl From<DropSection> for SidebarSection {
@@ -668,64 +659,6 @@ pub fn format_working_duration_label(elapsed_ms: i64) -> String {
     format!("{}h {}m", minutes / 60, minutes % 60)
 }
 
-/// Row age: "now", "5m", "3h", "2d".
-pub fn sidebar_time_label(timestamp_ms: i64, now_ms: i64) -> String {
-    let minutes = (now_ms - timestamp_ms).max(0) / 60_000;
-    if minutes < 1 {
-        return "now".into();
-    }
-    if minutes < 60 {
-        return format!("{minutes}m");
-    }
-    let hours = minutes / 60;
-    if hours < 24 {
-        return format!("{hours}h");
-    }
-    format!("{}d", hours / 24)
-}
-
-fn pull_request_search_terms(thread: &ThreadSummary) -> Vec<String> {
-    thread
-        .linked_pull_request
-        .as_ref()
-        .map(|pr| {
-            vec![
-                format!("#{}", pr.number),
-                format!("{}#{}", pr.repository, pr.number),
-                pr.url.clone(),
-            ]
-        })
-        .unwrap_or_default()
-}
-
-/// Title or linked pull request matches in list order, then threads only the
-/// Host's message search matched.
-pub fn search_sidebar_threads<T: AsRef<ThreadSummary>>(
-    threads: Vec<T>,
-    query: &str,
-    content_matches: &BTreeSet<String>,
-) -> Vec<T> {
-    let query = query.trim().to_lowercase();
-    if query.is_empty() {
-        return vec![];
-    }
-    let mut titles = vec![];
-    let mut contents = vec![];
-    for thread in threads {
-        let summary = thread.as_ref();
-        let matches_title = std::iter::once(summary.title.clone())
-            .chain(pull_request_search_terms(summary))
-            .any(|term| term.to_lowercase().contains(&query));
-        if matches_title {
-            titles.push(thread);
-        } else if content_matches.contains(&summary.id) {
-            contents.push(thread);
-        }
-    }
-    titles.extend(contents);
-    titles
-}
-
 /// One project scope choice; `project_id: None` is "All projects".
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
@@ -929,13 +862,6 @@ pub fn project_sort_timestamp(
         ThreadSortOrder::UpdatedAt => project.updated_at.or(project.created_at),
     }
     .unwrap_or(i64::MIN)
-}
-
-/// Approximates the default collation: case-insensitive, lower case first.
-pub(crate) fn locale_compare(left: &str, right: &str) -> Ordering {
-    left.to_lowercase()
-        .cmp(&right.to_lowercase())
-        .then_with(|| right.cmp(left))
 }
 
 /// Most recent activity first, then title and id; manual keeps the input.

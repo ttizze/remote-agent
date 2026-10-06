@@ -1,95 +1,54 @@
 //! A row's long-press menu as records: lifecycle first, then arrangement,
 //! title and auto-settle, with Delete last.
 use super::RowVariant;
-use crate::view::snooze::{SnoozePreset, SnoozePresetId};
+use crate::state::ThreadAction;
+use crate::view::snooze::SnoozePreset;
+use crate::view::thread_menu::{
+    ThreadMenuAction, ThreadMenuChild, ThreadMenuItem, ThreadMenuItemId, child,
+};
+use crate::view::thread_sort::MoveDirection;
 use crate::view::thread_summary::ThreadSummary;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
-pub enum ThreadMenuAction {
-    NewThreadOnBranch,
-    CopyThreadId,
-    Settle,
-    Unsettle,
-    /// Wake a snoozed thread now.
-    Unsnooze,
-    /// Opens the snooze choices.
-    Snooze,
-    /// Resolve with `resolve_snooze_menu_selection` when picked.
-    SnoozePreset {
-        preset: SnoozePresetId,
-    },
-    /// Opens the custom date and time picker.
-    SnoozeCustom,
-    /// Opens the arrangement sheet.
-    Arrange,
-    MoveUp,
-    MoveDown,
-    Pin,
-    Unpin,
-    Rename,
-    RegenerateTitle,
-    /// Opens the auto-settle choices.
-    AutoSettle,
-    SetAutoSettle {
-        enabled: bool,
-    },
-    Delete,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
-pub struct ThreadMenuOption {
-    pub action: ThreadMenuAction,
-    pub label: String,
-    /// A secondary line, such as a preset's wake time.
-    pub detail: Option<String>,
-    pub checked: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
-pub struct ThreadMenuItem {
-    pub action: ThreadMenuAction,
-    pub label: String,
-    pub enabled: bool,
-    pub destructive: bool,
-    /// A submenu's choices.
-    pub options: Vec<ThreadMenuOption>,
-}
-
-fn entry(action: ThreadMenuAction, label: &str) -> ThreadMenuItem {
+fn entry(id: ThreadMenuItemId, label: &str, action: Option<ThreadMenuAction>) -> ThreadMenuItem {
     ThreadMenuItem {
-        action,
+        id,
         label: label.into(),
+        icon: None,
         enabled: true,
         destructive: false,
-        options: vec![],
-    }
-}
-
-fn option(action: ThreadMenuAction, label: &str, checked: bool) -> ThreadMenuOption {
-    ThreadMenuOption {
+        separator_before: false,
         action,
-        label: label.into(),
-        detail: None,
-        checked,
+        confirmation: None,
+        children: vec![],
     }
 }
 
-/// The presets, each with its wake time, then "Custom…".
-pub fn snooze_menu_options(presets: &[SnoozePreset]) -> Vec<ThreadMenuOption> {
+fn thread(action: ThreadAction) -> Option<ThreadMenuAction> {
+    Some(ThreadMenuAction::Thread { action })
+}
+
+/// The presets, each with its wake time, then "Custom…". A picked preset is
+/// re-resolved with `resolve_snooze_menu_selection` by its id.
+pub fn snooze_menu_options(presets: &[SnoozePreset]) -> Vec<ThreadMenuChild> {
     presets
         .iter()
-        .map(|preset| ThreadMenuOption {
+        .map(|preset| ThreadMenuChild {
             detail: Some(preset.when_label.clone()),
-            ..option(
-                ThreadMenuAction::SnoozePreset { preset: preset.id },
+            ..child(
+                ThreadMenuItemId::SnoozePreset { preset: preset.id },
                 &preset.label,
-                false,
+                ThreadMenuAction::Thread {
+                    action: ThreadAction::Snooze {
+                        until: preset.snoozed_until.clone(),
+                    },
+                },
             )
         })
-        .chain([option(ThreadMenuAction::SnoozeCustom, "Custom…", false)])
+        .chain([child(
+            ThreadMenuItemId::SnoozeCustom,
+            "Custom…",
+            ThreadMenuAction::CustomSnooze,
+        )])
         .collect()
 }
 
@@ -98,14 +57,18 @@ pub fn title_regeneration_menu_item(regenerating: bool) -> ThreadMenuItem {
     if regenerating {
         ThreadMenuItem {
             enabled: false,
-            ..entry(ThreadMenuAction::RegenerateTitle, "Regenerating…")
+            ..entry(ThreadMenuItemId::RegenerateTitle, "Regenerating…", None)
         }
     } else {
-        entry(ThreadMenuAction::RegenerateTitle, "Regenerate title")
+        entry(
+            ThreadMenuItemId::RegenerateTitle,
+            "Regenerate title",
+            thread(ThreadAction::RegenerateTitle),
+        )
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RowMenuContext<'a> {
     pub variant: RowVariant,
     pub snoozed: bool,
@@ -114,76 +77,114 @@ pub struct RowMenuContext<'a> {
     pub can_move_up: bool,
     pub can_move_down: bool,
     /// Non-empty when the thread can be snoozed now.
-    pub snooze_options: &'a [ThreadMenuOption],
+    pub snooze_options: &'a [ThreadMenuChild],
 }
 
 /// Snoozed rows offer Wake, settled rows Un-settle, cards Settle and, when
 /// allowed, Snooze. Moves appear on cards only; the pin item follows the
 /// thread's pin even on a settled row.
-pub fn thread_row_menu(thread: &ThreadSummary, context: &RowMenuContext) -> Vec<ThreadMenuItem> {
+pub fn thread_row_menu(row: &ThreadSummary, context: &RowMenuContext) -> Vec<ThreadMenuItem> {
+    use ThreadMenuItemId as Id;
     let mut menu = vec![];
-    if thread.branch.is_some() {
+    if let Some(branch) = &row.branch {
         menu.push(entry(
-            ThreadMenuAction::NewThreadOnBranch,
+            Id::NewThreadOnBranch,
             "New thread on branch",
+            Some(ThreadMenuAction::NewThreadOnBranch {
+                project_id: row.project.clone(),
+                branch: branch.clone(),
+                worktree_path: row.worktree_path.clone(),
+            }),
         ));
     }
-    menu.push(entry(ThreadMenuAction::CopyThreadId, "Copy thread ID"));
+    menu.push(entry(
+        Id::CopyThreadId,
+        "Copy thread ID",
+        Some(ThreadMenuAction::CopyThreadId {
+            thread_id: row.id.clone(),
+        }),
+    ));
     let card = context.variant == RowVariant::Card;
     if context.snoozed {
-        menu.push(entry(ThreadMenuAction::Unsnooze, "Wake thread"));
+        menu.push(entry(
+            Id::Unsnooze,
+            "Wake thread",
+            thread(ThreadAction::Unsnooze),
+        ));
     } else if card {
-        menu.push(entry(ThreadMenuAction::Settle, "Settle"));
+        menu.push(entry(Id::Settle, "Settle", thread(ThreadAction::Settle)));
         if !context.snooze_options.is_empty() {
             menu.push(ThreadMenuItem {
-                options: context.snooze_options.to_vec(),
-                ..entry(ThreadMenuAction::Snooze, "Snooze")
+                children: context.snooze_options.to_vec(),
+                ..entry(Id::Snooze, "Snooze", None)
             });
         }
     } else {
-        menu.push(entry(ThreadMenuAction::Unsettle, "Un-settle"));
+        menu.push(entry(
+            Id::Unsettle,
+            "Un-settle",
+            thread(ThreadAction::Unsettle),
+        ));
     }
     if !context.snoozed {
         if context.reorderable {
-            menu.push(entry(ThreadMenuAction::Arrange, "Arrange threads…"));
+            menu.push(entry(
+                Id::Arrange,
+                "Arrange threads…",
+                Some(ThreadMenuAction::Arrange),
+            ));
             if card {
-                menu.push(ThreadMenuItem {
-                    enabled: context.can_move_up,
-                    ..entry(ThreadMenuAction::MoveUp, "Move up")
-                });
-                menu.push(ThreadMenuItem {
-                    enabled: context.can_move_down,
-                    ..entry(ThreadMenuAction::MoveDown, "Move down")
-                });
+                let step = |id, label, enabled, direction| ThreadMenuItem {
+                    enabled,
+                    ..entry(id, label, Some(ThreadMenuAction::Move { direction }))
+                };
+                menu.push(step(
+                    Id::MoveUp,
+                    "Move up",
+                    context.can_move_up,
+                    MoveDirection::Up,
+                ));
+                menu.push(step(
+                    Id::MoveDown,
+                    "Move down",
+                    context.can_move_down,
+                    MoveDirection::Down,
+                ));
             }
         }
-        menu.push(if thread.pinned_at.is_some() {
-            entry(ThreadMenuAction::Unpin, "Unpin")
+        menu.push(if row.pinned_at.is_some() {
+            entry(Id::Unpin, "Unpin", thread(ThreadAction::Unpin))
         } else {
-            entry(ThreadMenuAction::Pin, "Pin")
+            entry(Id::Pin, "Pin", thread(ThreadAction::Pin))
         });
     }
-    menu.push(entry(ThreadMenuAction::Rename, "Rename"));
-    menu.push(title_regeneration_menu_item(thread.title_regenerating));
-    let enabled = !thread.auto_settle_disabled;
+    menu.push(entry(
+        Id::Rename,
+        "Rename",
+        Some(ThreadMenuAction::StartRename),
+    ));
+    menu.push(title_regeneration_menu_item(row.title_regenerating));
+    let enabled = !row.auto_settle_disabled;
+    let choice = |id, label, value: bool| ThreadMenuChild {
+        checked: Some(enabled == value),
+        ..child(
+            id,
+            label,
+            ThreadMenuAction::Thread {
+                action: ThreadAction::AutoSettle { enabled: value },
+            },
+        )
+    };
     menu.push(ThreadMenuItem {
-        options: vec![
-            option(
-                ThreadMenuAction::SetAutoSettle { enabled: true },
-                "Enabled",
-                enabled,
-            ),
-            option(
-                ThreadMenuAction::SetAutoSettle { enabled: false },
-                "Disabled",
-                !enabled,
-            ),
+        children: vec![
+            choice(Id::AutoSettleEnabled, "Enabled", true),
+            choice(Id::AutoSettleDisabled, "Disabled", false),
         ],
-        ..entry(ThreadMenuAction::AutoSettle, "Auto-settle behavior")
+        ..entry(Id::AutoSettle, "Auto-settle behavior", None)
     });
     menu.push(ThreadMenuItem {
         destructive: true,
-        ..entry(ThreadMenuAction::Delete, "Delete")
+        ..entry(Id::Delete, "Delete", thread(ThreadAction::Delete))
     });
     menu
 }

@@ -5,7 +5,7 @@ use crate::view::thread_summary::{
     RunSummary, RuntimeSummary,
     fixtures::{ms, run, runtime, summary},
 };
-use agent_domain::{BackgroundKind, LinkedPullRequest};
+use agent_domain::BackgroundKind;
 use proptest::prelude::*;
 
 fn ids<T: AsRef<ThreadSummary>>(threads: &[T]) -> Vec<&str> {
@@ -522,84 +522,8 @@ fn waiting_stays_static_while_working_shows_its_duration() {
     assert!(should_show_sidebar_duration(SidebarThreadStatus::Working));
 }
 
-fn search_threads() -> Vec<ThreadSummary> {
-    [
-        ("thread-1", "Fix workspace search", "Alpha"),
-        ("thread-2", "Review providers", "Workspace"),
-        ("thread-3", "WORKTREE cleanup", "Beta"),
-    ]
-    .map(|(id, title, project)| ThreadSummary {
-        title: title.into(),
-        project: project.into(),
-        ..summary(id)
-    })
-    .to_vec()
-}
-
 fn content(ids: &[&str]) -> BTreeSet<String> {
     ids.iter().map(|id| id.to_string()).collect()
-}
-
-#[test]
-fn search_matches_titles_case_insensitively_in_list_order() {
-    let found = search_sidebar_threads(search_threads(), "work", &content(&[]));
-    assert_eq!(ids(&found), ["thread-1", "thread-3"]);
-}
-
-#[test]
-fn search_does_not_match_project_metadata() {
-    let found = search_sidebar_threads(search_threads(), "workspace", &content(&[]));
-    assert_eq!(ids(&found), ["thread-1"]);
-}
-
-#[test]
-fn an_empty_query_finds_nothing() {
-    assert!(search_sidebar_threads(search_threads(), "   ", &content(&[])).is_empty());
-}
-
-#[test]
-fn content_only_matches_follow_every_title_match() {
-    let found = search_sidebar_threads(search_threads(), "work", &content(&["thread-2"]));
-    assert_eq!(ids(&found), ["thread-1", "thread-3", "thread-2"]);
-}
-
-#[test]
-fn a_thread_matching_title_and_content_is_listed_once() {
-    let found = search_sidebar_threads(search_threads(), "work", &content(&["thread-1"]));
-    assert_eq!(ids(&found), ["thread-1", "thread-3"]);
-}
-
-#[test]
-fn content_matches_outside_the_sidebar_are_ignored() {
-    let found = search_sidebar_threads(search_threads(), "work", &content(&["thread-missing"]));
-    assert_eq!(ids(&found), ["thread-1", "thread-3"]);
-}
-
-#[test]
-fn search_matches_the_linked_pull_request() {
-    let mut threads = search_threads();
-    threads[1].linked_pull_request = Some(LinkedPullRequest {
-        project: "Workspace".into(),
-        repository: "acme/tools".into(),
-        number: 42,
-        url: "https://github.com/acme/tools/pull/42".into(),
-    });
-    assert_eq!(
-        ids(&search_sidebar_threads(
-            threads.clone(),
-            "#42",
-            &content(&[])
-        )),
-        ["thread-2"]
-    );
-    assert_eq!(
-        ids(&search_sidebar_threads(
-            threads,
-            "ACME/TOOLS#42",
-            &content(&[])
-        )),
-        ["thread-2"]
-    );
 }
 
 fn scope_items() -> Vec<SidebarProjectScopeItem> {
@@ -774,11 +698,26 @@ fn negative_working_durations_clamp_to_zero() {
 #[test]
 fn row_ages_compact_the_relative_label() {
     let now = ms("2026-03-09T12:00:00.000Z");
-    assert_eq!(sidebar_time_label(now + 5_000, now), "now");
-    assert_eq!(sidebar_time_label(now - 59_000, now), "now");
-    assert_eq!(sidebar_time_label(now - 5 * 60_000, now), "5m");
-    assert_eq!(sidebar_time_label(now - 3 * 3_600_000, now), "3h");
-    assert_eq!(sidebar_time_label(now - 2 * 86_400_000, now), "2d");
+    assert_eq!(
+        crate::view::time::compact_relative_time_label(now + 5_000, now),
+        "now"
+    );
+    assert_eq!(
+        crate::view::time::compact_relative_time_label(now - 59_000, now),
+        "now"
+    );
+    assert_eq!(
+        crate::view::time::compact_relative_time_label(now - 5 * 60_000, now),
+        "5m"
+    );
+    assert_eq!(
+        crate::view::time::compact_relative_time_label(now - 3 * 3_600_000, now),
+        "3h"
+    );
+    assert_eq!(
+        crate::view::time::compact_relative_time_label(now - 2 * 86_400_000, now),
+        "2d"
+    );
 }
 
 fn plan_thread() -> ThreadSummary {
