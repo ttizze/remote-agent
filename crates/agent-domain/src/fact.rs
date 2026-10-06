@@ -1523,18 +1523,6 @@ pub fn bounded_json(value: &Json) -> Json {
         value.clone()
     }
 }
-/// Reference failure text bounds: UTF-16 units, cut with an ellipsis.
-pub fn bounded_failure_text(text: &str, max: usize) -> String {
-    let units = text.encode_utf16().collect::<Vec<_>>();
-    if units.len() <= max {
-        return text.to_owned();
-    }
-    let mut end = max - 1;
-    if (0xDC00..=0xDFFF).contains(&units[end]) {
-        end -= 1;
-    }
-    String::from_utf16_lossy(&units[..end]) + "…"
-}
 /// Version of the folded `State` and `Fact` encodings. Stored snapshots with
 /// another value are rebuilt from facts.
 pub const STATE_FORMAT: u32 = 1;

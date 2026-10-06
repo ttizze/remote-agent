@@ -3400,9 +3400,9 @@ impl Decision {
             attempt,
             String::new(),
             ItemKind::Error {
-                message: bounded_failure_text(message, 4096),
+                message: provider_failure_message(message),
                 retry: None,
-                code: code.map(str::to_owned),
+                code: code.and_then(provider_failure_code),
                 class: class.map(str::to_owned),
                 retryable: code.map(|_| false),
             },
@@ -3490,9 +3490,9 @@ impl Decision {
                 class,
                 retryable,
             } => ItemKind::Error {
-                message: bounded_failure_text(message, 4096),
+                message: provider_failure_message(message),
                 retry: retry.clone(),
-                code: code.as_deref().map(|code| bounded_failure_text(code, 128)),
+                code: code.as_deref().and_then(provider_failure_code),
                 class: class.clone(),
                 retryable: *retryable,
             },

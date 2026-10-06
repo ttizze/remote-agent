@@ -3,6 +3,7 @@
 mod answers;
 mod context;
 mod fact;
+mod failure;
 mod ids;
 mod machine;
 mod model;
@@ -14,6 +15,7 @@ mod usage;
 pub use answers::*;
 pub use context::*;
 pub use fact::*;
+pub use failure::*;
 pub use ids::*;
 pub use machine::*;
 pub use model::*;
