@@ -1,8 +1,8 @@
 use super::{ExecutorContext, retry};
 use crate::{Durability, EffectError, EffectHandler, EffectJob, Store, StoreError};
 use agent_domain::{
-    CapturedBaseline, CheckpointId, CheckpointScope, CheckpointScopeId, CheckpointStatus, Effect,
-    EffectBody, EffectResult, Input, Run, RunAttemptId, State, ThreadId,
+    CapturedBaseline, CheckpointFile, CheckpointId, CheckpointScope, CheckpointScopeId,
+    CheckpointStatus, Effect, EffectBody, EffectResult, Input, Run, RunAttemptId, State, ThreadId,
 };
 use base64::Engine as _;
 use futures_util::future::BoxFuture;
@@ -275,7 +275,7 @@ impl EffectHandler for CaptureCheckpoint {
                         .await?,
                 );
             }
-            let status = capture(&self.0, scope, ordinal).await;
+            let (status, files) = capture(&self.0, scope, ordinal).await;
             self.0.ops.run_finalized(&job.thread, run, &scope.cwd);
             Ok(Some(EffectResult::CheckpointCaptured {
                 status,
@@ -284,6 +284,7 @@ impl EffectHandler for CaptureCheckpoint {
                 attempt: job.effect.attempt.clone(),
                 checkpoint: checkpoint_id(&scope.id, ordinal),
                 file_ref: checkpoint_reference(&scope.id, ordinal),
+                files,
             }))
         })
     }
@@ -339,26 +340,51 @@ impl CaptureCheckpoint {
     }
 }
 
+/// T3 `CheckpointService.capture`: the summary diffs against the previous
+/// ordinal's ref (itself for ordinal 0) and is empty when that ref or the diff
+/// is unavailable.
 async fn capture(
     context: &ExecutorContext,
     scope: &CheckpointScope,
     ordinal: u64,
-) -> CheckpointStatus {
+) -> (CheckpointStatus, Vec<CheckpointFile>) {
     let ops = &context.ops;
     if !ops.is_git_repository(scope.cwd.clone()).await {
-        return CheckpointStatus::Missing;
+        return (CheckpointStatus::Missing, vec![]);
     }
     let reference = checkpoint_reference(&scope.id, ordinal);
-    match ops
+    if let Err(error) = ops
         .capture_checkpoint(scope.cwd.clone(), reference.clone())
         .await
     {
-        Ok(()) => CheckpointStatus::Ready,
-        Err(error) => {
-            tracing::warn!(scope = %scope.id, %reference, %error, "checkpoint capture failed");
-            CheckpointStatus::Error
-        }
+        tracing::warn!(scope = %scope.id, %reference, %error, "checkpoint capture failed");
+        return (CheckpointStatus::Error, vec![]);
     }
+    let previous = checkpoint_reference(&scope.id, ordinal.saturating_sub(1));
+    let previous_exists = match ops
+        .has_checkpoint(scope.cwd.clone(), previous.clone())
+        .await
+    {
+        Ok(exists) => exists,
+        Err(error) => {
+            tracing::warn!(scope = %scope.id, reference = %previous, %error, "previous checkpoint ref lookup failed");
+            false
+        }
+    };
+    if !previous_exists {
+        return (CheckpointStatus::Ready, vec![]);
+    }
+    let files = match ops
+        .checkpoint_files(scope.cwd.clone(), previous, reference.clone())
+        .await
+    {
+        Ok(files) => files,
+        Err(error) => {
+            tracing::warn!(scope = %scope.id, %reference, %error, "checkpoint diff summary failed");
+            vec![]
+        }
+    };
+    (CheckpointStatus::Ready, files)
 }
 
 pub const SHARED_WORKSPACE_RESTORE_MESSAGE: &str = "File restore requires an isolated worktree. This workspace may contain changes from another thread. Rewind the conversation without restoring files instead.";

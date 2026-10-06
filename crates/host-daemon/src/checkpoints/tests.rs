@@ -32,16 +32,9 @@ fn large_text(lines: usize) -> String {
         .map(|index| format!("line {index:05}\n"))
         .collect()
 }
-/// `parseTurnDiffFilesFromNumstat`: destination paths, zero for binary counts, sorted.
+/// `parseTurnDiffFilesFromNumstat`, compared regardless of order.
 fn summary(numstat: &str) -> Vec<(String, u64, u64)> {
-    let mut files = vec![];
-    crate::workspace_review::parse_numstat(numstat.as_bytes(), |path, added, deleted| {
-        files.push((
-            String::from_utf8_lossy(path).into_owned(),
-            added.unwrap_or(0),
-            deleted.unwrap_or(0),
-        ));
-    });
+    let mut files = turn_diff_files(numstat);
     files.sort();
     files
 }
@@ -312,13 +305,20 @@ async fn uses_head_for_a_missing_baseline_only_when_requested() {
 
 #[test]
 fn numstat_summaries_follow_the_reference_parser() {
-    assert_eq!(summary(""), vec![]);
+    let parsed = |numstat: &str| turn_diff_files(numstat);
+    let files = |entries: &[(&str, u64, u64)]| {
+        entries
+            .iter()
+            .map(|(path, added, deleted)| ((*path).to_owned(), *added, *deleted))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(parsed(""), vec![]);
     assert_eq!(
-        summary(&["0\t2\tsrc/b.ts", "2\t1\ta.txt", ""].join("\0")),
+        parsed(&["0\t2\tsrc/b.ts", "2\t1\ta.txt", ""].join("\0")),
         files(&[("a.txt", 2, 1), ("src/b.ts", 0, 2)])
     );
     assert_eq!(
-        summary(
+        parsed(
             &[
                 "0\t0\t",
                 "src/old.ts",
@@ -338,15 +338,63 @@ fn numstat_summaries_follow_the_reference_parser() {
         ])
     );
     assert_eq!(
-        summary(&["-\t-\timage.png", "0\t0\tempty.txt", ""].join("\0")),
+        parsed(&["-\t-\timage.png", "0\t0\tempty.txt", ""].join("\0")),
         files(&[("empty.txt", 0, 0), ("image.png", 0, 0)])
     );
     let path = " café\tline\r\nname.txt ";
     assert_eq!(
-        summary(&format!("3\t2\t\0old\tname\n.txt\0{path}\0")),
+        parsed(&format!("3\t2\t\0old\tname\n.txt\0{path}\0")),
         files(&[(path, 3, 2)])
     );
-    assert_eq!(summary(&format!("1\t0\t{path}\0")), files(&[(path, 1, 0)]));
+    assert_eq!(parsed(&format!("1\t0\t{path}\0")), files(&[(path, 1, 0)]));
+}
+
+// `localeCompare` order, as Node prints it for these paths.
+#[test]
+fn numstat_summaries_sort_like_locale_compare() {
+    let names = [
+        "B.txt", "a.txt", "_c.txt", "src/b.ts", "src-a.ts", "src.ts", "A.txt", "10.txt", "9.txt",
+    ];
+    let numstat: String = names.iter().map(|name| format!("1\t0\t{name}\0")).collect();
+    let sorted: Vec<_> = turn_diff_files(&numstat)
+        .into_iter()
+        .map(|(path, _, _)| path)
+        .collect();
+    assert_eq!(
+        sorted,
+        [
+            "_c.txt", "10.txt", "9.txt", "a.txt", "A.txt", "B.txt", "src-a.ts", "src.ts",
+            "src/b.ts"
+        ]
+    );
+}
+
+#[tokio::test]
+async fn checkpoint_files_summarize_the_changes_between_two_refs() {
+    let dir = repo_with_commit().await;
+    let cwd = dir.path();
+    let store = Checkpoints::default();
+    store.capture(cwd, FROM).await.unwrap();
+    std::fs::write(cwd.join("README.md"), "# changed\nmore\n").unwrap();
+    std::fs::write(cwd.join("B.bin"), [0u8, 1, 2, 0]).unwrap();
+    std::fs::write(cwd.join("added.txt"), "one\ntwo\n").unwrap();
+    store.capture(cwd, TO).await.unwrap();
+    let file = |path: &str, additions, deletions| agent_domain::CheckpointFile {
+        path: path.into(),
+        kind: "modified".into(),
+        additions,
+        deletions,
+    };
+    assert_eq!(
+        store.files(cwd, FROM, TO).await.unwrap(),
+        [
+            file("added.txt", 2, 0),
+            file("B.bin", 0, 0),
+            file("README.md", 2, 1)
+        ]
+    );
+    assert!(store.files(cwd, FROM, FROM).await.unwrap().is_empty());
+    assert!(store.files(cwd, "refs/t3/test/missing", TO).await.is_err());
 }
 
 #[tokio::test]

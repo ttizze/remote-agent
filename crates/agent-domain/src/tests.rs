@@ -614,6 +614,7 @@ fn checkpoint(s: &mut State, run: &RunId, attempt: &RunAttemptId, key: &str) -> 
             attempt: Some(attempt.clone()),
             checkpoint: id.clone(),
             file_ref: key.into(),
+            files: vec![],
         },
     );
     id
@@ -1912,6 +1913,7 @@ fn failed_capture_settles_the_run_and_stopped_capture_keeps_its_terminal_status(
             attempt: Some(b.clone()),
             checkpoint: CheckpointId::new("stopped-cp").unwrap(),
             file_ref: "stopped-cp".into(),
+            files: vec![],
         },
     );
     assert!(s.captures.is_empty());
@@ -1943,6 +1945,7 @@ fn failed_capture_settles_the_run_and_stopped_capture_keeps_its_terminal_status(
             attempt: Some(c),
             checkpoint: CheckpointId::new("missing-cp").unwrap(),
             file_ref: String::new(),
+            files: vec![],
         },
     );
     assert_eq!(s.runs[2].status, RunStatus::Completed);
@@ -2678,6 +2681,7 @@ fn first_scoped_capture_requires_a_baseline_and_late_capture_uses_its_original_s
         checkpoint: CheckpointId::new("captured").unwrap(),
         file_ref: "after".into(),
         baselines: vec![],
+        files: vec![],
     };
     assert_eq!(
         result(&mut s, "missing", missing.clone()).reply,
@@ -2730,6 +2734,49 @@ fn first_scoped_capture_requires_a_baseline_and_late_capture_uses_its_original_s
         },
     );
     assert!(rollback.effects.iter().any(|effect|matches!(&effect.body,EffectBody::Rollback {restore:Some(RestoreFiles {scope:Some(scope),file_ref,..}),..} if scope.cwd=="/workspace/one" && file_ref=="before")));
+}
+
+// T3 CheckpointService.ts: a captured turn carries the files changed since the
+// previous checkpoint; materialized baselines carry none.
+#[test]
+fn a_captured_checkpoint_records_its_file_summary_and_baselines_record_none() {
+    let file = |path: &str, additions| CheckpointFile {
+        path: path.into(),
+        kind: "modified".into(),
+        additions,
+        deletions: 1,
+    };
+    for (files, recorded) in [(
+        vec![file("a.txt", 2), file("src/b.ts", 0)],
+        vec![file("a.txt", 2), file("src/b.ts", 0)],
+    )] {
+        let mut s = state();
+        let (run, a) = running(&mut s, "first");
+        finish(&mut s, &a);
+        result(
+            &mut s,
+            "captured",
+            EffectResult::CheckpointCaptured {
+                status: CheckpointStatus::Ready,
+                baselines: vec![CapturedBaseline {
+                    status: CheckpointStatus::Ready,
+                    checkpoint: CheckpointId::new("baseline").unwrap(),
+                    ordinal: 0,
+                    file_ref: "before".into(),
+                    native_heads: BTreeMap::new(),
+                }],
+                run: run.clone(),
+                attempt: Some(a.clone()),
+                checkpoint: CheckpointId::new("captured").unwrap(),
+                file_ref: "after".into(),
+                files,
+            },
+        );
+        assert_eq!(s.checkpoints.len(), 2);
+        assert!(s.checkpoints[0].files.is_empty());
+        assert_eq!(s.checkpoints[1].run, Some(run));
+        assert_eq!(s.checkpoints[1].files, recorded);
+    }
 }
 
 #[test]
@@ -2791,7 +2838,7 @@ fn interrupt_failure_keeps_the_root_and_children_live_until_provider_confirmatio
             "unsafe-rollback",
             Command::Rollback {
                 checkpoint: cp,
-                restore_files: true
+                restore_files: true,
             }
         )
         .reply,

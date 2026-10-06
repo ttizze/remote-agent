@@ -518,6 +518,16 @@ pub struct Checkpoint {
     pub run_ordinal: u64,
     pub native_heads: BTreeMap<String, Option<String>>,
     pub file_ref: String,
+    pub files: Vec<CheckpointFile>,
+}
+/// One file a checkpoint changed since the scope's previous checkpoint (T3
+/// `OrchestrationV2CheckpointFileSummary`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckpointFile {
+    pub path: String,
+    pub kind: String,
+    pub additions: u64,
+    pub deletions: u64,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Task {
@@ -1426,6 +1436,7 @@ pub enum EffectResult {
         attempt: Option<RunAttemptId>,
         checkpoint: CheckpointId,
         file_ref: String,
+        files: Vec<CheckpointFile>,
     },
     RollbackFinished {
         bindings: Vec<NativeBinding>,

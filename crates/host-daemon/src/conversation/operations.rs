@@ -5,7 +5,7 @@ use crate::claude::control::ClaudeProgram;
 use crate::{
     ProjectStore, terminals::Terminals, workspace_files::WorkspaceFiles, worktrees::Worktrees,
 };
-use agent_domain::{AttachmentKind, ThreadId};
+use agent_domain::{AttachmentKind, CheckpointFile, ThreadId};
 use agent_runtime::{
     CreatedWorktree, HostOperations, HostProject, PreparedRestore, TextGenerationRequest,
     WorktreeRequest,
@@ -300,6 +300,19 @@ impl HostOperations for HostIo {
         Box::pin(async move {
             self.checkpoints
                 .has(Path::new(&cwd), &reference)
+                .await
+                .map_err(error)
+        })
+    }
+    fn checkpoint_files(
+        &self,
+        cwd: String,
+        from: String,
+        to: String,
+    ) -> BoxFuture<'_, Result<Vec<CheckpointFile>, String>> {
+        Box::pin(async move {
+            self.checkpoints
+                .files(Path::new(&cwd), &from, &to)
                 .await
                 .map_err(error)
         })

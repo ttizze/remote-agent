@@ -47,6 +47,8 @@ pub(crate) struct FakeOps {
     pub(crate) log_settings: AtomicBool,
     pub(crate) titles: Mutex<VecDeque<Result<String, String>>>,
     pub(crate) generations: Mutex<Vec<TextGenerationRequest>>,
+    /// The next checkpoint file summaries.
+    pub(crate) files: Mutex<Result<Vec<agent_domain::CheckpointFile>, String>>,
 }
 
 impl FakeOps {
@@ -69,6 +71,7 @@ impl FakeOps {
             log_settings: AtomicBool::new(false),
             titles: Mutex::new(VecDeque::new()),
             generations: Mutex::new(vec![]),
+            files: Mutex::new(Ok(vec![])),
         })
     }
     pub(crate) fn record(&self, entry: impl Into<String>) {
@@ -174,6 +177,18 @@ impl HostOperations for Ops {
                 return Err("simulated ref lookup timeout".into());
             }
             Ok(self.0.refs.lock().unwrap().contains(&(cwd, reference)))
+        })
+    }
+    fn checkpoint_files(
+        &self,
+        cwd: String,
+        from: String,
+        to: String,
+    ) -> BoxFuture<'_, Result<Vec<agent_domain::CheckpointFile>, String>> {
+        Box::pin(async move {
+            self.0
+                .record(format!("files {cwd} {} {}", ordinal(&from), ordinal(&to)));
+            self.0.files.lock().unwrap().clone()
         })
     }
     fn prepare_restore(

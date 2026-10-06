@@ -369,6 +369,7 @@ pub enum FactBody {
         run_ordinal: u64,
         native_heads: BTreeMap<String, Option<String>>,
         file_ref: String,
+        files: Vec<CheckpointFile>,
     },
     RollbackRequested {
         command: CommandId,
@@ -1295,6 +1296,7 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
             run_ordinal,
             native_heads,
             file_ref,
+            files,
         } => {
             let checkpoint = Checkpoint {
                 status: *status,
@@ -1304,6 +1306,7 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
                 run_ordinal: *run_ordinal,
                 native_heads: native_heads.clone(),
                 file_ref: file_ref.clone(),
+                files: files.clone(),
             };
             if let Some(existing) = state.checkpoints.iter_mut().find(|c| &c.id == id) {
                 *existing = checkpoint;

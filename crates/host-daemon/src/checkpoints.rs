@@ -540,6 +540,71 @@ impl Checkpoints {
         }
         Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     }
+
+    /// The files changed from `from` to `to` (T3 `CheckpointService.capture`).
+    pub(crate) async fn files(
+        &self,
+        cwd: &Path,
+        from: &str,
+        to: &str,
+    ) -> Result<Vec<agent_domain::CheckpointFile>> {
+        let numstat = self
+            .diff(cwd, from, to, false, DiffFormat::Numstat, false)
+            .await?;
+        Ok(turn_diff_files(&numstat)
+            .into_iter()
+            .map(
+                |(path, additions, deletions)| agent_domain::CheckpointFile {
+                    path,
+                    kind: "modified".into(),
+                    additions,
+                    deletions,
+                },
+            )
+            .collect())
+    }
+}
+
+/// T3 `parseTurnDiffFilesFromNumstat`: Git's NUL-delimited numstat as
+/// `(path, additions, deletions)`, destination paths for renames and copies,
+/// zero counts for binary files, sorted like `localeCompare`.
+pub(crate) fn turn_diff_files(numstat: &str) -> Vec<(String, u64, u64)> {
+    let records: Vec<&str> = numstat.split('\0').collect();
+    let mut files = vec![];
+    let mut index = 0;
+    while index < records.len() {
+        let record = records[index];
+        index += 1;
+        let mut fields = record.splitn(3, '\t');
+        let count = |field: Option<&str>| match field {
+            Some("-") => Some(0),
+            Some(digits) if !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) => {
+                Some(digits.parse::<u64>().unwrap_or(u64::MAX))
+            }
+            _ => None,
+        };
+        let (Some(additions), Some(deletions), Some(path)) =
+            (count(fields.next()), count(fields.next()), fields.next())
+        else {
+            continue;
+        };
+        let path = if path.is_empty() {
+            // Renames and copies use two more records: the source and destination.
+            let destination = records.get(index + 1).copied().unwrap_or_default();
+            index += 2;
+            destination
+        } else {
+            path
+        };
+        if !path.is_empty() {
+            files.push((path.to_owned(), additions, deletions));
+        }
+    }
+    let collator =
+        icu_collator::Collator::try_new(&Default::default(), icu_collator::CollatorOptions::new())
+            .expect("compiled root collation");
+    files.sort_by(|left, right| collator.compare(&left.0, &right.0));
+    files
 }
 
 #[cfg(test)]

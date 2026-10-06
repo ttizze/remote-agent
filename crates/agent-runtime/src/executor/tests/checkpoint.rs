@@ -34,6 +34,8 @@ async fn captures_a_finished_turn_after_its_thread_start_baseline() {
             "provider-start thread-capture",
             "lookup /repo 0",
             "capture /repo 1",
+            "lookup /repo 0",
+            "files /repo 0 1",
             "finalized thread-capture /repo",
         ]
     );
@@ -95,7 +97,19 @@ async fn materializes_a_baseline_as_missing_when_its_ref_lookup_fails() {
                 CheckpointStatus::Ready
             }
         );
-        assert_eq!(rig.ops.logged_with("lookup"), ["lookup /repo 0"]);
+        // The baseline, then the previous ref of the capture's file summary.
+        assert_eq!(
+            rig.ops.logged_with("lookup"),
+            ["lookup /repo 0", "lookup /repo 0"]
+        );
+        assert_eq!(
+            rig.ops.logged_with("files"),
+            if lookup_fails {
+                vec![]
+            } else {
+                vec!["files /repo 0 1"]
+            }
+        );
         assert_eq!(rig.run(&id, &run).await.status, RunStatus::Completed);
     }
 }
@@ -140,6 +154,65 @@ async fn a_failed_capture_records_an_error_checkpoint_and_finishes_the_run() {
     assert_eq!(rig.run(&id, &run).await.status, RunStatus::Completed);
 }
 
+// T3 CheckpointService.capture: a turn's checkpoint lists the files changed
+// since the scope's previous checkpoint; an unavailable previous ref, diff or
+// capture leaves the list empty and the run still finishes.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_captured_turn_records_the_files_changed_since_the_previous_checkpoint() {
+    let file = agent_domain::CheckpointFile {
+        path: "a.txt".into(),
+        kind: "modified".into(),
+        additions: 2,
+        deletions: 1,
+    };
+    for case in ["summary", "diff-fails", "previous-missing", "capture-fails"] {
+        let rig = rig();
+        let id = tid("thread-files");
+        rig.scoped(&id, root_workspace("/repo")).await;
+        let run = rig.send(&id, "first", "first").await;
+        rig.drain().await;
+        *rig.ops.files.lock().unwrap() = if case == "diff-fails" {
+            Err("simulated diff failure".into())
+        } else {
+            Ok(vec![file.clone()])
+        };
+        if case == "previous-missing" {
+            rig.ops.refs.lock().unwrap().clear();
+        }
+        rig.ops
+            .fail_capture
+            .store(case == "capture-fails", Ordering::SeqCst);
+        rig.turn(&id, &run, "turn-1", RunStatus::Completed).await;
+        rig.drain().await;
+
+        let state = rig.state(&id).await;
+        let files = |ordinal| {
+            state
+                .checkpoints
+                .iter()
+                .find(|checkpoint| checkpoint.run_ordinal == ordinal)
+                .unwrap()
+                .files
+                .clone()
+        };
+        assert!(files(0).is_empty(), "{case}");
+        assert_eq!(
+            files(1),
+            if case == "summary" {
+                vec![file.clone()]
+            } else {
+                vec![]
+            },
+            "{case}"
+        );
+        assert_eq!(
+            rig.run(&id, &run).await.status,
+            RunStatus::Completed,
+            "{case}"
+        );
+    }
+}
+
 // CheckpointScopeOwnership.test.ts: a later root run resolves the thread baseline.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_later_run_reuses_the_scope_baselines() {
@@ -156,6 +229,8 @@ async fn a_later_run_reuses_the_scope_baselines() {
             "lookup /repo 1",
             "provider-start thread-scope-owner",
             "capture /repo 2",
+            "lookup /repo 1",
+            "files /repo 1 2",
             "finalized thread-scope-owner /repo",
         ]
     );

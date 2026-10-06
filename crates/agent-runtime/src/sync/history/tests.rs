@@ -370,6 +370,7 @@ fn with_control_state(mut state: State) -> State {
             run_ordinal: 1,
             native_heads: Default::default(),
             file_ref: "refs/checkpoint".into(),
+            files: vec![],
         },
     );
     state

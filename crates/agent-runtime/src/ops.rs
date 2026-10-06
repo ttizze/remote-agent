@@ -1,5 +1,5 @@
 //! Host I/O the runtime's effect executors, recovery and launch depend on.
-use agent_domain::{Attachment, RunId, ThreadId};
+use agent_domain::{Attachment, CheckpointFile, RunId, ThreadId};
 use futures_util::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use std::io;
@@ -115,6 +115,14 @@ pub trait HostOperations: Send + Sync {
     ) -> BoxFuture<'_, Result<(), String>>;
     fn has_checkpoint(&self, cwd: String, reference: String)
     -> BoxFuture<'_, Result<bool, String>>;
+    /// Files changed from `from` to `to`, sorted by path (T3 `diffCheckpoints`
+    /// as numstat, read by `parseTurnDiffFilesFromNumstat`).
+    fn checkpoint_files(
+        &self,
+        cwd: String,
+        from: String,
+        to: String,
+    ) -> BoxFuture<'_, Result<Vec<CheckpointFile>, String>>;
     /// Puts back the originals a previous process left aside before restoring.
     fn prepare_restore(
         &self,

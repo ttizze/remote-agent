@@ -5700,6 +5700,7 @@ impl Decision {
                 attempt,
                 checkpoint,
                 file_ref,
+                files,
             } => {
                 let Some(r) = self
                     .state
@@ -5749,6 +5750,7 @@ impl Decision {
                             run_ordinal: baseline.ordinal,
                             native_heads: baseline.native_heads.clone(),
                             file_ref: baseline.file_ref.clone(),
+                            files: vec![],
                         });
                     }
                 }
@@ -5790,6 +5792,7 @@ impl Decision {
                         )
                         .collect(),
                     file_ref: file_ref.clone(),
+                    files: files.clone(),
                 });
                 if let Some(status) = self.state.captures.get(run).copied() {
                     self.fact(FactBody::RunFinished {

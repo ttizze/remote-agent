@@ -138,6 +138,7 @@ mod tests {
             run_ordinal: ordinal,
             native_heads: BTreeMap::new(),
             file_ref: file_ref.into(),
+            files: vec![],
         }
     }
     /// Two completed runs; only the second has a ready checkpoint.
