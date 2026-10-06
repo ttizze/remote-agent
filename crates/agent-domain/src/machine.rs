@@ -6,6 +6,8 @@ use std::collections::{BTreeMap, BTreeSet};
 pub const WORKSPACE_PREPARATION_FAILURE_CODE: &str = "workspace_preparation_failed";
 /// The command row that stands for a deferred run's workspace preparation.
 pub const WORKSPACE_PREPARATION_INPUT: &str = "Preparing workspace";
+/// What a rollback the provider could not carry out records.
+pub const ROLLBACK_FAILED_MESSAGE: &str = "The provider could not roll back this conversation. Try again; if it keeps failing, check the provider and server logs.";
 const INTERRUPT_REQUESTED: &str = "Interrupt requested";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -3301,6 +3303,15 @@ impl Decision {
                         && run.status.terminal()
                         && run.status != RunStatus::RolledBack
                 });
+                // T3 asks the provider to rewind whenever later runs exist,
+                // which fails without a native thread to rewind.
+                if rewinds && !self.state.native_sessions.contains_key(&active) {
+                    self.fact(FactBody::RollbackFailed {
+                        command: id.clone(),
+                        message: ROLLBACK_FAILED_MESSAGE.into(),
+                    });
+                    return Reply::Accepted;
+                }
                 let providers = self
                     .state
                     .native_sessions

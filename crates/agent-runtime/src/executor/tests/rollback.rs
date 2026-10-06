@@ -252,8 +252,11 @@ async fn a_provider_that_cannot_rewind_fails_the_rollback_and_puts_the_files_bac
     assert!(rolled_back(&state).is_empty());
 }
 
+// T3 CheckpointRollbackService rewinds the provider for every later run, even a
+// failed one, and that fails without a native thread (CodexAdapterV2
+// getNativeThreadId).
 #[tokio::test(flavor = "multi_thread")]
-async fn a_rollback_without_a_native_session_resets_nothing_and_still_finishes() {
+async fn a_rollback_without_a_native_session_to_rewind_fails() {
     let rig = rig();
     let id = tid("rewind-no-provider");
     let scope = rig.scoped(&id, worktree("/wt")).await;
@@ -277,7 +280,11 @@ async fn a_rollback_without_a_native_session_resets_nothing_and_still_finishes()
 
     let state = rig.state(&id).await;
     assert!(state.rollback.is_none());
-    assert_eq!(state.rollback_failure, None);
+    assert_eq!(
+        state.rollback_failure.as_deref(),
+        Some(ROLLBACK_FAILED_MESSAGE)
+    );
+    assert!(rolled_back(&state).is_empty());
     assert!(rollback_calls(&rig.ops).is_empty());
     assert_eq!(rig.host.spawned(), 0);
 }

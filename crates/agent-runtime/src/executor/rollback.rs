@@ -7,7 +7,7 @@ use agent_domain::{
 };
 use futures_util::future::BoxFuture;
 
-pub const ROLLBACK_FAILED_MESSAGE: &str = "The provider could not roll back this conversation. Try again; if it keeps failing, check the provider and server logs.";
+pub use agent_domain::ROLLBACK_FAILED_MESSAGE;
 
 /// One rollback request (T3 `CheckpointRollbackService`): the restored files are
 /// staged with the originals kept aside and every provider rewinds to its absolute
