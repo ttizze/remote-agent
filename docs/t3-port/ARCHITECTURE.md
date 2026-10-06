@@ -214,3 +214,6 @@ T3 と同じ契約にする。snapshot、`afterSequence` からの再送、synch
 - 2026-10-07: 稼働中の Codex run への steer・promote-to-steer が同じ instance で model か option だけを変える場合も、T3 dispatchSteerIntoRun と同じく run を restart する。同じ native thread と session で新しい attempt を始め、handoff と detach は出さず、steer の発言だけを渡す。restart できない Claude は稼働中の turn に steer し、run の選択は変えず、thread の選択を次の turn に保存する。
 - 2026-10-07: rollback 中の rollback は T3 と同じく受け付け、要求の順に1つずつ実行する（`State.rollbacks` の先頭が実行中）。各 rollback は実行を始めるときに checkpoint の ready・active な provider・native thread を現在の状態で確かめ直す。失敗を記録するのは最新の要求だけにする。rollback 中に送った直接開始の発言は queued ではなく starting の run として待ち、rollback がすべて終わった（失敗を含む）ときに開始する。2026-10-06 の revert review の項の「rollback の重複を拒否」と「キューに入れる」はこの項で置き換える。
 - 2026-10-07: 質問への回答の添付の path も Host が dispatch 前に埋める値として command の fingerprint に含めない。path を消された回答の再送は最初の結果を返す。
+- 2026-10-07（利用者の承認）: 段階 4 の範囲は会話に関する T3 の機能すべて（一覧・会話画面・入力欄・キュー・承認と質問・計画・委任・fork・rollback・diff・thread の terminal・setup・設定・アーカイブ・検索・既存履歴の取り込み）。Git/PR の操作、予定実行、usage、端末プレビューは段階 6 で入れる。
+- 2026-10-07（利用者の承認）: 決定事項 3 を改める。クライアントは T3 と同じ楽観的更新を行う（settle・snooze・pin などの一覧の操作を即座に反映し、未確定の送信を会話に表示する）。Host の確定で置き換え、拒否されたら元に戻す。
+- 2026-10-07（利用者の承認）: クライアントは T3 と同じく一覧と会話の snapshot を cursor 付きで端末に保存し、起動直後にそれを表示してから `afterSequence` で再開する。
