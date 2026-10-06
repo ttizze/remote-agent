@@ -476,7 +476,6 @@ impl Decision {
                 selection: run.selection.clone(),
             });
         }
-        let thread = self.state.thread.as_ref().unwrap().clone();
         let message = self
             .state
             .messages
@@ -504,7 +503,15 @@ impl Decision {
             );
             return;
         }
-        let mut native_thread = self
+        let native_thread = self.start_native_thread(&run);
+        self.prepare_provider_handoff(&run, native_thread.as_deref());
+        self.send_start(&run, attempt, message, native_thread, direct);
+    }
+    /// The native session a start continues, unless history may already have
+    /// reached it through an unconfirmed delivery.
+    fn start_native_thread(&mut self, run: &Run) -> Option<String> {
+        let thread = self.state.thread.as_ref().unwrap().id.clone();
+        let native_thread = self
             .state
             .native_sessions
             .get(&run.selection.instance)
@@ -512,7 +519,7 @@ impl Decision {
         if native_thread.is_some()
             && self.state.transfers.iter().any(|transfer| {
                 !transfer.superseded
-                    && transfer.target == thread.id
+                    && transfer.target == thread
                     && transfer.instance.as_deref() == Some(run.selection.instance.as_str())
                     && transfer.delivery.as_ref().is_some_and(|delivery| {
                         delivery.native_thread == native_thread
@@ -524,11 +531,23 @@ impl Decision {
             self.fact(FactBody::NativeSessionCleared {
                 instance: run.selection.instance.clone(),
             });
-            native_thread = None;
+            return None;
         }
-        self.prepare_provider_handoff(&run, native_thread.as_deref());
+        native_thread
+    }
+    /// Sends `message` as the attempt's turn with the transfers it consumes.
+    fn send_start(
+        &mut self,
+        run: &Run,
+        attempt: RunAttemptId,
+        message: Message,
+        native_thread: Option<String>,
+        direct: bool,
+    ) {
+        let id = &run.id;
+        let thread = self.state.thread.as_ref().unwrap().clone();
         let restart_work = pending_restart_work(
-            &run,
+            run,
             &self.state.runs,
             &self.state.attempts,
             &self.state.messages,
@@ -549,7 +568,7 @@ impl Decision {
             .filter(|transfer| {
                 !transfer.superseded
                     && transfer.target == thread.id
-                    && consumable(&self.state, transfer, &run, direct)
+                    && consumable(&self.state, transfer, run, direct)
                     && transfer.delivery.as_ref().is_none_or(|delivery| {
                         delivery.native_thread != native_thread
                             || delivery.status == ContextDeliveryStatus::Pending
@@ -605,7 +624,7 @@ impl Decision {
                 .flat_map(|delivery| delivery.item_ids.clone())
                 .collect();
             let estimate = native_thread.as_deref().map_or(0, |native| {
-                self.native_history_estimate(&run, native, &delivered)
+                self.native_history_estimate(run, native, &delivered)
             });
             let budget = handoff_budget(
                 self.state
@@ -1056,6 +1075,107 @@ impl Decision {
                 text: result.into(),
             });
         }
+    }
+    /// T3 dispatchSteerIntoRun's provider handoff for a restart onto another
+    /// instance: the thread's history through the running run, taken before the
+    /// steer is recorded.
+    fn restart_handoff(&self, target: &Run) -> HistoricalContext {
+        let mut items = self
+            .state
+            .items
+            .iter()
+            .filter(|item| {
+                item.run.as_ref().is_none_or(|id| {
+                    self.state
+                        .runs
+                        .iter()
+                        .any(|run| &run.id == id && run.status != RunStatus::RolledBack)
+                })
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        items.sort_by(|a, b| (a.ordinal, &a.id).cmp(&(b.ordinal, &b.id)));
+        prepare_history_covering(&self.state, &items, 1, target.ordinal)
+    }
+    /// Supersedes the running attempt and starts the run again with `message`
+    /// (T3 interrupt_restart). With a handoff the run moves to `selection`'s
+    /// instance, and the session it leaves is detached.
+    fn restart_run(
+        &mut self,
+        target: &Run,
+        attempt: &RunAttemptId,
+        selection: &ModelSelection,
+        message: &MessageId,
+        handoff: Option<HistoricalContext>,
+    ) {
+        let run = &target.id;
+        // Native children keep running until their own terminal events.
+        self.close_attempt_items(attempt, ItemStatus::Interrupted);
+        self.fact(FactBody::AttemptFinished {
+            id: attempt.clone(),
+            status: AttemptStatus::Superseded,
+        });
+        self.interrupt_provider(attempt);
+        if handoff.is_some() {
+            self.effect(
+                None,
+                EffectBody::DetachSessions {
+                    reason: "Provider thread handoff replaced this session binding.".into(),
+                    revoke_credentials: false,
+                    instance: Some(target.selection.instance.clone()),
+                },
+            );
+        }
+        self.fact(FactBody::RunRestarting {
+            id: run.clone(),
+            selection: selection.clone(),
+        });
+        let ordinal = self.state.attempts.iter().filter(|a| &a.run == run).count() as u64 + 1;
+        let next = RunAttemptId::new(self.key("attempt", &format!("{}:{ordinal}", run))).unwrap();
+        self.fact(FactBody::AttemptStarted {
+            id: next.clone(),
+            run: run.clone(),
+            ordinal,
+        });
+        let message = self.state.message(message).unwrap().clone();
+        let Some(history) = handoff else {
+            let t = self.state.thread.as_ref().unwrap();
+            let command = ProviderCommand::Start {
+                resume_interrupted_turn: false,
+                selection: selection.clone(),
+                runtime_mode: t.runtime_mode,
+                interaction_mode: t.interaction_mode,
+                text: message.text,
+                note: None,
+                attachments: message.attachments,
+                native_thread: self.state.native_sessions.get(&selection.instance).cloned(),
+                resume_at: None,
+                context: None,
+            };
+            self.effect(Some(next), EffectBody::Provider(command));
+            return;
+        };
+        let thread = self.state.thread.as_ref().unwrap().id.clone();
+        self.fact(FactBody::TransferOpened {
+            native_source: None,
+            target_run: None,
+            id: ContextTransferId::new(self.key("restart-handoff", run.as_str())).unwrap(),
+            kind: TransferKind::ProviderHandoff,
+            source: thread.clone(),
+            target: thread,
+            boundary: target.ordinal,
+            instance: Some(selection.instance.clone()),
+            history,
+        });
+        let restarted = self
+            .state
+            .runs
+            .iter()
+            .find(|r| &r.id == run)
+            .unwrap()
+            .clone();
+        let native_thread = self.start_native_thread(&restarted);
+        self.send_start(&restarted, next, message, native_thread, false);
     }
     fn interrupt_provider(&mut self, attempt: &RunAttemptId) {
         let owner = self.state.attempts.iter().find(|a| &a.id == attempt);
@@ -1589,9 +1709,6 @@ impl Decision {
             let Some(attempt) = target.attempt.clone() else {
                 return reject("no-running-provider-turn");
             };
-            if selection.instance != target.selection.instance {
-                return reject("steering-provider-mismatch");
-            }
             if maintenance(&message.text, &message.attachments).is_some() {
                 return reject("maintenance-must-run-separately");
             }
@@ -1602,13 +1719,19 @@ impl Decision {
             {
                 return reject("maintenance-in-progress");
             }
-            let restart = match mode {
-                DispatchMode::RestartActive { .. } => true,
-                _ => !support.steer,
-            };
+            // The running session decides how it can be steered (T3 decideSteeringExecution);
+            // another instance can only take over by restarting the run.
+            let support = TurnSupport::for_driver(target.selection.driver);
+            let moves = selection.instance != target.selection.instance;
+            let restart = moves
+                || match mode {
+                    DispatchMode::RestartActive { .. } => true,
+                    _ => !support.steer,
+                };
             if restart && !(support.interrupt && support.restart) {
                 return reject("restart-unsupported");
             }
+            let handoff = moves.then(|| self.restart_handoff(&target));
             if selection != thread_selection {
                 self.fact(FactBody::ModelSelected {
                     selection: selection.clone(),
@@ -1626,40 +1749,7 @@ impl Decision {
             });
             self.user_item(&message.id, run);
             if restart {
-                // Native children keep running until their own terminal events.
-                self.close_attempt_items(&attempt, ItemStatus::Interrupted);
-                self.fact(FactBody::AttemptFinished {
-                    id: attempt.clone(),
-                    status: AttemptStatus::Superseded,
-                });
-                self.interrupt_provider(&attempt);
-                self.fact(FactBody::RunRestarting {
-                    id: run.clone(),
-                    selection: selection.clone(),
-                });
-                let ordinal =
-                    self.state.attempts.iter().filter(|a| a.run == *run).count() as u64 + 1;
-                let next =
-                    RunAttemptId::new(self.key("attempt", &format!("{}:{ordinal}", run))).unwrap();
-                self.fact(FactBody::AttemptStarted {
-                    id: next.clone(),
-                    run: run.clone(),
-                    ordinal,
-                });
-                let t = self.state.thread.as_ref().unwrap();
-                let command = ProviderCommand::Start {
-                    resume_interrupted_turn: false,
-                    selection: selection.clone(),
-                    runtime_mode: t.runtime_mode,
-                    interaction_mode: t.interaction_mode,
-                    text: message.text.clone(),
-                    note: None,
-                    attachments: message.attachments.clone(),
-                    native_thread: self.state.native_sessions.get(&selection.instance).cloned(),
-                    resume_at: None,
-                    context: None,
-                };
-                self.effect(Some(next), EffectBody::Provider(command));
+                self.restart_run(&target, &attempt, &selection, &message.id, handoff);
             } else {
                 self.effect(
                     Some(attempt),
@@ -3046,11 +3136,20 @@ impl Decision {
                 if target.status != RunStatus::Running {
                     return reject("run-not-active");
                 }
-                if self.state.thread.as_ref().unwrap().selection.instance
-                    != target.selection.instance
-                {
-                    return reject("steering-provider-mismatch");
-                }
+                // T3 promotes on the thread's selection, so another instance restarts the run.
+                let selection = self.state.thread.as_ref().unwrap().selection.clone();
+                let handoff = if selection.instance != target.selection.instance {
+                    let support = TurnSupport::for_driver(target.selection.driver);
+                    if !(support.interrupt && support.restart) {
+                        return reject("restart-unsupported");
+                    }
+                    Some(self.restart_handoff(&target))
+                } else {
+                    None
+                };
+                let Some(attempt) = target.attempt.clone() else {
+                    return reject("run-not-active");
+                };
                 self.fact(FactBody::RunFinished {
                     id: queued.clone(),
                     status: RunStatus::Cancelled,
@@ -3061,8 +3160,12 @@ impl Decision {
                     intent: InputIntent::PromotedQueuedToSteer,
                 });
                 self.user_item(&m.id, active);
+                if handoff.is_some() {
+                    self.restart_run(&target, &attempt, &selection, &m.id, handoff);
+                    return Reply::Run(active.clone());
+                }
                 self.effect(
-                    target.attempt,
+                    Some(attempt),
                     EffectBody::Provider(ProviderCommand::Steer {
                         message: m.id.clone(),
                         text: m.text,
