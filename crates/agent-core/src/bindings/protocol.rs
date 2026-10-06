@@ -1,5 +1,6 @@
 //! ABI converters for retained peripheral wire records.
 use crate::{models::*, provider::ProviderKind};
+use agent_domain::{Driver, InteractionMode, RuntimeMode};
 use agent_protocol::{browser::*, diagnostics::*, operations::*};
 #[uniffi::remote(Enum)]
 enum WorktreeStatus {
@@ -127,7 +128,7 @@ struct Worktree {
 }
 #[uniffi::remote(Record)]
 struct WorktreeThread {
-    pub id: orchestration::ThreadId,
+    pub id: agent_protocol::orchestration::ThreadId,
     pub name: String,
     pub active: bool,
 }
@@ -138,7 +139,7 @@ enum ProviderKind {
 }
 #[uniffi::remote(Record)]
 struct BrowserRequest {
-    pub thread_id: orchestration::ThreadId,
+    pub thread_id: agent_protocol::orchestration::ThreadId,
     pub tab_id: String,
     pub image_id: String,
     pub action: BrowserAction,
@@ -322,4 +323,21 @@ struct AccountLogin {
 struct TerminalSize {
     pub cols: u16,
     pub rows: u16,
+}
+#[uniffi::remote(Enum)]
+enum Driver {
+    Codex,
+    Claude,
+}
+#[uniffi::remote(Enum)]
+enum RuntimeMode {
+    ApprovalRequired,
+    AutoAcceptEdits,
+    Auto,
+    FullAccess,
+}
+#[uniffi::remote(Enum)]
+enum InteractionMode {
+    Default,
+    Plan,
 }

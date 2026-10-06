@@ -1,54 +1,145 @@
-//! Device state. The Host owns conversation decisions and the domain log.
-use orchestration::*;
+//! Device state published to native views. The Host owns conversation
+//! decisions; this holds what the device folded, sent and is editing.
+use crate::commands::build::FollowUpBehavior;
+use crate::commands::outbox::Outbox;
+use crate::sync::{ShellCache, ShellStatus, ThreadSync};
+use agent_domain::{
+    Attachment, AttachmentKind, CheckpointId, Driver, InteractionMode, ModelSelection, RunId,
+    RuntimeMode, State, ThreadId, ThreadShell, WorktreeSetupSnapshot,
+};
+use agent_protocol::conversation::{SearchMatch, ShellLocation, ShellSnapshot};
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    borrow::Cow,
+    collections::BTreeMap,
+    ops::{Deref, DerefMut},
+    sync::Arc,
+};
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+/// The project a new thread uses when none is chosen.
+pub const CHATS_PROJECT: &str = "chats";
+
+/// Copy-on-write storage shared between published snapshots.
+#[derive(Debug, PartialEq)]
+pub struct Shared<T>(Arc<T>);
+impl<T> Clone for Shared<T> {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+impl<T: Default> Default for Shared<T> {
+    fn default() -> Self {
+        Self(Arc::default())
+    }
+}
+impl<T> From<T> for Shared<T> {
+    fn from(value: T) -> Self {
+        Self(Arc::new(value))
+    }
+}
+impl<T> Deref for Shared<T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        &self.0
+    }
+}
+impl<T: Clone> DerefMut for Shared<T> {
+    fn deref_mut(&mut self) -> &mut T {
+        Arc::make_mut(&mut self.0)
+    }
+}
+impl<T> Shared<T> {
+    pub fn shares_storage(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct ModelOption {
+    pub key: String,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct Draft {
     pub attachments: Vec<DraftAttachment>,
     pub text: String,
     pub instance_id: String,
+    pub driver: Driver,
     pub model: String,
-    pub effort: Option<String>,
-    pub service_tier: Option<String>,
-    pub runtime_mode: String,
-    pub interaction_mode: String,
+    pub options: Vec<ModelOption>,
+    pub runtime_mode: RuntimeMode,
+    pub interaction_mode: InteractionMode,
+}
+impl Default for Draft {
+    fn default() -> Self {
+        Self {
+            attachments: vec![],
+            text: String::new(),
+            instance_id: String::new(),
+            driver: Driver::Codex,
+            model: String::new(),
+            options: vec![],
+            runtime_mode: RuntimeMode::FullAccess,
+            interaction_mode: InteractionMode::Default,
+        }
+    }
+}
+fn attachment_error(code: &str) -> String {
+    match code {
+        "too-many-attachments" => "You can attach up to 100 files per message.",
+        "duplicate-attachment-id" => "Duplicate attachment ids are not allowed.",
+        "image-too-large" => "Images must be 10 MB or smaller.",
+        _ => "This attachment cannot be sent.",
+    }
+    .into()
 }
 impl Draft {
+    pub fn is_empty(&self) -> bool {
+        self.text.trim().is_empty() && self.attachments.is_empty()
+    }
     pub fn attachment_refs(&self) -> Result<Vec<Attachment>, String> {
-        let result = self
+        let attachments = self
             .attachments
             .iter()
             .map(DraftAttachment::reference)
             .collect::<Result<Vec<_>, _>>()?;
-        orchestration::attachments::validate(&result)?;
-        Ok(result)
+        agent_domain::validate_attachments(&attachments).map_err(attachment_error)?;
+        Ok(attachments)
     }
     pub fn selection(&self) -> Result<ModelSelection, String> {
-        if self.model.trim().is_empty() {
+        if self.model.trim().is_empty() || self.instance_id.trim().is_empty() {
             return Err("Select a model".into());
         }
-        let mut options = BTreeMap::new();
-        if let Some(effort) = &self.effort {
-            options.insert(
-                "reasoningEffort".into(),
-                Json(serde_json::Value::String(effort.clone())),
-            );
-        }
-        if let Some(tier) = &self.service_tier {
-            options.insert(
-                "serviceTier".into(),
-                Json(serde_json::Value::String(tier.clone())),
-            );
-        }
         Ok(ModelSelection {
-            instance_id: ProviderInstanceId::new(&self.instance_id).map_err(|e| e.to_string())?,
+            instance: self.instance_id.clone(),
+            driver: self.driver,
             model: self.model.clone(),
-            options,
+            options: self
+                .options
+                .iter()
+                .map(|option| (option.key.clone(), option.value.clone()))
+                .collect(),
         })
     }
+    pub fn with_selection(mut self, selection: &ModelSelection) -> Self {
+        self.instance_id = selection.instance.clone();
+        self.driver = selection.driver;
+        self.model = selection.model.clone();
+        self.options = selection
+            .options
+            .iter()
+            .map(|(key, value)| ModelOption {
+                key: key.clone(),
+                value: value.clone(),
+            })
+            .collect();
+        self
+    }
 }
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct DraftAttachment {
@@ -62,18 +153,26 @@ pub struct DraftAttachment {
     pub status: String,
     pub error: Option<String>,
 }
+pub fn native_image(mime: &str) -> bool {
+    matches!(
+        mime,
+        "image/png" | "image/jpeg" | "image/gif" | "image/webp"
+    )
+}
 impl DraftAttachment {
     pub fn metadata(&self) -> Attachment {
         Attachment {
-            id: self.remote_id.clone().unwrap_or_else(|| self.id.clone()),
             kind: if self.kind == "image" {
                 AttachmentKind::Image
             } else {
                 AttachmentKind::File
             },
+            source: None,
+            id: self.remote_id.clone().unwrap_or_else(|| self.id.clone()),
             name: self.name.clone(),
             mime_type: self.mime_type.clone(),
-            size_bytes: self.size_bytes,
+            path: String::new(),
+            size: self.size_bytes,
         }
     }
     pub fn reference(&self) -> Result<Attachment, String> {
@@ -85,19 +184,18 @@ impl DraftAttachment {
             .ok_or("Attachment has not uploaded")?;
         Ok(self.metadata())
     }
-    pub fn from_remote(a: &Attachment) -> Self {
+    pub fn from_remote(attachment: &Attachment) -> Self {
         Self {
-            id: a.id.clone(),
-            remote_id: Some(a.id.clone()),
-            name: a.name.clone(),
-            mime_type: a.mime_type.clone(),
-            kind: if a.kind == AttachmentKind::Image {
-                "image"
-            } else {
-                "file"
+            id: attachment.id.clone(),
+            remote_id: Some(attachment.id.clone()),
+            name: attachment.name.clone(),
+            mime_type: attachment.mime_type.clone(),
+            kind: match attachment.kind {
+                AttachmentKind::Image => "image",
+                AttachmentKind::File => "file",
             }
             .into(),
-            size_bytes: a.size_bytes,
+            size_bytes: attachment.size,
             local_path: String::new(),
             status: "ready".into(),
             error: None,
@@ -105,16 +203,35 @@ impl DraftAttachment {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct ThreadCache {
-    pub projection: Arc<ThreadProjection>,
-    pub sequence: u64,
-    pub snapshot_sequence: u64,
-    pub history_cursor: Option<HistoryCursor>,
-    pub has_more_history: bool,
-    pub synchronized: bool,
-    pub latest_local_turn_ordinal: Option<u64>,
-    pub accessed_at: u64,
+/// Keeps text appended to the draft (by dictation) after the base the native
+/// edit started from.
+pub fn merge_draft_text(base: String, edited: String, current: String) -> String {
+    if current != base && current.starts_with(&base) {
+        format!("{}{}", edited, &current[base.len()..])
+    } else {
+        edited
+    }
+}
+
+/// Restored content joins the draft after a blank line, once.
+pub fn merge_restored_text(existing: &str, incoming: &str) -> String {
+    if incoming.is_empty() {
+        return existing.into();
+    }
+    if existing.is_empty() {
+        return incoming.into();
+    }
+    if existing == incoming || existing.ends_with(&format!("\n\n{incoming}")) {
+        return existing.into();
+    }
+    format!("{existing}\n\n{incoming}")
+}
+
+/// A rollback whose rolled-back message returns to the composer once it succeeds.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PendingRollback {
+    pub thread: ThreadId,
+    pub checkpoint: CheckpointId,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -125,23 +242,23 @@ pub struct Snapshot {
     pub connected: bool,
     pub host_name: Option<String>,
     pub error: Option<String>,
-    pub shell: Option<Arc<ShellSnapshot>>,
-    pub shell_synchronized: bool,
-    pub threads: BTreeMap<ThreadId, ThreadCache>,
-    pub selected_thread: Option<ThreadId>,
-    pub selected_project: Option<String>,
-    pub search: String,
-    pub search_matches: Vec<SearchMatch>,
-    pub observed_returns: BTreeMap<ThreadId, Timestamp>,
+    pub shell: Arc<ShellCache>,
+    /// Open only while the archive is shown.
+    pub archived: Option<Arc<ShellCache>>,
+    pub threads: BTreeMap<ThreadId, Arc<ThreadSync>>,
+    pub setups: BTreeMap<ThreadId, WorktreeSetupSnapshot>,
+    pub outbox: Arc<Outbox>,
+    pub rollbacks: BTreeMap<agent_domain::CommandId, PendingRollback>,
     pub drafts: Shared<BTreeMap<String, Draft>>,
     pub default_draft: Draft,
+    pub follow_up: FollowUpBehavior,
+    pub selected_thread: Option<ThreadId>,
+    pub selected_project: Option<String>,
     pub editing_run: Option<RunId>,
+    pub search: String,
+    pub search_matches: Vec<SearchMatch>,
     pub models: Vec<crate::models::Model>,
-    pub projects: Vec<crate::models::Project>,
     pub model_errors: BTreeMap<String, String>,
-    pub uncertain_commands: std::collections::BTreeSet<CommandId>,
-    pub pending_commands: Shared<Vec<Command>>,
-    pub pending_launches: Shared<Vec<agent_protocol::orchestration::LaunchThread>>,
     pub workspace: Workspace,
     pub terminals: BTreeMap<String, Terminal>,
     pub accounts: Option<agent_protocol::operations::Accounts>,
@@ -150,12 +267,46 @@ pub struct Snapshot {
     pub remote_hosts: Vec<crate::models::RemoteHost>,
     pub invitation: Option<crate::models::Invitation>,
 }
+
 impl Snapshot {
     pub fn accepts_after(&self, previous: &Snapshot) -> bool {
         self.store_id != previous.store_id || self.revision >= previous.revision
     }
     pub fn terminal_available(&self) -> bool {
         self.connected && !self.cwd().is_empty()
+    }
+    /// The active shell with pending lifecycle previews applied.
+    pub fn shell_view(&self) -> Option<Cow<'_, ShellSnapshot>> {
+        self.shell
+            .snapshot
+            .as_ref()
+            .map(|shell| self.outbox.overlay_shell(shell))
+    }
+    pub fn shell_status(&self) -> ShellStatus {
+        self.shell.status
+    }
+    pub fn thread_row(&self, id: &ThreadId) -> Option<&ThreadShell> {
+        [Some(&self.shell), self.archived.as_ref()]
+            .into_iter()
+            .flatten()
+            .filter_map(|cache| cache.snapshot.as_ref())
+            .flat_map(|shell| &shell.threads)
+            .find(|row| &row.id == id)
+    }
+    pub fn thread(&self, id: &ThreadId) -> Option<&ThreadSync> {
+        self.threads.get(id).map(Arc::as_ref)
+    }
+    pub fn thread_state(&self, id: &ThreadId) -> Option<&State> {
+        self.thread(id)?.state.as_deref()
+    }
+    pub fn selected_state(&self) -> Option<&State> {
+        self.thread_state(self.selected_thread.as_ref()?)
+    }
+    pub fn shell_projects(&self) -> &[crate::models::Project] {
+        self.shell
+            .snapshot
+            .as_ref()
+            .map_or(&[], |shell| shell.projects.as_slice())
     }
     pub fn draft_key(&self) -> String {
         if let (Some(thread), Some(run)) = (&self.selected_thread, &self.editing_run) {
@@ -164,30 +315,13 @@ impl Snapshot {
         self.selected_thread
             .as_ref()
             .map(ToString::to_string)
-            .unwrap_or_else(|| {
-                format!(
-                    "new:{}",
-                    self.selected_project.as_deref().unwrap_or("bex:chats")
-                )
-            })
+            .unwrap_or_else(|| self.new_thread_draft_key())
     }
-    pub fn draft_pending(&self) -> bool {
-        let draft = self.current_draft();
-        self.pending_commands.iter().any(|command| self.selected_thread.as_ref() == Some(&command.thread_id) && match &command.body {
-            CommandBody::MessageDispatch(message) => self.editing_run.is_none() && (message.text == draft.text && draft.attachment_refs().is_ok_and(|a|a==message.attachments) || message.source_plan_ref.as_ref().is_some_and(|r| self.selected_thread.as_ref() == Some(&r.thread_id))),
-            CommandBody::QueuedRunEdit { run_id, text, .. } => self.editing_run.as_ref() == Some(run_id) && *text == draft.text,
-            _ => false,
-        }) || self.pending_launches.iter().any(|launch| launch.input.source_plan_ref.as_ref().is_some_and(|r| self.selected_thread.as_ref() == Some(&r.thread_id))
-            || self.selected_thread.is_none() && matches!(&launch.create.body, CommandBody::ThreadCreate { project_id, .. } if project_id.as_str() == self.selected_project.as_deref().unwrap_or("bex:chats")))
-    }
-    pub fn context_pending(&self, thread_id: &ThreadId) -> bool {
-        self.pending_commands.iter().any(|command| {
-            command.thread_id == *thread_id
-                && matches!(
-                    command.body,
-                    CommandBody::ThreadFork { .. } | CommandBody::ThreadMergeBack { .. }
-                )
-        })
+    pub fn new_thread_draft_key(&self) -> String {
+        format!(
+            "new:{}",
+            self.selected_project.as_deref().unwrap_or(CHATS_PROJECT)
+        )
     }
     pub fn current_draft(&self) -> Draft {
         self.drafts
@@ -200,94 +334,96 @@ impl Snapshot {
                 )
             })
     }
+    /// A thread's draft, or one with the thread's model and modes.
     pub fn draft_for_thread(&self, id: &ThreadId) -> Draft {
-        self.drafts.get(id.as_str()).cloned().unwrap_or_else(|| {
-            if let Some(thread) = self.shell.as_ref().and_then(|shell| {
-                shell
-                    .threads
-                    .iter()
-                    .chain(&shell.archived_threads)
-                    .find(|s| &s.thread.id == id)
-            }) {
-                Draft {
-                    attachments: vec![],
-                    text: String::new(),
-                    instance_id: thread.thread.provider_instance_id.to_string(),
-                    model: thread.thread.model_selection.model.clone(),
-                    effort: thread
-                        .thread
-                        .model_selection
-                        .options
-                        .get("reasoningEffort")
-                        .and_then(|j| j.0.as_str())
-                        .map(str::to_owned),
-                    service_tier: thread
-                        .thread
-                        .model_selection
-                        .options
-                        .get("serviceTier")
-                        .and_then(|j| j.0.as_str())
-                        .map(str::to_owned),
-                    runtime_mode: thread.thread.runtime_mode.as_str().into(),
-                    interaction_mode: thread.thread.interaction_mode.as_str().into(),
-                }
-            } else {
-                self.default_draft.clone()
-            }
+        if let Some(draft) = self.drafts.get(id.as_str()) {
+            return draft.clone();
+        }
+        let thread = self
+            .thread_state(id)
+            .and_then(|state| state.thread.as_ref())
+            .map(|t| (&t.selection, t.runtime_mode, t.interaction_mode))
+            .or_else(|| {
+                self.thread_row(id)
+                    .map(|row| (&row.selection, row.runtime_mode, row.interaction_mode))
+            });
+        match thread {
+            Some((selection, runtime_mode, interaction_mode)) => Draft {
+                runtime_mode,
+                interaction_mode,
+                ..Draft::default().with_selection(selection)
+            },
+            None => self.default_draft.clone(),
+        }
+    }
+    /// A fork or merge back from this thread is waiting for the Host.
+    pub fn context_pending(&self, thread: &ThreadId) -> bool {
+        self.outbox.entries.iter().any(|entry| {
+            &entry.thread == thread
+                && matches!(
+                    &entry.request,
+                    crate::commands::outbox::Request::Dispatch(dispatch)
+                        if matches!(dispatch.command, agent_domain::Command::Fork { .. } | agent_domain::Command::MergeBack { .. })
+                )
         })
     }
-    pub fn projection(&self) -> Option<&ThreadProjection> {
-        self.selected_thread
-            .as_ref()
-            .and_then(|id| self.threads.get(id))
-            .map(|cache| cache.projection.as_ref())
-    }
     pub fn cwd(&self) -> String {
-        let thread = self.projection().map(|p| &p.thread).or_else(|| {
-            self.selected_thread
-                .as_ref()
-                .and_then(|id| {
-                    self.shell
-                        .as_ref()?
-                        .threads
-                        .iter()
-                        .chain(&self.shell.as_ref()?.archived_threads)
-                        .find(|s| &s.thread.id == id)
+        let workspace = self.selected_thread.as_ref().and_then(|id| {
+            self.thread_state(id)
+                .and_then(|state| state.thread.as_ref())
+                .map(|thread| (thread.workspace.clone(), thread.project.clone()))
+                .or_else(|| {
+                    self.thread_row(id)
+                        .map(|row| (row.workspace.clone(), row.project.clone()))
                 })
-                .map(|s| &s.thread)
         });
-        thread
-            .and_then(|t| t.worktree_path.clone())
-            .or_else(|| {
-                let project = thread
-                    .map(|t| t.project_id.as_str())
-                    .or(self.selected_project.as_deref())
-                    .unwrap_or("bex:chats");
-                self.projects
-                    .iter()
-                    .find(|p| p.id == project)?
-                    .roots
-                    .first()
-                    .map(|r| r.path.clone())
-            })
+        if let Some((Some(workspace), _)) = &workspace {
+            return workspace
+                .worktree_path
+                .clone()
+                .unwrap_or_else(|| workspace.cwd.clone());
+        }
+        let project = workspace
+            .map(|(_, project)| project)
+            .or_else(|| self.selected_project.clone())
+            .unwrap_or_else(|| CHATS_PROJECT.into());
+        self.shell_projects()
+            .iter()
+            .find(|p| p.id == project)
+            .and_then(|p| p.roots.first())
+            .map(|root| root.path.clone())
             .unwrap_or_default()
     }
-}
-
-#[cfg_attr(feature = "bindings", uniffi::export)]
-impl Snapshot {
-    pub fn turn_diff_options(&self) -> Vec<crate::presentation::diff::TurnDiffOption> {
-        let Some(projection) = self.projection() else {
-            return vec![];
-        };
-        let Some(scope) = projection
-            .checkpoint_scopes
-            .iter()
-            .find(|scope| scope.kind == ScopeKind::RootRun)
-        else {
-            return vec![];
-        };
-        crate::presentation::diff::turn_diff_options(&projection.checkpoints, &scope.id)
+    pub fn shell_location(&self, location: ShellLocation) -> Option<&ShellCache> {
+        match location {
+            ShellLocation::Active => Some(&self.shell),
+            ShellLocation::Archived => self.archived.as_deref(),
+        }
+    }
+    pub fn terminal_view(&self, handle: &str, after: u64) -> TerminalView {
+        let terminal = self.terminals.get(handle);
+        TerminalView {
+            status: terminal.map(|t| match &t.phase {
+                TerminalPhase::Starting => "Starting".into(),
+                TerminalPhase::Running => "Running".into(),
+                TerminalPhase::Suspended => "Waiting for reconnect".into(),
+                TerminalPhase::Detached => "Detached".into(),
+                TerminalPhase::Exited(code) => format!("Exited · {code}"),
+                TerminalPhase::Failed(message) => message.clone(),
+            }),
+            loading: terminal.is_some_and(|t| t.phase == TerminalPhase::Starting),
+            accepts_input: self.connected
+                && terminal.is_some_and(|t| t.phase == TerminalPhase::Running),
+            output: terminal
+                .map(|t| {
+                    t.output
+                        .iter()
+                        .filter(|o| o.sequence > after)
+                        .map(|output| output.as_ref().clone())
+                        .collect()
+                })
+                .unwrap_or_default(),
+        }
     }
 }
 
@@ -300,7 +436,7 @@ pub struct Workspace {
     pub file_drafts: BTreeMap<String, Arc<FileDraft>>,
     pub review_generation: u64,
     pub review: Option<Arc<crate::models::WorkspaceReview>>,
-    pub diff_request: Option<agent_protocol::orchestration::GetTurnDiff>,
+    pub diff_request: Option<agent_protocol::conversation::GetTurnDiff>,
     pub worktree_settings: Option<crate::models::WorktreeSettings>,
     pub worktrees: Vec<crate::models::Worktree>,
 }
@@ -344,13 +480,6 @@ pub struct TerminalView {
     pub output: Vec<TerminalOutput>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
-pub enum SendBehavior {
-    Default,
-    Steer,
-    Restart,
-}
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct QuestionAnswer {
@@ -368,6 +497,7 @@ pub enum ThreadAction {
     Snooze { until: String },
     Unsnooze,
     Rename { title: String },
+    RegenerateTitle,
     MarkUnread,
     AutoSettle { enabled: bool },
     Archive,
@@ -398,15 +528,14 @@ pub enum Intent {
     NewThread {
         project_id: Option<String>,
     },
+    ShowArchived {
+        open: bool,
+    },
     Search {
         query: String,
     },
     FilterProject {
         project_id: Option<String>,
-    },
-    MovePinned {
-        thread_id: String,
-        up: bool,
     },
     ReorderPinned {
         thread_id: String,
@@ -428,10 +557,12 @@ pub enum Intent {
     RemoveAttachment {
         id: String,
     },
+    /// `alternate` is the second send gesture (Mod+Enter, long press).
     Send {
-        behavior: SendBehavior,
+        alternate: bool,
     },
     Stop,
+    StopSessions,
     DiscardPending {
         command_id: String,
     },
@@ -456,15 +587,15 @@ pub enum Intent {
     },
     SetModel {
         instance_id: String,
+        driver: Driver,
         model: String,
-        effort: Option<String>,
-        service_tier: Option<String>,
+        options: Vec<ModelOption>,
     },
     SetRuntimeMode {
-        mode: String,
+        mode: RuntimeMode,
     },
     SetInteractionMode {
-        mode: String,
+        mode: InteractionMode,
     },
     RespondApproval {
         request_id: String,
@@ -477,10 +608,11 @@ pub enum Intent {
     DismissInput {
         request_id: String,
     },
-    LoadHistory,
-    LoadItem {
+    LoadEarlier,
+    LoadItemDetail {
         item_id: String,
     },
+    CancelSetup,
     Refresh,
     Transcribe {
         draft_key: String,
@@ -505,8 +637,8 @@ pub enum Intent {
         cwd: String,
     },
     ReadTurnDiff {
-        from_turn_count: u64,
-        to_turn_count: u64,
+        from_run_ordinal: u64,
+        to_run_ordinal: u64,
         ignore_whitespace: bool,
     },
     LoadWorktreeSettings,
@@ -576,4 +708,86 @@ pub enum Intent {
     RegisterProject {
         path: String,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_native_edit_keeps_dictation_appended_after_its_base() {
+        assert_eq!(
+            merge_draft_text(
+                "hello".into(),
+                "hello there".into(),
+                "hello\ntranscript".into()
+            ),
+            "hello there\ntranscript"
+        );
+        assert_eq!(
+            merge_draft_text("hello".into(), "".into(), "hello".into()),
+            ""
+        );
+    }
+
+    #[test]
+    fn restored_text_joins_the_draft_once() {
+        assert_eq!(merge_restored_text("", "sent"), "sent");
+        assert_eq!(merge_restored_text("typed", ""), "typed");
+        assert_eq!(merge_restored_text("typed", "sent"), "typed\n\nsent");
+        assert_eq!(
+            merge_restored_text("typed\n\nsent", "sent"),
+            "typed\n\nsent"
+        );
+        assert_eq!(merge_restored_text("sent", "sent"), "sent");
+    }
+
+    #[test]
+    fn a_draft_selection_needs_a_model_and_carries_its_options() {
+        let mut draft = Draft::default();
+        assert!(draft.selection().is_err());
+        draft.instance_id = "codex".into();
+        draft.model = "gpt".into();
+        draft.options.push(ModelOption {
+            key: "reasoningEffort".into(),
+            value: "high".into(),
+        });
+        let selection = draft.selection().unwrap();
+        assert_eq!(selection.options["reasoningEffort"], "high");
+        assert_eq!(
+            Draft::default().with_selection(&selection),
+            Draft {
+                attachments: vec![],
+                text: String::new(),
+                ..draft
+            }
+        );
+    }
+
+    #[test]
+    fn attachments_send_only_after_their_upload() {
+        let mut attachment = DraftAttachment {
+            id: "local".into(),
+            remote_id: None,
+            name: "a.png".into(),
+            mime_type: "image/png".into(),
+            kind: "image".into(),
+            size_bytes: 4,
+            local_path: "/tmp/a.png".into(),
+            status: "uploading".into(),
+            error: None,
+        };
+        assert!(attachment.reference().is_err());
+        attachment.status = "ready".into();
+        attachment.remote_id = Some("pending:1".into());
+        let reference = attachment.reference().unwrap();
+        assert_eq!(reference.id, "pending:1");
+        assert_eq!(reference.kind, AttachmentKind::Image);
+        assert_eq!(
+            DraftAttachment::from_remote(&reference)
+                .remote_id
+                .as_deref(),
+            Some("pending:1")
+        );
+    }
 }

@@ -1,6 +1,4 @@
-//! Native presentation of the orchestration, with shared text and diff rendering.
-mod conversation;
-pub use conversation::*;
+//! Shared text, diff, theme and connection presentation.
 pub mod connections;
 pub mod diff;
 pub mod error;

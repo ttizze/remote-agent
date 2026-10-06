@@ -4,13 +4,13 @@ mod protocol;
 mod snapshot;
 
 use crate::{
+    connection::{Outcome, StoreOptions},
     diagnostics::{
         ConnectionPhase,
         connection::{Trace, identifier},
     },
     models::Invitation,
     state::{Intent, Snapshot},
-    store::Outcome,
     transport::{Endpoint, Identity, Relays, Ticket},
 };
 use std::{
@@ -105,7 +105,7 @@ pub fn validate_invitation(invitation: Invitation, now: u64) -> Result<String, A
 
 #[derive(uniffi::Object)]
 pub struct AgentStore {
-    store: crate::store::Store,
+    store: crate::connection::Store,
     endpoint: tokio::sync::Mutex<Option<NativeEndpoint>>,
     trace: Arc<Trace>,
 }
@@ -228,6 +228,7 @@ impl AgentStore {
     #[uniffi::constructor]
     pub async fn offline(
         persisted: Vec<u8>,
+        cache_directory: Option<String>,
         diagnostics_directory: Option<String>,
     ) -> Result<Arc<Self>, AgentError> {
         let started = std::time::Instant::now();
@@ -237,8 +238,14 @@ impl AgentStore {
         }
         trace.activate();
         let snapshot = crate::persistence::decode(&persisted).map_err(error)?;
-        let store =
-            crate::store::Store::offline_for(snapshot, orchestration::CreationSource::Mobile);
+        let store = crate::connection::Store::offline(
+            snapshot,
+            StoreOptions {
+                creation_source: "mobile".into(),
+                cache_directory: cache_directory.map(Into::into),
+                start_on_list: true,
+            },
+        );
         trace.record(
             ConnectionPhase::StoreRestored,
             0,
@@ -256,9 +263,10 @@ impl AgentStore {
     pub async fn connect(
         connection: Connection,
         persisted: Vec<u8>,
+        cache_directory: Option<String>,
         diagnostics_directory: Option<String>,
     ) -> Result<Arc<Self>, AgentError> {
-        let store = Self::offline(persisted, diagnostics_directory).await?;
+        let store = Self::offline(persisted, cache_directory, diagnostics_directory).await?;
         store.reconnect(connection).await?;
         Ok(store)
     }
@@ -296,6 +304,11 @@ impl AgentStore {
 
     pub fn snapshot(&self) -> Arc<Snapshot> {
         self.store.snapshot()
+    }
+
+    /// The app returned to the foreground; subscriptions resume from their cursors.
+    pub fn app_became_active(&self) {
+        self.store.app_became_active();
     }
 
     /// Subscribe before comparing to avoid losing an update between read and wait.

@@ -21,10 +21,12 @@ pub enum ComposerDispatchMode {
 
 /// The configured follow-up for a running turn; the alternate gesture swaps
 /// queue and steer.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+/// The setting defaults to queue; an unset behavior steers.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum FollowUpBehavior {
-    Queue,
     #[default]
+    Queue,
     Steer,
     Restart,
 }
@@ -37,7 +39,7 @@ pub fn resolve_composer_dispatch_mode(
     if !running {
         return ComposerDispatchMode::Auto;
     }
-    let behavior = behavior.unwrap_or_default();
+    let behavior = behavior.unwrap_or(FollowUpBehavior::Steer);
     match (alternate, behavior) {
         (true, FollowUpBehavior::Queue) => ComposerDispatchMode::Steer,
         (true, _) => ComposerDispatchMode::Queue,

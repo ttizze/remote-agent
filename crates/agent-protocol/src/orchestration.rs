@@ -1,4 +1,7 @@
 //! Native orchestration RPC parameters. Shared domain records live in orchestration.
+/// The thread id of the peripheral records (browser, worktree threads) that
+/// still use the orchestration type.
+pub use ::orchestration::ThreadId;
 use ::orchestration::*;
 use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]

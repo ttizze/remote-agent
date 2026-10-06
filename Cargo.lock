@@ -142,7 +142,6 @@ dependencies = [
  "agent-transport",
  "insta",
  "markdown",
- "orchestration",
  "proptest",
  "rstest",
  "scopeguard",
