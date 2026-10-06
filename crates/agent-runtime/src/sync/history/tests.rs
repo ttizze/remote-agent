@@ -53,6 +53,7 @@ pub(crate) fn command_row(index: usize, output: String) -> Item {
             command: format!("cmd-{index}"),
             cwd: None,
             exit_code: Some(0),
+            title: None,
         },
         output,
     )

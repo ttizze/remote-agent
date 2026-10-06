@@ -3,7 +3,7 @@ use super::*;
 use crate::executor::tests::{FakeOps, Rig, RigOptions, codex, rig, rig_with};
 use crate::session::tests::fake::Gate;
 use crate::{CreatedWorktree, DaemonOptions, EffectStatus};
-use agent_domain::{AttachmentKind, EffectBody, ItemKind, RunStatus, State};
+use agent_domain::{AttachmentKind, EffectBody, ItemKind, ItemStatus, RunStatus, State};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -99,6 +99,27 @@ async fn until(what: &str, check: impl AsyncFn() -> bool) {
     }
 }
 
+/// The run's "Preparing workspace" command row: its status and title.
+fn preparation(state: &State) -> (ItemStatus, Option<String>) {
+    state
+        .items
+        .iter()
+        .find_map(|item| match &item.kind {
+            ItemKind::CommandExecution { command, title, .. }
+                if command == agent_domain::WORKSPACE_PREPARATION_INPUT =>
+            {
+                Some((item.status, title.clone()))
+            }
+            _ => None,
+        })
+        .expect("preparation row")
+}
+fn error_status(state: &State) -> Option<ItemStatus> {
+    state.items.iter().find_map(|item| match &item.kind {
+        ItemKind::Error { .. } => Some(item.status),
+        _ => None,
+    })
+}
 fn error_text(state: &State) -> Option<String> {
     state.items.iter().find_map(|item| match &item.kind {
         ItemKind::Error { message, .. } => Some(message.clone()),
@@ -140,10 +161,17 @@ async fn returns_a_visible_preparing_message_while_provisioning_is_still_blocked
     let current = state(&rig, &launched.thread).await;
     assert_eq!(current.messages[0].text, "Build the feature");
     assert_eq!(current.runs[0].status, RunStatus::Preparing);
+    assert_eq!(preparation(&current).0, ItemStatus::Running);
 
     let worker = rig.clone();
     let drained = tokio::spawn(async move { worker.drain().await });
     worktree_gate.until_arrived(1).await;
+    assert_eq!(
+        preparation(&*state(&rig, &launched.thread).await)
+            .1
+            .as_deref(),
+        Some("Preparing worktree")
+    );
     assert_eq!(provider_starts(&rig, &launched.thread).await, 0);
     worktree_gate.release();
     setup_gate.until_arrived(1).await;
@@ -160,6 +188,10 @@ async fn returns_a_visible_preparing_message_while_provisioning_is_still_blocked
         "/repo-worktrees/feature"
     );
     assert_eq!(current.runs[0].status, RunStatus::Preparing);
+    assert_eq!(
+        preparation(&current).1.as_deref(),
+        Some("Starting setup script")
+    );
     assert_eq!(provider_starts(&rig, &launched.thread).await, 0);
     setup_gate.release();
     drained.await.unwrap();
@@ -273,6 +305,7 @@ async fn a_preparation_failure_keeps_the_thread_and_message_visible() {
         let current = state(&rig, &launched.thread).await;
         assert_eq!(current.messages[0].text, format!("Fail during {point}"));
         assert_eq!(current.runs[0].status, RunStatus::Failed, "{point}");
+        assert_eq!(preparation(&current).0, ItemStatus::Failed, "{point}");
         let error = error_text(&current).unwrap();
         assert!(error.contains(&failure), "{error}");
         assert!(
@@ -343,6 +376,8 @@ async fn retries_a_failed_workspace_preparation_on_the_same_run() {
     let retried = state(&rig, &launched.thread).await;
     assert_eq!(retried.runs.len(), 1);
     assert_eq!(retried.runs[0].status, RunStatus::Starting);
+    assert_eq!(error_status(&retried), Some(ItemStatus::Cancelled));
+    assert_eq!(preparation(&retried).0, ItemStatus::Completed);
     assert_eq!(
         retried
             .thread
@@ -954,7 +989,11 @@ async fn a_completed_setup_is_not_run_again_by_a_retried_preparation() {
     .unwrap();
     let run = state(&rig, &launched.thread).await.runs[0].id.clone();
     for _ in 0..2 {
-        prepare_workspace(&rig.context, &launched.thread, Some(&run))
+        let prepared = crate::executor::PreparedRun {
+            run: &run,
+            effect: "effect:setup-once",
+        };
+        prepare_workspace(&rig.context, &launched.thread, Some(prepared))
             .await
             .unwrap();
     }

@@ -4,6 +4,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 /// The error code of a run whose workspace preparation failed (T3 contracts).
 pub const WORKSPACE_PREPARATION_FAILURE_CODE: &str = "workspace_preparation_failed";
+/// The command row that stands for a deferred run's workspace preparation.
+pub const WORKSPACE_PREPARATION_INPUT: &str = "Preparing workspace";
+const INTERRUPT_REQUESTED: &str = "Interrupt requested";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InputEnvelope {
@@ -863,29 +866,77 @@ impl Decision {
             });
         }
     }
+    /// Cancelling a delegated completion delivery disposes its whole parent-run
+    /// cohort, so siblings still running never wake the parent (T3).
     fn cancel_queued_run(&mut self, run: &RunId) {
-        let ids = self
+        let cohort = self
             .state
             .runs
             .iter()
             .find(|r| &r.id == run)
-            .and_then(|r| self.state.message(&r.message))
-            .and_then(|message| message.notification.as_ref())
-            .and_then(|notification| match &notification.source {
-                NotificationSource::Delegated { task_ids } => Some(task_ids.clone()),
-                _ => None,
+            .and_then(|r| self.delivery_cohort(&r.message));
+        match cohort {
+            Some(cohort) => self.dispose_cohort(&cohort),
+            None => self.fact(FactBody::RunFinished {
+                id: run.clone(),
+                status: RunStatus::Cancelled,
+            }),
+        }
+    }
+    /// The parent run whose delegated completions a message delivers.
+    fn delivery_cohort(&self, message: &MessageId) -> Option<RunId> {
+        let NotificationSource::Delegated { task_ids } =
+            &self.state.message(message)?.notification.as_ref()?.source
+        else {
+            return None;
+        };
+        task_ids.iter().find_map(|id| {
+            self.state
+                .tasks
+                .iter()
+                .find(|task| &task.id == id)
+                .and_then(|task| task.run.clone())
+        })
+    }
+    /// Disposes the undelivered completions of a parent run and cancels its
+    /// queued delivery.
+    fn dispose_cohort(&mut self, cohort: &RunId) {
+        let tasks = self
+            .state
+            .tasks
+            .iter()
+            .filter(|task| {
+                task.app_owned()
+                    && task.run.as_ref() == Some(cohort)
+                    && matches!(
+                        task.delivery,
+                        DeliveryState::Pending | DeliveryState::Claimed
+                    )
             })
-            .unwrap_or_default();
-        for id in ids {
+            .map(|task| task.id.clone())
+            .collect::<Vec<_>>();
+        for id in tasks {
             self.fact(FactBody::TaskDeliveryChanged {
                 id,
                 state: DeliveryState::Disposed,
             });
         }
-        self.fact(FactBody::RunFinished {
-            id: run.clone(),
-            status: RunStatus::Cancelled,
-        });
+        let deliveries = self
+            .state
+            .runs
+            .iter()
+            .filter(|run| {
+                run.status == RunStatus::Queued
+                    && self.delivery_cohort(&run.message).as_ref() == Some(cohort)
+            })
+            .map(|run| run.id.clone())
+            .collect::<Vec<_>>();
+        for id in deliveries {
+            self.fact(FactBody::RunFinished {
+                id,
+                status: RunStatus::Cancelled,
+            });
+        }
     }
     fn hold_queue(&mut self) {
         let runs = self
@@ -927,51 +978,31 @@ impl Decision {
             });
         }
     }
+    /// Ends the provider's native subagents of an attempt. Delegated children
+    /// run in their own threads and outlive the parent turn (T3).
     fn stop_tasks(&mut self, attempt: &RunAttemptId, status: ItemStatus, confirmed: bool) {
         let tasks = self
             .state
             .tasks
             .iter()
-            .filter(|task| {
-                &task.attempt == attempt
-                    && (!task.status.terminal()
-                        || task.app_owned()
-                            && matches!(
-                                task.delivery,
-                                DeliveryState::Pending | DeliveryState::Claimed
-                            ))
-            })
+            .filter(|task| &task.attempt == attempt && !task.app_owned() && !task.status.terminal())
             .cloned()
             .collect::<Vec<_>>();
-        let task_ids = tasks.iter().map(|task| task.id.clone()).collect::<Vec<_>>();
         for task in tasks {
-            if !task.status.terminal() {
-                if confirmed {
-                    self.fact(FactBody::TaskFinished {
-                        id: task.id.clone(),
-                        status,
-                        result: String::new(),
-                    });
-                }
-                self.effect(
-                    Some(attempt.clone()),
-                    EffectBody::SendToThread {
-                        thread: task.child_thread,
-                        command: Box::new(Command::Stop),
-                    },
-                );
+            if confirmed {
+                self.fact(FactBody::TaskFinished {
+                    id: task.id.clone(),
+                    status,
+                    result: String::new(),
+                });
             }
-            self.fact(FactBody::TaskDeliveryChanged {
-                id: task.id,
-                state: DeliveryState::Disposed,
-            });
-        }
-        let queued=self.state.runs.iter().filter(|run|run.status==RunStatus::Queued && self.state.messages.iter().find(|message|message.id==run.message).and_then(|message|message.notification.as_ref()).is_some_and(|notification| matches!(&notification.source,NotificationSource::Delegated {task_ids:cohort} if cohort.iter().any(|id| task_ids.contains(id))))).map(|run|run.id.clone()).collect::<Vec<_>>();
-        for id in queued {
-            self.fact(FactBody::RunFinished {
-                id,
-                status: RunStatus::Cancelled,
-            });
+            self.effect(
+                Some(attempt.clone()),
+                EffectBody::SendToThread {
+                    thread: task.child_thread,
+                    command: Box::new(Command::Stop),
+                },
+            );
         }
     }
     fn finish_task(&mut self, id: &NodeId, status: ItemStatus, result: &str) {
@@ -1033,36 +1064,83 @@ impl Decision {
             }),
         );
     }
-    fn interrupt_item(&mut self, attempt: &RunAttemptId, run: &RunId, status: Option<ItemStatus>) {
-        let key = self.native_key("interrupt-request", attempt, "stop");
-        let request = TurnItemId::new(key.clone()).unwrap();
-        if !self.state.items.iter().any(|item| item.id == request) {
+    /// The run's interrupt request and, once known, its result (T3 run signal items).
+    fn interrupt_item(
+        &mut self,
+        run: &RunId,
+        attempt: Option<&RunAttemptId>,
+        request: &str,
+        result: Option<(ItemStatus, &str)>,
+    ) {
+        let key = format!("interrupt-request:{}:{run}", run.as_str().len());
+        let request_id = TurnItemId::new(key.clone()).unwrap();
+        if !self.state.items.iter().any(|item| item.id == request_id) {
             self.item_start(
-                request.clone(),
+                request_id.clone(),
                 Some(run.clone()),
-                Some(attempt.clone()),
+                attempt.cloned(),
                 key,
                 ItemKind::RunInterruptRequest,
             );
+            self.append_text(&request_id, request);
             self.fact(FactBody::ItemCompleted {
-                id: request.clone(),
+                id: request_id.clone(),
                 status: ItemStatus::Completed,
             });
         }
-        if let Some(status) = status {
-            let key = self.native_key("interrupt-result", attempt, "stop");
+        if let Some((status, text)) = result {
+            let key = format!("interrupt-result:{}:{run}", run.as_str().len());
             let result = TurnItemId::new(key.clone()).unwrap();
             if !self.state.items.iter().any(|item| item.id == result) {
                 self.item_start(
                     result.clone(),
                     Some(run.clone()),
-                    Some(attempt.clone()),
+                    attempt.cloned(),
                     key,
-                    ItemKind::RunInterruptResult { request },
+                    ItemKind::RunInterruptResult {
+                        request: request_id,
+                    },
                 );
+                self.append_text(&result, text);
                 self.fact(FactBody::ItemCompleted { id: result, status });
             }
         }
+    }
+    fn preparation_item(&self, run: &RunId) -> Option<Item> {
+        self.state
+            .items
+            .iter()
+            .find(|item| {
+                item.run.as_ref() == Some(run)
+                    && matches!(&item.kind, ItemKind::CommandExecution { command, .. }
+                        if command == WORKSPACE_PREPARATION_INPUT)
+            })
+            .cloned()
+    }
+    /// Settles a running preparation row with T3's title, output and exit code.
+    fn end_preparation(
+        &mut self,
+        run: &RunId,
+        status: ItemStatus,
+        title: &str,
+        output: &str,
+        exit_code: Option<i64>,
+    ) {
+        let Some(item) = self
+            .preparation_item(run)
+            .filter(|item| !item.status.terminal())
+        else {
+            return;
+        };
+        self.fact(FactBody::ItemDetailChanged {
+            id: item.id.clone(),
+            kind: preparation_kind(title, exit_code),
+        });
+        self.replace_text(&item.id, output);
+        self.fact(FactBody::ItemCompleted {
+            id: item.id,
+            status,
+        });
     }
     fn complete_delegation(&mut self, run: &RunId, status: RunStatus) {
         let Some(origin) = self.state.delegation.clone() else {
@@ -1165,7 +1243,12 @@ impl Decision {
             });
             self.close_attempt_items(attempt, i);
             if self.state.stopping.contains(attempt) {
-                self.interrupt_item(attempt, run, Some(i));
+                self.interrupt_item(
+                    run,
+                    Some(attempt),
+                    INTERRUPT_REQUESTED,
+                    Some((i, "Run interrupted by user")),
+                );
             }
         }
         if let Some(scope) = r.checkpoint_scope.filter(|_| capture) {
@@ -1441,6 +1524,15 @@ impl Decision {
             });
         }
         if deferred {
+            self.user_item(&message.id, &id);
+            let key = format!("workspace-preparation:{}:{id}", id.as_str().len());
+            self.item_start(
+                TurnItemId::new(key.clone()).unwrap(),
+                Some(id.clone()),
+                None,
+                key,
+                preparation_kind(WORKSPACE_PREPARATION_INPUT, None),
+            );
             self.effect(None, EffectBody::PrepareWorkspace { run: id.clone() });
         } else if !queued {
             self.start_run(&id);
@@ -1589,6 +1681,7 @@ impl Decision {
                         &Interrupt {
                             run,
                             hold_queue: true,
+                            reason: None,
                         },
                     );
                 }
@@ -1613,6 +1706,7 @@ impl Decision {
                         &Interrupt {
                             run,
                             hold_queue: true,
+                            reason: None,
                         },
                     );
                 }
@@ -2112,8 +2206,39 @@ impl Decision {
                 {
                     return reject("run-not-preparing");
                 }
+                self.end_preparation(
+                    run,
+                    ItemStatus::Completed,
+                    "Workspace ready",
+                    "Workspace preparation completed.",
+                    Some(0),
+                );
                 self.start_run(run);
                 Reply::Run(run.clone())
+            }
+            PreparedRunProgress { run, phase } => {
+                let Some(item) = self.preparation_item(run).filter(|_| {
+                    self.state
+                        .runs
+                        .iter()
+                        .any(|r| &r.id == run && r.status == RunStatus::Preparing)
+                }) else {
+                    return reject("run-not-preparing");
+                };
+                let mut kind = item.kind.clone();
+                if let ItemKind::CommandExecution { title, .. } = &mut kind {
+                    *title = Some(
+                        match phase {
+                            PreparationPhase::Worktree => "Preparing worktree",
+                            PreparationPhase::Setup => "Starting setup script",
+                        }
+                        .into(),
+                    );
+                }
+                if kind != item.kind {
+                    self.fact(FactBody::ItemDetailChanged { id: item.id, kind });
+                }
+                Reply::Accepted
             }
             FailPrepared { run, message } => {
                 if !self
@@ -2124,6 +2249,13 @@ impl Decision {
                 {
                     return reject("run-not-preparing");
                 }
+                self.end_preparation(
+                    run,
+                    ItemStatus::Failed,
+                    "Workspace preparation failed",
+                    message,
+                    Some(1),
+                );
                 self.error_item_coded(
                     run,
                     message,
@@ -2162,11 +2294,25 @@ impl Decision {
                     id: failure,
                     status: ItemStatus::Cancelled,
                 });
+                if let Some(item) = self.preparation_item(run) {
+                    self.fact(FactBody::ItemReopened {
+                        id: item.id.clone(),
+                    });
+                    self.fact(FactBody::ItemDetailChanged {
+                        id: item.id.clone(),
+                        kind: preparation_kind(WORKSPACE_PREPARATION_INPUT, None),
+                    });
+                    self.replace_text(&item.id, "");
+                }
                 self.fact(FactBody::RunPrepared { id: run.clone() });
                 self.effect(None, EffectBody::PrepareWorkspace { run: run.clone() });
                 Reply::Accepted
             }
-            Interrupt { run, hold_queue } => {
+            Interrupt {
+                run,
+                hold_queue,
+                reason,
+            } => {
                 let Some(target) = self.state.runs.iter().find(|r| &r.id == run).cloned() else {
                     return reject("run-not-active");
                 };
@@ -2185,31 +2331,55 @@ impl Decision {
                 {
                     return reject("run-not-active");
                 }
+                if target
+                    .attempt
+                    .as_ref()
+                    .is_some_and(|attempt| self.state.stopping.contains(attempt))
+                {
+                    return Reply::Ignored;
+                }
                 if *hold_queue {
                     self.hold_queue();
                 }
+                let request = reason.as_deref().unwrap_or(INTERRUPT_REQUESTED);
+                let cohort = self.delivery_cohort(&target.message).unwrap_or(run.clone());
+                let started = target.attempt.as_ref().is_some_and(|attempt| {
+                    self.state
+                        .attempts
+                        .iter()
+                        .any(|a| &a.id == attempt && a.status == AttemptStatus::Running)
+                });
                 if let Some(attempt) = &target.attempt {
-                    if self.state.stopping.contains(attempt) {
-                        return Reply::Ignored;
-                    }
-                    self.interrupt_item(attempt, run, None);
                     self.fact(FactBody::StopRequested {
                         attempt: attempt.clone(),
                     });
                     self.interrupt_provider(attempt);
                     self.stop_tasks(attempt, ItemStatus::Interrupted, false);
-                    if background && !target.status.blocking() {
-                        return Reply::Accepted;
-                    }
-                    let started = self
-                        .state
-                        .attempts
-                        .iter()
-                        .any(|a| &a.id == attempt && a.status == AttemptStatus::Running);
-                    if started {
-                        return Reply::Accepted;
-                    }
                 }
+                if started || background && !target.status.blocking() {
+                    self.interrupt_item(run, target.attempt.as_ref(), request, None);
+                    self.dispose_cohort(&cohort);
+                    return Reply::Accepted;
+                }
+                self.interrupt_item(
+                    run,
+                    target.attempt.as_ref(),
+                    request,
+                    Some((
+                        ItemStatus::Interrupted,
+                        "Run interrupted before provider start",
+                    )),
+                );
+                self.end_preparation(
+                    run,
+                    ItemStatus::Interrupted,
+                    "Workspace preparation interrupted",
+                    reason
+                        .as_deref()
+                        .unwrap_or("Interrupted before provider start"),
+                    None,
+                );
+                self.dispose_cohort(&cohort);
                 self.finish(run, RunStatus::Interrupted, true);
                 Reply::Accepted
             }
@@ -2234,64 +2404,54 @@ impl Decision {
                 Reply::Accepted
             }
             ReorderQueued { run, before } => {
-                let mut order = self
+                let queued = self
                     .state
                     .queued_runs()
                     .iter()
                     .map(|r| r.id.clone())
                     .collect::<Vec<_>>();
-                if !order.contains(run) || before.as_ref().is_some_and(|id| !order.contains(id)) {
+                if !queued.contains(run) {
                     return reject("queued-run-not-found");
                 }
                 if self.automatic_run(run) {
                     return reject("automatic-delivery-not-reorderable");
                 }
-                if before.as_ref().is_some_and(|id| self.automatic_run(id)) {
+                let delegated = |id: &RunId| {
+                    self.state
+                        .runs
+                        .iter()
+                        .find(|r| &r.id == id)
+                        .is_some_and(|r| self.state.delegated_delivery(&r.message))
+                };
+                if before.as_ref().is_some_and(&delegated) {
                     return reject("cannot-reorder-ahead-of-automatic-delivery");
                 }
-                if before.as_ref() == Some(run) {
-                    return Reply::Accepted;
-                }
-                order.retain(|id| id != run);
-                let position = before
-                    .as_ref()
-                    .and_then(|id| order.iter().position(|r| r == id))
-                    .unwrap_or(order.len());
+                let (automatic, rest): (Vec<_>, Vec<_>) =
+                    queued.into_iter().partition(|id| delegated(id));
+                let mut order = rest.into_iter().filter(|id| id != run).collect::<Vec<_>>();
+                let position = match before {
+                    None => order.len(),
+                    Some(id) => match order.iter().position(|r| r == id) {
+                        Some(position) => position,
+                        None => return reject("queued-run-not-found"),
+                    },
+                };
                 order.insert(position, run.clone());
-                self.fact(FactBody::QueueReordered { order });
+                self.fact(FactBody::QueueReordered {
+                    order: automatic.into_iter().chain(order).collect(),
+                });
                 Reply::Accepted
             }
             CancelQueued { run } => {
-                let Some(r) = self
+                if !self
                     .state
                     .runs
                     .iter()
-                    .find(|r| &r.id == run && r.status == RunStatus::Queued)
-                    .cloned()
-                else {
+                    .any(|r| &r.id == run && r.status == RunStatus::Queued)
+                {
                     return reject("queued-run-not-found");
-                };
-                let ids = self
-                    .state
-                    .messages
-                    .iter()
-                    .find(|message| message.id == r.message)
-                    .and_then(|message| message.notification.as_ref())
-                    .and_then(|notification| match &notification.source {
-                        NotificationSource::Delegated { task_ids } => Some(task_ids.clone()),
-                        _ => None,
-                    })
-                    .unwrap_or_default();
-                for id in ids {
-                    self.fact(FactBody::TaskDeliveryChanged {
-                        id,
-                        state: DeliveryState::Disposed,
-                    });
                 }
-                self.fact(FactBody::RunFinished {
-                    id: run.clone(),
-                    status: RunStatus::Cancelled,
-                });
+                self.cancel_queued_run(run);
                 self.promote();
                 Reply::Accepted
             }
@@ -2898,7 +3058,10 @@ impl Decision {
                 task,
                 child,
                 prompt,
+                title,
                 selection,
+                runtime_mode,
+                interaction_mode,
                 wake,
             } => {
                 let Some(run) = self.state.active_run().cloned() else {
@@ -2915,17 +3078,21 @@ impl Decision {
                 {
                     return reject("task-already-exists");
                 }
-                let prompt = prompt.trim();
+                // T3 decodes the task and title as trimmed non-empty strings.
+                let prompt = prompt.trim().to_owned();
                 if prompt.is_empty() {
                     return reject("task-required");
                 }
-                if prompt.encode_utf16().count() > 120_000 {
-                    return reject("message-too-long");
+                let title = title.as_deref().map(str::trim);
+                if title.is_some_and(str::is_empty) {
+                    return reject("title-required");
                 }
-                let child_title = delegated_title(
-                    prompt,
+                let title = title.map(str::to_owned);
+                let child_title = subagent_thread_title(
                     &self.state.thread.as_ref().unwrap().title,
-                    self.state.tasks.iter().filter(|t| t.app_owned()).count() + 1,
+                    title.as_deref(),
+                    &prompt,
+                    self.state.tasks.len() + 1,
                 );
                 let message = MessageId::new(self.key("delegate-message", task.as_str())).unwrap();
                 self.fact(FactBody::TaskStarted {
@@ -2937,10 +3104,16 @@ impl Decision {
                     attempt: attempt.clone(),
                     child: child.clone(),
                     parent: None,
-                    prompt: prompt.into(),
+                    prompt: prompt.clone(),
                     model: Some(selection.model.clone()),
                     wake: *wake,
                 });
+                if let Some(title) = &title {
+                    self.fact(FactBody::TaskNamed {
+                        id: task.clone(),
+                        title: title.clone(),
+                    });
+                }
                 self.item_start(
                     TurnItemId::new(self.key("delegate-item", task.as_str())).unwrap(),
                     Some(run.id),
@@ -2958,9 +3131,10 @@ impl Decision {
                             project: thread.project.clone(),
                             title: child_title,
                             selection: selection.clone(),
-                            runtime_mode: thread.runtime_mode,
-                            interaction_mode: thread.interaction_mode,
+                            runtime_mode: *runtime_mode,
+                            interaction_mode: *interaction_mode,
                             workspace: thread.workspace.clone(),
+                            arrangement: Box::new(ThreadArrangement::of(thread)),
                             origin: Delegation {
                                 parent: thread.id.clone(),
                                 task: task.clone(),
@@ -2968,9 +3142,9 @@ impl Decision {
                             },
                             message: SendMessage {
                                 created_by: MessageAuthor::Agent,
-                                creation_source: "server".into(),
+                                creation_source: "mcp".into(),
                                 id: message,
-                                text: prompt.into(),
+                                text: prompt.clone(),
                                 attachments: vec![],
                                 selection: None,
                                 mode: DispatchMode::StartImmediately,
@@ -2991,6 +3165,7 @@ impl Decision {
                 runtime_mode,
                 interaction_mode,
                 workspace,
+                arrangement,
                 origin,
                 message,
             } => {
@@ -3005,6 +3180,7 @@ impl Decision {
                     runtime_mode: *runtime_mode,
                     interaction_mode: *interaction_mode,
                 });
+                self.fact(FactBody::ThreadArranged(arrangement.as_ref().clone()));
                 if workspace.is_some() {
                     self.fact(FactBody::WorkspaceBound {
                         workspace: workspace.clone(),
@@ -3454,6 +3630,7 @@ impl Decision {
                 command: command.clone(),
                 cwd: cwd.clone(),
                 exit_code: *exit_code,
+                title: None,
             },
             ProviderItem::FileChange { changes } => ItemKind::FileChange {
                 changes: changes.clone(),
@@ -5449,15 +5626,25 @@ pub fn usage_limited(state: &State) -> bool {
             && failure_class(state, &run.id).as_deref() == Some("usage_limit")
     })
 }
-/// A delegated child's title: the trimmed prompt, clipped past 72 UTF-16 units.
-fn delegated_title(prompt: &str, parent_title: &str, ordinal: usize) -> String {
-    let units = prompt.encode_utf16().collect::<Vec<_>>();
+/// T3 SubagentProjection.ts subagentThreadTitle: the trimmed title or prompt,
+/// clipped past 72 UTF-16 units.
+fn subagent_thread_title(
+    parent_title: &str,
+    title: Option<&str>,
+    prompt: &str,
+    ordinal: usize,
+) -> String {
+    let detail = title
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+        .unwrap_or(prompt.trim());
+    let units = detail.encode_utf16().collect::<Vec<_>>();
     if units.is_empty() {
         format!("{parent_title} subagent {ordinal}")
     } else if units.len() > 72 {
         format!("{}...", String::from_utf16_lossy(&units[..69]))
     } else {
-        prompt.into()
+        detail.into()
     }
 }
 fn thread_title_pending(state: &State) -> bool {
@@ -5480,6 +5667,14 @@ fn wake_text(task_ids: &[NodeId]) -> String {
         format!(
             "Delegated tasks {list} reached terminal states. Use task_status with each taskId to read the results."
         )
+    }
+}
+fn preparation_kind(title: &str, exit_code: Option<i64>) -> ItemKind {
+    ItemKind::CommandExecution {
+        command: WORKSPACE_PREPARATION_INPUT.into(),
+        cwd: None,
+        exit_code,
+        title: Some(title.into()),
     }
 }
 fn reject(reason: &str) -> Reply {

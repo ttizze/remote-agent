@@ -190,6 +190,7 @@ impl Script {
                     self.command(Command::Interrupt {
                         run,
                         hold_queue: false,
+                        reason: None,
                     });
                     self.provider(ProviderEvent::TurnFinished {
                         status: RunStatus::Interrupted,

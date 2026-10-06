@@ -139,6 +139,27 @@ pub struct Thread {
     pub title_request: Option<CommandId>,
     pub imported: bool,
 }
+/// Sidebar state a fork or delegated child copies from its parent thread
+/// (T3 ThreadForkService and makeSubagentChildThread spread the parent row).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThreadArrangement {
+    pub pinned_at: Option<Timestamp>,
+    pub pin_order: Option<String>,
+    pub active_order: Option<String>,
+    pub auto_settle: bool,
+    pub title_request: Option<CommandId>,
+}
+impl ThreadArrangement {
+    pub fn of(thread: &Thread) -> Self {
+        Self {
+            pinned_at: thread.pinned_at.clone(),
+            pin_order: thread.pin_order.clone(),
+            active_order: thread.active_order.clone(),
+            auto_settle: thread.auto_settle,
+            title_request: thread.title_request.clone(),
+        }
+    }
+}
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Workspace {
     pub cwd: String,
@@ -244,6 +265,7 @@ pub enum ItemKind {
         command: String,
         cwd: Option<String>,
         exit_code: Option<i64>,
+        title: Option<String>,
     },
     FileChange {
         changes: Json,
@@ -615,15 +637,18 @@ impl State {
             .collect();
         runs.sort_by_key(|r| {
             (
-                !self
-                    .messages
-                    .iter()
-                    .any(|m| m.id == r.message && m.created_by == MessageAuthor::Agent),
+                !self.delegated_delivery(&r.message),
                 r.queue_position.unwrap_or(r.ordinal),
                 r.ordinal,
             )
         });
         runs
+    }
+    /// A delegated completion delivery; T3 delivers only these ahead of the queue.
+    pub fn delegated_delivery(&self, message: &MessageId) -> bool {
+        self.message(message)
+            .and_then(|m| m.notification.as_ref())
+            .is_some_and(|n| matches!(n.source, NotificationSource::Delegated { .. }))
     }
     pub fn visible_items(&self) -> Vec<&Item> {
         let visible_runs: BTreeSet<_> = self
@@ -691,6 +716,7 @@ pub enum DispatchMode {
     RestartActive { run: RunId },
 }
 values! { DeliveryIntent { Auto, Steer, Restart } }
+values! { PreparationPhase { Worktree, Setup } }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Command {
     ContinueRestart {
@@ -764,6 +790,10 @@ pub enum Command {
     ReleasePrepared {
         run: RunId,
     },
+    PreparedRunProgress {
+        run: RunId,
+        phase: PreparationPhase,
+    },
     FailPrepared {
         run: RunId,
         message: String,
@@ -774,6 +804,7 @@ pub enum Command {
     Interrupt {
         run: RunId,
         hold_queue: bool,
+        reason: Option<String>,
     },
     ResumeQueue,
     ReorderQueued {
@@ -841,7 +872,10 @@ pub enum Command {
         task: NodeId,
         child: ThreadId,
         prompt: String,
+        title: Option<String>,
         selection: ModelSelection,
+        runtime_mode: RuntimeMode,
+        interaction_mode: InteractionMode,
         wake: CompletionWake,
     },
     AcceptDelegation {
@@ -852,6 +886,7 @@ pub enum Command {
         runtime_mode: RuntimeMode,
         interaction_mode: InteractionMode,
         workspace: Option<Workspace>,
+        arrangement: Box<ThreadArrangement>,
         origin: Delegation,
         message: SendMessage,
     },
@@ -911,6 +946,7 @@ pub fn host_only_command(command: &Command) -> bool {
         | Command::AcceptTaskWake { .. }
         | Command::ContinueRestart { .. }
         | Command::ReleasePrepared { .. }
+        | Command::PreparedRunProgress { .. }
         | Command::FailPrepared { .. } => true,
         Command::Create { .. }
         | Command::Rename { .. }

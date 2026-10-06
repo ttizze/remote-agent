@@ -189,7 +189,10 @@ async fn a_delegation_to_an_existing_thread_fails_the_parents_task() {
                 task: agent_domain::NodeId::new("task:taken").unwrap(),
                 child: taken.clone(),
                 prompt: "Inspect the boundary".into(),
+                title: None,
                 selection: codex(),
+                runtime_mode: agent_domain::RuntimeMode::FullAccess,
+                interaction_mode: agent_domain::InteractionMode::Default,
                 wake: agent_domain::CompletionWake::SettledOnly,
             },
         )

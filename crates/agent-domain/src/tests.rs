@@ -359,6 +359,7 @@ fn stop_during_start_emits_interrupt_even_without_native_turn() {
         Command::Interrupt {
             run,
             hold_queue: true,
+            reason: None,
         },
     );
     assert_eq!(stopped.effects[0].attempt, Some(a.clone()));
@@ -1001,7 +1002,10 @@ fn a_delegated_child_reports_recovery_cancellation_or_its_continuation_result() 
                 task: task.clone(),
                 child: ThreadId::new("child").unwrap(),
                 prompt: "Inspect boundary".into(),
+                title: None,
                 selection: selection(),
+                runtime_mode: RuntimeMode::FullAccess,
+                interaction_mode: InteractionMode::Default,
                 wake: CompletionWake::SettledOnly,
             },
         );
@@ -1573,7 +1577,10 @@ fn cancelled_delegated_wake_stays_disposed_after_reconciliation() {
             task: task.clone(),
             child: ThreadId::new("child").unwrap(),
             prompt: "task prompt".into(),
+            title: None,
             selection: selection(),
+            runtime_mode: RuntimeMode::FullAccess,
+            interaction_mode: InteractionMode::Default,
             wake: CompletionWake::Always,
         },
     );
@@ -1693,6 +1700,7 @@ fn unread_uses_latest_completion_even_with_newer_queued_run() {
         Command::Interrupt {
             run,
             hold_queue: true,
+            reason: None,
         },
     );
     assert_eq!(
@@ -1756,7 +1764,7 @@ proptest! {
             let key=format!("command-{index}");
             match op {
                 0|1=>{ command(&mut s,&key,send_message(&key,DispatchMode::QueueAfterActive)); }
-                2=>{ if let Some(r)=s.active_run().cloned() { command(&mut s,&key,Command::Interrupt { run:r.id,hold_queue:index%2==0 }); } }
+                2=>{ if let Some(r)=s.active_run().cloned() { command(&mut s,&key,Command::Interrupt { run:r.id,hold_queue:index%2==0,reason:None }); } }
                 3=>{ command(&mut s,&key,Command::ResumeQueue); }
                 4=>{ if let Some(run)=s.queued_runs().first().map(|r| r.id.clone()) { command(&mut s,&key,Command::CancelQueued { run }); } }
                 5=>recover(&mut s),
@@ -1882,7 +1890,10 @@ fn automatic_completion_delivery_precedes_visible_queued_messages() {
             task: task.clone(),
             child: ThreadId::new("child").unwrap(),
             prompt: "task".into(),
+            title: None,
             selection: selection(),
+            runtime_mode: RuntimeMode::FullAccess,
+            interaction_mode: InteractionMode::Default,
             wake: CompletionWake::Always,
         },
     );
@@ -2666,7 +2677,10 @@ fn delegated_notifications_report_the_original_count_labels_and_child_links() {
                 task: ids[index].clone(),
                 child: ThreadId::new(format!("thread:{}", ids[index])).unwrap(),
                 prompt: prompt.into(),
+                title: None,
                 selection: selection(),
+                runtime_mode: RuntimeMode::FullAccess,
+                interaction_mode: InteractionMode::Default,
                 wake: CompletionWake::Always,
             },
         );
@@ -2750,7 +2764,10 @@ fn queued_siblings_share_one_wake_and_cancelling_it_disposes_the_cohort() {
                 task: task.clone(),
                 child: ThreadId::new(format!("child-{id}")).unwrap(),
                 prompt: id.into(),
+                title: None,
                 selection: selection(),
+                runtime_mode: RuntimeMode::FullAccess,
+                interaction_mode: InteractionMode::Default,
                 wake: CompletionWake::Always,
             },
         );
@@ -3822,7 +3839,10 @@ fn delegate(s: &mut State, key: &str) -> NodeId {
             task: task.clone(),
             child: ThreadId::new(format!("child-{key}")).unwrap(),
             prompt: "task prompt".into(),
+            title: None,
             selection: selection(),
+            runtime_mode: RuntimeMode::FullAccess,
+            interaction_mode: InteractionMode::Default,
             wake: CompletionWake::Always,
         },
     );
@@ -4252,7 +4272,10 @@ fn delegate_with(s: &mut State, key: &str, wake: CompletionWake) -> NodeId {
             task: task.clone(),
             child: ThreadId::new(format!("child-{key}")).unwrap(),
             prompt: format!("prompt {key}"),
+            title: None,
             selection: selection(),
+            runtime_mode: RuntimeMode::FullAccess,
+            interaction_mode: InteractionMode::Default,
             wake,
         },
     );
@@ -4672,7 +4695,10 @@ fn delegation_requires_a_task_and_titles_the_child_from_it() {
                 task: NodeId::new(key).unwrap(),
                 child: ThreadId::new(format!("child-{key}")).unwrap(),
                 prompt: prompt.into(),
+                title: None,
                 selection: selection(),
+                runtime_mode: RuntimeMode::FullAccess,
+                interaction_mode: InteractionMode::Default,
                 wake: CompletionWake::SettledOnly,
             },
         )
@@ -5276,7 +5302,9 @@ fn only_a_failed_workspace_preparation_returns_to_preparing() {
     let failure = s
         .items
         .iter()
-        .find(|item| item.run.as_ref() == Some(&prepared))
+        .find(|item| {
+            item.run.as_ref() == Some(&prepared) && matches!(item.kind, ItemKind::Error { .. })
+        })
         .unwrap()
         .clone();
     assert!(
@@ -5478,7 +5506,10 @@ fn a_rejected_delegation_fails_its_task_and_a_declined_continuation_settles_the_
             task: NodeId::new("rejected").unwrap(),
             child: ThreadId::new("existing-child").unwrap(),
             prompt: "Inspect boundary".into(),
+            title: None,
             selection: selection(),
+            runtime_mode: RuntimeMode::FullAccess,
+            interaction_mode: InteractionMode::Default,
             wake: CompletionWake::SettledOnly,
         },
     );
@@ -5520,7 +5551,10 @@ fn a_rejected_delegation_fails_its_task_and_a_declined_continuation_settles_the_
             task: NodeId::new("restarted").unwrap(),
             child: ThreadId::new("child").unwrap(),
             prompt: "Inspect boundary".into(),
+            title: None,
             selection: selection(),
+            runtime_mode: RuntimeMode::FullAccess,
+            interaction_mode: InteractionMode::Default,
             wake: CompletionWake::SettledOnly,
         },
     );
@@ -5653,3 +5687,7 @@ fn a_failed_rollback_resets_only_the_native_sessions_it_may_have_rewound() {
                 if native_thread.is_some() != rewound)));
     }
 }
+
+mod delegation;
+mod preparation;
+mod queue;

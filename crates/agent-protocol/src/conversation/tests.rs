@@ -682,13 +682,17 @@ fn clients_cannot_dispatch_host_only_commands() {
         Command::Interrupt {
             run: run.clone(),
             hold_queue: false,
+            reason: None,
         },
         Command::RetryPrepared { run },
         Command::Delegate {
             task: id("task"),
             child: id("child"),
             prompt: "help".into(),
+            title: None,
             selection: selection(),
+            runtime_mode: agent_domain::RuntimeMode::FullAccess,
+            interaction_mode: agent_domain::InteractionMode::Default,
             wake: agent_domain::CompletionWake::Always,
         },
         Command::Stop,

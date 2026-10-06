@@ -143,6 +143,7 @@ pub enum FactBody {
     ThreadRenamed {
         title: String,
     },
+    ThreadArranged(ThreadArrangement),
     ThreadUnsettled,
     ThreadImported,
     WorkspaceBound {
@@ -306,6 +307,9 @@ pub enum FactBody {
     ItemCompleted {
         id: TurnItemId,
         status: ItemStatus,
+    },
+    ItemReopened {
+        id: TurnItemId,
     },
     RequestOpened {
         owner_path: Vec<String>,
@@ -745,6 +749,14 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
             thread.title = title.clone();
             thread.title_request = None;
         }
+        ThreadArranged(arrangement) => {
+            let t = state.thread.as_mut().ok_or(FoldError::Missing("thread"))?;
+            t.pinned_at = arrangement.pinned_at.clone();
+            t.pin_order = arrangement.pin_order.clone();
+            t.active_order = arrangement.active_order.clone();
+            t.auto_settle = arrangement.auto_settle;
+            t.title_request = arrangement.title_request.clone();
+        }
         ThreadImported => {
             state
                 .thread
@@ -1142,6 +1154,11 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
                 m.streaming = false;
                 m.updated_at = at.clone();
             }
+        }
+        ItemReopened { id } => {
+            let item = find_mut(&mut state.items, "item", |i| &i.id == id)?;
+            item.status = ItemStatus::Running;
+            item.completed_at = None;
         }
         RequestOpened {
             owner_path,

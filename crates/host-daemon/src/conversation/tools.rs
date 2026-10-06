@@ -299,6 +299,21 @@ fn text<'a>(input: &'a Value, key: &str) -> Result<&'a str, String> {
         .filter(|s| !s.trim().is_empty())
         .ok_or_else(|| format!("{key} is required"))
 }
+/// An optional trimmed non-empty string of at most `max` UTF-16 units.
+fn bounded(input: &Value, key: &str, max: usize) -> Result<Option<String>, String> {
+    let Some(value) = input.get(key) else {
+        return Ok(None);
+    };
+    let value = value
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| format!("{key} is required"))?;
+    if value.encode_utf16().count() > max {
+        return Err(format!("{key} must be at most {max} characters"));
+    }
+    Ok(Some(value.to_owned()))
+}
 /// One command id per tool call, or per `clientRequestId` across retries.
 fn key(scope: &ThreadId, invocation: &str, name: &str, input: &Value) -> Result<CommandId, String> {
     let client = match input.get("clientRequestId") {
@@ -507,6 +522,7 @@ impl AgentTools {
         Ok(json!({
             "taskId": task.id,
             "childThreadId": task.child_thread,
+            "childNodeId": task.id,
             "childRunId": status.child_run_id,
             "status": task_status(task.status),
             "workState": work_state,
@@ -576,8 +592,9 @@ impl AgentTools {
                 let task_id =
                     NodeId::new(format!("node:delegated:{command_id}")).expect("derived id");
                 if !parent.tasks.iter().any(|task| task.id == task_id) {
-                    // Children run with the parent's modes; an override may only narrow them.
-                    child_modes(current.runtime_mode, current.interaction_mode, &input)?;
+                    // An override may only narrow the parent's modes (T3 resolveRuntimeMode).
+                    let (runtime_mode, interaction_mode) =
+                        child_modes(current.runtime_mode, current.interaction_mode, &input)?;
                     let run = parent
                         .active_run()
                         .ok_or("Delegation requires an active parent run")?;
@@ -586,7 +603,9 @@ impl AgentTools {
                     }
                     let models = self.live_models().await?;
                     let selection = child_model(&current.selection, &input["target"], &models)?;
-                    let task = text(&input, "task")?.trim().to_owned();
+                    // The tool schema bounds the task before the role preamble is added.
+                    let task = bounded(&input, "task", 120_000)?.ok_or("task is required")?;
+                    let title = bounded(&input, "title", 512)?;
                     let task = match input["role"].as_str() {
                         None | Some("general") => task,
                         Some(
@@ -604,7 +623,10 @@ impl AgentTools {
                             child: ThreadId::new(format!("thread:delegated:{command_id}"))
                                 .expect("derived id"),
                             prompt: task,
+                            title,
                             selection,
+                            runtime_mode,
+                            interaction_mode,
                             wake: if wait {
                                 CompletionWake::SettledOnly
                             } else {
@@ -762,6 +784,7 @@ impl AgentTools {
                             Command::Interrupt {
                                 run: id.clone().expect("active run"),
                                 hold_queue: true,
+                                reason: input["reason"].as_str().map(str::to_owned),
                             },
                         )
                         .await?;

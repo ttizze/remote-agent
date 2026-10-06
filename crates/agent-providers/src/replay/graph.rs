@@ -582,12 +582,8 @@ fn delegated_task_status_replay_keeps_the_original_result_while_followups_run_an
                 starts += 1;
                 graph.outbound(frame);
                 if starts == 2 {
-                    let selection = graph.replay.states[&parent]
-                        .thread
-                        .as_ref()
-                        .unwrap()
-                        .selection
-                        .clone();
+                    let parent_thread = graph.replay.states[&parent].thread.clone().unwrap();
+                    let selection = parent_thread.selection.clone();
                     assert_eq!(
                         graph.replay.command(
                             &parent,
@@ -596,7 +592,10 @@ fn delegated_task_status_replay_keeps_the_original_result_while_followups_run_an
                                 child: child.clone(),
                                 prompt: "Inspect the delegated API boundary and return the result."
                                     .into(),
+                                title: None,
                                 selection,
+                                runtime_mode: parent_thread.runtime_mode,
+                                interaction_mode: parent_thread.interaction_mode,
                                 wake: CompletionWake::SettledOnly
                             }
                         ),
@@ -651,7 +650,8 @@ fn delegated_task_status_replay_keeps_the_original_result_while_followups_run_an
                         &child,
                         Command::Interrupt {
                             run: active,
-                            hold_queue: false
+                            hold_queue: false,
+                            reason: None
                         }
                     ),
                     Reply::Accepted
