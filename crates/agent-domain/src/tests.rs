@@ -40,6 +40,8 @@ fn state() -> State {
             runtime_mode: RuntimeMode::FullAccess,
             interaction_mode: InteractionMode::Default,
             workspace: None,
+            created_by: crate::MessageAuthor::User,
+            creation_source: "desktop".into(),
         },
     );
     s
@@ -3435,6 +3437,8 @@ fn merge_back_requires_a_fork_of_the_target_and_a_finished_source() {
             target: ThreadId::new("fork").unwrap(),
             source: SourcePoint::Run(run),
             title: None,
+            created_by: crate::MessageAuthor::User,
+            creation_source: "desktop".into(),
         },
     );
     let mut child = accept_child(&fork);
@@ -4760,6 +4764,8 @@ fn workspace_bindings_are_recorded_and_inherited_by_forks() {
             target: ThreadId::new("fork").unwrap(),
             source: SourcePoint::Run(run),
             title: None,
+            created_by: crate::MessageAuthor::User,
+            creation_source: "desktop".into(),
         },
     );
     let child = accept_child(&fork);
@@ -5162,6 +5168,8 @@ fn a_fork_child_does_not_share_its_parents_checkpoint_scope() {
             target: ThreadId::new("fork-child").unwrap(),
             source: SourcePoint::Run(run),
             title: None,
+            created_by: crate::MessageAuthor::User,
+            creation_source: "desktop".into(),
         },
     );
     let accept = step

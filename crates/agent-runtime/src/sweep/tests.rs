@@ -25,6 +25,8 @@ fn make_thread(id: &str, project: &str, change: impl FnOnce(&mut ThreadShell)) -
                 selection: selection(),
                 runtime_mode: RuntimeMode::FullAccess,
                 interaction_mode: InteractionMode::Default,
+                created_by: agent_domain::MessageAuthor::User,
+                creation_source: "desktop".into(),
             },
         },
     )
@@ -165,6 +167,8 @@ async fn sweeps_read_live_unarchived_rows() {
                     selection: selection(),
                     runtime_mode: RuntimeMode::FullAccess,
                     interaction_mode: InteractionMode::Default,
+                    created_by: agent_domain::MessageAuthor::User,
+                    creation_source: "desktop".into(),
                 },
                 CommandOrigin::Client,
             )

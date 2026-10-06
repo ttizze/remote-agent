@@ -522,6 +522,8 @@ impl Rig {
                     runtime_mode: RuntimeMode::FullAccess,
                     interaction_mode: InteractionMode::Default,
                     workspace,
+                    created_by: agent_domain::MessageAuthor::User,
+                    creation_source: "desktop".into(),
                 },
             )
             .await;

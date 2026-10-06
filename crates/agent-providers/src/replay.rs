@@ -129,6 +129,8 @@ impl Replay {
                 runtime_mode: RuntimeMode::FullAccess,
                 interaction_mode: InteractionMode::Default,
                 workspace: None,
+                created_by: agent_domain::MessageAuthor::User,
+                creation_source: "desktop".into(),
             },
         );
         replay

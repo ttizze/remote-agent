@@ -84,6 +84,8 @@ impl Host {
                     runtime_mode: RuntimeMode::FullAccess,
                     interaction_mode: InteractionMode::Default,
                     workspace: Some(root_workspace("/repo")),
+                    created_by: agent_domain::MessageAuthor::User,
+                    creation_source: "desktop".into(),
                 },
             )
             .await;
@@ -313,6 +315,8 @@ async fn live_turn(host: &Host, runtime: &Runtime, thread: &ThreadId) -> (RunId,
                 runtime_mode: RuntimeMode::FullAccess,
                 interaction_mode: InteractionMode::Default,
                 workspace: Some(root_workspace("/repo")),
+                created_by: agent_domain::MessageAuthor::User,
+                creation_source: "desktop".into(),
             },
         )
         .await
@@ -492,6 +496,8 @@ async fn the_facade_admits_client_commands_and_serves_reads() {
             interaction_mode: InteractionMode::Default,
             workspace: crate::WorkspaceStrategy::Root { branch: None },
             initial_message: None,
+            created_by: agent_domain::MessageAuthor::User,
+            creation_source: "desktop".into(),
         })
         .await
         .unwrap();
@@ -580,6 +586,8 @@ fn launch_request(
             created_by: agent_domain::MessageAuthor::User,
             creation_source: "web".into(),
         }),
+        created_by: agent_domain::MessageAuthor::User,
+        creation_source: "desktop".into(),
     }
 }
 
@@ -985,6 +993,8 @@ async fn a_branch_update_keeps_the_project_root_and_replays_on_retry() {
                 runtime_mode: RuntimeMode::FullAccess,
                 interaction_mode: InteractionMode::Default,
                 workspace: None,
+                created_by: agent_domain::MessageAuthor::User,
+                creation_source: "desktop".into(),
             },
         )
         .await;

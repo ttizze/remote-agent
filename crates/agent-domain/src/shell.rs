@@ -28,6 +28,8 @@ pub struct ThreadShell {
     pub parent: Option<ThreadId>,
     pub fork_boundary: Option<u64>,
     pub imported: bool,
+    pub created_by: MessageAuthor,
+    pub creation_source: String,
     pub created_at: Timestamp,
     pub updated_at: Timestamp,
     pub archived_at: Option<Timestamp>,
@@ -148,6 +150,8 @@ pub fn shell(state: &State) -> Option<ThreadShell> {
         parent: thread.parent.clone(),
         fork_boundary: thread.fork_boundary,
         imported: thread.imported,
+        created_by: thread.created_by,
+        creation_source: thread.creation_source.clone(),
         created_at: thread.created_at.clone(),
         updated_at: thread.updated_at.clone(),
         archived_at: thread.archived_at.clone(),
@@ -294,6 +298,8 @@ mod tests {
                 runtime_mode: RuntimeMode::FullAccess,
                 interaction_mode: InteractionMode::Default,
                 workspace: None,
+                created_by: crate::MessageAuthor::User,
+                creation_source: "desktop".into(),
             },
         );
         state

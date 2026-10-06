@@ -26,7 +26,7 @@ use std::{
     path::PathBuf,
     sync::{Arc, OnceLock},
 };
-use tools::{AgentTools, ModelCatalog, ToolBridge};
+use tools::{AgentTools, HostOrchestration, ModelCatalog, ToolBridge};
 
 /// The selected Claude account's credential storage.
 pub(crate) trait ClaudeCredentials: Send + Sync {
@@ -103,10 +103,27 @@ impl Conversation {
         });
         let runtime = Arc::new(Runtime::open(config.runtime, io, host.clone()).await?);
         let _ = host.runtime.set(Arc::downgrade(&runtime));
-        let tools = Arc::new(AgentTools {
+        let installed = [
+            config
+                .programs
+                .codex
+                .is_some()
+                .then_some(agent_protocol::provider::ProviderKind::Codex),
+            config
+                .programs
+                .claude
+                .is_some()
+                .then_some(agent_protocol::provider::ProviderKind::Claude),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        let tools = Arc::new(AgentTools::new(Arc::new(HostOrchestration {
             runtime: runtime.clone(),
+            projects: resources.projects.clone(),
             models: config.models,
-        });
+            installed,
+        })));
         Ok(Arc::new(Self {
             runtime,
             resources,
@@ -145,17 +162,25 @@ impl Conversation {
     /// A project was registered: shell subscribers see it and its recent sessions
     /// are imported.
     pub(crate) async fn project_added(&self, project: &str) {
-        if let Err(error) = self.resources.projects.refresh().await {
-            tracing::warn!(operation = "conversation.projects", message = %format_args!("{error:#}"));
-        }
-        if let Err(error) = self.runtime.project_changed(project).await {
-            tracing::warn!(operation = "conversation.projects", message = %error);
-        }
-        let (runtime, project) = (self.runtime.clone(), project.to_owned());
-        tokio::spawn(async move {
-            if let Err(error) = runtime.import(&project, None).await {
-                tracing::warn!(operation = "conversation.import", message = %error);
-            }
-        });
+        project_added(&self.runtime, &self.resources.projects, project).await;
     }
+}
+
+pub(crate) async fn project_added(
+    runtime: &Arc<Runtime>,
+    projects: &ProjectCatalog,
+    project: &str,
+) {
+    if let Err(error) = projects.refresh().await {
+        tracing::warn!(operation = "conversation.projects", message = %format_args!("{error:#}"));
+    }
+    if let Err(error) = runtime.project_changed(project).await {
+        tracing::warn!(operation = "conversation.projects", message = %error);
+    }
+    let (runtime, project) = (runtime.clone(), project.to_owned());
+    tokio::spawn(async move {
+        if let Err(error) = runtime.import(&project, None).await {
+            tracing::warn!(operation = "conversation.import", message = %error);
+        }
+    });
 }

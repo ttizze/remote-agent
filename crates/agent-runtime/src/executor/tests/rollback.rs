@@ -734,6 +734,8 @@ async fn a_launch_into_the_restored_worktree_waits_for_the_restore() {
                         branch: None,
                     },
                     initial_message: None,
+                    created_by: agent_domain::MessageAuthor::User,
+                    creation_source: "desktop".into(),
                 },
             )
             .await;
@@ -818,6 +820,8 @@ async fn a_fork_whose_source_turn_was_rolled_back_starts_from_portable_context()
                 target: child.clone(),
                 source: agent_domain::SourcePoint::Run(second),
                 title: None,
+                created_by: agent_domain::MessageAuthor::User,
+                creation_source: "desktop".into(),
             },
         )
         .await;

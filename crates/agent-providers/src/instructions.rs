@@ -1,6 +1,6 @@
 //! Instructions providers receive, ported from T3's RuntimeInstructions,
-//! CodexDeveloperInstructions and T3OrchestrationInstructions. Only "T3 Code"
-//! is replaced with neutral wording.
+//! CodexDeveloperInstructions and T3OrchestrationInstructions. Only the MCP
+//! server names are ours.
 use agent_domain::InteractionMode;
 use serde_json::{Value, json};
 
@@ -33,7 +33,7 @@ pub fn runtime_instructions(
         format!(" with {effort} reasoning effort")
     };
     format!(
-        "<runtime_info>In case you're asked: you are running in this app through the {harness} harness{model_info}{effort_info}. No need to mention this otherwise. You can embed images and videos in your response using Markdown with absolute file paths.</runtime_info>\n\n{PULL_REQUEST_LINKING_INSTRUCTIONS}"
+        "<runtime_info>In case you're asked: you are running in T3 Code through the {harness} harness{model_info}{effort_info}. No need to mention this otherwise. You can embed images and videos in your response using Markdown with absolute file paths.</runtime_info>\n\n{PULL_REQUEST_LINKING_INSTRUCTIONS}"
     )
 }
 
@@ -70,9 +70,9 @@ pub fn claude_append_system_prompt(mcp: bool) -> String {
 
 pub const ORCHESTRATION_INSTRUCTIONS: &str = r##"
 
-## Orchestration
+## T3 Code orchestration
 
-The `t3-code` MCP server provides app-owned orchestration. Treat these concepts distinctly:
+The `orchestration` MCP server provides app-owned orchestration. Treat these concepts distinctly:
 
 - A delegated task/subagent is child work owned by the current thread. Use `orchestrator_capabilities` to discover the current provider/model IDs from the same live catalog as the composer, including configured custom models. Do not treat a native tool's model list as the full list of available subagent models. Prefer native subagent tools for same-provider work only when they support the chosen model. Use `delegate_task` with that provider instance and model when native tools cannot, including for same-provider work. Also use `delegate_task` for cross-provider or explicitly T3-owned child tasks. Retain each returned `taskId`, and use `task_status` or `task_cancel` to manage it. The returned `childThreadId` is backing storage for the subagent, not the target for starting another delegated review round.
 - `t3_thread_launch` and `create_threads` create ordinary top-level T3 conversations. Use them only when the user explicitly asks for separate/new/top-level threads or conversations. Never use them merely because the user said "subagent" or requested parallel delegated work.
@@ -93,16 +93,16 @@ For stacked work, set `baseRef` to the intended parent branch and `startFromOrig
 
 `t3_thread_launch` has no idempotency key. Retain its returned threadId and inspect it with `t3_thread_read` / `t3_thread_wait`; preparation can still be running after acceptance. If a launch fails or its response is lost, inspect `t3_thread_list` before retrying, since a thread may already exist.
 
-Tool names may include a harness-normalized MCP prefix, such as `mcp__t3_code__delegate_task`; the semantics are the same. Some harnesses attach optional MCP servers lazily: if an initial tool-catalog scan does not show T3 tools, do not conclude that cross-provider delegation is unavailable. Make one bounded direct attempt using the known T3 tool name on the next tool step. In Codex code mode, for example, call `tools.mcp__t3_code__orchestrator_capabilities({})` before reporting that the capability is absent. Keep polling/wait loops bounded, do not duplicate active work, and use stable `clientRequestId` values when retrying tools that accept them.
+Tool names may include a harness-normalized MCP prefix, such as `mcp__orchestration__delegate_task`; the semantics are the same. Some harnesses attach optional MCP servers lazily: if an initial tool-catalog scan does not show T3 tools, do not conclude that cross-provider delegation is unavailable. Make one bounded direct attempt using the known T3 tool name on the next tool step. In Codex code mode, for example, call `tools.mcp__orchestration__orchestrator_capabilities({})` before reporting that the capability is absent. Keep polling/wait loops bounded, do not duplicate active work, and use stable `clientRequestId` values when retrying tools that accept them.
 
 ACP fallback: some ACP agents accept the injected MCP server but fail to expose its tools. When the T3 tools are absent and `T3_ACP_MCP_NODE` is present, call the same tools through the terminal: `ELECTRON_RUN_AS_NODE=1 "$T3_ACP_MCP_NODE" ${T3_ACP_MCP_ENTRYPOINT:+"$T3_ACP_MCP_ENTRYPOINT"} acp-mcp-call orchestrator_capabilities '{}'` (`T3_ACP_MCP_ENTRYPOINT` is unset when T3 runs as a standalone executable). Delegate with `acp-mcp-call delegate_task '{"task":"...","target":{"providerInstanceId":"...","model":"..."},"mode":"async","clientRequestId":"..."}'`. This is the supported T3 transport fallback, not an ordinary shell-based substitute for delegation.
 "##;
 
 pub const BROWSER_TOOL_INSTRUCTIONS: &str = r##"
 
-## Collaborative browser
+## T3 Code collaborative browser
 
-You are running inside this app. The `t3-code` MCP server is the product-native collaborative browser shared with the user. When it exposes `preview_*` tools, prefer those tools for browser navigation, inspection, interaction, screenshots, and recordings.
+You are running inside T3 Code. The `browser` MCP server is the product-native collaborative browser shared with the user. When it exposes `preview_*` tools, prefer those tools for browser navigation, inspection, interaction, screenshots, and recordings.
 
 For browser work, first call `preview_status`. If no automation-capable preview is attached, call `preview_open` before concluding that the browser is unavailable. Then use `preview_navigate`, `preview_snapshot`, and the focused interaction tools. Prefer snapshot-provided locators over coordinates.
 
@@ -110,7 +110,7 @@ Do not switch to global browser skills, Chrome, Node REPL browser automation, st
 "##;
 
 pub const PULL_REQUEST_LINKING_INSTRUCTIONS: &str = r##"<pull_request_linking>
-When the t3-code MCP server exposes link_pull_request, you must use it to register every pull request you create or work on for this thread. Call link_pull_request with the full PR URL immediately after creating a PR or starting work on an existing PR. For a stack, call it for every layer, not just the current branch or the top PR. This applies when creating or updating PRs through gh, gh stack, another CLI, or the host API: those operations do not register the PRs with this thread. Linking an already-linked PR is safe. Before finishing PR work, call list_thread_pull_requests and link any PR from your work that is missing. Do not link unrelated PRs mentioned only as background. If a linking call fails, report that failure instead of claiming the PR is linked. When asked to monitor, watch, or babysit a PR and watch_pull_request is available, call it and end your turn: The app wakes you when checks finish, someone else comments, or the branch conflicts, so do not poll or run your own watcher.
+When the orchestration MCP server exposes link_pull_request, you must use it to register every pull request you create or work on for this thread. Call link_pull_request with the full PR URL immediately after creating a PR or starting work on an existing PR. For a stack, call it for every layer, not just the current branch or the top PR. This applies when creating or updating PRs through gh, gh stack, another CLI, or the host API: those operations do not register the PRs with this thread. Linking an already-linked PR is safe. Before finishing PR work, call list_thread_pull_requests and link any PR from your work that is missing. Do not link unrelated PRs mentioned only as background. If a linking call fails, report that failure instead of claiming the PR is linked. When asked to monitor, watch, or babysit a PR and watch_pull_request is available, call it and end your turn: T3 Code wakes you when checks finish, someone else comments, or the branch conflicts, so do not poll or run your own watcher.
 </pull_request_linking>"##;
 
 pub const CODEX_PLAN_MODE_DEVELOPER_INSTRUCTIONS: &str = r##"<collaboration_mode># Plan Mode (Conversational)
@@ -277,7 +277,9 @@ mod tests {
     #[test]
     fn runtime_instructions_link_pull_requests_and_name_the_model_on_one_line() {
         let instructions = runtime_instructions("Codex", None, None, None);
-        assert!(instructions.contains("When the t3-code MCP server exposes link_pull_request"));
+        assert!(
+            instructions.contains("When the orchestration MCP server exposes link_pull_request")
+        );
         assert!(instructions.contains("with the full PR URL immediately after creating a PR"));
         assert!(instructions.contains("For a stack, call it for every layer"));
         assert!(instructions.contains("call list_thread_pull_requests and link any PR"));
@@ -312,7 +314,7 @@ mod tests {
                 .starts_with("<collaboration_mode># Plan Mode")
         );
         let instructions = runtime("gpt-5.3-codex", "high");
-        assert!(instructions.contains("this app"));
+        assert!(instructions.contains("T3 Code"));
         assert!(instructions.contains("Codex harness"));
         assert!(instructions.contains("as gpt-5.3-codex with high reasoning effort"));
         let runtime_info = &instructions[..instructions.find("</runtime_info>").unwrap()];
@@ -335,7 +337,7 @@ mod tests {
     #[test]
     fn browser_instructions_follow_the_attached_tools() {
         let attached = tools(true);
-        assert!(attached.contains("t3-code"));
+        assert!(attached.contains("`browser` MCP server"));
         assert!(attached.contains("preview_status"));
         assert!(attached.contains("preview_open"));
         assert!(attached.contains("Do not switch to global browser skills"));
@@ -343,10 +345,30 @@ mod tests {
             let detached = tools(false);
             assert!(!detached.contains("preview_status"));
             assert!(!detached.contains("preview_open"));
-            assert!(!detached.contains("Collaborative browser"));
+            assert!(!detached.contains("T3 Code collaborative browser"));
             assert!(!detached.contains("Do not switch to global browser skills"));
             assert!(codex_developer_instructions(mode).contains("<collaboration_mode>"));
             assert!(codex_developer_instructions(mode).contains("</collaboration_mode>"));
+        }
+    }
+
+    // T3 T3OrchestrationInstructions.test.ts.
+    #[test]
+    fn orchestration_instructions_distinguish_subagents_and_structured_schedules() {
+        for text in [
+            "Use `delegate_task`",
+            "ordinary top-level T3 conversations",
+            "Never use them merely",
+            "cross-provider",
+            "call `delegate_task` again",
+            "Do not use `t3_thread_send` on `childThreadId`",
+            "structured object, never as JSON text",
+            "\"everyMs\":3600000",
+            "bindToCurrentThread=false",
+            "The `orchestration` MCP server provides app-owned orchestration.",
+            "`mcp__orchestration__delegate_task`",
+        ] {
+            assert!(ORCHESTRATION_INSTRUCTIONS.contains(text), "{text}");
         }
     }
 

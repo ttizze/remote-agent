@@ -136,11 +136,19 @@ pub struct Thread {
     pub fork_boundary: Option<u64>,
     pub workspace: Option<Workspace>,
     /// The pending title generation; a rename or a newer request supersedes it.
-    pub title_request: Option<CommandId>,
+    pub title_request: Option<TitleRequest>,
     pub imported: bool,
+    pub created_by: MessageAuthor,
+    pub creation_source: String,
     pub snoozed_at: Option<Timestamp>,
     pub limit_recovery: Option<LimitRecovery>,
     pub linked_pull_request: Option<LinkedPullRequest>,
+}
+/// T3 ThreadTitleRegeneration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TitleRequest {
+    pub id: CommandId,
+    pub started_at: Timestamp,
 }
 /// What to do once a usage limit resets (T3 OrchestrationV2LimitRecovery).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -200,7 +208,7 @@ pub struct ThreadArrangement {
     pub pin_order: Option<String>,
     pub active_order: Option<String>,
     pub auto_settle: bool,
-    pub title_request: Option<CommandId>,
+    pub title_request: Option<TitleRequest>,
 }
 impl ThreadArrangement {
     pub fn of(thread: &Thread) -> Self {
@@ -370,6 +378,14 @@ pub enum ItemKind {
     },
     Notification {
         notification: Notification,
+    },
+    /// T3 thread_created: a thread an agent created from this run.
+    ThreadCreated {
+        thread: ThreadId,
+        run: Option<RunId>,
+        title: String,
+        instance: String,
+        model: String,
     },
 }
 /// A provider retry that is still in progress or has resolved.
@@ -826,6 +842,8 @@ pub enum Command {
         runtime_mode: RuntimeMode,
         interaction_mode: InteractionMode,
         workspace: Option<Workspace>,
+        created_by: MessageAuthor,
+        creation_source: String,
     },
     /// A native session imported with its original message times. It is
     /// settled and bound to the native session.
@@ -971,6 +989,8 @@ pub enum Command {
         target: ThreadId,
         source: SourcePoint,
         title: Option<String>,
+        created_by: MessageAuthor,
+        creation_source: String,
     },
     /// `native` is the source's native thread and boundary, if it has one.
     AcceptFork {
@@ -988,6 +1008,8 @@ pub enum Command {
         arrangement: Box<ThreadArrangement>,
         context: HistoricalContext,
         native: Option<NativeBinding>,
+        created_by: MessageAuthor,
+        creation_source: String,
     },
     MergeBack {
         target: ThreadId,
@@ -1021,6 +1043,8 @@ pub enum Command {
         arrangement: Box<ThreadArrangement>,
         origin: Delegation,
         message: Box<SendMessage>,
+        created_by: MessageAuthor,
+        creation_source: String,
     },
     TaskProgress {
         task: NodeId,
@@ -1051,6 +1075,15 @@ pub enum Command {
     },
     Compact,
     Stop,
+    /// T3 thread.created.record: a top-level thread the agent of `run` created.
+    RecordCreatedThread {
+        run: RunId,
+        thread: ThreadId,
+        project: String,
+        target_run: Option<RunId>,
+        title: String,
+        selection: ModelSelection,
+    },
     BindNativeChild {
         native_thread: Option<String>,
         owner: RunAttemptId,
@@ -1119,6 +1152,7 @@ pub fn host_only_command(command: &Command) -> bool {
         | Command::AcknowledgeTask { .. }
         | Command::DisposeTask { .. }
         | Command::Compact
+        | Command::RecordCreatedThread { .. }
         | Command::Stop => false,
     }
 }

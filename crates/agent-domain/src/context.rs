@@ -308,6 +308,25 @@ pub fn historical_message(
     })
 }
 pub fn prepare_history(state: &State, items: &[Item], boundary: u64) -> HistoricalContext {
+    let from = items
+        .iter()
+        .filter_map(|item| {
+            item.run
+                .as_ref()
+                .and_then(|id| state.runs.iter().find(|run| &run.id == id))
+                .map(|run| run.ordinal)
+        })
+        .min()
+        .unwrap_or(0);
+    prepare_history_covering(state, items, from, boundary)
+}
+/// History of `items`, described as covering app runs `from` through `boundary`.
+pub fn prepare_history_covering(
+    state: &State,
+    items: &[Item],
+    from: u64,
+    boundary: u64,
+) -> HistoricalContext {
     let thread = &state.thread.as_ref().unwrap().id;
     let messages = items
         .iter()
@@ -332,16 +351,6 @@ pub fn prepare_history(state: &State, items: &[Item], boundary: u64) -> Historic
             historical_message(item, thread, run, native)
         })
         .collect::<Vec<_>>();
-    let from = items
-        .iter()
-        .filter_map(|item| {
-            item.run
-                .as_ref()
-                .and_then(|id| state.runs.iter().find(|run| &run.id == id))
-                .map(|run| run.ordinal)
-        })
-        .min()
-        .unwrap_or(0);
     let coverage = format!(
         "Provider context handoff. Thread: {thread}. Covered app runs: {from}-{boundary}.\nSource item range: {} through {}.\nRecover omitted history using t3_thread_read({{threadId:\"{thread}\",view:\"activity\",limit:20,maxCharsPerItem:4000}}); paginate with afterPosition=nextPosition. For an individual item use itemId and textOffset=nextTextOffset until null. Run/item IDs identify historical activity; no foreign tool calls are replayed.",
         items.first().map_or("none", |item| item.id.as_str()),

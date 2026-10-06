@@ -270,6 +270,8 @@ async fn created_thread(id: &str) -> (tempfile::TempDir, ActorHandle, ThreadId) 
                 selection: selection(),
                 runtime_mode: RuntimeMode::FullAccess,
                 interaction_mode: InteractionMode::Default,
+                created_by: agent_domain::MessageAuthor::User,
+                creation_source: "desktop".into(),
             },
             CommandOrigin::Client,
         )

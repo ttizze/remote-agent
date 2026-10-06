@@ -190,6 +190,8 @@ impl Rig {
                     runtime_mode: mode,
                     interaction_mode: InteractionMode::Default,
                     workspace: None,
+                    created_by: agent_domain::MessageAuthor::User,
+                    creation_source: "desktop".into(),
                 },
             )
             .await;
@@ -1386,6 +1388,8 @@ async fn a_codex_native_fork_binds_the_child_to_the_forked_thread() {
                 target: child.clone(),
                 source: agent_domain::SourcePoint::Run(run),
                 title: None,
+                created_by: agent_domain::MessageAuthor::User,
+                creation_source: "desktop".into(),
             },
         )
         .await;
@@ -1430,6 +1434,8 @@ async fn a_rejected_codex_fork_fails_the_childs_first_run() {
             target: child.clone(),
             source: agent_domain::SourcePoint::Run(run),
             title: None,
+            created_by: agent_domain::MessageAuthor::User,
+            creation_source: "desktop".into(),
         },
     )
     .await;
@@ -1482,6 +1488,8 @@ async fn a_claude_native_fork_copies_the_transcript_through_the_head() {
             target: child.clone(),
             source: agent_domain::SourcePoint::Run(run),
             title: None,
+            created_by: agent_domain::MessageAuthor::User,
+            creation_source: "desktop".into(),
         },
     )
     .await;
@@ -2307,6 +2315,8 @@ async fn a_claude_fork_reserves_its_session_before_writing_the_transcript() {
             target: child.clone(),
             source: agent_domain::SourcePoint::Run(run),
             title: None,
+            created_by: agent_domain::MessageAuthor::User,
+            creation_source: "desktop".into(),
         },
     )
     .await;
@@ -2826,5 +2836,37 @@ async fn a_claude_launch_pre_approves_the_app_tools_and_appends_the_instructions
     assert_eq!(
         initialize["request"]["appendSystemPrompt"],
         agent_providers::claude_append_system_prompt(true)
+    );
+}
+
+// T3 claudeMcpQueryOverrides: a read-only sandbox pre-approves only the
+// annotated read-only tools, after the sandbox's own read tools.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_read_only_claude_sandbox_pre_approves_only_read_only_app_tools() {
+    let rig = rig(SessionOptions::default(), 5);
+    rig.host.respond(claude_replies);
+    *rig.host.claude.lock().unwrap() = ClaudeSettings {
+        sandbox_kind: Some("readOnly".into()),
+        read_only_allows_global_reads: true,
+        mcp_servers: BTreeMap::from([("orchestration".to_owned(), json!({"command":"agent"}))]),
+        mcp_allowed_tools: vec!["mcp__orchestration__*".into()],
+        mcp_read_only_tools: vec![
+            "mcp__orchestration__orchestrator_capabilities".into(),
+            "mcp__orchestration__t3_thread_list".into(),
+        ],
+        ..ClaudeSettings::default()
+    };
+    let id = thread("thread-claude-read-only-tools");
+    let process = rig.claude_turn(&id, RuntimeMode::ApprovalRequired).await;
+    let args = process.request.claude.clone().unwrap().args();
+    let allowed = args
+        .iter()
+        .position(|arg| arg == "--allowedTools")
+        .map(|index| args[index + 1].clone());
+    assert_eq!(
+        allowed.as_deref(),
+        Some(
+            "Read,Glob,Grep,mcp__orchestration__orchestrator_capabilities,mcp__orchestration__t3_thread_list"
+        )
     );
 }

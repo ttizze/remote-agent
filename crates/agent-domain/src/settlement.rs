@@ -201,6 +201,8 @@ mod tests {
                     },
                     runtime_mode: RuntimeMode::FullAccess,
                     interaction_mode: InteractionMode::Default,
+                    created_by: crate::MessageAuthor::User,
+                    creation_source: "desktop".into(),
                 },
             },
         )

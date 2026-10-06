@@ -32,7 +32,13 @@ async fn arm(rig: &Rig, thread: &ThreadId, command: &str) -> CommandId {
 async fn title(rig: &Rig, thread: &ThreadId) -> (String, Option<CommandId>) {
     let state = rig.state(thread).await;
     let thread = state.thread.as_ref().unwrap();
-    (thread.title.clone(), thread.title_request.clone())
+    (
+        thread.title.clone(),
+        thread
+            .title_request
+            .as_ref()
+            .map(|request| request.id.clone()),
+    )
 }
 
 fn generations(rig: &Rig) -> Vec<TextGenerationRequest> {

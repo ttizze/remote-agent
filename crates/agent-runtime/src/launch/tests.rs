@@ -32,6 +32,8 @@ fn request(
             created_by: MessageAuthor::User,
             creation_source: "web".into(),
         }),
+        created_by: agent_domain::MessageAuthor::User,
+        creation_source: "desktop".into(),
     }
 }
 
@@ -764,6 +766,8 @@ async fn schedules_an_accepted_preparing_message_exactly_once() {
                     worktree_path: None,
                     branch: None,
                 }),
+                created_by: agent_domain::MessageAuthor::User,
+                creation_source: "desktop".into(),
             },
             CommandOrigin::Client,
         )
@@ -814,7 +818,7 @@ async fn arms_durable_title_generation_after_accepting_the_first_message() {
     let current = state(&rig, &launched.thread).await;
     let thread = current.thread.as_ref().unwrap();
     assert_eq!(thread.title, "Generate my title");
-    let request = thread.title_request.clone().unwrap();
+    let request = thread.title_request.clone().unwrap().id;
     let job = rig.job(&launched.thread, "GenerateTitle").await;
     assert_eq!(
         job.effect.body,
@@ -1004,6 +1008,8 @@ async fn a_launch_interrupted_after_its_create_is_resumed_by_a_retry() {
                 runtime_mode: input.runtime_mode,
                 interaction_mode: input.interaction_mode,
                 workspace: None,
+                created_by: agent_domain::MessageAuthor::User,
+                creation_source: "desktop".into(),
             },
             CommandOrigin::Client,
         )
