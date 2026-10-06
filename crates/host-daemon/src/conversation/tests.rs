@@ -453,6 +453,8 @@ async fn a_stream_resumed_at_its_head_answers_without_replaying() {
                 runtime_mode: RuntimeMode::FullAccess,
                 interaction_mode: InteractionMode::Default,
                 workspace: None,
+                created_by: agent_domain::MessageAuthor::User,
+                creation_source: "desktop".into(),
             },
         })))
         .await
@@ -583,6 +585,8 @@ async fn the_shell_stream_lists_projects_and_threads_then_follows_changes() {
                 runtime_mode: RuntimeMode::FullAccess,
                 interaction_mode: InteractionMode::Default,
                 workspace: None,
+                created_by: agent_domain::MessageAuthor::User,
+                creation_source: "desktop".into(),
             },
         })))
         .await
@@ -649,6 +653,8 @@ async fn conversation_calls_answer_with_typed_errors() {
                 runtime_mode: RuntimeMode::FullAccess,
                 interaction_mode: InteractionMode::Default,
                 workspace: None,
+                created_by: agent_domain::MessageAuthor::User,
+                creation_source: "desktop".into(),
             },
         ))
         .await
@@ -664,6 +670,8 @@ async fn conversation_calls_answer_with_typed_errors() {
         runtime_mode: RuntimeMode::FullAccess,
         interaction_mode: InteractionMode::Default,
         workspace: None,
+        created_by: agent_domain::MessageAuthor::User,
+        creation_source: "desktop".into(),
     };
     host.call::<wire::Committed>(dispatch(&first, "shared-id", create(&first)))
         .await

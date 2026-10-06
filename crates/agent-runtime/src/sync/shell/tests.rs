@@ -385,6 +385,8 @@ async fn thread(context: &ActorContext, id: &str) -> ActorHandle {
             selection: selection(),
             runtime_mode: RuntimeMode::FullAccess,
             interaction_mode: InteractionMode::Default,
+            created_by: agent_domain::MessageAuthor::User,
+            creation_source: "desktop".into(),
         },
     )
     .await;

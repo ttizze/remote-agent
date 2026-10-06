@@ -214,6 +214,8 @@ fn a_message_can_implement_another_threads_plan() {
             runtime_mode: RuntimeMode::FullAccess,
             interaction_mode: InteractionMode::Default,
             workspace: None,
+            created_by: crate::MessageAuthor::User,
+            creation_source: "desktop".into(),
         },
     );
     let resolved = |project: &str, implemented| ResolvedPlan {

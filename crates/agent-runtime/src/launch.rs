@@ -53,6 +53,8 @@ pub struct LaunchThread {
     pub interaction_mode: InteractionMode,
     pub workspace: WorkspaceStrategy,
     pub initial_message: Option<InitialMessage>,
+    pub created_by: MessageAuthor,
+    pub creation_source: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -537,6 +539,8 @@ pub(crate) async fn launch(
                 runtime_mode: request.runtime_mode,
                 interaction_mode: request.interaction_mode,
                 workspace,
+                created_by: request.created_by,
+                creation_source: request.creation_source.clone(),
             },
             CommandOrigin::Client,
         )

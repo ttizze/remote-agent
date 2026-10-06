@@ -8,6 +8,8 @@ fn fork(s: &mut State, key: &str, source: SourcePoint) -> Step {
             target: ThreadId::new(format!("{key}-child")).unwrap(),
             source,
             title: None,
+            created_by: crate::MessageAuthor::User,
+            creation_source: "desktop".into(),
         },
     )
 }
@@ -357,6 +359,8 @@ fn fork_sources_follow_the_reference_source_points() {
             target: ThreadId::new("titled-child").unwrap(),
             source: SourcePoint::Run(first.clone()),
             title: Some("  Named fork ".into()),
+            created_by: crate::MessageAuthor::User,
+            creation_source: "desktop".into(),
         },
     );
     assert_eq!(accept_child(&titled).thread.unwrap().title, "Named fork");
@@ -368,6 +372,8 @@ fn fork_sources_follow_the_reference_source_points() {
                 target: ThreadId::new("blank-child").unwrap(),
                 source: SourcePoint::Run(first),
                 title: Some(" ".into()),
+                created_by: crate::MessageAuthor::User,
+                creation_source: "desktop".into(),
             },
         )
         .reply,

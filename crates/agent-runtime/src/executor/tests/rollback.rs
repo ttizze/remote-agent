@@ -636,6 +636,8 @@ async fn a_launch_into_the_restored_worktree_waits_for_the_restore() {
                         branch: None,
                     },
                     initial_message: None,
+                    created_by: agent_domain::MessageAuthor::User,
+                    creation_source: "desktop".into(),
                 },
             )
             .await;

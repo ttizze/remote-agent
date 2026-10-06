@@ -70,7 +70,7 @@ impl GenerateTitle {
         let Some(thread) = state
             .thread
             .as_ref()
-            .filter(|thread| thread.title_request.as_ref() == Some(request))
+            .filter(|thread| thread.title_request.as_ref().map(|r| &r.id) == Some(request))
         else {
             return Ok(Outcome::Stale);
         };

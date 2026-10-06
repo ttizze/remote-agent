@@ -116,6 +116,8 @@ pub enum FactBody {
         selection: ModelSelection,
         runtime_mode: RuntimeMode,
         interaction_mode: InteractionMode,
+        created_by: MessageAuthor,
+        creation_source: String,
     },
     ChildEventDeferred {
         key: String,
@@ -675,6 +677,8 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
             selection,
             runtime_mode,
             interaction_mode,
+            created_by,
+            creation_source,
         } => {
             if state.thread.is_some() {
                 return Err(FoldError::Conflict);
@@ -703,6 +707,8 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
                 workspace: None,
                 title_request: None,
                 imported: false,
+                created_by: *created_by,
+                creation_source: creation_source.clone(),
                 snoozed_at: None,
                 limit_recovery: None,
                 linked_pull_request: None,
@@ -802,7 +808,10 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
                 .thread
                 .as_mut()
                 .ok_or(FoldError::Missing("thread"))?
-                .title_request = Some(request.clone())
+                .title_request = Some(TitleRequest {
+                id: request.clone(),
+                started_at: at.clone(),
+            })
         }
         TitleRequestCleared => {
             state

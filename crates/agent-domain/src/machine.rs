@@ -1974,6 +1974,43 @@ impl Decision {
                 self.start_run(&run);
                 Reply::Run(run)
             }
+            RecordCreatedThread {
+                run,
+                thread,
+                project,
+                target_run,
+                title,
+                selection,
+            } => {
+                let Some(parent) = self.state.runs.iter().find(|r| &r.id == run).cloned() else {
+                    return reject("run-not-found");
+                };
+                if &self.state.thread.as_ref().unwrap().project != project {
+                    return reject("thread-in-another-project");
+                }
+                let item = TurnItemId::new(format!("turn-item:created-thread:{id}")).unwrap();
+                if self.state.items.iter().any(|i| i.id == item) {
+                    return Reply::Ignored;
+                }
+                self.item_start(
+                    item.clone(),
+                    Some(parent.id.clone()),
+                    parent.attempt.clone(),
+                    item.to_string(),
+                    ItemKind::ThreadCreated {
+                        thread: thread.clone(),
+                        run: target_run.clone(),
+                        title: title.clone(),
+                        instance: selection.instance.clone(),
+                        model: selection.model.clone(),
+                    },
+                );
+                self.fact(FactBody::ItemCompleted {
+                    id: item,
+                    status: ItemStatus::Completed,
+                });
+                Reply::Accepted
+            }
             Stop => {
                 if let Some(run) = self.state.active_run().map(|r| r.id.clone()) {
                     return self.command(
@@ -2044,6 +2081,8 @@ impl Decision {
                 runtime_mode,
                 interaction_mode,
                 workspace,
+                created_by,
+                creation_source,
             } => {
                 if self.state.thread.is_some() {
                     return reject("thread-already-exists");
@@ -2055,6 +2094,8 @@ impl Decision {
                     selection: selection.clone(),
                     runtime_mode: *runtime_mode,
                     interaction_mode: *interaction_mode,
+                    created_by: *created_by,
+                    creation_source: creation_source.clone(),
                 });
                 if workspace.is_some() {
                     self.fact(FactBody::WorkspaceBound {
@@ -2116,6 +2157,8 @@ impl Decision {
                         selection: selection.clone(),
                         runtime_mode: crate::RuntimeMode::FullAccess,
                         interaction_mode: crate::InteractionMode::Default,
+                        created_by: MessageAuthor::User,
+                        creation_source: "provider".into(),
                     },
                 );
                 self.fact_at(created_at.clone(), FactBody::ThreadImported);
@@ -3426,6 +3469,8 @@ impl Decision {
                 target,
                 source,
                 title,
+                created_by,
+                creation_source,
             } => {
                 let title = title.as_deref().map(str::trim);
                 if title.is_some_and(str::is_empty) {
@@ -3524,6 +3569,8 @@ impl Decision {
                             arrangement: Box::new(ThreadArrangement::of(&thread)),
                             context,
                             native,
+                            created_by: *created_by,
+                            creation_source: creation_source.clone(),
                         }),
                     },
                 );
@@ -3544,6 +3591,8 @@ impl Decision {
                 arrangement,
                 context,
                 native,
+                created_by,
+                creation_source,
             } => {
                 if self.state.thread.is_some() {
                     return reject("thread-already-exists");
@@ -3555,6 +3604,8 @@ impl Decision {
                     selection: selection.clone(),
                     runtime_mode: *runtime_mode,
                     interaction_mode: *interaction_mode,
+                    created_by: *created_by,
+                    creation_source: creation_source.clone(),
                 });
                 self.fact(FactBody::ThreadArranged(arrangement.as_ref().clone()));
                 if workspace.is_some() {
@@ -3769,6 +3820,8 @@ impl Decision {
                                 task: task.clone(),
                                 message: message.clone(),
                             },
+                            created_by: MessageAuthor::Agent,
+                            creation_source: "mcp".into(),
                             message: Box::new(SendMessage {
                                 created_by: MessageAuthor::Agent,
                                 creation_source: "mcp".into(),
@@ -3799,6 +3852,8 @@ impl Decision {
                 arrangement,
                 origin,
                 message,
+                created_by,
+                creation_source,
             } => {
                 if self.state.thread.is_some() {
                     return reject("thread-already-exists");
@@ -3810,6 +3865,8 @@ impl Decision {
                     selection: selection.clone(),
                     runtime_mode: *runtime_mode,
                     interaction_mode: *interaction_mode,
+                    created_by: *created_by,
+                    creation_source: creation_source.clone(),
                 });
                 self.fact(FactBody::ThreadArranged(arrangement.as_ref().clone()));
                 if workspace.is_some() {
@@ -5196,6 +5253,8 @@ impl Decision {
                                 runtime_mode: t.runtime_mode,
                                 interaction_mode: t.interaction_mode,
                                 workspace: t.workspace.clone(),
+                                created_by: MessageAuthor::Agent,
+                                creation_source: "provider".into(),
                             }),
                         },
                     );
@@ -5993,11 +6052,10 @@ impl Decision {
                 _ => return Reply::Ignored,
             },
             EffectResult::TitleGenerated { request, title } => {
-                let Some(thread) = self
-                    .state
-                    .thread
-                    .as_ref()
-                    .filter(|thread| thread.title_request.as_ref() == Some(request))
+                let Some(thread) =
+                    self.state.thread.as_ref().filter(|thread| {
+                        thread.title_request.as_ref().map(|r| &r.id) == Some(request)
+                    })
                 else {
                     return Reply::Ignored;
                 };

@@ -54,6 +54,8 @@ impl Writer {
                     selection: selection(),
                     runtime_mode: RuntimeMode::FullAccess,
                     interaction_mode: InteractionMode::Default,
+                    created_by: agent_domain::MessageAuthor::User,
+                    creation_source: "desktop".into(),
                 },
             )
             .await;
@@ -367,6 +369,8 @@ async fn reads_history_pages_and_single_items_from_the_actor() {
             selection: selection(),
             runtime_mode: RuntimeMode::FullAccess,
             interaction_mode: InteractionMode::Default,
+            created_by: agent_domain::MessageAuthor::User,
+            creation_source: "desktop".into(),
         },
     )
     .await;

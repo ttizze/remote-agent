@@ -574,6 +574,8 @@ impl Replay {
                     target: target.clone(),
                     source: SourcePoint::Run(through_run),
                     title: Some("Forked thread".into()),
+                    created_by: agent_domain::MessageAuthor::User,
+                    creation_source: "desktop".into(),
                 },
             )
             .await;

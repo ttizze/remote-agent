@@ -189,6 +189,8 @@ impl Rig {
                     runtime_mode: mode,
                     interaction_mode: InteractionMode::Default,
                     workspace: None,
+                    created_by: agent_domain::MessageAuthor::User,
+                    creation_source: "desktop".into(),
                 },
             )
             .await;
@@ -1384,6 +1386,8 @@ async fn a_codex_native_fork_binds_the_child_to_the_forked_thread() {
                 target: child.clone(),
                 source: agent_domain::SourcePoint::Run(run),
                 title: None,
+                created_by: agent_domain::MessageAuthor::User,
+                creation_source: "desktop".into(),
             },
         )
         .await;
@@ -1428,6 +1432,8 @@ async fn a_rejected_codex_fork_fails_the_childs_first_run() {
             target: child.clone(),
             source: agent_domain::SourcePoint::Run(run),
             title: None,
+            created_by: agent_domain::MessageAuthor::User,
+            creation_source: "desktop".into(),
         },
     )
     .await;
@@ -1480,6 +1486,8 @@ async fn a_claude_native_fork_copies_the_transcript_through_the_head() {
             target: child.clone(),
             source: agent_domain::SourcePoint::Run(run),
             title: None,
+            created_by: agent_domain::MessageAuthor::User,
+            creation_source: "desktop".into(),
         },
     )
     .await;
@@ -2305,6 +2313,8 @@ async fn a_claude_fork_reserves_its_session_before_writing_the_transcript() {
             target: child.clone(),
             source: agent_domain::SourcePoint::Run(run),
             title: None,
+            created_by: agent_domain::MessageAuthor::User,
+            creation_source: "desktop".into(),
         },
     )
     .await;

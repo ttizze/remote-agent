@@ -336,6 +336,11 @@ impl Conversation {
                     start_from_origin: *start_from_origin,
                 },
             },
+            created_by: MessageAuthor::User,
+            creation_source: params.message.as_ref().map_or_else(
+                || "desktop".into(),
+                |message| message.creation_source.clone(),
+            ),
             initial_message,
         };
         let launched = self
