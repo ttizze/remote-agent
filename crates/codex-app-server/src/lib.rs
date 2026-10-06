@@ -53,6 +53,11 @@ pub enum Error {
     LifecycleManaged { method: String },
 }
 
+/// The Codex executable `spawn` would run for `program`.
+pub fn resolve_executable(program: &std::path::Path) -> Result<PathBuf, Error> {
+    executable::resolve(program)
+}
+
 /// A ready, initialized Codex App Server process.
 pub struct CodexAppServer {
     child: tokio::sync::Mutex<Child>,

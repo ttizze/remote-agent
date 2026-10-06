@@ -445,6 +445,21 @@ fn raw_shell(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawShell> {
     ))
 }
 
+impl Store {
+    /// Every thread that is not deleted, archived ones included.
+    pub fn thread_shells(&self) -> Result<Vec<ShellThread>, StoreError> {
+        self.read(|c| {
+            let mut statement = c.prepare_cached(&format!(
+                "SELECT {SHELL_COLUMNS} FROM thread_shells WHERE deleted = 0 ORDER BY thread_id"
+            ))?;
+            statement
+                .query_map([], raw_shell)?
+                .map(|raw| Ok(shell_thread(raw?)?.1))
+                .collect()
+        })
+    }
+}
+
 /// One read transaction: the changed rows after `after` when the replay is small
 /// enough, otherwise every live row.
 fn initial(c: &Connection, after: Option<u64>) -> Result<Initial, StoreError> {

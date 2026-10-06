@@ -545,6 +545,7 @@ fn errors_keep_a_stable_code_and_delivery_through_the_wire() {
         ConversationError::ProjectNotFound("project".into()),
         ConversationError::ProjectChanged("project".into()),
         ConversationError::CheckpointUnavailable(2),
+        ConversationError::AttachmentUnavailable("missing upload".into()),
         ConversationError::Unavailable("database is locked".into()),
     ];
     assert_eq!(

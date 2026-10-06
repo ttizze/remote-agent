@@ -385,10 +385,11 @@ pub enum ErrorCode {
     ProjectNotFound,
     ProjectChanged,
     CheckpointUnavailable,
+    AttachmentUnavailable,
     Unavailable,
 }
 impl ErrorCode {
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::ResponseTooLarge,
         Self::ThreadNotFound,
         Self::CommandIdConflict,
@@ -398,6 +399,7 @@ impl ErrorCode {
         Self::ProjectNotFound,
         Self::ProjectChanged,
         Self::CheckpointUnavailable,
+        Self::AttachmentUnavailable,
         Self::Unavailable,
     ];
     pub fn as_str(self) -> &'static str {
@@ -411,6 +413,7 @@ impl ErrorCode {
             Self::ProjectNotFound => "project_not_found",
             Self::ProjectChanged => "project_changed",
             Self::CheckpointUnavailable => "checkpoint_unavailable",
+            Self::AttachmentUnavailable => "attachment_unavailable",
             Self::Unavailable => "conversation_unavailable",
         }
     }
@@ -442,6 +445,8 @@ pub enum ConversationError {
     ProjectChanged(String),
     #[error("run {0} has no ready checkpoint")]
     CheckpointUnavailable(u64),
+    #[error("attachment is unavailable: {0}")]
+    AttachmentUnavailable(String),
     /// Storage or runtime failure; the request may or may not have taken effect.
     #[error("{0}")]
     Unavailable(String),
@@ -458,6 +463,7 @@ impl ConversationError {
             Self::ProjectNotFound(_) => ErrorCode::ProjectNotFound,
             Self::ProjectChanged(_) => ErrorCode::ProjectChanged,
             Self::CheckpointUnavailable(_) => ErrorCode::CheckpointUnavailable,
+            Self::AttachmentUnavailable(_) => ErrorCode::AttachmentUnavailable,
             Self::Unavailable(_) => ErrorCode::Unavailable,
         }
     }

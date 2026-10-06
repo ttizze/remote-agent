@@ -16,7 +16,7 @@ fn shell(id: &str, archived: bool, deleted: bool) -> ShellThread {
             archived,
             deleted,
             needs_recovery: false,
-            summary: thread_shell(id, id),
+            summary: Box::new(thread_shell(id, id)),
         },
     }
 }

@@ -252,6 +252,11 @@ fn derived<T>(
     make(format!("{kind}:{}", derived_uuid(kind, command.as_str()))).expect("derived id")
 }
 
+/// The thread a launch creates when the request names none.
+pub fn launch_thread_id(command: &CommandId) -> ThreadId {
+    derived("thread", command, ThreadId::new)
+}
+
 /// The workspace a launch binds at creation; a new worktree is bound once provisioned.
 fn initial_workspace(strategy: &WorkspaceStrategy, root: &str) -> Option<Workspace> {
     match strategy {
@@ -354,7 +359,7 @@ pub(crate) async fn launch(
             let thread = request
                 .thread
                 .clone()
-                .unwrap_or_else(|| derived("thread", &request.command, ThreadId::new));
+                .unwrap_or_else(|| launch_thread_id(&request.command));
             // Only an accepted create of this thread can be resumed as its launch.
             if let Some(receipt) = &receipt
                 && (receipt.thread != thread

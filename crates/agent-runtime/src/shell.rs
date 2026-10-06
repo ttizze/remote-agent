@@ -12,7 +12,7 @@ pub struct ShellRow {
     pub archived: bool,
     pub deleted: bool,
     pub needs_recovery: bool,
-    pub summary: ThreadShell,
+    pub summary: Box<ThreadShell>,
 }
 
 /// Computes the list summary of a thread from its projection.
@@ -29,7 +29,7 @@ impl ShellProjector for ThreadShellProjector {
             archived: thread.archived_at.is_some(),
             deleted: thread.deleted_at.is_some(),
             needs_recovery: needs_recovery(state),
-            summary: agent_domain::shell(state)?,
+            summary: Box::new(agent_domain::shell(state)?),
         })
     }
 }
