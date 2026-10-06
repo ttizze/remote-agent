@@ -199,6 +199,8 @@ name = "agent-providers"
 version = "0.1.0"
 dependencies = [
  "agent-domain",
+ "proptest",
+ "regex",
  "serde",
  "serde_json",
  "serde_yaml",
