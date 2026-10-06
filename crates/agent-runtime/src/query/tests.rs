@@ -416,8 +416,11 @@ async fn reads_history_pages_and_single_items_from_the_actor() {
         .find(|row| row.message.as_ref().is_some_and(|m| m.text == "hello"))
         .unwrap();
     assert_eq!(
-        handle.turn_item(&row.item.id).await.unwrap().as_ref(),
-        Some(row)
+        handle.turn_item(&row.item.id).await.unwrap(),
+        Some(TurnItemDetail {
+            row: row.clone(),
+            task: None
+        })
     );
     assert!(
         handle
@@ -441,7 +444,7 @@ fn reads_withheld_command_output_on_demand_within_its_bound() {
     let client = crate::sync::client_state(&std::sync::Arc::new(state.clone()));
     let page = recent_history(&client, 1, PagePolicy::RECENT);
     assert!(page.rows[0].item.text.is_empty() && page.rows[0].item.output_omitted);
-    let detail = turn_item(&state, &state.items[0].id).unwrap();
+    let detail = turn_item(&state, &state.items[0].id).unwrap().row;
     assert_eq!(
         detail.item.text,
         format!(
@@ -450,4 +453,59 @@ fn reads_withheld_command_output_on_demand_within_its_bound() {
         )
     );
     assert_eq!(state.items[0].text.len(), 300 * 1024);
+}
+
+/// A subagent's prompt, progress and result come with its item read, bounded
+/// at 256 KiB like the rest of the withheld detail instead of the timeline's
+/// 32 KiB.
+#[test]
+fn reads_a_subagent_task_on_demand_within_the_detail_bound() {
+    use crate::sync::history::tests::{created, item};
+    use agent_domain::{CompletionWake, DeliveryState, ItemStatus, NodeId, RunAttemptId, Task};
+    let marker = "\n… output truncated for transport";
+    let result = "r".repeat(40 * 1024);
+    let progress = format!("{}😀{}", "p".repeat(256 * 1024 - 1), "x".repeat(1024));
+    let mut state = created();
+    let task = NodeId::new("child-agent").unwrap();
+    state.items = vec![item(
+        "item-task",
+        1,
+        ItemKind::Subagent { task: task.clone() },
+        String::new(),
+    )];
+    state.tasks = vec![Task {
+        original_message: None,
+        native_task: None,
+        background: false,
+        id: task,
+        native_key: "child-agent".into(),
+        run: None,
+        attempt: RunAttemptId::new("attempt").unwrap(),
+        child_thread: ThreadId::new("child").unwrap(),
+        parent_task: None,
+        prompt: "Inspect code".into(),
+        title: None,
+        started_at: at(0),
+        completed_at: Some(at(1)),
+        model: None,
+        status: ItemStatus::Completed,
+        result: Some(result.clone()),
+        progress: Some(progress.clone()),
+        wake: CompletionWake::Always,
+        delivery: DeliveryState::Pending,
+        generation: 0,
+    }];
+    let client = crate::sync::client_state(&std::sync::Arc::new(state.clone()));
+    assert!(client.tasks[0].result.as_ref().unwrap().ends_with(marker));
+
+    let detail = turn_item(&state, &state.items[0].id).unwrap();
+    assert_eq!(detail.row.item, state.items[0]);
+    let read = detail.task.unwrap();
+    assert_eq!(read.prompt, "Inspect code");
+    assert_eq!(read.result, Some(result));
+    assert_eq!(
+        read.progress,
+        Some(format!("{}{marker}", "p".repeat(256 * 1024 - 1)))
+    );
+    assert_eq!(state.tasks[0].progress, Some(progress));
 }

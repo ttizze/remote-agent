@@ -513,9 +513,16 @@ impl Conversation {
         )))
     }
 
-    async fn turn_item(&self, params: &wire::GetTurnItem) -> Result<Option<wire::HistoryRow>> {
+    async fn turn_item(&self, params: &wire::GetTurnItem) -> Result<Option<wire::TurnItemDetail>> {
         let view = self.existing(&params.thread_id).await?;
-        Ok(agent_runtime::turn_item(&view.state, &params.item_id).map(history_row))
+        Ok(
+            agent_runtime::turn_item(&view.state, &params.item_id).map(|detail| {
+                wire::TurnItemDetail {
+                    row: history_row(detail.row),
+                    task: detail.task,
+                }
+            }),
+        )
     }
 
     async fn read_history(&self, params: &wire::ReadHistory) -> Result<wire::HistoryPage> {

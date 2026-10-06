@@ -391,14 +391,20 @@ async fn a_launched_thread_streams_its_turn_and_reads_back_through_every_query()
         .iter()
         .find(|row| matches!(row.item.kind, ItemKind::AssistantMessage { .. }))
         .expect("the answer is in the history");
-    let item: Option<wire::HistoryRow> = host
+    let item: Option<wire::TurnItemDetail> = host
         .call(Call::TurnItem(wire::GetTurnItem {
             thread_id: thread.clone(),
             item_id: assistant.item.id.clone(),
         }))
         .await
         .unwrap();
-    assert_eq!(item.as_ref(), Some(assistant));
+    assert_eq!(
+        item,
+        Some(wire::TurnItemDetail {
+            row: assistant.clone(),
+            task: None
+        })
+    );
 
     let found: Vec<wire::SearchMatch> = tokio::time::timeout(Duration::from_secs(10), async {
         loop {

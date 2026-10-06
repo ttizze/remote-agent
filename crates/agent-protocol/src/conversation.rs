@@ -4,8 +4,8 @@ use crate::error::{Delivery, RpcFailure};
 use crate::models::Project;
 use agent_domain::{
     Attachment, Command, CommandId, Driver, Fact, InteractionMode, Item, Message, MessageContext,
-    MessageId, ModelSelection, Plan, Reply, RuntimeMode, State, ThreadId, ThreadShell, Timestamp,
-    TurnItemId, host_only_command,
+    MessageId, ModelSelection, Plan, Reply, RuntimeMode, State, Task, ThreadId, ThreadShell,
+    Timestamp, TurnItemId, host_only_command,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -269,6 +269,16 @@ pub struct HistoryRow {
 pub struct GetTurnItem {
     pub thread_id: ThreadId,
     pub item_id: TurnItemId,
+}
+
+/// The answer to `conversation/getTurnItem`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TurnItemDetail {
+    pub row: HistoryRow,
+    /// The task a subagent item of the thread shows; its prompt, progress and
+    /// result are bounded to 256 KiB each rather than the timeline's 32 KiB.
+    pub task: Option<Task>,
 }
 
 /// `conversation/readHistory`: the page before `cursor`, or the newest page.
