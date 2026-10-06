@@ -5,8 +5,7 @@ use crate::commands::outbox::PendingMessage;
 use std::collections::BTreeSet;
 
 /// Appends the undelivered messages after all presented rows until the
-/// thread folds each one. A send waiting behind the active run belongs to the
-/// queue, not the feed.
+/// thread folds each one.
 pub fn append_pending_messages(
     mut presented: Vec<FeedRow>,
     feed: &[FeedRow],
@@ -23,7 +22,7 @@ pub fn append_pending_messages(
     presented.extend(
         pending
             .iter()
-            .filter(|message| !message.queued && !delivered.contains(message.id.as_str()))
+            .filter(|message| !delivered.contains(message.id.as_str()))
             .cloned()
             .map(FeedRow::PendingMessage),
     );
@@ -133,14 +132,5 @@ mod tests {
         );
         // Folded messages still count as delivered even when absent from the presented rows.
         assert_eq!(append_pending_messages(vec![], &[delivered], &[queued]), []);
-    }
-
-    #[test]
-    fn leaves_sends_waiting_behind_the_active_run_to_the_queue() {
-        let queued = PendingMessage {
-            queued: true,
-            ..pending("queued")
-        };
-        assert_eq!(append_pending_messages(vec![], &[], &[queued]), []);
     }
 }

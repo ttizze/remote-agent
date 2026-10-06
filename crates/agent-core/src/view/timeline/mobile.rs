@@ -40,26 +40,7 @@ pub use super::mobile_presentation::{
     is_context_compaction_activity_group, thread_feed_activity_is_visible,
     thread_feed_run_is_unsettled,
 };
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum FeedIcon {
-    Agent,
-    Alert,
-    Browser,
-    Computer,
-    Check,
-    Command,
-    Edit,
-    Eye,
-    Globe,
-    Search,
-    Hammer,
-    Lock,
-    Message,
-    Warning,
-    Wrench,
-    Zap,
-}
+pub use super::work_row::WorkIcon;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FeedStatus {
@@ -98,7 +79,7 @@ pub struct FeedActivity {
     pub fetches_detail: bool,
     pub full_detail: Option<String>,
     pub copy_text: String,
-    pub icon: FeedIcon,
+    pub icon: WorkIcon,
     pub logo: Option<ToolLogo>,
     pub tool_like: bool,
     pub prominent: bool,
@@ -533,46 +514,46 @@ fn dynamic_tool_action(name: &str, input: &Value) -> ToolActivityAction {
     classify_tool_activity(Some(ItemType::DynamicTool), None, Some(&data))
 }
 
-fn item_icon(state: &State, item: &Item) -> FeedIcon {
+fn item_icon(state: &State, item: &Item) -> WorkIcon {
     match &item.kind {
         ItemKind::Notification { notification } => match notification.source {
             NotificationSource::Native(BackgroundKind::Subagent)
-            | NotificationSource::Delegated { .. } => FeedIcon::Hammer,
-            NotificationSource::Native(BackgroundKind::Command) => FeedIcon::Command,
-            NotificationSource::Native(BackgroundKind::Monitor) => FeedIcon::Eye,
-            NotificationSource::Native(BackgroundKind::BackgroundTask) => FeedIcon::Zap,
+            | NotificationSource::Delegated { .. } => WorkIcon::Hammer,
+            NotificationSource::Native(BackgroundKind::Command) => WorkIcon::Command,
+            NotificationSource::Native(BackgroundKind::Monitor) => WorkIcon::Eye,
+            NotificationSource::Native(BackgroundKind::BackgroundTask) => WorkIcon::Zap,
         },
         ItemKind::DynamicTool { name, input, .. } => match dynamic_tool_action(name, &input.0) {
-            ToolActivityAction::Read => FeedIcon::Eye,
-            ToolActivityAction::Search => FeedIcon::Search,
-            _ => FeedIcon::Wrench,
+            ToolActivityAction::Read => WorkIcon::Eye,
+            ToolActivityAction::Search => WorkIcon::Search,
+            _ => WorkIcon::Wrench,
         },
-        ItemKind::Reasoning => FeedIcon::Agent,
-        ItemKind::CommandExecution { .. } => FeedIcon::Command,
-        ItemKind::FileChange { .. } => FeedIcon::Edit,
-        ItemKind::WebSearch { .. } => FeedIcon::Globe,
+        ItemKind::Reasoning => WorkIcon::Agent,
+        ItemKind::CommandExecution { .. } => WorkIcon::Command,
+        ItemKind::FileChange { .. } => WorkIcon::Edit,
+        ItemKind::WebSearch { .. } => WorkIcon::Globe,
         ItemKind::ApprovalRequest { .. } => match approval_parts(state, item) {
-            Some(("permission", _, _)) => FeedIcon::Lock,
-            _ => FeedIcon::Message,
+            Some(("permission", _, _)) => WorkIcon::Lock,
+            _ => WorkIcon::Message,
         },
         ItemKind::UserInputRequest { .. }
         | ItemKind::UserMessage { .. }
-        | ItemKind::AssistantMessage { .. } => FeedIcon::Message,
-        ItemKind::Subagent { .. } => FeedIcon::Hammer,
+        | ItemKind::AssistantMessage { .. } => WorkIcon::Message,
+        ItemKind::Subagent { .. } => WorkIcon::Hammer,
         ItemKind::RunInterruptRequest
         | ItemKind::RunInterruptResult { .. }
-        | ItemKind::SystemNotice { .. } => FeedIcon::Warning,
+        | ItemKind::SystemNotice { .. } => WorkIcon::Warning,
         ItemKind::Error { .. } if usage_limit(item) => {
             if item.status == ItemStatus::Completed {
-                FeedIcon::Check
+                WorkIcon::Check
             } else {
-                FeedIcon::Warning
+                WorkIcon::Warning
             }
         }
-        ItemKind::Error { .. } => FeedIcon::Alert,
-        ItemKind::ProposedPlan { .. } | ItemKind::TodoList { .. } => FeedIcon::Check,
+        ItemKind::Error { .. } => WorkIcon::Alert,
+        ItemKind::ProposedPlan { .. } | ItemKind::TodoList { .. } => WorkIcon::Check,
         ItemKind::Compaction { .. } | ItemKind::Fork { .. } | ItemKind::ThreadCreated { .. } => {
-            FeedIcon::Zap
+            WorkIcon::Zap
         }
     }
 }
@@ -838,8 +819,8 @@ fn feed_activity(
             None => turn_item_has_detail(&item, state) || work_entry.question_answer.is_some(),
         };
     let icon = match work_entry.tool_surface {
-        Some(ToolSurface::Browser) => FeedIcon::Browser,
-        Some(ToolSurface::Computer) => FeedIcon::Computer,
+        Some(ToolSurface::Browser) => WorkIcon::Browser,
+        Some(ToolSurface::Computer) => WorkIcon::Computer,
         None => item_icon(state, &item),
     };
     let status = if matches!(item.kind, ItemKind::Error { .. }) && usage_limit(&item) {

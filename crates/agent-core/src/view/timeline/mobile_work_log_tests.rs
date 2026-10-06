@@ -349,7 +349,7 @@ fn describes_a_tool_toggle_for_assistive_technologies() {
             latest_run: Some(crate::view::timeline::mobile::FeedLatestRun::from(
                 &state.runs[0],
             )),
-            expanded_runs: [RunId::new("run-1").unwrap()].into(),
+            expanded_runs: [agent_domain::RunId::new("run-1").unwrap()].into(),
             ..FeedInput::default()
         },
     );

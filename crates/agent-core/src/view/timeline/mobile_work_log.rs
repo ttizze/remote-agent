@@ -2,11 +2,16 @@
 //! label, icon, tone and detail of each call, tool toggles and subagent cards.
 use super::lifecycle::{LifecycleRow, SubagentLink, lifecycle_row};
 use super::mobile::{
-    FeedActivity, FeedIcon, FeedStatus, WorkToggle, format_item_full_detail, is_failed_error,
+    FeedActivity, FeedStatus, WorkIcon, WorkToggle, format_item_full_detail, is_failed_error,
     subagent_task, work_entry_row_label,
+};
+pub use super::work_row::{
+    ProviderFailureRow, WorkActivityDetail, WorkActivityRow, WorkIconTone, WorkLabelTone,
+    WorkLogRow, WorkRowIcon, WorkRowRole,
 };
 use crate::sync::Detail;
 use crate::view::timeline::timing::format_duration;
+use crate::view::work_log::ToolSurface;
 use crate::view::work_log::item_detail::{ToolCallLines, tool_call_lines, turn_item_output_text};
 use crate::view::work_log::presentation::{
     ToolGroupAction, ToolGroupSummaryKind, resolve_work_entry_tool_presentation, tool_group_action,
@@ -15,9 +20,8 @@ use crate::view::work_log::presentation::{
 use crate::view::work_log::tool_catalog::ToolLogo;
 use crate::view::work_log::turn_item::workspace_preparation_retry_run_ids;
 use crate::view::work_log::user_input::{has_question_answer, question_answer_preview};
-use crate::view::work_log::{ToolIcon, ToolSurface};
 use agent_domain::{
-    Driver, Item, ItemKind, ItemStatus, RunId, State, ThreadId, Timestamp,
+    Driver, Item, ItemKind, ItemStatus, State, ThreadId, Timestamp,
     WORKSPACE_PREPARATION_FAILURE_CODE,
 };
 use serde_json::json;
@@ -52,118 +56,6 @@ pub fn work_log_layout(activities: &[FeedActivity]) -> WorkLogLayout {
     } else {
         WorkLogLayout::Rows
     }
-}
-
-/// A provider failure that ended a turn, drawn with its message.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProviderFailureRow {
-    pub summary: String,
-    /// A usage limit, drawn as a warning without the message.
-    pub warning: bool,
-    pub message: String,
-    pub reset_at: Option<Timestamp>,
-    pub created_at: Timestamp,
-    /// The run a Retry prepares again, while it still ends in this failure.
-    pub retry_preparation: Option<RunId>,
-    pub copy_text: String,
-}
-
-impl ProviderFailureRow {
-    /// `reset_time` is the reset formatted for the reader's locale.
-    pub fn label(&self, reset_time: Option<&str>) -> String {
-        if !self.warning {
-            return self.summary.clone();
-        }
-        match reset_time {
-            Some(time) => format!("Usage limit reached. Retry after {time}."),
-            None => "Usage limit reached.".into(),
-        }
-    }
-
-    pub fn accessibility_label(&self, reset_time: Option<&str>) -> String {
-        if self.warning {
-            self.label(reset_time)
-        } else {
-            format!("{}: {}", self.summary, self.message)
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum WorkRowIcon {
-    Brain,
-    Logo(ToolLogo),
-    Feed(FeedIcon),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WorkLabelTone {
-    Default,
-    Warning,
-    Danger,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WorkIconTone {
-    Default,
-    Warning,
-    Destructive,
-    /// A failed call's icon, muted.
-    Failed,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WorkRowRole {
-    None,
-    Button,
-    /// Opens the thread of the subagent a notification reports.
-    Link,
-}
-
-/// One work-log call row and, when expanded, its detail.
-#[derive(Debug, Clone, PartialEq)]
-pub struct WorkActivityRow {
-    pub id: String,
-    pub role: WorkRowRole,
-    pub opens_thread: Option<ThreadId>,
-    pub can_expand: bool,
-    pub expanded: bool,
-    /// Load the item's withheld detail; the row shows it once loaded.
-    pub load_detail: bool,
-    pub shimmer: bool,
-    pub label: String,
-    pub answer_preview: Option<String>,
-    /// The answer preview reads as an answer, not as the question.
-    pub answer_highlighted: bool,
-    pub icon: WorkRowIcon,
-    pub tool_icon: Option<ToolIcon>,
-    pub icon_tone: WorkIconTone,
-    pub label_tone: WorkLabelTone,
-    pub failed: bool,
-    /// A failure mark beside a branded tool icon.
-    pub failure_mark: bool,
-    pub accessibility_label: String,
-    pub accessibility_hint: String,
-    pub copy_text: String,
-    pub detail: Option<WorkActivityDetail>,
-}
-
-/// The expanded panel of a call row.
-#[derive(Debug, Clone, PartialEq)]
-pub struct WorkActivityDetail {
-    pub reasoning: Option<String>,
-    pub call: Option<ToolCallLines>,
-    pub full_detail: Option<String>,
-    pub output: Option<String>,
-    pub failed_exit_code: Option<i64>,
-    pub viewed_image_path: Option<String>,
-    pub shows_question_answer: bool,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum WorkLogRow {
-    ProviderFailure(ProviderFailureRow),
-    Activity(Box<WorkActivityRow>),
 }
 
 fn provider_failure_row(state: &State, activity: &FeedActivity) -> Option<ProviderFailureRow> {
@@ -295,7 +187,7 @@ pub fn work_log_row(
         && item.status != ItemStatus::Completed;
     let destructive = !system_notice
         && !usage_limit
-        && matches!(activity.icon, FeedIcon::Alert | FeedIcon::Warning);
+        && matches!(activity.icon, WorkIcon::Alert | WorkIcon::Warning);
     let failed = activity.status == Some(FeedStatus::Failure);
     let tool_icon = activity.work_entry.tool_icon.clone().or_else(|| {
         activity

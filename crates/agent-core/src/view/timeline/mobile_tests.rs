@@ -526,7 +526,7 @@ mod build_thread_feed {
         assert!(activity.prominent);
         assert!(!activity.tool_like);
         assert_eq!(activity.status, None);
-        assert_eq!(activity.icon, FeedIcon::Warning);
+        assert_eq!(activity.icon, WorkIcon::Warning);
         assert_eq!(activity.work_entry.tone, WorkTone::Info);
         assert_eq!(activity.work_entry.item_type, Some(ItemType::SystemNotice));
         assert!(!kinds(&presented).contains(&"run-fold"));
@@ -549,7 +549,7 @@ mod build_thread_feed {
         let activity = activities(&rows)[0];
         assert_eq!(activity.summary, "Usage limit reached");
         assert_eq!(activity.status, Some(FeedStatus::Neutral));
-        assert_eq!(activity.icon, FeedIcon::Warning);
+        assert_eq!(activity.icon, WorkIcon::Warning);
         assert!(activity.full_detail.as_deref().unwrap().contains(message));
     }
 
@@ -598,7 +598,7 @@ mod build_thread_feed {
         let recovered = activities(&recovered_rows)[0];
         if class == "usage_limit" {
             assert_eq!(recovered.status, Some(FeedStatus::Success));
-            assert_eq!(recovered.icon, FeedIcon::Check);
+            assert_eq!(recovered.icon, WorkIcon::Check);
         }
         let failed_rows = feed(vec![
             retry(ItemStatus::Failed),
@@ -1328,7 +1328,7 @@ mod build_thread_feed {
             fetches_detail: false,
             full_detail: None,
             copy_text: id.into(),
-            icon: FeedIcon::Command,
+            icon: WorkIcon::Command,
             logo: None,
             tool_like: true,
             prominent: false,
@@ -1770,7 +1770,7 @@ mod retained_feed_presentation {
         let details = presented[1].activities();
         assert_eq!(details.len(), 2);
         for activity in details {
-            assert_eq!(activity.icon, FeedIcon::Computer);
+            assert_eq!(activity.icon, WorkIcon::Computer);
             assert_eq!(activity.work_entry.tool_icon, Some(native_icon.clone()));
             let source = activity.work_entry.tool_source.as_ref().unwrap();
             assert_eq!(
