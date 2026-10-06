@@ -3,8 +3,10 @@
 pub mod archived;
 pub mod attachments;
 pub mod inbox;
+pub mod models;
 pub mod projects;
 pub mod search;
+pub mod settings;
 pub mod sidebar;
 pub mod snooze;
 pub mod thread_list;
