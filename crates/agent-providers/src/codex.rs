@@ -30,7 +30,13 @@ impl WireContext {
 enum Pending {
     Initialize,
     Thread {
-        resume: bool,
+        /// The resume parameters; `None` starts a new thread.
+        resume: Option<Resume>,
+        then: Option<Then>,
+    },
+    /// `thread/unarchive` before resuming an archived session again.
+    Unarchive {
+        params: Value,
         then: Option<Then>,
     },
     Inject {
@@ -65,6 +71,11 @@ enum Pending {
     },
     Operation(String),
 }
+#[derive(Debug, Clone)]
+struct Resume {
+    params: Value,
+    unarchived: bool,
+}
 /// What runs once the native thread is started or resumed.
 #[derive(Debug, Clone)]
 enum Then {
@@ -78,7 +89,10 @@ impl Pending {
     fn operation(&self) -> String {
         match self {
             Pending::Initialize => "initialize".into(),
-            Pending::Thread { resume: true, .. } => "thread/resume".into(),
+            Pending::Thread {
+                resume: Some(_), ..
+            }
+            | Pending::Unarchive { .. } => "thread/resume".into(),
             Pending::Thread { .. } => "thread/start".into(),
             Pending::Inject { .. } => "thread/inject_items".into(),
             Pending::RevertRead { .. } => "thread/read".into(),
@@ -229,9 +243,12 @@ impl CodexProtocol {
                     params["excludeTurns"] = json!(true);
                     self.request(
                         "thread/resume",
-                        params,
+                        params.clone(),
                         Pending::Thread {
-                            resume: true,
+                            resume: Some(Resume {
+                                params,
+                                unarchived: false,
+                            }),
                             then: Some(Then::Turn {
                                 start,
                                 history: handoff,
@@ -243,7 +260,7 @@ impl CodexProtocol {
                         "thread/start",
                         context.thread_params(Some(&selection.model)),
                         Pending::Thread {
-                            resume: false,
+                            resume: None,
                             then: Some(Then::Turn {
                                 start,
                                 history: handoff,
@@ -283,7 +300,7 @@ impl CodexProtocol {
                 if self
                     .pending
                     .values()
-                    .any(|p| matches!(p, Pending::Thread { .. }))
+                    .any(|p| matches!(p, Pending::Thread { .. } | Pending::Unarchive { .. }))
                 {
                     self.stop_before_thread = true;
                 }
@@ -401,19 +418,27 @@ impl CodexProtocol {
                 params["excludeTurns"] = json!(true);
                 self.request(
                     "thread/resume",
-                    params,
+                    params.clone(),
                     Pending::Thread {
-                        resume: true,
+                        resume: Some(Resume {
+                            params,
+                            unarchived: false,
+                        }),
                         then: Some(Then::Compact),
                     },
                 )
             }
-            ProviderCommand::Compact { .. } => {
-                let thread = self.thread.clone().ok_or_else(|| {
-                    ProtocolError::Invalid("compact requires native thread".into())
-                })?;
-                self.compact(&thread)
-            }
+            ProviderCommand::Compact { .. } => match self.thread.clone() {
+                Some(thread) => self.compact(&thread),
+                None => self.request(
+                    "thread/start",
+                    context.thread_params(context.thread_model.as_deref()),
+                    Pending::Thread {
+                        resume: None,
+                        then: Some(Then::Compact),
+                    },
+                ),
+            },
             // Codex selection/runtime parameters are authoritative on turn/start.
             ProviderCommand::SetModel { .. } | ProviderCommand::SetRuntimeMode { .. } => {
                 return Ok(Translation::default());
@@ -543,6 +568,20 @@ impl CodexProtocol {
         }
         outbound
     }
+    /// A root turn runs, or a sent request will start one.
+    pub fn turn_in_flight(&self) -> bool {
+        self.thread
+            .as_ref()
+            .is_some_and(|thread| self.turns.contains_key(thread))
+            || self.pending.values().any(|pending| match pending {
+                Pending::Thread { then, .. } | Pending::Unarchive { then, .. } => then.is_some(),
+                Pending::Inject { .. } => true,
+                Pending::Operation(operation) => {
+                    operation == "turn/start" || operation == "thread/compact/start"
+                }
+                _ => false,
+            })
+    }
     pub fn receive(&mut self, frame: &Value) -> Result<Translation, ProtocolError> {
         let mut output = Translation::default();
         if frame.get("method").is_none() {
@@ -568,6 +607,23 @@ impl CodexProtocol {
                     return Ok(output);
                 }
                 let message = string(error, "message");
+                if let Pending::Thread {
+                    resume: Some(resume),
+                    then,
+                } = &pending
+                    && !resume.unarchived
+                    && archived_session(&message)
+                {
+                    output.outbound.push(self.request(
+                        "thread/unarchive",
+                        json!({"threadId":resume.params["threadId"]}),
+                        Pending::Unarchive {
+                            params: resume.params.clone(),
+                            then: then.clone(),
+                        },
+                    ));
+                    return Ok(output);
+                }
                 if let Pending::Terminate { process, .. } = &pending
                     && (message.contains("ProcessExited") || message.contains("InputStreamEnded"))
                 {
@@ -592,6 +648,19 @@ impl CodexProtocol {
             });
             match pending {
                 Pending::Initialize => output.outbound.push(json!({"method":"initialized"})),
+                Pending::Unarchive { params, then } => {
+                    output.outbound.push(self.request(
+                        "thread/resume",
+                        params.clone(),
+                        Pending::Thread {
+                            resume: Some(Resume {
+                                params,
+                                unarchived: true,
+                            }),
+                            then,
+                        },
+                    ));
+                }
                 Pending::Thread { then, .. } => {
                     let thread = required(&result["thread"], "id")?;
                     self.thread = Some(thread.clone());
@@ -1632,7 +1701,10 @@ impl CodexProtocol {
             let pending = match method.as_str() {
                 "initialize" => Pending::Initialize,
                 "thread/start" | "thread/resume" => Pending::Thread {
-                    resume: method == "thread/resume",
+                    resume: (method == "thread/resume").then(|| Resume {
+                        params: frame["params"].clone(),
+                        unarchived: false,
+                    }),
                     then: None,
                 },
                 _ => Pending::Operation(method),
@@ -1641,6 +1713,31 @@ impl CodexProtocol {
             self.pending.insert(id, pending);
         }
     }
+}
+/// T3's `/\bsession \S+ is archived\b|\bcodex unarchive\b/i`.
+fn archived_session(message: &str) -> bool {
+    let word = |c: char| c.is_alphanumeric() || c == '_';
+    let message = message.to_lowercase();
+    let bounded = |at: usize, len: usize| {
+        !message[..at].ends_with(word) && !message[at + len..].starts_with(word)
+    };
+    if message
+        .match_indices("codex unarchive")
+        .any(|(at, found)| bounded(at, found.len()))
+    {
+        return true;
+    }
+    message.match_indices("session ").any(|(at, _)| {
+        if message[..at].ends_with(word) {
+            return false;
+        }
+        let rest = &message[at + "session ".len()..];
+        let id = rest.len() - rest.trim_start_matches(|c: char| !c.is_whitespace()).len();
+        id > 0
+            && rest[id..]
+                .strip_prefix(" is archived")
+                .is_some_and(|tail| !tail.starts_with(word))
+    })
 }
 pub fn completed_steer_error(message: &str) -> bool {
     let message = message.to_lowercase();
