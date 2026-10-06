@@ -92,6 +92,7 @@ results! {
     Browser(crate::browser::BrowserFrame),
     PermissionSettings(crate::permissions::PermissionSettings),
     Models(crate::operations::ModelPage), WorktreeSettings(crate::models::WorktreeSettings),
+    ConversationSettings(crate::models::ConversationSettings),
     Worktrees(Vec<crate::models::Worktree>), Review(crate::models::WorkspaceReview),
     Empty(crate::models::Empty),
     AccountUsage(crate::operations::AccountUsage),

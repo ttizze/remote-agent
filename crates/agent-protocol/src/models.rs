@@ -128,6 +128,61 @@ pub struct FileContent {
     pub text: String,
     pub size: u64,
 }
+/// When a project's threads settle on their own (T3 `sidebarAutoSettleAfterDays`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AutoSettle {
+    Never,
+    /// 1 to 90 days after the thread's last activity.
+    AfterDays(u32),
+}
+
+/// One project's overrides; an absent value inherits the Host's.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ProjectConversationSettings {
+    pub auto_settle: Option<AutoSettle>,
+    pub continue_after_restart: Option<bool>,
+}
+
+/// Host conversation settings with T3's defaults.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ConversationSettings {
+    pub auto_settle: AutoSettle,
+    /// Continue turns a Host restart cut (T3 `continueThreadsAfterServerUpdate`).
+    pub continue_after_restart: bool,
+    pub snooze_limited_threads: bool,
+    pub auto_resume_limited_threads: bool,
+    pub project_overrides: std::collections::BTreeMap<String, ProjectConversationSettings>,
+}
+impl Default for ConversationSettings {
+    fn default() -> Self {
+        Self {
+            auto_settle: AutoSettle::AfterDays(3),
+            continue_after_restart: false,
+            snooze_limited_threads: false,
+            auto_resume_limited_threads: false,
+            project_overrides: Default::default(),
+        }
+    }
+}
+impl ConversationSettings {
+    pub fn validate(&self) -> Result<(), String> {
+        let days = |settle: &AutoSettle| match settle {
+            AutoSettle::AfterDays(days) if !(1..=90).contains(days) => {
+                Err("automatic settlement needs 1 to 90 days".to_owned())
+            }
+            _ => Ok(()),
+        };
+        days(&self.auto_settle)?;
+        self.project_overrides
+            .values()
+            .filter_map(|project| project.auto_settle.as_ref())
+            .try_for_each(days)
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct WorktreeSettings {

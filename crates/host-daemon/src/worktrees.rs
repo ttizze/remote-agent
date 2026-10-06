@@ -1,5 +1,5 @@
 use agent_domain::{WorktreeSetupStageId, WorktreeSetupStageStatus};
-use agent_protocol::models::{Worktree, WorktreeSettings};
+use agent_protocol::models::{ConversationSettings, Worktree, WorktreeSettings};
 use agent_runtime::{SetupEvent, SetupProgress};
 use anyhow::{Context as _, Result, anyhow};
 use serde::{Deserialize, Serialize};
@@ -14,6 +14,7 @@ use std::{
 #[serde(default, rename_all = "camelCase")]
 struct State {
     settings: WorktreeSettings,
+    conversation: ConversationSettings,
     workspace_roots: HashMap<String, String>,
     /// Each thread's checkout, recorded before it is created.
     threads: HashMap<String, ThreadCheckout>,
@@ -22,6 +23,8 @@ struct State {
 pub(crate) struct Worktrees {
     path: PathBuf,
     lock: tokio::sync::Mutex<()>,
+    /// The saved conversation settings, for synchronous reads.
+    conversation: std::sync::RwLock<ConversationSettings>,
 }
 
 impl Worktrees {
@@ -29,7 +32,40 @@ impl Worktrees {
         Self {
             path: project_state.with_file_name("bex-worktrees.json"),
             lock: tokio::sync::Mutex::new(()),
+            conversation: Default::default(),
         }
+    }
+
+    /// The conversation settings as last loaded or saved.
+    pub(crate) fn conversation(&self) -> ConversationSettings {
+        self.conversation
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+    }
+
+    /// Reads, or replaces and saves, the conversation settings.
+    pub(crate) async fn conversation_settings(
+        &self,
+        update: Option<ConversationSettings>,
+    ) -> Result<ConversationSettings> {
+        let _guard = self.lock.lock().await;
+        let path = self.path.clone();
+        let settings = tokio::task::spawn_blocking(move || {
+            let mut state = read(&path)?;
+            if let Some(settings) = update {
+                settings.validate().map_err(|error| anyhow!(error))?;
+                state.conversation = settings;
+                save(&path, &state)?;
+            }
+            Ok::<_, anyhow::Error>(state.conversation)
+        })
+        .await??;
+        *self
+            .conversation
+            .write()
+            .unwrap_or_else(|error| error.into_inner()) = settings.clone();
+        Ok(settings)
     }
 
     pub(crate) async fn list(&self) -> Result<Vec<Worktree>> {
@@ -2050,5 +2086,30 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn conversation_settings_persist_with_t3_defaults_and_bounds() {
+        use agent_protocol::models::AutoSettle;
+        let directory = tempfile::tempdir().unwrap();
+        let state = directory.path().join("projects.json");
+        let store = Worktrees::new(&state);
+        let defaults = store.conversation_settings(None).await.unwrap();
+        assert_eq!(defaults, ConversationSettings::default());
+        assert_eq!(defaults.auto_settle, AutoSettle::AfterDays(3));
+        let mut changed = defaults.clone();
+        changed.auto_settle = AutoSettle::Never;
+        changed.continue_after_restart = true;
+        store
+            .conversation_settings(Some(changed.clone()))
+            .await
+            .unwrap();
+        assert_eq!(store.conversation(), changed);
+        let reopened = Worktrees::new(&state);
+        assert_eq!(reopened.conversation_settings(None).await.unwrap(), changed);
+        let mut invalid = changed.clone();
+        invalid.auto_settle = AutoSettle::AfterDays(91);
+        assert!(store.conversation_settings(Some(invalid)).await.is_err());
+        assert_eq!(store.conversation(), changed);
     }
 }

@@ -79,6 +79,8 @@ contracts! {
     ReviewWorkspace, "host/workspace/review" => (op::ReviewWorkspace, m::WorkspaceReview) [clone],
     ReadWorktreeSettings, "host/worktree/settings/read" => (m::Empty, m::WorktreeSettings),
     UpdateWorktreeSettings, "host/worktree/settings/update" => (m::WorktreeSettings, m::WorktreeSettings),
+    ReadConversationSettings, "host/conversation/settings/read" => (m::Empty, m::ConversationSettings),
+    UpdateConversationSettings, "host/conversation/settings/update" => (m::ConversationSettings, m::ConversationSettings),
     ListWorktrees, "host/worktree/list" => (m::Empty, Vec<m::Worktree>),
     RemoveWorktree, "host/worktree/remove" => (op::RemoveWorktree, ()) [clone],
     ListAccounts, "host/account/list" => (m::Empty, op::Accounts),

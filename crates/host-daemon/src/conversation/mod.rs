@@ -118,6 +118,7 @@ impl Conversation {
     /// Recovers unfinished threads, then starts effects, import and the agent tools.
     pub(crate) async fn start(&self) -> anyhow::Result<()> {
         self.resources.projects.refresh().await?;
+        self.resources.worktrees.conversation_settings(None).await?;
         self.runtime.start().await?;
         self.bridge
             .serve(Arc::downgrade(&self.tools))
@@ -127,6 +128,11 @@ impl Conversation {
     /// Stops effects and provider processes; unfinished threads record the shutdown.
     pub(crate) async fn shutdown(&self) {
         self.runtime.shutdown().await;
+    }
+
+    /// The conversation settings changed: automatic settlement sweeps again (T3).
+    pub(crate) fn settings_changed(&self) {
+        self.runtime.settings_changed();
     }
 
     /// A project's settings changed: shell subscribers see the update.

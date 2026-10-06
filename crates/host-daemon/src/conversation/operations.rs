@@ -6,10 +6,10 @@ use crate::{
     ProjectStore, terminals::Terminals, workspace_files::WorkspaceFiles, worktrees::Worktrees,
 };
 use agent_domain::{AttachmentKind, CheckpointFile, ThreadId};
-use agent_protocol::models::{Project, ProjectRoot, ProjectScript};
+use agent_protocol::models::{AutoSettle, Project, ProjectRoot, ProjectScript};
 use agent_runtime::{
-    CreatedWorktree, HostOperations, HostProject, PreparedRestore, SetupRequest, SetupRun,
-    StartedSetup, TextGenerationRequest, WorktreeRequest,
+    ConversationSettings, CreatedWorktree, HostOperations, HostProject, PreparedRestore,
+    SetupRequest, SetupRun, StartedSetup, TextGenerationRequest, WorktreeRequest,
 };
 use futures_util::future::BoxFuture;
 use serde_json::Value;
@@ -302,6 +302,58 @@ impl PreparedRestore for Restore {
     }
 }
 
+/// T3 `resolveProjectSettings`: a project's overrides over the Host's values.
+fn resolve_settings(
+    saved: &agent_protocol::models::ConversationSettings,
+    project: &str,
+) -> ConversationSettings {
+    let overrides = saved.project_overrides.get(project);
+    let auto_settle = overrides
+        .and_then(|project| project.auto_settle)
+        .unwrap_or(saved.auto_settle);
+    ConversationSettings {
+        auto_settle_after_days: match auto_settle {
+            AutoSettle::Never => None,
+            AutoSettle::AfterDays(days) => Some(days.into()),
+        },
+        continue_after_restart: overrides
+            .and_then(|project| project.continue_after_restart)
+            .unwrap_or(saved.continue_after_restart),
+        snooze_limited_threads: saved.snooze_limited_threads,
+        auto_resume_limited_threads: saved.auto_resume_limited_threads,
+    }
+}
+
+#[cfg(test)]
+mod settings_tests {
+    use super::*;
+    use agent_protocol::models::ProjectConversationSettings;
+
+    #[test]
+    fn project_overrides_take_precedence_and_absent_values_inherit() {
+        let mut saved = agent_protocol::models::ConversationSettings::default();
+        assert_eq!(
+            resolve_settings(&saved, "any"),
+            ConversationSettings::default()
+        );
+        saved.auto_settle = AutoSettle::Never;
+        saved.auto_resume_limited_threads = true;
+        saved.project_overrides.insert(
+            "opted-in".into(),
+            ProjectConversationSettings {
+                auto_settle: Some(AutoSettle::AfterDays(2)),
+                continue_after_restart: Some(true),
+            },
+        );
+        let inherited = resolve_settings(&saved, "other");
+        assert_eq!(inherited.auto_settle_after_days, None);
+        assert!(!inherited.continue_after_restart && inherited.auto_resume_limited_threads);
+        let opted_in = resolve_settings(&saved, "opted-in");
+        assert_eq!(opted_in.auto_settle_after_days, Some(2));
+        assert!(opted_in.continue_after_restart);
+    }
+}
+
 pub(crate) struct HostIo {
     pub(crate) projects: Arc<ProjectCatalog>,
     pub(crate) checkpoints: Arc<Checkpoints>,
@@ -319,6 +371,9 @@ fn error(error: anyhow::Error) -> String {
 impl HostOperations for HostIo {
     fn projects(&self) -> Vec<HostProject> {
         self.projects.list()
+    }
+    fn settings(&self, project: &str) -> ConversationSettings {
+        resolve_settings(&self.worktrees.conversation(), project)
     }
     fn real_path(&self, path: String) -> BoxFuture<'_, io::Result<Option<String>>> {
         Box::pin(async move {
