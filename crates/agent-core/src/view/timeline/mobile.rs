@@ -772,7 +772,7 @@ pub fn format_item_full_detail(visibility: FeedVisibility, item: &Item) -> Strin
     .unwrap_or_default()
 }
 
-fn feed_activity(
+pub(crate) fn feed_activity(
     state: &State,
     item: Arc<Item>,
     attempt: Option<RunAttemptId>,
