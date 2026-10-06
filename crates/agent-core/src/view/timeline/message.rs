@@ -1,5 +1,6 @@
 //! Decorations around user and assistant messages: attribution, intent
 //! markers, status chips, collapsing, copy text and per-message actions.
+use crate::js_text::is_js_space;
 use agent_domain::{
     InputIntent, Item, ItemKind, ItemStatus, Message, MessageAuthor, RunId, State, ThreadId,
     context_references,
@@ -15,10 +16,6 @@ fn status_name(status: ItemStatus) -> &'static str {
         ItemStatus::Failed => "failed",
         ItemStatus::Cancelled => "cancelled",
     }
-}
-
-fn js_space(c: char) -> bool {
-    c == '\u{feff}' || (c != '\u{85}' && c.is_whitespace())
 }
 
 /// A user-role message written by an agent rather than the user.
@@ -116,7 +113,7 @@ pub const SHOW_LESS: &str = "Show less";
 
 /// Long bodies start clipped behind "Show full message".
 pub fn user_message_collapsible(text: &str) -> bool {
-    !text.trim_matches(js_space).is_empty()
+    !text.trim_matches(is_js_space).is_empty()
         && (text.encode_utf16().count() > MAX_COLLAPSED_USER_MESSAGE_LENGTH
             || text.split('\n').count() > MAX_COLLAPSED_USER_MESSAGE_LINES)
 }
@@ -261,7 +258,7 @@ pub fn assistant_copy_state(
     show_copy_button: bool,
     streaming: bool,
 ) -> AssistantCopyState {
-    let text = text.filter(|text| !text.trim_matches(js_space).is_empty());
+    let text = text.filter(|text| !text.trim_matches(is_js_space).is_empty());
     let visible = show_copy_button && text.is_some() && !streaming;
     AssistantCopyState {
         visible,

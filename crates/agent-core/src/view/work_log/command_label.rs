@@ -1,5 +1,6 @@
 //! The program a shell command line runs, read without executing it, and the
 //! script a plain shell wrapper carries.
+use crate::js_text::{is_js_space, js_trim};
 use regex::Regex;
 use std::collections::HashMap;
 use std::sync::LazyLock;
@@ -229,18 +230,8 @@ impl CommandWrapper {
     }
 }
 
-/// JavaScript `\s`: Unicode white space plus U+FEFF, without U+0085.
-pub(crate) fn js_space(c: char) -> bool {
-    c == '\u{feff}' || (c != '\u{85}' && c.is_whitespace())
-}
-
-/// JavaScript `String.prototype.trim`.
-pub(crate) fn js_trim(text: &str) -> &str {
-    text.trim_matches(js_space)
-}
-
 fn js_trim_start(text: &str) -> &str {
-    text.trim_start_matches(js_space)
+    text.trim_start_matches(is_js_space)
 }
 
 /// Builds a regex whose `\s` and `\S` mean the JavaScript classes.
@@ -468,7 +459,7 @@ fn tokenize_shell_command(command: &str) -> Option<Vec<String>> {
             token_started = true;
             continue;
         }
-        if js_space(character) {
+        if is_js_space(character) {
             if substitution_depth > 0 || parameter_expansion_depth > 0 {
                 current.push(character);
                 token_started = true;
@@ -561,7 +552,7 @@ fn read_heredoc_delimiter(
             }
         } else if character == '"' || character == '\'' {
             quote = Some(character);
-        } else if js_space(character) || ";&|<>()".contains(character) {
+        } else if is_js_space(character) || ";&|<>()".contains(character) {
             break;
         } else {
             delimiter.push(character);
@@ -688,7 +679,7 @@ fn split_first_shell_command(command: &str) -> ShellCommandSplit {
             continue;
         }
         if character == '#'
-            && before.is_none_or(|before| js_space(before) || ";&|(".contains(before))
+            && before.is_none_or(|before| is_js_space(before) || ";&|(".contains(before))
         {
             in_comment = true;
             comment_start = i;
@@ -784,7 +775,7 @@ fn split_first_shell_command(command: &str) -> ShellCommandSplit {
         let first_command =
             js_trim_start(&command_without_shell_comments(command, i, &comments)).to_owned();
         let mut next_command_index = i + if double_operator { 2 } else { 1 };
-        while let Some(space) = at(next_command_index).filter(|&c| js_space(c)) {
+        while let Some(space) = at(next_command_index).filter(|&c| is_js_space(c)) {
             next_command_index += space.len_utf8();
         }
         let next_command = js_trim(&command[next_command_index.min(command.len())..]);
@@ -949,7 +940,7 @@ fn static_program_name(value: &str) -> Option<String> {
     }
     let program = last_path_segment(trimmed);
     if program.is_empty()
-        || (program.chars().any(js_space) && !trimmed.contains(['\\', '/']))
+        || (program.chars().any(is_js_space) && !trimmed.contains(['\\', '/']))
         || starts_with_any(program, NON_PROGRAM_PREFIX_CHARACTERS)
         || ends_with_any(program, NON_PROGRAM_SUFFIX_CHARACTERS)
     {
@@ -963,7 +954,7 @@ fn leading_powershell_literal(command: &str) -> Option<String> {
     let quote = match input.first() {
         Some(&quote @ ('"' | '\'')) => quote,
         _ => {
-            let word: String = input.iter().take_while(|&&c| !js_space(c)).collect();
+            let word: String = input.iter().take_while(|&&c| !is_js_space(c)).collect();
             return static_program_name(&word);
         }
     };
@@ -996,7 +987,7 @@ fn leading_powershell_literal(command: &str) -> Option<String> {
 /// something that is not a literal program.
 fn powershell_call_operator_program_name(command: &str) -> Option<Option<String>> {
     let rest = js_trim_start(command).strip_prefix('&')?;
-    if !rest.starts_with(js_space) {
+    if !rest.starts_with(is_js_space) {
         return None;
     }
     Some(leading_powershell_literal(rest))
@@ -1157,7 +1148,7 @@ fn literal_assignment_program(token: &str) -> Option<(String, Option<String>)> {
         value = tokenize_shell_command(&value[1..value.len() - 1])
             .and_then(|tokens| tokens.into_iter().next())
             .unwrap_or_default();
-    } else if value.chars().any(js_space) && !value.contains(['\\', '/']) {
+    } else if value.chars().any(is_js_space) && !value.contains(['\\', '/']) {
         return Some((name, None));
     }
     let program = static_program_name(&value);
@@ -1412,7 +1403,7 @@ fn parse_command_program_name(
     let first_character = js_trim_start(&split.first_command).chars().next();
     if tokens.len() == 1
         && matches!(first_character, Some('"' | '\''))
-        && tokens[0].contains(|c: char| js_space(c) || matches!(c, '(' | ')' | '='))
+        && tokens[0].contains(|c: char| is_js_space(c) || matches!(c, '(' | ')' | '='))
         && !tokens[0].contains(['\\', '/'])
     {
         return next_segment(context);

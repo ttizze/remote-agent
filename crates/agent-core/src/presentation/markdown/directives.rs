@@ -9,7 +9,7 @@ use super::artifact_templates::{
 use super::citations::{
     DirectiveAttributes, FileCitationLink, file_citation_link, file_citation_markdown,
 };
-use super::js_text::{js_space, utf16_offset};
+use crate::js_text::{is_js_space, utf16_offset};
 use ::markdown::{ParseOptions, mdast::Node};
 use regex::Regex;
 use std::sync::LazyLock;
@@ -67,7 +67,7 @@ fn line_ending_or_space(c: char) -> bool {
 
 fn name_ends(c: Option<char>) -> bool {
     c.is_none_or(|c| {
-        line_ending(c) || js_space(c) || (unicode_punctuation(c) && c != '-' && c != '_')
+        line_ending(c) || is_js_space(c) || (unicode_punctuation(c) && c != '-' && c != '_')
     })
 }
 
@@ -168,7 +168,8 @@ impl Cursor<'_> {
                 self.skip_whitespace(allow_eol);
                 continue;
             }
-            if line_ending(c) || js_space(c) || (unicode_punctuation(c) && c != '-' && c != '_') {
+            if line_ending(c) || is_js_space(c) || (unicode_punctuation(c) && c != '-' && c != '_')
+            {
                 return (c == '}').then(|| {
                     self.bump();
                     clean_attributes(list)
@@ -178,7 +179,7 @@ impl Cursor<'_> {
             self.bump();
             self.skip_while(|c| {
                 !(line_ending(c)
-                    || js_space(c)
+                    || is_js_space(c)
                     || (unicode_punctuation(c) && !matches!(c, '-' | '.' | ':' | '_')))
             });
             list.push((source[start..self.at].into(), String::new()));

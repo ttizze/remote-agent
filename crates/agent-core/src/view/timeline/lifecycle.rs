@@ -1,5 +1,6 @@
 //! Lifecycle rows of the conversation: interrupts, compactions, forks,
 //! created threads, subagents and provider handoffs.
+use crate::js_text::{is_js_space, js_trim};
 use agent_domain::{
     ContextTransferId, Driver, Item, ItemKind, ItemStatus, NodeId, Notification,
     NotificationOutcome, Run, RunId, RunStatus, State, ThreadId, Timestamp, Transfer, TransferKind,
@@ -274,14 +275,6 @@ static MARKDOWN_LINK: LazyLock<Regex> =
 static LIST_BULLET: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?mR)^[ \t]*[-*][ \t]+").unwrap());
 
-fn js_space(c: char) -> bool {
-    c == '\u{feff}' || (c != '\u{85}' && c.is_whitespace())
-}
-
-fn js_trim(text: &str) -> &str {
-    text.trim_matches(js_space)
-}
-
 /// One line of a markdown result: no list bullets, code ticks or link targets.
 fn plain_detail(text: &str) -> String {
     let linked = MARKDOWN_LINK.replace_all(text, "$1");
@@ -290,7 +283,7 @@ fn plain_detail(text: &str) -> String {
     let mut collapsed = String::with_capacity(unbulleted.len());
     let mut space = false;
     for c in unbulleted.chars() {
-        if js_space(c) {
+        if is_js_space(c) {
             space = true;
         } else {
             if space {
@@ -390,7 +383,7 @@ pub(crate) fn format_subagent_display_title(title: &str) -> String {
     let mut spaced = String::with_capacity(name.len());
     let mut gap = false;
     for c in name.chars() {
-        if c == '_' || js_space(c) {
+        if c == '_' || is_js_space(c) {
             gap = true;
         } else {
             if gap {
@@ -406,7 +399,7 @@ pub(crate) fn format_subagent_display_title(title: &str) -> String {
     let mut titled = String::with_capacity(spaced.len());
     let mut word_start = true;
     for c in js_trim(&spaced).chars() {
-        if js_space(c) {
+        if is_js_space(c) {
             word_start = true;
             titled.push(c);
         } else if word_start {

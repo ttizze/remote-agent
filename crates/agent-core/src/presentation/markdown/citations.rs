@@ -1,6 +1,6 @@
 //! File citations Codex emits as `:codex-file-citation{path=… line_range_start=…}`,
 //! resolved to a file link and its portable Markdown form.
-use super::js_text::{js_space, js_trim};
+use crate::js_text::{is_js_space, js_trim};
 use std::collections::BTreeMap;
 
 /// Directive attributes by name; a later duplicate replaces an earlier one.
@@ -56,7 +56,7 @@ fn js_number(value: &str) -> Option<f64> {
 }
 
 fn positive_integer(value: Option<&str>) -> Option<u64> {
-    let value = value.filter(|value| !value.chars().all(js_space))?;
+    let value = value.filter(|value| !value.chars().all(is_js_space))?;
     let parsed = js_number(value)?;
     (parsed.fract() == 0.0 && parsed.abs() <= MAX_SAFE_INTEGER && parsed > 0.0)
         .then_some(parsed as u64)

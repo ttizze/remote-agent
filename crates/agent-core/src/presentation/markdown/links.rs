@@ -1,6 +1,6 @@
 //! Markdown link destinations and inline code that name local files, and how native
 //! clients present links (external host, file chip with icon, or plain link).
-use super::js_text::{decode_uri_component, js_space, js_trim, utf16_len, utf16_skip};
+use crate::js_text::{decode_uri_component, is_js_space, js_trim, utf16_len, utf16_skip};
 use regex::Regex;
 use std::sync::LazyLock;
 
@@ -151,7 +151,7 @@ fn looks_like_hostname(segment: &str, has_position: bool) -> bool {
 /// It does not resolve paths or turn plain prose and fenced code into links.
 pub fn inline_code_file_path_candidate(code_text: &str) -> Option<String> {
     let trimmed = js_trim(code_text);
-    if trimmed.is_empty() || trimmed.chars().any(|c| js_space(c) || c == '`') {
+    if trimmed.is_empty() || trimmed.chars().any(|c| is_js_space(c) || c == '`') {
         return None;
     }
     let candidate = if is_windows_absolute_path(trimmed) {

@@ -1,7 +1,7 @@
 //! What a tool call did (ran, read, changed, searched) and its read and search
 //! headings, from the structured tool input.
 use super::ItemType;
-use super::js_text::{JS_SPACE, js_trim};
+use crate::js_text::{JS_SPACE, js_trim};
 use regex::Regex;
 use serde_json::{Map, Value};
 use std::collections::HashSet;

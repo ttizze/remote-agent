@@ -1,6 +1,6 @@
 //! Drafts of the answers to a pending question request: option chips, a
 //! custom answer and attachments, and the answers they submit.
-use crate::view::work_log::command_label::js_trim;
+use crate::js_text::js_trim;
 use agent_domain::{Answer, Answers, Question};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

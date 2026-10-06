@@ -1,6 +1,6 @@
 //! What an expanded work row shows: the call, the formatted output, and
 //! whether the Host withheld content `LoadItemDetail` fetches.
-use super::command_label::js_trim;
+use crate::js_text::js_trim;
 use agent_domain::{Item, ItemKind, ItemStatus, RequestBody, State};
 use serde_json::Value;
 

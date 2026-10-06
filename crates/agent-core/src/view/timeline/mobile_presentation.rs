@@ -4,8 +4,9 @@ use super::mobile::{
     ActivityGroup, FeedActivity, FeedInput, FeedLatestRun, FeedRow, FeedStatus, WorkToggle,
     compact_work_entry_text, is_failed_error, single_row, split_activity_group,
 };
+use crate::js_text::js_trim;
 use crate::view::timeline::timing::format_duration;
-use crate::view::work_log::command_label::{command_program_name, js_trim};
+use crate::view::work_log::command_label::command_program_name;
 use crate::view::work_log::presentation::{
     ToolGroupAction, live_activity_tool_status, resolve_work_entry_tool_presentation,
     summarize_tool_group, tool_group_action, tool_group_summary_kind,

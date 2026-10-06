@@ -1,7 +1,7 @@
 //! A tool row's surface, icon, source and viewed image, read from the
 //! provider-neutral presentation an item carries.
-use super::command_label::{js_space, js_trim};
 use super::{NativeApp, ToolIcon, ToolSource, ToolSourceKind, ToolSurface};
+use crate::js_text::{is_js_space, js_trim};
 use agent_domain::{Item, ItemKind, ToolPresentation};
 use serde_json::Value;
 
@@ -111,7 +111,7 @@ fn read_tool_path(name: &str, input: &Value) -> Option<String> {
     let normalized: String = name
         .to_lowercase()
         .chars()
-        .filter(|&c| !js_space(c) && !matches!(c, '_' | '-'))
+        .filter(|&c| !is_js_space(c) && !matches!(c, '_' | '-'))
         .collect();
     if normalized != "read" && normalized != "read file" {
         return None;

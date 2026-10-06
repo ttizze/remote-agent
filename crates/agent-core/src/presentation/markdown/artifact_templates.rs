@@ -1,7 +1,7 @@
 //! Codex result cards announced by `::artifact-template{…}`: a skill the user can reuse
 //! to make a document, presentation, image and so on.
 use super::citations::DirectiveAttributes;
-use super::js_text::{js_space, js_trim};
+use crate::js_text::{is_js_space, js_trim};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ArtifactTemplateKind {
@@ -139,13 +139,13 @@ pub fn artifact_template_presentation_label(kind: ArtifactTemplateKind) -> &'sta
 /// Adds the template's prompt to the draft unless the draft already ends with it.
 pub fn append_artifact_template_use_prompt(draft: &str, template: &ArtifactTemplate) -> String {
     let prompt = artifact_template_use_prompt(template);
-    let trimmed_draft = draft.trim_end_matches(js_space);
+    let trimmed_draft = draft.trim_end_matches(is_js_space);
     if let Some(before) = trimmed_draft.strip_suffix(prompt.as_str())
-        && before.chars().next_back().is_none_or(js_space)
+        && before.chars().next_back().is_none_or(is_js_space)
     {
         return draft.to_owned();
     }
-    let needs_leading_space = draft.chars().next_back().is_some_and(|c| !js_space(c));
+    let needs_leading_space = draft.chars().next_back().is_some_and(|c| !is_js_space(c));
     format!(
         "{draft}{}{prompt}",
         if needs_leading_space { " " } else { "" }

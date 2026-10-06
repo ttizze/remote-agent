@@ -1,5 +1,6 @@
 //! Desktop work-log row labels: the collapsed heading of a call, its live
 //! present-tense form, and which calls an expanded group lists.
+use crate::js_text::{JS_SPACE, is_js_space, js_trim, utf16_len};
 use crate::presentation::markdown::links::{
     file_basename, format_file_path_position, is_windows_absolute_path, split_file_path_position,
     strip_slash_prefixed_windows_drive,
@@ -7,7 +8,6 @@ use crate::presentation::markdown::links::{
 use crate::view::work_log::{
     ItemType, SourceActivity, ToolLifecycleStatus, WorkLogEntry, WorkTone,
     command_label::{command_display_text, command_program_name},
-    js_text::{JS_SPACE, is_js_space, js_trim, utf16_len},
     presentation::{
         ToolGroupAction, live_activity_tool_status, normalize_compact_tool_label,
         resolve_work_entry_tool_presentation, tool_group_action, work_entry_indicates_tool_failure,

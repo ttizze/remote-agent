@@ -1,6 +1,6 @@
 //! The orchestration tools the Host serves over MCP, with the labels cards,
 //! activity rows and group summaries share.
-use super::js_text::{JS_DOT, JS_SPACE};
+use crate::js_text::{JS_DOT, JS_SPACE};
 use regex::Regex;
 use std::sync::LazyLock;
 
@@ -323,7 +323,7 @@ static PREFIXED_NAME: LazyLock<Regex> = LazyLock::new(|| {
 
 /// A label without a trailing "complete"/"completed".
 pub(crate) fn without_completion_suffix(value: &str) -> String {
-    super::js_text::js_trim(&COMPLETION_SUFFIX.replace(value, "")).into()
+    crate::js_text::js_trim(&COMPLETION_SUFFIX.replace(value, "")).into()
 }
 
 /// Providers disagree on how the injected server prefixes its tools:

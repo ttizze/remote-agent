@@ -1,6 +1,10 @@
 //! Where the bytes of an authored image or video source are loaded from.
 //! Filesystem paths belong to the Host and never reach an image view directly.
-use super::js_text::js_trim;
+use crate::presentation::markdown::links::{
+    file_basename, is_windows_absolute_path, normalize_markdown_link_destination,
+    safe_decode_uri_component, split_markdown_link_search_and_hash,
+    strip_slash_prefixed_windows_drive,
+};
 use regex::Regex;
 use std::sync::LazyLock;
 
@@ -16,68 +20,8 @@ static DIRECT_IMAGE_SOURCE: LazyLock<Regex> = LazyLock::new(|| {
 });
 static URI_SCHEME: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^[A-Za-z][A-Za-z0-9+.-]*:").expect("scheme pattern compiles"));
-static SLASH_PREFIXED_WINDOWS_DRIVE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^/[A-Za-z]:[\\/]").expect("drive pattern compiles"));
-static WINDOWS_DRIVE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^[a-zA-Z]:(?:[/\\]|$)").expect("drive pattern compiles"));
 static POSITION_SUFFIX: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r":[0-9]+(?::[0-9]+)?$").expect("position pattern compiles"));
-
-pub(crate) fn is_windows_absolute_path(value: &str) -> bool {
-    value.starts_with("\\\\") || WINDOWS_DRIVE.is_match(value)
-}
-
-/// JavaScript `decodeURIComponent`, keeping the input when it is malformed.
-fn safe_decode_uri_component(value: &str) -> String {
-    let bytes = value.as_bytes();
-    let mut decoded = Vec::with_capacity(bytes.len());
-    let mut index = 0;
-    while index < bytes.len() {
-        if bytes[index] != b'%' {
-            decoded.push(bytes[index]);
-            index += 1;
-            continue;
-        }
-        let Some(byte) = bytes
-            .get(index + 1..index + 3)
-            .filter(|hex| hex.iter().all(u8::is_ascii_hexdigit))
-            .and_then(|hex| u8::from_str_radix(std::str::from_utf8(hex).ok()?, 16).ok())
-        else {
-            return value.into();
-        };
-        decoded.push(byte);
-        index += 3;
-    }
-    String::from_utf8(decoded).unwrap_or_else(|_| value.into())
-}
-
-fn normalize_markdown_link_destination(value: &str) -> &str {
-    let trimmed = js_trim(value);
-    trimmed
-        .strip_prefix('<')
-        .and_then(|inner| inner.strip_suffix('>'))
-        .unwrap_or(trimmed)
-}
-
-/// Browser URL parsers write `C:/foo` as `/C:/foo` for file URLs.
-fn strip_slash_prefixed_windows_drive(path: &str) -> &str {
-    if SLASH_PREFIXED_WINDOWS_DRIVE.is_match(path) {
-        &path[1..]
-    } else {
-        path
-    }
-}
-
-/// The path before any `?` and the `#` fragment.
-fn split_search_and_hash(value: &str) -> (&str, &str) {
-    let (path_with_search, hash) = value
-        .find('#')
-        .map_or((value, ""), |index| (&value[..index], &value[index..]));
-    let path = path_with_search
-        .find('?')
-        .map_or(path_with_search, |index| &path_with_search[..index]);
-    (path, hash)
-}
 
 /// A `file:` URL as a host path, still percent-encoded. A non-localhost
 /// authority becomes a UNC share.
@@ -95,7 +39,7 @@ fn parse_file_url_path(href: &str) -> Option<String> {
     } else {
         format!("\\\\{host}{}", parsed.path().replace('/', "\\"))
     };
-    (!path.is_empty()).then(|| strip_slash_prefixed_windows_drive(&path).to_owned())
+    (!path.is_empty()).then(|| strip_slash_prefixed_windows_drive(&path))
 }
 
 fn join_workspace_path(workspace_root: &str, relative_path: &str) -> String {
@@ -119,6 +63,7 @@ pub fn classify_markdown_image_source(
         return MarkdownImageSource::Blocked;
     };
     let source = normalize_markdown_link_destination(value);
+    let source = source.as_str();
     if source.is_empty() || source.starts_with('#') || source.starts_with('?') {
         return MarkdownImageSource::Blocked;
     }
@@ -131,13 +76,14 @@ pub fn classify_markdown_image_source(
     {
         return match parse_file_url_path(source) {
             Some(path) => MarkdownImageSource::WorkspaceFile {
-                path: strip_slash_prefixed_windows_drive(&safe_decode_uri_component(&path)).into(),
+                path: strip_slash_prefixed_windows_drive(&safe_decode_uri_component(&path)),
             },
             None => MarkdownImageSource::Blocked,
         };
     }
-    let decoded = safe_decode_uri_component(split_search_and_hash(source).0);
+    let decoded = safe_decode_uri_component(&split_markdown_link_search_and_hash(source).path);
     let path = strip_slash_prefixed_windows_drive(&decoded);
+    let path = path.as_str();
     if path.is_empty() {
         return MarkdownImageSource::Blocked;
     }
@@ -156,20 +102,7 @@ pub fn classify_markdown_image_source(
 }
 
 pub fn markdown_image_source_fragment(source: &str) -> String {
-    split_search_and_hash(normalize_markdown_link_destination(source))
-        .1
-        .into()
-}
-
-fn file_basename(path: &str) -> &str {
-    // A trailing separator still names the directory before it.
-    let trimmed = path.trim_end_matches(['/', '\\']);
-    if trimmed.is_empty() {
-        return path;
-    }
-    trimmed
-        .rfind(['/', '\\'])
-        .map_or(trimmed, |index| &trimmed[index + 1..])
+    split_markdown_link_search_and_hash(&normalize_markdown_link_destination(source)).hash
 }
 
 /// The image or video type of a literal filesystem extension such as `.png`.
@@ -214,6 +147,7 @@ pub(crate) fn workspace_media(source: &str, resolved_path: &str) -> Option<Works
         None => resolved_path,
     };
     let basename = file_basename(path);
+    let basename = basename.as_str();
     let mime_type = media_mime_type_from_extension(&basename[basename.rfind('.')?..])?;
     let windows = is_windows_absolute_path(path) || path.starts_with("//");
     let reference_name = if windows {

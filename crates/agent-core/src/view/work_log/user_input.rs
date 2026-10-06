@@ -1,6 +1,6 @@
 //! One-line previews of the answers given to a question request.
 use super::QuestionAnswer;
-use super::command_label::{js_space, js_trim};
+use crate::js_text::{is_js_space, js_trim};
 use agent_domain::Answer;
 
 /// Runs of white space as one space, trimmed.
@@ -8,7 +8,7 @@ fn collapsed(text: &str) -> String {
     let mut result = String::new();
     let mut in_space = false;
     for c in text.chars() {
-        if js_space(c) {
+        if is_js_space(c) {
             if !in_space {
                 result.push(' ');
             }

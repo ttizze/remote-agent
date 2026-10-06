@@ -1,7 +1,7 @@
 //! Group summaries of orchestration tool calls: what succeeded, counted by
 //! the entities the calls touched.
-use super::js_text::js_trim;
 use super::tool_catalog::ToolSummaryAction;
+use crate::js_text::js_trim;
 use serde_json::{Map, Value};
 use std::borrow::Cow;
 use std::collections::HashSet;

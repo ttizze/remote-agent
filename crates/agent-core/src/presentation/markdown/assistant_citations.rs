@@ -1,6 +1,6 @@
 //! Quotes of earlier assistant replies, written into a user message as
 //! `[Assistant quote](citation://v1/<environment>/<thread>/<message>?text=…)`.
-use super::js_text::{decode_uri_component, js_space, js_trim, utf16_len, utf16_offset};
+use crate::js_text::{decode_uri_component, is_js_space, js_trim, utf16_len, utf16_offset};
 use serde::Serialize;
 use std::collections::HashMap;
 
@@ -172,7 +172,7 @@ fn citation_links(text: &str) -> Vec<(usize, usize, &str)> {
         let href_len = text[href_start..]
             .strip_prefix(HREF_PREFIX)
             .and_then(|body| {
-                let end = body.find(|c: char| c == ')' || js_space(c))?;
+                let end = body.find(|c: char| c == ')' || is_js_space(c))?;
                 let units = utf16_len(&body[..end]);
                 (body[end..].starts_with(')')
                     && (1..=MAX_HREF_LENGTH - HREF_PREFIX.len()).contains(&units))

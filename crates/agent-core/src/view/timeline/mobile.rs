@@ -2,12 +2,13 @@
 //! grouped activities, before folds, tool toggles and the live slot are
 //! presented (see `mobile_presentation`).
 use crate::commands::outbox::PendingMessage;
+use crate::js_text::{is_js_space, js_trim};
 use crate::view::timeline::entries::{
     ChatMessage, EntriesInput, TimelineEntryKind, derive_timeline_entries, file_change_paths,
     question_answer,
 };
 use crate::view::timeline::lifecycle::{HandoffDivider, format_subagent_display_title};
-use crate::view::work_log::command_label::{command_display_text, js_space, js_trim};
+use crate::view::work_log::command_label::command_display_text;
 use crate::view::work_log::item_detail::{turn_item_has_detail, turn_item_needs_detail_fetch};
 use crate::view::work_log::presentation::{
     ToolGroupAction, ToolGroupSummaryKind, context_compaction_label,
@@ -248,7 +249,7 @@ pub(crate) fn compact_work_entry_text(value: &str) -> String {
     let mut compacted = String::with_capacity(value.len());
     let mut space = false;
     for c in value.chars() {
-        if js_space(c) {
+        if is_js_space(c) {
             space = true;
         } else {
             if space {

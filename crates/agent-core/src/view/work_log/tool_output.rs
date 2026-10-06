@@ -3,7 +3,7 @@
 //!
 //! The Host compacts dynamic tool output with its own copy of this reader
 //! before delivery; this copy reads outputs fetched with the item detail.
-use super::js_text::{JS_SPACE, js_trim, utf16_len};
+use crate::js_text::{JS_SPACE, js_trim, utf16_len};
 use regex::Regex;
 use serde_json::{Map, Value, json};
 use std::borrow::Cow;

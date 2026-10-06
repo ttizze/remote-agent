@@ -1,16 +1,17 @@
 //! Work-log presentation both layouts share: tool identity and status labels,
 //! failure and success markers, group actions and group summaries.
-use super::js_text::{js_trim, utf16_prefix};
 use super::media_source::{MarkdownImageSource, classify_markdown_image_source, workspace_media};
 use super::tool_activity::{ToolActivityAction, classify_tool_activity};
 use super::tool_catalog::{
     ToolDefinition, ToolLogo, ToolSummaryAction, resolve_tool_definition, without_completion_suffix,
 };
 use super::tool_output::tool_output_indicates_failure;
+use super::tool_presentation::is_workspace_image_preview_path;
 use super::tool_summary::{
     ToolCallOutcome, ToolSummaryCall, summarize_tool_calls, tool_result_indicates_failure,
 };
 use super::{ItemType, ToolLifecycleStatus, ToolSource, ToolSourceKind, WorkLogEntry, WorkTone};
+use crate::js_text::{js_trim, utf16_prefix};
 use agent_domain::{Item, ItemKind, ItemStatus, Json, ThreadId};
 use regex::Regex;
 use serde_json::{Value, json};
@@ -444,17 +445,6 @@ pub fn tool_group_action(entry: &WorkLogEntry) -> ToolGroupAction {
     } else {
         ToolGroupAction::Update
     }
-}
-
-const WORKSPACE_IMAGE_PREVIEW_EXTENSIONS: [&str; 8] = [
-    ".avif", ".gif", ".ico", ".jpeg", ".jpg", ".png", ".svg", ".webp",
-];
-
-fn is_workspace_image_preview_path(path: &str) -> bool {
-    let path = path.to_lowercase();
-    WORKSPACE_IMAGE_PREVIEW_EXTENSIONS
-        .iter()
-        .any(|extension| path.ends_with(extension))
 }
 
 fn single_line_image_path(path: Option<&str>) -> Option<&str> {
