@@ -4,6 +4,7 @@ pub mod command_label;
 pub mod entry;
 pub mod item_detail;
 pub mod item_support;
+mod js_text;
 pub mod presentation;
 pub mod scroll_anchor;
 pub mod tool_activity;
