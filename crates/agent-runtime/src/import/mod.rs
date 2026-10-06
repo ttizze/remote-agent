@@ -10,7 +10,7 @@ mod scanner;
 mod sources;
 
 pub use fs::*;
-pub use git::ProjectGit;
+pub use git::{ProjectGit, normalize_remote_url};
 pub use importer::*;
 pub use paths::MANAGED_WORKTREE_SEGMENT;
 pub use record::{

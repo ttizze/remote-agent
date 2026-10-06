@@ -44,6 +44,32 @@ pub struct Project {
     pub roots: Vec<ProjectRoot>,
     #[serde(default)]
     pub scripts: Vec<ProjectScript>,
+    /// Resolved from the root's Git remotes when the Host lists the project; never
+    /// stored.
+    #[serde(default)]
+    pub repository_identity: Option<RepositoryIdentity>,
+}
+/// T3 `RepositoryIdentity`: the repository a project's checkout belongs to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepositoryIdentity {
+    /// The normalized remote URL, shared by every clone.
+    pub canonical_key: String,
+    pub locator: RepositoryLocator,
+    pub web_url: Option<String>,
+    pub root_path: Option<String>,
+    pub display_name: Option<String>,
+    pub provider: Option<String>,
+    pub owner: Option<String>,
+    pub name: Option<String>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepositoryLocator {
+    /// Always `git-remote`.
+    pub source: String,
+    pub remote_name: String,
+    pub remote_url: String,
 }
 /// A project action (T3 `ProjectScript`). The first one that runs on worktree
 /// creation is the project's setup script.

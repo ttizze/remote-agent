@@ -21,6 +21,24 @@ struct Project {
     pub name: String,
     pub roots: Vec<ProjectRoot>,
     pub scripts: Vec<ProjectScript>,
+    pub repository_identity: Option<RepositoryIdentity>,
+}
+#[uniffi::remote(Record)]
+struct RepositoryIdentity {
+    pub canonical_key: String,
+    pub locator: RepositoryLocator,
+    pub web_url: Option<String>,
+    pub root_path: Option<String>,
+    pub display_name: Option<String>,
+    pub provider: Option<String>,
+    pub owner: Option<String>,
+    pub name: Option<String>,
+}
+#[uniffi::remote(Record)]
+struct RepositoryLocator {
+    pub source: String,
+    pub remote_name: String,
+    pub remote_url: String,
 }
 #[uniffi::remote(Record)]
 struct ProjectScript {

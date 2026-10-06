@@ -6,7 +6,7 @@ use crate::{
     ProjectStore, terminals::Terminals, workspace_files::WorkspaceFiles, worktrees::Worktrees,
 };
 use agent_domain::{AttachmentKind, CheckpointFile, ThreadId};
-use agent_protocol::models::{AutoSettle, Project, ProjectRoot, ProjectScript};
+use agent_protocol::models::{AutoSettle, Project, ProjectRoot, ProjectScript, RepositoryIdentity};
 use agent_runtime::{
     ConversationSettings, CreatedWorktree, HostOperations, HostProject, PreparedRestore,
     SetupRequest, SetupRun, StartedSetup, TextGenerationRequest, WorktreeRequest,
@@ -31,6 +31,7 @@ pub(crate) struct ProjectCatalog {
     store: ProjectStore,
     projects: RwLock<Vec<HostProject>>,
     scripts: RwLock<HashMap<String, Vec<ProjectScript>>>,
+    identities: RwLock<HashMap<String, RepositoryIdentity>>,
     chats: tokio::sync::OnceCell<bool>,
 }
 
@@ -40,6 +41,7 @@ impl ProjectCatalog {
             store,
             projects: RwLock::new(vec![]),
             scripts: RwLock::default(),
+            identities: RwLock::default(),
             chats: tokio::sync::OnceCell::new(),
         }
     }
@@ -86,6 +88,12 @@ impl ProjectCatalog {
     /// The project as clients see it.
     pub(crate) fn wire(&self, project: HostProject) -> Project {
         Project {
+            repository_identity: self
+                .identities
+                .read()
+                .unwrap_or_else(|error| error.into_inner())
+                .get(&project.id)
+                .cloned(),
             scripts: self.scripts(&project.id),
             id: project.id,
             name: project.name,
@@ -121,6 +129,22 @@ impl ProjectCatalog {
                 root: chats.to_string_lossy().into_owned(),
             });
         }
+        let roots: Vec<(String, String)> = projects
+            .iter()
+            .filter(|project| project.id != CHATS_PROJECT)
+            .map(|project| (project.id.clone(), project.root.clone()))
+            .collect();
+        let identities = tokio::task::spawn_blocking(move || {
+            roots
+                .into_iter()
+                .filter_map(|(id, root)| Some((id, crate::repository::resolve(Path::new(&root))?)))
+                .collect()
+        })
+        .await?;
+        *self
+            .identities
+            .write()
+            .unwrap_or_else(|error| error.into_inner()) = identities;
         *self
             .projects
             .write()

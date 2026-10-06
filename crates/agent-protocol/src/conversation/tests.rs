@@ -66,6 +66,7 @@ fn attachment() -> Attachment {
 }
 fn project(id: &str) -> Project {
     Project {
+        repository_identity: None,
         id: id.into(),
         name: id.into(),
         roots: vec![crate::models::ProjectRoot {
@@ -527,7 +528,7 @@ fn stream_items_round_trip() {
         },
         ShellUpdate::ProjectUpdated {
             sequence: 44,
-            project: project("project"),
+            project: Box::new(project("project")),
         },
         ShellUpdate::ProjectRemoved {
             sequence: 45,

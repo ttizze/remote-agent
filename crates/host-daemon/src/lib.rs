@@ -12,6 +12,7 @@ mod host_runtime;
 pub mod local_host;
 pub mod platform;
 mod projects;
+mod repository;
 mod terminals;
 mod workspace_files;
 mod workspace_review;

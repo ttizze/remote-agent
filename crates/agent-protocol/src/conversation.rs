@@ -229,7 +229,7 @@ pub enum ShellUpdate {
     },
     ProjectUpdated {
         sequence: u64,
-        project: Project,
+        project: Box<Project>,
     },
     ProjectRemoved {
         sequence: u64,

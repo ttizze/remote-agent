@@ -175,7 +175,8 @@ fn azure_key(host: &str, segments: &[&str]) -> Option<String> {
     })
 }
 
-pub(crate) fn normalize_remote_url(value: &str) -> String {
+/// T3 `normalizeGitRemoteUrl`: the key every clone of one repository shares.
+pub fn normalize_remote_url(value: &str) -> String {
     let trimmed = value.trim().trim_end_matches('/');
     let trimmed = match trimmed.len().checked_sub(4) {
         Some(at) if trimmed.is_char_boundary(at) && trimmed[at..].eq_ignore_ascii_case(".git") => {

@@ -58,6 +58,7 @@ impl ProjectStore {
         }
         let id = uuid::Uuid::new_v4().to_string();
         projects.push(Project {
+            repository_identity: None,
             id: id.clone(),
             name: root
                 .file_name()
@@ -84,6 +85,7 @@ impl ProjectStore {
             Some(index) => index,
             None if rootless => {
                 projects.push(Project {
+                    repository_identity: None,
                     id: id.into(),
                     ..Project::default()
                 });

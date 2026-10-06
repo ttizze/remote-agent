@@ -1028,3 +1028,49 @@ async fn agent_tools_read_a_thread_of_their_own_project() {
         Err("Delegation requires an active parent run".into())
     );
 }
+
+// T3 ShellStream: projects carry their repository identity.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn shell_projects_carry_their_repository_identity() {
+    let host = host().await;
+    git(
+        &host.project_root,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "git@github.com:T3Tools/t3code.git",
+        ],
+    );
+    let _: agent_protocol::models::Empty = host
+        .call(Call::UpdateProject(
+            agent_protocol::operations::UpdateProject {
+                project_id: host.project.clone(),
+                scripts: None,
+            },
+        ))
+        .await
+        .unwrap();
+    let shell = host
+        .reply(Call::ShellStream(wire::SubscribeShell {
+            after_sequence: None,
+            request_completion_marker: false,
+            location: wire::ShellLocation::Active,
+        }))
+        .await;
+    let Response::Success {
+        result: wire::ShellUpdate::Snapshot(snapshot),
+    } = protocol::decode::<Response<wire::ShellUpdate>>(&shell.initial).unwrap()
+    else {
+        panic!("a snapshot opens the shell stream");
+    };
+    let project = snapshot
+        .projects
+        .iter()
+        .find(|project| project.id == host.project)
+        .unwrap();
+    let identity = project.repository_identity.as_ref().unwrap();
+    assert_eq!(identity.canonical_key, "github.com/t3tools/t3code");
+    assert_eq!(identity.provider.as_deref(), Some("github"));
+    host.conversation.shutdown().await;
+}

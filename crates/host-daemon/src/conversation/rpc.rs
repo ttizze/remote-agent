@@ -99,7 +99,7 @@ fn shell_update(update: agent_runtime::ShellUpdate, catalog: &ProjectCatalog) ->
             project: value,
         } => wire::ShellUpdate::ProjectUpdated {
             sequence,
-            project: catalog.wire(value),
+            project: Box::new(catalog.wire(value)),
         },
         Shell::ProjectRemoved { sequence, project } => wire::ShellUpdate::ProjectRemoved {
             sequence,
