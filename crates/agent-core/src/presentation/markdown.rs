@@ -1,4 +1,7 @@
 //! Native clients use the same GFM parser as GPUI's Markdown renderer.
+pub mod citations;
+pub mod directives;
+pub mod links;
 use ::markdown::{
     ParseOptions,
     mdast::{AlignKind, Node},

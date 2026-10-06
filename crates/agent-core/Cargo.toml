@@ -25,6 +25,7 @@ tokio-util.workspace = true
 thiserror.workspace = true
 scopeguard = "1.2"
 markdown = "=1.0.0"
+regex = "1"
 
 [dev-dependencies]
 tempfile = "3"
