@@ -1111,6 +1111,45 @@ async fn native_subagent_replays_keep_children_runless_and_output_out_of_the_par
                 .iter()
                 .any(|i| matches!(i.kind, ItemKind::DynamicTool { .. }))
         );
+        // subagent/codex_output.ts: child commands stay out of the parent.
+        assert!(
+            !replay
+                .state()
+                .items
+                .iter()
+                .any(|i| matches!(i.kind, ItemKind::CommandExecution { .. })),
+            "{scenario} {driver:?}: a child command reached the parent"
+        );
+        if scenario == "subagent" {
+            // Each child was handed one file and reported what only that file holds.
+            let pairs = match driver {
+                Driver::Codex => [
+                    ("package.json", "tsconfig.json", "effect-codex-app-server"),
+                    ("tsconfig.json", "package.json", "../../tsconfig.base.json"),
+                ],
+                Driver::Claude => [
+                    ("package.json", "tsconfig.json", "claude-read-only-fixture"),
+                    ("tsconfig.json", "package.json", "ES2022"),
+                ],
+            };
+            let tasks = &replay.state().tasks;
+            for (file, other, content) in pairs {
+                assert!(
+                    tasks.iter().any(|task| task.prompt.contains(file)
+                        && !task.prompt.contains(other)
+                        && task.result.as_deref().is_some_and(|r| r.contains(content))),
+                    "{scenario} {driver:?}: no child read only {file}: {tasks:?}"
+                );
+            }
+            if driver == Driver::Claude {
+                for file in ["package.json", "tsconfig.json"] {
+                    let prompt = format!(
+                        "Read the file `{file}` in the current working directory and return its full contents."
+                    );
+                    assert!(tasks.iter().any(|task| task.prompt == prompt));
+                }
+            }
+        }
         for state in replay.states.values() {
             for task in &state.tasks {
                 assert_eq!(
@@ -1131,6 +1170,17 @@ async fn native_subagent_replays_keep_children_runless_and_output_out_of_the_par
                         .iter()
                         .any(|i| matches!(i.kind, ItemKind::AssistantMessage { .. })),
                     "{scenario} {driver:?}: child has no assistant response"
+                );
+                let result = task.result.as_deref().unwrap_or_default();
+                let head: String = result.chars().take(40).collect();
+                assert!(
+                    !head.is_empty()
+                        && child.items.iter().any(|i| {
+                            matches!(i.kind, ItemKind::AssistantMessage { .. })
+                                && i.text.contains(&head)
+                        }),
+                    "{scenario} {driver:?}: child {} does not hold its own response {head:?}",
+                    task.child_thread
                 );
                 if driver == Driver::Claude {
                     assert!(

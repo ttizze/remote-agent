@@ -1,5 +1,6 @@
 //! In-memory provider processes and Host for session tests.
 use super::super::*;
+use std::collections::VecDeque;
 use std::pin::Pin;
 use std::task::{Context, Poll, Waker};
 use tokio::io::ReadBuf;
@@ -113,6 +114,14 @@ impl tokio::io::AsyncWrite for Stdin {
         _: &mut Context<'_>,
         bytes: &[u8],
     ) -> Poll<io::Result<usize>> {
+        let stall = *self.host.stall.lock().unwrap();
+        if let Some(marker) = stall
+            && bytes
+                .windows(marker.len())
+                .any(|window| window == marker.as_bytes())
+        {
+            return Poll::Pending;
+        }
         self.buffer.extend_from_slice(bytes);
         while let Some(end) = self.buffer.iter().position(|b| *b == b'\n') {
             let line: Vec<u8> = self.buffer.drain(..=end).collect();
@@ -163,6 +172,7 @@ impl ProcessControl for Control {
 }
 
 type SpawnHook = Arc<dyn Fn(&SpawnRequest) -> BoxFuture<'static, io::Result<()>> + Send + Sync>;
+type SessionWriteHook = Arc<dyn Fn(&str) + Send + Sync>;
 
 /// Records Host calls in order and hands out fake processes.
 pub(crate) struct FakeHost {
@@ -177,6 +187,9 @@ pub(crate) struct FakeHost {
     pub(crate) transcripts: Mutex<BTreeMap<String, String>>,
     pub(crate) outbound: Mutex<VecDeque<Value>>,
     pub(crate) translate: Mutex<Option<Translate>>,
+    /// A write containing this text never completes, as a provider that stopped reading.
+    pub(crate) stall: Mutex<Option<&'static str>>,
+    pub(crate) before_session_write: Mutex<Option<SessionWriteHook>>,
 }
 impl FakeHost {
     pub(crate) fn new() -> Arc<Self> {
@@ -197,6 +210,8 @@ impl FakeHost {
             transcripts: Mutex::new(BTreeMap::new()),
             outbound: Mutex::new(VecDeque::new()),
             translate: Mutex::new(None),
+            stall: Mutex::new(None),
+            before_session_write: Mutex::new(None),
         })
     }
     pub(crate) fn respond(&self, responder: impl Fn(&Value) -> Vec<Value> + Send + Sync + 'static) {
@@ -315,6 +330,10 @@ impl SessionHost for FakeHost {
         transcript: String,
     ) -> BoxFuture<'_, io::Result<()>> {
         Box::pin(async move {
+            let hook = self.before_session_write.lock().unwrap().clone();
+            if let Some(hook) = hook {
+                hook(&session);
+            }
             self.transcripts.lock().unwrap().insert(session, transcript);
             Ok(())
         })

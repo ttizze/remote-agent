@@ -120,7 +120,7 @@ pub(crate) fn codex_replies(frame: &Value) -> Vec<Value> {
 }
 
 fn claude_replies(frame: &Value) -> Vec<Value> {
-    if frame["type"] == "control_request" && frame["request"]["subtype"] != "interrupt" {
+    if frame["type"] == "control_request" {
         return vec![
             json!({"type":"control_response","response":{"subtype":"success","request_id":frame["request_id"],"response":{}}}),
         ];
@@ -285,6 +285,7 @@ fn options(idle: u64, pin: u64) -> SessionOptions {
         max_idle_pin: Duration::from_millis(pin),
         reply_timeout: Duration::from_secs(5),
         close_grace: Duration::from_millis(200),
+        write_timeout: Duration::from_secs(5),
     }
 }
 
@@ -700,6 +701,12 @@ async fn a_released_session_leaves_no_live_request() {
         .find(|item| matches!(&item.kind, ItemKind::ApprovalRequest { request: r } if *r == request.id))
         .unwrap();
     assert!(card.status.terminal());
+    assert_eq!(request.status, RequestStatus::Expired);
+    assert_eq!(
+        request.capability,
+        agent_domain::ResponseCapability::NotResumable
+    );
+    assert_eq!(card.status, ItemStatus::Failed);
 }
 
 // ProviderTurnStartService.test.ts: "terminalizes a starting run when its
@@ -1488,5 +1495,724 @@ async fn a_claude_rollback_closes_the_process_for_a_resume_at_the_head() {
             .await
             .unwrap(),
         None
+    );
+}
+
+fn written_methods(process: &fake::FakeProcess, method: &str) -> Vec<Value> {
+    process
+        .written()
+        .into_iter()
+        .filter(|frame| frame["method"] == method)
+        .collect()
+}
+
+fn claude_kinds(frames: &[Value]) -> Vec<String> {
+    frames
+        .iter()
+        .map(|frame| {
+            frame["request"]["subtype"]
+                .as_str()
+                .or(frame["type"].as_str())
+                .unwrap()
+                .to_owned()
+        })
+        .collect()
+}
+
+impl Rig {
+    /// A Claude thread whose first turn completed on a live process.
+    async fn claude_turn(&self, id: &ThreadId, mode: RuntimeMode) -> Arc<fake::FakeProcess> {
+        self.create(id, selection(Driver::Claude, "claude-sonnet-4-6"), mode)
+            .await;
+        self.send(id, "first", DispatchMode::StartImmediately).await;
+        self.drain().await;
+        let process = self.host.process(0);
+        let session = process.request.claude.clone().unwrap().new_session.unwrap();
+        process
+            .emit(json!({"type":"system","subtype":"init","session_id":session,"uuid":"init-1"}));
+        process.emit(json!({"type":"result","subtype":"success","is_error":false,"num_turns":1,"result":"done","session_id":session,"uuid":"r-1"}));
+        self.until_status(id, RunStatus::Completed).await;
+        process
+    }
+    async fn fail_fact_writes(&self, failing: bool) {
+        self.store
+            .on_writer(move |c| {
+                c.execute_batch(if failing {
+                    "CREATE TEMP TRIGGER fail_facts BEFORE INSERT ON facts
+                     BEGIN SELECT RAISE(ABORT, 'injected failure'); END;"
+                } else {
+                    "DROP TRIGGER fail_facts;"
+                })?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+    fn draining(&self) -> tokio::task::JoinHandle<()> {
+        let worker = self.worker.clone();
+        tokio::spawn(async move {
+            worker.drain(100).await.unwrap();
+        })
+    }
+}
+
+// ProviderTurnStartService.ts:1165: a Stop while the session opens leaves no turn to send.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stop_while_the_session_opens_sends_no_turn() {
+    let rig = rig(SessionOptions::default(), 5);
+    rig.host.respond(codex_replies);
+    let gate = Arc::new(Gate::default());
+    let hook = gate.clone();
+    rig.host.before_spawn(move |_| {
+        let gate = hook.clone();
+        Box::pin(async move {
+            gate.pass().await;
+            Ok(())
+        })
+    });
+    let id = thread("thread-stop-while-opening");
+    rig.create(
+        &id,
+        selection(Driver::Codex, "gpt"),
+        RuntimeMode::FullAccess,
+    )
+    .await;
+    rig.send(&id, "hello", DispatchMode::StartImmediately).await;
+    let draining = rig.draining();
+    gate.until_arrived(1).await;
+    rig.command(&id, Command::Stop).await;
+    gate.release();
+    draining.await.unwrap();
+    rig.drain().await;
+    let process = rig.host.process(0);
+    assert!(written_methods(&process, "thread/start").is_empty());
+    assert!(written_methods(&process, "turn/start").is_empty());
+    assert_eq!(rig.run_status(&id).await, RunStatus::Interrupted);
+}
+
+// ProviderTurnControlService.ts:220 interruptAndAwaitTerminal: a restart sends
+// the replacement turn only after the old one ends, and the old turn's late
+// frames stay with its own attempt.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_restart_waits_for_the_old_turn_and_keeps_its_late_replies_with_it() {
+    let rig = rig(SessionOptions::default(), 5);
+    let id = thread("thread-restart");
+    let first = rig.codex_turn(&id).await;
+    rig.host.respond(|frame| {
+        if frame["method"] == "turn/interrupt" {
+            return vec![];
+        }
+        codex_replies(frame)
+    });
+    let process = rig.host.process(0);
+    process.emit(json!({"method":"turn/started","params":{"threadId":"native-thread","turn":{"id":"native-turn"}}}));
+    rig.until_status(&id, RunStatus::Running).await;
+    let run = rig.state(&id).await.runs[0].id.clone();
+    let reply = rig
+        .send(&id, "instead", DispatchMode::RestartActive { run })
+        .await;
+    assert!(!matches!(reply, Reply::Rejected { .. }), "{reply:?}");
+    let draining = rig.draining();
+    rig.until("interrupt written", async || {
+        !written_methods(&process, "turn/interrupt").is_empty()
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(written_methods(&process, "turn/start").len(), 1);
+    process.emit(json!({"method":"turn/completed","params":{"threadId":"native-thread","turn":{"id":"native-turn","status":"interrupted"}}}));
+    rig.until("replacement started", async || {
+        written_methods(&process, "turn/start").len() == 2
+    })
+    .await;
+    draining.await.unwrap();
+    let second = rig.attempt(&id).await;
+    assert_ne!(first, second);
+    let state = rig.state(&id).await;
+    assert!(
+        state.runs[0].status.blocking(),
+        "{:?}",
+        state.runs[0].status
+    );
+    let interrupt = written_methods(&process, "turn/interrupt")[0]["id"].clone();
+    process.emit(json!({"id":interrupt,"error":{"code":-32600,"message":"no running turn"}}));
+    rig.until("rejection handled", async || process.stdout.drained())
+        .await;
+    let state = rig.state(&id).await;
+    assert!(state.runs[0].status.blocking());
+    assert!(
+        !state
+            .items
+            .iter()
+            .any(|item| matches!(item.kind, ItemKind::Error { .. })),
+        "the old interrupt's rejection reached the replacement attempt"
+    );
+}
+
+// RunExecutionService.ts:427: a command retained from an earlier turn reports
+// to that turn's attempt even while a later turn runs.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_retained_command_finishes_under_the_turn_that_started_it() {
+    let rig = rig(SessionOptions::default(), 5);
+    let id = thread("thread-retained");
+    rig.codex_turn(&id).await;
+    let process = rig.host.process(0);
+    process.emit(json!({"method":"turn/started","params":{"threadId":"native-thread","turn":{"id":"native-turn"}}}));
+    process.emit(json!({"method":"item/started","params":{"threadId":"native-thread","turnId":"native-turn","item":{"type":"commandExecution","id":"call-bg","command":"sleep 20","processId":"4242","status":"inProgress"}}}));
+    process.emit(json!({"method":"turn/completed","params":{"threadId":"native-thread","turn":{"id":"native-turn","status":"completed"}}}));
+    rig.until_status(&id, RunStatus::Completed).await;
+    assert!(!rig.state(&id).await.background_work.is_empty());
+    rig.send(&id, "next", DispatchMode::StartImmediately).await;
+    rig.drain().await;
+    rig.until("second turn", async || {
+        written_methods(&process, "turn/start").len() == 2
+    })
+    .await;
+    process.emit(json!({"method":"turn/started","params":{"threadId":"native-thread","turn":{"id":"native-turn-2"}}}));
+    rig.until_status(&id, RunStatus::Running).await;
+    process.emit(json!({"method":"item/completed","params":{"threadId":"native-thread","turnId":"native-turn","item":{"type":"commandExecution","id":"call-bg","command":"sleep 20","processId":"4242","status":"completed","exitCode":0,"aggregatedOutput":"done\n"}}}));
+    rig.until("background work reported", async || {
+        rig.state(&id).await.background_work.is_empty()
+    })
+    .await;
+    let state = rig.state(&id).await;
+    let commands: Vec<_> = state
+        .items
+        .iter()
+        .filter(|item| matches!(item.kind, ItemKind::CommandExecution { .. }))
+        .collect();
+    assert_eq!(commands.len(), 1);
+    assert_eq!(commands[0].run.as_ref(), Some(&state.runs[0].id));
+    assert_eq!(commands[0].status, ItemStatus::Completed);
+    assert_eq!(state.runs[1].status, RunStatus::Running);
+}
+
+// ProviderSessionManager.ts:885: a provider that stops reading its stdin never
+// stalls the task that reads its output and handles Close.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_blocked_stdin_write_keeps_output_and_close_handled() {
+    let rig = rig(
+        SessionOptions {
+            write_timeout: Duration::from_secs(60),
+            close_grace: Duration::from_millis(200),
+            ..SessionOptions::default()
+        },
+        5,
+    );
+    rig.host.respond(codex_replies);
+    *rig.host.stall.lock().unwrap() = Some("turn/start");
+    let id = thread("thread-stalled-stdin");
+    rig.create(
+        &id,
+        selection(Driver::Codex, "gpt"),
+        RuntimeMode::FullAccess,
+    )
+    .await;
+    rig.send(&id, "hello", DispatchMode::StartImmediately).await;
+    rig.drain().await;
+    let process = rig.host.process(0);
+    rig.until("thread started", async || {
+        !written_methods(&process, "thread/start").is_empty()
+    })
+    .await;
+    process.emit(json!({"method":"turn/started","params":{"threadId":"native-thread","turn":{"id":"native-turn"}}}));
+    rig.until_status(&id, RunStatus::Running).await;
+    tokio::time::timeout(Duration::from_secs(2), rig.sessions.detach(&id, false))
+        .await
+        .expect("close is handled while a write is blocked");
+    assert!(process.exited());
+    assert!(rig.sessions.sessions().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_write_the_provider_never_accepts_fails_the_session() {
+    let rig = rig(
+        SessionOptions {
+            write_timeout: Duration::from_millis(200),
+            close_grace: Duration::from_millis(200),
+            ..SessionOptions::default()
+        },
+        5,
+    );
+    rig.host.respond(codex_replies);
+    *rig.host.stall.lock().unwrap() = Some("turn/start");
+    let id = thread("thread-write-timeout");
+    rig.create(
+        &id,
+        selection(Driver::Codex, "gpt"),
+        RuntimeMode::FullAccess,
+    )
+    .await;
+    rig.send(&id, "hello", DispatchMode::StartImmediately).await;
+    rig.drain().await;
+    rig.gone(&id).await;
+    rig.until_status(&id, RunStatus::Failed).await;
+    assert!(rig.state(&id).await.items.iter().any(|item| matches!(
+        &item.kind,
+        ItemKind::Error { message, .. } if message == "The provider stopped reading its input."
+    )));
+}
+
+// ClaudeAdapterV2.ts:7297 and :7328: Stop interrupts and then closes the
+// query, so the run ends even without a result frame, and background shells
+// of a settled root end with the process.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_claude_stop_closes_the_process_and_ends_the_run() {
+    let rig = rig(SessionOptions::default(), 5);
+    rig.host.respond(claude_replies);
+    let id = thread("thread-claude-stop");
+    rig.create(
+        &id,
+        selection(Driver::Claude, "claude-sonnet-4-6"),
+        RuntimeMode::FullAccess,
+    )
+    .await;
+    rig.send(&id, "first", DispatchMode::StartImmediately).await;
+    rig.drain().await;
+    let process = rig.host.process(0);
+    let session = process.request.claude.clone().unwrap().new_session.unwrap();
+    process.emit(json!({"type":"system","subtype":"init","session_id":session,"uuid":"init-1"}));
+    rig.until("prompt sent", async || process.stdout.drained())
+        .await;
+    rig.command(&id, Command::Stop).await;
+    rig.drain().await;
+    assert!(
+        process
+            .written()
+            .iter()
+            .any(|frame| frame["request"]["subtype"] == "interrupt")
+    );
+    assert!(process.exited());
+    rig.gone(&id).await;
+    assert_eq!(rig.run_status(&id).await, RunStatus::Interrupted);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_claude_stop_after_the_turn_ends_its_background_shells() {
+    let rig = rig(SessionOptions::default(), 5);
+    rig.host.respond(claude_replies);
+    let id = thread("thread-claude-stop-background");
+    let process = rig.claude_turn(&id, RuntimeMode::FullAccess).await;
+    let attempt = rig.attempt(&id).await;
+    background_work(&rig, &id, &attempt, None).await;
+    rig.command(&id, Command::Stop).await;
+    rig.drain().await;
+    assert!(process.exited());
+    rig.gone(&id).await;
+    assert!(rig.state(&id).await.background_work.is_empty());
+}
+
+// ProviderSessionManager.ts:763: a commit the store rejects for a while is
+// retried; the translation is not dropped.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_frame_whose_commit_fails_for_a_while_is_retried() {
+    let rig = rig(SessionOptions::default(), 5);
+    let id = thread("thread-commit-retry");
+    rig.codex_turn(&id).await;
+    rig.fail_fact_writes(true).await;
+    rig.finish_codex_turn(0);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(rig.run_status(&id).await, RunStatus::Starting);
+    rig.fail_fact_writes(false).await;
+    rig.until_status(&id, RunStatus::Completed).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_frame_that_cannot_be_committed_fails_the_session() {
+    let rig = rig(options(60_000, 60_000), 5);
+    let id = thread("thread-commit-failure");
+    rig.codex_turn(&id).await;
+    let process = rig.host.process(0);
+    rig.fail_fact_writes(true).await;
+    rig.finish_codex_turn(0);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    while !process.exited() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the session kept running"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    rig.fail_fact_writes(false).await;
+    rig.gone(&id).await;
+    rig.until_status(&id, RunStatus::Failed).await;
+    assert!(rig.state(&id).await.items.iter().any(|item| matches!(
+        &item.kind,
+        ItemKind::Error { message, .. } if message.starts_with("Provider output could not be recorded")
+    )));
+}
+
+// ProviderSessionManager.ts:654: closure reaches every attempt whose work the
+// process still holds, not only the latest owner.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_closed_process_ends_the_work_of_every_attempt_it_ran() {
+    let rig = rig(SessionOptions::default(), 5);
+    let id = thread("thread-closed-earlier-work");
+    let first = rig.codex_turn(&id).await;
+    background_work(&rig, &id, &first, None).await;
+    rig.finish_codex_turn(0);
+    rig.until_status(&id, RunStatus::Completed).await;
+    rig.send(&id, "next", DispatchMode::StartImmediately).await;
+    rig.drain().await;
+    let process = rig.host.process(0);
+    rig.until("second turn", async || {
+        written_methods(&process, "turn/start").len() == 2
+    })
+    .await;
+    rig.finish_codex_turn(0);
+    rig.until("second turn completed", async || {
+        rig.state(&id).await.runs[1].status == RunStatus::Completed
+    })
+    .await;
+    assert!(!rig.state(&id).await.background_work.is_empty());
+    process.exit(false);
+    rig.gone(&id).await;
+    rig.until("earlier work ended", async || {
+        rig.state(&id).await.background_work.is_empty()
+    })
+    .await;
+}
+
+// ProviderTurnStartService.ts:644: a compaction with no native thread starts one.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_first_codex_compaction_starts_a_native_thread() {
+    let rig = rig(SessionOptions::default(), 5);
+    rig.host.respond(codex_replies);
+    let id = thread("thread-first-compact");
+    rig.create(
+        &id,
+        selection(Driver::Codex, "gpt"),
+        RuntimeMode::FullAccess,
+    )
+    .await;
+    rig.send(&id, "/compact", DispatchMode::StartImmediately)
+        .await;
+    rig.drain().await;
+    let process = rig.host.process(0);
+    rig.until("compact sent", async || {
+        !written_methods(&process, "thread/compact/start").is_empty()
+    })
+    .await;
+    let methods: Vec<_> = process
+        .written()
+        .iter()
+        .map(|frame| frame["method"].as_str().unwrap_or_default().to_owned())
+        .collect();
+    assert_eq!(
+        methods,
+        [
+            "initialize",
+            "initialized",
+            "thread/start",
+            "thread/compact/start"
+        ]
+    );
+    assert_eq!(
+        rig.state(&id)
+            .await
+            .native_sessions
+            .get("codex")
+            .map(String::as_str),
+        Some("native-thread")
+    );
+}
+
+// The architecture requires the configuration reply before Start: a rejected
+// set_model is not the process's model, so the next Start aligns again.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rejected_claude_model_change_is_aligned_again_before_the_next_turn() {
+    let rig = rig(SessionOptions::default(), 5);
+    rig.host.respond(|frame| {
+        if frame["request"]["subtype"] == "set_model" {
+            return vec![
+                json!({"type":"control_response","response":{"subtype":"error","request_id":frame["request_id"],"error":"model rejected"}}),
+            ];
+        }
+        claude_replies(frame)
+    });
+    let id = thread("thread-claude-model-rejected");
+    rig.create(
+        &id,
+        selection(Driver::Claude, "claude-sonnet-4-6"),
+        RuntimeMode::FullAccess,
+    )
+    .await;
+    rig.send(&id, "first", DispatchMode::StartImmediately).await;
+    rig.drain().await;
+    let process = rig.host.process(0);
+    let session = process.request.claude.clone().unwrap().new_session.unwrap();
+    process.emit(json!({"type":"system","subtype":"init","session_id":session,"uuid":"init-1"}));
+    rig.until_status(&id, RunStatus::Running).await;
+    rig.command(
+        &id,
+        Command::SelectModel {
+            selection: selection(Driver::Claude, "claude-opus-4-6"),
+        },
+    )
+    .await;
+    rig.drain().await;
+    rig.until("rejection recorded", async || {
+        rig.state(&id).await.items.iter().any(|item| {
+            matches!(&item.kind, ItemKind::Error { message, .. } if message == "model rejected")
+        })
+    })
+    .await;
+    process.emit(json!({"type":"result","subtype":"success","is_error":false,"num_turns":1,"result":"done","session_id":session,"uuid":"r-1"}));
+    rig.until_status(&id, RunStatus::Completed).await;
+    rig.host.respond(claude_replies);
+    let before = process.written().len();
+    rig.send(&id, "second", DispatchMode::StartImmediately)
+        .await;
+    rig.drain().await;
+    assert_eq!(rig.host.spawned(), 1);
+    assert_eq!(
+        claude_kinds(&process.written()[before..]),
+        ["set_model", "user"]
+    );
+}
+
+// ClaudeAdapterV2.ts:7063 and :6930: the CLI switches its own mode (plan mode);
+// the next prompt restores the thread's mode.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_claude_mode_the_cli_reports_is_restored_before_the_next_prompt() {
+    let rig = rig(SessionOptions::default(), 5);
+    rig.host.respond(claude_replies);
+    let id = thread("thread-claude-plan-mode");
+    let process = rig.claude_turn(&id, RuntimeMode::FullAccess).await;
+    let mode = process
+        .request
+        .claude
+        .clone()
+        .unwrap()
+        .policy
+        .permission_mode;
+    assert_ne!(mode, "plan");
+    process.emit(json!({"type":"system","subtype":"status","permissionMode":"plan","session_id":"s","uuid":"status-1"}));
+    rig.until("status handled", async || process.stdout.drained())
+        .await;
+    let before = process.written().len();
+    rig.send(&id, "second", DispatchMode::StartImmediately)
+        .await;
+    rig.drain().await;
+    let written = &process.written()[before..];
+    assert_eq!(claude_kinds(written), ["set_permission_mode", "user"]);
+    assert_eq!(written[0]["request"]["mode"], mode);
+}
+
+// ClaudeAdapterV2.ts:6940: a launch change that needs a new process is refused
+// while the live process runs background work.
+#[tokio::test(flavor = "multi_thread")]
+async fn claude_keeps_a_process_with_background_work_when_launch_flags_change() {
+    let rig = rig(SessionOptions::default(), 5);
+    rig.host.respond(claude_replies);
+    let id = thread("thread-claude-background-blocks");
+    let process = rig.claude_turn(&id, RuntimeMode::FullAccess).await;
+    let attempt = rig.attempt(&id).await;
+    background_work(&rig, &id, &attempt, None).await;
+    rig.command(
+        &id,
+        Command::RuntimeMode {
+            mode: RuntimeMode::ApprovalRequired,
+        },
+    )
+    .await;
+    rig.send(&id, "second", DispatchMode::StartImmediately)
+        .await;
+    rig.drain().await;
+    assert_eq!(rig.host.spawned(), 1);
+    assert!(!process.exited());
+    let state = rig.state(&id).await;
+    assert_eq!(state.runs[1].status, RunStatus::Failed);
+    assert!(state.items.iter().any(|item| matches!(
+        &item.kind,
+        ItemKind::Error { message, .. } if message == claude::BACKGROUND_BLOCKS_REPLACEMENT
+    )));
+}
+
+// ProviderSessionManager.ts:1023: background traffic does not postpone the pin cap.
+#[tokio::test(flavor = "multi_thread")]
+async fn background_traffic_does_not_extend_the_pin_cap() {
+    let rig = rig(options(100, 400), 5);
+    let id = thread("thread-pin-traffic");
+    let attempt = rig.codex_turn(&id).await;
+    background_work(&rig, &id, &attempt, None).await;
+    rig.finish_codex_turn(0);
+    rig.until_status(&id, RunStatus::Completed).await;
+    let process = rig.host.process(0);
+    let traffic = tokio::spawn({
+        let process = process.clone();
+        async move {
+            while !process.exited() {
+                process.emit(json!({"method":"account/rateLimits/updated","params":{}}));
+                tokio::time::sleep(Duration::from_millis(30)).await;
+            }
+        }
+    });
+    rig.gone(&id).await;
+    assert!(process.exited());
+    traffic.await.unwrap();
+}
+
+// ProviderTurnControlService.ts:296: a steer rejection names its own message.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_steer_rejection_promotes_the_message_of_its_own_request() {
+    let rig = rig(SessionOptions::default(), 5);
+    let id = thread("thread-steer-ids");
+    rig.codex_turn(&id).await;
+    rig.host.respond(|frame| {
+        if frame["method"] == "turn/steer" {
+            return vec![];
+        }
+        codex_replies(frame)
+    });
+    let process = rig.host.process(0);
+    process.emit(json!({"method":"turn/started","params":{"threadId":"native-thread","turn":{"id":"native-turn"}}}));
+    rig.until_status(&id, RunStatus::Running).await;
+    let run = rig.state(&id).await.runs[0].id.clone();
+    for text in ["first steer", "second steer"] {
+        rig.send(&id, text, DispatchMode::SteerActive { run: run.clone() })
+            .await;
+        rig.drain().await;
+    }
+    let steers = written_methods(&process, "turn/steer");
+    assert_eq!(steers.len(), 2);
+    process.emit(json!({"id":steers[1]["id"],"error":{"code":-32600,"message":"turn completed"}}));
+    rig.until("follow-up", async || rig.state(&id).await.runs.len() == 2)
+        .await;
+    let state = rig.state(&id).await;
+    let message = state
+        .messages
+        .iter()
+        .find(|message| message.id == state.runs[1].message)
+        .unwrap();
+    assert_eq!(message.text, "second steer");
+}
+
+// ClaudeAdapterV2.ts:2970 and :7392: skills are read again for every prompt and steer.
+#[tokio::test(flavor = "multi_thread")]
+async fn claude_reads_skills_again_for_a_reused_prompt_and_a_steer() {
+    let rig = rig(SessionOptions::default(), 5);
+    rig.host.respond(claude_replies);
+    let id = thread("thread-claude-skills");
+    let process = rig.claude_turn(&id, RuntimeMode::FullAccess).await;
+    rig.host.claude.lock().unwrap().skills = vec!["review".into()];
+    let before = process.written().len();
+    rig.send(&id, "$review now", DispatchMode::StartImmediately)
+        .await;
+    rig.drain().await;
+    assert_eq!(rig.host.spawned(), 1);
+    let prompt = process.written()[before..]
+        .iter()
+        .find(|frame| frame["type"] == "user")
+        .cloned()
+        .unwrap();
+    assert_eq!(
+        prompt["message"]["content"],
+        json!([{"type":"text","text":"/review now"}])
+    );
+    rig.until_status(&id, RunStatus::Running).await;
+    rig.host.claude.lock().unwrap().skills = vec!["ship".into()];
+    let run = rig.state(&id).await.runs[1].id.clone();
+    rig.send(&id, "$ship it", DispatchMode::SteerActive { run })
+        .await;
+    rig.drain().await;
+    let steer = process
+        .written()
+        .into_iter()
+        .rfind(|frame| frame["type"] == "user")
+        .unwrap();
+    assert_eq!(steer["priority"], "now");
+    assert_eq!(
+        steer["message"]["content"],
+        json!([{"type":"text","text":"/ship it"}])
+    );
+}
+
+// A new Claude session is bound before its prompt makes the CLI write a
+// transcript, so an import cannot adopt it first.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_claude_session_is_bound_before_its_prompt_is_sent() {
+    let rig = rig(SessionOptions::default(), 5);
+    let observed = Arc::new(Mutex::new(None));
+    let (store, seen) = (rig.store.clone(), observed.clone());
+    rig.host.respond(move |frame| {
+        if frame["type"] == "user" {
+            let bound: Option<String> = store
+                .read(|c| {
+                    Ok(c.query_row(
+                        "SELECT json_extract(payload, '$.SessionBound.native_thread') FROM facts
+                         WHERE kind = 'SessionBound' LIMIT 1",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .ok())
+                })
+                .unwrap();
+            *seen.lock().unwrap() = Some(bound);
+        }
+        claude_replies(frame)
+    });
+    let id = thread("thread-claude-bound-first");
+    rig.create(
+        &id,
+        selection(Driver::Claude, "claude-sonnet-4-6"),
+        RuntimeMode::FullAccess,
+    )
+    .await;
+    rig.send(&id, "first", DispatchMode::StartImmediately).await;
+    rig.drain().await;
+    let session = rig
+        .host
+        .process(0)
+        .request
+        .claude
+        .clone()
+        .unwrap()
+        .new_session;
+    assert!(session.is_some());
+    assert_eq!(*observed.lock().unwrap(), Some(session));
+}
+
+// The forked Claude session is reserved by the source thread before its
+// transcript is written.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_claude_fork_reserves_its_session_before_writing_the_transcript() {
+    let rig = rig(SessionOptions::default(), 5);
+    rig.host.respond(claude_replies);
+    let id = thread("thread-claude-fork-reserve");
+    let process = rig.claude_turn(&id, RuntimeMode::FullAccess).await;
+    let session = process.request.claude.clone().unwrap().new_session.unwrap();
+    rig.host.transcripts.lock().unwrap().insert(
+        session.clone(),
+        format!(
+            "{}\n",
+            json!({"type":"user","uuid":"u-1","parentUuid":null,"sessionId":session,"message":{"role":"user","content":"first"},"timestamp":"2026-10-06T00:00:00Z"})
+        ),
+    );
+    let child = thread("thread-claude-fork-reserve-child");
+    let owners = Arc::new(Mutex::new(vec![]));
+    let (store, seen, other) = (rig.store.clone(), owners.clone(), child.clone());
+    *rig.host.before_session_write.lock().unwrap() = Some(Arc::new(move |session: &str| {
+        let owner = store
+            .read(|c| crate::store::native_session_owner(c, session, &other))
+            .unwrap();
+        seen.lock().unwrap().push(owner);
+    }));
+    let run = rig.state(&id).await.runs[0].id.clone();
+    rig.command(
+        &id,
+        Command::Fork {
+            target: child.clone(),
+            through_run: run,
+            title: None,
+        },
+    )
+    .await;
+    rig.drain().await;
+    assert_eq!(*owners.lock().unwrap(), [Some(id.clone())]);
+    assert!(
+        rig.state(&child)
+            .await
+            .native_sessions
+            .contains_key("claude")
     );
 }

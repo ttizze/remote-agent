@@ -383,6 +383,140 @@ fn codex_compact_on_a_fresh_process_resumes_the_saved_thread_first() {
         .outbound;
     assert_eq!(again[0]["method"], "thread/compact/start");
 }
+// CodexAdapterV2.ts resumeThread: an archived session is unarchived and
+// resumed again instead of being lost.
+#[test]
+fn codex_unarchives_an_archived_session_and_resumes_it_once() {
+    let mut start = codex_start();
+    if let ProviderCommand::Start { native_thread, .. } = &mut start {
+        *native_thread = Some("saved".into());
+    }
+    let mut protocol = CodexProtocol::default();
+    let resume = protocol
+        .command(&start, &wire_context(), &[])
+        .unwrap()
+        .outbound;
+    let archived = protocol
+        .receive(&json!({"id":resume[0]["id"],"error":{"code":-32600,"message":"Session saved is archived. Run `codex unarchive saved` first."}}))
+        .unwrap();
+    assert_eq!(archived.outbound[0]["method"], "thread/unarchive");
+    assert_eq!(archived.outbound[0]["params"], json!({"threadId":"saved"}));
+    let again = protocol
+        .receive(&json!({"id":archived.outbound[0]["id"],"result":{}}))
+        .unwrap();
+    assert_eq!(again.outbound[0]["method"], "thread/resume");
+    assert_eq!(again.outbound[0]["params"], resume[0]["params"]);
+    let ready = protocol
+        .receive(&json!({"id":again.outbound[0]["id"],"result":{"thread":{"id":"saved"}}}))
+        .unwrap();
+    assert_eq!(
+        ready.events,
+        [ProviderEvent::SessionReady {
+            native_thread: "saved".into()
+        }]
+    );
+    assert_eq!(ready.outbound[0]["method"], "turn/start");
+
+    let mut protocol = CodexProtocol::default();
+    let resume = protocol
+        .command(&start, &wire_context(), &[])
+        .unwrap()
+        .outbound;
+    let unarchive = protocol
+        .receive(&json!({"id":resume[0]["id"],"error":{"code":-32600,"message":"session saved is archived"}}))
+        .unwrap()
+        .outbound;
+    let again = protocol
+        .receive(&json!({"id":unarchive[0]["id"],"result":{}}))
+        .unwrap()
+        .outbound;
+    let lost = protocol.receive(
+        &json!({"id":again[0]["id"],"error":{"code":-32600,"message":"session saved is archived"}}),
+    );
+    assert!(
+        matches!(&lost, Err(ProtocolError::Remote { operation, .. }) if operation == "thread/resume"),
+        "{lost:?}"
+    );
+}
+#[test]
+fn only_the_reference_archive_messages_unarchive() {
+    for (message, archived) in [
+        ("Session 019a is archived", true),
+        ("thread failed: session abc-1 is archived.", true),
+        ("run codex unarchive first", true),
+        ("thread not found", false),
+        ("subsession abc is archived", false),
+        ("session abc is archivedx", false),
+        ("session  is archived", false),
+        ("codex unarchived", false),
+    ] {
+        let mut start = codex_start();
+        if let ProviderCommand::Start { native_thread, .. } = &mut start {
+            *native_thread = Some("saved".into());
+        }
+        let mut protocol = CodexProtocol::default();
+        let resume = protocol
+            .command(&start, &wire_context(), &[])
+            .unwrap()
+            .outbound;
+        let answer = protocol
+            .receive(&json!({"id":resume[0]["id"],"error":{"code":-32600,"message":message}}));
+        assert_eq!(answer.is_ok(), archived, "{message}");
+    }
+}
+// ProviderTurnStartService.ts: a compaction without a native thread ensures one first.
+#[test]
+fn codex_compact_without_a_native_thread_starts_one_first() {
+    let mut protocol = CodexProtocol::default();
+    let start = protocol
+        .command(
+            &ProviderCommand::Compact {
+                native_thread: None,
+            },
+            &wire_context(),
+            &[],
+        )
+        .unwrap()
+        .outbound;
+    assert_eq!(start[0]["method"], "thread/start");
+    let ready = protocol
+        .receive(&json!({"id":start[0]["id"],"result":{"thread":{"id":"fresh"}}}))
+        .unwrap();
+    assert_eq!(
+        ready.events,
+        [ProviderEvent::SessionReady {
+            native_thread: "fresh".into()
+        }]
+    );
+    assert_eq!(ready.outbound[0]["method"], "thread/compact/start");
+    assert_eq!(ready.outbound[0]["params"]["threadId"], "fresh");
+}
+#[test]
+fn codex_reports_a_root_turn_in_flight_until_it_completes() {
+    let mut protocol = CodexProtocol::default();
+    assert!(!protocol.turn_in_flight());
+    let start = protocol
+        .command(&codex_start(), &wire_context(), &[])
+        .unwrap()
+        .outbound;
+    assert!(protocol.turn_in_flight());
+    let turn = protocol
+        .receive(&json!({"id":start[0]["id"],"result":{"thread":{"id":"native"}}}))
+        .unwrap()
+        .outbound;
+    assert!(protocol.turn_in_flight());
+    protocol
+        .receive(&json!({"id":turn[0]["id"],"result":{"turn":{"id":"turn-1"}}}))
+        .unwrap();
+    assert!(protocol.turn_in_flight());
+    protocol
+        .receive(&json!({"method":"turn/started","params":{"threadId":"native-child","turn":{"id":"child-turn"}}}))
+        .unwrap();
+    protocol
+        .receive(&json!({"method":"turn/completed","params":{"threadId":"native","turn":{"id":"turn-1","status":"interrupted"}}}))
+        .unwrap();
+    assert!(!protocol.turn_in_flight());
+}
 #[test]
 fn codex_stop_before_thread_ready_cancels_prompt_and_the_next_prompt_can_start() {
     use serde_json::json;

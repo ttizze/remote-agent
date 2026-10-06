@@ -121,5 +121,6 @@ CREATE INDEX facts_native_session
     ON facts (COALESCE(
         json_extract(payload, '$.SessionBound.native_thread'),
         json_extract(payload, '$.NativeSessionBound.native_thread'),
-        json_extract(payload, '$.NativeChildBound.native_thread')))
-    WHERE kind IN ('SessionBound', 'NativeSessionBound', 'NativeChildBound');
+        json_extract(payload, '$.NativeChildBound.native_thread'),
+        json_extract(payload, '$.ForkSessionReserved.native_thread')))
+    WHERE kind IN ('SessionBound', 'NativeSessionBound', 'NativeChildBound', 'ForkSessionReserved');

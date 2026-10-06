@@ -14,6 +14,10 @@ impl SessionManager {
             .await
             .map_err(ExecError::Retry)?;
         let entry = self.codex_session(target, &context).await?;
+        self.settled(&entry, attempt).await?;
+        if !self.still_current(&target.key.thread, attempt).await? {
+            return Ok(());
+        }
         self.bind(attempt, &entry);
         let (command, images) = (command.clone(), images.to_vec());
         let operation = operation(&command);

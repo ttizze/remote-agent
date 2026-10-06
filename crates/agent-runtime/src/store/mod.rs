@@ -346,11 +346,12 @@ pub(crate) fn thread_id(value: String) -> Result<ThreadId, StoreError> {
 
 /// Matches the `facts_native_session` index expression.
 pub(crate) const NATIVE_OWNER_QUERY: &str = "SELECT thread_id FROM facts
-     WHERE kind IN ('SessionBound', 'NativeSessionBound', 'NativeChildBound')
+     WHERE kind IN ('SessionBound', 'NativeSessionBound', 'NativeChildBound', 'ForkSessionReserved')
        AND COALESCE(
                json_extract(payload, '$.SessionBound.native_thread'),
                json_extract(payload, '$.NativeSessionBound.native_thread'),
-               json_extract(payload, '$.NativeChildBound.native_thread')) = ?1
+               json_extract(payload, '$.NativeChildBound.native_thread'),
+               json_extract(payload, '$.ForkSessionReserved.native_thread')) = ?1
        AND thread_id <> ?2
      LIMIT 1";
 
