@@ -1,7 +1,6 @@
-//! Orchestration-v2 RPC and independent native Host resources.
+//! Host RPCs and the authenticated connections that carry them.
 pub(crate) mod connections;
 pub(crate) mod identity;
-mod import;
 pub(crate) mod permissions;
 mod resources;
 pub(crate) mod service;

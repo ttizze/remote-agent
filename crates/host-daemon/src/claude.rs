@@ -1,2 +1,3 @@
-//! Claude credential workflows remain independent of orchestration.
+//! Claude credential workflows and CLI launches.
 pub(crate) mod accounts;
+pub(crate) mod control;

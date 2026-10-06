@@ -6,8 +6,11 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-orchestration = { path = "../orchestration", features = ["runtime"] }
-provider-adapters = { path = "../provider-adapters" }
+agent-domain = { path = "../agent-domain" }
+agent-providers = { path = "../agent-providers" }
+agent-runtime = { path = "../agent-runtime" }
+# Wire types the old client protocol still carries (uploads, worktree threads).
+orchestration = { path = "../orchestration" }
 async-trait = "0.1.89"
 tracing.workspace = true
 bex-process = { path = "../bex-process" }

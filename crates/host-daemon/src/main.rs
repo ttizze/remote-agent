@@ -15,8 +15,8 @@ async fn main() {
     };
 
     if let Some(command_line::Mode::AgentMcp { address }) = &config.mode {
-        if let Err(error) = host_daemon::agent_tools::serve(*address).await {
-            eprintln!("BEX orchestration bridge: {error}");
+        if let Err(error) = host_daemon::conversation::tools::serve(*address).await {
+            eprintln!("orchestration bridge: {error}");
             std::process::exit(1);
         }
         return;

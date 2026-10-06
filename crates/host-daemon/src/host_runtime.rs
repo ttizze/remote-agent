@@ -47,7 +47,7 @@ impl HostRuntime {
         self.endpoint.ticket()
     }
     pub async fn run(self: Arc<Self>, shutdown: CancellationToken) -> Result<()> {
-        self.service.start();
+        self.service.start().await?;
         let service = self.service.clone();
         let maintenance_stop = shutdown.clone();
         let maintenance = tokio::spawn(async move {

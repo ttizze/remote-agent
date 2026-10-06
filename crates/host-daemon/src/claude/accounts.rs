@@ -198,11 +198,11 @@ impl Accounts {
         Ok(async move {
             cache
                 .read(async {
-                    let response = provider_adapters::claude::query_control(
-                        &provider_adapters::claude::ClaudeConfig {
-                            program,
-                            config_home,
-                        },
+                    let response = super::control::ClaudeProgram {
+                        program,
+                        config_home,
+                    }
+                    .query_control(
                         &home,
                         &directory,
                         Some((
@@ -210,8 +210,7 @@ impl Accounts {
                             serde_json::json!({"subtype":"get_usage","skip_behaviors":true}),
                         )),
                     )
-                    .await
-                    .map_err(|error| error.to_string())?;
+                    .await?;
                     Ok(crate::account_usage::claude(&response))
                 })
                 .await

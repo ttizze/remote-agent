@@ -2,7 +2,7 @@ use crate::command_line::StartupConfig;
 use agent_transport::transport::{Endpoint, Relays};
 use anyhow::{Context, Result};
 use host_daemon::{
-    FileKeyStore, HostCredentials, HostRpcService, HostRuntime, ProjectStore,
+    ConversationSettings, FileKeyStore, HostCredentials, HostRpcService, HostRuntime, ProjectStore,
     local_host::{HostLease, LocalHostRegistry},
 };
 use std::sync::Arc;
@@ -85,12 +85,27 @@ pub(crate) async fn run(config: StartupConfig) -> Result<()> {
     }
     if app_server.is_ok()
         && let Err(error) = service
-            .enable_accounts(account_directory.join("codex-accounts"), app_server_config)
+            .enable_accounts(
+                account_directory.join("codex-accounts"),
+                app_server_config.clone(),
+            )
             .await
     {
         tracing::error!(target:"bex", operation="host.codex.accounts", message=%error);
     }
-    service.start();
+    service
+        .enable_conversation(ConversationSettings {
+            database: directory.join("conversation.sqlite"),
+            codex: app_server_config.program.clone(),
+            codex_home: app_server_config.codex_home.clone(),
+        })
+        .await
+        .context("cannot open the conversation store")?;
+    // Unfinished threads recover before the endpoint accepts any command.
+    service
+        .start()
+        .await
+        .context("cannot start the conversation runtime")?;
     let local_ticket = endpoint.local_ticket();
     let runtime = Arc::new(
         HostRuntime::new(

@@ -175,19 +175,17 @@ impl Identity for CodexResources {
     }
 }
 
-pub(super) struct ClaudeResources {
+pub(crate) struct ClaudeResources {
     accounts: tokio::sync::Mutex<crate::claude::accounts::Accounts>,
-    pub adapter: Arc<provider_adapters::claude::ClaudeAdapter>,
     pub native_home: PathBuf,
     directory: PathBuf,
-    config: provider_adapters::claude::ClaudeConfig,
+    program: PathBuf,
 }
 impl ClaudeResources {
     pub async fn load(
         program: PathBuf,
         directory: PathBuf,
         native_home: Option<PathBuf>,
-        output: tokio::sync::mpsc::Sender<provider_adapters::ProviderBatch>,
     ) -> anyhow::Result<Self> {
         crate::platform::create_state_directory(&directory)?;
         let native_home = native_home
@@ -200,21 +198,18 @@ impl ClaudeResources {
             native_home.clone(),
         )
         .await?;
-        let config = provider_adapters::claude::ClaudeConfig {
-            program,
-            config_home: native_home.clone(),
-        };
-        let adapter = Arc::new(provider_adapters::claude::ClaudeAdapter::new(
-            config.clone(),
-            output,
-        ));
         Ok(Self {
             accounts: tokio::sync::Mutex::new(accounts),
-            adapter,
             native_home,
             directory,
-            config,
+            program,
         })
+    }
+    pub(crate) fn program(&self) -> crate::claude::control::ClaudeProgram {
+        crate::claude::control::ClaudeProgram {
+            program: self.program.clone(),
+            config_home: self.native_home.clone(),
+        }
     }
     pub async fn credentials_home(&self) -> Result<PathBuf, Failure> {
         self.accounts
@@ -230,10 +225,10 @@ impl ClaudeResources {
             .await
             .map_err(|error| error.to_string())?;
         let cwd = tempfile::tempdir_in(&self.directory).map_err(|error| error.to_string())?;
-        let initialized =
-            provider_adapters::claude::query_control(&self.config, &auth_home, cwd.path(), None)
-                .await
-                .map_err(|error| error.to_string())?;
+        let initialized = self
+            .program()
+            .query_control(&auth_home, cwd.path(), None)
+            .await?;
         let entries = initialized["models"]
             .as_array()
             .ok_or("Claude Code did not return a model catalog")?;

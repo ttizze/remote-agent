@@ -6,7 +6,6 @@ use std::{
     sync::Arc,
 };
 
-pub(crate) mod state;
 /// The Host owns project registration independently of native provider catalogs.
 #[derive(Debug, Clone)]
 pub struct ProjectStore {
@@ -24,11 +23,11 @@ impl ProjectStore {
         &self.path
     }
     pub(crate) fn chat_directory(&self) -> PathBuf {
-        self.path.with_file_name("bex-chats")
+        self.path.with_file_name("chats")
     }
 
-    async fn read_projects(&self) -> anyhow::Result<Vec<Project>> {
-        match tokio::fs::read(self.path.with_file_name("bex-projects.json")).await {
+    pub(crate) async fn load(&self) -> anyhow::Result<Vec<Project>> {
+        match tokio::fs::read(self.path.with_file_name("projects.json")).await {
             Ok(bytes) => Ok(serde_json::from_slice(&bytes)?),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
             Err(error) => Err(error.into()),
@@ -43,7 +42,7 @@ impl ProjectStore {
             "project path must be a directory"
         );
         let _registration = self.registration.lock().await;
-        let mut projects = self.read_projects().await?;
+        let mut projects = self.load().await?;
         let path = root.to_str().context("project path is not UTF-8")?;
         for project in &projects {
             for registered in &project.roots {
@@ -66,7 +65,7 @@ impl ProjectStore {
                 .unwrap_or_else(|| path.into()),
             roots: vec![agent_protocol::models::ProjectRoot { path: path.into() }],
         });
-        let file = self.path.with_file_name("bex-projects.json");
+        let file = self.path.with_file_name("projects.json");
         let bytes = serde_json::to_vec(&projects)?;
         tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
             if let Some(parent) = file.parent() {
@@ -81,82 +80,26 @@ impl ProjectStore {
         .await??;
         Ok(id)
     }
-    pub(crate) async fn load(&self) -> anyhow::Result<state::Snapshot> {
-        let mut snapshot = state::Snapshot {
-            projects: self.read_projects().await?,
-            ..Default::default()
-        };
-        for root in snapshot.projects.iter().flat_map(|project| &project.roots) {
-            if !Path::new(&root.path).is_absolute() {
-                continue;
-            }
-            match tokio::fs::canonicalize(&root.path).await {
-                Ok(path) => {
-                    snapshot
-                        .resolved_roots
-                        .insert(root.path.clone(), dunce::simplified(&path).to_owned());
-                }
-                Err(error)
-                    if matches!(
-                        error.kind(),
-                        io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied
-                    ) => {}
-                Err(error) => return Err(error.into()),
-            }
-        }
-        snapshot.worktree_roots = crate::worktrees::workspace_roots(&self.path).await?;
-        Ok(snapshot)
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     #[tokio::test]
-    async fn registration_is_durable_idempotent_and_refreshes_worktree_roots() {
+    async fn registration_is_durable_and_idempotent() {
         let directory = tempfile::tempdir().unwrap();
         let root = dunce::canonicalize(directory.path()).unwrap();
         let project = root.join("project");
         std::fs::create_dir(&project).unwrap();
-        let store = ProjectStore::new(root.join("bex-worktrees.json"));
-        assert!(store.load().await.unwrap().projects.is_empty());
-        let registered_id = store.register(&project).await.unwrap();
-        assert_eq!(store.register(&project).await.unwrap(), registered_id);
-        let reopened = ProjectStore::new(store.path());
-        let snapshot = reopened.load().await.unwrap();
-        assert_eq!(snapshot.projects.len(), 1);
-        assert_eq!(
-            snapshot.project_for_workspace(project.to_str().unwrap()),
-            Some(snapshot.projects[0].id.as_str())
-        );
-        let id = snapshot.projects[0].id.clone();
-        assert_eq!(registered_id, id);
-        assert_ne!(id, project.to_str().unwrap());
-        let checkout = root.join("checkout");
-        std::fs::write(
-            store.path(),
-            serde_json::to_vec(
-                &serde_json::json!({"workspaceRoots":{checkout.to_str().unwrap():project}}),
-            )
-            .unwrap(),
-        )
-        .unwrap();
-        assert_eq!(
-            reopened
-                .load()
-                .await
-                .unwrap()
-                .project_for_workspace(checkout.to_str().unwrap()),
-            Some(id.as_str())
-        );
-        std::fs::remove_file(store.path()).unwrap();
-        assert_eq!(
-            reopened
-                .load()
-                .await
-                .unwrap()
-                .project_for_workspace(checkout.to_str().unwrap()),
-            None
-        );
+        let store = ProjectStore::new(root.join("worktrees.json"));
+        assert!(store.load().await.unwrap().is_empty());
+        let registered = store.register(&project).await.unwrap();
+        assert_eq!(store.register(&project).await.unwrap(), registered);
+        let projects = ProjectStore::new(store.path()).load().await.unwrap();
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0].id, registered);
+        assert_eq!(projects[0].name, "project");
+        assert_eq!(projects[0].roots[0].path, project.to_str().unwrap());
+        assert!(store.register(Path::new("relative")).await.is_err());
     }
 }

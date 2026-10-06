@@ -4685,7 +4685,10 @@ dependencies = [
 name = "host-daemon"
 version = "0.1.0"
 dependencies = [
+ "agent-domain",
  "agent-protocol",
+ "agent-providers",
+ "agent-runtime",
  "agent-transport",
  "alacritty_terminal",
  "anyhow",
@@ -4703,7 +4706,6 @@ dependencies = [
  "futures-util",
  "orchestration",
  "proptest",
- "provider-adapters",
  "reqwest",
  "ring",
  "rustls",

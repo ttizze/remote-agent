@@ -3,6 +3,7 @@ pub mod browser;
 mod checkpoints;
 mod claude;
 mod codex_accounts;
+pub mod conversation;
 mod dictation;
 mod git;
 mod host_identity;
@@ -21,7 +22,7 @@ pub use host_runtime::HostRuntime;
 
 pub use host_identity::{CredentialStore, FileKeyStore, HostCredentials, load_local_identity};
 
-pub use host_rpc::service::agent_tools;
+pub use host_rpc::service::ConversationSettings;
 pub use host_rpc::{HostRpcService, HostSession, SessionId};
 pub use projects::ProjectStore;
 
