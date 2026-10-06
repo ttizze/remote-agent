@@ -121,6 +121,7 @@ impl Conversation {
         let tools = Arc::new(AgentTools::new(Arc::new(HostOrchestration {
             runtime: runtime.clone(),
             projects: resources.projects.clone(),
+            files: resources.files.clone(),
             models: config.models,
             installed,
         })));

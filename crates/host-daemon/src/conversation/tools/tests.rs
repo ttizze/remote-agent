@@ -2,11 +2,11 @@
 use super::backend::{Dispatched, Orchestration, ProjectFailure, ProviderModel, ProviderSnapshot};
 use super::*;
 use agent_domain::{
-    Attempt, AttemptStatus, Command, CompletionWake, DeliveryState, Driver, InputIntent,
-    InteractionMode, Item, ItemKind, ItemStatus, Message, MessageAuthor, MessageId, ModelSelection,
-    NodeId, Question, QuestionOption, Request, RequestBody, RequestStatus, ResponseCapability,
-    Role, Run, RunAttemptId, RunId, RunStatus, RuntimeMode, RuntimeRequestId, Task, Thread,
-    ThreadShell, Timestamp, TurnItemId,
+    Attachment, AttachmentKind, Attempt, AttemptStatus, Command, CompletionWake, DeliveryState,
+    Driver, InputIntent, InteractionMode, Item, ItemKind, ItemStatus, Message, MessageAuthor,
+    MessageId, ModelSelection, NodeId, Question, QuestionOption, Request, RequestBody,
+    RequestStatus, ResponseCapability, Role, Run, RunAttemptId, RunId, RunStatus, RuntimeMode,
+    RuntimeRequestId, Task, Thread, ThreadShell, Timestamp, TurnItemId,
 };
 use agent_protocol::models::ProjectScript;
 use agent_runtime::{HostProject, LaunchThread, SearchMatch};
@@ -29,6 +29,7 @@ struct Fake {
     providers: Mutex<Vec<ProviderSnapshot>>,
     projects: Mutex<Vec<HostProject>>,
     launches: Mutex<Vec<LaunchThread>>,
+    claims: Mutex<Vec<(ThreadId, Vec<Attachment>)>>,
     created: Mutex<Vec<CreatedProject>>,
 }
 impl Fake {
@@ -199,6 +200,30 @@ impl Orchestration for Fake {
         self.put(state);
         self.launches.lock().unwrap().push(request);
         Box::pin(async move { Ok(thread) })
+    }
+    /// Claims every upload but `pending:missing` into `chat:<thread>:<token>`.
+    fn claim_attachments(
+        &self,
+        thread: &ThreadId,
+        attachments: Vec<Attachment>,
+    ) -> BoxFuture<'_, Result<Vec<Attachment>, String>> {
+        self.claims
+            .lock()
+            .unwrap()
+            .push((thread.clone(), attachments.clone()));
+        let claimed = attachments
+            .into_iter()
+            .map(|mut attachment| {
+                let token = attachment.id.strip_prefix("pending:").unwrap().to_owned();
+                if token == "missing" {
+                    return Err("attachment not found".to_owned());
+                }
+                attachment.id = format!("chat:{thread}:{token}");
+                attachment.path = format!("/claimed/{token}");
+                Ok(attachment)
+            })
+            .collect();
+        Box::pin(async move { claimed })
     }
     fn providers(&self) -> BoxFuture<'_, Result<Vec<ProviderSnapshot>, String>> {
         let providers = self.providers.lock().unwrap().clone();
@@ -1493,6 +1518,109 @@ async fn launches_threads_from_a_full_access_caller_and_scratch_threads_into_cha
     )
     .await;
     assert_eq!(code(&denied), "capability_denied");
+}
+
+#[tokio::test]
+async fn launches_claim_pending_uploads_into_the_new_thread_and_reject_other_attachments() {
+    let fake = Arc::new(Fake::default());
+    fake.put(active_state("source-thread", "codex"));
+    let tools = tools(&fake);
+    let file = |id: &str| json!({"type":"file","id":id,"name":"notes.txt","mimeType":"text/plain","sizeBytes":12});
+    let image = json!({"type":"image","id":"pending:shot","name":"shot.png","mimeType":"image/png","sizeBytes":0});
+    let launched = call(
+        &tools,
+        "source-thread",
+        "thread_launch",
+        json!({"title":"Audit","message":"Review these","attachments":[file("pending:notes"), image]}),
+    )
+    .await;
+    let thread = ThreadId::new(launched["threadId"].as_str().unwrap()).unwrap();
+    {
+        let claims = fake.claims.lock().unwrap();
+        assert_eq!(claims.len(), 1);
+        assert_eq!(claims[0].0, thread);
+        let launches = fake.launches.lock().unwrap();
+        let message = launches[0].initial_message.as_ref().unwrap();
+        assert_eq!(message.text, "Review these");
+        assert_eq!(
+            message
+                .attachments
+                .iter()
+                .map(|file| (file.kind, file.id.as_str(), file.path.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                (
+                    AttachmentKind::File,
+                    format!("chat:{thread}:notes").as_str(),
+                    "/claimed/notes"
+                ),
+                (
+                    AttachmentKind::Image,
+                    format!("chat:{thread}:shot").as_str(),
+                    "/claimed/shot"
+                ),
+            ]
+        );
+    }
+    assert_eq!(launched["status"], "preparing");
+
+    // Attachments alone still start the thread with an empty prompt.
+    call(
+        &tools,
+        "source-thread",
+        "thread_launch",
+        json!({"title":"Look","attachments":[file("pending:only")]}),
+    )
+    .await;
+    {
+        let launches = fake.launches.lock().unwrap();
+        let message = launches[1].initial_message.as_ref().unwrap();
+        assert_eq!(message.text, "");
+        assert_eq!(message.attachments.len(), 1);
+    }
+
+    // A claimed attachment belongs to another thread.
+    let claimed = call(
+        &tools,
+        "source-thread",
+        "thread_launch",
+        json!({"title":"Audit","attachments":[file("pending:notes"), file("chat:other:notes")]}),
+    )
+    .await;
+    assert_eq!(code(&claimed), "invalid_request");
+    assert_eq!(
+        claimed["message"],
+        "A new thread accepts only pending attachment uploads."
+    );
+    let missing = call(
+        &tools,
+        "source-thread",
+        "thread_launch",
+        json!({"title":"Audit","attachments":[file("pending:missing")]}),
+    )
+    .await;
+    assert_eq!(
+        missing,
+        json!({"_tag":"OrchestratorMcpFailure","code":"orchestration_error","message":"attachment not found"})
+    );
+    for invalid in [
+        json!({"type":"image","id":"pending:text","name":"a.txt","mimeType":"text/plain","sizeBytes":1}),
+        json!({"type":"file","id":"pending:empty","name":"a.txt","mimeType":"text/plain","sizeBytes":0}),
+        json!({"type":"file","id":"pending:big","name":"a.txt","mimeType":"text/plain","sizeBytes":50 * 1024 * 1024 + 1}),
+        json!({"type":"file","id":" ","name":"a.txt","mimeType":"text/plain","sizeBytes":1}),
+        json!({"type":"folder","id":"pending:dir","name":"a","mimeType":"inode/directory","sizeBytes":1}),
+    ] {
+        let rejected = call(
+            &tools,
+            "source-thread",
+            "thread_launch",
+            json!({"title":"Audit","attachments":[invalid]}),
+        )
+        .await;
+        assert_eq!(rejected["_tag"], "AiError", "{rejected}");
+    }
+    assert_eq!(fake.claims.lock().unwrap().len(), 3);
+    assert_eq!(fake.launches.lock().unwrap().len(), 2);
 }
 
 #[tokio::test]

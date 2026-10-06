@@ -2,7 +2,8 @@
 //! the live provider catalog.
 use super::ModelCatalog;
 use crate::conversation::ProjectCatalog;
-use agent_domain::{Command, CommandId, Reply, State, ThreadId, ThreadShell};
+use crate::workspace_files::WorkspaceFiles;
+use agent_domain::{Attachment, Command, CommandId, Reply, State, ThreadId, ThreadShell};
 use agent_protocol::{
     models::{Model, ProjectScript},
     provider::ProviderKind,
@@ -77,6 +78,13 @@ pub(crate) trait Orchestration: Send + Sync {
         limit: Option<usize>,
     ) -> BoxFuture<'_, Result<Vec<SearchMatch>, String>>;
     fn launch(&self, request: LaunchThread) -> BoxFuture<'_, Result<ThreadId, String>>;
+    /// Claims uploads into the thread's attachment storage, as a message's
+    /// intake does; the error says why an attachment cannot be sent.
+    fn claim_attachments(
+        &self,
+        thread: &ThreadId,
+        attachments: Vec<Attachment>,
+    ) -> BoxFuture<'_, Result<Vec<Attachment>, String>>;
     fn providers(&self) -> BoxFuture<'_, Result<Vec<ProviderSnapshot>, String>>;
     fn projects(&self) -> Vec<HostProject>;
     fn project_scripts(&self, project: &str) -> Vec<ProjectScript>;
@@ -93,6 +101,7 @@ pub(crate) trait Orchestration: Send + Sync {
 pub(crate) struct HostOrchestration {
     pub(crate) runtime: Arc<Runtime>,
     pub(crate) projects: Arc<ProjectCatalog>,
+    pub(crate) files: WorkspaceFiles,
     pub(crate) models: Arc<dyn ModelCatalog>,
     /// Drivers with a configured program.
     pub(crate) installed: Vec<ProviderKind>,
@@ -169,6 +178,20 @@ impl Orchestration for HostOrchestration {
                 .await
                 .map_err(|error| error.to_string())?
                 .map_err(|error| error.to_string())
+        })
+    }
+
+    fn claim_attachments(
+        &self,
+        thread: &ThreadId,
+        attachments: Vec<Attachment>,
+    ) -> BoxFuture<'_, Result<Vec<Attachment>, String>> {
+        let (files, thread) = (self.files.clone(), thread.clone());
+        Box::pin(async move {
+            tokio::task::spawn_blocking(move || files.claim(thread.as_str(), &attachments))
+                .await
+                .map_err(|error| error.to_string())?
+                .map_err(|error| format!("{error:#}"))
         })
     }
 
