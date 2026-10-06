@@ -240,6 +240,7 @@ impl HostRpcService {
             });
         }
         let mut runtime = RuntimeConfig::new(settings.database.clone());
+        runtime.handoff = Arc::new(agent_runtime::ProviderHandoffCatalog);
         runtime.import = Some(ImportSettings {
             scan: ScanConfig {
                 homes,
