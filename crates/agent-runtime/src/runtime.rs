@@ -340,7 +340,7 @@ impl Runtime {
         command: Command,
     ) -> Result<Committed, RuntimeError> {
         let _admitted = self.admit().await?;
-        let command = self.checked_attachments(&id, command).await?;
+        self.checked_attachments(&command).await?;
         let command = self.with_host_context(&id, &thread, command).await?;
         let command =
             crate::executor::with_restore_refusal(&self.executors, &thread, command).await?;
@@ -405,44 +405,32 @@ impl Runtime {
         Ok(command)
     }
 
-    /// An answer attachment that no longer exists reaches the state machine
-    /// without a path, which it rejects. A replayed command keeps its first
-    /// result.
-    async fn checked_attachments(
-        &self,
-        id: &CommandId,
-        command: Command,
-    ) -> Result<Command, RuntimeError> {
-        let Command::Respond {
-            request,
-            decision,
-            answers,
-            mut attachments,
-        } = command
-        else {
-            return Ok(command);
+    /// Every answer attachment must still exist before the answer is
+    /// dispatched, including a retry of a recorded answer. A missing file
+    /// fails the call without a receipt, so the same command can be retried
+    /// once the file is back.
+    async fn checked_attachments(&self, command: &Command) -> Result<(), RuntimeError> {
+        let Command::Respond { attachments, .. } = command else {
+            return Ok(());
         };
-        let lookup = id.clone();
-        let replayed = !attachments.is_empty()
-            && self
-                .store()
-                .blocking(move |store| store.receipt(&lookup))
-                .await?
-                .is_some();
-        if !replayed {
-            for file in attachments.values_mut().flatten() {
-                let found = self.executors.ops.real_path(file.path.clone()).await;
-                if !matches!(found, Ok(Some(_))) {
-                    file.path.clear();
+        for file in attachments.values().flatten() {
+            match self.executors.ops.real_path(file.path.clone()).await {
+                Ok(Some(_)) => {}
+                Ok(None) => {
+                    return Err(RuntimeError::AttachmentUnavailable(format!(
+                        "Attachment '{}' is no longer available. Attach it again.",
+                        file.name
+                    )));
+                }
+                Err(_) => {
+                    return Err(RuntimeError::AttachmentUnavailable(format!(
+                        "Could not access attachment '{}'.",
+                        file.name
+                    )));
                 }
             }
         }
-        Ok(Command::Respond {
-            request,
-            decision,
-            answers,
-            attachments,
-        })
+        Ok(())
     }
 
     pub async fn launch(&self, request: LaunchThread) -> Result<LaunchReply, LaunchError> {

@@ -245,7 +245,11 @@ impl Conversation {
             .resources
             .files
             .claim(thread.as_str(), attachments)
-            .map_err(|error| ConversationError::AttachmentUnavailable(format!("{error:#}")))?;
+            .map_err(|error| {
+                ConversationError::AttachmentUnavailable(format!(
+                    "attachment is unavailable: {error:#}"
+                ))
+            })?;
         if let Some(context) = context {
             let claimed = before
                 .into_iter()
@@ -296,6 +300,9 @@ impl Conversation {
             .await
             .map_err(|error| match error {
                 RuntimeError::Closed => ConversationError::Unavailable(error.to_string()),
+                RuntimeError::AttachmentUnavailable(message) => {
+                    ConversationError::AttachmentUnavailable(message)
+                }
                 error => unavailable(error),
             })?;
         match &result.reply {

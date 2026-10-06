@@ -488,7 +488,8 @@ pub enum ConversationError {
     ProjectChanged(String),
     #[error("run {0} has no ready checkpoint")]
     CheckpointUnavailable(u64),
-    #[error("attachment is unavailable: {0}")]
+    /// Carries the complete message shown to the user.
+    #[error("{0}")]
     AttachmentUnavailable(String),
     /// Storage or runtime failure; the request may or may not have taken effect.
     #[error("{0}")]
