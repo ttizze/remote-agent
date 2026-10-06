@@ -1,15 +1,18 @@
-//! The agent-providers reference transcripts through the store, actors, outbox
-//! and session manager. A fake process checks each `expect_outbound` frame and
-//! plays each `emit_inbound` frame; the projections must meet the expectations of
-//! the pure replay in agent-providers/src/replay.rs.
+//! Every agent-providers reference transcript through the store, actors, outbox,
+//! executors and session manager. A fake process checks each `expect_outbound`
+//! frame and plays each `emit_inbound` frame; the projections must meet the
+//! expectations of the reference tests.
 //!
-//! Excluded: the graph transcripts (`thread_fork_native*`, `thread_merge_back*`,
-//! `thread_rollback*`, `delegated_task_status`). One recorded process serves
-//! several native threads there, while this design runs one process per thread
-//! and provider instance with its own JSON-RPC id space, so their frames cannot
-//! be replayed strictly; agent-providers replays them as graph seeds.
+//! The graph transcripts (`thread_fork_native*`, `thread_merge_back*`,
+//! `thread_rollback*`, `delegated_task_status`) drive several app threads: Codex
+//! threads share one app-server and JSON-RPC id space, and each Claude thread
+//! runs its own CLI. A recorded Claude fork's session id maps to the one the
+//! Host writes. The 0.137 Codex rollouts predate history injection, so, as the
+//! reference harness does, `thread/inject_items` succeeds outside the
+//! recording: its request ids are skipped in the recorded id space and the
+//! recorded inline handoff becomes the user's text.
 use super::fake::FakeHost;
-use super::{Rig, rig};
+use super::{Rig, runtime_rig as rig};
 use crate::{DaemonOptions, EffectDaemon, SessionOptions};
 use agent_domain::*;
 use agent_providers::ClaudeLaunch;
@@ -30,6 +33,16 @@ fn optional(value: &Value, key: &str) -> Option<String> {
     value.get(key).and_then(Value::as_str).map(str::to_owned)
 }
 
+const GRAPH: [&str; 4] = [
+    "thread_fork_native",
+    "thread_merge_back",
+    "thread_rollback",
+    "delegated_task_status",
+];
+fn graph(scenario: &str) -> bool {
+    GRAPH.iter().any(|prefix| scenario.starts_with(prefix))
+}
+
 /// The SDK answers its own `initialize`; the recorder does not show it.
 fn claude_initialize(frame: &Value) -> Vec<Value> {
     if frame["type"] == "control_request" && frame["request"]["subtype"] == "initialize" {
@@ -40,8 +53,16 @@ fn claude_initialize(frame: &Value) -> Vec<Value> {
     vec![]
 }
 
+/// The 0.137 rollouts predate `thread/inject_items`.
+fn codex_frame(frame: &Value) -> Option<Value> {
+    (frame["method"] != "thread/inject_items").then(|| frame.clone())
+}
+
+/// Recorded Claude session -> the session the runtime created for it.
+type Sessions = Arc<Mutex<BTreeMap<String, String>>>;
+
 /// The recorded launch options a new Claude process must match.
-fn check_open(expected: &Value, launch: &ClaudeLaunch) -> Result<(), String> {
+fn check_open(expected: &Value, launch: &ClaudeLaunch, sessions: &Sessions) -> Result<(), String> {
     let args = launch.args();
     let value = |name: &str| {
         args.iter()
@@ -55,6 +76,14 @@ fn check_open(expected: &Value, launch: &ClaudeLaunch) -> Result<(), String> {
     let options = &expected["options"];
     let settings =
         value("settings").map(|settings| serde_json::from_str::<Value>(&settings).unwrap());
+    let resume = options["resume"].as_str().map(|recorded| {
+        sessions
+            .lock()
+            .unwrap()
+            .get(recorded)
+            .cloned()
+            .unwrap_or_else(|| recorded.to_owned())
+    });
     let mut mismatches = vec![];
     if value("model").as_deref() != options["model"].as_str() {
         mismatches.push(format!("model {:?}", value("model")));
@@ -62,7 +91,7 @@ fn check_open(expected: &Value, launch: &ClaudeLaunch) -> Result<(), String> {
     if settings != Some(options["settings"].clone()) {
         mismatches.push(format!("settings {settings:?}"));
     }
-    if value("resume").as_deref() != options["resume"].as_str() {
+    if value("resume") != resume {
         mismatches.push(format!("resume {:?}", value("resume")));
     }
     if options["resume"].is_string()
@@ -83,6 +112,18 @@ fn check_open(expected: &Value, launch: &ClaudeLaunch) -> Result<(), String> {
     }
 }
 
+/// The app threads a graph transcript created, in order.
+#[derive(Default)]
+struct Graph {
+    forks: Vec<ThreadId>,
+    merges: usize,
+    /// The thread of the latest recorded Claude query.
+    current: Option<ThreadId>,
+    /// A Claude fork waiting for its recorded `session.forked`.
+    forking: Option<ThreadId>,
+    delegated: Option<ThreadId>,
+}
+
 struct Replay {
     rig: Rig,
     _daemon: EffectDaemon,
@@ -93,6 +134,10 @@ struct Replay {
     opens: Arc<Mutex<VecDeque<Value>>>,
     errors: Arc<Mutex<Vec<String>>>,
     ignored_config: Vec<String>,
+    sessions: Sessions,
+    graph: Mutex<Graph>,
+    /// History the runtime offered through `thread/inject_items`.
+    injected: Arc<Mutex<Vec<Value>>>,
 }
 
 impl Replay {
@@ -108,6 +153,8 @@ impl Replay {
         let host: &FakeHost = &rig.host;
         let opens = Arc::new(Mutex::new(VecDeque::new()));
         let errors = Arc::new(Mutex::new(vec![]));
+        let sessions = Sessions::default();
+        let injected = Arc::new(Mutex::new(vec![]));
         *host.prompts.lock().unwrap() = rows
             .iter()
             .filter(|row| {
@@ -121,10 +168,10 @@ impl Replay {
         if driver == Driver::Claude {
             *host.translate.lock().unwrap() = Some(sdk_frame);
             host.respond(claude_initialize);
-            let (opens, errors) = (opens.clone(), errors.clone());
+            let (opens, errors, sessions) = (opens.clone(), errors.clone(), sessions.clone());
             host.before_spawn(move |request| {
                 let result = match (request.claude.as_ref(), opens.lock().unwrap().pop_front()) {
-                    (Some(launch), Some(expected)) => check_open(&expected, launch),
+                    (Some(launch), Some(expected)) => check_open(&expected, launch, &sessions),
                     (_, None) => {
                         Err("a Claude process opened without a recorded query.open".into())
                     }
@@ -134,6 +181,16 @@ impl Replay {
                     errors.lock().unwrap().push(error);
                 }
                 Box::pin(async { Ok(()) })
+            });
+        } else if graph(scenario) {
+            *host.translate.lock().unwrap() = Some(codex_frame);
+            let injected = injected.clone();
+            host.respond(move |frame| {
+                if frame["method"] != "thread/inject_items" {
+                    return vec![];
+                }
+                injected.lock().unwrap().push(frame.clone());
+                vec![json!({"id":frame["id"],"result":{}})]
             });
         }
         {
@@ -167,7 +224,13 @@ impl Replay {
             ModelSelection {
                 instance: format!("{driver:?}"),
                 driver,
-                model: optional(&rows[0]["metadata"], "model").unwrap_or_default(),
+                model: optional(&rows[0]["metadata"], "model")
+                    .or_else(|| {
+                        rows.iter()
+                            .find(|row| row["frame"]["method"] == "turn/start")
+                            .and_then(|row| optional(&row["frame"]["params"], "model"))
+                    })
+                    .unwrap_or_default(),
                 options: BTreeMap::new(),
             },
             RuntimeMode::FullAccess,
@@ -206,6 +269,9 @@ impl Replay {
             rows,
             opens,
             errors,
+            sessions,
+            graph: Mutex::new(Graph::default()),
+            injected,
         }
     }
 
@@ -261,47 +327,67 @@ impl Replay {
     async fn run(scenario: &str, driver: Driver) -> Outcome {
         let mut replay = Self::start(scenario, driver).await;
         let rows = std::mem::take(&mut replay.rows);
-        for (index, row) in rows.iter().enumerate() {
-            let frame = &row["frame"];
-            match row["type"].as_str() {
-                Some("emit_inbound") => {
-                    let frame = if frame["type"] == "permission.request" {
-                        json!({"type":"control_request","request_id":frame["options"]["toolUseID"],"request":{"subtype":"can_use_tool","tool_name":frame["toolName"],"input":frame["input"],"tool_use_id":frame["options"]["toolUseID"],"permission_suggestions":frame["options"]["suggestions"],"description":frame["options"]["description"]}})
-                    } else {
-                        frame.clone()
-                    };
-                    replay.live(index).emit(frame);
-                    replay.settle(index).await;
-                }
-                Some("runtime_exit") => {
-                    replay.live(index).exit(row["status"] == "success");
-                    replay
-                        .rig
-                        .until("the session closed", async || {
-                            replay.rig.sessions.sessions().is_empty()
-                        })
-                        .await;
-                    replay.settle(index).await;
-                }
-                Some("expect_outbound") => match string(frame, "type").as_str() {
-                    "query.open" => replay.opens.lock().unwrap().push_back(frame.clone()),
-                    "subagent.lookup" | "session.fork" => {}
-                    _ => replay.expect(&rows, index).await,
-                },
-                _ => {}
-            }
+        for index in 0..rows.len() {
+            replay.step(&rows, index).await;
         }
-        replay.settle(rows.len()).await;
-        let unexpected: Vec<_> = replay.rig.host.outbound.lock().unwrap().drain(..).collect();
+        replay.finish(&rows).await
+    }
+
+    async fn step(&self, rows: &[Value], index: usize) {
+        let row = &rows[index];
+        let frame = &row["frame"];
+        match row["type"].as_str() {
+            Some("emit_inbound") if frame["type"] == "session.forked" => {
+                self.forked(frame).await;
+            }
+            Some("emit_inbound") => {
+                let frame = if frame["type"] == "permission.request" {
+                    json!({"type":"control_request","request_id":frame["options"]["toolUseID"],"request":{"subtype":"can_use_tool","tool_name":frame["toolName"],"input":frame["input"],"tool_use_id":frame["options"]["toolUseID"],"permission_suggestions":frame["options"]["suggestions"],"description":frame["options"]["description"]}})
+                } else {
+                    frame.clone()
+                };
+                let frame = self.mapped(self.recorded_reply(frame));
+                self.live(index).emit(frame);
+                self.settle(index).await;
+            }
+            Some("runtime_exit") => {
+                self.live(index).exit(row["status"] == "success");
+                self.rig
+                    .until("the session closed", async || {
+                        self.rig.sessions.sessions().is_empty()
+                    })
+                    .await;
+                self.settle(index).await;
+            }
+            Some("expect_outbound") => match string(frame, "type").as_str() {
+                "query.open" => {
+                    self.opens.lock().unwrap().push_back(frame.clone());
+                    self.opened(frame, index).await;
+                }
+                "session.fork" => self.fork_claude(frame, index).await,
+                "subagent.lookup" => {}
+                _ => self.expect(rows, index).await,
+            },
+            _ => {}
+        }
+    }
+
+    async fn finish(self, rows: &[Value]) -> Outcome {
+        self.settle(rows.len()).await;
+        let unexpected: Vec<_> = self.rig.host.outbound.lock().unwrap().drain(..).collect();
         assert!(
             unexpected.is_empty(),
-            "{scenario} {driver:?}: unexpected outbound {unexpected:?}"
+            "{} {:?}: unexpected outbound {unexpected:?}",
+            self.scenario,
+            self.driver
         );
         assert!(
-            replay.opens.lock().unwrap().is_empty(),
-            "{scenario} {driver:?}: a recorded process never opened"
+            self.opens.lock().unwrap().is_empty(),
+            "{} {:?}: a recorded process never opened",
+            self.scenario,
+            self.driver
         );
-        Outcome::collect(replay).await
+        Outcome::collect(self).await
     }
 
     fn live(&self, index: usize) -> Arc<super::fake::FakeProcess> {
@@ -338,6 +424,10 @@ impl Replay {
                 .as_object_mut()
                 .map(|message| message.remove("uuid"));
         }
+        let expected = &self.injected_turn(expected);
+        if let Some(id) = actual["id"].as_u64() {
+            actual["id"] = json!(id - self.skipped(id));
+        }
         assert_eq!(
             normalized_frame(&actual, &self.ignored_config),
             normalized_frame(expected, &self.ignored_config),
@@ -351,14 +441,25 @@ impl Replay {
     }
 
     async fn send(&self, text: String, steer: bool) {
+        self.send_to(&self.root.clone(), text, steer).await;
+    }
+
+    async fn send_to(&self, thread: &ThreadId, text: String, steer: bool) {
         let mode = if steer {
             DispatchMode::SteerActive {
-                run: self.state().await.active_run().unwrap().id.clone(),
+                run: self
+                    .rig
+                    .state(thread)
+                    .await
+                    .active_run()
+                    .unwrap()
+                    .id
+                    .clone(),
             }
         } else {
             DispatchMode::QueueAfterActive
         };
-        let reply = self.rig.send(&self.root, &text, mode).await;
+        let reply = self.rig.send(thread, &text, mode).await;
         assert!(!matches!(reply, Reply::Rejected { .. }), "{reply:?}");
     }
 
@@ -414,59 +515,349 @@ impl Replay {
             .await;
     }
 
+    /// Loaded threads and their states.
+    async fn threads(&self) -> Vec<(ThreadId, Arc<State>)> {
+        let mut threads = self.rig.registry.loaded();
+        threads.sort();
+        let mut states = vec![];
+        for thread in threads {
+            let state = self.rig.state(&thread).await;
+            states.push((thread, state));
+        }
+        states
+    }
+
+    /// The app thread bound to a native thread or session.
+    async fn thread_of(&self, native: &str) -> ThreadId {
+        self.threads()
+            .await
+            .into_iter()
+            .find(|(_, state)| state.native_sessions.values().any(|bound| bound == native))
+            .map(|(thread, _)| thread)
+            .unwrap_or_else(|| self.root.clone())
+    }
+
+    /// The latest completed run whose turn ended at `head`.
+    fn run_at(state: &State, head: Option<&str>) -> RunId {
+        state
+            .runs
+            .iter()
+            .rev()
+            .find(|run| {
+                run.status.terminal()
+                    && run.status != RunStatus::RolledBack
+                    && head.is_none_or(|head| {
+                        run.attempt
+                            .as_ref()
+                            .and_then(|id| state.attempts.iter().find(|a| &a.id == id))
+                            .is_some_and(|a| a.native_head.as_deref() == Some(head))
+                    })
+            })
+            .unwrap()
+            .id
+            .clone()
+    }
+
+    /// The user forks `parent` through the run that ended at `head`.
+    async fn fork(&self, parent: &ThreadId, head: Option<&str>) -> ThreadId {
+        let through_run = Self::run_at(&*self.rig.state(parent).await, head);
+        let target = {
+            let graph = self.graph.lock().unwrap();
+            ThreadId::new(format!("fork-{}", graph.forks.len())).unwrap()
+        };
+        let reply = self
+            .rig
+            .command(
+                parent,
+                Command::Fork {
+                    target: target.clone(),
+                    through_run,
+                    title: Some("Forked thread".into()),
+                },
+            )
+            .await;
+        assert_eq!(reply, Reply::Thread(target.clone()));
+        self.graph.lock().unwrap().forks.push(target.clone());
+        target
+    }
+
+    /// The user rolls `thread` back to the checkpoint whose native head is `head`.
+    async fn rollback(&self, thread: &ThreadId, head: Option<&str>) {
+        let state = self.rig.state(thread).await;
+        let instance = state.thread.as_ref().unwrap().selection.instance.clone();
+        let checkpoint = state
+            .checkpoints
+            .iter()
+            .find(|cp| cp.native_heads.get(&instance).and_then(Option::as_deref) == head)
+            .unwrap_or_else(|| panic!("{}: no checkpoint at {head:?}", self.scenario))
+            .id
+            .clone();
+        assert_eq!(
+            self.rig
+                .command(
+                    thread,
+                    Command::Rollback {
+                        checkpoint,
+                        restore_files: false,
+                    },
+                )
+                .await,
+            Reply::Accepted
+        );
+    }
+
+    /// A recorded Claude query opens for the thread holding its session; a
+    /// resume at a message is the user's rollback to it.
+    async fn opened(&self, frame: &Value, index: usize) {
+        let options = &frame["options"];
+        let thread = match options["resume"].as_str() {
+            Some(recorded) => {
+                let session = self
+                    .sessions
+                    .lock()
+                    .unwrap()
+                    .get(recorded)
+                    .cloned()
+                    .unwrap_or_else(|| recorded.to_owned());
+                self.thread_of(&session).await
+            }
+            None => self.root.clone(),
+        };
+        self.graph.lock().unwrap().current = Some(thread.clone());
+        if let Some(head) = options["resumeSessionAt"].as_str() {
+            self.settle(index).await;
+            self.rollback(&thread, Some(head)).await;
+            self.settle(index).await;
+            assert!(
+                self.rig.state(&thread).await.rollback.is_none(),
+                "{}",
+                self.context(index)
+            );
+        }
+    }
+
+    async fn fork_claude(&self, frame: &Value, index: usize) {
+        self.settle(index).await;
+        let source = self
+            .sessions
+            .lock()
+            .unwrap()
+            .get(&string(frame, "sessionId"))
+            .cloned()
+            .unwrap_or_else(|| string(frame, "sessionId"));
+        let parent = self.thread_of(&source).await;
+        let target = self
+            .fork(&parent, frame["options"]["upToMessageId"].as_str())
+            .await;
+        self.settle(index).await;
+        self.graph.lock().unwrap().forking = Some(target);
+    }
+
+    /// Injection requests sent before the request `id`, absent from the recording.
+    fn skipped(&self, id: u64) -> u64 {
+        self.injected
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|frame| frame["id"].as_u64().is_some_and(|injected| injected < id))
+            .count() as u64
+    }
+
+    /// A recorded reply answers the request the runtime numbered after its
+    /// injections.
+    fn recorded_reply(&self, mut frame: Value) -> Value {
+        if frame.get("method").is_none()
+            && let Some(recorded) = frame["id"].as_u64()
+        {
+            let injected: Vec<u64> = self
+                .injected
+                .lock()
+                .unwrap()
+                .iter()
+                .filter_map(|frame| frame["id"].as_u64())
+                .collect();
+            let mut id = recorded;
+            while injected.contains(&id) || id - self.skipped(id) < recorded {
+                id += 1;
+            }
+            frame["id"] = json!(id);
+        }
+        frame
+    }
+
+    /// With the history injected, a recorded inline handoff is the user's text.
+    fn injected_turn(&self, expected: &Value) -> Value {
+        let mut expected = expected.clone();
+        if expected["method"] == "turn/start"
+            && !self.injected.lock().unwrap().is_empty()
+            && let Some(input) = expected["params"]["input"].as_array_mut()
+        {
+            for part in input {
+                if let Some((header, user)) = part["text"]
+                    .as_str()
+                    .and_then(|text| text.split_once("\n\nUser message:\n"))
+                    && header.starts_with("Context handoff (")
+                {
+                    part["text"] = json!(user);
+                }
+            }
+        }
+        expected
+    }
+
+    /// A recorded frame naming the sessions the runtime created instead.
+    fn mapped(&self, frame: Value) -> Value {
+        fn walk(value: Value, sessions: &BTreeMap<String, String>) -> Value {
+            match value {
+                Value::String(text) => Value::String(sessions.get(&text).cloned().unwrap_or(text)),
+                Value::Array(values) => {
+                    Value::Array(values.into_iter().map(|v| walk(v, sessions)).collect())
+                }
+                Value::Object(map) => Value::Object(
+                    map.into_iter()
+                        .map(|(key, value)| (key, walk(value, sessions)))
+                        .collect(),
+                ),
+                other => other,
+            }
+        }
+        let sessions = self.sessions.lock().unwrap().clone();
+        if sessions.is_empty() {
+            frame
+        } else {
+            walk(frame, &sessions)
+        }
+    }
+
+    /// The recorded fork session is the one the runtime wrote for the child.
+    async fn forked(&self, frame: &Value) {
+        let target = self.graph.lock().unwrap().forking.take().unwrap();
+        let session =
+            self.rig.state(&target).await.native_sessions[&format!("{:?}", self.driver)].clone();
+        self.sessions
+            .lock()
+            .unwrap()
+            .insert(string(frame, "sessionId"), session);
+    }
+
+    /// The prompt text of a recorded turn.
+    fn prompt(frame: &Value) -> String {
+        if frame["type"] == "prompt.offer" {
+            string(&frame["message"]["message"], "content")
+        } else {
+            frame["params"]["input"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|b| b["text"].as_str())
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+    }
+
+    /// The user's message for a recorded turn of `thread`; a recorded merge-back
+    /// handoff is the next fork merging back first.
+    async fn user_turn(&self, thread: &ThreadId, text: String, steer: bool) {
+        let text = match text.split_once("User message:\n") {
+            Some((_, user)) if text.starts_with("Context handoff (") => {
+                let source = {
+                    let mut graph = self.graph.lock().unwrap();
+                    graph.merges += 1;
+                    graph.forks[graph.merges - 1].clone()
+                };
+                assert_eq!(
+                    self.rig
+                        .command(
+                            &source,
+                            Command::MergeBack {
+                                target: thread.clone(),
+                                through_run: None,
+                            },
+                        )
+                        .await,
+                    Reply::Accepted
+                );
+                // The transfer reaches the target before the user's message.
+                self.settle(0).await;
+                user.to_owned()
+            }
+            _ => text,
+        };
+        self.send_to(thread, text, steer).await;
+    }
+
     /// The user action an expected outbound frame implies when the runtime has
     /// nothing left to send.
     async fn user_action(&self, rows: &[Value], index: usize) {
         let frame = &rows[index]["frame"];
         let method = string(frame, "method");
         let kind = string(frame, "type");
-        let prompt = |frame: &Value| {
-            if frame["type"] == "prompt.offer" {
-                string(&frame["message"]["message"], "content")
-            } else {
-                frame["params"]["input"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|b| b["text"].as_str())
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            }
-        };
+        let native = |frame: &Value| string(&frame["params"], "threadId");
         match (method.as_str(), kind.as_str()) {
+            ("thread/start", _)
+                if self.scenario == "delegated_task_status"
+                    && !self.state().await.native_sessions.is_empty() =>
+            {
+                self.delegate(rows, index).await;
+            }
             (
                 "initialize"
                 | "thread/start"
                 | "thread/resume"
                 | "thread/inject_items"
-                | "turn/start",
+                | "turn/start"
+                | "thread/fork"
+                | "thread/read",
                 _,
             ) => {
-                let start = rows[index..]
+                // The first user-visible operation the frames lead to.
+                let (at, next) = rows[index..]
                     .iter()
-                    .find(|row| {
-                        row["type"] == "expect_outbound" && row["frame"]["method"] == "turn/start"
+                    .enumerate()
+                    .find(|(_, row)| {
+                        row["type"] == "expect_outbound"
+                            && matches!(
+                                row["frame"]["method"].as_str(),
+                                Some("turn/start" | "thread/fork" | "thread/read")
+                            )
                     })
-                    .map(|row| prompt(&row["frame"]))
-                    .unwrap_or_default();
-                self.send(start, false).await;
-                if self.scenario == "queued_turn" && self.state().await.runs.len() == 1 {
-                    let second = rows[index + 1..]
-                        .iter()
-                        .filter(|row| {
-                            row["type"] == "expect_outbound"
-                                && row["frame"]["method"] == "turn/start"
-                        })
-                        .nth(1)
-                        .map(|row| prompt(&row["frame"]))
-                        .unwrap();
-                    self.send(second, false).await;
+                    .map(|(at, row)| (index + at, &row["frame"]))
+                    .unwrap();
+                match next["method"].as_str() {
+                    Some("thread/fork") => {
+                        let parent = self.thread_of(&native(next)).await;
+                        self.fork(&parent, next["params"]["lastTurnId"].as_str())
+                            .await;
+                    }
+                    Some("thread/read") => self.codex_rollback(rows, at).await,
+                    _ => {
+                        let thread = self.thread_of(&native(next)).await;
+                        self.user_turn(&thread, Self::prompt(next), false).await;
+                        if self.scenario == "queued_turn" && self.state().await.runs.len() == 1 {
+                            let second = rows[at + 1..]
+                                .iter()
+                                .find(|row| {
+                                    row["type"] == "expect_outbound"
+                                        && row["frame"]["method"] == "turn/start"
+                                })
+                                .map(|row| Self::prompt(&row["frame"]))
+                                .unwrap();
+                            self.send(second, false).await;
+                        }
+                    }
                 }
             }
-            ("turn/steer", _) => self.send(prompt(frame), true).await,
+            ("turn/steer", _) => self.send(Self::prompt(frame), true).await,
             (_, "prompt.offer") => {
                 let steer = frame["message"]["priority"] == "now";
-                self.send(prompt(frame), steer).await;
+                let thread = self
+                    .graph
+                    .lock()
+                    .unwrap()
+                    .current
+                    .clone()
+                    .unwrap_or_else(|| self.root.clone());
+                self.user_turn(&thread, Self::prompt(frame), steer).await;
                 if self.scenario == "queued_turn" && self.state().await.runs.len() == 1 {
                     let second = rows[index + 1..]
                         .iter()
@@ -474,13 +865,39 @@ impl Replay {
                             row["type"] == "expect_outbound"
                                 && row["frame"]["type"] == "prompt.offer"
                         })
-                        .map(|row| prompt(&row["frame"]))
+                        .map(|row| Self::prompt(&row["frame"]))
                         .unwrap();
                     self.send(second, false).await;
                 }
             }
-            ("turn/interrupt" | "thread/backgroundTerminals/terminate", _)
-            | (_, "query.interrupt") => {
+            ("turn/interrupt", _) if self.graph.lock().unwrap().delegated.is_some() => {
+                let child = self.thread_of(&native(frame)).await;
+                let run = self
+                    .rig
+                    .state(&child)
+                    .await
+                    .active_run()
+                    .unwrap()
+                    .id
+                    .clone();
+                assert_eq!(
+                    self.rig
+                        .command(
+                            &child,
+                            Command::Interrupt {
+                                run,
+                                hold_queue: false,
+                            },
+                        )
+                        .await,
+                    Reply::Accepted
+                );
+            }
+            ("turn/interrupt" | "thread/backgroundTerminals/terminate", _) => {
+                let thread = self.thread_of(&native(frame)).await;
+                self.rig.command(&thread, Command::Stop).await;
+            }
+            (_, "query.interrupt") => {
                 self.rig.command(&self.root, Command::Stop).await;
             }
             ("thread/compact/start", _) => {
@@ -491,6 +908,73 @@ impl Replay {
             }
             _ => {}
         }
+    }
+
+    /// The recorded revert names the oldest discarded turn; the user rolls back
+    /// to the checkpoint of the run before it.
+    async fn codex_rollback(&self, rows: &[Value], index: usize) {
+        let thread = self
+            .thread_of(&string(&rows[index]["frame"]["params"], "threadId"))
+            .await;
+        let discarded = rows[index..]
+            .iter()
+            .find(|row| {
+                row["type"] == "expect_outbound" && row["frame"]["method"] == "thread/revert"
+            })
+            .and_then(|row| row["frame"]["params"]["beforeTurnId"].as_str())
+            .unwrap();
+        let state = self.rig.state(&thread).await;
+        let run = state
+            .runs
+            .iter()
+            .find(|run| {
+                run.attempt
+                    .as_ref()
+                    .and_then(|id| state.attempts.iter().find(|a| &a.id == id))
+                    .is_some_and(|a| a.native_head.as_deref() == Some(discarded))
+            })
+            .unwrap();
+        let instance = state.thread.as_ref().unwrap().selection.instance.clone();
+        let head = state
+            .checkpoints
+            .iter()
+            .find(|cp| cp.run_ordinal == run.ordinal - 1)
+            .and_then(|cp| cp.native_heads.get(&instance).cloned().flatten());
+        self.rollback(&thread, head.as_deref()).await;
+    }
+
+    /// The parent delegates the recorded child task.
+    async fn delegate(&self, rows: &[Value], index: usize) {
+        let prompt = rows[index..]
+            .iter()
+            .find(|row| row["type"] == "expect_outbound" && row["frame"]["method"] == "turn/start")
+            .map(|row| Self::prompt(&row["frame"]))
+            .unwrap();
+        let child = ThreadId::new("delegated-child").unwrap();
+        let selection = self
+            .state()
+            .await
+            .thread
+            .as_ref()
+            .unwrap()
+            .selection
+            .clone();
+        assert_eq!(
+            self.rig
+                .command(
+                    &self.root,
+                    Command::Delegate {
+                        task: NodeId::new("delegated-task").unwrap(),
+                        child: child.clone(),
+                        prompt,
+                        selection,
+                        wake: CompletionWake::SettledOnly,
+                    },
+                )
+                .await,
+            Reply::Thread(child.clone())
+        );
+        self.graph.lock().unwrap().delegated = Some(child);
     }
 }
 
@@ -577,28 +1061,14 @@ async fn run(scenario: &str, driver: Driver) -> Outcome {
     Replay::run(scenario, driver).await
 }
 
-/// Every single-session transcript has a port below.
+/// Every reference transcript has a port below.
 #[test]
-fn every_single_session_transcript_is_replayed() {
+fn every_transcript_is_replayed() {
     let manifest: Vec<Value> = serde_json::from_str(include_str!(
         "../../../../agent-providers/src/fixtures/manifest.json"
     ))
     .unwrap();
-    let graph = |file: &str| {
-        [
-            "thread_fork_native",
-            "thread_merge_back",
-            "thread_rollback",
-            "delegated_task_status",
-        ]
-        .iter()
-        .any(|prefix| file.starts_with(prefix))
-    };
-    let mut expected: Vec<String> = manifest
-        .iter()
-        .map(|entry| string(entry, "file"))
-        .filter(|file| !graph(file))
-        .collect();
+    let mut expected: Vec<String> = manifest.iter().map(|entry| string(entry, "file")).collect();
     expected.sort();
     let source = include_str!("replay.rs");
     let mut covered: Vec<String> = expected
@@ -620,7 +1090,12 @@ fn every_single_session_transcript_is_replayed() {
         .collect();
     covered.sort();
     assert_eq!(covered, expected);
-    assert_eq!(expected.len(), 53);
+    assert_eq!(expected.len(), 71);
+    assert_eq!(
+        expected.iter().filter(|file| graph(file)).count(),
+        18,
+        "{GRAPH:?}"
+    );
 }
 
 // Ports of the agent-providers replay tests, expectations unchanged.
@@ -1898,4 +2373,326 @@ async fn subagent_resume_after_restart_keeps_one_child_and_its_tools_and_message
             .any(|i| matches!(i.kind, ItemKind::AssistantMessage { .. })
                 && i.text.contains("Bug/edge case found"))
     );
+}
+
+fn visible_text(state: &State) -> String {
+    state
+        .activity_items()
+        .iter()
+        .filter(|item| {
+            matches!(
+                item.kind,
+                ItemKind::UserMessage { .. } | ItemKind::AssistantMessage { .. }
+            )
+        })
+        .map(|item| item.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+impl Outcome {
+    fn forks(&self) -> Vec<ThreadId> {
+        self.replay.graph.lock().unwrap().forks.clone()
+    }
+}
+
+// T3 ThreadFork.integration.test.ts: native forks keep the selected boundary,
+// and sibling forks keep separate deltas.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_fork_replays_preserve_the_selected_boundary_and_keep_sibling_deltas_separate() {
+    for driver in [Driver::Codex, Driver::Claude] {
+        for scenario in [
+            "thread_fork_native",
+            "thread_fork_native_prior_turn",
+            "thread_fork_native_continue",
+            "thread_fork_native_siblings",
+        ] {
+            let replay = run(scenario, driver).await;
+            replay.integrity();
+            let root = ThreadId::new("root").unwrap();
+            assert_eq!(
+                replay.states.len(),
+                if scenario.ends_with("siblings") { 3 } else { 2 },
+                "{scenario} {driver:?}"
+            );
+            let source = &replay.states[&root];
+            for target in &replay.forks() {
+                let child = &replay.states[target];
+                assert_eq!(child.thread.as_ref().unwrap().parent.as_ref(), Some(&root));
+                assert_eq!(child.native_sessions.len(), 1);
+                assert_ne!(child.native_sessions, source.native_sessions);
+                assert!(child.runs.iter().all(|r| r.status == RunStatus::Completed));
+                assert_eq!(child.transfers.len(), 1);
+                assert_eq!(
+                    child.transfers[0].delivery.as_ref().unwrap().status,
+                    ContextDeliveryStatus::NativeFork
+                );
+                assert!(
+                    child
+                        .items
+                        .iter()
+                        .any(|i| matches!(i.kind, ItemKind::Fork { .. }))
+                );
+            }
+            if scenario == "thread_fork_native_prior_turn" {
+                let child = &replay.states[&replay.forks()[0]];
+                assert!(visible_text(child).contains("fork boundary alpha"));
+                assert!(!visible_text(child).contains("fork boundary beta"));
+                assert!(matches!(
+                    child.inherited_items[0].kind,
+                    ItemKind::UserMessage { .. }
+                ));
+                assert!(matches!(
+                    child.inherited_items[1].kind,
+                    ItemKind::AssistantMessage { .. }
+                ));
+            }
+        }
+    }
+}
+
+// T3 ProviderRollback / ThreadFork integration: rollback hides the discarded
+// local items and keeps the native boundary.
+#[tokio::test(flavor = "multi_thread")]
+async fn rollback_replays_hide_discarded_local_items_and_preserve_the_native_boundary() {
+    for (scenario, driver) in [
+        ("thread_rollback", Driver::Codex),
+        ("thread_rollback", Driver::Claude),
+        ("thread_rollback_after_restart", Driver::Codex),
+        ("thread_rollback_to_stopped_turn", Driver::Codex),
+        ("thread_fork_native_fork_local_rollback", Driver::Claude),
+    ] {
+        let replay = run(scenario, driver).await;
+        replay.integrity();
+        let state = if scenario.contains("fork_local") {
+            &replay.states[&replay.forks()[0]]
+        } else {
+            &replay.states[&ThreadId::new("root").unwrap()]
+        };
+        assert!(state.rollback.is_none());
+        assert_eq!(
+            state
+                .runs
+                .iter()
+                .filter(|r| r.status == RunStatus::RolledBack)
+                .count(),
+            1,
+            "{scenario} {driver:?}"
+        );
+        let visible = visible_text(state);
+        if scenario.contains("fork_local") {
+            assert!(visible.contains("fork local source alpha"));
+            assert!(visible.contains("fork local first"));
+            assert!(!visible.contains("fork local second"));
+        } else {
+            assert!(visible.contains("rollback fixture first turn complete"));
+            if !scenario.contains("stopped") {
+                assert!(!visible.contains("rollback fixture second turn complete"));
+            }
+        }
+    }
+}
+
+// T3 ThreadMergeBack.integration.test.ts: each merge delivers only its fork's
+// delta and the source conversation stays intact.
+#[tokio::test(flavor = "multi_thread")]
+async fn merge_back_replays_deliver_only_each_fork_delta_and_preserve_source_conversation() {
+    for driver in [Driver::Codex, Driver::Claude] {
+        for scenario in ["thread_merge_back_continue", "thread_merge_back_siblings"] {
+            let replay = run(scenario, driver).await;
+            replay.integrity();
+            let source = &replay.states[&ThreadId::new("root").unwrap()];
+            assert_eq!(
+                source.transfers.len(),
+                if scenario.ends_with("siblings") { 2 } else { 1 }
+            );
+            assert!(
+                source
+                    .transfers
+                    .iter()
+                    .all(|t| t.delivery.as_ref().is_some_and(|d| matches!(
+                        d.status,
+                        ContextDeliveryStatus::Inline | ContextDeliveryStatus::Injected
+                    )))
+            );
+            let text = visible_text(source)
+                .replace(" | ", "|")
+                .replace("| ", "|")
+                .replace(" |", "|");
+            assert!(!text.contains("Context handoff ("));
+            if scenario.ends_with("siblings") {
+                assert!(text.contains(
+                    "merge-sibling-source-3C7K|merge-sibling-first-6V2J|merge-sibling-second-9X5B"
+                ));
+                for (i, child) in replay.forks().iter().enumerate() {
+                    let text = visible_text(&replay.states[child]);
+                    assert!(text.contains(if i == 0 {
+                        "first merge sibling stored"
+                    } else {
+                        "second merge sibling stored"
+                    }));
+                    assert!(!text.contains(if i == 0 {
+                        "second merge sibling stored"
+                    } else {
+                        "first merge sibling stored"
+                    }));
+                }
+            } else {
+                assert!(text.contains("merge-source-4H8Q|merge-fork-7T2W"));
+            }
+            for transfer in &source.transfers {
+                assert!(
+                    transfer
+                        .history
+                        .messages
+                        .iter()
+                        .all(|m| m.thread == transfer.source.as_str())
+                );
+            }
+            // T3 asserts the injected history: one fork prompt and its stored reply.
+            if driver == Driver::Codex {
+                let injected = replay.replay.injected.lock().unwrap().clone();
+                assert_eq!(injected.len(), source.transfers.len());
+                for frame in injected {
+                    let items = frame["params"]["items"].as_array().unwrap();
+                    // The leading coverage item is the history's context, not a message.
+                    let users: Vec<_> = items[1..]
+                        .iter()
+                        .filter(|item| item["role"] == "user")
+                        .collect();
+                    assert!(
+                        items[0]["content"][0]["text"]
+                            .as_str()
+                            .unwrap()
+                            .starts_with("Context handoff (merge_back / fork_delta_summary):")
+                    );
+                    assert_eq!(users.len(), 1, "{frame}");
+                    assert!(
+                        users[0]
+                            .to_string()
+                            .contains("Remember the fork-local marker")
+                    );
+                    assert!(items.iter().any(|item| {
+                        item["role"] == "assistant" && item.to_string().contains("stored")
+                    }));
+                }
+            }
+        }
+    }
+}
+
+// T3 OrchestratorMcp delegated task status integration: the original result
+// stays stable while follow-ups run and queue.
+#[tokio::test(flavor = "multi_thread")]
+async fn delegated_task_status_replay_keeps_the_original_result_while_followups_run_and_queue() {
+    let mut replay = Replay::start("delegated_task_status", Driver::Codex).await;
+    let rows = std::mem::take(&mut replay.rows);
+    let parent = ThreadId::new("root").unwrap();
+    let child = ThreadId::new("delegated-child").unwrap();
+    let status = async |replay: &Replay| {
+        let owner = replay.rig.state(&parent).await;
+        let child = replay.rig.state(&child).await;
+        delegated_task_status(
+            &owner.tasks[0],
+            &child.runs,
+            &child.items,
+            &owner.transfers,
+            &child.messages,
+        )
+    };
+    let mut turns = 0;
+    let mut original = None;
+    let mut original_transfer = None;
+    for index in 0..rows.len() {
+        replay.step(&rows, index).await;
+        let row = &rows[index];
+        let frame = &row["frame"];
+        if row["type"] == "expect_outbound"
+            && frame["method"] == "turn/start"
+            && replay.graph.lock().unwrap().delegated.is_some()
+        {
+            turns += 1;
+        }
+        if row["type"] == "expect_outbound" && frame["method"] == "turn/start" && turns == 1 {
+            let state = replay.rig.state(&child).await;
+            assert_eq!(
+                state.thread.as_ref().unwrap().parent.as_ref(),
+                Some(&parent)
+            );
+            assert!(state.native_owner.is_none());
+        }
+        if row["type"] != "emit_inbound" {
+            continue;
+        }
+        if frame["method"] == "turn/completed" && turns == 1 {
+            let status = status(&replay).await;
+            original = status.child_run_id.clone();
+            original_transfer = status.result_context_transfer_id.clone();
+            assert_eq!(status.status, ItemStatus::Completed);
+            assert_eq!(
+                status.summary.as_deref(),
+                Some("Delegated API boundary inspected.")
+            );
+            assert!(!status.has_pending_child_runs);
+            assert_eq!(status.latest_terminal_run_id, original);
+            assert_eq!(status.latest_terminal_status, Some(RunStatus::Completed));
+            assert_eq!(status.latest_terminal_summary, status.summary);
+            assert!(original_transfer.is_some());
+            assert_eq!(
+                status.latest_terminal_result_context_transfer_id,
+                original_transfer
+            );
+        }
+        if frame["method"] == "turn/started" && turns == 2 {
+            replay
+                .send_to(
+                    &child,
+                    "Complete the queued follow-up and return the final result.".into(),
+                    false,
+                )
+                .await;
+            replay.settle(index).await;
+            let state = replay.rig.state(&child).await;
+            assert_eq!(
+                state.runs.iter().map(|run| run.status).collect::<Vec<_>>(),
+                [RunStatus::Completed, RunStatus::Running, RunStatus::Queued]
+            );
+            assert_eq!(
+                replay.state().await.active_run().unwrap().status,
+                RunStatus::Running
+            );
+            let status = status(&replay).await;
+            assert!(status.has_pending_child_runs);
+            assert_eq!(status.child_run_id, original);
+            assert_eq!(status.status, ItemStatus::Completed);
+            assert_eq!(
+                status.summary.as_deref(),
+                Some("Delegated API boundary inspected.")
+            );
+            assert_eq!(status.result_context_transfer_id, original_transfer);
+            assert_eq!(status.latest_terminal_run_id, original);
+        }
+    }
+    let status = status(&replay).await;
+    let state = replay.rig.state(&child).await;
+    assert_eq!(status.child_run_id, original);
+    assert_eq!(status.status, ItemStatus::Completed);
+    assert_eq!(
+        status.summary.as_deref(),
+        Some("Delegated API boundary inspected.")
+    );
+    assert_eq!(status.result_context_transfer_id, original_transfer);
+    assert!(!status.has_pending_child_runs);
+    assert_eq!(
+        status.latest_terminal_run_id,
+        Some(state.runs[2].id.clone())
+    );
+    assert_eq!(status.latest_terminal_status, Some(RunStatus::Completed));
+    assert_eq!(
+        status.latest_terminal_summary.as_deref(),
+        Some("Queued delegated follow-up completed.")
+    );
+    assert_eq!(status.latest_terminal_result_context_transfer_id, None);
+    assert_eq!(state.runs[1].status, RunStatus::Interrupted);
+    replay.finish(&rows).await.integrity();
 }

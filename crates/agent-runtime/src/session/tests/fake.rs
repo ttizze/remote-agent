@@ -82,10 +82,26 @@ pub(crate) struct FakeProcess {
     exit: watch::Sender<Option<bool>>,
     /// Runs instead of exiting when the session closes the process's stdin.
     pub(crate) on_stdin_close: Mutex<Option<StdinClosed>>,
+    /// The Claude conversation messages the process saw, in order, as the CLI
+    /// would record them in its transcript.
+    pub(crate) messages: Mutex<Vec<Value>>,
 }
 impl FakeProcess {
     pub(crate) fn emit(&self, frame: Value) {
+        self.record_message(&frame);
         self.stdout.push(&frame);
+    }
+    fn record_message(&self, frame: &Value) {
+        if self.request.claude.is_some()
+            && matches!(frame["type"].as_str(), Some("user" | "assistant"))
+            && frame["parent_tool_use_id"].is_null()
+            && let Some(uuid) = frame["uuid"].as_str()
+        {
+            let mut messages = self.messages.lock().unwrap();
+            if !messages.iter().any(|message| message["uuid"] == uuid) {
+                messages.push(frame.clone());
+            }
+        }
     }
     pub(crate) fn written(&self) -> Vec<Value> {
         self.written.lock().unwrap().clone()
@@ -126,6 +142,7 @@ impl tokio::io::AsyncWrite for Stdin {
         while let Some(end) = self.buffer.iter().position(|b| *b == b'\n') {
             let line: Vec<u8> = self.buffer.drain(..=end).collect();
             let frame: Value = serde_json::from_slice(&line).unwrap();
+            self.process.record_message(&frame);
             self.process.written.lock().unwrap().push(frame.clone());
             self.host.written(&frame);
             let responder = self.host.responder.lock().unwrap().clone();
@@ -267,6 +284,7 @@ impl SessionHost for FakeHost {
                 written: Mutex::new(vec![]),
                 exit: watch::Sender::new(None),
                 on_stdin_close: Mutex::new(None),
+                messages: Mutex::new(vec![]),
             });
             self.processes.lock().unwrap().push(process.clone());
             Ok(ProviderProcess {
@@ -312,18 +330,37 @@ impl SessionHost for FakeHost {
                 .collect())
         })
     }
+    /// A recorded transcript, or the one the CLI processes of the thread
+    /// would have written.
     fn read_claude_session(
         &self,
-        _: LaunchTarget,
+        target: LaunchTarget,
         session: String,
     ) -> BoxFuture<'_, io::Result<String>> {
         Box::pin(async move {
-            self.transcripts
+            if let Some(transcript) = self.transcripts.lock().unwrap().get(&session) {
+                return Ok(transcript.clone());
+            }
+            let messages: Vec<Value> = self
+                .processes
                 .lock()
                 .unwrap()
-                .get(&session)
-                .cloned()
-                .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, session))
+                .iter()
+                .filter(|process| process.request.target.key == target.key)
+                .flat_map(|process| process.messages.lock().unwrap().clone())
+                .collect();
+            if messages.is_empty() {
+                return Err(io::Error::new(io::ErrorKind::NotFound, session));
+            }
+            let mut parent = Value::Null;
+            let mut transcript = String::new();
+            for message in messages {
+                let uuid = message["uuid"].clone();
+                transcript.push_str(&json!({"type":message["type"],"uuid":uuid,"parentUuid":parent,"sessionId":session,"message":message["message"],"timestamp":"2026-10-06T00:00:00Z"}).to_string());
+                transcript.push('\n');
+                parent = uuid;
+            }
+            Ok(transcript)
         })
     }
     fn write_claude_session(

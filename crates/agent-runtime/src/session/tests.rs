@@ -53,6 +53,36 @@ pub(crate) struct Rig {
 }
 
 pub(crate) fn rig(options: SessionOptions, max_attempts: u32) -> Rig {
+    rig_handlers(options, max_attempts, |sessions, registry, _| {
+        with_session_handlers(EffectHandlers::default(), sessions)
+            .with("SendToThread", Arc::new(Forward(registry.clone())))
+    })
+}
+
+/// A rig whose every effect runs through the runtime executors with fake Host
+/// operations, as the Host runs them.
+pub(crate) fn runtime_rig(options: SessionOptions, max_attempts: u32) -> Rig {
+    rig_handlers(options, max_attempts, |sessions, registry, store| {
+        crate::with_runtime_handlers(
+            EffectHandlers::default(),
+            &crate::ExecutorContext {
+                store: store.clone(),
+                registry: registry.clone(),
+                sessions: sessions.clone(),
+                ops: Arc::new(crate::executor::tests::Ops(
+                    crate::executor::tests::FakeOps::new(),
+                )),
+                workspaces: Arc::default(),
+            },
+        )
+    })
+}
+
+fn rig_handlers(
+    options: SessionOptions,
+    max_attempts: u32,
+    handlers: impl FnOnce(&Arc<SessionManager>, &Arc<ActorRegistry>, &Store) -> EffectHandlers,
+) -> Rig {
     let (dir, store) = temp_store();
     let clock = Arc::new(ManualClock::new(&at()));
     let live = LiveSessions::default();
@@ -62,8 +92,7 @@ pub(crate) fn rig(options: SessionOptions, max_attempts: u32) -> Rig {
     let registry = ActorRegistry::new(context);
     let host = FakeHost::new();
     let sessions = SessionManager::new(registry.clone(), host.clone(), options, live);
-    let handlers = with_session_handlers(EffectHandlers::default(), &sessions)
-        .with("SendToThread", Arc::new(Forward(registry.clone())));
+    let handlers = handlers(&sessions, &registry, &store);
     let outbox = SqliteOutbox::new(store.clone(), clock.clone());
     let worker = Arc::new(EffectWorker::new(
         outbox,

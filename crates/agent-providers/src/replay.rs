@@ -64,11 +64,8 @@ struct Replay {
     serial: u64,
     owner: Option<RunAttemptId>,
     facts: Vec<Fact>,
-    provider_commands: Vec<(ThreadId, ProviderCommand)>,
-    native_forks: Vec<(ThreadId, CommandId, ProviderCommand)>,
     /// Outbound frames the translators generated and the transcript has not
-    /// matched yet. Only the strict single-session harness fills it.
-    strict: bool,
+    /// matched yet.
     pending: VecDeque<Value>,
     context: WireContext,
     ignored_config: Vec<String>,
@@ -101,9 +98,7 @@ impl Replay {
             serial: 0,
             owner: None,
             facts: vec![],
-            provider_commands: vec![],
-            native_forks: vec![],
-            strict: false,
+
             pending: VecDeque::new(),
             context: WireContext {
                 cwd: "<workspace>".into(),
@@ -168,22 +163,6 @@ impl Replay {
             self.facts.extend(step.facts);
         }
         for effect in step.effects {
-            match &effect.body {
-                EffectBody::Provider(command) => self
-                    .provider_commands
-                    .push((thread.clone(), command.clone())),
-                EffectBody::Rollback { providers, .. } => {
-                    for rollback in providers {
-                        self.provider_commands
-                            .push((thread.clone(), rollback.command.clone()));
-                    }
-                }
-                EffectBody::ForkNative { command, provider } => {
-                    self.native_forks
-                        .push((thread.clone(), command.clone(), provider.clone()))
-                }
-                _ => {}
-            }
             match effect.body {
                 EffectBody::SendToThread { thread, command } => {
                     self.command(&thread, *command);
@@ -211,10 +190,8 @@ impl Replay {
                         String::new()
                     };
                     let output = self.claude.command(&command, &key, &[]).unwrap();
-                    if self.strict {
-                        self.pending
-                            .extend(output.outbound.iter().filter_map(sdk_frame));
-                    }
+                    self.pending
+                        .extend(output.outbound.iter().filter_map(sdk_frame));
                     if let Some(attempt) = effect.attempt {
                         for event in output.events {
                             self.apply(
@@ -228,7 +205,7 @@ impl Replay {
                     }
                 }
                 EffectBody::Provider(command)
-                    if *thread == self.root && self.driver == Driver::Codex && self.strict =>
+                    if *thread == self.root && self.driver == Driver::Codex =>
                 {
                     if matches!(
                         command,
@@ -328,13 +305,11 @@ impl Replay {
             Err(ProtocolError::Remote { .. }) if frame.get("error").is_some() => return,
             Err(error) => panic!("{}: {error}", self.scenario),
         };
-        if self.strict {
-            match self.driver {
-                Driver::Codex => self.pending.extend(output.outbound),
-                Driver::Claude => self
-                    .pending
-                    .extend(output.outbound.iter().filter_map(sdk_frame)),
-            }
+        match self.driver {
+            Driver::Codex => self.pending.extend(output.outbound),
+            Driver::Claude => self
+                .pending
+                .extend(output.outbound.iter().filter_map(sdk_frame)),
         }
         if let Some(owner) = self.owner.clone() {
             let root = self.root.clone();
@@ -591,7 +566,6 @@ impl Replay {
     fn run(scenario: &str, driver: Driver) -> Self {
         let rows = transcript(scenario, driver);
         let mut replay = Self::new(driver, &rows);
-        replay.strict = true;
         // The recorder's explicit runtime policy is an input of the turn.
         if let Some(start) = rows
             .iter()
@@ -1657,8 +1631,6 @@ fn native_subagent_threads_refuse_messages_with_the_reference_error_and_no_proje
         assert!(replay.states[&child].runs.is_empty());
     }
 }
-
-mod graph;
 
 #[test]
 fn resumed_provider_thread_replay_keeps_the_original_conversation_and_native_identity() {
