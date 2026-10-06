@@ -831,7 +831,8 @@ fn recovery_preserves_distinct_work_ids_and_shutdown_reason() {
     );
     assert!(s.tasks.iter().all(|task| task.result.as_deref()
         == Some("Cancelled because the server shut down before the provider work completed.")));
-    assert!(!recovered.effects.iter().any(|effect| matches!(effect.body, EffectBody::SendToThread { command: ref next, .. } if matches!(**next, Command::ContinueRestart { .. }))));
+    // T3 prepareForShutdown: the cut root turn continues after the next start.
+    assert!(recovered.effects.iter().any(|effect| matches!(effect.body, EffectBody::SendToThread { command: ref next, .. } if matches!(**next, Command::ContinueRestart { .. }))));
     recover(&mut s);
     assert_eq!(s.runs[0].restart_cancelled_work.len(), 2);
 }
