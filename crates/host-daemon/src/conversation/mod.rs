@@ -4,8 +4,8 @@ mod diff;
 mod operations;
 mod rpc;
 mod sessions;
-mod title_links;
 mod setup;
+mod title_links;
 pub mod tools;
 
 #[cfg(test)]

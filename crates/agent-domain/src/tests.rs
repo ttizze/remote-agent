@@ -2755,37 +2755,33 @@ fn a_captured_checkpoint_records_its_file_summary_and_baselines_record_none() {
         additions,
         deletions: 1,
     };
-    for (files, recorded) in [(
-        vec![file("a.txt", 2), file("src/b.ts", 0)],
-        vec![file("a.txt", 2), file("src/b.ts", 0)],
-    )] {
-        let mut s = state();
-        let (run, a) = running(&mut s, "first");
-        finish(&mut s, &a);
-        result(
-            &mut s,
-            "captured",
-            EffectResult::CheckpointCaptured {
+    let files = vec![file("a.txt", 2), file("src/b.ts", 0)];
+    let mut s = state();
+    let (run, a) = running(&mut s, "first");
+    finish(&mut s, &a);
+    result(
+        &mut s,
+        "captured",
+        EffectResult::CheckpointCaptured {
+            status: CheckpointStatus::Ready,
+            baselines: vec![CapturedBaseline {
                 status: CheckpointStatus::Ready,
-                baselines: vec![CapturedBaseline {
-                    status: CheckpointStatus::Ready,
-                    checkpoint: CheckpointId::new("baseline").unwrap(),
-                    ordinal: 0,
-                    file_ref: "before".into(),
-                    native_heads: BTreeMap::new(),
-                }],
-                run: run.clone(),
-                attempt: Some(a.clone()),
-                checkpoint: CheckpointId::new("captured").unwrap(),
-                file_ref: "after".into(),
-                files,
-            },
-        );
-        assert_eq!(s.checkpoints.len(), 2);
-        assert!(s.checkpoints[0].files.is_empty());
-        assert_eq!(s.checkpoints[1].run, Some(run));
-        assert_eq!(s.checkpoints[1].files, recorded);
-    }
+                checkpoint: CheckpointId::new("baseline").unwrap(),
+                ordinal: 0,
+                file_ref: "before".into(),
+                native_heads: BTreeMap::new(),
+            }],
+            run: run.clone(),
+            attempt: Some(a.clone()),
+            checkpoint: CheckpointId::new("captured").unwrap(),
+            file_ref: "after".into(),
+            files: files.clone(),
+        },
+    );
+    assert_eq!(s.checkpoints.len(), 2);
+    assert!(s.checkpoints[0].files.is_empty());
+    assert_eq!(s.checkpoints[1].run, Some(run));
+    assert_eq!(s.checkpoints[1].files, files);
 }
 
 #[test]
