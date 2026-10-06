@@ -1,4 +1,9 @@
 //! Pure conversion of native actions into domain commands.
+pub mod build;
+pub mod lifecycle;
+pub mod outbox;
+pub mod workflows;
+
 use crate::state::{Draft, QuestionAnswer, ThreadAction};
 use orchestration::*;
 
