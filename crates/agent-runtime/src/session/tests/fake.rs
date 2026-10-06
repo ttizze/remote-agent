@@ -190,6 +190,8 @@ pub(crate) struct FakeHost {
     /// A write containing this text never completes, as a provider that stopped reading.
     pub(crate) stall: Mutex<Option<&'static str>>,
     pub(crate) before_session_write: Mutex<Option<SessionWriteHook>>,
+    /// The managed Codex account's login parameters.
+    pub(crate) codex_login: Mutex<Option<Value>>,
 }
 impl FakeHost {
     pub(crate) fn new() -> Arc<Self> {
@@ -212,6 +214,7 @@ impl FakeHost {
             translate: Mutex::new(None),
             stall: Mutex::new(None),
             before_session_write: Mutex::new(None),
+            codex_login: Mutex::new(None),
         })
     }
     pub(crate) fn respond(&self, responder: impl Fn(&Value) -> Vec<Value> + Send + Sync + 'static) {
@@ -338,8 +341,26 @@ impl SessionHost for FakeHost {
             Ok(())
         })
     }
-    fn released(&self, key: &SessionKey, revoke_credentials: bool) {
-        self.log(format!("released:{}:{revoke_credentials}", key.thread));
+    fn revoke_credentials(&self, thread: &ThreadId, instance: Option<&str>) {
+        self.log(format!("revoked:{thread}:{}", instance.unwrap_or("*")));
+    }
+    fn codex_account(&self, instance: String) -> BoxFuture<'_, Result<Option<Value>, String>> {
+        Box::pin(async move {
+            self.log(format!("account:{instance}"));
+            Ok(self.codex_login.lock().unwrap().clone())
+        })
+    }
+    fn refresh_codex_account(
+        &self,
+        instance: String,
+        previous: Option<String>,
+    ) -> BoxFuture<'_, Result<Value, String>> {
+        Box::pin(async move {
+            self.log(format!("refresh:{instance}:{previous:?}"));
+            Ok(
+                json!({"accessToken":"fresh","chatgptAccountId":"account-1","chatgptPlanType":"pro"}),
+            )
+        })
     }
     fn prompt_uuid(&self, effect_id: &str) -> String {
         self.prompts

@@ -4,6 +4,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone, Default)]
 pub struct WireContext {
+    /// The app thread a command belongs to; one app-server serves many.
+    pub route: String,
     pub cwd: String,
     pub client_name: String,
     pub client_version: String,
@@ -25,6 +27,32 @@ impl WireContext {
         }
         params
     }
+    /// T3's provider-thread load key: a thread loaded for another selection or
+    /// runtime policy is resumed with the new parameters before its turn.
+    fn load_key(
+        &self,
+        selection: &ModelSelection,
+        runtime_mode: RuntimeMode,
+        interaction_mode: InteractionMode,
+    ) -> String {
+        json!([
+            selection,
+            runtime_mode,
+            interaction_mode,
+            self.cwd,
+            self.approval_policy,
+            self.sandbox_policy
+        ])
+        .to_string()
+    }
+}
+/// One app thread's view of the shared app-server.
+#[derive(Debug, Default)]
+struct Route {
+    /// The root native thread loaded for this route, and its load key.
+    thread: Option<String>,
+    load_key: Option<String>,
+    stop_before_thread: bool,
 }
 #[derive(Debug, Clone)]
 enum Pending {
@@ -33,16 +61,22 @@ enum Pending {
         /// The resume parameters; `None` starts a new thread.
         resume: Option<Resume>,
         then: Option<Then>,
+        load_key: Option<String>,
     },
     /// `thread/unarchive` before resuming an archived session again.
     Unarchive {
         params: Value,
         then: Option<Then>,
+        load_key: Option<String>,
     },
     Inject {
         start: Value,
         history: InlineHistory,
     },
+    /// Restores a thread's additional context after a compaction.
+    Restore,
+    /// Drops this connection's subscription to a thread another route no longer uses.
+    Unload,
     RevertRead {
         thread: String,
         head: Option<String>,
@@ -95,6 +129,8 @@ impl Pending {
             | Pending::Unarchive { .. } => "thread/resume".into(),
             Pending::Thread { .. } => "thread/start".into(),
             Pending::Inject { .. } => "thread/inject_items".into(),
+            Pending::Restore => "additional context restore".into(),
+            Pending::Unload => "thread/unsubscribe".into(),
             Pending::RevertRead { .. } => "thread/read".into(),
             Pending::RevertResume { .. } => "thread/resume".into(),
             Pending::RevertPage { .. } => "thread/turns/list".into(),
@@ -128,20 +164,29 @@ struct InlineHistory {
     history: HistoricalContext,
     inline_text: String,
 }
-/// One native app-server session's RPC correlation, with no application entities.
+/// One app-server process's RPC correlation, with no application entities. The
+/// native threads of many app threads (routes) share its JSON-RPC id space.
 #[derive(Debug, Default)]
 pub struct CodexProtocol {
     next_id: u64,
-    pending: BTreeMap<u64, Pending>,
-    thread: Option<String>,
+    pending: BTreeMap<u64, (String, Pending)>,
+    routes: BTreeMap<String, Route>,
+    /// Root native thread -> route.
+    roots: BTreeMap<String, String>,
+    /// Native threads loaded without a route yet, such as a fork's thread.
+    unclaimed: BTreeSet<String>,
     turns: BTreeMap<String, String>,
     reasoning_parts: BTreeMap<String, BTreeMap<(String, u64), String>>,
     interrupt_pending: BTreeSet<String>,
-    stop_before_thread: bool,
-    /// Native child thread -> native parent, used solely to route notifications.
+    /// Native child thread -> native parent (empty under a root), used solely
+    /// to route notifications.
     children: BTreeMap<String, String>,
+    /// Native child thread -> its root native thread.
+    child_roots: BTreeMap<String, String>,
     /// Pending server request ID -> method, to shape the reply.
     server_requests: BTreeMap<String, String>,
+    /// The additional context each native thread last received; restored after compaction.
+    additional_context: BTreeMap<String, Value>,
     running: BTreeMap<String, RunningCommand>,
     /// Completed turns that still own running commands.
     settled: BTreeSet<String>,
@@ -154,13 +199,114 @@ pub struct CodexProtocol {
     failures: BTreeMap<String, (String, Option<String>, String)>,
 }
 impl CodexProtocol {
-    fn request(&mut self, method: &str, params: Value, pending: Pending) -> Value {
+    fn request(&mut self, route: &str, method: &str, params: Value, pending: Pending) -> Value {
         self.next_id += 1;
-        self.pending.insert(self.next_id, pending);
+        self.pending.insert(self.next_id, (route.into(), pending));
         json!({"id":self.next_id,"method":method,"params":params})
     }
     pub fn initialize(&mut self, context: &WireContext) -> Value {
-        self.request("initialize",json!({"capabilities":{"experimentalApi":true,"optOutNotificationMethods":["turn/diff/updated"]},"clientInfo":{"name":context.client_name,"title":context.client_name,"version":context.client_version}}),Pending::Initialize)
+        self.request("", "initialize",json!({"capabilities":{"experimentalApi":true,"optOutNotificationMethods":["turn/diff/updated"]},"clientInfo":{"name":context.client_name,"title":context.client_name,"version":context.client_version}}),Pending::Initialize)
+    }
+    /// `account/login/start` for the app-server's managed account.
+    pub fn login(&mut self, params: Value) -> Value {
+        self.request(
+            "",
+            "account/login/start",
+            params,
+            Pending::Operation("account/login/start".into()),
+        )
+    }
+    fn route_mut(&mut self, route: &str) -> &mut Route {
+        self.routes.entry(route.into()).or_default()
+    }
+    /// The root native thread of the route, if loaded.
+    pub fn native_thread(&self, route: &str) -> Option<&str> {
+        self.routes.get(route)?.thread.as_deref()
+    }
+    /// The route of a root or child native thread. A process serving a single
+    /// route attributes unknown threads to it.
+    fn route_of(&self, native: Option<&str>) -> Option<String> {
+        let found = native.and_then(|native| {
+            let root = self
+                .child_roots
+                .get(native)
+                .map(String::as_str)
+                .unwrap_or(native);
+            self.roots.get(root).cloned()
+        });
+        found.or_else(|| match self.routes.len() {
+            1 => self.routes.keys().next().cloned(),
+            _ => None,
+        })
+    }
+    fn is_root(&self, native: &str) -> bool {
+        self.roots.contains_key(native)
+    }
+    /// Records a native child under the notification's thread.
+    fn adopt_child(&mut self, child: &str, parent: Option<&String>) {
+        let parent = parent.cloned().unwrap_or_default();
+        let root = if self.is_root(&parent) {
+            Some(parent.clone())
+        } else {
+            self.child_roots.get(&parent).cloned()
+        };
+        if let Some(root) = root {
+            self.child_roots.entry(child.into()).or_insert(root);
+        }
+        let under = if self.is_root(&parent) {
+            String::new()
+        } else {
+            parent
+        };
+        self.children.entry(child.into()).or_insert(under);
+    }
+    fn bind_root(&mut self, route: &str, thread: &str, load_key: Option<String>) {
+        self.unclaimed.remove(thread);
+        self.roots.insert(thread.into(), route.into());
+        let state = self.route_mut(route);
+        state.thread = Some(thread.into());
+        state.load_key = load_key;
+    }
+    /// Stops using the route's native thread in this process (T3 unloadThread):
+    /// the app-server may shut it down, and a later turn resumes it.
+    pub fn unload(&mut self, route: &str) -> Translation {
+        let Some(thread) = self.routes.get_mut(route).and_then(|r| {
+            r.load_key = None;
+            r.thread.take()
+        }) else {
+            return Translation::default();
+        };
+        Translation {
+            outbound: vec![self.request(
+                route,
+                "thread/unsubscribe",
+                json!({"threadId":thread}),
+                Pending::Unload,
+            )],
+            route: Some(route.into()),
+            ..Translation::default()
+        }
+    }
+    /// Interrupts the route's running root turn, as T3 does for a thread that
+    /// detaches from a shared app-server.
+    pub fn interrupt_active_turn(&mut self, route: &str) -> Translation {
+        let Some(thread) = self.native_thread(route).map(str::to_owned) else {
+            return Translation::default();
+        };
+        let Some(turn) = self.turns.get(&thread).cloned() else {
+            return Translation::default();
+        };
+        self.stopping.insert(thread.clone());
+        Translation {
+            outbound: vec![self.request(
+                route,
+                "turn/interrupt",
+                json!({"threadId":thread,"turnId":turn}),
+                Pending::Operation("turn/interrupt".into()),
+            )],
+            route: Some(route.into()),
+            ..Translation::default()
+        }
     }
     /// Image bytes are prepared by the resource owner; paths are never sent.
     pub fn command(
@@ -169,6 +315,17 @@ impl CodexProtocol {
         context: &WireContext,
         images: &[PreparedImage],
     ) -> Result<Translation, ProtocolError> {
+        let mut output = self.command_frames(command, context, images)?;
+        output.route = Some(context.route.clone());
+        Ok(output)
+    }
+    fn command_frames(
+        &mut self,
+        command: &ProviderCommand,
+        context: &WireContext,
+        images: &[PreparedImage],
+    ) -> Result<Translation, ProtocolError> {
+        let route = context.route.as_str();
         let frame = match command {
             ProviderCommand::Start {
                 resume_interrupted_turn,
@@ -230,18 +387,29 @@ impl CodexProtocol {
                     }
                     start["collaborationMode"] = json!({"mode":if *interaction_mode == InteractionMode::Plan {"plan"} else {"default"},"settings":settings});
                 }
-                if let Some(thread) = self
-                    .thread
-                    .clone()
-                    .filter(|id| native_thread.as_ref() == Some(id))
+                let load_key = context.load_key(selection, *runtime_mode, *interaction_mode);
+                if native_thread
+                    .as_ref()
+                    .is_some_and(|thread| self.unclaimed.contains(thread))
                 {
+                    // A fork loaded the thread in this process for its first turn.
+                    let thread = native_thread.clone().unwrap_or_default();
+                    self.bind_root(route, &thread, Some(load_key.clone()));
+                }
+                let state = self.route_mut(route);
+                if let Some(thread) = state.thread.clone().filter(|id| {
+                    native_thread.as_ref() == Some(id)
+                        && state.load_key.as_ref().is_none_or(|key| *key == load_key)
+                }) {
+                    state.load_key = Some(load_key);
                     start["threadId"] = json!(thread);
-                    self.start_or_inject(start, handoff)
+                    self.start_or_inject(route, start, handoff)
                 } else if let Some(thread) = native_thread {
                     let mut params = context.thread_params(Some(&selection.model));
                     params["threadId"] = json!(thread);
                     params["excludeTurns"] = json!(true);
                     self.request(
+                        route,
                         "thread/resume",
                         params.clone(),
                         Pending::Thread {
@@ -253,10 +421,12 @@ impl CodexProtocol {
                                 start,
                                 history: handoff,
                             }),
+                            load_key: Some(load_key),
                         },
                     )
                 } else {
                     self.request(
+                        route,
                         "thread/start",
                         context.thread_params(Some(&selection.model)),
                         Pending::Thread {
@@ -265,6 +435,7 @@ impl CodexProtocol {
                                 start,
                                 history: handoff,
                             }),
+                            load_key: Some(load_key),
                         },
                     )
                 }
@@ -273,9 +444,10 @@ impl CodexProtocol {
                 text, attachments, ..
             } => {
                 let thread = self
-                    .thread
-                    .as_ref()
-                    .ok_or_else(|| ProtocolError::Invalid("no native thread".into()))?;
+                    .native_thread(route)
+                    .ok_or_else(|| ProtocolError::Invalid("no native thread".into()))?
+                    .to_owned();
+                let thread = &thread;
                 let turn = self
                     .turns
                     .get(thread)
@@ -286,9 +458,11 @@ impl CodexProtocol {
                         turn_completed: true,
                     })?;
                 let input = codex_input(text, attachments, images)?;
+                let params = json!({"threadId":thread,"expectedTurnId":turn,"input":input});
                 self.request(
+                    route,
                     "turn/steer",
-                    json!({"threadId":thread,"expectedTurnId":turn,"input":input}),
+                    params,
                     Pending::Operation("turn/steer".into()),
                 )
             }
@@ -297,14 +471,18 @@ impl CodexProtocol {
                 native_turn,
             } => {
                 let mut output = Translation::default();
-                if self
-                    .pending
-                    .values()
-                    .any(|p| matches!(p, Pending::Thread { .. } | Pending::Unarchive { .. }))
-                {
-                    self.stop_before_thread = true;
+                let own = |pending: &&(String, Pending)| pending.0 == route;
+                if self.pending.values().filter(own).any(|(_, p)| {
+                    matches!(
+                        p,
+                        Pending::Thread { then: Some(_), .. } | Pending::Unarchive { .. }
+                    )
+                }) {
+                    self.route_mut(route).stop_before_thread = true;
                 }
-                let thread = native_thread.as_ref().or(self.thread.as_ref()).cloned();
+                let thread = native_thread
+                    .clone()
+                    .or_else(|| self.native_thread(route).map(str::to_owned));
                 if let Some(thread) = thread {
                     // A completed turn is not interrupted again; only its
                     // retained commands are stopped.
@@ -313,19 +491,19 @@ impl CodexProtocol {
                         Some(turn) => active.filter(|active| active == turn),
                         None => active,
                     };
-                    if self.pending.values().any(|pending| matches!(pending,Pending::Inject {start,..} if start["threadId"] == thread)) {
-                        self.stop_before_thread = true;
+                    if self.pending.values().any(|(_, pending)| matches!(pending,Pending::Inject {start,..} if start["threadId"] == thread)) {
+                        self.route_mut(route).stop_before_thread = true;
                     }
                     if turn.is_none()
                         && self
                             .pending
                             .values()
-                            .any(|p| matches!(p, Pending::Operation(op) if op == "turn/start"))
+                            .any(|(_, p)| matches!(p, Pending::Operation(op) if op == "turn/start"))
                     {
                         self.interrupt_pending.insert(thread.clone());
                     }
                     self.stopping.insert(thread.clone());
-                    output.outbound = self.interrupt(&thread, turn.as_deref());
+                    output.outbound = self.interrupt(route, &thread, turn.as_deref());
                     let untracked = self
                         .running
                         .iter()
@@ -387,6 +565,7 @@ impl CodexProtocol {
                 native_thread,
                 absolute_head,
             } => self.request(
+                route,
                 "thread/read",
                 json!({"threadId":native_thread,"includeTurns":false}),
                 Pending::RevertRead {
@@ -405,6 +584,7 @@ impl CodexProtocol {
                     params["lastTurnId"] = json!(turn);
                 }
                 self.request(
+                    route,
                     "thread/fork",
                     params,
                     Pending::Operation("thread/fork".into()),
@@ -412,11 +592,12 @@ impl CodexProtocol {
             }
             ProviderCommand::Compact {
                 native_thread: Some(thread),
-            } if self.thread.as_ref() != Some(thread) => {
+            } if self.native_thread(route) != Some(thread.as_str()) => {
                 let mut params = context.thread_params(context.thread_model.as_deref());
                 params["threadId"] = json!(thread);
                 params["excludeTurns"] = json!(true);
                 self.request(
+                    route,
                     "thread/resume",
                     params.clone(),
                     Pending::Thread {
@@ -425,17 +606,20 @@ impl CodexProtocol {
                             unarchived: false,
                         }),
                         then: Some(Then::Compact),
+                        load_key: None,
                     },
                 )
             }
-            ProviderCommand::Compact { .. } => match self.thread.clone() {
-                Some(thread) => self.compact(&thread),
+            ProviderCommand::Compact { .. } => match self.native_thread(route).map(str::to_owned) {
+                Some(thread) => self.compact(route, &thread),
                 None => self.request(
+                    route,
                     "thread/start",
                     context.thread_params(context.thread_model.as_deref()),
                     Pending::Thread {
                         resume: None,
                         then: Some(Then::Compact),
+                        load_key: None,
                     },
                 ),
             },
@@ -501,7 +685,7 @@ impl CodexProtocol {
         })
     }
     fn route(&self, events: Vec<ProviderEvent>, thread: Option<&String>) -> Vec<ProviderEvent> {
-        match thread.filter(|thread| self.thread.as_ref() != Some(*thread)) {
+        match thread.filter(|thread| !self.is_root(thread)) {
             Some(thread) => child_events(events, thread, &self.children).unwrap_or_default(),
             None => events,
         }
@@ -514,6 +698,7 @@ impl CodexProtocol {
     }
     fn revert_page(
         &mut self,
+        route: &str,
         thread: String,
         head: Option<String>,
         before: Option<String>,
@@ -525,26 +710,68 @@ impl CodexProtocol {
                 "Thread history pagination repeated a cursor.".into(),
             ));
         }
-        Ok(self.request("thread/turns/list",json!({"threadId":thread,"cursor":cursor,"limit":100,"sortDirection":"desc","itemsView":"summary"}),Pending::RevertPage {thread,head,before,visited}))
+        Ok(self.request(route, "thread/turns/list",json!({"threadId":thread,"cursor":cursor,"limit":100,"sortDirection":"desc","itemsView":"summary"}),Pending::RevertPage {thread,head,before,visited}))
     }
-    fn start_or_inject(&mut self, start: Value, history: Option<InlineHistory>) -> Value {
+    fn start_or_inject(
+        &mut self,
+        route: &str,
+        start: Value,
+        history: Option<InlineHistory>,
+    ) -> Value {
+        if let Some(context) = start.get("additionalContext")
+            && let Some(thread) = start["threadId"].as_str()
+        {
+            self.additional_context
+                .insert(thread.into(), context.clone());
+        } else if let Some(thread) = start["threadId"].as_str() {
+            self.additional_context.remove(thread);
+        }
         if let Some(history) = history {
-            self.request("thread/inject_items",json!({"threadId":start["threadId"],"items":history_response_items(&history.history.messages,&history.history.context)}),Pending::Inject {start,history})
+            self.request(route, "thread/inject_items",json!({"threadId":start["threadId"],"items":history_response_items(&history.history.messages,&history.history.context)}),Pending::Inject {start,history})
         } else {
-            self.request("turn/start", start, Pending::Operation("turn/start".into()))
+            self.turn_start(route, start)
         }
     }
-    fn compact(&mut self, thread: &str) -> Value {
+    fn turn_start(&mut self, route: &str, start: Value) -> Value {
         self.request(
+            route,
+            "turn/start",
+            start,
+            Pending::Operation("turn/start".into()),
+        )
+    }
+    fn compact(&mut self, route: &str, thread: &str) -> Value {
+        self.request(
+            route,
             "thread/compact/start",
             json!({"threadId":thread}),
             Pending::Operation("thread/compact/start".into()),
         )
     }
-    fn interrupt(&mut self, thread: &str, turn: Option<&str>) -> Vec<Value> {
+    /// T3 restoreAdditionalContext: Codex drops client developer messages when it
+    /// compacts but resends additional context only when it changes.
+    fn restore_additional_context(&mut self, thread: &str) -> Option<Value> {
+        let context = self.additional_context.get(thread)?.as_object()?.clone();
+        let route = self.route_of(Some(thread)).unwrap_or_default();
+        let items = context
+            .iter()
+            .map(|(key, entry)| {
+                let value = entry["value"].as_str().unwrap_or_default();
+                json!({"type":"message","role":"developer","content":[{"type":"input_text","text":format!("<{key}>{value}</{key}>")}]})
+            })
+            .collect::<Vec<_>>();
+        Some(self.request(
+            &route,
+            "thread/inject_items",
+            json!({"threadId":thread,"items":items}),
+            Pending::Restore,
+        ))
+    }
+    fn interrupt(&mut self, route: &str, thread: &str, turn: Option<&str>) -> Vec<Value> {
         let mut outbound = vec![];
         if let Some(turn) = turn {
             outbound.push(self.request(
+                route,
                 "turn/interrupt",
                 json!({"threadId":thread,"turnId":turn}),
                 Pending::Operation("turn/interrupt".into()),
@@ -558,6 +785,7 @@ impl CodexProtocol {
             .collect::<BTreeSet<_>>();
         for process in processes {
             outbound.push(self.request(
+                route,
                 "thread/backgroundTerminals/terminate",
                 json!({"threadId":thread,"processId":process}),
                 Pending::Terminate {
@@ -568,19 +796,24 @@ impl CodexProtocol {
         }
         outbound
     }
-    /// A root turn runs, or a sent request will start one.
-    pub fn turn_in_flight(&self) -> bool {
-        self.thread
-            .as_ref()
+    /// A root turn of the route runs, or a sent request will start one.
+    pub fn turn_in_flight(&self, route: &str) -> bool {
+        self.native_thread(route)
             .is_some_and(|thread| self.turns.contains_key(thread))
-            || self.pending.values().any(|pending| match pending {
-                Pending::Thread { then, .. } | Pending::Unarchive { then, .. } => then.is_some(),
-                Pending::Inject { .. } => true,
-                Pending::Operation(operation) => {
-                    operation == "turn/start" || operation == "thread/compact/start"
-                }
-                _ => false,
-            })
+            || self
+                .pending
+                .values()
+                .filter(|(owner, _)| owner == route)
+                .any(|(_, pending)| match pending {
+                    Pending::Thread { then, .. } | Pending::Unarchive { then, .. } => {
+                        then.is_some()
+                    }
+                    Pending::Inject { .. } => true,
+                    Pending::Operation(operation) => {
+                        operation == "turn/start" || operation == "thread/compact/start"
+                    }
+                    _ => false,
+                })
     }
     pub fn receive(&mut self, frame: &Value) -> Result<Translation, ProtocolError> {
         let mut output = Translation::default();
@@ -588,38 +821,38 @@ impl CodexProtocol {
             let Some(id) = frame.get("id").and_then(Value::as_u64) else {
                 return Ok(output);
             };
-            let Some(pending) = self.pending.remove(&id) else {
+            let Some((route, pending)) = self.pending.remove(&id) else {
                 return Ok(output);
             };
+            output.route = Some(route.clone());
             if let Some(error) = frame.get("error") {
                 if error["code"] == -32601
                     && let Pending::Inject { mut start, history } = pending
                 {
-                    if std::mem::take(&mut self.stop_before_thread) {
+                    if std::mem::take(&mut self.route_mut(&route).stop_before_thread) {
                         return Ok(output);
                     }
                     replace_input_text(&mut start, history.inline_text);
-                    output.outbound.push(self.request(
-                        "turn/start",
-                        start,
-                        Pending::Operation("turn/start".into()),
-                    ));
+                    output.outbound.push(self.turn_start(&route, start));
                     return Ok(output);
                 }
                 let message = string(error, "message");
                 if let Pending::Thread {
                     resume: Some(resume),
                     then,
+                    load_key,
                 } = &pending
                     && !resume.unarchived
                     && archived_session(&message)
                 {
                     output.outbound.push(self.request(
+                        &route,
                         "thread/unarchive",
                         json!({"threadId":resume.params["threadId"]}),
                         Pending::Unarchive {
                             params: resume.params.clone(),
                             then: then.clone(),
+                            load_key: load_key.clone(),
                         },
                     ));
                     return Ok(output);
@@ -648,8 +881,13 @@ impl CodexProtocol {
             });
             match pending {
                 Pending::Initialize => output.outbound.push(json!({"method":"initialized"})),
-                Pending::Unarchive { params, then } => {
+                Pending::Unarchive {
+                    params,
+                    then,
+                    load_key,
+                } => {
                     output.outbound.push(self.request(
+                        &route,
                         "thread/resume",
                         params.clone(),
                         Pending::Thread {
@@ -658,36 +896,38 @@ impl CodexProtocol {
                                 unarchived: true,
                             }),
                             then,
+                            load_key,
                         },
                     ));
                 }
-                Pending::Thread { then, .. } => {
+                Pending::Thread { then, load_key, .. } => {
                     let thread = required(&result["thread"], "id")?;
-                    self.thread = Some(thread.clone());
+                    self.bind_root(&route, &thread, load_key);
                     output.events.push(ProviderEvent::SessionReady {
                         native_thread: thread.clone(),
                     });
-                    if !std::mem::take(&mut self.stop_before_thread) {
+                    if !std::mem::take(&mut self.route_mut(&route).stop_before_thread) {
                         match then {
                             None => {}
                             Some(Then::Turn { mut start, history }) => {
                                 start["threadId"] = json!(thread);
-                                output.outbound.push(self.start_or_inject(start, history));
+                                output
+                                    .outbound
+                                    .push(self.start_or_inject(&route, start, history));
                             }
-                            Some(Then::Compact) => output.outbound.push(self.compact(&thread)),
+                            Some(Then::Compact) => {
+                                output.outbound.push(self.compact(&route, &thread))
+                            }
                         }
                     }
                 }
                 Pending::Inject { start, .. } => {
                     output.events.push(ProviderEvent::ContextInjected);
-                    if !std::mem::take(&mut self.stop_before_thread) {
-                        output.outbound.push(self.request(
-                            "turn/start",
-                            start,
-                            Pending::Operation("turn/start".into()),
-                        ));
+                    if !std::mem::take(&mut self.route_mut(&route).stop_before_thread) {
+                        output.outbound.push(self.turn_start(&route, start));
                     }
                 }
+                Pending::Restore | Pending::Unload => {}
                 Pending::RevertRead {
                     thread,
                     head,
@@ -702,12 +942,14 @@ impl CodexProtocol {
                         runtime_params["threadId"] = json!(thread);
                         runtime_params["excludeTurns"] = json!(true);
                         output.outbound.push(self.request(
+                            &route,
                             "thread/resume",
                             runtime_params,
                             Pending::RevertResume { thread, head },
                         ));
                     } else {
                         output.outbound.push(self.revert_page(
+                            &route,
                             thread,
                             head,
                             None,
@@ -718,6 +960,7 @@ impl CodexProtocol {
                 }
                 Pending::RevertResume { thread, head } => {
                     output.outbound.push(self.revert_page(
+                        &route,
                         thread,
                         head,
                         None,
@@ -739,6 +982,7 @@ impl CodexProtocol {
                         if head.as_ref() == Some(&id) {
                             if let Some(before) = before {
                                 output.outbound.push(self.request(
+                                    &route,
                                     "thread/revert",
                                     json!({"threadId":thread,"beforeTurnId":before}),
                                     Pending::Revert { thread },
@@ -754,6 +998,7 @@ impl CodexProtocol {
                     }
                     if let Some(cursor) = optional(result, "nextCursor") {
                         output.outbound.push(self.revert_page(
+                            &route,
                             thread,
                             head,
                             before,
@@ -764,6 +1009,7 @@ impl CodexProtocol {
                         return Err(ProtocolError::MissingBoundary(head));
                     } else if let Some(before) = before {
                         output.outbound.push(self.request(
+                            &route,
                             "thread/revert",
                             json!({"threadId":thread,"beforeTurnId":before}),
                             Pending::Revert { thread },
@@ -782,6 +1028,7 @@ impl CodexProtocol {
                 Pending::Terminate { thread, process } => {
                     if result["terminated"] == false {
                         output.outbound.push(self.request(
+                            &route,
                             "thread/backgroundTerminals/list",
                             json!({"threadId":thread}),
                             Pending::TerminalList { thread, process },
@@ -808,6 +1055,7 @@ impl CodexProtocol {
                     }
                     if let Some(cursor) = optional(result, "nextCursor") {
                         output.outbound.push(self.request(
+                            &route,
                             "thread/backgroundTerminals/list",
                             json!({"threadId":thread,"cursor":cursor}),
                             Pending::TerminalList { thread, process },
@@ -817,18 +1065,20 @@ impl CodexProtocol {
                     }
                 }
                 Pending::Operation(operation) if operation == "thread/fork" => {
-                    output.completion = Some(Completion::Forked {
-                        native_thread: required(&result["thread"], "id")?,
-                    });
+                    let native_thread = required(&result["thread"], "id")?;
+                    self.unclaimed.insert(native_thread.clone());
+                    output.completion = Some(Completion::Forked { native_thread });
                 }
                 Pending::Operation(operation) => {
                     if operation == "turn/start"
                         && let Some(turn) = optional(&result["turn"], "id")
-                        && let Some(thread) = self.thread.clone()
+                        && let Some(thread) = self.native_thread(&route).map(str::to_owned)
                     {
                         self.turns.insert(thread.clone(), turn.clone());
                         if self.interrupt_pending.remove(&thread) {
-                            output.outbound.extend(self.interrupt(&thread, Some(&turn)));
+                            output
+                                .outbound
+                                .extend(self.interrupt(&route, &thread, Some(&turn)));
                         }
                     }
                 }
@@ -860,10 +1110,28 @@ impl CodexProtocol {
         match method.as_str() {
             "thread/started" => {
                 let thread = required(&p["thread"], "id")?;
-                if self.thread.is_none() {
-                    self.thread = Some(thread.clone());
+                if !self.is_root(&thread) && !self.child_roots.contains_key(&thread) {
+                    // A new thread announced before its `thread/start` reply
+                    // belongs to the only route starting one.
+                    let mut starting =
+                        self.pending
+                            .values()
+                            .filter_map(|(route, pending)| match pending {
+                                Pending::Thread {
+                                    resume: None,
+                                    load_key,
+                                    ..
+                                } => Some((route.clone(), load_key.clone())),
+                                _ => None,
+                            });
+                    if let (Some((route, load_key)), None) = (starting.next(), starting.next())
+                        && self.native_thread(&route).is_none()
+                    {
+                        self.bind_root(&route, &thread, load_key);
+                    }
                 }
-                if self.thread.as_ref() == Some(&thread) {
+                if self.is_root(&thread) {
+                    output.route = self.roots.get(&thread).cloned();
                     events.push(ProviderEvent::SessionReady {
                         native_thread: thread,
                     });
@@ -874,10 +1142,13 @@ impl CodexProtocol {
                 if let Some(thread) = &native_thread {
                     self.turns.insert(thread.clone(), turn.clone());
                     if self.interrupt_pending.remove(thread) {
-                        output.outbound.extend(self.interrupt(thread, Some(&turn)));
+                        let route = self.route_of(Some(thread)).unwrap_or_default();
+                        output
+                            .outbound
+                            .extend(self.interrupt(&route, thread, Some(&turn)));
                     }
                     // Each turn names the native thread it continues.
-                    if self.thread.as_ref() == Some(thread) {
+                    if self.is_root(thread) {
                         events.push(ProviderEvent::SessionReady {
                             native_thread: thread.clone(),
                         });
@@ -1264,12 +1535,7 @@ impl CodexProtocol {
                     "subAgentActivity" => {
                         let child = required(item, "agentThreadId")?;
                         if string(item, "kind") == "started" {
-                            self.children.entry(child.clone()).or_insert_with(|| {
-                                native_thread
-                                    .clone()
-                                    .filter(|p| self.thread.as_ref() != Some(p))
-                                    .unwrap_or_default()
-                            });
+                            self.adopt_child(&child, native_thread.as_ref());
                         } else if !self.children.contains_key(&child) {
                             return Ok(output);
                         }
@@ -1310,12 +1576,7 @@ impl CodexProtocol {
                         for child in receivers {
                             // Only a spawn assigns a parent; other calls address known children.
                             if tool == "spawnAgent" {
-                                self.children.entry(child.clone()).or_insert_with(|| {
-                                    native_thread
-                                        .clone()
-                                        .filter(|p| self.thread.as_ref() != Some(p))
-                                        .unwrap_or_default()
-                                });
+                                self.adopt_child(&child, native_thread.as_ref());
                             } else if !self.children.contains_key(&child) {
                                 continue;
                             }
@@ -1500,7 +1761,17 @@ impl CodexProtocol {
             // Account, process and diagnostic notifications do not alter a conversation.
             _ => {}
         }
-        if let Some(thread) = native_thread.filter(|t| self.thread.as_ref() != Some(t)) {
+        if method == "item/completed"
+            && p["item"]["type"] == "contextCompaction"
+            && let Some(thread) = &native_thread
+            && let Some(restore) = self.restore_additional_context(thread)
+        {
+            output.outbound.push(restore);
+        }
+        if output.route.is_none() {
+            output.route = self.route_of(native_thread.as_deref());
+        }
+        if let Some(thread) = native_thread.filter(|t| !self.is_root(t)) {
             let path = native_path(&thread, &self.children)?;
             let mut routed = vec![];
             for mut event in events {
@@ -1693,8 +1964,10 @@ fn codex_item(kind: &str, item: &Value) -> Option<(ProviderItem, Option<String>)
 #[cfg(test)]
 impl CodexProtocol {
     pub(crate) fn replay_outbound(&mut self, frame: &Value) {
-        if frame["method"] == "turn/start" {
-            self.thread = optional(&frame["params"], "threadId");
+        if frame["method"] == "turn/start"
+            && let Some(thread) = optional(&frame["params"], "threadId")
+        {
+            self.bind_root("", &thread, None);
         }
         if let Some(id) = frame["id"].as_u64() {
             let method = string(frame, "method");
@@ -1706,11 +1979,12 @@ impl CodexProtocol {
                         unarchived: false,
                     }),
                     then: None,
+                    load_key: None,
                 },
                 _ => Pending::Operation(method),
             };
             self.next_id = self.next_id.max(id);
-            self.pending.insert(id, pending);
+            self.pending.insert(id, (String::new(), pending));
         }
     }
 }

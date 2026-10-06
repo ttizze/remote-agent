@@ -1,17 +1,16 @@
 use super::{
-    ProcessControl, ProviderProcess, SessionError, SessionKey, SessionManager, SessionOptions,
+    Members, ProcessControl, ProviderProcess, SessionError, SessionManager, SessionOptions, Slot,
     claude::ClaudeProcess,
 };
 use crate::{ActorRegistry, RuntimeError};
 use agent_domain::{
-    EffectResult, Input, MessageId, ProviderEvent, ProviderOperation, RequestStatus, RunAttemptId,
-    State,
+    EffectResult, Input, MessageId, ProviderEvent, ProviderOperation, RunAttemptId, State, ThreadId,
 };
 use agent_providers::{
     ClaudeProtocol, CodexProtocol, Completion, ProtocolError, Translation, read_frame, write_frame,
 };
-use serde_json::Value;
-use std::collections::HashMap;
+use serde_json::{Value, json};
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, BufReader};
@@ -23,6 +22,7 @@ use tokio::time::Instant;
 const COMMIT_ATTEMPTS: u32 = 8;
 const COMMIT_BACKOFF: Duration = Duration::from_millis(50);
 const COMMIT_BACKOFF_CAP: Duration = Duration::from_secs(1);
+const TOKEN_REFRESH: &str = "account/chatgptAuthTokens/refresh";
 
 pub(crate) enum Protocol {
     Codex(CodexProtocol),
@@ -48,9 +48,9 @@ impl Protocol {
         }
     }
     /// Claude attributes a preceding turn in the state machine, so only Codex waits.
-    fn turn_in_flight(&self) -> bool {
+    fn turn_in_flight(&self, thread: &ThreadId) -> bool {
         match self {
-            Self::Codex(protocol) => protocol.turn_in_flight(),
+            Self::Codex(protocol) => protocol.turn_in_flight(thread.as_str()),
             Self::Claude(_) => false,
         }
     }
@@ -74,7 +74,9 @@ pub(crate) enum Expect {
 
 /// One translation run inside the session task.
 pub(crate) struct Run {
-    /// Becomes the session owner before the translation runs.
+    /// The app thread the run belongs to.
+    pub(crate) thread: ThreadId,
+    /// Becomes the thread's owner on this process before the translation runs.
     pub(crate) owner: Option<RunAttemptId>,
     /// The attempt that receives this translation's events; the owner by default.
     pub(crate) events_to: Option<RunAttemptId>,
@@ -94,22 +96,45 @@ pub(crate) struct Ran {
 }
 pub(crate) enum Mail {
     Run(Run),
-    /// Answered once no root turn of another attempt is in flight.
+    /// Answered once no root turn of another attempt of the thread is in flight.
     Settled {
+        thread: ThreadId,
         attempt: RunAttemptId,
         done: oneshot::Sender<()>,
     },
+    /// The thread no longer uses this process; its late output still reaches it.
+    Detach {
+        thread: ThreadId,
+    },
     Close {
         report: bool,
-        revoke: bool,
         done: oneshot::Sender<()>,
     },
 }
 
-/// The attempt (and steering message) a sent request belongs to.
+/// The thread, attempt (and steering message) a sent request belongs to.
 struct Sent {
-    attempt: RunAttemptId,
+    thread: ThreadId,
+    attempt: Option<RunAttemptId>,
     steer: Option<MessageId>,
+}
+
+/// One app thread's work on the process.
+#[derive(Default)]
+struct Member {
+    owner: Option<RunAttemptId>,
+    /// Every attempt that ran here, oldest first.
+    attempts: Vec<RunAttemptId>,
+    completion: Option<oneshot::Sender<Result<Completion, String>>>,
+    settled: Vec<oneshot::Sender<()>>,
+    detached: bool,
+}
+impl Member {
+    fn remember(&mut self, attempt: &RunAttemptId) {
+        if !self.attempts.contains(attempt) {
+            self.attempts.push(attempt.clone());
+        }
+    }
 }
 
 struct Outgoing {
@@ -127,7 +152,6 @@ enum Event {
 enum Exit {
     Closed {
         report: bool,
-        revoke: bool,
         done: Option<oneshot::Sender<()>>,
     },
     Eof,
@@ -137,13 +161,15 @@ enum Exit {
 }
 
 pub(crate) struct Task {
-    key: SessionKey,
+    slot: Slot,
+    instance: String,
     generation: u64,
     manager: Weak<SessionManager>,
     registry: Arc<ActorRegistry>,
     options: SessionOptions,
     protocol: Protocol,
     claude: Option<Arc<Mutex<ClaudeProcess>>>,
+    attachments: Arc<Mutex<Members>>,
     mail: mpsc::UnboundedReceiver<Mail>,
     outgoing: mpsc::UnboundedSender<Outgoing>,
     writer: JoinHandle<()>,
@@ -152,16 +178,12 @@ pub(crate) struct Task {
     stderr: Option<Box<dyn AsyncRead + Send + Unpin>>,
     control: Box<dyn ProcessControl>,
     line: Vec<u8>,
-    owner: Option<RunAttemptId>,
     handshake: bool,
-    /// Every attempt that ran on this process, oldest first.
-    attempts: Vec<RunAttemptId>,
+    members: BTreeMap<ThreadId, Member>,
     sent: HashMap<String, Sent>,
-    /// Retained background work key or tool -> the attempt that started it.
-    background: HashMap<String, RunAttemptId>,
+    /// Retained background work key or tool -> the thread and attempt that started it.
+    background: HashMap<String, (ThreadId, RunAttemptId)>,
     replies: Vec<ReplyWaiter>,
-    completion: Option<oneshot::Sender<Result<Completion, String>>>,
-    settled: Vec<oneshot::Sender<()>>,
     deadline: Instant,
     pinned_since: Option<Instant>,
     stderr_tail: String,
@@ -171,13 +193,15 @@ pub(crate) struct Task {
 impl Task {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
-        key: SessionKey,
+        slot: Slot,
+        instance: String,
         generation: u64,
         manager: Weak<SessionManager>,
         registry: Arc<ActorRegistry>,
         options: SessionOptions,
         protocol: Protocol,
         claude: Option<Arc<Mutex<ClaudeProcess>>>,
+        attachments: Arc<Mutex<Members>>,
         mail: mpsc::UnboundedReceiver<Mail>,
         process: ProviderProcess,
     ) -> Self {
@@ -190,7 +214,8 @@ impl Task {
             failed,
         ));
         Self {
-            key,
+            slot,
+            instance,
             generation,
             manager,
             registry,
@@ -198,6 +223,7 @@ impl Task {
             options,
             protocol,
             claude,
+            attachments,
             mail,
             outgoing,
             writer,
@@ -206,14 +232,11 @@ impl Task {
             stderr: Some(process.stderr),
             control: process.control,
             line: Vec::new(),
-            owner: None,
             handshake: false,
-            attempts: Vec::new(),
+            members: BTreeMap::new(),
             sent: HashMap::new(),
             background: HashMap::new(),
             replies: Vec::new(),
-            completion: None,
-            settled: Vec::new(),
             pinned_since: None,
             stderr_tail: String::new(),
             failure: None,
@@ -238,22 +261,25 @@ impl Task {
                     self.touch();
                     self.run_op(run).await;
                 }
-                Event::Mail(Some(Mail::Settled { attempt, done })) => {
-                    if self.owner.as_ref() == Some(&attempt) {
+                Event::Mail(Some(Mail::Settled {
+                    thread,
+                    attempt,
+                    done,
+                })) => {
+                    let member = self.members.entry(thread).or_default();
+                    if member.owner.as_ref() == Some(&attempt) {
                         let _ = done.send(());
                     } else {
-                        self.settled.push(done);
+                        member.settled.push(done);
                         self.release_settled();
                     }
                 }
-                Event::Mail(Some(Mail::Close {
-                    report,
-                    revoke,
-                    done,
-                })) => {
+                Event::Mail(Some(Mail::Detach { thread })) => {
+                    self.members.entry(thread).or_default().detached = true;
+                }
+                Event::Mail(Some(Mail::Close { report, done })) => {
                     break Exit::Closed {
                         report,
-                        revoke,
                         done: Some(done),
                     };
                 }
@@ -262,13 +288,17 @@ impl Task {
                     self.frame(frame).await;
                     self.release_settled();
                 }
-                Event::Frame(Ok(None)) => break Exit::Eof,
+                // A failed write closes stdin, so the provider may exit first.
+                Event::Frame(Ok(None)) => match self.write_failed.as_mut().map(|f| f.try_recv()) {
+                    Some(Ok(error)) => break Exit::Failed(error),
+                    _ => break Exit::Eof,
+                },
                 Event::Frame(Err(error)) if error.kind() == std::io::ErrorKind::InvalidData => {
-                    tracing::warn!(thread = %self.key.thread, instance = %self.key.instance, %error,
+                    tracing::warn!(slot = ?self.slot, %error,
                         "skipping an undecodable provider frame");
                 }
                 Event::Frame(Err(error)) => {
-                    tracing::warn!(thread = %self.key.thread, %error, "provider output failed");
+                    tracing::warn!(slot = ?self.slot, %error, "provider output failed");
                     break Exit::Eof;
                 }
                 Event::Stderr(Ok(0)) | Event::Stderr(Err(_)) => self.stderr = None,
@@ -292,16 +322,18 @@ impl Task {
     }
 
     fn release_settled(&mut self) {
-        if !self.protocol.turn_in_flight() {
-            for waiter in self.settled.drain(..) {
-                let _ = waiter.send(());
+        for (thread, member) in &mut self.members {
+            if !self.protocol.turn_in_flight(thread) {
+                for waiter in member.settled.drain(..) {
+                    let _ = waiter.send(());
+                }
             }
         }
     }
 
     fn keep_stderr(&mut self, bytes: &[u8]) {
         let text = String::from_utf8_lossy(bytes);
-        tracing::debug!(thread = %self.key.thread, instance = %self.key.instance, stderr = %text);
+        tracing::debug!(slot = ?self.slot, stderr = %text);
         self.stderr_tail.push_str(&text);
         if self.stderr_tail.len() > 4096 {
             let mut cut = self.stderr_tail.len() - 4096;
@@ -312,14 +344,9 @@ impl Task {
         }
     }
 
-    fn remember(&mut self, attempt: &RunAttemptId) {
-        if !self.attempts.contains(attempt) {
-            self.attempts.push(attempt.clone());
-        }
-    }
-
     async fn run_op(&mut self, run: Run) {
         let Run {
+            thread,
             owner,
             events_to,
             steer,
@@ -329,12 +356,14 @@ impl Task {
             done,
         } = run;
         self.handshake |= handshake;
+        let member = self.members.entry(thread.clone()).or_default();
+        member.detached = false;
         if let Some(owner) = owner {
-            self.remember(&owner);
-            self.owner = Some(owner);
+            member.remember(&owner);
+            member.owner = Some(owner);
         }
         if let Some(attempt) = &events_to {
-            self.remember(attempt);
+            member.remember(attempt);
         }
         let mut translation = match op(&mut self.protocol) {
             Ok(translation) => translation,
@@ -367,7 +396,8 @@ impl Task {
                         let _ = sender.send(Ok(completion));
                     }
                     None => {
-                        if let Some(previous) = self.completion.replace(sender) {
+                        let member = self.members.entry(thread.clone()).or_default();
+                        if let Some(previous) = member.completion.replace(sender) {
                             let _ = previous.send(Err("superseded by a newer operation".into()));
                         }
                     }
@@ -375,26 +405,77 @@ impl Task {
                 ran.completion = Some(receiver);
             }
         }
-        let attempt = events_to.or_else(|| self.owner.clone());
         let result = self
-            .deliver(translation, attempt, steer, Some(written))
+            .deliver(translation, Some(thread), events_to, steer, Some(written))
             .await;
         let _ = done.send(result.map(|()| ran));
     }
 
     async fn frame(&mut self, frame: Value) {
         self.observe_frame(&frame);
-        let attempt = reply_id(&frame)
+        if frame["method"] == TOKEN_REFRESH && frame.get("id").is_some() {
+            self.refresh_token(&frame);
+            return;
+        }
+        let sent = reply_id(&frame)
             .and_then(|id| self.sent.get(&id))
-            .map(|sent| sent.attempt.clone());
+            .map(|sent| (sent.thread.clone(), sent.attempt.clone()));
         match self.protocol.receive(&frame) {
             Ok(translation) => {
-                if let Err(error) = self.deliver(translation, attempt, None, None).await {
-                    tracing::warn!(thread = %self.key.thread, %error, "provider frame was not fully handled");
+                let (thread, attempt) = match sent {
+                    Some((thread, attempt)) => (Some(thread), attempt),
+                    None => (None, None),
+                };
+                if let Err(error) = self.deliver(translation, thread, attempt, None, None).await {
+                    tracing::warn!(slot = ?self.slot, %error, "provider frame was not fully handled");
                 }
             }
-            Err(error) => self.protocol_error(error).await,
+            Err(error) => {
+                let thread = sent.map(|(thread, _)| thread);
+                self.protocol_error(error, thread).await
+            }
         }
+    }
+
+    /// Answers the app-server's managed-token refresh with the selected account.
+    fn refresh_token(&self, frame: &Value) {
+        let Some(manager) = self.manager.upgrade() else {
+            return;
+        };
+        let (id, instance, outgoing) = (
+            frame["id"].clone(),
+            self.instance.clone(),
+            self.outgoing.clone(),
+        );
+        let previous = frame["params"]["previousAccountId"]
+            .as_str()
+            .map(str::to_owned);
+        tokio::spawn(async move {
+            let response = match manager.host.refresh_codex_account(instance, previous).await {
+                Ok(result) => json!({"id":id,"result":result}),
+                Err(message) => json!({"id":id,"error":{"code":-32000,"message":message}}),
+            };
+            let _ = outgoing.send(Outgoing {
+                frames: vec![response],
+                written: None,
+            });
+        });
+    }
+
+    /// The app thread a translation belongs to.
+    fn thread_of(&self, translation: &Translation, known: Option<ThreadId>) -> Option<ThreadId> {
+        known
+            .or_else(|| {
+                translation
+                    .route
+                    .as_deref()
+                    .filter(|route| !route.is_empty())
+                    .and_then(|route| ThreadId::new(route).ok())
+            })
+            .or_else(|| match &self.slot {
+                Slot::Thread(key) => Some(key.thread.clone()),
+                Slot::Shared(_) => None,
+            })
     }
 
     /// Commits each event to the attempt that owns it, then writes outbound
@@ -404,10 +485,12 @@ impl Task {
     async fn deliver(
         &mut self,
         translation: Translation,
+        thread: Option<ThreadId>,
         attempt: Option<RunAttemptId>,
         steer: Option<MessageId>,
         written: Option<Written>,
     ) -> Result<(), SessionError> {
+        let thread = self.thread_of(&translation, thread);
         let Translation {
             events,
             outbound,
@@ -415,7 +498,12 @@ impl Task {
             completion,
             ..
         } = translation;
-        let default = attempt.or_else(|| self.owner.clone());
+        let default = attempt.or_else(|| {
+            thread
+                .as_ref()
+                .and_then(|thread| self.members.get(thread))
+                .and_then(|member| member.owner.clone())
+        });
         let mut carried = None;
         for event in events {
             let owner = match event_key(&event).and_then(|key| self.background.get(key)) {
@@ -426,27 +514,28 @@ impl Task {
                 None if matches!(event, ProviderEvent::Wake { .. }) && carried.is_some() => {
                     carried.clone()
                 }
-                None => default.clone(),
+                None => thread.clone().zip(default.clone()),
             };
-            let Some(owner) = owner else {
-                tracing::debug!(thread = %self.key.thread,
-                    "dropping a provider event of a session without a turn");
+            let Some((owner_thread, owner)) = owner else {
+                tracing::debug!(slot = ?self.slot,
+                    "dropping a provider event without a turn");
                 continue;
             };
             self.observe(&event);
-            self.retain(&event, &owner);
-            if let Err(error) = self.commit(&owner, event).await {
+            self.retain(&event, &owner_thread, &owner);
+            if let Err(error) = self.commit(&owner_thread, &owner, event).await {
                 self.failure = Some(format!("Provider output could not be recorded: {error}"));
                 return Err(error.into());
             }
         }
-        if let Some(attempt) = &default {
+        if let Some(thread) = &thread {
             for frame in &outbound {
                 if let Some(id) = request(frame) {
                     self.sent.insert(
                         id,
                         Sent {
-                            attempt: attempt.clone(),
+                            thread: thread.clone(),
+                            attempt: default.clone(),
                             steer: steer.clone(),
                         },
                     );
@@ -473,7 +562,10 @@ impl Task {
             }
         }
         if let Some(completion) = completion
-            && let Some(waiter) = self.completion.take()
+            && let Some(waiter) = thread
+                .as_ref()
+                .and_then(|thread| self.members.get_mut(thread))
+                .and_then(|member| member.completion.take())
         {
             let _ = waiter.send(Ok(completion));
         }
@@ -481,7 +573,7 @@ impl Task {
     }
 
     /// Background work keeps the attempt that started it.
-    fn retain(&mut self, event: &ProviderEvent, attempt: &RunAttemptId) {
+    fn retain(&mut self, event: &ProviderEvent, thread: &ThreadId, attempt: &RunAttemptId) {
         if let ProviderEvent::BackgroundTask {
             key, tool, status, ..
         } = event
@@ -490,8 +582,9 @@ impl Task {
                 self.background.remove(key);
                 self.background.remove(tool);
             } else {
-                self.background.insert(key.clone(), attempt.clone());
-                self.background.insert(tool.clone(), attempt.clone());
+                let owner = (thread.clone(), attempt.clone());
+                self.background.insert(key.clone(), owner.clone());
+                self.background.insert(tool.clone(), owner);
             }
         }
     }
@@ -524,7 +617,11 @@ impl Task {
         }
     }
 
-    async fn protocol_error(&mut self, error: ProtocolError) {
+    async fn protocol_error(&mut self, error: ProtocolError, thread: Option<ThreadId>) {
+        let thread = thread.or_else(|| match &self.slot {
+            Slot::Thread(key) => Some(key.thread.clone()),
+            Slot::Shared(_) => None,
+        });
         match error {
             ProtocolError::Remote {
                 request,
@@ -543,21 +640,30 @@ impl Task {
                     return;
                 }
                 if completion_operation(&operation)
-                    && let Some(waiter) = self.completion.take()
+                    && let Some(waiter) = thread
+                        .as_ref()
+                        .and_then(|thread| self.members.get_mut(thread))
+                        .and_then(|member| member.completion.take())
                 {
                     let _ = waiter.send(Err(message));
                     return;
                 }
                 let Some((operation, session_lost)) = failed_operation(&operation) else {
-                    tracing::warn!(thread = %self.key.thread, %operation, %message,
+                    tracing::warn!(slot = ?self.slot, %operation, %message,
                         "provider rejected an operation nobody waits for");
                     return;
                 };
-                let (attempt, message_id) = match sent {
-                    Some(sent) => (Some(sent.attempt), sent.steer),
-                    None => (self.owner.clone(), None),
+                let (thread, attempt, message_id) = match sent {
+                    Some(sent) => (Some(sent.thread), sent.attempt, sent.steer),
+                    None => {
+                        let owner = thread
+                            .as_ref()
+                            .and_then(|thread| self.members.get(thread))
+                            .and_then(|member| member.owner.clone());
+                        (thread, owner, None)
+                    }
                 };
-                let Some(attempt) = attempt else {
+                let (Some(thread), Some(attempt)) = (thread, attempt) else {
                     return;
                 };
                 let failed = Input::Effect(EffectResult::ProviderFailed {
@@ -568,16 +674,23 @@ impl Task {
                     turn_completed,
                     session_lost,
                 });
-                if let Err(error) = self.retrying(|task| task.input(failed.clone())).await {
-                    tracing::warn!(thread = %self.key.thread, %error, "could not record a provider failure");
+                if let Err(error) = self
+                    .retrying(|task| task.input(&thread, failed.clone()))
+                    .await
+                {
+                    tracing::warn!(slot = ?self.slot, %error, "could not record a provider failure");
                 }
             }
-            other => match self.completion.take() {
+            other => match thread
+                .as_ref()
+                .and_then(|thread| self.members.get_mut(thread))
+                .and_then(|member| member.completion.take())
+            {
                 Some(waiter) => {
                     let _ = waiter.send(Err(other.to_string()));
                 }
                 None => {
-                    tracing::warn!(thread = %self.key.thread, error = %other, "invalid provider frame")
+                    tracing::warn!(slot = ?self.slot, error = %other, "invalid provider frame")
                 }
             },
         }
@@ -585,10 +698,11 @@ impl Task {
 
     async fn commit(
         &mut self,
+        thread: &ThreadId,
         attempt: &RunAttemptId,
         event: ProviderEvent,
     ) -> Result<(), RuntimeError> {
-        self.retrying(|task| task.provider(attempt.clone(), event.clone()))
+        self.retrying(|task| task.provider(thread, attempt.clone(), event.clone()))
             .await
     }
 
@@ -606,7 +720,7 @@ impl Task {
                 Err(error @ (RuntimeError::Store(_) | RuntimeError::ActorStopped))
                     if tries < COMMIT_ATTEMPTS =>
                 {
-                    tracing::warn!(thread = %self.key.thread, %error, tries,
+                    tracing::warn!(slot = ?self.slot, %error, tries,
                         "retrying a provider commit");
                     tokio::time::sleep(delay).await;
                     delay = (delay * 2).min(COMMIT_BACKOFF_CAP);
@@ -619,44 +733,57 @@ impl Task {
 
     fn provider(
         &self,
+        thread: &ThreadId,
         attempt: RunAttemptId,
         event: ProviderEvent,
     ) -> impl Future<Output = Result<(), RuntimeError>> + use<> {
-        let (registry, thread) = (self.registry.clone(), self.key.thread.clone());
+        let (registry, thread) = (self.registry.clone(), thread.clone());
         async move {
             let actor = registry.get_or_load(&thread).await?;
             actor.provider(attempt, event).await.map(|_| ())
         }
     }
 
-    fn input(&self, input: Input) -> impl Future<Output = Result<(), RuntimeError>> + use<> {
-        let (registry, thread) = (self.registry.clone(), self.key.thread.clone());
+    fn input(
+        &self,
+        thread: &ThreadId,
+        input: Input,
+    ) -> impl Future<Output = Result<(), RuntimeError>> + use<> {
+        let (registry, thread) = (self.registry.clone(), thread.clone());
         async move {
             let actor = registry.get_or_load(&thread).await?;
             actor.input(input).await.map(|_| ())
         }
     }
 
-    /// Idle when the thread has no running turn or live request on this session;
-    /// background work pins it up to `max_idle_pin`.
+    /// T3 ProviderSessionManager: busy while a turn of any thread runs on the
+    /// process; background work pins an idle process up to `max_idle_pin`.
     async fn idle_due(&mut self) -> bool {
         if !self.mail.is_empty() {
             self.touch();
             return false;
         }
-        let state = match self.registry.state(&self.key.thread).await {
-            Ok(state) => state,
-            Err(error) => {
-                tracing::warn!(thread = %self.key.thread, %error, "cannot read the thread for idle release");
-                self.touch();
-                return false;
+        let mut states = vec![];
+        for (thread, member) in &self.members {
+            match self.registry.state(thread).await {
+                Ok(state) => states.push((state, member.attempts.clone())),
+                Err(error) => {
+                    tracing::warn!(%thread, %error, "cannot read the thread for idle release");
+                    self.touch();
+                    return false;
+                }
             }
-        };
+        }
         if !self.mail.is_empty() {
             self.touch();
             return false;
         }
-        match activity(&state, &self.key.instance, &self.attempts) {
+        let activity = states
+            .iter()
+            .map(|(state, attempts)| activity(state, &self.instance, attempts))
+            .max()
+            .unwrap_or(Activity::Idle);
+        match activity {
             Activity::Busy => {
                 self.pinned_since = None;
                 self.touch();
@@ -670,7 +797,7 @@ impl Task {
                         (now + self.options.idle_timeout).min(since + self.options.max_idle_pin);
                     false
                 } else {
-                    tracing::warn!(thread = %self.key.thread, instance = %self.key.instance,
+                    tracing::warn!(slot = ?self.slot,
                         "releasing an idle provider session whose background work outlived the pin");
                     true
                 }
@@ -696,28 +823,24 @@ impl Task {
     }
 
     async fn finish(mut self, exit: Exit) {
-        let (report, error, revoke, done) = match exit {
-            Exit::Closed {
-                report,
-                revoke,
-                done,
-            } => {
+        let (report, error, done) = match exit {
+            Exit::Closed { report, done } => {
                 self.stop().await;
-                (report, None, revoke, done)
+                (report, None, done)
             }
             Exit::Idle => {
                 self.stop().await;
-                (true, None, false, None)
+                (true, None, None)
             }
             Exit::Abandoned => {
                 self.stop().await;
-                (false, None, false, None)
+                (false, None, None)
             }
             Exit::Failed(error) => {
-                tracing::warn!(thread = %self.key.thread, instance = %self.key.instance, %error,
+                tracing::warn!(slot = ?self.slot, %error,
                     "closing a provider session that cannot continue");
                 self.stop().await;
-                (true, Some(error), false, None)
+                (true, Some(error), None)
             }
             Exit::Eof => {
                 self.writer.abort();
@@ -731,13 +854,12 @@ impl Task {
                         }
                     };
                 if !success {
-                    tracing::warn!(thread = %self.key.thread, instance = %self.key.instance,
-                        stderr = %self.stderr_tail, "provider process exited unsuccessfully");
+                    tracing::warn!(slot = ?self.slot, stderr = %self.stderr_tail,
+                        "provider process exited unsuccessfully");
                 }
                 (
                     true,
                     (!success).then(|| "Provider process exited".to_owned()),
-                    false,
                     None,
                 )
             }
@@ -745,34 +867,39 @@ impl Task {
         for (_, waiter) in self.replies.drain(..) {
             let _ = waiter.send(Err("The provider session closed.".into()));
         }
-        if let Some(waiter) = self.completion.take() {
-            let _ = waiter.send(Err("The provider session closed.".into()));
-        }
-        self.settled.clear();
-        if report {
+        let mut closed = vec![];
+        for (thread, member) in &mut self.members {
+            if let Some(waiter) = member.completion.take() {
+                let _ = waiter.send(Err("The provider session closed.".into()));
+            }
+            member.settled.clear();
+            if !report || member.detached {
+                continue;
+            }
             // Every attempt that still owns work on this process learns it is gone;
             // the owner last, and not while its handshake reports the exit itself.
-            let owner = self.owner.clone();
-            let mut closed: Vec<_> = self
-                .attempts
-                .iter()
-                .filter(|attempt| Some(*attempt) != owner.as_ref())
-                .cloned()
-                .collect();
+            let owner = member.owner.clone();
+            closed.extend(
+                member
+                    .attempts
+                    .iter()
+                    .filter(|attempt| Some(*attempt) != owner.as_ref())
+                    .map(|attempt| (thread.clone(), attempt.clone())),
+            );
             if !self.handshake {
-                closed.extend(owner);
+                closed.extend(owner.map(|owner| (thread.clone(), owner)));
             }
-            for attempt in closed {
-                let event = ProviderEvent::SessionClosed {
-                    error: error.clone(),
-                };
-                if let Err(error) = self.commit(&attempt, event).await {
-                    tracing::warn!(thread = %self.key.thread, %error, "could not record a closed provider session");
-                }
+        }
+        for (thread, attempt) in closed {
+            let event = ProviderEvent::SessionClosed {
+                error: error.clone(),
+            };
+            if let Err(error) = self.commit(&thread, &attempt, event).await {
+                tracing::warn!(%thread, %error, "could not record a closed provider session");
             }
         }
         if let Some(manager) = self.manager.upgrade() {
-            manager.closed(&self.key, self.generation, revoke);
+            manager.closed(&self.slot, self.generation, &self.attachments);
         }
         if let Some(done) = done {
             let _ = done.send(());
@@ -889,21 +1016,20 @@ pub(crate) fn failed_operation(operation: &str) -> Option<(ProviderOperation, bo
     })
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Activity {
-    Busy,
-    Pinned,
     Idle,
+    Pinned,
+    Busy,
 }
 
+/// T3 counts running turns as busy; a pending request alone does not keep the
+/// session, and its release expires the request.
 pub(crate) fn activity(state: &State, instance: &str, attempts: &[RunAttemptId]) -> Activity {
-    let running = state
+    if state
         .active_run()
-        .is_some_and(|run| run.selection.instance == instance);
-    let asking = state.requests.iter().any(|request| {
-        request.status == RequestStatus::Pending && attempts.contains(&request.attempt)
-    });
-    if running || asking {
+        .is_some_and(|run| run.selection.instance == instance)
+    {
         return Activity::Busy;
     }
     if holds_background(state, attempts) {

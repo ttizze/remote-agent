@@ -280,9 +280,7 @@ impl SessionHost for ProviderHost {
         })
     }
 
-    fn released(&self, key: &SessionKey, revoke_credentials: bool) {
-        if revoke_credentials {
-            self.tools.revoke(&key.thread, &key.instance);
-        }
+    fn revoke_credentials(&self, thread: &ThreadId, instance: Option<&str>) {
+        self.tools.revoke(thread, instance);
     }
 }

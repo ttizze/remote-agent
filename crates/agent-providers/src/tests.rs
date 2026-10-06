@@ -494,28 +494,28 @@ fn codex_compact_without_a_native_thread_starts_one_first() {
 #[test]
 fn codex_reports_a_root_turn_in_flight_until_it_completes() {
     let mut protocol = CodexProtocol::default();
-    assert!(!protocol.turn_in_flight());
+    assert!(!protocol.turn_in_flight(""));
     let start = protocol
         .command(&codex_start(), &wire_context(), &[])
         .unwrap()
         .outbound;
-    assert!(protocol.turn_in_flight());
+    assert!(protocol.turn_in_flight(""));
     let turn = protocol
         .receive(&json!({"id":start[0]["id"],"result":{"thread":{"id":"native"}}}))
         .unwrap()
         .outbound;
-    assert!(protocol.turn_in_flight());
+    assert!(protocol.turn_in_flight(""));
     protocol
         .receive(&json!({"id":turn[0]["id"],"result":{"turn":{"id":"turn-1"}}}))
         .unwrap();
-    assert!(protocol.turn_in_flight());
+    assert!(protocol.turn_in_flight(""));
     protocol
         .receive(&json!({"method":"turn/started","params":{"threadId":"native-child","turn":{"id":"child-turn"}}}))
         .unwrap();
     protocol
         .receive(&json!({"method":"turn/completed","params":{"threadId":"native","turn":{"id":"turn-1","status":"interrupted"}}}))
         .unwrap();
-    assert!(!protocol.turn_in_flight());
+    assert!(!protocol.turn_in_flight(""));
 }
 #[test]
 fn codex_stop_before_thread_ready_cancels_prompt_and_the_next_prompt_can_start() {
@@ -1946,4 +1946,192 @@ fn claude_prompts_run_known_skills_and_request_ultrathink_effort() {
         )
         .unwrap();
     assert_eq!(model.outbound[0]["request"]["model"], "claude-fable-5[1m]");
+}
+
+fn routed(route: &str) -> WireContext {
+    WireContext {
+        route: route.into(),
+        ..wire_context()
+    }
+}
+/// Starts a turn of `route` on a shared translator; its native thread is `native`.
+fn shared_start(codex: &mut CodexProtocol, route: &str, native: &str, turn: &str) {
+    let start = codex
+        .command(&codex_start(), &routed(route), &[])
+        .unwrap()
+        .outbound;
+    let ready = codex
+        .receive(&json!({"id":start[0]["id"],"result":{"thread":{"id":native}}}))
+        .unwrap();
+    assert_eq!(ready.route.as_deref(), Some(route));
+    codex
+        .receive(&json!({"id":ready.outbound[0]["id"],"result":{"turn":{"id":turn}}}))
+        .unwrap();
+}
+// T3 CodexAdapterV2 serves every provider thread of a session from one
+// app-server: native threads of different app threads share the id space and
+// each notification belongs to the route of its native thread.
+#[test]
+fn one_app_server_routes_each_native_thread_to_its_own_route() {
+    let mut codex = CodexProtocol::default();
+    shared_start(&mut codex, "thread-a", "native-a", "turn-a");
+    shared_start(&mut codex, "thread-b", "native-b", "turn-b");
+    let delta = notify(
+        &mut codex,
+        "item/agentMessage/delta",
+        json!({"threadId":"native-b","turnId":"turn-b","itemId":"m","delta":"hi"}),
+    );
+    assert_eq!(delta.route.as_deref(), Some("thread-b"));
+    assert!(matches!(
+        &delta.events[..],
+        [ProviderEvent::TextDelta { .. }]
+    ));
+    let spawn = notify(
+        &mut codex,
+        "item/started",
+        json!({"threadId":"native-a","turnId":"turn-a","item":{"type":"collabAgentToolCall","id":"spawn","tool":"spawnAgent","receiverThreadIds":["child-a"],"prompt":"look"}}),
+    );
+    assert_eq!(spawn.route.as_deref(), Some("thread-a"));
+    let child = notify(
+        &mut codex,
+        "item/agentMessage/delta",
+        json!({"threadId":"child-a","turnId":"child-turn","itemId":"c","delta":"x"}),
+    );
+    assert_eq!(child.route.as_deref(), Some("thread-a"));
+    assert!(matches!(&child.events[..], [ProviderEvent::Child { key, .. }] if key == "child-a"));
+    let unknown = notify(
+        &mut codex,
+        "item/agentMessage/delta",
+        json!({"threadId":"elsewhere","turnId":"t","itemId":"u","delta":"x"}),
+    );
+    assert_eq!(unknown.route, None);
+    let interrupt = codex
+        .command(
+            &ProviderCommand::Interrupt {
+                native_thread: None,
+                native_turn: None,
+            },
+            &routed("thread-b"),
+            &[],
+        )
+        .unwrap();
+    assert_eq!(interrupt.outbound[0]["method"], "turn/interrupt");
+    assert_eq!(
+        interrupt.outbound[0]["params"],
+        json!({"threadId":"native-b","turnId":"turn-b"})
+    );
+    assert!(codex.turn_in_flight("thread-a") && codex.turn_in_flight("thread-b"));
+    notify(
+        &mut codex,
+        "turn/completed",
+        json!({"threadId":"native-b","turn":{"id":"turn-b","status":"interrupted"}}),
+    );
+    assert!(codex.turn_in_flight("thread-a") && !codex.turn_in_flight("thread-b"));
+}
+// T3 ProviderTurnStartService: a fork's thread is loaded for the child's first
+// turn, a thread loaded for another selection or policy is resumed again, and
+// a stop while starting suppresses only that route's prompt.
+#[test]
+fn a_shared_translator_loads_threads_per_route() {
+    let mut codex = CodexProtocol::default();
+    shared_start(&mut codex, "source", "native-source", "turn-source");
+    notify(
+        &mut codex,
+        "turn/completed",
+        json!({"threadId":"native-source","turn":{"id":"turn-source","status":"completed"}}),
+    );
+    let fork = codex
+        .command(
+            &ProviderCommand::Fork {
+                native_thread: "native-source".into(),
+                through_turn: Some("turn-source".into()),
+            },
+            &routed("source"),
+            &[],
+        )
+        .unwrap();
+    let forked = codex
+        .receive(&json!({"id":fork.outbound[0]["id"],"result":{"thread":{"id":"native-fork"}}}))
+        .unwrap();
+    assert_eq!(
+        forked.completion,
+        Some(Completion::Forked {
+            native_thread: "native-fork".into()
+        })
+    );
+    let mut child_start = codex_start();
+    if let ProviderCommand::Start { native_thread, .. } = &mut child_start {
+        *native_thread = Some("native-fork".into());
+    }
+    let child = codex.command(&child_start, &routed("fork"), &[]).unwrap();
+    assert_eq!(child.outbound[0]["method"], "turn/start");
+    assert_eq!(child.outbound[0]["params"]["threadId"], "native-fork");
+    let mut source_start = codex_start();
+    if let ProviderCommand::Start {
+        native_thread,
+        runtime_mode,
+        ..
+    } = &mut source_start
+    {
+        *native_thread = Some("native-source".into());
+        *runtime_mode = RuntimeMode::FullAccess;
+    }
+    let resumed = codex
+        .command(&source_start, &routed("source"), &[])
+        .unwrap();
+    assert_eq!(resumed.outbound[0]["method"], "thread/resume");
+    let other = codex
+        .command(&codex_start(), &routed("other"), &[])
+        .unwrap();
+    assert_eq!(other.outbound[0]["method"], "thread/start");
+    codex
+        .command(
+            &ProviderCommand::Interrupt {
+                native_thread: None,
+                native_turn: None,
+            },
+            &routed("other"),
+            &[],
+        )
+        .unwrap();
+    let source_ready = codex
+        .receive(
+            &json!({"id":resumed.outbound[0]["id"],"result":{"thread":{"id":"native-source"}}}),
+        )
+        .unwrap();
+    assert_eq!(source_ready.outbound[0]["method"], "turn/start");
+    let other_ready = codex
+        .receive(&json!({"id":other.outbound[0]["id"],"result":{"thread":{"id":"native-other"}}}))
+        .unwrap();
+    assert!(other_ready.outbound.is_empty());
+}
+// T3 restoreAdditionalContext: compaction drops client developer messages, so
+// the thread's additional context is injected again.
+#[test]
+fn a_compaction_restores_the_threads_additional_context() {
+    let mut codex = CodexProtocol::default();
+    let context = WireContext {
+        additional_context: Some(Json(
+            json!({"orchestration":{"kind":"application","value":"use the tools"}}),
+        )),
+        ..routed("thread")
+    };
+    let start = codex
+        .command(&codex_start(), &context, &[])
+        .unwrap()
+        .outbound;
+    codex
+        .receive(&json!({"id":start[0]["id"],"result":{"thread":{"id":"native"}}}))
+        .unwrap();
+    let compacted = notify(
+        &mut codex,
+        "item/completed",
+        json!({"threadId":"native","turnId":"turn","item":{"type":"contextCompaction","id":"compact"}}),
+    );
+    assert_eq!(compacted.outbound.len(), 1);
+    assert_eq!(compacted.outbound[0]["method"], "thread/inject_items");
+    assert_eq!(
+        compacted.outbound[0]["params"],
+        json!({"threadId":"native","items":[{"type":"message","role":"developer","content":[{"type":"input_text","text":"<orchestration>use the tools</orchestration>"}]}]})
+    );
 }

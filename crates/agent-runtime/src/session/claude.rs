@@ -73,7 +73,7 @@ impl SessionManager {
         let sent = self
             .send(
                 &entry,
-                Request::new(move |p| {
+                Request::new(&target.key.thread, move |p| {
                     let claude = p.claude()?;
                     claude.set_skills(skills);
                     claude.command(&command, &prompt, &images)
@@ -95,7 +95,7 @@ impl SessionManager {
         settings: &ClaudeSettings,
         launch: ClaudeLaunch,
     ) -> Result<Entry, Failure> {
-        if let Some(entry) = self.entry(&target.key) {
+        if let Some(entry) = self.entry(&Slot::Thread(target.key.clone())) {
             let reusable = entry.claude.as_ref().is_some_and(|process| {
                 let process = process.lock().expect("claude process");
                 launch.native_session.is_some()
@@ -103,7 +103,7 @@ impl SessionManager {
                     && compatible(&process.launch, &launch)
             });
             if reusable {
-                match self.align(&entry, &launch).await {
+                match self.align(&entry, &target.key.thread, &launch).await {
                     Ok(()) => return Ok(entry),
                     Err(message) => {
                         tracing::warn!(thread = %target.key.thread, %message,
@@ -133,7 +133,7 @@ impl SessionManager {
                 }))
                 .into());
             }
-            self.close_entry(&entry, true, false).await;
+            self.close_entry(&entry, true).await;
         }
         let resumed = launch.native_session.is_some();
         let entry = self.spawn(target, Some(launch)).await?;
@@ -142,7 +142,7 @@ impl SessionManager {
         let initialized = self
             .request_reply(
                 &entry,
-                Request::new(move |p| {
+                Request::new(&target.key.thread, move |p| {
                     let claude = p.claude()?;
                     claude.set_skills(skills);
                     Ok(frames(vec![claude.control.initialize(&prompt)]))
@@ -152,7 +152,7 @@ impl SessionManager {
             )
             .await;
         if let Err(message) = initialized {
-            self.close_entry(&entry, false, false).await;
+            self.close_entry(&entry, false).await;
             return Err(if resumed {
                 ExecError::Settle(Box::new(EffectResult::ProviderFailed {
                     attempt: attempt.clone(),
@@ -177,7 +177,7 @@ impl SessionManager {
         let routes = self.task_routes(state).await;
         self.send(
             &entry,
-            Request::new(move |p| {
+            Request::new(&target.key.thread, move |p| {
                 let claude = p.claude()?;
                 for (task, tool, parent, agent) in &routes {
                     claude.restore_task_route(task, tool, parent.as_deref(), *agent);
@@ -193,7 +193,12 @@ impl SessionManager {
         Ok(entry)
     }
 
-    pub(super) async fn align(&self, entry: &Entry, launch: &ClaudeLaunch) -> Result<(), String> {
+    pub(super) async fn align(
+        &self,
+        entry: &Entry,
+        thread: &ThreadId,
+        launch: &ClaudeLaunch,
+    ) -> Result<(), String> {
         let Some(process) = &entry.claude else {
             return Ok(());
         };
@@ -209,7 +214,7 @@ impl SessionManager {
             let payload = json!({ "model": model });
             self.request_reply(
                 entry,
-                Request::new(move |p| {
+                Request::new(thread, move |p| {
                     Ok(frames(vec![
                         p.claude()?.control.request("set_model", payload),
                     ]))
@@ -222,7 +227,7 @@ impl SessionManager {
             let payload = json!({ "mode": mode });
             self.request_reply(
                 entry,
-                Request::new(move |p| {
+                Request::new(thread, move |p| {
                     Ok(frames(vec![
                         p.claude()?.control.request("set_permission_mode", payload),
                     ]))

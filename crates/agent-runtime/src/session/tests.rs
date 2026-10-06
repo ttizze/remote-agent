@@ -107,8 +107,13 @@ pub(crate) fn codex_replies(frame: &Value) -> Vec<Value> {
     let id = frame["id"].clone();
     match frame["method"].as_str() {
         Some("initialize") => vec![json!({"id":id,"result":{}})],
-        Some("thread/start") => {
+        // A process's first thread is `native-thread`; later threads of a
+        // shared app-server are told apart by their request id.
+        Some("thread/start") if id == 2 => {
             vec![json!({"id":id,"result":{"thread":{"id":"native-thread"}}})]
+        }
+        Some("thread/start") => {
+            vec![json!({"id":id,"result":{"thread":{"id":format!("native-thread-{id}")}}})]
         }
         Some("thread/resume") => {
             vec![json!({"id":id,"result":{"thread":{"id":frame["params"]["threadId"]}}})]
@@ -242,22 +247,33 @@ impl Rig {
     }
     /// A Codex thread whose first turn is running on a live session.
     async fn codex_turn(&self, id: &ThreadId) -> RunAttemptId {
+        self.codex_turn_on(id, "codex").await
+    }
+    async fn codex_turn_on(&self, id: &ThreadId, instance: &str) -> RunAttemptId {
         self.host.respond(codex_replies);
-        self.create(
-            id,
-            selection(Driver::Codex, "gpt-6-luna"),
-            RuntimeMode::FullAccess,
-        )
-        .await;
+        let mut selection = selection(Driver::Codex, "gpt-6-luna");
+        selection.instance = instance.into();
+        self.create(id, selection, RuntimeMode::FullAccess).await;
+        let started = |process: &fake::FakeProcess| {
+            process
+                .written()
+                .iter()
+                .filter(|frame| frame["method"] == "turn/start")
+                .count()
+        };
+        let before = self.host.last().map_or(0, |process| started(&process));
+        let spawned = self.host.spawned();
         self.send(id, "hello", DispatchMode::StartImmediately).await;
         self.drain().await;
         let attempt = self.attempt(id).await;
         self.until("turn accepted", async || {
             self.host.last().is_some_and(|process| {
-                process
-                    .written()
-                    .iter()
-                    .any(|frame| frame["method"] == "turn/start")
+                started(&process)
+                    > if self.host.spawned() == spawned {
+                        before
+                    } else {
+                        0
+                    }
             })
         })
         .await;
@@ -436,9 +452,10 @@ async fn opens_independent_sessions_concurrently() {
         })
     });
     let (a, b) = (thread("thread-concurrent-a"), thread("thread-concurrent-b"));
-    for id in [&a, &b] {
-        rig.create(id, selection(Driver::Codex, "gpt"), RuntimeMode::FullAccess)
-            .await;
+    for (id, instance) in [(&a, "codex"), (&b, "codex-work")] {
+        let mut selection = selection(Driver::Codex, "gpt");
+        selection.instance = instance.into();
+        rig.create(id, selection, RuntimeMode::FullAccess).await;
         rig.send(id, "hello", DispatchMode::StartImmediately).await;
     }
     let (first, second) = (
@@ -498,23 +515,30 @@ async fn opens_a_duplicate_session_only_once() {
     assert_eq!(rig.host.spawned(), 1);
 }
 
-// "closes every live session for a provider instance".
+// "closes every live session for a provider instance": both threads share the
+// instance's app-server, and closing it releases both credentials.
 #[tokio::test(flavor = "multi_thread")]
 async fn closes_every_live_session_for_a_provider_instance() {
     let rig = rig(SessionOptions::default(), 5);
     let (a, b) = (thread("thread-logout-a"), thread("thread-logout-b"));
     rig.codex_turn(&a).await;
     rig.codex_turn(&b).await;
+    assert_eq!(rig.host.spawned(), 1);
+    assert_eq!(rig.sessions.sessions().len(), 2);
     rig.sessions.close_instance("codex").await;
     assert!(rig.sessions.sessions().is_empty());
-    assert!(rig.host.process(0).exited() && rig.host.process(1).exited());
-    let released: Vec<_> = rig
+    assert!(rig.host.process(0).exited());
+    let mut revoked: Vec<_> = rig
         .host
         .logged()
         .into_iter()
-        .filter(|entry| entry.starts_with("released:"))
+        .filter(|entry| entry.starts_with("revoked:"))
         .collect();
-    assert_eq!(released.len(), 2);
+    revoked.sort();
+    assert_eq!(
+        revoked,
+        [format!("revoked:{a}:codex"), format!("revoked:{b}:codex")]
+    );
 }
 
 // "releases live sessions when its layer shuts down": recovery, not the
@@ -541,7 +565,7 @@ async fn a_stopped_provider_commits_its_last_frames_then_releases_the_session() 
     rig.host.process(0).exit(true);
     rig.gone(&id).await;
     assert_eq!(rig.run_status(&id).await, RunStatus::Completed);
-    assert!(rig.host.logged().contains(&format!("released:{id}:false")));
+    assert!(rig.host.logged().contains(&format!("revoked:{id}:codex")));
 }
 
 // "issues MCP credentials before opening and revokes them on close" and
@@ -555,7 +579,18 @@ async fn configures_before_spawning_and_revokes_credentials_on_detach() {
     assert_eq!(&log[..2], [format!("context:{id}"), format!("spawn:{id}")]);
     rig.sessions.detach(&id, true).await;
     assert!(rig.sessions.sessions().is_empty());
-    assert!(rig.host.logged().contains(&format!("released:{id}:true")));
+    assert!(rig.host.logged().contains(&format!("revoked:{id}:*")));
+}
+
+// "terminal detach revokes credentials even when no session is live" (#18).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_terminal_detach_revokes_credentials_without_a_live_process() {
+    let rig = rig(SessionOptions::default(), 5);
+    let id = thread("thread-credentials-idle");
+    rig.sessions.detach(&id, true).await;
+    assert_eq!(rig.host.logged(), [format!("revoked:{id}:*")]);
+    rig.sessions.detach(&id, false).await;
+    assert_eq!(rig.host.logged().len(), 1);
 }
 
 // "releases idle sessions without sweeping all sessions" and "keeps active
@@ -565,7 +600,7 @@ async fn releases_an_idle_session_only_after_its_turn_terminates() {
     let rig = rig(options(150, 60_000), 5);
     let (id, other) = (thread("thread-idle"), thread("thread-busy"));
     rig.codex_turn(&id).await;
-    rig.codex_turn(&other).await;
+    rig.codex_turn_on(&other, "codex-work").await;
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert_eq!(rig.sessions.sessions().len(), 2);
     rig.finish_codex_turn(0);
@@ -576,7 +611,7 @@ async fn releases_an_idle_session_only_after_its_turn_terminates() {
         rig.sessions.sessions(),
         [SessionKey {
             thread: other.clone(),
-            instance: "codex".into()
+            instance: "codex-work".into()
         }]
     );
 }
@@ -648,7 +683,7 @@ async fn a_replacement_session_keeps_its_own_lifetime() {
     let id = thread("thread-replacement");
     let attempt = rig.codex_turn(&id).await;
     background_work(&rig, &id, &attempt, None).await;
-    rig.sessions.detach(&id, false).await;
+    rig.sessions.close_instance("codex").await;
     rig.until_status(&id, RunStatus::Failed).await;
     rig.send(&id, "again", DispatchMode::StartImmediately).await;
     rig.drain().await;
@@ -1100,9 +1135,13 @@ async fn a_rejected_request_settles_only_the_waiter_of_its_id() {
     .await;
     rig.send(&id, "first", DispatchMode::StartImmediately).await;
     rig.drain().await;
-    let entry = rig.sessions.entry(&rig.sessions.sessions()[0]).unwrap();
-    let set_model = |model: &'static str| {
-        Request::new(move |p| {
+    let entry = rig
+        .sessions
+        .entry(&Slot::Thread(rig.sessions.sessions()[0].clone()))
+        .unwrap();
+    let owner = id.clone();
+    let set_model = move |model: &'static str| {
+        Request::new(&owner, move |p| {
             Ok(frames(vec![
                 p.claude()?
                     .control
@@ -1716,7 +1755,7 @@ async fn a_blocked_stdin_write_keeps_output_and_close_handled() {
     .await;
     process.emit(json!({"method":"turn/started","params":{"threadId":"native-thread","turn":{"id":"native-turn"}}}));
     rig.until_status(&id, RunStatus::Running).await;
-    tokio::time::timeout(Duration::from_secs(2), rig.sessions.detach(&id, false))
+    tokio::time::timeout(Duration::from_secs(2), rig.sessions.close_instance("codex"))
         .await
         .expect("close is handled while a write is blocked");
     assert!(process.exited());
@@ -1746,10 +1785,16 @@ async fn a_write_the_provider_never_accepts_fails_the_session() {
     rig.drain().await;
     rig.gone(&id).await;
     rig.until_status(&id, RunStatus::Failed).await;
-    assert!(rig.state(&id).await.items.iter().any(|item| matches!(
-        &item.kind,
-        ItemKind::Error { message, .. } if message == "The provider stopped reading its input."
-    )));
+    let state = rig.state(&id).await;
+    assert!(
+        state.items.iter().any(|item| matches!(
+            &item.kind,
+            ItemKind::Error { message, .. } if message == "The provider stopped reading its input."
+        )),
+        "{:?} {:?}",
+        state.items,
+        rig.host.logged()
+    );
 }
 
 // ClaudeAdapterV2.ts:7297 and :7328: Stop interrupts and then closes the
@@ -2214,5 +2259,216 @@ async fn a_claude_fork_reserves_its_session_before_writing_the_transcript() {
             .await
             .native_sessions
             .contains_key("claude")
+    );
+}
+
+/// Replies with native ids derived from the request id, as a shared app-server
+/// serving several threads.
+fn shared_replies(frame: &Value) -> Vec<Value> {
+    let id = frame["id"].clone();
+    match frame["method"].as_str() {
+        Some("initialize" | "account/login/start" | "thread/unsubscribe" | "turn/interrupt") => {
+            vec![json!({"id":id,"result":{}})]
+        }
+        Some("thread/start") => {
+            vec![json!({"id":id,"result":{"thread":{"id":format!("native-{id}")}}})]
+        }
+        Some("turn/start") => {
+            vec![json!({"id":id,"result":{"turn":{"id":format!("turn-{id}")}}})]
+        }
+        _ => vec![],
+    }
+}
+
+impl Rig {
+    /// Starts a Codex turn on the shared app-server; its native thread and turn.
+    async fn shared_turn(&self, id: &ThreadId) -> (String, String) {
+        self.create(
+            id,
+            selection(Driver::Codex, "gpt-6-luna"),
+            RuntimeMode::FullAccess,
+        )
+        .await;
+        let starts = || {
+            self.host
+                .last()
+                .map_or(vec![], |process| written_methods(&process, "turn/start"))
+        };
+        let before = starts().len();
+        self.send(id, "hello", DispatchMode::StartImmediately).await;
+        self.drain().await;
+        self.until("turn started", async || starts().len() > before)
+            .await;
+        let start = starts().pop().unwrap();
+        let thread = start["params"]["threadId"].as_str().unwrap().to_owned();
+        let turn = format!("turn-{}", start["id"]);
+        self.host
+            .process(0)
+            .emit(json!({"method":"turn/started","params":{"threadId":thread,"turn":{"id":turn}}}));
+        self.until_status(id, RunStatus::Running).await;
+        (thread, turn)
+    }
+}
+
+fn complete(process: &fake::FakeProcess, thread: &str, turn: &str, text: &str) {
+    process.emit(json!({"method":"item/completed","params":{"threadId":thread,"turnId":turn,"item":{"type":"agentMessage","id":format!("reply-{turn}"),"text":text,"phase":"final_answer"}}}));
+    process.emit(json!({"method":"turn/completed","params":{"threadId":thread,"turn":{"id":turn,"status":"completed"}}}));
+}
+
+fn replies(state: &State) -> Vec<String> {
+    state
+        .items
+        .iter()
+        .filter(|item| matches!(item.kind, ItemKind::AssistantMessage { .. }))
+        .map(|item| item.text.clone())
+        .collect()
+}
+
+// T3 Orchestrator providerSessionIdFor: Codex supports several provider threads
+// per session, so an instance's threads share one app-server and JSON-RPC id
+// space; each native thread's output reaches its own thread.
+#[tokio::test(flavor = "multi_thread")]
+async fn codex_threads_share_one_app_server_and_keep_their_own_output() {
+    let rig = rig(SessionOptions::default(), 5);
+    rig.host.respond(shared_replies);
+    let (a, b) = (thread("thread-shared-a"), thread("thread-shared-b"));
+    let (native_a, turn_a) = rig.shared_turn(&a).await;
+    let (native_b, turn_b) = rig.shared_turn(&b).await;
+    assert_ne!(native_a, native_b);
+    assert_eq!(rig.host.spawned(), 1);
+    let process = rig.host.process(0);
+    assert_eq!(written_methods(&process, "initialize").len(), 1);
+    let ids: Vec<u64> = process
+        .written()
+        .iter()
+        .filter_map(|frame| frame["id"].as_u64())
+        .collect();
+    assert!(ids.windows(2).all(|pair| pair[0] < pair[1]), "{ids:?}");
+    complete(&process, &native_b, &turn_b, "reply for b");
+    rig.until_status(&b, RunStatus::Completed).await;
+    assert_eq!(replies(&*rig.state(&b).await), ["reply for b"]);
+    assert_eq!(rig.run_status(&a).await, RunStatus::Running);
+    assert!(replies(&*rig.state(&a).await).is_empty());
+    rig.command(&a, Command::Stop).await;
+    rig.drain().await;
+    let interrupts = written_methods(&process, "turn/interrupt");
+    assert_eq!(interrupts.len(), 1);
+    assert_eq!(interrupts[0]["params"]["threadId"], native_a.as_str());
+    assert_eq!(interrupts[0]["params"]["turnId"], turn_a.as_str());
+    complete(&process, &native_a, &turn_a, "reply for a");
+    rig.until("a settles", async || rig.run_status(&a).await.terminal())
+        .await;
+    assert_eq!(replies(&*rig.state(&b).await), ["reply for b"]);
+}
+
+// T3 ProviderSessionManager: the shared session is busy while any thread's
+// turn runs, and is released once every thread is idle.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_shared_app_server_stays_while_any_thread_runs() {
+    let rig = rig(options(150, 60_000), 5);
+    rig.host.respond(shared_replies);
+    let (a, b) = (
+        thread("thread-shared-idle-a"),
+        thread("thread-shared-idle-b"),
+    );
+    let (native_a, turn_a) = rig.shared_turn(&a).await;
+    let (native_b, turn_b) = rig.shared_turn(&b).await;
+    let process = rig.host.process(0);
+    complete(&process, &native_a, &turn_a, "done");
+    rig.until_status(&a, RunStatus::Completed).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(!process.exited());
+    assert_eq!(rig.sessions.sessions().len(), 2);
+    complete(&process, &native_b, &turn_b, "done");
+    rig.gone(&b).await;
+    assert!(process.exited());
+    assert!(rig.sessions.sessions().is_empty());
+}
+
+// T3 ProviderSessionManager.detach for a multi-thread session: the thread's
+// running turn is interrupted and its native thread unloaded, while the
+// app-server keeps serving the other thread. Only a terminal detach revokes.
+#[tokio::test(flavor = "multi_thread")]
+async fn detaching_from_the_shared_app_server_interrupts_and_unloads_only_that_thread() {
+    let rig = rig(SessionOptions::default(), 5);
+    rig.host.respond(shared_replies);
+    let (a, b) = (thread("thread-detach-a"), thread("thread-detach-b"));
+    let (native_a, turn_a) = rig.shared_turn(&a).await;
+    rig.shared_turn(&b).await;
+    let process = rig.host.process(0);
+    rig.sessions.detach(&a, false).await;
+    let interrupts = written_methods(&process, "turn/interrupt");
+    assert_eq!(interrupts.len(), 1);
+    assert_eq!(interrupts[0]["params"]["threadId"], native_a.as_str());
+    assert_eq!(interrupts[0]["params"]["turnId"], turn_a.as_str());
+    let unloads = written_methods(&process, "thread/unsubscribe");
+    assert_eq!(unloads.len(), 1);
+    assert_eq!(unloads[0]["params"]["threadId"], native_a.as_str());
+    assert!(!process.exited());
+    assert_eq!(
+        rig.sessions.sessions(),
+        [SessionKey {
+            thread: b.clone(),
+            instance: "codex".into()
+        }]
+    );
+    assert!(
+        !rig.host
+            .logged()
+            .iter()
+            .any(|entry| entry.starts_with("revoked:"))
+    );
+    rig.sessions.detach(&b, true).await;
+    assert!(rig.host.logged().contains(&format!("revoked:{b}:*")));
+    assert!(rig.sessions.sessions().is_empty());
+}
+
+// T3 CodexAdapterV2 resolveRuntime: a new app-server runs as the selected
+// managed account, and its token refreshes are answered from that account.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_app_server_signs_in_with_the_managed_account_and_refreshes_its_token() {
+    let rig = rig(SessionOptions::default(), 5);
+    rig.host.respond(shared_replies);
+    let login = json!({"type":"chatgptAuthTokens","accessToken":"token","chatgptAccountId":"account-1","chatgptPlanType":"pro"});
+    *rig.host.codex_login.lock().unwrap() = Some(login.clone());
+    let id = thread("thread-managed-account");
+    rig.shared_turn(&id).await;
+    let process = rig.host.process(0);
+    let methods: Vec<_> = process
+        .written()
+        .iter()
+        .filter_map(|frame| frame["method"].as_str().map(str::to_owned))
+        .collect();
+    assert_eq!(
+        methods[..4],
+        [
+            "initialize",
+            "initialized",
+            "account/login/start",
+            "thread/start"
+        ]
+    );
+    assert_eq!(
+        written_methods(&process, "account/login/start")[0]["params"],
+        login
+    );
+    process.emit(json!({"id":"refresh-1","method":"account/chatgptAuthTokens/refresh","params":{"reason":"unauthorized","previousAccountId":"account-1"}}));
+    rig.until("refresh answered", async || {
+        process
+            .written()
+            .iter()
+            .any(|frame| frame["id"] == "refresh-1")
+    })
+    .await;
+    let answer = process
+        .written()
+        .into_iter()
+        .find(|frame| frame["id"] == "refresh-1")
+        .unwrap();
+    assert_eq!(answer["result"]["accessToken"], "fresh");
+    assert!(
+        rig.host
+            .logged()
+            .contains(&"refresh:codex:Some(\"account-1\")".to_owned())
     );
 }
