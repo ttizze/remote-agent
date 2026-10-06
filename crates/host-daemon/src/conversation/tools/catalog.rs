@@ -572,3 +572,13 @@ fn project() -> Vec<Value> {
 pub(crate) fn tools() -> Vec<Value> {
     [orchestrator(), thread(), project()].concat()
 }
+
+/// Tools T3 marks read-only, which a read-only Claude sandbox pre-approves.
+#[cfg(test)]
+pub(crate) fn read_only_tools() -> Vec<String> {
+    tools()
+        .into_iter()
+        .filter(|tool| tool["annotations"]["readOnlyHint"] == true)
+        .filter_map(|tool| tool["name"].as_str().map(str::to_owned))
+        .collect()
+}

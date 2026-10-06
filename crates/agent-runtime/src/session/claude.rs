@@ -385,9 +385,14 @@ pub(super) fn claude_launch(
         settings.sandbox_kind.as_deref(),
         settings.read_only_allows_global_reads,
     );
-    if !settings.mcp_servers.is_empty() && !settings.mcp_allowed_tools.is_empty() {
+    let mcp_tools = if settings.sandbox_kind.as_deref() == Some("readOnly") {
+        &settings.mcp_read_only_tools
+    } else {
+        &settings.mcp_allowed_tools
+    };
+    if !settings.mcp_servers.is_empty() && !mcp_tools.is_empty() {
         let mut allowed = policy.allowed_tools.take().unwrap_or_default();
-        for tool in &settings.mcp_allowed_tools {
+        for tool in mcp_tools {
             if !allowed.contains(tool) {
                 allowed.push(tool.clone());
             }

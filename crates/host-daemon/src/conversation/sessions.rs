@@ -23,6 +23,27 @@ use std::{
     sync::{Arc, OnceLock, Weak},
 };
 
+/// T3 CLAUDE_READ_ONLY_T3_MCP_ALLOWED_TOOLS: the tools annotated read-only.
+pub(crate) const CLAUDE_READ_ONLY_TOOLS: [&str; 17] = [
+    "orchestrator_capabilities",
+    "list_scheduled_tasks",
+    "t3_thread_list",
+    "t3_thread_wait",
+    "t3_pending_request_list",
+    "t3_pending_request_read",
+    "t3_thread_configuration",
+    "t3_thread_transfers",
+    "t3_worktree_status",
+    "t3_worktree_list",
+    "t3_project_list",
+    "t3_project_read",
+    "t3_thread_search",
+    "t3_preview_list",
+    "t3_environment_read",
+    "t3_queue_list",
+    "t3_queue_read",
+];
+
 /// One provider process to start.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ProcessSpec {
@@ -244,7 +265,8 @@ impl SessionHost for ProviderHost {
             let config = self.claude()?.0.config_home.clone();
             let cwd = self.cwd(&target).await?;
             // T3 claudeMcpQueryOverrides: the app's tools are pre-approved, and
-            // a waiting tool may block for up to an hour.
+            // a waiting tool may block for up to an hour. The browser's tools
+            // stand in for T3's preview tools under its wildcard.
             let mut mcp_servers = self.mcp_servers(&target.key)?;
             for server in mcp_servers.values_mut() {
                 server["timeout"] = json!(CLAUDE_MCP_TOOL_TIMEOUT_MS);
@@ -252,6 +274,10 @@ impl SessionHost for ProviderHost {
             let mcp_allowed_tools = mcp_servers
                 .keys()
                 .map(|name| format!("mcp__{name}__*"))
+                .collect();
+            let mcp_read_only_tools = CLAUDE_READ_ONLY_TOOLS
+                .iter()
+                .map(|tool| format!("mcp__{}__{tool}", tools::SERVER_NAME))
                 .collect();
             let skills = {
                 let cwd = cwd.clone();
@@ -262,6 +288,7 @@ impl SessionHost for ProviderHost {
             Ok(ClaudeSettings {
                 mcp_servers,
                 mcp_allowed_tools,
+                mcp_read_only_tools,
                 append_system_prompt: claude_append_system_prompt(true),
                 additional_directories: vec![
                     cwd.to_string_lossy().into_owned(),

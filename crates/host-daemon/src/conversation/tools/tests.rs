@@ -1172,6 +1172,16 @@ fn orchestrator_tool_guidance_matches_t3() {
     assert_eq!(find("t3_thread_read")["annotations"]["readOnlyHint"], false);
 }
 
+#[test]
+fn a_read_only_claude_sandbox_pre_approves_every_read_only_tool() {
+    for tool in read_only_tools() {
+        assert!(
+            crate::conversation::sessions::CLAUDE_READ_ONLY_TOOLS.contains(&tool.as_str()),
+            "{tool}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn returns_a_bounded_public_failure_without_serializing_storage_causes() {
     let fake = Arc::new(Fake::default());

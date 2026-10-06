@@ -11,6 +11,8 @@ mod tests;
 mod thread;
 
 pub(crate) use backend::HostOrchestration;
+#[cfg(test)]
+pub(crate) use catalog::read_only_tools;
 pub(crate) use catalog::tools;
 
 use agent_domain::{CommandId, Reply, State, ThreadId};

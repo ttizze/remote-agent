@@ -97,6 +97,8 @@ pub struct ClaudeSettings {
     /// Tools of the app's MCP servers the CLI runs without asking (T3
     /// claudeMcpQueryOverrides), added to the policy's allowed tools.
     pub mcp_allowed_tools: Vec<String>,
+    /// The read-only tools a read-only sandbox pre-approves instead.
+    pub mcp_read_only_tools: Vec<String>,
     pub settings: Option<Value>,
     pub extra_args: BTreeMap<String, Option<String>>,
     pub append_system_prompt: String,

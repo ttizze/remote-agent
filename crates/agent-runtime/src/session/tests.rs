@@ -2654,3 +2654,35 @@ async fn a_claude_launch_pre_approves_the_app_tools_and_appends_the_instructions
         agent_providers::claude_append_system_prompt(true)
     );
 }
+
+// T3 claudeMcpQueryOverrides: a read-only sandbox pre-approves only the
+// annotated read-only tools, after the sandbox's own read tools.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_read_only_claude_sandbox_pre_approves_only_read_only_app_tools() {
+    let rig = rig(SessionOptions::default(), 5);
+    rig.host.respond(claude_replies);
+    *rig.host.claude.lock().unwrap() = ClaudeSettings {
+        sandbox_kind: Some("readOnly".into()),
+        read_only_allows_global_reads: true,
+        mcp_servers: BTreeMap::from([("orchestration".to_owned(), json!({"command":"agent"}))]),
+        mcp_allowed_tools: vec!["mcp__orchestration__*".into()],
+        mcp_read_only_tools: vec![
+            "mcp__orchestration__orchestrator_capabilities".into(),
+            "mcp__orchestration__t3_thread_list".into(),
+        ],
+        ..ClaudeSettings::default()
+    };
+    let id = thread("thread-claude-read-only-tools");
+    let process = rig.claude_turn(&id, RuntimeMode::ApprovalRequired).await;
+    let args = process.request.claude.clone().unwrap().args();
+    let allowed = args
+        .iter()
+        .position(|arg| arg == "--allowedTools")
+        .map(|index| args[index + 1].clone());
+    assert_eq!(
+        allowed.as_deref(),
+        Some(
+            "Read,Glob,Grep,mcp__orchestration__orchestrator_capabilities,mcp__orchestration__t3_thread_list"
+        )
+    );
+}
