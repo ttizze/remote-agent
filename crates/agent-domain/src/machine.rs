@@ -1711,7 +1711,8 @@ impl Decision {
             return Reply::Run(run.clone());
         }
         let held = self.state.queued_runs().iter().any(|r| r.queue_held);
-        let queued = active.is_some() || !self.state.captures.is_empty();
+        let queued =
+            active.is_some() || !self.state.captures.is_empty() || self.state.rollback.is_some();
         // T3 queues a deferred start behind an active run without preparation.
         let deferred = matches!(mode, DispatchMode::DeferStart) && !queued;
         let id = RunId::new(format!("run:{}:{}", message.id.as_str().len(), message.id)).unwrap();
@@ -1800,26 +1801,16 @@ impl Decision {
                 return reject("thread-deleted");
             }
         }
-        // Metadata can change during rollback; operation results carry only the
-        // rollback identity and never overwrite thread metadata.
+        // T3 accepts commands while a rollback runs: new messages wait behind it
+        // and the rollback checks the active provider when it executes. Its
+        // results carry only the rollback identity and never overwrite metadata.
         if self.state.rollback.is_some()
             && matches!(
                 command,
-                Send(_)
-                    | ContinueRestart { .. }
+                ContinueRestart { .. }
                     | ReleasePrepared { .. }
                     | RetryPrepared { .. }
-                    | ResumeQueue
                     | Rollback { .. }
-                    | Fork { .. }
-                    | MergeBack { .. }
-                    | Delegate { .. }
-                    | SelectModel { .. }
-                    | SwitchProvider { .. }
-                    | RuntimeMode { .. }
-                    | InteractionMode { .. }
-                    | Compact
-                    | PromoteToSteer { .. }
             )
         {
             return reject("rollback-pending");
@@ -3288,10 +3279,7 @@ impl Decision {
                 // selection moved to another instance than the active one.
                 let thread = self.state.thread.as_ref().unwrap();
                 if thread.selection.instance != active {
-                    let message = format!(
-                        "Active provider changed before rollback target {checkpoint} could execute on thread {}.",
-                        thread.id
-                    );
+                    let message = rollback_provider_changed(checkpoint, &thread.id);
                     self.fact(FactBody::RollbackFailed {
                         command: id.clone(),
                         message,
@@ -5898,6 +5886,7 @@ impl Decision {
                         head: binding.head.clone(),
                     });
                 }
+                self.promote();
             }
             EffectResult::RollbackFailed { command, message } => {
                 let Some(pending) = self
@@ -5921,6 +5910,7 @@ impl Decision {
                     command: command.clone(),
                     message: message.clone(),
                 });
+                self.promote();
             }
             EffectResult::ThreadCommandFailed {
                 command, reason, ..
@@ -6314,6 +6304,13 @@ pub fn latest_stable_run(state: &State) -> Option<&Run> {
 /// the provider of the direct turn that consumes them; handoffs keep their
 /// instance; a delegated result reaches only a turn after its spawning run
 /// failed or was interrupted.
+/// T3 CheckpointRollbackService's failure when the selection left the active
+/// provider before the rollback executed.
+pub fn rollback_provider_changed(checkpoint: &CheckpointId, thread: &ThreadId) -> String {
+    format!(
+        "Active provider changed before rollback target {checkpoint} could execute on thread {thread}."
+    )
+}
 /// A command's identity for its receipt. Context the Host fills in on the
 /// first dispatch is left out, so a retry of the same command replays it.
 fn command_fingerprint(command: &Command) -> String {

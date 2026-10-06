@@ -3,7 +3,7 @@ use super::{ExecutorContext, retry};
 use crate::{Durability, EffectError, EffectHandler, EffectJob, ExecError, PreparedRestore};
 use agent_domain::{
     CheckpointScope, CommandId, Effect, EffectBody, EffectResult, Input, Reply, RestoreFiles,
-    State, ThreadId,
+    State, ThreadId, latest_executed_run, rollback_provider_changed,
 };
 use futures_util::future::BoxFuture;
 
@@ -61,6 +61,14 @@ impl EffectHandler for Rollback {
                     message: message.into(),
                 }))
             };
+            // T3 CheckpointRollbackService: the selection may have moved to
+            // another instance while the rollback waited.
+            if let Some(thread) = &state.thread
+                && latest_executed_run(&state).map(|run| &run.selection.instance)
+                    != Some(&thread.selection.instance)
+            {
+                return failed(&rollback_provider_changed(&pending.checkpoint, &thread.id));
+            }
             let _fence = match restore {
                 Some(_) => Some(context.workspaces.restore().await),
                 None => None,

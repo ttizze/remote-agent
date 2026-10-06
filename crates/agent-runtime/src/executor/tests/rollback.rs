@@ -719,3 +719,38 @@ async fn a_fork_whose_source_turn_was_rolled_back_starts_from_portable_context()
         )
     );
 }
+
+// T3 accepts a provider switch while a rollback waits, and the rollback then
+// fails because the active provider changed (CheckpointRollbackService).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_provider_switch_while_a_rollback_waits_fails_the_rollback() {
+    let rig = rig();
+    rig.host.respond(revert_replies(rig.ops.clone(), false));
+    let id = tid("rewind-after-switch");
+    let scope = rig.scoped(&id, worktree("/wt")).await;
+    rig.completed_run(&id, "first", "turn-1").await;
+    rig.completed_run(&id, "second", "turn-2").await;
+    rig.ops.log.lock().unwrap().clear();
+    assert_eq!(rollback(&rig, &id, &scope, 1, true).await, Reply::Accepted);
+    let other = ModelSelection {
+        instance: "codex-other".into(),
+        ..codex()
+    };
+    assert_eq!(
+        rig.command(&id, Command::SwitchProvider { selection: other })
+            .await,
+        Reply::Accepted
+    );
+    rig.drain().await;
+    let state = rig.state(&id).await;
+    assert!(state.rollback.is_none());
+    assert_eq!(
+        state.rollback_failure,
+        Some(agent_domain::rollback_provider_changed(
+            &checkpoint_id(&scope.id, 1),
+            &id
+        ))
+    );
+    assert!(rollback_calls(&rig.ops).is_empty());
+    assert!(rolled_back(&state).is_empty());
+}

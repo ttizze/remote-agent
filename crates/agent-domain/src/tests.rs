@@ -692,7 +692,7 @@ fn checkpoint(s: &mut State, run: &RunId, attempt: &RunAttemptId, key: &str) -> 
     id
 }
 #[test]
-fn rollback_is_absolute_blocks_run_operations_and_preserves_new_metadata() {
+fn rollback_is_absolute_holds_new_runs_and_preserves_new_metadata() {
     let mut s = state();
     let (first, a) = running(&mut s, "first");
     finish(&mut s, &a);
@@ -708,24 +708,36 @@ fn rollback_is_absolute_blocks_run_operations_and_preserves_new_metadata() {
             restore_files: true,
         },
     );
-    for (key, c) in [
-        ("resume", Command::ResumeQueue),
-        ("send", send_message("new", DispatchMode::StartImmediately)),
-        (
+    assert_eq!(
+        command(
+            &mut s,
             "rollback-again",
             Command::Rollback {
                 checkpoint: CheckpointId::new("cp-first").unwrap(),
                 restore_files: false,
             },
-        ),
-    ] {
-        assert_eq!(
-            command(&mut s, key, c).reply,
-            Reply::Rejected {
-                reason: "rollback-pending".into()
-            }
-        );
-    }
+        )
+        .reply,
+        Reply::Rejected {
+            reason: "rollback-pending".into()
+        }
+    );
+    // T3 accepts a message during a rollback; its turn starts after it.
+    assert_eq!(
+        command(&mut s, "resume", Command::ResumeQueue).reply,
+        Reply::Accepted
+    );
+    let Reply::Run(new) = command(
+        &mut s,
+        "send",
+        send_message("new", DispatchMode::StartImmediately),
+    )
+    .reply
+    else {
+        panic!()
+    };
+    let status = |s: &State| s.runs.iter().find(|run| run.id == new).unwrap().status;
+    assert_eq!(status(&s), RunStatus::Queued);
     command(
         &mut s,
         "rename",
@@ -741,8 +753,9 @@ fn rollback_is_absolute_blocks_run_operations_and_preserves_new_metadata() {
             command: CommandId::new("rollback").unwrap(),
         },
     );
-    assert_eq!(s.thread.unwrap().title, "Renamed while restoring");
     assert_eq!(s.runs[1].status, RunStatus::RolledBack);
+    assert_eq!(status(&s), RunStatus::Starting);
+    assert_eq!(s.thread.unwrap().title, "Renamed while restoring");
 }
 #[test]
 fn waiting_capture_survives_recovery_without_releasing_the_queue() {
@@ -2096,11 +2109,16 @@ fn rollback_discards_pending_captures_and_invalidates_later_checkpoints() {
     assert!(s.captures.is_empty());
     assert_eq!(s.runs[1].status, RunStatus::RolledBack);
     assert_eq!(s.runs[2].status, RunStatus::RolledBack);
-    assert_eq!(s.runs[3].status, RunStatus::Queued);
+    // Nothing holds the queue once the rollback discarded the capture.
+    assert_eq!(s.runs[3].status, RunStatus::Starting);
     assert_eq!(
         s.checkpoints.iter().find(|c| c.id == later).unwrap().status,
         CheckpointStatus::Stale
     );
+    let (queued, fourth) = (s.runs[3].id.clone(), s.runs[3].attempt.clone().unwrap());
+    finish(&mut s, &fourth);
+    checkpoint(&mut s, &queued, &fourth, "cp-queued");
+    assert_eq!(s.runs[3].status, RunStatus::Completed);
     assert_eq!(
         command(
             &mut s,
@@ -2115,8 +2133,6 @@ fn rollback_discards_pending_captures_and_invalidates_later_checkpoints() {
             reason: "checkpoint-not-ready".into()
         }
     );
-    command(&mut s, "resume", Command::ResumeQueue);
-    assert_eq!(s.runs[3].status, RunStatus::Starting);
     let _ = second;
 }
 #[test]
@@ -2872,8 +2888,10 @@ fn interrupt_failure_keeps_the_root_and_children_live_until_provider_confirmatio
     ));
 }
 
+// T3 accepts selection and mode changes while a rollback runs; the rollback
+// checks the active provider when it executes (CheckpointRollbackService).
 #[test]
-fn provider_selection_and_runtime_changes_are_blocked_during_rollback() {
+fn provider_selection_and_runtime_changes_are_accepted_during_rollback() {
     let mut s = state();
     let (run, attempt) = running(&mut s, "first");
     finish(&mut s, &attempt);
@@ -2886,12 +2904,14 @@ fn provider_selection_and_runtime_changes_are_blocked_during_rollback() {
             restore_files: false,
         },
     );
+    let mut model = selection();
+    model.model = "gpt-6-luna-mini".into();
     for (i, change) in [
         Command::SelectModel {
-            selection: selection(),
+            selection: model.clone(),
         },
         Command::SwitchProvider {
-            selection: selection(),
+            selection: model.clone(),
         },
         Command::RuntimeMode {
             mode: RuntimeMode::Auto,
@@ -2903,15 +2923,16 @@ fn provider_selection_and_runtime_changes_are_blocked_during_rollback() {
     .into_iter()
     .enumerate()
     {
-        let before = s.clone();
         assert_eq!(
             command(&mut s, &format!("change-{i}"), change).reply,
-            Reply::Rejected {
-                reason: "rollback-pending".into()
-            }
+            Reply::Accepted
         );
-        assert_eq!(s, before);
     }
+    let thread = s.thread.as_ref().unwrap();
+    assert_eq!(thread.selection, model);
+    assert_eq!(thread.runtime_mode, RuntimeMode::Auto);
+    assert_eq!(thread.interaction_mode, InteractionMode::Plan);
+    assert!(s.rollback.is_some());
 }
 
 proptest! {
