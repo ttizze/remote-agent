@@ -321,8 +321,11 @@ async fn a_provider_that_cannot_rewind_fails_the_rollback_and_puts_the_files_bac
     assert!(rolled_back(&state).is_empty());
 }
 
+// T3 CheckpointRollbackService rewinds the provider for every later run, even a
+// failed one, and that fails without a native thread (CodexAdapterV2
+// getNativeThreadId).
 #[tokio::test(flavor = "multi_thread")]
-async fn a_rollback_without_a_native_session_resets_nothing_and_still_finishes() {
+async fn a_rollback_without_a_native_session_to_rewind_fails() {
     let rig = rig();
     let id = tid("rewind-no-provider");
     let scope = rig.scoped(&id, worktree("/wt")).await;
@@ -346,7 +349,11 @@ async fn a_rollback_without_a_native_session_resets_nothing_and_still_finishes()
 
     let state = rig.state(&id).await;
     assert!(state.rollback.is_none());
-    assert_eq!(state.rollback_failure, None);
+    assert_eq!(
+        state.rollback_failure.as_deref(),
+        Some(ROLLBACK_FAILED_MESSAGE)
+    );
+    assert!(rolled_back(&state).is_empty());
     assert!(rollback_calls(&rig.ops).is_empty());
     assert_eq!(rig.host.spawned(), 0);
 }
@@ -787,6 +794,91 @@ async fn a_workspace_shared_after_admission_fails_the_rollback_after_its_retries
         rig.outbox_kinds(&id)
             .await
             .contains(&("Rollback".to_owned(), crate::EffectStatus::Failed))
+    );
+    assert!(rollback_calls(&rig.ops).is_empty());
+    assert!(rolled_back(&state).is_empty());
+}
+
+// T3 Orchestrator reads the fork source again at the child's first message
+// (CommandPolicy decideForkExecution): a source turn rolled back since the fork
+// is handed over as portable context instead of a native fork.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_fork_whose_source_turn_was_rolled_back_starts_from_portable_context() {
+    let rig = rig();
+    rig.host.respond(revert_replies(rig.ops.clone(), false));
+    let id = tid("fork-rolled-back-parent");
+    let scope = rig.scoped(&id, worktree("/wt")).await;
+    rig.completed_run(&id, "first", "turn-1").await;
+    let second = rig.completed_run(&id, "second", "turn-2").await;
+    let child = tid("fork-rolled-back-child");
+    let forked = rig
+        .command(
+            &id,
+            Command::Fork {
+                target: child.clone(),
+                source: agent_domain::SourcePoint::Run(second),
+                title: None,
+            },
+        )
+        .await;
+    assert_eq!(forked, Reply::Thread(child.clone()));
+    rig.drain().await;
+    assert!(rig.state(&child).await.transfers[0].native_source.is_some());
+    assert_eq!(rollback(&rig, &id, &scope, 1, false).await, Reply::Accepted);
+    rig.drain().await;
+    assert_eq!(rolled_back(&*rig.state(&id).await), [2]);
+    rig.send(&child, "child", "child").await;
+    rig.drain().await;
+    let forks = (0..rig.host.spawned())
+        .flat_map(|index| rig.host.process(index).written())
+        .filter(|frame| frame["method"] == "thread/fork")
+        .count();
+    assert_eq!(forks, 0);
+    let state = rig.state(&child).await;
+    assert_ne!(state.runs[0].status, RunStatus::Failed);
+    let transfer = state
+        .transfers
+        .iter()
+        .find(|transfer| !transfer.superseded)
+        .unwrap();
+    assert!(transfer.native_source.is_none());
+    assert!(
+        transfer.delivery.as_ref().is_some_and(
+            |delivery| delivery.status != agent_domain::ContextDeliveryStatus::NativeFork
+        )
+    );
+}
+
+// T3 accepts a provider switch while a rollback waits, and the rollback then
+// fails because the active provider changed (CheckpointRollbackService).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_provider_switch_while_a_rollback_waits_fails_the_rollback() {
+    let rig = rig();
+    rig.host.respond(revert_replies(rig.ops.clone(), false));
+    let id = tid("rewind-after-switch");
+    let scope = rig.scoped(&id, worktree("/wt")).await;
+    rig.completed_run(&id, "first", "turn-1").await;
+    rig.completed_run(&id, "second", "turn-2").await;
+    rig.ops.log.lock().unwrap().clear();
+    assert_eq!(rollback(&rig, &id, &scope, 1, true).await, Reply::Accepted);
+    let other = ModelSelection {
+        instance: "codex-other".into(),
+        ..codex()
+    };
+    assert_eq!(
+        rig.command(&id, Command::SwitchProvider { selection: other })
+            .await,
+        Reply::Accepted
+    );
+    rig.drain().await;
+    let state = rig.state(&id).await;
+    assert!(state.rollback.is_none());
+    assert_eq!(
+        state.rollback_failure,
+        Some(agent_domain::rollback_provider_changed(
+            &checkpoint_id(&scope.id, 1),
+            &id
+        ))
     );
     assert!(rollback_calls(&rig.ops).is_empty());
     assert!(rolled_back(&state).is_empty());

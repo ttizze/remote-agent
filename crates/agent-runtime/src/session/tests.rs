@@ -612,7 +612,7 @@ async fn a_stopped_provider_commits_its_last_frames_then_releases_the_session() 
 // "terminal detach revokes the thread's MCP credential".
 #[tokio::test(flavor = "multi_thread")]
 async fn configures_before_spawning_and_revokes_credentials_on_detach() {
-    let rig = rig(SessionOptions::default(), 5);
+    let rig = rig(short_interrupt(), 5);
     let id = thread("thread-credentials");
     rig.codex_turn(&id).await;
     let log = rig.host.logged();
@@ -2481,6 +2481,94 @@ async fn shared_rate_limits_reach_every_thread_and_fill_a_stopped_turns_reset() 
     assert_eq!(rig.run_status(&b).await, RunStatus::Running);
 }
 
+// T3 CodexAdapterV2 turn.terminal: a usage-limit failure takes its reset from
+// the app-server's snapshot even for a thread that attached after it arrived.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_thread_attaching_after_the_rate_limit_snapshot_still_gets_its_reset() {
+    let rig = rig(SessionOptions::default(), 5);
+    rig.host.respond(shared_replies);
+    let (a, b) = (
+        thread("thread-late-limits-a"),
+        thread("thread-late-limits-b"),
+    );
+    rig.shared_turn(&a).await;
+    let process = rig.host.process(0);
+    process.emit(json!({"method":"account/rateLimits/updated","params":{"rateLimits":{"limitId":"codex","primary":{"usedPercent":100,"resetsAt":2000000000}}}}));
+    rig.until("a records the snapshot", async || {
+        rig.state(&a).await.rate_limit_resets.get("codex") == Some(&Some(2_000_000_000))
+    })
+    .await;
+    let (native_b, turn_b) = rig.shared_turn(&b).await;
+    process.emit(json!({"method":"turn/completed","params":{"threadId":native_b,"turn":{"id":turn_b,"status":"failed","error":{"message":"Usage limit reached.","codexErrorInfo":"usageLimitExceeded"}}}}));
+    rig.until_status(&b, RunStatus::Failed).await;
+    assert!(rig.state(&b).await.items.iter().any(|item| matches!(
+        &item.kind,
+        ItemKind::Error { class: Some(class), reset_at: Some(reset), .. }
+            if class == "usage_limit" && reset.millis() == 2_000_000_000_000
+    )));
+}
+
+// T3 CodexAdapterV2 trackRunningDynamicTool: a persistent tool outlives its
+// completed turn, and its later completion stays with the run that started it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_persistent_tool_completes_under_the_turn_that_started_it() {
+    let rig = rig(SessionOptions::default(), 5);
+    rig.host.respond(shared_replies);
+    let id = thread("thread-persistent-tool");
+    let (native, first) = rig.shared_turn(&id).await;
+    let process = rig.host.process(0);
+    let tool = |status: &str| json!({"type":"dynamicToolCall","id":"monitor","namespace":"t3","tool":"watch","arguments":{"persistent":true},"status":status});
+    let other = json!({"type":"dynamicToolCall","id":"lookup","tool":"lookup","arguments":{},"status":"inProgress"});
+    for item in [tool("inProgress"), other] {
+        process.emit(json!({"method":"item/started","params":{"threadId":native,"turnId":first,"item":item}}));
+    }
+    complete(&process, &native, &first, "watching");
+    rig.until_status(&id, RunStatus::Completed).await;
+    let started = rig.state(&id).await;
+    let item = |state: &State, key: &str| {
+        state
+            .items
+            .iter()
+            .find(|item| item.native_key == key)
+            .cloned()
+            .unwrap()
+    };
+    assert_eq!(item(&started, "monitor").status, ItemStatus::Running);
+    assert!(item(&started, "lookup").status.terminal());
+    let first_run = item(&started, "monitor").run;
+    let starts = || written_methods(&process, "turn/start").len();
+    let before = starts();
+    rig.send(&id, "next", DispatchMode::StartImmediately).await;
+    rig.drain().await;
+    rig.until("second turn", async || starts() > before).await;
+    process.emit(
+        json!({"method":"turn/started","params":{"threadId":native,"turn":{"id":"turn-second"}}}),
+    );
+    rig.until("second turn runs", async || {
+        rig.state(&id)
+            .await
+            .runs
+            .iter()
+            .any(|run| run.status == RunStatus::Running && run.id != *first_run.as_ref().unwrap())
+    })
+    .await;
+    process.emit(json!({"method":"item/completed","params":{"threadId":native,"turnId":first,"item":tool("completed")}}));
+    rig.until("the tool completes", async || {
+        item(&*rig.state(&id).await, "monitor").status == ItemStatus::Completed
+    })
+    .await;
+    let state = rig.state(&id).await;
+    assert_eq!(item(&state, "monitor").run, first_run);
+    assert_eq!(
+        state
+            .items
+            .iter()
+            .filter(|item| item.native_key == "monitor")
+            .count(),
+        1
+    );
+}
+
 // T3 ProviderSessionManager: the shared session is busy while any thread's
 // turn runs, and is released once every thread is idle.
 #[tokio::test(flavor = "multi_thread")]
@@ -2510,13 +2598,16 @@ async fn a_shared_app_server_stays_while_any_thread_runs() {
 // app-server keeps serving the other thread. Only a terminal detach revokes.
 #[tokio::test(flavor = "multi_thread")]
 async fn detaching_from_the_shared_app_server_interrupts_and_unloads_only_that_thread() {
-    let rig = rig(SessionOptions::default(), 5);
+    let rig = rig(short_interrupt(), 5);
     rig.host.respond(shared_replies);
     let (a, b) = (thread("thread-detach-a"), thread("thread-detach-b"));
     let (native_a, turn_a) = rig.shared_turn(&a).await;
     rig.shared_turn(&b).await;
     let process = rig.host.process(0);
     rig.sessions.detach(&a, false).await;
+    // T3 finalizes a turn its app-server did not end after the interrupt.
+    rig.until_status(&a, RunStatus::Interrupted).await;
+    assert_eq!(rig.run_status(&b).await, RunStatus::Running);
     let interrupts = written_methods(&process, "turn/interrupt");
     assert_eq!(interrupts.len(), 1);
     assert_eq!(interrupts[0]["params"]["threadId"], native_a.as_str());
@@ -2541,6 +2632,42 @@ async fn detaching_from_the_shared_app_server_interrupts_and_unloads_only_that_t
     rig.sessions.detach(&b, true).await;
     assert!(rig.host.logged().contains(&format!("revoked:{b}:*")));
     assert!(rig.sessions.sessions().is_empty());
+}
+
+fn short_interrupt() -> SessionOptions {
+    SessionOptions {
+        interrupt_timeout: Duration::from_millis(300),
+        ..SessionOptions::default()
+    }
+}
+
+// T3 interruptThread awaits the interrupted turn before the thread lets go of
+// the app-server, so the turn's own completion is recorded.
+#[tokio::test(flavor = "multi_thread")]
+async fn detaching_from_the_shared_app_server_waits_for_the_interrupted_turn() {
+    let rig = rig(SessionOptions::default(), 5);
+    rig.host.respond(shared_replies);
+    let (a, b) = (
+        thread("thread-detach-wait-a"),
+        thread("thread-detach-wait-b"),
+    );
+    let (native_a, turn_a) = rig.shared_turn(&a).await;
+    rig.shared_turn(&b).await;
+    let process = rig.host.process(0);
+    let (sessions, detached) = (rig.sessions.clone(), a.clone());
+    let detach = tokio::spawn(async move { sessions.detach(&detached, false).await });
+    rig.until("the interrupt is sent", async || {
+        !written_methods(&process, "turn/interrupt").is_empty()
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(written_methods(&process, "thread/unsubscribe").is_empty());
+    complete(&process, &native_a, &turn_a, "stopped here");
+    detach.await.unwrap();
+    assert_eq!(written_methods(&process, "thread/unsubscribe").len(), 1);
+    rig.until("a settles", async || rig.run_status(&a).await.terminal())
+        .await;
+    assert_eq!(replies(&*rig.state(&a).await), ["stopped here"]);
 }
 
 // T3 CodexAdapterV2 resolveRuntime: a new app-server runs as the selected
@@ -2591,6 +2718,61 @@ async fn a_new_app_server_signs_in_with_the_managed_account_and_refreshes_its_to
             .logged()
             .contains(&"refresh:codex:Some(\"account-1\")".to_owned())
     );
+}
+
+// A managed account the live app-server rejected is reported and signed in
+// again before the app-server's next use, instead of running as the old one.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rejected_account_selection_fails_and_signs_in_before_the_next_turn() {
+    let rig = rig(SessionOptions::default(), 5);
+    rig.host.respond(shared_replies);
+    let first = json!({"type":"chatgptAuthTokens","accessToken":"first","chatgptAccountId":"account-1","chatgptPlanType":"pro"});
+    *rig.host.codex_login.lock().unwrap() = Some(first);
+    let id = thread("thread-account-switch");
+    let (native, turn) = rig.shared_turn(&id).await;
+    let process = rig.host.process(0);
+    complete(&process, &native, &turn, "done");
+    rig.until_status(&id, RunStatus::Completed).await;
+    let second = json!({"type":"chatgptAuthTokens","accessToken":"second","chatgptAccountId":"account-2","chatgptPlanType":"pro"});
+    *rig.host.codex_login.lock().unwrap() = Some(second.clone());
+    rig.host.respond(|frame| {
+        if frame["method"] == "account/login/start" {
+            return vec![
+                json!({"id":frame["id"],"error":{"code":-32000,"message":"login refused"}}),
+            ];
+        }
+        shared_replies(frame)
+    });
+    assert!(rig.sessions.apply_codex_account("codex").await.is_err());
+    rig.host.respond(shared_replies);
+    let starts = written_methods(&process, "turn/start").len();
+    rig.send(&id, "again", DispatchMode::StartImmediately).await;
+    rig.drain().await;
+    rig.until("the next turn starts", async || {
+        written_methods(&process, "turn/start").len() > starts
+    })
+    .await;
+    let methods: Vec<_> = process
+        .written()
+        .iter()
+        .filter_map(|frame| frame["method"].as_str().map(str::to_owned))
+        .collect();
+    let last_login = methods
+        .iter()
+        .rposition(|method| method == "account/login/start")
+        .unwrap();
+    let last_start = methods
+        .iter()
+        .rposition(|method| method == "turn/start")
+        .unwrap();
+    assert!(last_login < last_start);
+    assert_eq!(
+        written_methods(&process, "account/login/start")
+            .last()
+            .unwrap()["params"],
+        second
+    );
+    assert_eq!(written_methods(&process, "account/login/start").len(), 3);
 }
 
 // T3 ClaudeAdapterV2 query options: the app's MCP tools are pre-approved after

@@ -16,8 +16,8 @@ use crate::{
 };
 use agent_domain::{
     Command, CommandId, EffectResult, FactBody, Input, InputEnvelope, ModelSelection,
-    ProviderEvent, Reply, RunAttemptId, State, Step, ThreadId, ThreadMachine, Timestamp, apply,
-    host_only_command,
+    ProviderEvent, Reply, RunAttemptId, RunStatus, State, Step, ThreadId, ThreadMachine, Timestamp,
+    apply, host_only_command,
 };
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -504,6 +504,7 @@ impl Actor {
         {
             return Ok(self.unpersisted(rejected("command-id-conflict")));
         }
+        self.align_handoff(Some(&command)).await;
         let (at, step) = self.decide(Input::Command {
             id,
             command,
@@ -528,8 +529,53 @@ impl Actor {
         input: Input,
         settle: Option<EffectSettlement>,
     ) -> Result<Committed, RuntimeError> {
+        if !matches!(input, Input::HandoffPolicy { .. }) {
+            self.align_handoff(None).await;
+        }
         let (at, step) = self.decide(input);
         self.persist(at, step, settle).await
+    }
+
+    /// Records the handoff limits of the selection the next step may start a
+    /// run with, so its start budgets with that model's window (T3 reads the
+    /// run's model window before budgeting delivery).
+    async fn align_handoff(&mut self, command: Option<&Command>) {
+        let Some(thread) = &self.state.thread else {
+            return;
+        };
+        let selection = match command {
+            Some(Command::Send(message)) => message.selection.as_ref(),
+            Some(Command::SelectModel { selection } | Command::SwitchProvider { selection }) => {
+                Some(selection)
+            }
+            Some(_) => None,
+            None => self
+                .state
+                .runs
+                .iter()
+                .filter(|run| matches!(run.status, RunStatus::Preparing | RunStatus::Starting))
+                .min_by_key(|run| run.ordinal)
+                .or_else(|| self.state.queued_runs().first().copied())
+                .map(|run| &run.selection),
+        }
+        .unwrap_or(&thread.selection);
+        let Some(policy) = self.context.handoff.policy(selection) else {
+            return;
+        };
+        if self.state.context_windows.get(&selection.instance).copied() == policy.model_window
+            && self.state.handoff_token_cap == Some(policy.token_cap)
+        {
+            return;
+        }
+        let input = Input::HandoffPolicy {
+            instance: selection.instance.clone(),
+            model_window: policy.model_window,
+            token_cap: policy.token_cap,
+        };
+        let (at, step) = self.decide(input);
+        if let Err(error) = self.persist(at, step, None).await {
+            tracing::warn!(thread = %self.thread, %error, "could not record the handoff limits");
+        }
     }
 
     fn decide(&self, input: Input) -> (Timestamp, Step) {

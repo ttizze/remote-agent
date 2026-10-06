@@ -206,3 +206,45 @@ fn the_host_refusal_is_not_part_of_the_rollback_identity() {
     assert_eq!(replay.reply, first.reply);
     assert_eq!(replay.receipt, first.receipt);
 }
+
+// T3 CheckpointRollbackService asks the provider to rewind whenever later runs
+// exist: after a failed rewind dropped the native thread, a new rollback fails
+// instead of hiding the later runs without rewinding anything.
+#[test]
+fn rollback_without_a_native_thread_to_rewind_fails() {
+    let mut s = state();
+    let (first, a) = running(&mut s, "first");
+    finish(&mut s, &a);
+    let cp = checkpoint(&mut s, &first, &a, "cp-first");
+    let (second, b) = running(&mut s, "second");
+    finish(&mut s, &b);
+    checkpoint(&mut s, &second, &b, "cp-second");
+    rollback(&mut s, "rollback", &cp);
+    let started = ThreadMachine::step(
+        &s,
+        &InputEnvelope {
+            at: at(),
+            key: "rewinding".into(),
+            input: Input::RollbackRewindStarted {
+                command: CommandId::new("rollback").unwrap(),
+                instances: vec!["codex".into()],
+            },
+        },
+    );
+    s = fold(&s, &started.facts).unwrap();
+    result(
+        &mut s,
+        "failed",
+        EffectResult::RollbackFailed {
+            command: CommandId::new("rollback").unwrap(),
+            message: ROLLBACK_FAILED_MESSAGE.into(),
+        },
+    );
+    assert!(s.native_sessions.is_empty());
+    let retry = rollback(&mut s, "retry", &cp);
+    assert_eq!(retry.reply, Reply::Accepted);
+    assert!(retry.effects.is_empty());
+    assert!(s.rollback.is_none());
+    assert_eq!(s.rollback_failure.as_deref(), Some(ROLLBACK_FAILED_MESSAGE));
+    assert_eq!(s.runs[1].status, RunStatus::Completed);
+}

@@ -397,6 +397,14 @@ pub struct Item {
     /// Set only on delivery: the exit code or the withheld output shows a failure.
     pub output_indicates_failure: bool,
 }
+impl Item {
+    /// A running tool call that asked to outlive its turn (T3
+    /// isPersistentCodexDynamicTool).
+    pub fn persistent_tool(&self) -> bool {
+        !self.status.terminal()
+            && matches!(&self.kind, ItemKind::DynamicTool { input, .. } if input.0["persistent"] == true)
+    }
+}
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum RequestBody {
     Approval {
@@ -1425,6 +1433,11 @@ pub enum EffectResult {
     ForkFailed {
         attempt: RunAttemptId,
         message: String,
+    },
+    /// The fork's source run no longer has a stable native boundary (T3
+    /// decideForkExecution reads the source run again at the first message).
+    ForkSourceChanged {
+        attempt: RunAttemptId,
     },
     ProviderFailed {
         attempt: RunAttemptId,

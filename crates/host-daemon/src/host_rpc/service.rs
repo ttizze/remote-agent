@@ -654,6 +654,7 @@ impl HostRpcService {
             let sessions = conversation.runtime.sessions();
             if select && let Err(error) = sessions.apply_codex_account("codex").await {
                 tracing::warn!(operation = "conversation.codex_account", message = %error);
+                return Err(Failure::new("account_operation_failed", error));
             }
             // T3 closes an instance's sessions when it signs out.
             if logout && self.inner.resources.codex.signed_out() {

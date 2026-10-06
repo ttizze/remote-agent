@@ -73,6 +73,8 @@ pub(crate) struct Members {
     /// Threads whose MCP credentials the process holds until it is gone.
     recorded: BTreeSet<ThreadId>,
     closed: bool,
+    /// A selected managed account the process has not signed in with yet.
+    account_pending: bool,
 }
 
 /// What the Host needs to configure or launch a provider for one thread.
@@ -729,12 +731,13 @@ impl SessionManager {
                     }
                 };
                 let turns = turns_after(&state, native_thread, absolute_head.as_deref());
-                let native = native_thread.clone();
+                let (native, boundary) = (native_thread.clone(), absolute_head.clone());
                 let completed = self
                     .request_completion(
                         &entry,
                         Request::new(thread, move |p| {
-                            Ok(p.codex()?.rollback(&native, turns, &context))
+                            Ok(p.codex()?
+                                .rollback(&native, turns, boundary.as_deref(), &context))
                         }),
                     )
                     .await
@@ -773,6 +776,24 @@ impl SessionManager {
                 message,
             }))
         };
+        // T3 reads the source run again at the first message: one rolled back
+        // since the fork no longer has its native boundary.
+        if let Some(transfer) = state.transfers.iter().find(|transfer| {
+            transfer.kind == TransferKind::Fork
+                && !transfer.superseded
+                && &transfer.target == thread
+                && transfer.native_source.is_some()
+        }) {
+            let source = self.state(&transfer.source).await?;
+            if !source.runs.iter().any(|run| {
+                run.ordinal == transfer.boundary
+                    && matches!(run.status, RunStatus::Completed | RunStatus::Waiting)
+            }) {
+                return Ok(Some(EffectResult::ForkSourceChanged {
+                    attempt: attempt.clone(),
+                }));
+            }
+        }
         let target = match instance_target(&state, thread, instance) {
             Ok(target) => target,
             Err(ExecError::Retry(message)) => return failed(message),
@@ -872,6 +893,32 @@ impl SessionManager {
             }
             Err(_) => tracing::warn!(%thread, "interrupting a detached thread timed out"),
         }
+        // T3 waits for the interrupted turn and then finalizes it itself, so
+        // the run ends even when the app-server never reports it.
+        let (done, settled) = oneshot::channel();
+        let sent = entry.mail.send(Mail::Settled {
+            thread: thread.clone(),
+            attempt: None,
+            done,
+        });
+        if sent.is_ok()
+            && !matches!(
+                tokio::time::timeout(self.options.interrupt_timeout, settled).await,
+                Ok(Ok(()))
+            )
+        {
+            tracing::warn!(%thread, "a detached thread's turn did not finish after its interrupt");
+            let route = thread.as_str().to_owned();
+            if let Err(error) = self
+                .send(
+                    entry,
+                    Request::new(thread, move |p| Ok(p.codex()?.abandon_turn(&route))),
+                )
+                .await
+            {
+                tracing::warn!(%thread, %error, "could not end a detached thread's turn");
+            }
+        }
         let detached = {
             let mut members = entry.members.lock().expect("session members");
             members.attached.remove(thread).is_some()
@@ -913,31 +960,36 @@ impl SessionManager {
 
     /// Signs the instance's live Codex app-server in with the selected managed
     /// account, as the Host's single app-server did when an account was selected.
+    /// Until that succeeds the app-server signs in again before its next use.
     pub async fn apply_codex_account(&self, instance: &str) -> Result<(), String> {
-        let Some(entry) = self.entry(&Slot::Shared(instance.to_owned())) else {
-            return Ok(());
-        };
-        let Some(params) = self.host.codex_account(instance.to_owned()).await? else {
-            return Ok(());
-        };
-        let thread = {
-            let members = entry.members.lock().expect("session members");
-            members
-                .attached
-                .keys()
-                .chain(&members.recorded)
-                .next()
-                .cloned()
-        };
-        let Some(thread) = thread else {
-            return Ok(());
-        };
-        self.request_reply(
-            &entry,
-            Request::new(&thread, move |p| Ok(frames(vec![p.codex()?.login(params)]))),
-        )
-        .await
-        .map(|_| ())
+        let slot = Slot::Shared(instance.to_owned());
+        self.opening
+            .with_lock(slot.clone(), async {
+                let Some(entry) = self.entry(&slot) else {
+                    return Ok(());
+                };
+                let thread = {
+                    let mut members = entry.members.lock().expect("session members");
+                    members.account_pending = true;
+                    members
+                        .attached
+                        .keys()
+                        .chain(&members.recorded)
+                        .next()
+                        .cloned()
+                };
+                let Some(thread) = thread else {
+                    return Ok(());
+                };
+                self.codex_sign_in(&entry, &thread).await?;
+                entry
+                    .members
+                    .lock()
+                    .expect("session members")
+                    .account_pending = false;
+                Ok(())
+            })
+            .await
     }
 
     /// Host shutdown: recovery decides what the runs become, so no session
@@ -1053,7 +1105,7 @@ impl SessionManager {
             .mail
             .send(Mail::Settled {
                 thread: thread.clone(),
-                attempt: attempt.clone(),
+                attempt: Some(attempt.clone()),
                 done,
             })
             .map_err(|_| Failure::Gone)?;

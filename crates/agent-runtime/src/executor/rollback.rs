@@ -5,11 +5,11 @@ use crate::{
 };
 use agent_domain::{
     CheckpointScope, CheckpointStatus, Command, CommandId, Effect, EffectBody, EffectResult, Input,
-    Reply, RestoreFiles, State, ThreadId,
+    Reply, RestoreFiles, State, ThreadId, latest_executed_run, rollback_provider_changed,
 };
 use futures_util::future::BoxFuture;
 
-pub const ROLLBACK_FAILED_MESSAGE: &str = "The provider could not roll back this conversation. Try again; if it keeps failing, check the provider and server logs.";
+pub use agent_domain::ROLLBACK_FAILED_MESSAGE;
 
 /// One rollback request (T3 `CheckpointRollbackService`): the restored files are
 /// staged with the originals kept aside and every provider rewinds to its absolute
@@ -63,6 +63,14 @@ impl EffectHandler for Rollback {
                     message: message.into(),
                 }))
             };
+            // T3 CheckpointRollbackService: the selection may have moved to
+            // another instance while the rollback waited.
+            if let Some(thread) = &state.thread
+                && latest_executed_run(&state).map(|run| &run.selection.instance)
+                    != Some(&thread.selection.instance)
+            {
+                return failed(&rollback_provider_changed(&pending.checkpoint, &thread.id));
+            }
             let _fence = match restore {
                 Some(_) => Some(context.workspaces.restore().await),
                 None => None,

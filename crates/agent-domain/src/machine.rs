@@ -6,6 +6,8 @@ use std::collections::{BTreeMap, BTreeSet};
 pub const WORKSPACE_PREPARATION_FAILURE_CODE: &str = "workspace_preparation_failed";
 /// The command row that stands for a deferred run's workspace preparation.
 pub const WORKSPACE_PREPARATION_INPUT: &str = "Preparing workspace";
+/// What a rollback the provider could not carry out records.
+pub const ROLLBACK_FAILED_MESSAGE: &str = "The provider could not roll back this conversation. Try again; if it keeps failing, check the provider and server logs.";
 const INTERRUPT_REQUESTED: &str = "Interrupt requested";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -466,15 +468,16 @@ impl Decision {
             .find(|run| &run.id == id)
             .unwrap()
             .clone();
-        if self
-            .state
-            .thread
-            .as_ref()
-            .is_some_and(|thread| thread.selection != run.selection)
-        {
+        let previous = self.state.thread.as_ref().unwrap().selection.clone();
+        if previous != run.selection {
             self.fact(FactBody::ModelSelected {
                 selection: run.selection.clone(),
             });
+            // T3 applies the provider-switch release plan when a queued run
+            // takes another instance.
+            if previous.instance != run.selection.instance {
+                self.release_other_instances(&run.selection.instance);
+            }
         }
         let thread = self.state.thread.as_ref().unwrap().clone();
         let message = self
@@ -965,9 +968,12 @@ impl Decision {
         }
     }
     /// Message-capable questions outlive their turn; the user answers them
-    /// later. Retained background work keeps its row until it reports.
+    /// later. Retained background work keeps its row until it reports, as does
+    /// a persistent Codex tool after a completed turn (T3 CodexAdapterV2).
     fn close_attempt_items(&mut self, attempt: &RunAttemptId, status: ItemStatus) {
-        let items=self.state.items.iter().filter(|i| i.attempt.as_ref()==Some(attempt) && !i.status.terminal() && !self.state.background_work.values().any(|w| &w.attempt==attempt && (w.key==i.native_key || w.tool==i.native_key)) && !matches!(&i.kind,ItemKind::Subagent {task} if self.state.tasks.iter().any(|candidate|&candidate.id==task && !candidate.status.terminal())) && !matches!(&i.kind,ItemKind::UserInputRequest { request } if self.state.requests.iter().any(|r| &r.id==request && r.capability==ResponseCapability::Message))).map(|i| i.id.clone()).collect::<Vec<_>>();
+        let keeps_tools =
+            status == ItemStatus::Completed && self.attempt_driver(attempt) == Some(Driver::Codex);
+        let items=self.state.items.iter().filter(|i| i.attempt.as_ref()==Some(attempt) && !i.status.terminal() && !(keeps_tools && i.persistent_tool()) &&!self.state.background_work.values().any(|w| &w.attempt==attempt && (w.key==i.native_key || w.tool==i.native_key)) && !matches!(&i.kind,ItemKind::Subagent {task} if self.state.tasks.iter().any(|candidate|&candidate.id==task && !candidate.status.terminal())) && !matches!(&i.kind,ItemKind::UserInputRequest { request } if self.state.requests.iter().any(|r| &r.id==request && r.capability==ResponseCapability::Message))).map(|i| i.id.clone()).collect::<Vec<_>>();
         for id in items {
             self.fact(FactBody::ItemCompleted { id, status });
         }
@@ -1219,6 +1225,38 @@ impl Decision {
                 && !transfer.superseded
                 && transfer.delivery.is_none()
         })
+    }
+    /// Releases the sessions of every instance but `kept` when the thread moves
+    /// to another instance (T3 ProviderSwitchService create_with_handoff).
+    fn release_other_instances(&mut self, kept: &str) {
+        for instance in self
+            .used_instances(None)
+            .into_iter()
+            .filter(|instance| instance != kept)
+        {
+            self.effect(
+                None,
+                EffectBody::DetachSessions {
+                    reason: "Provider or model selection changed.".into(),
+                    revoke_credentials: false,
+                    instance: Some(instance),
+                },
+            );
+        }
+    }
+    /// The driver of the attempt's run, or of the thread for a native child turn.
+    fn attempt_driver(&self, attempt: &RunAttemptId) -> Option<Driver> {
+        self.state
+            .runs
+            .iter()
+            .find(|run| run.attempt.as_ref() == Some(attempt))
+            .map(|run| run.selection.driver)
+            .or_else(|| {
+                self.state
+                    .thread
+                    .as_ref()
+                    .map(|thread| thread.selection.driver)
+            })
     }
     /// The starting run waiting on a native fork from `attempt`.
     fn awaiting_fork(&self, attempt: &RunAttemptId) -> Option<(Run, Transfer)> {
@@ -1679,7 +1717,8 @@ impl Decision {
             return Reply::Run(run.clone());
         }
         let held = self.state.queued_runs().iter().any(|r| r.queue_held);
-        let queued = active.is_some() || !self.state.captures.is_empty();
+        let queued =
+            active.is_some() || !self.state.captures.is_empty() || self.state.rollback.is_some();
         // T3 queues a deferred start behind an active run without preparation.
         let deferred = matches!(mode, DispatchMode::DeferStart) && !queued;
         let id = RunId::new(format!("run:{}:{}", message.id.as_str().len(), message.id)).unwrap();
@@ -1769,26 +1808,16 @@ impl Decision {
                 return reject("thread-deleted");
             }
         }
-        // Metadata can change during rollback; operation results carry only the
-        // rollback identity and never overwrite thread metadata.
+        // T3 accepts commands while a rollback runs: new messages wait behind it
+        // and the rollback checks the active provider when it executes. Its
+        // results carry only the rollback identity and never overwrite metadata.
         if self.state.rollback.is_some()
             && matches!(
                 command,
-                Send(_)
-                    | ContinueRestart { .. }
+                ContinueRestart { .. }
                     | ReleasePrepared { .. }
                     | RetryPrepared { .. }
-                    | ResumeQueue
                     | Rollback { .. }
-                    | Fork { .. }
-                    | MergeBack { .. }
-                    | Delegate { .. }
-                    | SelectModel { .. }
-                    | SwitchProvider { .. }
-                    | RuntimeMode { .. }
-                    | InteractionMode { .. }
-                    | Compact
-                    | PromoteToSteer { .. }
             )
         {
             return reject("rollback-pending");
@@ -2466,23 +2495,9 @@ impl Decision {
                     selection: selection.clone(),
                 });
                 // A model applies from the next turn; another instance takes over
-                // with a handoff and the previous instances' sessions are released
-                // (T3 ProviderSwitchService).
+                // with a handoff.
                 if current.instance != selection.instance {
-                    for instance in self
-                        .used_instances(None)
-                        .into_iter()
-                        .filter(|instance| instance != &selection.instance)
-                    {
-                        self.effect(
-                            None,
-                            EffectBody::DetachSessions {
-                                reason: "Provider or model selection changed.".into(),
-                                revoke_credentials: false,
-                                instance: Some(instance),
-                            },
-                        );
-                    }
+                    self.release_other_instances(&selection.instance);
                 }
                 Reply::Accepted
             }
@@ -3286,10 +3301,7 @@ impl Decision {
                 // selection moved to another instance than the active one.
                 let thread = self.state.thread.as_ref().unwrap();
                 if thread.selection.instance != active {
-                    let message = format!(
-                        "Active provider changed before rollback target {checkpoint} could execute on thread {}.",
-                        thread.id
-                    );
+                    let message = rollback_provider_changed(checkpoint, &thread.id);
                     self.fact(FactBody::RollbackFailed {
                         command: id.clone(),
                         message,
@@ -3301,6 +3313,15 @@ impl Decision {
                         && run.status.terminal()
                         && run.status != RunStatus::RolledBack
                 });
+                // T3 asks the provider to rewind whenever later runs exist,
+                // which fails without a native thread to rewind.
+                if rewinds && !self.state.native_sessions.contains_key(&active) {
+                    self.fact(FactBody::RollbackFailed {
+                        command: id.clone(),
+                        message: ROLLBACK_FAILED_MESSAGE.into(),
+                    });
+                    return Reply::Accepted;
+                }
                 let providers = self
                     .state
                     .native_sessions
@@ -4344,6 +4365,11 @@ impl Decision {
                 .background_work
                 .values()
                 .any(|work| &work.attempt == attempt && (&work.key == key || &work.tool == key))
+                || self.state.items.iter().any(|item| {
+                    item.attempt.as_ref() == Some(attempt)
+                        && &item.native_key == key
+                        && item.persistent_tool()
+                })
         };
         let background = matches!(event, ProviderEvent::RequestOpened { owner_path, .. } if !owner_path.is_empty())
             || matches!(event, ProviderEvent::ItemFinished { key, .. } | ProviderEvent::TextDelta { key, .. } if retained(key))
@@ -4518,6 +4544,21 @@ impl Decision {
                 if run.as_ref().is_some_and(|run| {
                     !matches!(run.status, RunStatus::Starting | RunStatus::Running)
                 }) {
+                    let tools = self
+                        .state
+                        .items
+                        .iter()
+                        .filter(|item| {
+                            item.attempt.as_ref() == Some(attempt) && item.persistent_tool()
+                        })
+                        .map(|item| item.id.clone())
+                        .collect::<Vec<_>>();
+                    for id in tools {
+                        self.fact(FactBody::ItemCompleted {
+                            id,
+                            status: ItemStatus::Interrupted,
+                        });
+                    }
                     self.stop_tasks(
                         attempt,
                         if self.state.stopping.contains(attempt) {
@@ -5604,6 +5645,27 @@ impl Decision {
                 self.dispatch_start(&run.id, attempt, true);
                 return Reply::Accepted;
             }
+            // T3 decideForkExecution: a source run that is no longer completed
+            // or waiting is handed over as portable context instead.
+            EffectResult::ForkSourceChanged { attempt } => {
+                let Some((run, transfer)) = self.awaiting_fork(attempt) else {
+                    return Reply::Ignored;
+                };
+                self.fact(FactBody::TransferOpened {
+                    native_source: None,
+                    id: ContextTransferId::new(self.key("portable-fork", transfer.id.as_str()))
+                        .unwrap(),
+                    kind: TransferKind::Fork,
+                    source: transfer.source.clone(),
+                    target: transfer.target.clone(),
+                    boundary: transfer.boundary,
+                    instance: None,
+                    target_run: None,
+                    history: transfer.history.clone(),
+                });
+                self.dispatch_start(&run.id, attempt, true);
+                return Reply::Accepted;
+            }
             // T3 ProviderTurnStartService.ts: a native fork that fails on the
             // last attempt fails the run; the transfer stays pending.
             EffectResult::ForkFailed { attempt, message } => {
@@ -5857,6 +5919,7 @@ impl Decision {
                         head: binding.head.clone(),
                     });
                 }
+                self.promote();
             }
             EffectResult::RollbackFailed { command, message } => {
                 let Some(pending) = self
@@ -5880,6 +5943,7 @@ impl Decision {
                     command: command.clone(),
                     message: message.clone(),
                 });
+                self.promote();
             }
             EffectResult::ThreadCommandFailed {
                 command, reason, ..
@@ -6269,6 +6333,13 @@ pub fn latest_stable_run(state: &State) -> Option<&Run> {
         .filter(|run| run.status == RunStatus::Completed && run.checkpoint.is_some())
         .max_by_key(|run| run.ordinal)
 }
+/// T3 CheckpointRollbackService's failure when the selection left the active
+/// provider before the rollback executed.
+pub fn rollback_provider_changed(checkpoint: &CheckpointId, thread: &ThreadId) -> String {
+    format!(
+        "Active provider changed before rollback target {checkpoint} could execute on thread {thread}."
+    )
+}
 /// Whether a run's start takes a transfer. Fork and merge-back transfers take
 /// the provider of the direct turn that consumes them; handoffs keep their
 /// instance; a delegated result reaches only a turn after its spawning run
@@ -6384,24 +6455,7 @@ fn preparation_kind(title: &str, exit_code: Option<i64>) -> ItemKind {
 /// What the Host fills in before dispatch is not part of a command's identity, so
 /// a resent command returns its first result.
 fn command_fingerprint(command: &Command) -> String {
-    let encode =
-        |command: &Command| serde_json::to_string(command).expect("domain commands serialize");
-    let mut identity = match command {
-        Command::Rollback {
-            restore_refusal: Some(_),
-            ..
-        }
-        | Command::Send(SendMessage {
-            context: None,
-            resolved_plan: Some(_),
-            ..
-        })
-        | Command::UpdateMetadata {
-            project_root: Some(_),
-            ..
-        } => command.clone(),
-        command => return encode(command),
-    };
+    let mut identity = command.clone();
     match &mut identity {
         Command::Rollback {
             restore_refusal, ..
@@ -6410,7 +6464,7 @@ fn command_fingerprint(command: &Command) -> String {
         Command::UpdateMetadata { project_root, .. } => *project_root = None,
         _ => {}
     }
-    encode(&identity)
+    serde_json::to_string(&identity).expect("domain commands serialize")
 }
 fn reject(reason: &str) -> Reply {
     Reply::Rejected {

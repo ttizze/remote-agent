@@ -9,7 +9,7 @@ use crate::{EffectStatus, ManualClock, ShellUpdate, ThreadUpdate};
 use agent_domain::{Attachment, AttachmentKind};
 use agent_domain::{
     DispatchMode, InteractionMode, ProviderEvent, Question, Reply, RequestBody, RequestStatus,
-    ResponseCapability, RunAttemptId, RunId, RunStatus, RuntimeMode, State,
+    ResponseCapability, RunAttemptId, RunId, RunStatus, RuntimeMode, State, Workspace,
 };
 use serde_json::json;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -961,6 +961,70 @@ async fn an_answer_with_an_unavailable_attachment_is_rejected() {
         .await
         .unwrap();
     assert_eq!(accepted.reply, Reply::Request(request_id));
+    runtime.shutdown().await;
+}
+
+// T3 Orchestrator thread.metadata.update keeps a thread without a worktree in
+// its project root when only the branch changes, and a retried command replays
+// its first result although the Host filled in the project root.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_branch_update_keeps_the_project_root_and_replays_on_retry() {
+    let host = host();
+    let runtime = host.open().await;
+    runtime.start().await.unwrap();
+    let thread = tid("thread_branch_only");
+    let created = host
+        .internal(
+            &runtime,
+            &thread,
+            Command::Create {
+                thread: thread.clone(),
+                project: "project".into(),
+                title: "Thread".into(),
+                selection: codex(),
+                runtime_mode: RuntimeMode::FullAccess,
+                interaction_mode: InteractionMode::Default,
+                workspace: None,
+            },
+        )
+        .await;
+    assert_eq!(created, Reply::Thread(thread.clone()));
+    let update = |branch: &str| Command::UpdateMetadata {
+        title: None,
+        regenerate_title: None,
+        branch: Some(Some(branch.into())),
+        worktree_path: None,
+        expected_worktree_path: None,
+        expected_empty: false,
+        limit_recovery: None,
+        linked_pull_request: None,
+        project_root: None,
+    };
+    let id = host.id();
+    let first = runtime
+        .dispatch(thread.clone(), id.clone(), update("feature"))
+        .await
+        .unwrap();
+    assert_eq!(first.reply, Reply::Accepted);
+    assert_eq!(
+        state(&runtime, &thread)
+            .await
+            .thread
+            .as_ref()
+            .unwrap()
+            .workspace,
+        Some(Workspace {
+            cwd: "/repo".into(),
+            worktree_path: None,
+            branch: Some("feature".into()),
+        })
+    );
+    let retried = runtime
+        .dispatch(thread.clone(), id, update("feature"))
+        .await
+        .unwrap();
+    assert_eq!(retried.reply, Reply::Accepted);
+    assert!(retried.replayed);
     runtime.shutdown().await;
 }
 

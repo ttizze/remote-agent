@@ -277,6 +277,44 @@ fn claude_selection() -> ModelSelection {
         options: BTreeMap::new(),
     }
 }
+// T3 Orchestrator start-queued: a queued run that takes another instance
+// applies the provider-switch release plan to the previous instance.
+#[test]
+fn a_queued_run_on_another_instance_releases_the_previous_instance() {
+    let mut s = state();
+    let (_, first) = running(&mut s, "first");
+    let Command::Send(mut message) = send_message("switch", DispatchMode::QueueAfterActive) else {
+        unreachable!()
+    };
+    message.selection = Some(claude_selection());
+    let queued = command(&mut s, "switch", Command::Send(message));
+    assert!(queued.effects.is_empty());
+    let released = provider(
+        &mut s,
+        "finish",
+        &first,
+        ProviderEvent::TurnFinished {
+            status: RunStatus::Completed,
+            native_head: Some("native-head".into()),
+        },
+    );
+    assert_eq!(s.runs[1].status, RunStatus::Starting);
+    assert_eq!(s.thread.as_ref().unwrap().selection, claude_selection());
+    let detached: Vec<_> = released
+        .effects
+        .iter()
+        .filter(|effect| matches!(effect.body, EffectBody::DetachSessions { .. }))
+        .map(|effect| effect.body.clone())
+        .collect();
+    assert_eq!(
+        detached,
+        [EffectBody::DetachSessions {
+            reason: "Provider or model selection changed.".into(),
+            revoke_credentials: false,
+            instance: Some("codex".into()),
+        }]
+    );
+}
 // T3 CommandPolicy.test.ts: providers without interrupt-and-restart reject a required restart.
 #[test]
 fn restart_and_steering_respect_capabilities_and_maintenance_turns() {
@@ -521,6 +559,41 @@ fn repeated_command_returns_receipt_without_repeating_effects() {
         }
     );
 }
+// The Host fills another thread's plan in on the first dispatch only; the
+// retry of the client's command still replays its receipt.
+#[test]
+fn a_retry_without_the_hosts_resolved_plan_replays_the_receipt() {
+    let mut s = state();
+    let Command::Send(mut message) = send_message("plan", DispatchMode::StartImmediately) else {
+        unreachable!()
+    };
+    message.source_plan = Some(PlanRef {
+        thread: ThreadId::new("planner").unwrap(),
+        plan: PlanId::new("plan").unwrap(),
+    });
+    let client = Command::Send(message.clone());
+    message.resolved_plan = Some(ResolvedPlan {
+        project: "project".into(),
+        kind: PlanKind::Proposed,
+        implemented: false,
+    });
+    let first = command(&mut s, "plan", Command::Send(message));
+    assert!(matches!(first.reply, Reply::Run(_)));
+    let retry = ThreadMachine::step(
+        &s,
+        &InputEnvelope {
+            at: at(),
+            key: "retry".into(),
+            input: Input::Command {
+                id: CommandId::new("plan").unwrap(),
+                command: Box::new(client),
+                receipt: first.receipt.clone(),
+            },
+        },
+    );
+    assert_eq!(retry.reply, first.reply);
+    assert!(retry.facts.is_empty());
+}
 #[test]
 fn prepared_failure_promotes_queue_and_retry_cannot_overlap_it() {
     let mut s = state();
@@ -621,7 +694,7 @@ fn checkpoint(s: &mut State, run: &RunId, attempt: &RunAttemptId, key: &str) -> 
     id
 }
 #[test]
-fn rollback_is_absolute_blocks_run_operations_and_preserves_new_metadata() {
+fn rollback_is_absolute_holds_new_runs_and_preserves_new_metadata() {
     let mut s = state();
     let (first, a) = running(&mut s, "first");
     finish(&mut s, &a);
@@ -638,25 +711,37 @@ fn rollback_is_absolute_blocks_run_operations_and_preserves_new_metadata() {
             restore_refusal: None,
         },
     );
-    for (key, c) in [
-        ("resume", Command::ResumeQueue),
-        ("send", send_message("new", DispatchMode::StartImmediately)),
-        (
+    assert_eq!(
+        command(
+            &mut s,
             "rollback-again",
             Command::Rollback {
                 checkpoint: CheckpointId::new("cp-first").unwrap(),
                 restore_files: false,
                 restore_refusal: None,
             },
-        ),
-    ] {
-        assert_eq!(
-            command(&mut s, key, c).reply,
-            Reply::Rejected {
-                reason: "rollback-pending".into()
-            }
-        );
-    }
+        )
+        .reply,
+        Reply::Rejected {
+            reason: "rollback-pending".into()
+        }
+    );
+    // T3 accepts a message during a rollback; its turn starts after it.
+    assert_eq!(
+        command(&mut s, "resume", Command::ResumeQueue).reply,
+        Reply::Accepted
+    );
+    let Reply::Run(new) = command(
+        &mut s,
+        "send",
+        send_message("new", DispatchMode::StartImmediately),
+    )
+    .reply
+    else {
+        panic!()
+    };
+    let status = |s: &State| s.runs.iter().find(|run| run.id == new).unwrap().status;
+    assert_eq!(status(&s), RunStatus::Queued);
     command(
         &mut s,
         "rename",
@@ -672,8 +757,9 @@ fn rollback_is_absolute_blocks_run_operations_and_preserves_new_metadata() {
             command: CommandId::new("rollback").unwrap(),
         },
     );
-    assert_eq!(s.thread.unwrap().title, "Renamed while restoring");
     assert_eq!(s.runs[1].status, RunStatus::RolledBack);
+    assert_eq!(status(&s), RunStatus::Starting);
+    assert_eq!(s.thread.unwrap().title, "Renamed while restoring");
 }
 #[test]
 fn waiting_capture_survives_recovery_without_releasing_the_queue() {
@@ -2032,11 +2118,16 @@ fn rollback_discards_pending_captures_and_invalidates_later_checkpoints() {
     assert!(s.captures.is_empty());
     assert_eq!(s.runs[1].status, RunStatus::RolledBack);
     assert_eq!(s.runs[2].status, RunStatus::RolledBack);
-    assert_eq!(s.runs[3].status, RunStatus::Queued);
+    // Nothing holds the queue once the rollback discarded the capture.
+    assert_eq!(s.runs[3].status, RunStatus::Starting);
     assert_eq!(
         s.checkpoints.iter().find(|c| c.id == later).unwrap().status,
         CheckpointStatus::Stale
     );
+    let (queued, fourth) = (s.runs[3].id.clone(), s.runs[3].attempt.clone().unwrap());
+    finish(&mut s, &fourth);
+    checkpoint(&mut s, &queued, &fourth, "cp-queued");
+    assert_eq!(s.runs[3].status, RunStatus::Completed);
     assert_eq!(
         command(
             &mut s,
@@ -2052,8 +2143,6 @@ fn rollback_discards_pending_captures_and_invalidates_later_checkpoints() {
             reason: "checkpoint-not-ready".into()
         }
     );
-    command(&mut s, "resume", Command::ResumeQueue);
-    assert_eq!(s.runs[3].status, RunStatus::Starting);
     let _ = second;
 }
 #[test]
@@ -2852,8 +2941,10 @@ fn interrupt_failure_keeps_the_root_and_children_live_until_provider_confirmatio
     ));
 }
 
+// T3 accepts selection and mode changes while a rollback runs; the rollback
+// checks the active provider when it executes (CheckpointRollbackService).
 #[test]
-fn provider_selection_and_runtime_changes_are_blocked_during_rollback() {
+fn provider_selection_and_runtime_changes_are_accepted_during_rollback() {
     let mut s = state();
     let (run, attempt) = running(&mut s, "first");
     finish(&mut s, &attempt);
@@ -2867,12 +2958,14 @@ fn provider_selection_and_runtime_changes_are_blocked_during_rollback() {
             restore_refusal: None,
         },
     );
+    let mut model = selection();
+    model.model = "gpt-6-luna-mini".into();
     for (i, change) in [
         Command::SelectModel {
-            selection: selection(),
+            selection: model.clone(),
         },
         Command::SwitchProvider {
-            selection: selection(),
+            selection: model.clone(),
         },
         Command::RuntimeMode {
             mode: RuntimeMode::Auto,
@@ -2884,15 +2977,16 @@ fn provider_selection_and_runtime_changes_are_blocked_during_rollback() {
     .into_iter()
     .enumerate()
     {
-        let before = s.clone();
         assert_eq!(
             command(&mut s, &format!("change-{i}"), change).reply,
-            Reply::Rejected {
-                reason: "rollback-pending".into()
-            }
+            Reply::Accepted
         );
-        assert_eq!(s, before);
     }
+    let thread = s.thread.as_ref().unwrap();
+    assert_eq!(thread.selection, model);
+    assert_eq!(thread.runtime_mode, RuntimeMode::Auto);
+    assert_eq!(thread.interaction_mode, InteractionMode::Plan);
+    assert!(s.rollback.is_some());
 }
 
 proptest! {

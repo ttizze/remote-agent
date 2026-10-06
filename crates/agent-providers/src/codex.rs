@@ -77,18 +77,19 @@ enum Pending {
     Restore,
     /// Drops this connection's subscription to a thread another route no longer uses.
     Unload,
-    /// T3 revertCodexThread: `turns` newest turns are discarded.
+    /// T3 revertCodexThread: at most `turns` newest turns after the target's
+    /// boundary are discarded.
     RevertRead {
-        thread: String,
+        target: RevertTarget,
         turns: u64,
         runtime_params: Value,
     },
     RevertResume {
-        thread: String,
+        target: RevertTarget,
         turns: u64,
     },
     RevertPage {
-        thread: String,
+        target: RevertTarget,
         remaining: u64,
         before: Option<String>,
         visited: BTreeSet<Option<String>>,
@@ -107,6 +108,13 @@ enum Pending {
         process: String,
     },
     Operation(String),
+}
+/// The native thread a rollback reverts and the turn it keeps last; `None`
+/// keeps no turn.
+#[derive(Debug, Clone)]
+struct RevertTarget {
+    thread: String,
+    boundary: Option<String>,
 }
 #[derive(Debug, Clone)]
 struct Resume {
@@ -317,6 +325,31 @@ impl CodexProtocol {
             route: Some(route.into()),
             ..Translation::default()
         }
+    }
+    /// Ends the route's root turn as interrupted when the app-server did not
+    /// (T3 finalizeRemainingInterruptLineage after its interrupt timeout).
+    pub fn abandon_turn(&mut self, route: &str) -> Translation {
+        let mut output = Translation {
+            route: Some(route.into()),
+            ..Translation::default()
+        };
+        let thread = self.native_thread(route).map(str::to_owned);
+        if let Some(thread) = thread
+            && let Some(turn) = self.turns.get(&thread).cloned()
+        {
+            let completed = json!({"method":"turn/completed","params":{"threadId":thread,"turn":{"id":turn,"status":"interrupted"}}});
+            output.events = self
+                .receive(&completed)
+                .map(|translation| translation.events)
+                .unwrap_or_default();
+        } else if self.turn_in_flight(route) {
+            self.pending.retain(|_, (owner, _)| owner != route);
+            output.events.push(ProviderEvent::TurnFinished {
+                status: RunStatus::Interrupted,
+                native_head: None,
+            });
+        }
+        output
     }
     /// Image bytes are prepared by the resource owner; paths are never sent.
     pub fn command(
@@ -696,10 +729,13 @@ impl CodexProtocol {
     }
     /// T3 CodexAdapterV2 rollbackThread: discards the `turns` newest turns of
     /// the native thread. No turn to discard sends nothing.
+    /// Reverts to just after the `boundary` turn. Listing the boundary ends the
+    /// count, so repeating a rollback leaves an already rewound thread as it is.
     pub fn rollback(
         &mut self,
         native_thread: &str,
         turns: u64,
+        boundary: Option<&str>,
         context: &WireContext,
     ) -> Translation {
         let route = context.route.as_str();
@@ -718,7 +754,10 @@ impl CodexProtocol {
             "thread/read",
             json!({"threadId":native_thread,"includeTurns":false}),
             Pending::RevertRead {
-                thread: native_thread.into(),
+                target: RevertTarget {
+                    thread: native_thread.into(),
+                    boundary: boundary.map(str::to_owned),
+                },
                 turns,
                 runtime_params: context.thread_params(context.thread_model.as_deref()),
             },
@@ -728,7 +767,7 @@ impl CodexProtocol {
     fn revert_page(
         &mut self,
         route: &str,
-        thread: String,
+        target: RevertTarget,
         remaining: u64,
         before: Option<String>,
         cursor: Option<String>,
@@ -739,7 +778,7 @@ impl CodexProtocol {
                 "Thread history pagination repeated a cursor.".into(),
             ));
         }
-        Ok(self.request(route, "thread/turns/list",json!({"threadId":thread,"cursor":cursor,"limit":remaining.min(100),"sortDirection":"desc","itemsView":"summary"}),Pending::RevertPage {thread,remaining,before,visited}))
+        Ok(self.request(route, "thread/turns/list",json!({"threadId":target.thread,"cursor":cursor,"limit":remaining.min(100),"sortDirection":"desc","itemsView":"summary"}),Pending::RevertPage {target,remaining,before,visited}))
     }
     fn start_or_inject(
         &mut self,
@@ -958,29 +997,30 @@ impl CodexProtocol {
                 }
                 Pending::Restore | Pending::Unload => {}
                 Pending::RevertRead {
-                    thread,
+                    target,
                     turns,
                     mut runtime_params,
                 } => {
                     if result["thread"]["historyMode"] != "paginated" {
                         return Err(ProtocolError::Invalid(format!(
-                            "Cannot roll back Codex thread {thread}: the thread uses legacy history, which Codex 0.156 cannot revert."
+                            "Cannot roll back Codex thread {}: the thread uses legacy history, which Codex 0.156 cannot revert.",
+                            target.thread
                         )));
                     }
                     // `thread/revert` acts only on a thread loaded in this process.
                     if result["thread"]["status"]["type"] == "notLoaded" {
-                        runtime_params["threadId"] = json!(thread);
+                        runtime_params["threadId"] = json!(target.thread);
                         runtime_params["excludeTurns"] = json!(true);
                         output.outbound.push(self.request(
                             &route,
                             "thread/resume",
                             runtime_params,
-                            Pending::RevertResume { thread, turns },
+                            Pending::RevertResume { target, turns },
                         ));
                     } else {
                         output.outbound.push(self.revert_page(
                             &route,
-                            thread,
+                            target,
                             turns,
                             None,
                             None,
@@ -988,10 +1028,10 @@ impl CodexProtocol {
                         )?);
                     }
                 }
-                Pending::RevertResume { thread, turns } => {
+                Pending::RevertResume { target, turns } => {
                     output.outbound.push(self.revert_page(
                         &route,
-                        thread,
+                        target,
                         turns,
                         None,
                         None,
@@ -999,7 +1039,7 @@ impl CodexProtocol {
                     )?);
                 }
                 Pending::RevertPage {
-                    thread,
+                    target,
                     mut remaining,
                     mut before,
                     visited,
@@ -1007,20 +1047,28 @@ impl CodexProtocol {
                     let turns = result["data"].as_array().ok_or_else(|| {
                         ProtocolError::Invalid("missing native turn history".into())
                     })?;
+                    let mut reached = false;
                     for turn in turns {
-                        before = Some(required(turn, "id")?);
+                        let id = required(turn, "id")?;
+                        if target.boundary.as_ref() == Some(&id) {
+                            reached = true;
+                            break;
+                        }
+                        before = Some(id);
                         remaining -= 1;
                         if remaining == 0 {
                             break;
                         }
                     }
                     let cursor = optional(result, "nextCursor");
-                    if remaining > 0
+                    let thread = target.thread.clone();
+                    if !reached
+                        && remaining > 0
                         && let Some(cursor) = cursor
                     {
                         output.outbound.push(self.revert_page(
                             &route,
-                            thread,
+                            target,
                             remaining,
                             before,
                             Some(cursor),
@@ -1135,9 +1183,13 @@ impl CodexProtocol {
         match method.as_str() {
             "thread/started" => {
                 let thread = required(&p["thread"], "id")?;
-                if !self.is_root(&thread) && !self.child_roots.contains_key(&thread) {
+                if !self.is_root(&thread)
+                    && !self.child_roots.contains_key(&thread)
+                    && !self.unclaimed.contains(&thread)
+                {
                     // A new thread announced before its `thread/start` reply
-                    // belongs to the only route starting one.
+                    // belongs to the only route starting one, unless a pending
+                    // fork may have created it instead.
                     let mut starting =
                         self.pending
                             .values()
@@ -1146,10 +1198,14 @@ impl CodexProtocol {
                                     resume: None,
                                     load_key,
                                     ..
-                                } => Some((route.clone(), load_key.clone())),
+                                } => Some(Some((route.clone(), load_key.clone()))),
+                                Pending::Operation(operation) if operation == "thread/fork" => {
+                                    Some(None)
+                                }
                                 _ => None,
                             });
-                    if let (Some((route, load_key)), None) = (starting.next(), starting.next())
+                    if let (Some(Some((route, load_key))), None) =
+                        (starting.next(), starting.next())
                         && self.native_thread(&route).is_none()
                     {
                         self.bind_root(&route, &thread, load_key);
@@ -1220,6 +1276,13 @@ impl CodexProtocol {
                             )
                         }
                     };
+                    // T3 reads the process-wide snapshot for each usage-limit
+                    // failure, including a thread that attached after it arrived.
+                    if class == "usage_limit" && self.rate_limits.is_some() {
+                        events.push(ProviderEvent::RateLimits {
+                            resets_at: usage_limit_reset(self.rate_limits.as_ref()),
+                        });
+                    }
                     events.push(ProviderEvent::ItemFinished {
                         key: format!("terminal-failure:{turn_id}"),
                         kind: ProviderItem::Error {
