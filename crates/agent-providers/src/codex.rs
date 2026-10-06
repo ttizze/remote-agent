@@ -228,8 +228,12 @@ impl CodexProtocol {
         self.routes.get(route)?.thread.as_deref()
     }
     /// The route of a root or child native thread. A process serving a single
-    /// route attributes unknown threads to it.
+    /// route attributes unknown threads to it, but not a fork's thread no
+    /// route has claimed yet.
     fn route_of(&self, native: Option<&str>) -> Option<String> {
+        if native.is_some_and(|native| self.unclaimed.contains(native)) {
+            return None;
+        }
         let found = native.and_then(|native| {
             let root = self
                 .child_roots

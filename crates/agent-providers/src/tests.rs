@@ -2066,6 +2066,13 @@ fn a_shared_translator_loads_threads_per_route() {
             native_thread: "native-fork".into()
         })
     );
+    // Until the child claims it, the fork's thread belongs to no route.
+    let usage = notify(
+        &mut codex,
+        "thread/tokenUsage/updated",
+        json!({"threadId":"native-fork","turnId":"turn-source","tokenUsage":{"total":{},"last":{}}}),
+    );
+    assert_eq!(usage.route, None);
     let mut child_start = codex_start();
     if let ProviderCommand::Start { native_thread, .. } = &mut child_start {
         *native_thread = Some("native-fork".into());
