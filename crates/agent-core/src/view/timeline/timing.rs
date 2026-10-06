@@ -1,5 +1,5 @@
 //! Durations of turns and delegated work.
-use agent_domain::{ItemStatus, RunId, RunStatus, Timestamp};
+use agent_domain::{ItemStatus, ThreadShell, Timestamp};
 
 pub fn format_duration(duration_ms: f64) -> String {
     if !duration_ms.is_finite() || duration_ms < 0.0 {
@@ -38,33 +38,20 @@ pub fn elapsed_ms(start: &Timestamp, end: &Timestamp) -> i64 {
     (end.millis() - start.millis()).max(0)
 }
 
-/// The run the working indicator times.
-#[derive(Debug, Clone, PartialEq)]
-pub struct LatestRunTiming {
-    pub run: RunId,
-    pub status: RunStatus,
-    /// Set when the run is created; `started_at` waits for the provider.
-    pub requested_at: Option<Timestamp>,
-    pub started_at: Option<Timestamp>,
-    pub completed_at: Option<Timestamp>,
-}
-
-/// When the working indicator counts from. A requested run counts from its
-/// request while the provider starts; a settled run falls back to the send time.
-pub fn active_work_started_at(
-    latest: Option<&LatestRunTiming>,
-    active_run: Option<&RunId>,
+/// When the working indicator counts from: the start of the work the
+/// activity-owning run does. A local send counts only until the Host names a run.
+pub fn working_started_at(
+    shell: Option<&ThreadShell>,
     send_started_at: Option<&Timestamp>,
 ) -> Option<Timestamp> {
-    if active_run.is_some_and(|active| latest.is_none_or(|latest| &latest.run != active)) {
-        return send_started_at.cloned();
-    }
-    if latest.is_none_or(|latest| latest.completed_at.is_none()) {
-        return latest
-            .and_then(|latest| latest.started_at.clone().or(latest.requested_at.clone()))
-            .or_else(|| send_started_at.cloned());
-    }
-    send_started_at.cloned()
+    shell
+        .and_then(|shell| shell.activity_run_started_at.clone())
+        .or_else(|| {
+            shell
+                .is_none_or(|shell| shell.active_run.is_none())
+                .then(|| send_started_at.cloned())
+                .flatten()
+        })
 }
 
 /// Unknown settled timing must not turn a task's age into its work duration.
@@ -90,22 +77,6 @@ mod tests {
     fn at(value: &str) -> Timestamp {
         Timestamp::parse(value).unwrap()
     }
-    fn run(
-        id: &str,
-        status: RunStatus,
-        requested: &str,
-        started: Option<&str>,
-        completed: Option<&str>,
-    ) -> LatestRunTiming {
-        LatestRunTiming {
-            run: RunId::new(id).unwrap(),
-            status,
-            requested_at: Some(at(requested)),
-            started_at: started.map(at),
-            completed_at: completed.map(at),
-        }
-    }
-
     #[test]
     fn formats_durations() {
         for (duration, expected) in [
@@ -138,86 +109,40 @@ mod tests {
         }
     }
 
+    fn shell(activity: Option<&str>, active_run: Option<&str>) -> ThreadShell {
+        let mut shell = agent_domain::shell(&crate::sync::fixtures::thread_state("t")).unwrap();
+        shell.activity_run_started_at = activity.map(at);
+        shell.active_run = active_run.map(|run| agent_domain::RunId::new(run).unwrap());
+        shell
+    }
+
     #[test]
-    fn does_not_time_a_superseded_turn_when_the_active_turn_differs() {
-        let old = run(
-            "old",
-            RunStatus::Starting,
-            "2026-09-06T23:33:00.000Z",
-            None,
-            None,
-        );
-        let active = RunId::new("new").unwrap();
-        for send in [None, Some(at("2026-09-06T23:34:00.000Z"))] {
+    fn shares_the_detail_timer_when_a_newer_run_is_queued_or_cancelled() {
+        let activity = "2026-03-09T10:00:00.000Z";
+        let shell = shell(Some(activity), Some("older-run"));
+        for send in ["2026-03-09T10:30:00.000Z", "2026-03-09T10:50:00.000Z"] {
             assert_eq!(
-                active_work_started_at(Some(&old), Some(&active), send.as_ref()),
-                send
+                working_started_at(Some(&shell), Some(&at(send))),
+                Some(at(activity))
             );
         }
-    }
-
-    #[test]
-    fn stops_timing_a_turn_that_failed_before_its_provider_started() {
-        let failed = run(
-            "turn-1",
-            RunStatus::Failed,
-            "2026-09-06T23:33:00.000Z",
-            None,
-            Some("2026-09-06T23:33:05.000Z"),
-        );
-        assert_eq!(active_work_started_at(Some(&failed), None, None), None);
-    }
-
-    #[test]
-    fn counts_from_requested_at_while_the_provider_is_still_starting() {
-        let starting = run(
-            "turn-1",
-            RunStatus::Starting,
-            "2026-09-06T23:33:00.000Z",
-            None,
-            None,
-        );
+        // A Host-owned run without a valid start must not borrow a local dispatch clock.
+        let without_start = self::shell(None, Some("older-run"));
         assert_eq!(
-            active_work_started_at(Some(&starting), None, None),
-            Some(at("2026-09-06T23:33:00.000Z"))
+            working_started_at(Some(&without_start), Some(&at("2026-03-09T10:50:00.000Z"))),
+            None
         );
     }
 
     #[test]
-    fn prefers_the_turns_own_started_at_once_the_provider_reports_it() {
-        let running = run(
-            "turn-1",
-            RunStatus::Running,
-            "2026-09-06T23:33:00.000Z",
-            Some("2026-09-06T23:33:05.000Z"),
-            None,
-        );
-        let active = RunId::new("turn-1").unwrap();
+    fn a_local_send_counts_until_the_host_names_a_run() {
+        let send = at("2026-03-09T10:50:00.000Z");
+        assert_eq!(working_started_at(None, Some(&send)), Some(send.clone()));
         assert_eq!(
-            active_work_started_at(Some(&running), Some(&active), None),
-            Some(at("2026-09-06T23:33:05.000Z"))
-        );
-    }
-
-    #[test]
-    fn stops_counting_once_the_turn_has_settled_even_while_a_session_starts_again() {
-        let settled = run(
-            "turn-1",
-            RunStatus::Completed,
-            "2026-09-06T23:33:00.000Z",
-            Some("2026-09-06T23:33:05.000Z"),
-            Some("2026-09-06T23:33:09.000Z"),
-        );
-        assert_eq!(active_work_started_at(Some(&settled), None, None), None);
-    }
-
-    #[test]
-    fn falls_back_to_the_callers_send_timestamp_when_there_is_no_turn_yet() {
-        let send = at("2026-09-06T23:33:00.000Z");
-        assert_eq!(
-            active_work_started_at(None, None, Some(&send)),
+            working_started_at(Some(&shell(None, None)), Some(&send)),
             Some(send.clone())
         );
+        assert_eq!(working_started_at(None, None), None);
     }
 
     #[test]
