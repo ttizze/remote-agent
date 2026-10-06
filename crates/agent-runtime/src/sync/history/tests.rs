@@ -43,6 +43,8 @@ pub(crate) fn item(id: &str, ordinal: u64, kind: ItemKind, text: String) -> Item
         text,
         started_at: at(),
         completed_at: Some(at()),
+        output_omitted: false,
+        output_indicates_failure: false,
     }
 }
 pub(crate) fn command_row(index: usize, output: String) -> Item {
@@ -557,7 +559,7 @@ fn charges_control_state_and_messages_when_measuring_bounded_timeline_bytes() {
     full.items = (0..8)
         .map(|index| command_row(index, "x".repeat(2_000)))
         .collect();
-    let max_encoded_bytes = 12_000;
+    let max_encoded_bytes = 12_500;
     let policy = PagePolicy::budget(50, max_encoded_bytes);
     let bounded = bounded_state(&full, 1, policy);
     let contribution: u64 = bounded.state.items.iter().map(json_len).sum();
@@ -652,7 +654,8 @@ fn omits_historical_control_details_that_remain_available_from_history_items() {
         .collect();
     assert!(json_len(&populated) > 4 * HISTORY_MAX_ENCODED_BYTES);
 
-    let bounded = bounded_state(&populated, 9, PagePolicy::RECENT);
+    let client = crate::sync::client_state(&std::sync::Arc::new(populated.clone()));
+    let bounded = bounded_state(&client, 9, PagePolicy::RECENT);
     assert!(json_len(&bounded.state) <= HISTORY_MAX_ENCODED_BYTES);
     assert!(!bounded.payload_budget_exceeded);
     assert!(
@@ -719,3 +722,84 @@ fn keeps_paged_historical_plan_detail_in_the_turn_item_and_only_status_in_its_ar
 }
 
 mod fold_after_bounded_snapshot;
+
+/// Reasoning rows keep their text on the wire, so ten whole user turns of them can
+/// outgrow a transport frame; the window then stops at the frame budget.
+fn heavy_turns(turns: usize, rows_per_turn: usize, text: usize) -> State {
+    let mut state = created();
+    let mut index = 0;
+    for turn in 0..turns {
+        prompt(
+            &mut state,
+            index,
+            &format!("prompt-{turn}"),
+            MessageAuthor::User,
+            "go",
+        );
+        index += 1;
+        for _ in 0..rows_per_turn {
+            state.items.push(item(
+                &format!("item-{index}"),
+                index as u64 + 1,
+                ItemKind::Reasoning,
+                "r".repeat(text),
+            ));
+            index += 1;
+        }
+    }
+    state
+}
+
+#[test]
+fn stops_a_turn_window_at_the_frame_budget_so_every_thread_opens() {
+    let state = heavy_turns(10, 40, 64 * 1024);
+    let page = recent_history(&state, 1, PagePolicy::RECENT);
+    let bytes: u64 = page.rows.iter().map(json_len).sum();
+    assert!(bytes <= HISTORY_FRAME_MAX_BYTES);
+    assert!(page.has_more && page.next_cursor.is_some());
+    let older = history_before(&state, page.next_cursor.as_deref().unwrap(), 1, None).unwrap();
+    assert!(!older.rows.is_empty());
+
+    let bounded = bounded_state(&state, 1, PagePolicy::RECENT);
+    assert!(json_len(&bounded.state) <= HISTORY_FRAME_MAX_BYTES);
+    assert!(bounded.has_more_history);
+
+    // Within the frame budget, whole user turns still decide the window (T3).
+    let light = heavy_turns(12, 2, 1024);
+    assert_eq!(
+        recent_history(&light, 1, PagePolicy::RECENT).rows.len(),
+        10 * 3
+    );
+}
+
+#[test]
+fn shortens_a_single_finished_row_that_alone_exceeds_the_frame_budget() {
+    let mut state = created();
+    prompt(
+        &mut state,
+        0,
+        "prompt-0",
+        MessageAuthor::User,
+        &"u".repeat(HISTORY_FRAME_MAX_BYTES as usize),
+    );
+    let page = recent_history(&state, 1, PagePolicy::RECENT);
+    let [row] = &page.rows[..] else { panic!() };
+    assert!(json_len(row) <= HISTORY_FRAME_MAX_BYTES);
+    assert!(row.item.text.ends_with(super::TRUNCATION_MARKER));
+    assert!(
+        row.message
+            .as_ref()
+            .unwrap()
+            .text
+            .ends_with(super::TRUNCATION_MARKER)
+    );
+
+    let bounded = bounded_state(&state, 1, PagePolicy::RECENT);
+    assert!(json_len(&bounded.state) <= HISTORY_FRAME_MAX_BYTES);
+    assert!(
+        bounded.state.items[0]
+            .text
+            .ends_with(super::TRUNCATION_MARKER)
+    );
+    assert_eq!(state.items[0].text.len(), HISTORY_FRAME_MAX_BYTES as usize);
+}

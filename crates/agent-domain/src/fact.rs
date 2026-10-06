@@ -452,6 +452,11 @@ pub enum FactBody {
         id: NodeId,
         state: DeliveryState,
     },
+    /// Delivery only, never stored: a tool item as clients receive it, standing in
+    /// for the fact that started or changed it (T3 WireProjection `turn-item.updated`).
+    ItemProjected {
+        item: Item,
+    },
 }
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum FoldError {
@@ -1163,6 +1168,8 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
                 text: String::new(),
                 started_at: at.clone(),
                 completed_at: None,
+                output_omitted: false,
+                output_indicates_failure: false,
             });
         }
         ItemTextAppended { id, offset, text } => {
@@ -1554,6 +1561,10 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
             id,
             state: delivery,
         } => find_mut(&mut state.tasks, "task", |t| &t.id == id)?.delivery = *delivery,
+        ItemProjected { item } => match state.items.iter_mut().find(|i| i.id == item.id) {
+            Some(existing) => *existing = item.clone(),
+            None => state.items.push(item.clone()),
+        },
     }
     // Visits and arranging the active list are not thread activity (T3).
     if !matches!(
@@ -1568,8 +1579,6 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
 /// Largest text carried by one fact. Longer text is split across appends so
 /// each fact fits a transport frame; nothing is truncated.
 pub const MAX_FACT_TEXT: usize = 1 << 20;
-/// Largest encoded JSON value kept on one fact.
-pub const MAX_FACT_JSON: usize = 4 << 20;
 pub fn text_chunks(text: &str) -> Vec<&str> {
     let mut chunks = vec![];
     let mut rest = text;
@@ -1583,19 +1592,9 @@ pub fn text_chunks(text: &str) -> Vec<&str> {
     }
     chunks
 }
-/// JSON larger than `MAX_FACT_JSON` is replaced by its size; the item text
-/// keeps the readable output.
-pub fn bounded_json(value: &Json) -> Json {
-    let size = serde_json::to_vec(&value.0).map_or(0, |bytes| bytes.len());
-    if size > MAX_FACT_JSON {
-        Json(serde_json::json!({"omittedBytes": size}))
-    } else {
-        value.clone()
-    }
-}
 /// Version of the folded `State` and `Fact` encodings. Stored snapshots with
 /// another value are rebuilt from facts.
-pub const STATE_FORMAT: u32 = 1;
+pub const STATE_FORMAT: u32 = 2;
 pub fn fold(initial: &State, facts: &[Fact]) -> Result<State, FoldError> {
     let mut state = initial.clone();
     for fact in facts {

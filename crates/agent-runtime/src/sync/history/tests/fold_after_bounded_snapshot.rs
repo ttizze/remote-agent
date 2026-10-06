@@ -1,11 +1,15 @@
-//! A bounded snapshot followed by later facts folds without error and agrees with
-//! the full fold for everything it holds and everything in its window.
+//! A bounded client snapshot followed by later client facts folds without error and
+//! agrees with the client form of the full fold for everything it holds and
+//! everything in its window.
 use super::*;
+use crate::StoredFact;
+use crate::sync::{client_facts, client_state};
 use agent_domain::{
     Command, DispatchMode, Input, InputEnvelope, ProviderEvent, ProviderItem, SendMessage,
     ThreadMachine, fold,
 };
 use proptest::prelude::*;
+use std::sync::Arc;
 
 #[derive(Debug, Clone)]
 enum Op {
@@ -24,7 +28,7 @@ fn op() -> impl Strategy<Value = Op> {
     prop_oneof![
         3 => any::<bool>().prop_map(|queue| Op::Send { queue }),
         1 => Just(Op::Steer),
-        3 => (0u8..3).prop_map(Op::Item),
+        3 => (0u8..4).prop_map(Op::Item),
         3 => (1u8..40).prop_map(Op::Delta),
         2 => Just(Op::FinishItem),
         1 => Just(Op::Plan),
@@ -39,6 +43,8 @@ struct Script {
     facts: Vec<Fact>,
     /// Snapshots are taken between steps, after a whole commit.
     commits: Vec<usize>,
+    /// The state after each commit, which projects that commit's facts.
+    states: Vec<State>,
     step: usize,
     open: Vec<(String, ProviderItem)>,
 }
@@ -49,6 +55,7 @@ impl Script {
             state: State::default(),
             facts: vec![],
             commits: vec![],
+            states: vec![],
             step: 0,
             open: vec![],
         };
@@ -76,6 +83,7 @@ impl Script {
         }
         self.facts.extend(step.facts);
         self.commits.push(self.facts.len());
+        self.states.push(self.state.clone());
     }
     fn command(&mut self, command: Command) {
         let id = agent_domain::CommandId::new(format!("command-{}", self.step)).unwrap();
@@ -149,6 +157,12 @@ impl Script {
                 let kind = match kind {
                     0 => ProviderItem::Text,
                     1 => ProviderItem::Reasoning,
+                    2 => ProviderItem::Tool {
+                        presentation: Default::default(),
+                        name: "tool".into(),
+                        input: agent_domain::Json(serde_json::json!({ "q": "x".repeat(20_000) })),
+                        output: Some(agent_domain::Json(serde_json::json!({ "threadId": "t" }))),
+                    },
                     _ => ProviderItem::Command {
                         command: "ls".into(),
                         cwd: None,
@@ -226,19 +240,43 @@ proptest! {
             script.run(op);
         }
         let facts = script.facts;
-        let cut = script.commits[((script.commits.len() - 1) as f64 * split) as usize];
-        let prefix = fold(&State::default(), &facts[..cut]).unwrap();
-        let policy = PagePolicy { max_user_turns: turns, max_items, max_encoded_bytes: 10_000_000 };
-        let bounded = bounded_state(&prefix, cut as u64, policy);
+        let index = ((script.commits.len() - 1) as f64 * split) as usize;
+        let cut = script.commits[index];
+        let prefix = Arc::new(fold(&State::default(), &facts[..cut]).unwrap());
+        let policy = PagePolicy {
+            max_user_turns: turns,
+            max_items,
+            max_encoded_bytes: 10_000_000,
+            max_frame_bytes: HISTORY_FRAME_MAX_BYTES,
+        };
+        let client = client_state(&prefix);
+        let bounded = bounded_state(&client, cut as u64, policy);
         let window_start = bounded.history_cursor.as_deref().map_or(0, |cursor| {
             let cursor = HistoryCursor::decode(cursor).unwrap();
             prefix.items.iter().find(|item| item.id.as_str() == cursor.item).unwrap().ordinal
         });
 
-        let after = fold(&bounded.state, &facts[cut..]);
+        let mut after = Ok(bounded.state);
+        for (commit, end) in script.commits.iter().enumerate().skip(index + 1) {
+            let start = script.commits[commit - 1];
+            let stored: Arc<[StoredFact]> = facts[start..*end]
+                .iter()
+                .enumerate()
+                .map(|(offset, fact)| StoredFact {
+                    global_seq: (start + offset + 1) as u64,
+                    thread_seq: (start + offset + 1) as u64,
+                    fact: fact.clone(),
+                })
+                .collect();
+            let delivered: Vec<Fact> = client_facts(&script.states[commit], &stored)
+                .iter()
+                .map(|stored| stored.fact.clone())
+                .collect();
+            after = after.and_then(|state| fold(&state, &delivered));
+        }
         prop_assert!(after.is_ok(), "{:?}", after.err());
         let after = after.unwrap();
-        let full = script.state;
+        let full = State::clone(&client_state(&Arc::new(script.state)));
 
         prop_assert_eq!(&after.thread, &full.thread);
         prop_assert_eq!(&after.runs, &full.runs);

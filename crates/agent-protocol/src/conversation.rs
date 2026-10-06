@@ -142,6 +142,10 @@ pub struct SequencedFact {
     pub fact: Fact,
 }
 
+/// Snapshots, facts and history pages carry the delivery projection (T3
+/// WireProjection): command and tool output is withheld with `output_omitted` /
+/// `output_indicates_failure`, file bodies are dropped, subagent text is cut at
+/// 32 KiB, and a fact that changes a tool item arrives as `ItemProjected`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ThreadUpdate {
@@ -153,7 +157,8 @@ pub enum ThreadUpdate {
 }
 
 /// Groups facts in order into stream items that each fit `budget` encoded bytes.
-/// Facts are bounded where they are created, so a single fact always fits a frame.
+/// Text is split where facts are created and tool output is withheld on delivery,
+/// so a single fact fits a frame.
 pub fn fact_updates(facts: Vec<SequencedFact>, budget: usize) -> Vec<ThreadUpdate> {
     let mut updates = vec![];
     let (mut batch, mut used) = (vec![], 0usize);
@@ -249,7 +254,8 @@ pub struct HistoryRow {
     pub plan: Option<Plan>,
 }
 
-/// `conversation/getTurnItem`: one item in full, or `None` when it is not visible.
+/// `conversation/getTurnItem`: one item with the output the timeline withholds
+/// (each part bounded to 256 KiB), or `None` when it is not visible.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GetTurnItem {

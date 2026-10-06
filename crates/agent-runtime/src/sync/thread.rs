@@ -70,7 +70,7 @@ impl ThreadSnapshot {
                 window: None,
             };
         }
-        let bounded = bounded_state(state, head.global_seq, PagePolicy::RECENT);
+        let bounded = bounded_state(&client_state(state), head.global_seq, PagePolicy::RECENT);
         Self {
             snapshot_seq: head.global_seq,
             thread_seq: head.thread_seq,

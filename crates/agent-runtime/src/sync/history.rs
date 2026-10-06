@@ -1,6 +1,6 @@
 //! Timeline windows and history pages, ported from T3 `threadHistoryPaging.ts`.
 //! A row is one visible item (local or inherited) with the message and plan it shows.
-use super::wire::strip_host_only;
+use super::wire::{TRUNCATION_MARKER, truncate_detail};
 use agent_domain::{
     InputIntent, Item, ItemKind, Message, MessageAuthor, MessageId, Plan, RunAttemptId, RunId,
     RunStatus, State, ThreadId, TurnItemId,
@@ -17,6 +17,10 @@ pub const OLDER_HISTORY_USER_TURNS: usize = 20;
 /// Agent-started turns ride along with user turns up to this many turn starts.
 pub const HISTORY_MAX_RAW_TURNS: usize = 150;
 pub const HISTORY_CURSOR_MAX_LEN: usize = 4_096;
+/// Rows one page or window may carry whatever its turn count, so every thread
+/// opens within a transport frame. T3's websocket has no frame limit; this only
+/// binds where T3 would send more.
+pub const HISTORY_FRAME_MAX_BYTES: u64 = 8 * 1_048_576;
 /// Room kept for the snapshot envelope around the timeline and control state.
 const SNAPSHOT_ENVELOPE_BYTES: u64 = 1_024;
 
@@ -27,12 +31,15 @@ pub struct PagePolicy {
     pub max_user_turns: Option<usize>,
     pub max_items: usize,
     pub max_encoded_bytes: u64,
+    /// Applies to every page, with or without user turns.
+    pub max_frame_bytes: u64,
 }
 impl PagePolicy {
     pub const RECENT: Self = Self {
         max_user_turns: Some(HISTORY_MAX_USER_TURNS),
         max_items: HISTORY_MAX_ITEMS,
         max_encoded_bytes: HISTORY_MAX_ENCODED_BYTES,
+        max_frame_bytes: HISTORY_FRAME_MAX_BYTES,
     };
     pub const OLDER: Self = Self {
         max_user_turns: Some(OLDER_HISTORY_USER_TURNS),
@@ -43,6 +50,7 @@ impl PagePolicy {
             max_user_turns: None,
             max_items,
             max_encoded_bytes,
+            max_frame_bytes: HISTORY_FRAME_MAX_BYTES,
         }
     }
 }
@@ -227,8 +235,8 @@ pub(crate) struct Selection {
 }
 
 /// Walks backward from the exclusive `end`, collecting whole user turns. Timelines
-/// without user turns use the item and byte budgets and always admit one row, so an
-/// oversized item cannot stall paging.
+/// without user turns use the item and byte budgets. Every page stops at the frame
+/// budget and always admits one row, so an oversized item cannot stall paging.
 pub(crate) fn select_older(
     rows: &[Row<'_>],
     end: usize,
@@ -243,16 +251,15 @@ pub(crate) fn select_older(
     let (mut start, mut bytes, mut user_turns, mut raw_turns) = (end, 0, 0, 0);
     while start > 0 {
         let row = &rows[start - 1];
-        let row_bytes = if turn_limit.is_none() {
-            cost(row, start - 1)
-        } else {
-            0
-        };
+        let row_bytes = cost(row, start - 1);
         let selected = end - start;
-        let full = match turn_limit {
-            None => selected >= policy.max_items || bytes + row_bytes > policy.max_encoded_bytes,
-            Some(limit) => user_turns >= limit || raw_turns >= HISTORY_MAX_RAW_TURNS,
-        };
+        let full = bytes + row_bytes > policy.max_frame_bytes
+            || match turn_limit {
+                None => {
+                    selected >= policy.max_items || bytes + row_bytes > policy.max_encoded_bytes
+                }
+                Some(limit) => user_turns >= limit || raw_turns >= HISTORY_MAX_RAW_TURNS,
+            };
         if selected > 0 && full {
             break;
         }
@@ -273,27 +280,48 @@ pub(crate) fn select_older(
     }
 }
 
-fn page(rows: &[Row<'_>], selection: Selection) -> HistoryPage {
+/// Shortens the text of a finished row that alone exceeds the frame budget; later
+/// facts never append to it.
+fn fit_text(text: &mut String, budget: u64) {
+    let limit = (budget / 4) as usize;
+    if text.len() > limit {
+        *text = truncate_detail(text, limit.saturating_sub(TRUNCATION_MARKER.len())).into_owned();
+    }
+}
+pub(crate) fn fit_row(item: &mut Item, message: Option<&mut Message>, budget: u64) {
+    fit_text(&mut item.text, budget);
+    if let Some(message) = message {
+        fit_text(&mut message.text, budget);
+    }
+}
+
+fn page(rows: &[Row<'_>], selection: Selection, budget: u64) -> HistoryPage {
     HistoryPage {
         rows: rows[selection.start..selection.end]
             .iter()
             .enumerate()
-            .map(|(position, row)| row.owned(position))
+            .map(|(position, row)| {
+                let mut owned = row.owned(position);
+                if row.item.status.terminal() && page_row_bytes(row, position) > budget {
+                    fit_row(&mut owned.item, owned.message.as_mut(), budget);
+                }
+                owned
+            })
             .collect(),
         next_cursor: selection.next_cursor,
         has_more: selection.has_more,
     }
 }
 
-/// The newest page of the timeline.
+/// The newest page of the timeline. `state` is the client projection.
 pub fn recent_history(state: &State, snapshot_seq: u64, policy: PagePolicy) -> HistoryPage {
     let rows = timeline(state);
     let selection = select_older(&rows, rows.len(), snapshot_seq, policy, page_row_bytes);
-    page(&rows, selection)
+    page(&rows, selection, policy.max_frame_bytes)
 }
 
 /// The page before `cursor`. A cursor whose item is gone resumes from its recorded
-/// position, clamped to the current timeline.
+/// position, clamped to the current timeline. `state` is the client projection.
 pub fn history_before(
     state: &State,
     cursor: &str,
@@ -306,14 +334,9 @@ pub fn history_before(
         .iter()
         .position(|row| row.source.as_str() == cursor.source && row.item.id.as_str() == cursor.item)
         .unwrap_or(cursor.position.min(rows.len()));
-    let selection = select_older(
-        &rows,
-        anchor,
-        snapshot_seq,
-        policy.unwrap_or(PagePolicy::OLDER),
-        page_row_bytes,
-    );
-    Ok(page(&rows, selection))
+    let policy = policy.unwrap_or(PagePolicy::OLDER);
+    let selection = select_older(&rows, anchor, snapshot_seq, policy, page_row_bytes);
+    Ok(page(&rows, selection, policy.max_frame_bytes))
 }
 
 /// A snapshot whose timeline is a recent window. Control state (thread, runs,
@@ -343,7 +366,7 @@ fn retained_runs(state: &State) -> HashSet<&RunId> {
         .collect()
 }
 
-/// Bounds the projection like T3's `buildBoundedThreadProjection`. Beyond the recent
+/// Bounds the client projection like T3's `buildBoundedThreadProjection`. Beyond the recent
 /// window it keeps every item a later fact can still touch (non-terminal items and
 /// the items of live attempts), every interrupt request, and the messages of those
 /// items and of the latest, active and queued runs.
@@ -376,7 +399,6 @@ pub fn bounded_state(state: &State, snapshot_seq: u64, policy: PagePolicy) -> Bo
         .sum();
 
     let mut bounded = state.clone();
-    strip_host_only(&mut bounded);
     let active_runs: HashSet<&RunId> = state
         .runs
         .iter()
@@ -396,10 +418,10 @@ pub fn bounded_state(state: &State, snapshot_seq: u64, policy: PagePolicy) -> Bo
     let control = json_len(&bounded);
 
     let rows = timeline(state);
+    let overhead = reserve + control + SNAPSHOT_ENVELOPE_BYTES;
     let window_policy = PagePolicy {
-        max_encoded_bytes: policy
-            .max_encoded_bytes
-            .saturating_sub(reserve + control + SNAPSHOT_ENVELOPE_BYTES),
+        max_encoded_bytes: policy.max_encoded_bytes.saturating_sub(overhead),
+        max_frame_bytes: policy.max_frame_bytes.saturating_sub(overhead),
         ..policy
     };
     let window = select_older(
@@ -456,6 +478,27 @@ pub fn bounded_state(state: &State, snapshot_seq: u64, policy: PagePolicy) -> Bo
         })
         .collect();
 
+    if let [row] = windowed
+        && !dependency(row.item)
+        && snapshot_row_bytes(row, 0) > window_policy.max_frame_bytes
+    {
+        let id = &row.item.id;
+        let message = message_of(row.item).and_then(|message| {
+            bounded
+                .messages
+                .iter_mut()
+                .chain(&mut bounded.inherited_messages)
+                .find(|m| &m.id == message)
+        });
+        if let Some(item) = bounded
+            .items
+            .iter_mut()
+            .chain(&mut bounded.inherited_items)
+            .find(|item| &item.id == id)
+        {
+            fit_row(item, message, window_policy.max_frame_bytes);
+        }
+    }
     let payload_budget_exceeded = json_len(&bounded) > policy.max_encoded_bytes;
     BoundedState {
         state: bounded,

@@ -1,5 +1,5 @@
-//! Ported from T3 `ThreadStream.test.ts` (every `decideThreadResume` case), the
-//! bounded-snapshot case of ws.test.ts and the handoff case of `WireProjection.test.ts`.
+//! Ported from T3 `ThreadStream.test.ts` (every case), the bounded-snapshot case of
+//! ws.test.ts and the handoff case of `WireProjection.test.ts`.
 use super::*;
 use crate::store::tests::{selection, temp_store};
 use crate::sync::client_facts;
@@ -10,9 +10,9 @@ use agent_domain::{
     RuntimeMode, ThreadId, TransferKind,
 };
 
-const LARGE_TRANSCRIPT_BYTES: usize = 10 * 1_048_576;
+const LARGE_PROJECTABLE_OUTPUT_BYTES: usize = 10 * 1_048_576;
 // The projected replay measured well under this; leave room for small envelope additions.
-const MAX_PROJECTED_REPLAY_BYTES: u64 = 2_048;
+const MAX_PROJECTED_DYNAMIC_REPLAY_BYTES: u64 = 2_048;
 
 fn head(global_seq: u64) -> ThreadHead {
     ThreadHead {
@@ -162,18 +162,36 @@ fn builds_socket_fallback_snapshots_with_a_bounded_timeline_and_history_cursor()
     assert!(!window.payload_budget_exceeded);
 }
 
-/// T3 shrinks a large tool output on the wire. Here the client form drops a
-/// transfer transcript; the raw and encoded checks stay separate the same way.
 #[test]
-fn rejects_a_10_mib_raw_replay_even_when_its_client_form_fits_the_wire_budget() {
-    let raw = stored(10, transfer_opened("x".repeat(LARGE_TRANSCRIPT_BYTES)));
+fn rejects_a_10_mib_raw_replay_even_when_its_projected_form_fits_the_wire_budget() {
+    let raw = stored(
+        10,
+        FactBody::ItemStarted {
+            id: agent_domain::TurnItemId::new("large-dynamic-tool").unwrap(),
+            run: None,
+            attempt: None,
+            native_key: "large-dynamic-tool".into(),
+            ordinal: 1,
+            kind: agent_domain::ItemKind::DynamicTool {
+                presentation: agent_domain::ToolPresentation {
+                    title: Some("Large result".into()),
+                    ..Default::default()
+                },
+                name: "mcp__test__large_result".into(),
+                input: agent_domain::Json(serde_json::json!({ "query": "small" })),
+                output: Some(agent_domain::Json(serde_json::json!({
+                    "text": "x".repeat(LARGE_PROJECTABLE_OUTPUT_BYTES)
+                }))),
+            },
+        },
+    );
     let raw_payload_bytes = serde_json::to_vec(&raw[0].fact.body).unwrap().len() as u64;
     assert!(raw_payload_bytes > RESUME_MAX_RAW_PAYLOAD_BYTES);
     assert!(!replay_raw_payload_safe(raw_payload_bytes));
     assert!(replay_encoded_bytes(&raw) > RESUME_MAX_REPLAY_ENCODED_BYTES);
-    let projected = client_facts(&raw);
+    let projected = client_facts(&command_rows(0), &raw);
     let projected_bytes = replay_encoded_bytes(&projected);
-    assert!(projected_bytes <= MAX_PROJECTED_REPLAY_BYTES);
+    assert!(projected_bytes <= MAX_PROJECTED_DYNAMIC_REPLAY_BYTES);
     assert_eq!(
         decide_resume(ResumeInput {
             after: 9,
@@ -219,7 +237,7 @@ fn keeps_copied_handoff_transcripts_out_of_activity_items_and_live_events() {
         ));
     }
     let live = stored(4, transfer_opened(transcript.into()));
-    assert!(!contains(&client_facts(&live)));
+    assert!(!contains(&client_facts(&state, &live)));
     assert!(contains(&live));
     assert!(contains(&state));
 }

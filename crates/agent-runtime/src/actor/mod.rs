@@ -615,7 +615,10 @@ impl Actor {
                     self.snapshot_due = false;
                 }
                 if !outcome.facts.is_empty() {
-                    self.publish(ThreadUpdate::Facts(client_facts(&outcome.facts)));
+                    self.publish(ThreadUpdate::Facts(client_facts(
+                        &self.state,
+                        &outcome.facts,
+                    )));
                     self.queue_handoff(&outcome.facts);
                 }
                 Ok(Committed {
@@ -778,7 +781,7 @@ impl Actor {
             .blocking(move |store| store.facts_after(Some(&thread), after))
             .await?
             .into();
-        let facts = client_facts(&facts);
+        let facts = client_facts(&self.state, &facts);
         let plan = decide_resume(ResumeInput {
             after,
             high_water,

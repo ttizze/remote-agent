@@ -1,7 +1,7 @@
 //! Reads outside the subscription streams: history pages, one turn item, and search.
 use crate::sync::{
-    HistoryPage, HistoryRow, InvalidCursor, PagePolicy, ProjectDirectory, history_before,
-    recent_history, timeline,
+    HistoryPage, HistoryRow, InvalidCursor, PagePolicy, ProjectDirectory, client_state,
+    detail_item, history_before, recent_history, timeline,
 };
 use crate::{ActorHandle, RuntimeError, Store, StoreError};
 use agent_domain::{State, ThreadId, Timestamp, TurnItemId};
@@ -30,9 +30,10 @@ impl ActorHandle {
     /// The page before `cursor`, or the newest page without one.
     pub async fn history(&self, cursor: Option<&str>) -> Result<HistoryPage, QueryError> {
         let view = self.view().await?;
+        let state = client_state(&view.state);
         Ok(match cursor {
-            Some(cursor) => history_before(&view.state, cursor, view.head.global_seq, None)?,
-            None => recent_history(&view.state, view.head.global_seq, PagePolicy::RECENT),
+            Some(cursor) => history_before(&state, cursor, view.head.global_seq, None)?,
+            None => recent_history(&state, view.head.global_seq, PagePolicy::RECENT),
         })
     }
 
@@ -41,13 +42,18 @@ impl ActorHandle {
     }
 }
 
-/// One visible item with its message and plan, at its timeline position.
+/// One visible item with its message and plan, at its timeline position, with the
+/// detail the timeline withholds (T3 `getTurnItem`).
 pub fn turn_item(state: &State, item: &TurnItemId) -> Option<HistoryRow> {
     timeline(state)
         .iter()
         .enumerate()
         .find(|(_, row)| &row.item.id == item)
-        .map(|(position, row)| row.owned(position))
+        .map(|(position, row)| {
+            let mut owned = row.owned(position);
+            owned.item = detail_item(row.item);
+            owned
+        })
 }
 
 /// Every visible item in timeline order, positioned as history pages position them.

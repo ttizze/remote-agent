@@ -4195,8 +4195,8 @@ impl Decision {
             } => ItemKind::DynamicTool {
                 presentation: presentation.clone(),
                 name: name.clone(),
-                input: bounded_json(input),
-                output: output.as_ref().map(bounded_json),
+                input: input.clone(),
+                output: output.clone(),
             },
             ProviderItem::WebSearch { query, results } => ItemKind::WebSearch {
                 query: query.clone(),

@@ -412,3 +412,23 @@ async fn reads_history_pages_and_single_items_from_the_actor() {
         Err(QueryError::Cursor(_))
     ));
 }
+
+/// T3 `getTurnItem` returns the output the timeline withholds, bounded at 256 KiB.
+#[test]
+fn reads_withheld_command_output_on_demand_within_its_bound() {
+    use crate::sync::history::tests::{command_row, created};
+    let mut state = created();
+    state.items = vec![command_row(0, "o".repeat(300 * 1024))];
+    let client = crate::sync::client_state(&std::sync::Arc::new(state.clone()));
+    let page = recent_history(&client, 1, PagePolicy::RECENT);
+    assert!(page.rows[0].item.text.is_empty() && page.rows[0].item.output_omitted);
+    let detail = turn_item(&state, &state.items[0].id).unwrap();
+    assert_eq!(
+        detail.item.text,
+        format!(
+            "{}\n… output truncated for transport",
+            "o".repeat(256 * 1024)
+        )
+    );
+    assert_eq!(state.items[0].text.len(), 300 * 1024);
+}

@@ -389,6 +389,11 @@ pub struct Item {
     pub text: String,
     pub started_at: Timestamp,
     pub completed_at: Option<Timestamp>,
+    /// Set only on delivery (T3 WireProjection): the output stays on the Host and
+    /// `getTurnItem` reads it.
+    pub output_omitted: bool,
+    /// Set only on delivery: the exit code or the withheld output shows a failure.
+    pub output_indicates_failure: bool,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum RequestBody {

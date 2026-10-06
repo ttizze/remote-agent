@@ -11,12 +11,21 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 
 /// Cached projections older than this marker are rebuilt from facts.
-pub const SNAPSHOT_FORMAT: &str = "state-json-1";
+pub const SNAPSHOT_FORMAT: &str = "state-json-2";
 const _: () = assert!(
-    agent_domain::STATE_FORMAT == 1,
+    agent_domain::STATE_FORMAT == 2,
     "bump SNAPSHOT_FORMAT with STATE_FORMAT"
 );
 pub const SNAPSHOT_INTERVAL: u64 = 256;
+
+pub(crate) fn latest_sequence(c: &Connection) -> Result<u64, StoreError> {
+    Ok(c.query_row(
+        "SELECT MAX(COALESCE((SELECT MAX(global_seq) FROM facts), 0),
+                    COALESCE((SELECT seq FROM sqlite_sequence WHERE name = 'facts'), 0))",
+        [],
+        |row| row.get::<_, i64>(0),
+    )? as u64)
+}
 pub const FACT_PAGE: usize = 500;
 const SCHEMA_VERSION: &str = "1";
 const IDLE_READERS: usize = 4;
@@ -231,14 +240,9 @@ impl Store {
         })
     }
 
+    /// The last sequence handed out, to a fact or to a change outside the fact log.
     pub fn latest_global_seq(&self) -> Result<u64, StoreError> {
-        self.read(|c| {
-            Ok(c.query_row(
-                "SELECT COALESCE(MAX(global_seq), 0) FROM facts",
-                [],
-                |row| row.get::<_, i64>(0),
-            )? as u64)
-        })
+        self.read(latest_sequence)
     }
 
     /// Pending or running outbox rows keep their thread resident.

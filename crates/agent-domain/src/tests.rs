@@ -4712,7 +4712,7 @@ fn wire_encodings_round_trip_imports_titles_rollbacks_and_workspaces() {
         stale_file_refs: vec!["later".into()],
     });
     round_trip(&s);
-    assert_eq!(STATE_FORMAT, 1);
+    assert_eq!(STATE_FORMAT, 2);
 }
 // T3 CodexAdapterV2.test.ts:3805: a command outliving its turn reports back and wakes the thread.
 #[test]
