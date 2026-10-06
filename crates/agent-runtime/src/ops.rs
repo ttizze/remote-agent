@@ -54,7 +54,8 @@ pub struct TextGenerationRequest {
 /// Restored checkpoint files staged in place while the originals are kept aside.
 /// Dropping it without `commit` or `undo` (a cancelled effect) puts the originals back.
 pub trait PreparedRestore: Send {
-    /// Keeps the restored files and discards the originals.
+    /// Keeps the restored files and discards the originals. A failed commit still
+    /// keeps the restored files; `HostOperations::finish_restore` discards the rest.
     fn commit(self: Box<Self>) -> BoxFuture<'static, Result<(), String>>;
     /// Puts the original files back.
     fn undo(self: Box<Self>) -> BoxFuture<'static, Result<(), String>>;
@@ -84,11 +85,16 @@ pub trait HostOperations: Send + Sync {
     ) -> BoxFuture<'_, Result<(), String>>;
     fn has_checkpoint(&self, cwd: String, reference: String)
     -> BoxFuture<'_, Result<bool, String>>;
+    /// Puts back the originals a previous process left aside before restoring.
     fn prepare_restore(
         &self,
         cwd: String,
         reference: String,
     ) -> BoxFuture<'_, Result<Box<dyn PreparedRestore>, String>>;
+    /// Discards originals that a restore in `cwd` still keeps aside because its
+    /// process stopped, or its commit failed, after the rollback was recorded.
+    /// Nothing happens when none are left.
+    fn finish_restore(&self, cwd: String) -> BoxFuture<'_, Result<(), String>>;
     /// Missing references are ignored.
     fn delete_checkpoints(
         &self,
@@ -96,6 +102,8 @@ pub trait HostOperations: Send + Sync {
         references: Vec<String>,
     ) -> BoxFuture<'_, Result<(), String>>;
 
+    /// Idempotent per `request.thread`: after a crash before the runtime recorded
+    /// the result, the same request returns the checkout created for the thread.
     fn create_worktree(
         &self,
         request: WorktreeRequest,
@@ -117,7 +125,8 @@ pub trait HostOperations: Send + Sync {
         thread: ThreadId,
         paths: Vec<String>,
     ) -> BoxFuture<'_, Result<(), String>>;
-    fn cleanup_terminals(&self, cwd: String) -> BoxFuture<'_, ()>;
+    /// Closes the thread's terminals and deletes their history.
+    fn cleanup_terminals(&self, thread: ThreadId) -> BoxFuture<'_, Result<(), String>>;
 
     /// The raw model output (a JSON object matching the schema, or plain text).
     fn generate_text(

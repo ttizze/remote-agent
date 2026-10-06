@@ -1,6 +1,6 @@
 use crate::*;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Fact {
@@ -366,6 +366,10 @@ pub enum FactBody {
     RollbackFailed {
         command: CommandId,
         message: String,
+    },
+    RollbackRewindStarted {
+        command: CommandId,
+        instances: Vec<String>,
     },
     ForkAccepted {
         parent: ThreadId,
@@ -1255,6 +1259,7 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
                 command: command.clone(),
                 checkpoint: checkpoint.clone(),
                 restore_files: *restore_files,
+                rewinding: BTreeSet::new(),
             });
             state.rollback_failure = None;
         }
@@ -1295,6 +1300,14 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
                 }
             }
             state.rollback = None;
+        }
+        RollbackRewindStarted { command, instances } => {
+            let pending = state
+                .rollback
+                .as_mut()
+                .filter(|p| &p.command == command)
+                .ok_or(FoldError::Conflict)?;
+            pending.rewinding.extend(instances.iter().cloned());
         }
         RollbackFailed { command, message } => {
             if state

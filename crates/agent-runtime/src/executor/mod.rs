@@ -16,9 +16,11 @@ use crate::{
     ActorRegistry, CommandOrigin, Committed, EffectError, EffectHandlers, HostOperations,
     RuntimeError, SessionManager, Store, StoreError, with_session_handlers,
 };
-use agent_domain::{Command, CommandId, Input, State, ThreadId, Workspace};
-use rusqlite::params;
+use agent_domain::{Command, CommandId, EffectBody, Input, RunId, State, ThreadId, Workspace};
+use rusqlite::{OptionalExtension, params};
+use std::collections::BTreeSet;
 use std::sync::Arc;
+use tokio::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 /// What the executors share.
 #[derive(Clone)]
@@ -27,6 +29,21 @@ pub struct ExecutorContext {
     pub registry: Arc<ActorRegistry>,
     pub sessions: Arc<SessionManager>,
     pub ops: Arc<dyn HostOperations>,
+    pub workspaces: Arc<WorkspaceFence>,
+}
+
+/// Keeps a file restore's isolation check true until the restore ends: binding a
+/// thread to a workspace waits while a restore runs, and a restore waits for
+/// bindings in progress.
+#[derive(Default)]
+pub struct WorkspaceFence(RwLock<()>);
+impl WorkspaceFence {
+    pub(crate) async fn bind(&self) -> RwLockReadGuard<'_, ()> {
+        self.0.read().await
+    }
+    pub(crate) async fn restore(&self) -> RwLockWriteGuard<'_, ()> {
+        self.0.write().await
+    }
 }
 
 /// Registers the session manager's handlers, a checkpoint baseline in front of
@@ -64,6 +81,7 @@ pub fn with_runtime_handlers(
             Arc::new(SendToThread::new(Arc::new(RegistryThreads {
                 registry: context.registry.clone(),
                 ops: context.ops.clone(),
+                workspaces: context.workspaces.clone(),
             }))),
         )
         .with(
@@ -170,6 +188,42 @@ impl Store {
             })
             .collect()
         })
+    }
+
+    /// Whether the rollback command's success was recorded.
+    pub(crate) fn rolled_back(
+        &self,
+        thread: &ThreadId,
+        command: &CommandId,
+    ) -> Result<bool, StoreError> {
+        self.read(|c| {
+            Ok(c.query_row(
+                "SELECT 1 FROM facts WHERE thread_id = ?1 AND kind = 'RolledBack'
+                     AND json_extract(payload, '$.RolledBack.command') = ?2",
+                params![thread.as_str(), command.as_str()],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
+        })
+    }
+
+    /// Runs whose checkpoint capture is still queued or running.
+    pub(crate) fn capturing_runs(&self, thread: &ThreadId) -> Result<BTreeSet<RunId>, StoreError> {
+        Ok(self
+            .outbox(thread)?
+            .into_iter()
+            .filter(|row| {
+                matches!(
+                    row.status,
+                    crate::EffectStatus::Pending | crate::EffectStatus::Running
+                )
+            })
+            .filter_map(|row| match row.effect.body {
+                EffectBody::CaptureCheckpoint { run, .. } => Some(run),
+                _ => None,
+            })
+            .collect())
     }
 
     /// Every checkpoint scope directory the thread ever bound.

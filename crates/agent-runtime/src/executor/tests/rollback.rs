@@ -431,3 +431,217 @@ async fn preserves_overlapping_workspace_files() {
         }
     }
 }
+
+/// A thread in `/wt` with two completed runs, the files of both and a rollback to
+/// the first run's checkpoint accepted.
+async fn rolled_back_once(rig: &Rig, id: &ThreadId) -> CheckpointScope {
+    rig.host.respond(revert_replies(rig.ops.clone(), false));
+    let scope = rig.scoped(id, worktree("/wt")).await;
+    rig.completed_run(id, "first", "turn-1").await;
+    rig.completed_run(id, "second", "turn-2").await;
+    rig.ops.log.lock().unwrap().clear();
+    assert_eq!(rollback(rig, id, &scope, 1, true).await, Reply::Accepted);
+    scope
+}
+
+// The originals are discarded only after the rollback is recorded, so a later
+// failure can neither lose the user's files nor report a rollback that happened
+// as failed.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failure_after_the_rollback_is_recorded_keeps_the_restored_files() {
+    let rig = rig_with(RigOptions {
+        max_attempts: 1,
+        ..RigOptions::default()
+    });
+    let id = tid("rewind-recorded-then-failed");
+    rig.ops.fail_delete.store(true, Ordering::SeqCst);
+    let scope = rolled_back_once(&rig, &id).await;
+    rig.drain().await;
+
+    let state = rig.state(&id).await;
+    assert_eq!(state.rollback_failure, None);
+    assert_eq!(rolled_back(&state), [2]);
+    assert_eq!(rollback_calls(&rig.ops), ["prepare", "provider", "commit"]);
+    assert!(
+        rig.outbox_kinds(&id)
+            .await
+            .contains(&("Rollback".to_owned(), crate::EffectStatus::Failed))
+    );
+
+    // The next turn's baseline replaces the stale ref the rollback left behind.
+    rig.ops.fail_delete.store(false, Ordering::SeqCst);
+    rig.ops.log.lock().unwrap().clear();
+    let next = rig.send(&id, "third", "third").await;
+    rig.drain().await;
+    assert_eq!(rig.run(&id, &next).await.ordinal, 3);
+    let reference = checkpoint_reference(&scope.id, 2);
+    assert_eq!(
+        rig.ops
+            .logged()
+            .into_iter()
+            .filter(|entry| entry.starts_with("delete") || entry.starts_with("capture"))
+            .collect::<Vec<_>>(),
+        ["delete /wt 2", "capture /wt 2"]
+    );
+    assert!(
+        rig.ops
+            .refs
+            .lock()
+            .unwrap()
+            .contains(&("/wt".into(), reference))
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_retry_after_a_failed_commit_finishes_the_recorded_restore() {
+    let rig = rig_with(RigOptions {
+        max_attempts: 2,
+        ..RigOptions::default()
+    });
+    let id = tid("rewind-commit-failed");
+    rig.ops.fail_commit.store(true, Ordering::SeqCst);
+    rolled_back_once(&rig, &id).await;
+    rig.drain().await;
+    rig.clock.advance(1_000);
+    rig.drain().await;
+
+    let state = rig.state(&id).await;
+    assert_eq!(state.rollback_failure, None);
+    assert_eq!(rolled_back(&state), [2]);
+    let calls: Vec<_> = rig
+        .ops
+        .logged()
+        .into_iter()
+        .filter(|entry| !entry.starts_with("lookup") && !entry.starts_with("capture"))
+        .collect();
+    assert_eq!(
+        calls,
+        [
+            "prepare /wt 1",
+            "provider",
+            "commit",
+            "finish-restore /wt",
+            "delete /wt 2",
+        ]
+    );
+}
+
+// A provider that rewound before another one failed no longer matches the kept
+// conversation, so its native session is replaced by portable history.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_partially_rewound_rollback_resets_the_rewound_native_sessions() {
+    let rig = rig_with(RigOptions {
+        max_attempts: 1,
+        ..RigOptions::default()
+    });
+    let reverts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (ops, counter) = (rig.ops.clone(), reverts.clone());
+    rig.host.respond(move |frame| {
+        if frame["method"] == "thread/revert" {
+            let id = frame["id"].clone();
+            ops.record("provider");
+            return if counter.fetch_add(1, Ordering::SeqCst) == 0 {
+                vec![json!({"id":id,"result":{}})]
+            } else {
+                vec![json!({"id":id,"error":{"code":-32000,"message":"revert failed"}})]
+            };
+        }
+        revert_replies(ops.clone(), false)(frame)
+    });
+    let id = tid("rewind-two-providers");
+    let scope = rig.scoped(&id, worktree("/wt")).await;
+    rig.completed_run(&id, "first", "turn-1").await;
+    let mut other = codex();
+    other.instance = "codex-other".into();
+    rig.command(&id, Command::SwitchProvider { selection: other })
+        .await;
+    rig.completed_run(&id, "second", "turn-2").await;
+    let before = rig.state(&id).await;
+    assert!(before.native_sessions.contains_key("codex"));
+    assert!(before.native_sessions.contains_key("codex-other"));
+    rig.ops.log.lock().unwrap().clear();
+
+    assert_eq!(rollback(&rig, &id, &scope, 0, true).await, Reply::Accepted);
+    rig.drain().await;
+
+    assert_eq!(
+        rollback_calls(&rig.ops),
+        ["prepare", "provider", "provider", "undo"]
+    );
+    let state = rig.state(&id).await;
+    assert_eq!(
+        state.rollback_failure.as_deref(),
+        Some(ROLLBACK_FAILED_MESSAGE)
+    );
+    assert!(rolled_back(&state).is_empty());
+    assert!(
+        state.native_sessions.is_empty(),
+        "{:?}",
+        state.native_sessions
+    );
+}
+
+// A thread that binds a workspace while a restore is in progress waits for it,
+// so the restore never overwrites work it did not check for.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_launch_into_the_restored_worktree_waits_for_the_restore() {
+    let rig = Arc::new(rig());
+    rig.host.respond(revert_replies(rig.ops.clone(), false));
+    let id = tid("rewind-fenced");
+    let scope = rig.scoped(&id, worktree("/wt")).await;
+    rig.completed_run(&id, "first", "turn-1").await;
+    rig.ops.log.lock().unwrap().clear();
+    let launched = Arc::new(Mutex::new(None));
+    let (context, ops, slot) = (rig.context.clone(), rig.ops.clone(), launched.clone());
+    let started = Arc::new(AtomicBool::new(false));
+    let once = started.clone();
+    *rig.ops.on_restore.lock().unwrap() = Some(Arc::new(move || {
+        if once.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let (context, ops) = (context.clone(), ops.clone());
+        *slot.lock().unwrap() = Some(tokio::spawn(async move {
+            let preparations = crate::Preparations::default();
+            let reply = crate::launch::launch(
+                &context,
+                &preparations,
+                crate::LaunchThread {
+                    command: CommandId::new("command:launch:into-restore").unwrap(),
+                    thread: Some(tid("thread:into-restore")),
+                    project: "project".into(),
+                    title: "Same worktree".into(),
+                    generate_title: false,
+                    selection: codex(),
+                    runtime_mode: RuntimeMode::FullAccess,
+                    interaction_mode: InteractionMode::Default,
+                    workspace: crate::WorkspaceStrategy::ExistingWorktree {
+                        path: "/wt".into(),
+                        branch: None,
+                    },
+                    initial_message: None,
+                },
+            )
+            .await;
+            ops.record("launched");
+            reply
+        }));
+    }));
+
+    assert_eq!(rollback(&rig, &id, &scope, 0, true).await, Reply::Accepted);
+    rig.drain().await;
+    let task = launched.lock().unwrap().take().unwrap();
+    task.await.unwrap().unwrap();
+
+    let calls: Vec<_> = rig
+        .ops
+        .logged()
+        .into_iter()
+        .filter(|entry| {
+            ["prepare", "provider", "commit", "launched"]
+                .contains(&entry.split(' ').next().unwrap())
+        })
+        .map(|entry| entry.split(' ').next().unwrap().to_owned())
+        .collect();
+    assert_eq!(calls, ["prepare", "provider", "commit", "launched"]);
+    assert_eq!(rig.state(&id).await.rollback_failure, None);
+}

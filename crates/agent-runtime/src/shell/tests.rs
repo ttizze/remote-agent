@@ -121,6 +121,7 @@ fn recover(state: &mut State) -> bool {
         Input::Recover {
             trigger: RecoveryTrigger::Startup,
             continue_after_restart: false,
+            capturing: state.captures.keys().cloned().collect(),
         },
     );
     step.facts

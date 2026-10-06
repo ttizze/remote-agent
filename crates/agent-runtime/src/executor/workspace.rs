@@ -1,7 +1,7 @@
 use super::checkpoint::checkpoint_scope;
 use super::{ExecutorContext, effect_command_id};
 use crate::{
-    Durability, EffectError, EffectHandler, EffectJob, LaunchOperation, SetupRequest,
+    Durability, EffectError, EffectHandler, EffectJob, LaunchOperation, LaunchStatus, SetupRequest,
     WorkspaceStrategy, WorktreeRequest,
 };
 use agent_domain::{
@@ -129,6 +129,7 @@ pub async fn prepare_workspace(
         }
     };
     if current.workspace.as_ref() != Some(&workspace) {
+        let _binding = context.workspaces.bind().await;
         context
             .input(
                 thread,
@@ -171,6 +172,10 @@ pub async fn prepare_workspace(
             .await
             .map_err(retry)?;
     }
+    // A setup that completed is not run again by a retried preparation.
+    if record.as_ref().is_some_and(|record| record.prepared) {
+        return Ok(());
+    }
     context
         .ops
         .run_setup(SetupRequest {
@@ -180,7 +185,16 @@ pub async fn prepare_workspace(
             cwd: workspace.cwd,
         })
         .await
-        .map_err(failed(LaunchOperation::RunSetupScript))
+        .map_err(failed(LaunchOperation::RunSetupScript))?;
+    if let Some(record) = &record {
+        let now = context.registry.context().clock.now().millis();
+        context
+            .store
+            .set_launch_status(&record.command, LaunchStatus::Prepared, now)
+            .await
+            .map_err(|error| PrepareError::Retry(error.to_string()))?;
+    }
+    Ok(())
 }
 
 /// Prepares a deferred run's workspace, then releases the run to its provider.
@@ -208,7 +222,18 @@ impl EffectHandler for PrepareWorkspace {
             }
             let command = match prepare_workspace(context, &job.thread, Some(run)).await {
                 Ok(()) => Command::ReleasePrepared { run: run.clone() },
-                Err(PrepareError::Retry(error)) => return Err(EffectError::Retryable(error)),
+                Err(PrepareError::Retry(error)) if job.will_retry => {
+                    return Err(EffectError::Retryable(error));
+                }
+                // The last attempt fails the run so `RetryPrepared` can run it again.
+                Err(PrepareError::Retry(cause)) => Command::FailPrepared {
+                    run: run.clone(),
+                    message: PrepareError::Failed {
+                        operation: LaunchOperation::UpdateThread,
+                        cause,
+                    }
+                    .to_string(),
+                },
                 Err(error) => {
                     tracing::warn!(thread = %job.thread, %run, %error, "workspace preparation failed");
                     Command::FailPrepared {

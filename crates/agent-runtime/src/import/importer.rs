@@ -302,14 +302,6 @@ impl Importer {
         mark_first_run(self.store(), self.registry.context().clock.now()).await?;
         Ok(Some(total))
     }
-
-    /// Starts the first-run import in the background; the Host calls this after recovery.
-    pub fn spawn_first_run(
-        self: Arc<Self>,
-        projects: Arc<dyn ProjectRoots>,
-    ) -> tokio::task::JoinHandle<Result<Option<ImportCounts>, ImportError>> {
-        tokio::spawn(async move { self.first_run(projects.as_ref()).await })
-    }
 }
 
 #[cfg(test)]

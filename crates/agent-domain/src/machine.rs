@@ -1,6 +1,9 @@
 use crate::*;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+
+/// The error code of a run whose workspace preparation failed (T3 contracts).
+pub const WORKSPACE_PREPARATION_FAILURE_CODE: &str = "workspace_preparation_failed";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InputEnvelope {
@@ -2121,20 +2124,44 @@ impl Decision {
                 {
                     return reject("run-not-preparing");
                 }
-                self.error_item(run, message);
+                self.error_item_coded(
+                    run,
+                    message,
+                    Some("validation_error"),
+                    Some(WORKSPACE_PREPARATION_FAILURE_CODE),
+                );
                 self.finish(run, RunStatus::Failed, false);
                 Reply::Accepted
             }
             RetryPrepared { run } => {
-                if self.state.active_run().is_some()
-                    || !self
-                        .state
-                        .runs
-                        .iter()
-                        .any(|r| &r.id == run && r.status == RunStatus::Failed)
-                {
+                // Only a run whose workspace preparation failed goes back to preparing.
+                let failure = self
+                    .state
+                    .items
+                    .iter()
+                    .find(|item| {
+                        item.run.as_ref() == Some(run)
+                            && item.status == ItemStatus::Failed
+                            && matches!(&item.kind, ItemKind::Error { code: Some(code), .. }
+                                if code == WORKSPACE_PREPARATION_FAILURE_CODE)
+                    })
+                    .map(|item| item.id.clone());
+                let thread = self.state.thread.as_ref().unwrap();
+                let Some(failure) = failure.filter(|_| {
+                    thread.archived_at.is_none()
+                        && self.state.runs.iter().any(|r| {
+                            &r.id == run && r.status == RunStatus::Failed && r.attempt.is_none()
+                        })
+                }) else {
+                    return reject("run-not-retryable");
+                };
+                if self.state.active_run().is_some() {
                     return reject("run-not-retryable");
                 }
+                self.fact(FactBody::ItemCompleted {
+                    id: failure,
+                    status: ItemStatus::Cancelled,
+                });
                 self.fact(FactBody::RunPrepared { id: run.clone() });
                 self.effect(None, EffectBody::PrepareWorkspace { run: run.clone() });
                 Reply::Accepted
@@ -2416,7 +2443,7 @@ impl Decision {
                     };
                     let mut replies = vec![];
                     for question in questions {
-                        let answer = answers.as_ref().and_then(|a| a.get(&question.id));
+                        let answer = provider_answers.as_ref().and_then(|a| a.get(&question.id));
                         match answer {
                             Some(Answer::Text(text)) if !text.trim().is_empty() => {
                                 replies.push(format!("{}\n{}", question.question, text.trim()));
@@ -2637,7 +2664,6 @@ impl Decision {
                     history,
                     messages,
                     workspace: thread.workspace.clone(),
-                    checkpoint_scope: self.state.checkpoint_scope.clone(),
                     context,
                     native: None,
                 });
@@ -2708,7 +2734,6 @@ impl Decision {
                 history,
                 messages,
                 workspace,
-                checkpoint_scope,
                 context,
                 native,
             } => {
@@ -2728,10 +2753,7 @@ impl Decision {
                         workspace: workspace.clone(),
                     });
                 }
-                self.fact(FactBody::CheckpointScopeBound {
-                    run: None,
-                    scope: checkpoint_scope.clone(),
-                });
+                // The child's runs get a checkpoint scope of their own when they start.
                 self.fact(FactBody::ForkAccepted {
                     parent: parent.clone(),
                     boundary: *boundary,
@@ -3355,10 +3377,16 @@ impl Decision {
             self.fact(FactBody::ItemCompleted { id, status });
         }
     }
-    fn error_item(&mut self, run: &RunId, message: &str) {
-        self.error_item_with_class(run, message, None);
-    }
     fn error_item_with_class(&mut self, run: &RunId, message: &str, class: Option<&str>) {
+        self.error_item_coded(run, message, class, None);
+    }
+    fn error_item_coded(
+        &mut self,
+        run: &RunId,
+        message: &str,
+        class: Option<&str>,
+        code: Option<&str>,
+    ) {
         let id = TurnItemId::new(self.key("error", run.as_str())).unwrap();
         let attempt = self
             .state
@@ -3374,9 +3402,9 @@ impl Decision {
             ItemKind::Error {
                 message: bounded_failure_text(message, 4096),
                 retry: None,
-                code: None,
+                code: code.map(str::to_owned),
                 class: class.map(str::to_owned),
-                retryable: None,
+                retryable: code.map(|_| false),
             },
         );
         self.fact(FactBody::ItemCompleted {
@@ -5000,19 +5028,69 @@ impl Decision {
                 }
             }
             EffectResult::RollbackFailed { command, message } => {
-                if self
+                let Some(pending) = self
                     .state
                     .rollback
                     .as_ref()
-                    .is_none_or(|p| &p.command != command)
-                {
+                    .filter(|p| &p.command == command)
+                    .cloned()
+                else {
                     return Reply::Ignored;
+                };
+                // A rewound native history no longer matches the kept conversation.
+                for instance in &pending.rewinding {
+                    if self.state.native_sessions.contains_key(instance) {
+                        self.fact(FactBody::NativeSessionCleared {
+                            instance: instance.clone(),
+                        });
+                    }
                 }
                 self.fact(FactBody::RollbackFailed {
                     command: command.clone(),
                     message: message.clone(),
                 });
             }
+            EffectResult::ThreadCommandFailed {
+                command, reason, ..
+            } => match command.as_ref() {
+                Command::AcceptDelegation { origin, .. } => {
+                    if !self.state.tasks.iter().any(|task| {
+                        task.id == origin.task
+                            && task.original_message.as_ref() == Some(&origin.message)
+                            && !task.status.terminal()
+                    }) {
+                        return Reply::Ignored;
+                    }
+                    self.finish_task(
+                        &origin.task,
+                        ItemStatus::Failed,
+                        &format!("The delegated thread could not be started: {reason}"),
+                    );
+                    self.wake_tasks();
+                }
+                // A continuation that can never run settles its delegation as declined.
+                Command::ContinueRestart { source, .. } => {
+                    let Some(run) = self
+                        .state
+                        .runs
+                        .iter()
+                        .find(|run| &run.id == source)
+                        .cloned()
+                    else {
+                        return Reply::Ignored;
+                    };
+                    if self
+                        .state
+                        .runs
+                        .iter()
+                        .any(|candidate| candidate.restart_of.as_ref() == Some(source))
+                    {
+                        return Reply::Ignored;
+                    }
+                    self.complete_delegation(source, run.status);
+                }
+                _ => return Reply::Ignored,
+            },
             EffectResult::TitleGenerated { request, title } => {
                 let Some(thread) = self
                     .state
@@ -5170,7 +5248,12 @@ impl Decision {
             }
         }
     }
-    fn recover(&mut self, trigger: RecoveryTrigger, continue_after_restart: bool) {
+    fn recover(
+        &mut self,
+        trigger: RecoveryTrigger,
+        continue_after_restart: bool,
+        capturing: &BTreeSet<RunId>,
+    ) {
         let continuation = continue_after_restart
             .then(|| self.state.active_run())
             .flatten()
@@ -5223,12 +5306,16 @@ impl Decision {
             .iter()
             .filter(|r| {
                 r.status.blocking()
-                    && !(r.status == RunStatus::Waiting && self.state.captures.contains_key(&r.id))
+                    && !(r.status == RunStatus::Waiting
+                        && self.state.captures.contains_key(&r.id)
+                        && capturing.contains(&r.id))
             })
             .cloned()
             .collect::<Vec<_>>();
         for run in runs {
-            if let Some(attempt) = &run.attempt {
+            if let Some(attempt) = &run.attempt
+                && run.status != RunStatus::Waiting
+            {
                 self.fact(FactBody::AttemptFinished {
                     id: attempt.clone(),
                     status: AttemptStatus::Cancelled,
@@ -5631,13 +5718,33 @@ impl ThreadMachine {
                 });
                 Reply::Accepted
             }
+            Input::RollbackRewindStarted { command, instances } => {
+                let rewinding = decision
+                    .state
+                    .rollback
+                    .as_ref()
+                    .filter(|pending| &pending.command == command)
+                    .map(|pending| &pending.rewinding);
+                match rewinding {
+                    None => Reply::Ignored,
+                    Some(known) if instances.iter().all(|i| known.contains(i)) => Reply::Accepted,
+                    Some(_) => {
+                        decision.fact(FactBody::RollbackRewindStarted {
+                            command: command.clone(),
+                            instances: instances.clone(),
+                        });
+                        Reply::Accepted
+                    }
+                }
+            }
             Input::Provider { attempt, event } => decision.provider(attempt, event),
             Input::Effect(result) => decision.effect_result(result),
             Input::Recover {
                 trigger,
                 continue_after_restart,
+                capturing,
             } => {
-                decision.recover(*trigger, *continue_after_restart);
+                decision.recover(*trigger, *continue_after_restart, capturing);
                 Reply::Accepted
             }
             Input::Timer => {

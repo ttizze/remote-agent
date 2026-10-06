@@ -71,12 +71,16 @@ impl tokio::io::AsyncRead for PipeReader {
 pub(crate) type Translate = fn(&Value) -> Option<Value>;
 pub(crate) type Responder = Arc<dyn Fn(&Value) -> Vec<Value> + Send + Sync>;
 
+pub(crate) type StdinClosed = Box<dyn FnOnce(Arc<FakeProcess>) + Send>;
+
 /// One fake provider process, seen from the test.
 pub(crate) struct FakeProcess {
     pub(crate) request: SpawnRequest,
     pub(crate) stdout: Arc<Pipe>,
     pub(crate) written: Mutex<Vec<Value>>,
     exit: watch::Sender<Option<bool>>,
+    /// Runs instead of exiting when the session closes the process's stdin.
+    pub(crate) on_stdin_close: Mutex<Option<StdinClosed>>,
 }
 impl FakeProcess {
     pub(crate) fn emit(&self, frame: Value) {
@@ -132,7 +136,11 @@ impl tokio::io::AsyncWrite for Stdin {
 impl Drop for Stdin {
     /// A provider exits when its stdin closes.
     fn drop(&mut self) {
-        self.process.exit(true);
+        let hook = self.process.on_stdin_close.lock().unwrap().take();
+        match hook {
+            Some(hook) => hook(self.process.clone()),
+            None => self.process.exit(true),
+        }
     }
 }
 
@@ -240,6 +248,7 @@ impl SessionHost for FakeHost {
                 stdout: Arc::new(Pipe::default()),
                 written: Mutex::new(vec![]),
                 exit: watch::Sender::new(None),
+                on_stdin_close: Mutex::new(None),
             });
             self.processes.lock().unwrap().push(process.clone());
             Ok(ProviderProcess {

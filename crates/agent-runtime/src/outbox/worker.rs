@@ -424,7 +424,7 @@ impl EffectWorker {
                     .slot(options.liveness.max(Duration::from_millis(1))),
             );
         }
-        EffectDaemon { _slots: slots }
+        EffectDaemon { slots }
     }
 
     /// Commit notifications are the fast path; `available_at` schedules retries,
@@ -478,7 +478,13 @@ impl EffectWorker {
 
 /// Stops the claim loops when dropped.
 pub struct EffectDaemon {
-    _slots: JoinSet<()>,
+    slots: JoinSet<()>,
+}
+impl EffectDaemon {
+    /// Cancels the claim loops and waits until every running execution stopped.
+    pub async fn stop(mut self) {
+        self.slots.shutdown().await;
+    }
 }
 
 fn panic_text(panic: &(dyn std::any::Any + Send)) -> String {

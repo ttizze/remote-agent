@@ -47,7 +47,7 @@ fn root() -> WorkspaceStrategy {
 }
 
 async fn launch_on(rig: &Rig, request: LaunchThread) -> Result<LaunchReply, LaunchError> {
-    launch(&rig.context, request).await
+    launch(&rig.context, &rig.preparations, request).await
 }
 
 async fn state(rig: &Rig, thread: &ThreadId) -> Arc<State> {
@@ -774,5 +774,258 @@ async fn a_launch_without_a_message_prepares_its_worktree_in_the_background() {
             .await
             .iter()
             .all(|(_, status)| *status == EffectStatus::Succeeded)
+    );
+}
+
+// Two launches of one command for different threads: only the launch whose create
+// won keeps a row, and its preparation provisions the requested worktree instead
+// of falling back to the project checkout.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_launch_that_loses_the_create_leaves_the_winners_record_and_strategy() {
+    for round in 0..8 {
+        let rig = rig();
+        let command = format!("command:launch:race:{round}");
+        let first = request(
+            &command,
+            Some("thread:race:a"),
+            Some("A"),
+            worktree_strategy(),
+        );
+        let second = request(
+            &command,
+            Some("thread:race:b"),
+            Some("B"),
+            worktree_strategy(),
+        );
+        let (a, b) = tokio::join!(launch_on(&rig, first), launch_on(&rig, second));
+        let winner = match (a, b) {
+            (Ok(winner), Err(_)) | (Err(_), Ok(winner)) => winner,
+            other => panic!("exactly one launch wins: {other:?}"),
+        };
+        let record = rig
+            .store
+            .launch(&CommandId::new(command).unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.thread, winner.thread);
+        assert_eq!(record.strategy, worktree_strategy());
+        rig.drain().await;
+        let current = state(&rig, &winner.thread).await;
+        assert_eq!(current.runs[0].status, RunStatus::Starting);
+        assert_eq!(
+            current
+                .thread
+                .as_ref()
+                .unwrap()
+                .workspace
+                .as_ref()
+                .unwrap()
+                .worktree_path
+                .as_deref(),
+            Some("/repo-worktrees/feature")
+        );
+        assert_eq!(rig.ops.logged_with("worktree main").len(), 1);
+    }
+}
+
+// T3 ThreadLaunchService.ts derives a replay from the accepted create: a launch
+// whose create landed but whose process stopped before anything else resumes.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_launch_interrupted_after_its_create_is_resumed_by_a_retry() {
+    let rig = rig();
+    let input = request(
+        "command:launch:interrupted",
+        Some("thread:launch:interrupted"),
+        None,
+        worktree_strategy(),
+    );
+    let thread = input.thread.clone().unwrap();
+    rig.registry
+        .dispatch(
+            &thread,
+            input.command.clone(),
+            Command::Create {
+                thread: thread.clone(),
+                project: "project".into(),
+                title: input.title.clone(),
+                selection: input.selection.clone(),
+                runtime_mode: input.runtime_mode,
+                interaction_mode: input.interaction_mode,
+                workspace: None,
+            },
+            CommandOrigin::Client,
+        )
+        .await
+        .unwrap();
+    assert_eq!(rig.store.launch(&input.command).unwrap(), None);
+
+    let resumed = launch_on(&rig, input.clone()).await.unwrap();
+    assert!(resumed.resumed);
+    assert_eq!(resumed.thread, thread);
+    until("worktree bound", async || {
+        state(&rig, &thread)
+            .await
+            .thread
+            .as_ref()
+            .and_then(|thread| thread.workspace.as_ref())
+            .is_some_and(|workspace| workspace.cwd == "/repo-worktrees/feature")
+    })
+    .await;
+    until("preparation recorded", async || {
+        rig.store
+            .launch(&input.command)
+            .unwrap()
+            .is_some_and(|record| record.prepared)
+    })
+    .await;
+    assert!(rig.store.unprepared_launches().unwrap().is_empty());
+}
+
+// The runtime owns the background preparation of a launch without a message:
+// stopping it cancels the preparation, which stays recorded as unfinished.
+#[tokio::test(flavor = "multi_thread")]
+async fn stopping_preparations_cancels_a_background_preparation() {
+    let rig = rig();
+    let gate = Arc::new(Gate::default());
+    let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    struct Dropped(Arc<std::sync::atomic::AtomicBool>);
+    impl Drop for Dropped {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+    let (hook_gate, flag) = (gate.clone(), dropped.clone());
+    *rig.ops.worktree.lock().unwrap() = Some(Arc::new(move |_| {
+        let (gate, guard) = (hook_gate.clone(), Dropped(flag.clone()));
+        Box::pin(async move {
+            let _guard = guard;
+            gate.pass().await;
+            Err("released".into())
+        })
+    }));
+    let launched = launch_on(
+        &rig,
+        request(
+            "command:launch:owned",
+            Some("thread:launch:owned"),
+            None,
+            worktree_strategy(),
+        ),
+    )
+    .await
+    .unwrap();
+    gate.until_arrived(1).await;
+
+    rig.preparations.stop().await;
+    assert!(dropped.load(Ordering::SeqCst));
+    assert_eq!(
+        rig.store.unprepared_launches().unwrap(),
+        [(
+            CommandId::new("command:launch:owned").unwrap(),
+            launched.thread.clone()
+        )]
+    );
+    assert_eq!(
+        state(&rig, &launched.thread)
+            .await
+            .thread
+            .as_ref()
+            .unwrap()
+            .workspace,
+        None
+    );
+}
+
+// A preparation retried after its setup completed (its release could not be
+// recorded) does not run the project setup again.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_completed_setup_is_not_run_again_by_a_retried_preparation() {
+    let rig = rig();
+    let launched = launch_on(
+        &rig,
+        request(
+            "command:launch:setup-once",
+            Some("thread:launch:setup-once"),
+            Some("Set up once"),
+            worktree_strategy(),
+        ),
+    )
+    .await
+    .unwrap();
+    let run = state(&rig, &launched.thread).await.runs[0].id.clone();
+    for _ in 0..2 {
+        prepare_workspace(&rig.context, &launched.thread, Some(&run))
+            .await
+            .unwrap();
+    }
+    assert_eq!(rig.ops.logged_with("setup").len(), 1);
+    assert_eq!(rig.ops.logged_with("worktree").len(), 1);
+    rig.drain().await;
+    assert_eq!(rig.ops.logged_with("setup").len(), 1);
+    assert_eq!(
+        state(&rig, &launched.thread).await.runs[0].status,
+        RunStatus::Starting
+    );
+}
+
+// A preparation whose progress cannot be recorded fails its run on the last
+// attempt instead of leaving it preparing with no executor left.
+#[tokio::test(flavor = "multi_thread")]
+async fn exhausted_preparation_retries_fail_the_run_so_it_can_be_retried() {
+    let rig = rig_with(RigOptions {
+        max_attempts: 1,
+        ..RigOptions::default()
+    });
+    let store = rig.store.clone();
+    *rig.ops.worktree.lock().unwrap() = Some(Arc::new(move |_| {
+        let store = store.clone();
+        Box::pin(async move {
+            // The launch row can no longer be updated.
+            store
+                .write(|tx| {
+                    tx.execute("DROP TABLE launches", [])?;
+                    Ok(())
+                })
+                .await
+                .unwrap();
+            Ok(CreatedWorktree {
+                path: "/repo-worktrees/feature".into(),
+                branch: Some("feature".into()),
+            })
+        })
+    }));
+    let launched = launch_on(
+        &rig,
+        request(
+            "command:launch:unrecorded",
+            Some("thread:launch:unrecorded"),
+            Some("Cannot record"),
+            worktree_strategy(),
+        ),
+    )
+    .await
+    .unwrap();
+    rig.drain().await;
+
+    let current = state(&rig, &launched.thread).await;
+    assert_eq!(current.runs[0].status, RunStatus::Failed);
+    let error = error_text(&current).unwrap();
+    assert!(
+        error.starts_with("Workspace preparation failed during update thread: "),
+        "{error}"
+    );
+    assert_eq!(
+        rig.ops.logged_with("remove-worktree"),
+        ["remove-worktree /repo-worktrees/feature"]
+    );
+    assert_eq!(
+        rig.command(
+            &launched.thread,
+            Command::RetryPrepared {
+                run: current.runs[0].id.clone()
+            }
+        )
+        .await,
+        Reply::Accepted
     );
 }

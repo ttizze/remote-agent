@@ -1,5 +1,5 @@
 use crate::*;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 fn selection() -> ModelSelection {
     ModelSelection {
         instance: "codex".into(),
@@ -150,6 +150,7 @@ fn recover(s: &mut State) {
             input: Input::Recover {
                 trigger: RecoveryTrigger::Startup,
                 continue_after_restart: false,
+                capturing: s.captures.keys().cloned().collect(),
             },
         },
     );
@@ -820,6 +821,7 @@ fn recovery_preserves_distinct_work_ids_and_shutdown_reason() {
             input: Input::Recover {
                 trigger: RecoveryTrigger::Shutdown,
                 continue_after_restart: true,
+                capturing: s.captures.keys().cloned().collect(),
             },
         },
     );
@@ -870,6 +872,7 @@ fn restart_continuation_precedes_held_queue_and_carries_notes_across_an_unaccept
                 input: Input::Recover {
                     trigger: RecoveryTrigger::Startup,
                     continue_after_restart: true,
+                    capturing: s.captures.keys().cloned().collect(),
                 },
             },
         );
@@ -899,6 +902,7 @@ fn restart_continuation_precedes_held_queue_and_carries_notes_across_an_unaccept
                     input: Input::Recover {
                         trigger: RecoveryTrigger::Startup,
                         continue_after_restart: true,
+                        capturing: s.captures.keys().cloned().collect(),
                     },
                 },
             );
@@ -935,6 +939,7 @@ fn stopped_maintenance_and_settled_runs_do_not_receive_automatic_restart_prompts
                 input: Input::Recover {
                     trigger: RecoveryTrigger::Startup,
                     continue_after_restart: true,
+                    capturing: s.captures.keys().cloned().collect(),
                 },
             },
         );
@@ -1035,6 +1040,7 @@ fn a_delegated_child_reports_recovery_cancellation_or_its_continuation_result() 
                 input: Input::Recover {
                     trigger: RecoveryTrigger::Startup,
                     continue_after_restart,
+                    capturing: child.captures.keys().cloned().collect(),
                 },
             },
         );
@@ -1706,7 +1712,7 @@ proptest! {
         running(&mut s, "cut");
         for index in 0..queued { command(&mut s, &format!("queue-{index}"), send_message(&format!("queued-{index}"), DispatchMode::QueueAfterActive)); }
         for index in 0..restarts {
-            let recovered = ThreadMachine::step(&s, &InputEnvelope { at: at(), key: format!("restart-{index}"), input: Input::Recover { trigger: RecoveryTrigger::Startup, continue_after_restart: true } });
+            let recovered = ThreadMachine::step(&s, &InputEnvelope { at: at(), key: format!("restart-{index}"), input: Input::Recover { trigger: RecoveryTrigger::Startup, continue_after_restart: true, capturing: s.captures.keys().cloned().collect() } });
             s = fold(&s, &recovered.facts).unwrap();
             for effect in recovered.effects { if let EffectBody::SendToThread { command: next, .. } = effect.body { command(&mut s, &format!("continue-{index}"), *next); } }
             prop_assert_eq!(s.runs.iter().filter(|run| run.status.blocking()).count(), 1);
@@ -5219,4 +5225,431 @@ fn background_rosters_replace_work_and_usage_limits_render_their_wait() {
     );
     assert!(s.items.iter().any(|item| matches!(&item.kind, ItemKind::SystemNotice { message }
         if message == "Claude usage limit reached. This turn is paused until the 5-hour limit resets in 2h.")));
+}
+
+// T3 Orchestrator.ts dispatchPreparedRunRetry: only a recorded preparation failure is retried.
+#[test]
+fn only_a_failed_workspace_preparation_returns_to_preparing() {
+    let mut s = state();
+    let (provider_failed, a) = running(&mut s, "provider-failed");
+    provider(
+        &mut s,
+        "failed",
+        &a,
+        ProviderEvent::TurnFinished {
+            status: RunStatus::Failed,
+            native_head: None,
+        },
+    );
+    assert_eq!(s.runs[0].status, RunStatus::Failed);
+    assert_eq!(
+        command(
+            &mut s,
+            "retry-provider",
+            Command::RetryPrepared {
+                run: provider_failed
+            }
+        )
+        .reply,
+        Reply::Rejected {
+            reason: "run-not-retryable".into()
+        }
+    );
+
+    let Reply::Run(prepared) = command(
+        &mut s,
+        "prepare",
+        send_message("prepare", DispatchMode::DeferStart),
+    )
+    .reply
+    else {
+        panic!()
+    };
+    command(
+        &mut s,
+        "fail",
+        Command::FailPrepared {
+            run: prepared.clone(),
+            message: "Workspace preparation failed during run setup script: boom".into(),
+        },
+    );
+    let failure = s
+        .items
+        .iter()
+        .find(|item| item.run.as_ref() == Some(&prepared))
+        .unwrap()
+        .clone();
+    assert!(
+        matches!(&failure.kind, ItemKind::Error { code: Some(code), .. }
+        if code == WORKSPACE_PREPARATION_FAILURE_CODE)
+    );
+    let retried = command(
+        &mut s,
+        "retry",
+        Command::RetryPrepared {
+            run: prepared.clone(),
+        },
+    );
+    assert_eq!(retried.reply, Reply::Accepted);
+    assert_eq!(s.runs[1].status, RunStatus::Preparing);
+    assert_eq!(
+        s.items
+            .iter()
+            .find(|item| item.id == failure.id)
+            .unwrap()
+            .status,
+        ItemStatus::Cancelled
+    );
+    assert!(matches!(
+        command(&mut s, "again", Command::RetryPrepared { run: prepared }).reply,
+        Reply::Rejected { .. }
+    ));
+}
+
+// T3 ThreadMessageIntake.ts: the follow-up of a message-capable answer carries its attachments.
+#[test]
+fn a_message_capable_answer_sends_its_attachment_references() {
+    let mut s = state();
+    let (_, a) = running(&mut s, "first");
+    provider(
+        &mut s,
+        "question",
+        &a,
+        ProviderEvent::RequestOpened {
+            owner_path: vec![],
+            key: "question".into(),
+            body: RequestBody::Questions {
+                questions: vec![Question {
+                    required: true,
+                    id: "q".into(),
+                    header: "Spec".into(),
+                    question: "Which spec?".into(),
+                    multiple: false,
+                    options: vec![],
+                }],
+            },
+            capability: ResponseCapability::Message,
+        },
+    );
+    let file = Attachment {
+        kind: AttachmentKind::File,
+        source: None,
+        id: "file-1".into(),
+        name: "spec.txt".into(),
+        mime_type: "text/plain".into(),
+        path: "/attachments/spec.txt".into(),
+        size: 4,
+    };
+    let request = s.requests[0].id.clone();
+    let step = command(
+        &mut s,
+        "answer",
+        Command::Respond {
+            request,
+            decision: None,
+            answers: Some(Answers::from([(
+                "q".into(),
+                Answer::Text("This one".into()),
+            )])),
+            attachments: BTreeMap::from([("q".into(), vec![file])]),
+        },
+    );
+    let expected = "Which spec?\nThis one\n\nAttached file \"spec.txt\": \"/attachments/spec.txt\"";
+    assert!(
+        step.effects.iter().any(|effect| matches!(&effect.body,
+            EffectBody::Provider(ProviderCommand::Steer { text, .. }) if text == expected)),
+        "{:?}",
+        step.effects
+    );
+}
+
+#[test]
+fn a_fork_child_does_not_share_its_parents_checkpoint_scope() {
+    let mut s = state();
+    let (run, a) = running(&mut s, "first");
+    finish(&mut s, &a);
+    checkpoint(&mut s, &run, &a, "parent-cp");
+    assert!(s.checkpoint_scope.is_some());
+    let step = command(
+        &mut s,
+        "fork",
+        Command::Fork {
+            target: ThreadId::new("fork-child").unwrap(),
+            through_run: run,
+            title: None,
+        },
+    );
+    let sent = step
+        .effects
+        .into_iter()
+        .find_map(|effect| match effect.body {
+            EffectBody::SendToThread { command, .. } => Some(*command),
+            _ => None,
+        });
+    let accept = sent.unwrap_or_else(|| {
+        result(
+            &mut s,
+            "fork-failed",
+            EffectResult::ForkFailed {
+                command: CommandId::new("fork").unwrap(),
+                message: "no native fork".into(),
+            },
+        )
+        .effects
+        .into_iter()
+        .find_map(|effect| match effect.body {
+            EffectBody::SendToThread { command, .. } => Some(*command),
+            _ => None,
+        })
+        .unwrap()
+    });
+    let mut child = State::default();
+    assert_eq!(
+        command(&mut child, "accept", accept).reply,
+        Reply::Thread(ThreadId::new("fork-child").unwrap())
+    );
+    assert_eq!(child.checkpoint_scope, None);
+    running(&mut child, "child-first");
+    assert_eq!(child.active_run().unwrap().checkpoint_scope, None);
+}
+
+// T3 ProviderRuntimeRecoveryService.test.ts: "cancels a stale waiting run when no
+// checkpoint capture can finish it".
+#[test]
+fn recovery_cancels_a_waiting_run_whose_capture_can_no_longer_run() {
+    for queued in [true, false] {
+        let mut s = state();
+        let (run, a) = running(&mut s, "first");
+        finish(&mut s, &a);
+        checkpoint(&mut s, &run, &a, "baseline");
+        let (second, b) = running(&mut s, "second");
+        command(
+            &mut s,
+            "queue",
+            send_message("queue", DispatchMode::QueueAfterActive),
+        );
+        finish(&mut s, &b);
+        assert_eq!(s.runs[1].status, RunStatus::Waiting);
+        let recovered = ThreadMachine::step(
+            &s,
+            &InputEnvelope {
+                at: at(),
+                key: "recover".into(),
+                input: Input::Recover {
+                    trigger: RecoveryTrigger::Startup,
+                    continue_after_restart: false,
+                    capturing: if queued {
+                        BTreeSet::from([second.clone()])
+                    } else {
+                        BTreeSet::new()
+                    },
+                },
+            },
+        );
+        s = fold(&s, &recovered.facts).unwrap();
+        if queued {
+            assert_eq!(s.runs[1].status, RunStatus::Waiting);
+            continue;
+        }
+        assert_eq!(s.runs[1].status, RunStatus::Cancelled);
+        assert!(s.captures.is_empty());
+        assert_eq!(
+            s.attempts
+                .iter()
+                .find(|attempt| attempt.id == b)
+                .unwrap()
+                .status,
+            AttemptStatus::Completed
+        );
+        assert!(s.runs[2].queue_held);
+        command(&mut s, "resume", Command::ResumeQueue);
+        assert_eq!(s.runs[2].status, RunStatus::Starting);
+    }
+}
+
+#[test]
+fn a_rejected_delegation_fails_its_task_and_a_declined_continuation_settles_the_parent() {
+    let mut parent = state();
+    running(&mut parent, "parent");
+    let delegated = command(
+        &mut parent,
+        "delegate",
+        Command::Delegate {
+            task: NodeId::new("rejected").unwrap(),
+            child: ThreadId::new("existing-child").unwrap(),
+            prompt: "Inspect boundary".into(),
+            selection: selection(),
+            wake: CompletionWake::SettledOnly,
+        },
+    );
+    let accept = delegated
+        .effects
+        .into_iter()
+        .find_map(|effect| match effect.body {
+            EffectBody::SendToThread { command, .. } => Some(command),
+            _ => None,
+        })
+        .unwrap();
+    let failed = |accept: Box<Command>| EffectResult::ThreadCommandFailed {
+        thread: ThreadId::new("existing-child").unwrap(),
+        command: accept,
+        reason: "thread-already-exists".into(),
+    };
+    assert_eq!(
+        result(&mut parent, "rejected", failed(accept.clone())).reply,
+        Reply::Accepted
+    );
+    assert_eq!(parent.tasks[0].status, ItemStatus::Failed);
+    assert!(
+        parent.tasks[0]
+            .result
+            .as_deref()
+            .is_some_and(|result| result.contains("thread-already-exists"))
+    );
+    assert_eq!(
+        result(&mut parent, "again", failed(accept)).reply,
+        Reply::Ignored
+    );
+
+    let mut parent = state();
+    running(&mut parent, "parent");
+    let delegated = command(
+        &mut parent,
+        "delegate",
+        Command::Delegate {
+            task: NodeId::new("restarted").unwrap(),
+            child: ThreadId::new("child").unwrap(),
+            prompt: "Inspect boundary".into(),
+            selection: selection(),
+            wake: CompletionWake::SettledOnly,
+        },
+    );
+    let accept = delegated
+        .effects
+        .into_iter()
+        .find_map(|effect| match effect.body {
+            EffectBody::SendToThread { command, .. } => Some(*command),
+            _ => None,
+        })
+        .unwrap();
+    let mut child = State::default();
+    command(&mut child, "accept", accept);
+    let attempt = child.active_run().unwrap().attempt.clone().unwrap();
+    provider(
+        &mut child,
+        "ready",
+        &attempt,
+        ProviderEvent::SessionReady {
+            native_thread: "child-native".into(),
+        },
+    );
+    provider(
+        &mut child,
+        "started",
+        &attempt,
+        ProviderEvent::TurnStarted {
+            native_turn: Some("turn".into()),
+        },
+    );
+    let recovered = ThreadMachine::step(
+        &child,
+        &InputEnvelope {
+            at: at(),
+            key: "restart-child".into(),
+            input: Input::Recover {
+                trigger: RecoveryTrigger::Startup,
+                continue_after_restart: true,
+                capturing: BTreeSet::new(),
+            },
+        },
+    );
+    child = fold(&child, &recovered.facts).unwrap();
+    let continuation = recovered
+        .effects
+        .into_iter()
+        .find_map(|effect| match effect.body {
+            EffectBody::SendToThread { command, .. } => Some(command),
+            _ => None,
+        })
+        .unwrap();
+    let declined = result(
+        &mut child,
+        "declined",
+        EffectResult::ThreadCommandFailed {
+            thread: ThreadId::new("child").unwrap(),
+            command: continuation,
+            reason: "rollback-pending".into(),
+        },
+    );
+    let delivered = declined
+        .effects
+        .into_iter()
+        .find_map(|effect| match effect.body {
+            EffectBody::SendToThread { command, .. } => Some(*command),
+            _ => None,
+        })
+        .unwrap();
+    assert!(matches!(
+        &delivered,
+        Command::TaskResult {
+            status: ItemStatus::Cancelled,
+            ..
+        }
+    ));
+    command(&mut parent, "result", delivered);
+    assert_eq!(parent.tasks[0].status, ItemStatus::Cancelled);
+}
+
+#[test]
+fn a_failed_rollback_resets_only_the_native_sessions_it_may_have_rewound() {
+    for rewound in [false, true] {
+        let mut s = state();
+        let (first, a) = running(&mut s, "first");
+        finish(&mut s, &a);
+        let cp = checkpoint(&mut s, &first, &a, "cp-first");
+        let (second, b) = running(&mut s, "second");
+        finish(&mut s, &b);
+        checkpoint(&mut s, &second, &b, "cp-second");
+        command(
+            &mut s,
+            "rollback",
+            Command::Rollback {
+                checkpoint: cp,
+                restore_files: true,
+            },
+        );
+        let rollback = CommandId::new("rollback").unwrap();
+        if rewound {
+            let marked = ThreadMachine::step(
+                &s,
+                &InputEnvelope {
+                    at: at(),
+                    key: "rewinding".into(),
+                    input: Input::RollbackRewindStarted {
+                        command: rollback.clone(),
+                        instances: vec!["codex".into()],
+                    },
+                },
+            );
+            s = fold(&s, &marked.facts).unwrap();
+        }
+        result(
+            &mut s,
+            "failed",
+            EffectResult::RollbackFailed {
+                command: rollback,
+                message: "failed".into(),
+            },
+        );
+        assert_eq!(s.rollback_failure.as_deref(), Some("failed"));
+        assert_eq!(s.native_sessions.contains_key("codex"), !rewound);
+        let start = command(
+            &mut s,
+            "next",
+            send_message("next", DispatchMode::StartImmediately),
+        );
+        assert!(start.effects.iter().any(|effect| matches!(&effect.body,
+            EffectBody::Provider(ProviderCommand::Start { native_thread, .. })
+                if native_thread.is_some() != rewound)));
+    }
 }

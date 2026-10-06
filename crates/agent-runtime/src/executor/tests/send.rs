@@ -99,15 +99,30 @@ async fn settles_a_delegated_child_once_its_restart_continuation_fails_for_good(
     let handler = SendToThread::new(threads.clone());
 
     assert!(handler.run(job(continuation(true), true)).await.is_err());
-    assert!(threads.dispatched.lock().unwrap().is_empty());
     assert!(handler.run(job(continuation(true), false)).await.is_err());
+    assert!(threads.dispatched.lock().unwrap().is_empty());
+    // The worker feeds the failure to the sending thread with the row's settlement.
+    let failed = job(continuation(true), false);
     assert_eq!(
-        threads.dispatched.lock().unwrap().clone(),
-        [(
-            tid("thread:target"),
-            CommandId::new("effect:effect:send:declined").unwrap(),
-            continuation(false)
-        )]
+        handler.failure(&failed.effect, "provider instance removed"),
+        Some(EffectResult::ThreadCommandFailed {
+            thread: tid("thread:target"),
+            command: Box::new(continuation(true)),
+            reason: "provider instance removed".into(),
+        })
+    );
+    assert_eq!(
+        handler.failure(
+            &job(
+                Command::Rename {
+                    title: "Child".into()
+                },
+                false
+            )
+            .effect,
+            "gone"
+        ),
+        None
     );
 }
 
@@ -143,6 +158,7 @@ async fn a_continuation_follows_the_setting_when_it_runs() {
             Input::Recover {
                 trigger: agent_domain::RecoveryTrigger::Startup,
                 continue_after_restart: true,
+                capturing: Default::default(),
             },
         )
         .await;
@@ -152,4 +168,49 @@ async fn a_continuation_follows_the_setting_when_it_runs() {
         let continued = state.runs.iter().any(|run| run.restart_of.is_some());
         assert_eq!(continued, enabled, "enabled={enabled}");
     }
+}
+
+// A rejected child creation is not a delivery: the parent's task fails instead of
+// waiting for a child that never started.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_delegation_to_an_existing_thread_fails_the_parents_task() {
+    let rig = rig();
+    let parent = tid("thread:delegating-parent");
+    let taken = tid("thread:already-there");
+    rig.create(&parent, Some(root_workspace("/repo"))).await;
+    rig.create(&taken, Some(root_workspace("/repo"))).await;
+    rig.send(&parent, "parent-turn", "Delegate something").await;
+    rig.drain().await;
+
+    let reply = rig
+        .command(
+            &parent,
+            Command::Delegate {
+                task: agent_domain::NodeId::new("task:taken").unwrap(),
+                child: taken.clone(),
+                prompt: "Inspect the boundary".into(),
+                selection: codex(),
+                wake: agent_domain::CompletionWake::SettledOnly,
+            },
+        )
+        .await;
+    assert_eq!(reply, Reply::Thread(taken.clone()));
+    rig.drain().await;
+
+    let state = rig.state(&parent).await;
+    assert_eq!(state.tasks[0].status, agent_domain::ItemStatus::Failed);
+    assert!(
+        state.tasks[0]
+            .result
+            .as_deref()
+            .is_some_and(|result| result.contains("thread-already-exists")),
+        "{:?}",
+        state.tasks[0].result
+    );
+    assert!(
+        rig.outbox_kinds(&parent)
+            .await
+            .contains(&("SendToThread".to_owned(), crate::EffectStatus::Failed))
+    );
+    assert!(rig.state(&taken).await.runs.is_empty());
 }

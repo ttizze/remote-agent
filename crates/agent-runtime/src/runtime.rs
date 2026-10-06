@@ -4,17 +4,17 @@ use crate::{
     ActorContext, ActorRegistry, Clock, CommandOrigin, Committed, DaemonOptions, EffectDaemon,
     EffectHandlers, EffectWorker, ExecutorContext, HandoffCatalog, HistoryPage, HostOperations,
     IDLE_EVICTION, ImportCounts, ImportError, ImportProject, Importer, LaunchError, LaunchReply,
-    LaunchThread, LiveSessions, NoHandoffCatalog, ProjectDirectory, ProjectRoots, ProjectShell,
-    QueryError, RuntimeError, ScanConfig, Scanner, SearchMatch, SessionHost, SessionManager,
-    SessionOptions, ShellHub, ShellSubscribe, ShellSubscription, SqliteOutbox, Store, SystemClock,
-    ThreadSubscribe, ThreadSubscription, ThreadView, TranscriptFs, WorkerOptions,
-    with_runtime_handlers,
+    LaunchThread, LiveSessions, NoHandoffCatalog, Preparations, ProjectDirectory, ProjectRoots,
+    ProjectShell, QueryError, RuntimeError, ScanConfig, Scanner, SearchMatch, SessionHost,
+    SessionManager, SessionOptions, ShellHub, ShellSubscribe, ShellSubscription, SqliteOutbox,
+    Store, SystemClock, ThreadSubscribe, ThreadSubscription, ThreadView, TranscriptFs,
+    WorkerOptions, WorkspaceFence, with_runtime_handlers,
 };
 use agent_domain::{Command, CommandId, Input, RecoveryTrigger, ThreadId};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::sync::watch;
+use tokio::sync::{RwLock, RwLockReadGuard, watch};
 use tokio::task::JoinHandle;
 
 /// Transcript discovery for the first-run and per-project import.
@@ -55,6 +55,7 @@ impl RuntimeConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Phase {
     Opened,
+    Starting,
     Started,
     Closed,
 }
@@ -102,7 +103,12 @@ pub struct Runtime {
     importer: Option<Arc<Importer>>,
     daemon: DaemonOptions,
     eviction: Option<Duration>,
+    preparations: Preparations,
     phase: watch::Sender<Phase>,
+    /// Client operations hold it shared; shutdown takes it to wait for them.
+    admission: RwLock<()>,
+    /// Held while `start` recovers, so a shutdown waits for it.
+    lifecycle: tokio::sync::Mutex<()>,
     background: Mutex<Background>,
 }
 
@@ -129,6 +135,7 @@ impl Runtime {
             registry: registry.clone(),
             sessions,
             ops: ops.clone(),
+            workspaces: Arc::new(WorkspaceFence::default()),
         };
         let handlers = with_runtime_handlers(EffectHandlers::default(), &executors);
         let outbox = SqliteOutbox::new(store.clone(), config.clock.clone());
@@ -161,7 +168,10 @@ impl Runtime {
             importer,
             daemon: config.daemon,
             eviction: config.eviction,
+            preparations: Preparations::default(),
             phase: watch::Sender::new(Phase::Opened),
+            admission: RwLock::new(()),
+            lifecycle: tokio::sync::Mutex::new(()),
             background: Mutex::new(Background::default()),
         })
     }
@@ -180,43 +190,63 @@ impl Runtime {
 
     /// Settles what the previous process left behind before any client command:
     /// process-bound effects are cancelled, then every thread with unfinished
-    /// work recovers. Then the effect worker and the first-run import start.
+    /// work recovers. Then the effect worker, unfinished launch preparations and
+    /// the first-run import start.
     pub async fn start(&self) -> Result<(), RuntimeError> {
-        if *self.phase.borrow() != Phase::Opened {
+        let claimed = self.phase.send_if_modified(|phase| {
+            let opened = *phase == Phase::Opened;
+            if opened {
+                *phase = Phase::Starting;
+            }
+            opened
+        });
+        if !claimed {
             return Err(RuntimeError::InvalidInput(
                 "the runtime was already started",
             ));
         }
+        let _lifecycle = self.lifecycle.lock().await;
         let recovered = async {
             self.outbox
                 .reconcile_after_process_loss(&self.handlers)
                 .await?;
-            self.recover(RecoveryTrigger::Startup).await
+            self.recover(RecoveryTrigger::Startup).await?;
+            Ok::<_, RuntimeError>(
+                self.store()
+                    .blocking(|store| store.unprepared_launches())
+                    .await?,
+            )
         }
         .await;
-        if let Err(error) = recovered {
-            // Waiting commands fail instead of running against unrecovered threads.
-            self.phase.send_replace(Phase::Closed);
-            return Err(error);
-        }
+        let unprepared = match recovered {
+            Ok(unprepared) => unprepared,
+            Err(error) => {
+                // Waiting commands fail instead of running against unrecovered threads.
+                self.phase.send_replace(Phase::Closed);
+                return Err(error);
+            }
+        };
         let mut background = self.background.lock().expect("runtime background");
+        if *self.phase.borrow() != Phase::Starting {
+            return Err(RuntimeError::Closed);
+        }
         background.daemon = Some(self.worker.clone().spawn(self.daemon.clone()));
         if let Some(every) = self.eviction {
             background
                 .tasks
                 .push(self.registry().spawn_eviction(every, IDLE_EVICTION));
         }
+        for (command, thread) in unprepared {
+            self.preparations.schedule(&self.executors, command, thread);
+        }
         if let Some(importer) = &self.importer {
-            let handle = importer.clone().spawn_first_run(self.projects.clone());
+            let (importer, projects) = (importer.clone(), self.projects.clone());
             background.tasks.push(tokio::spawn(async move {
-                match handle.await {
-                    Ok(Err(error)) => tracing::warn!(%error, "the first-run import failed"),
-                    Err(error) => tracing::warn!(%error, "the first-run import stopped"),
-                    Ok(Ok(_)) => {}
+                if let Err(error) = importer.first_run(projects.as_ref()).await {
+                    tracing::warn!(%error, "the first-run import failed");
                 }
             }));
         }
-        drop(background);
         self.phase.send_replace(Phase::Started);
         Ok(())
     }
@@ -233,9 +263,15 @@ impl Runtime {
                 .thread
                 .as_ref()
                 .is_some_and(|current| self.executors.ops.continue_after_restart(&current.project));
+            let lookup = thread.clone();
+            let capturing = self
+                .store()
+                .blocking(move |store| store.capturing_runs(&lookup))
+                .await?;
             let input = Input::Recover {
                 trigger,
                 continue_after_restart,
+                capturing,
             };
             let mut retried = false;
             loop {
@@ -252,17 +288,22 @@ impl Runtime {
         Ok(threads.len())
     }
 
-    /// Waits until startup recovery finished; fails once the runtime shut down.
-    async fn ready(&self) -> Result<(), RuntimeError> {
+    /// Waits until startup recovery finished and admits one client operation,
+    /// which shutdown waits for; fails once the runtime shut down.
+    async fn admit(&self) -> Result<RwLockReadGuard<'_, ()>, RuntimeError> {
         let mut phase = self.phase.subscribe();
-        match *phase
-            .wait_for(|phase| *phase != Phase::Opened)
+        let ready = *phase
+            .wait_for(|phase| !matches!(phase, Phase::Opened | Phase::Starting))
             .await
-            .map_err(|_| RuntimeError::Closed)?
-        {
-            Phase::Started => Ok(()),
-            _ => Err(RuntimeError::Closed),
+            .map_err(|_| RuntimeError::Closed)?;
+        if ready != Phase::Started {
+            return Err(RuntimeError::Closed);
         }
+        let admitted = self.admission.read().await;
+        if *self.phase.borrow() != Phase::Started {
+            return Err(RuntimeError::Closed);
+        }
+        Ok(admitted)
     }
 
     /// A client command. Internal commands are rejected.
@@ -272,23 +313,67 @@ impl Runtime {
         id: CommandId,
         command: Command,
     ) -> Result<Committed, RuntimeError> {
-        self.ready().await?;
+        let _admitted = self.admit().await?;
+        let command = self.checked_attachments(&id, command).await?;
         self.registry()
             .dispatch(&thread, id, command, CommandOrigin::Client)
             .await
     }
 
-    pub async fn launch(&self, request: LaunchThread) -> Result<LaunchReply, LaunchError> {
-        if let Err(error) = self.ready().await {
-            return Err(LaunchError {
-                operation: crate::LaunchOperation::CreateThread,
-                command: request.command,
-                project: request.project,
-                thread: request.thread,
-                cause: error.to_string(),
-            });
+    /// An answer attachment that no longer exists reaches the state machine
+    /// without a path, which it rejects (T3 `appendUserInputAttachmentPaths`). A
+    /// replayed command keeps its first result.
+    async fn checked_attachments(
+        &self,
+        id: &CommandId,
+        command: Command,
+    ) -> Result<Command, RuntimeError> {
+        let Command::Respond {
+            request,
+            decision,
+            answers,
+            mut attachments,
+        } = command
+        else {
+            return Ok(command);
+        };
+        let lookup = id.clone();
+        let replayed = !attachments.is_empty()
+            && self
+                .store()
+                .blocking(move |store| store.receipt(&lookup))
+                .await?
+                .is_some();
+        if !replayed {
+            for file in attachments.values_mut().flatten() {
+                let found = self.executors.ops.real_path(file.path.clone()).await;
+                if !matches!(found, Ok(Some(_))) {
+                    file.path.clear();
+                }
+            }
         }
-        crate::launch::launch(&self.executors, request).await
+        Ok(Command::Respond {
+            request,
+            decision,
+            answers,
+            attachments,
+        })
+    }
+
+    pub async fn launch(&self, request: LaunchThread) -> Result<LaunchReply, LaunchError> {
+        let _admitted = match self.admit().await {
+            Ok(admitted) => admitted,
+            Err(error) => {
+                return Err(LaunchError {
+                    operation: crate::LaunchOperation::CreateThread,
+                    command: request.command,
+                    project: request.project,
+                    thread: request.thread,
+                    cause: error.to_string(),
+                });
+            }
+        };
+        crate::launch::launch(&self.executors, &self.preparations, request).await
     }
 
     pub async fn subscribe_thread(
@@ -341,6 +426,7 @@ impl Runtime {
         project: &str,
         expected_root: Option<&Path>,
     ) -> Result<ImportCounts, ImportError> {
+        let _admitted = self.admit().await?;
         match &self.importer {
             Some(importer) => {
                 importer
@@ -356,18 +442,27 @@ impl Runtime {
         self.shell.project_changed(project);
     }
 
-    /// Stops the effect worker and provider processes, then lets every thread with
-    /// unfinished work record the shutdown (a continuation, when enabled, runs
-    /// after the next start).
+    /// Stops admitting client operations and waits for the admitted ones, stops
+    /// the effect worker, launch preparations, the first-run import and provider
+    /// processes, then lets every thread with unfinished work record the shutdown
+    /// (a continuation, when enabled, runs after the next start).
     pub async fn shutdown(&self) {
         if self.phase.send_replace(Phase::Closed) == Phase::Closed {
             return;
         }
+        let _lifecycle = self.lifecycle.lock().await;
+        let _drained = self.admission.write().await;
         let background = std::mem::take(&mut *self.background.lock().expect("runtime background"));
-        drop(background.daemon);
-        for task in background.tasks {
+        if let Some(daemon) = background.daemon {
+            daemon.stop().await;
+        }
+        for task in &background.tasks {
             task.abort();
         }
+        for task in background.tasks {
+            let _ = task.await;
+        }
+        self.preparations.stop().await;
         self.sessions().shutdown().await;
         if let Err(error) = self.recover(RecoveryTrigger::Shutdown).await {
             tracing::warn!(%error, "shutdown recovery failed");
