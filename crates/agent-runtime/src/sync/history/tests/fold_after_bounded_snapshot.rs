@@ -107,6 +107,8 @@ impl Script {
             mode,
             intent: None,
             source_plan: None,
+            resolved_plan: None,
+            continuation: None,
         }));
     }
     /// A started run gets its native session and turn, like a live provider.

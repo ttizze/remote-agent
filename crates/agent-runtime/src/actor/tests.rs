@@ -73,6 +73,8 @@ pub(crate) fn send(id: &str) -> Command {
         mode: DispatchMode::StartImmediately,
         intent: None,
         source_plan: None,
+        resolved_plan: None,
+        continuation: None,
     })
 }
 fn rename(title: &str) -> Command {

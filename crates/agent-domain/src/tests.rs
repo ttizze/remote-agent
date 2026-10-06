@@ -60,6 +60,8 @@ fn send_message(key: &str, mode: DispatchMode) -> Command {
         mode,
         intent: None,
         source_plan: None,
+        resolved_plan: None,
+        continuation: None,
         title_seed: None,
     })
 }
@@ -1342,7 +1344,12 @@ fn plan_followup_preserves_attachments_and_consumes_the_proposal() {
             selection: None,
             mode: DispatchMode::StartImmediately,
             intent: None,
-            source_plan: Some(plan),
+            source_plan: Some(PlanRef {
+                thread: ThreadId::new("thread").unwrap(),
+                plan,
+            }),
+            resolved_plan: None,
+            continuation: None,
             title_seed: None,
         }),
     );
@@ -2914,6 +2921,8 @@ fn wire_encodings_round_trip_state_facts_commands_and_effects() {
         mode: DispatchMode::StartImmediately,
         intent: Some(DeliveryIntent::Auto),
         source_plan: None,
+        resolved_plan: None,
+        continuation: None,
         title_seed: None,
     });
     round_trip(&send);
@@ -3738,7 +3747,10 @@ fn a_proposed_plan_is_consumed_once_at_acceptance() {
     let implement = |key: &str, plan: &PlanId| {
         let mut send = send_message(key, DispatchMode::QueueAfterActive);
         if let Command::Send(message) = &mut send {
-            message.source_plan = Some(plan.clone());
+            message.source_plan = Some(PlanRef {
+                thread: ThreadId::new("thread").unwrap(),
+                plan: plan.clone(),
+            });
         }
         send
     };
@@ -5269,8 +5281,10 @@ fn a_failed_rollback_resets_only_the_native_sessions_it_may_have_rewound() {
 
 mod delegation;
 mod fork;
+mod metadata;
 mod preparation;
 mod queue;
+mod recovery;
 mod rollback;
 mod selection;
 mod thread;

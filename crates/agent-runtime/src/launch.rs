@@ -650,6 +650,8 @@ pub(crate) async fn launch(
                 mode: DispatchMode::DeferStart,
                 intent: None,
                 source_plan: None,
+                resolved_plan: None,
+                continuation: None,
                 title_seed: request.generate_title.then(|| request.title.clone()),
             }),
             CommandOrigin::Client,

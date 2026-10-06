@@ -134,6 +134,21 @@ pub enum FactBody {
         title: String,
     },
     ThreadArranged(ThreadArrangement),
+    LimitRecoveryChanged {
+        recovery: Option<LimitRecovery>,
+    },
+    PullRequestLinked {
+        pull_request: Option<LinkedPullRequest>,
+    },
+    RateLimitRejected {
+        attempt: RunAttemptId,
+        limit: String,
+        resets_at: Option<i64>,
+    },
+    RateLimitsReported {
+        instance: String,
+        resets_at: Option<i64>,
+    },
     ThreadUnsettled,
     ThreadImported,
     WorkspaceBound {
@@ -226,7 +241,7 @@ pub enum FactBody {
         status: RunStatus,
         queue_position: Option<u64>,
         held: bool,
-        source_plan: Option<PlanId>,
+        source_plan: Option<PlanRef>,
     },
     RunStarted {
         checkpoint_scope: Option<CheckpointScope>,
@@ -683,6 +698,9 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
                 workspace: None,
                 title_request: None,
                 imported: false,
+                snoozed_at: None,
+                limit_recovery: None,
+                linked_pull_request: None,
             });
         }
         ChildEventDeferred { key, event } => state
@@ -722,6 +740,35 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
             let thread = state.thread.as_mut().ok_or(FoldError::Missing("thread"))?;
             thread.title = title.clone();
             thread.title_request = None;
+        }
+        LimitRecoveryChanged { recovery } => {
+            state
+                .thread
+                .as_mut()
+                .ok_or(FoldError::Missing("thread"))?
+                .limit_recovery = recovery.clone()
+        }
+        PullRequestLinked { pull_request } => {
+            state
+                .thread
+                .as_mut()
+                .ok_or(FoldError::Missing("thread"))?
+                .linked_pull_request = pull_request.clone()
+        }
+        RateLimitRejected {
+            attempt,
+            limit,
+            resets_at,
+        } => {
+            find_mut(&mut state.attempts, "attempt", |a| &a.id == attempt)?
+                .rejected_limits
+                .insert(limit.clone(), *resets_at);
+        }
+        RateLimitsReported {
+            instance,
+            resets_at,
+        } => {
+            state.rate_limit_resets.insert(instance.clone(), *resets_at);
         }
         ThreadArranged(arrangement) => {
             let t = state.thread.as_mut().ok_or(FoldError::Missing("thread"))?;
@@ -804,11 +851,9 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
             }
         }
         ThreadSnoozed { until } => {
-            state
-                .thread
-                .as_mut()
-                .ok_or(FoldError::Missing("thread"))?
-                .snoozed_until = until.clone()
+            let t = state.thread.as_mut().ok_or(FoldError::Missing("thread"))?;
+            t.snoozed_until = until.clone();
+            t.snoozed_at = until.as_ref().map(|_| at.clone());
         }
         ThreadPinned { pinned, order } => {
             let t = state.thread.as_mut().ok_or(FoldError::Missing("thread"))?;
@@ -827,6 +872,7 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
                     t.settled_at = None;
                 }
                 t.snoozed_until = None;
+                t.snoozed_at = None;
             }
         }
         ThreadPinReordered { order } => {
@@ -1039,6 +1085,7 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
                 turn_usage: None,
                 usage_accumulator: None,
                 usage_observed: false,
+                rejected_limits: BTreeMap::new(),
                 started_at: at.clone(),
                 completed_at: None,
             });

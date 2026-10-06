@@ -10,7 +10,7 @@ use crate::{
     SqliteOutbox, Store, SystemClock, ThreadSubscribe, ThreadSubscription, ThreadView,
     TranscriptFs, WorkerOptions, WorkspaceFence, with_runtime_handlers,
 };
-use agent_domain::{Command, CommandId, Input, RecoveryTrigger, ThreadId};
+use agent_domain::{Command, CommandId, Input, RecoveryTrigger, ResolvedPlan, ThreadId};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -309,9 +309,72 @@ impl Runtime {
     ) -> Result<Committed, RuntimeError> {
         let _admitted = self.admit().await?;
         let command = self.checked_attachments(&id, command).await?;
+        let command = self.with_host_context(&id, &thread, command).await?;
         self.registry()
             .dispatch(&thread, id, command, CommandOrigin::Client)
             .await
+    }
+
+    /// Facts the state machine of one thread cannot read itself: another
+    /// thread's proposed plan, and the project root a cleared worktree falls
+    /// back to. A replayed command keeps its first result.
+    async fn with_host_context(
+        &self,
+        id: &CommandId,
+        thread: &ThreadId,
+        mut command: Command,
+    ) -> Result<Command, RuntimeError> {
+        let needed = matches!(&command, Command::Send(message)
+            if message.source_plan.as_ref().is_some_and(|source| source.thread != *thread))
+            || matches!(
+                &command,
+                Command::UpdateMetadata {
+                    worktree_path: Some(None),
+                    ..
+                }
+            );
+        let lookup = id.clone();
+        if !needed
+            || self
+                .store()
+                .blocking(move |store| store.receipt(&lookup))
+                .await?
+                .is_some()
+        {
+            return Ok(command);
+        }
+        match &mut command {
+            Command::Send(message) => {
+                if let Some(source) = message.source_plan.clone()
+                    && source.thread != *thread
+                {
+                    let state = self.registry().state(&source.thread).await.ok();
+                    message.resolved_plan = state.and_then(|state| {
+                        let project = state.thread.as_ref()?.project.clone();
+                        let plan = state.plans.iter().find(|plan| plan.id == source.plan)?;
+                        Some(ResolvedPlan {
+                            project,
+                            kind: plan.kind,
+                            implemented: plan.implemented_by.is_some(),
+                        })
+                    });
+                }
+            }
+            Command::UpdateMetadata {
+                worktree_path: Some(None),
+                project_root,
+                ..
+            } => {
+                let state = self.registry().state(thread).await?;
+                *project_root = state
+                    .thread
+                    .as_ref()
+                    .and_then(|current| self.executors.ops.project(&current.project))
+                    .map(|project| project.root);
+            }
+            _ => {}
+        }
+        Ok(command)
     }
 
     /// An answer attachment that no longer exists reaches the state machine

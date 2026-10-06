@@ -138,6 +138,59 @@ pub struct Thread {
     /// The pending title generation; a rename or a newer request supersedes it.
     pub title_request: Option<CommandId>,
     pub imported: bool,
+    pub snoozed_at: Option<Timestamp>,
+    pub limit_recovery: Option<LimitRecovery>,
+    pub linked_pull_request: Option<LinkedPullRequest>,
+}
+/// What to do once a usage limit resets (T3 OrchestrationV2LimitRecovery).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LimitRecovery {
+    /// The metadata command that set it; an automatic resume names it.
+    pub request: Option<CommandId>,
+    pub run: RunId,
+    pub reset_at: Timestamp,
+    pub auto_resume: bool,
+    pub snooze: bool,
+}
+/// A recovery choice; omitted options keep their value for the same run and reset.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LimitRecoveryUpdate {
+    pub run: RunId,
+    pub reset_at: Timestamp,
+    pub auto_resume: Option<bool>,
+    pub snooze: Option<bool>,
+}
+/// T3 ThreadLinkedPullRequest.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinkedPullRequest {
+    pub project: String,
+    pub repository: String,
+    pub number: u64,
+    pub url: String,
+}
+/// A proposed plan a message implements, possibly on another thread.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlanRef {
+    pub thread: ThreadId,
+    pub plan: PlanId,
+}
+/// Another thread's plan as the Host read it before dispatch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedPlan {
+    pub project: String,
+    pub kind: PlanKind,
+    pub implemented: bool,
+}
+/// T3 message.dispatch continuations of a stopped run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Continuation {
+    /// The user continues an interrupted or usage-limited run.
+    Manual { run: RunId },
+    /// The limit recovery resumes the limited run once its reset passed.
+    UsageLimit {
+        run: RunId,
+        recovery: Option<CommandId>,
+    },
 }
 /// Sidebar state a fork or delegated child copies from its parent thread
 /// (T3 ThreadForkService and makeSubagentChildThread spread the parent row).
@@ -204,7 +257,7 @@ pub struct Run {
     pub requested_at: Timestamp,
     pub started_at: Option<Timestamp>,
     pub completed_at: Option<Timestamp>,
-    pub source_plan: Option<PlanId>,
+    pub source_plan: Option<PlanRef>,
     pub checkpoint: Option<CheckpointId>,
     pub continuation: bool,
 }
@@ -224,6 +277,8 @@ pub struct Attempt {
     pub turn_usage: Option<TurnTokenUsage>,
     pub usage_accumulator: Option<UsageCounters>,
     pub usage_observed: bool,
+    /// Usage windows the provider rejected during this turn, with their resets.
+    pub rejected_limits: BTreeMap<String, Option<i64>>,
     pub started_at: Timestamp,
     pub completed_at: Option<Timestamp>,
 }
@@ -305,6 +360,8 @@ pub enum ItemKind {
         code: Option<String>,
         class: Option<String>,
         retryable: Option<bool>,
+        /// When a usage limit resets (T3 ProviderFailure resetAt).
+        reset_at: Option<Timestamp>,
     },
     SystemNotice {
         message: String,
@@ -612,6 +669,8 @@ pub struct State {
     pub handoff_token_cap: Option<u64>,
     pub context_windows: BTreeMap<String, u64>,
     pub usage_baselines: BTreeMap<String, UsageCounters>,
+    /// The latest account usage-limit reset each provider instance reported.
+    pub rate_limit_resets: BTreeMap<String, Option<i64>>,
 }
 impl State {
     /// A local message, or one referenced by an inherited fork item.
@@ -703,7 +762,10 @@ pub struct SendMessage {
     pub selection: Option<ModelSelection>,
     pub mode: DispatchMode,
     pub intent: Option<DeliveryIntent>,
-    pub source_plan: Option<PlanId>,
+    pub source_plan: Option<PlanRef>,
+    /// Filled by the Host for a plan on another thread.
+    pub resolved_plan: Option<ResolvedPlan>,
+    pub continuation: Option<Continuation>,
     /// Shown as the title while the first message's title is generated.
     pub title_seed: Option<String>,
 }
@@ -756,6 +818,29 @@ pub enum Command {
         title: String,
     },
     RegenerateTitle,
+    /// T3 thread.metadata.update. `project_root` is filled by the Host and
+    /// becomes the working directory when the worktree is cleared.
+    UpdateMetadata {
+        title: Option<String>,
+        regenerate_title: Option<bool>,
+        branch: Option<Option<String>>,
+        worktree_path: Option<Option<String>>,
+        expected_worktree_path: Option<Option<String>>,
+        expected_empty: bool,
+        limit_recovery: Option<Option<LimitRecoveryUpdate>>,
+        linked_pull_request: Option<Option<LinkedPullRequest>>,
+        project_root: Option<String>,
+    },
+    /// T3 thread.auto-settle from the Host's settlement sweep.
+    SettleAutomatically {
+        snapshot_at: Timestamp,
+        settled_at: Option<Timestamp>,
+    },
+    /// Another thread's run implements this thread's proposed plan.
+    ImplementPlan {
+        plan: PlanId,
+        run: RunId,
+    },
     Archive {
         archived: bool,
     },
@@ -904,7 +989,7 @@ pub enum Command {
         workspace: Option<Workspace>,
         arrangement: Box<ThreadArrangement>,
         origin: Delegation,
-        message: SendMessage,
+        message: Box<SendMessage>,
     },
     TaskProgress {
         task: NodeId,
@@ -963,10 +1048,13 @@ pub fn host_only_command(command: &Command) -> bool {
         | Command::ContinueRestart { .. }
         | Command::ReleasePrepared { .. }
         | Command::PreparedRunProgress { .. }
+        | Command::SettleAutomatically { .. }
+        | Command::ImplementPlan { .. }
         | Command::FailPrepared { .. } => true,
         Command::Create { .. }
         | Command::Rename { .. }
         | Command::RegenerateTitle
+        | Command::UpdateMetadata { .. }
         | Command::Archive { .. }
         | Command::Delete
         | Command::Settle { .. }
@@ -1048,6 +1136,11 @@ pub enum ProviderItem {
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ProviderEvent {
+    /// The account's usage-limit reset (Unix seconds), when every exhausted
+    /// window reports one (T3 codexUsageLimitResetAt).
+    RateLimits {
+        resets_at: Option<i64>,
+    },
     UsageTotals {
         native_thread: String,
         native_turn: String,

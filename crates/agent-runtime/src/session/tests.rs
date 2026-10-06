@@ -178,6 +178,8 @@ impl Rig {
                 mode,
                 intent: None,
                 source_plan: None,
+                resolved_plan: None,
+                continuation: None,
                 title_seed: None,
             }),
         )

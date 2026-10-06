@@ -1120,6 +1120,79 @@ impl Decision {
             }
         }
     }
+    /// T3 message.dispatch usageLimitContinuationOfRunId: `None` when the
+    /// limit recovery may resume the run now.
+    fn usage_limit_continuation(
+        &mut self,
+        command: &CommandId,
+        run: &RunId,
+        request: Option<&CommandId>,
+    ) -> Option<Reply> {
+        let thread = self.state.thread.as_ref().unwrap().clone();
+        let failure = usage_limit_failure(&self.state);
+        let recovery = thread.limit_recovery.clone();
+        let snoozed = thread
+            .snoozed_until
+            .as_ref()
+            .is_some_and(|until| until > &self.at);
+        let resumable = failure.as_ref().zip(recovery.as_ref()).is_some_and(
+            |((limited, reset_at), recovery)| {
+                &limited.id == run
+                    && recovery.auto_resume
+                    && recovery.request.as_ref() == request
+                    && &recovery.run == run
+                    && Some(&recovery.reset_at) == reset_at.as_ref()
+                    && recovery.reset_at <= self.at
+                    && thread.selection.instance == limited.selection.instance
+            },
+        ) && thread.archived_at.is_none()
+            && thread.settled != Some(true)
+            && !self
+                .state
+                .requests
+                .iter()
+                .any(|r| r.status == RequestStatus::Pending)
+            && !snoozed;
+        if resumable {
+            return None;
+        }
+        // A resume that came while still snoozed is re-armed under its own id.
+        if let Some(mut recovery) = recovery.filter(|recovery| {
+            recovery.auto_resume
+                && recovery.request.as_ref() == request
+                && &recovery.run == run
+                && snoozed
+        }) {
+            recovery.request = Some(command.clone());
+            self.fact(FactBody::LimitRecoveryChanged {
+                recovery: Some(recovery),
+            });
+        }
+        Some(Reply::Ignored)
+    }
+    /// T3's usage-limit reset for a failure of `attempt`: Claude's latest
+    /// rejected window when every one reports a reset, Codex's account snapshot.
+    fn usage_limit_reset(&self, attempt: &RunAttemptId) -> Option<Timestamp> {
+        let record = self.state.attempts.iter().find(|a| &a.id == attempt)?;
+        let run = self.state.runs.iter().find(|run| run.id == record.run)?;
+        let seconds = match run.selection.driver {
+            Driver::Claude => {
+                let resets = record
+                    .rejected_limits
+                    .values()
+                    .copied()
+                    .collect::<Option<Vec<_>>>()?;
+                resets.into_iter().max()?
+            }
+            Driver::Codex => self
+                .state
+                .rate_limit_resets
+                .get(&run.selection.instance)
+                .copied()
+                .flatten()?,
+        };
+        Timestamp::from_millis(seconds.saturating_mul(1000)).ok()
+    }
     /// T3 runForSourcePoint.
     fn source_run(&self, source: &SourcePoint) -> Option<&Run> {
         match source {
@@ -1365,17 +1438,50 @@ impl Decision {
         if let Err(reason) = validate_attachments(&message.attachments) {
             return reject(reason);
         }
-        if let Some(plan) = &message.source_plan {
-            let Some(plan) = self
-                .state
-                .plans
-                .iter()
-                .find(|p| &p.id == plan && p.kind == PlanKind::Proposed)
-            else {
+        if let Some(source) = &message.source_plan {
+            // Another thread's plan is read by the Host before dispatch.
+            let found = if source.thread == thread.id {
+                self.state
+                    .plans
+                    .iter()
+                    .find(|p| p.id == source.plan)
+                    .map(|plan| ResolvedPlan {
+                        project: thread.project.clone(),
+                        kind: plan.kind,
+                        implemented: plan.implemented_by.is_some(),
+                    })
+            } else {
+                message.resolved_plan.clone()
+            };
+            let Some(found) = found.filter(|plan| plan.kind == PlanKind::Proposed) else {
                 return reject("plan-not-found");
             };
-            if plan.implemented_by.is_some() {
+            if found.project != thread.project {
+                return reject("plan-in-another-project");
+            }
+            if found.implemented {
                 return reject("plan-not-active");
+            }
+        }
+        // T3 message.dispatch manualContinuationOfRunId.
+        if let Some(Continuation::Manual { run }) = &message.continuation {
+            let source = self.state.runs.iter().find(|r| &r.id == run);
+            let resumable = source.is_some_and(|source| {
+                source.status == RunStatus::Interrupted
+                    || source.status == RunStatus::Failed
+                        && failure_class(&self.state, &source.id).as_deref() == Some("usage_limit")
+            });
+            if !matches!(message.mode, DispatchMode::StartImmediately)
+                || !resumable
+                || latest_executed_run(&self.state).map(|r| &r.id) != Some(run)
+                || thread.archived_at.is_some()
+                || self
+                    .state
+                    .requests
+                    .iter()
+                    .any(|r| r.status == RequestStatus::Pending)
+            {
+                return reject("continuation-unavailable");
             }
         }
         let selection = message
@@ -1608,11 +1714,24 @@ impl Decision {
             held,
             source_plan: message.source_plan.clone(),
         });
-        if let Some(plan) = &message.source_plan {
-            self.fact(FactBody::PlanImplemented {
-                id: plan.clone(),
-                run: id.clone(),
-            });
+        if let Some(source) = &message.source_plan {
+            if source.thread == self.state.thread.as_ref().unwrap().id {
+                self.fact(FactBody::PlanImplemented {
+                    id: source.plan.clone(),
+                    run: id.clone(),
+                });
+            } else {
+                self.effect(
+                    None,
+                    EffectBody::SendToThread {
+                        thread: source.thread.clone(),
+                        command: Box::new(Command::ImplementPlan {
+                            plan: source.plan.clone(),
+                            run: id.clone(),
+                        }),
+                    },
+                );
+            }
         }
         if deferred {
             self.user_item(&message.id, &id);
@@ -2205,6 +2324,22 @@ impl Decision {
                         until: until.clone(),
                     });
                 }
+                // A manual snooze takes over from a recovery's snooze (T3).
+                if until.is_some()
+                    && let Some(mut recovery) = self
+                        .state
+                        .thread
+                        .as_ref()
+                        .unwrap()
+                        .limit_recovery
+                        .clone()
+                        .filter(|recovery| recovery.snooze)
+                {
+                    recovery.snooze = false;
+                    self.fact(FactBody::LimitRecoveryChanged {
+                        recovery: Some(recovery),
+                    });
+                }
                 Reply::Accepted
             }
             Pin { pinned, order } => {
@@ -2356,7 +2491,14 @@ impl Decision {
                 );
                 Reply::Accepted
             }
-            Send(message) => self.create_run(message),
+            Send(message) => {
+                if let Some(Continuation::UsageLimit { run, recovery }) = &message.continuation
+                    && let Some(reply) = self.usage_limit_continuation(id, run, recovery.as_ref())
+                {
+                    return reply;
+                }
+                self.create_run(message)
+            }
             Compact => {
                 let message = SendMessage {
                     created_by: MessageAuthor::User,
@@ -2368,9 +2510,206 @@ impl Decision {
                     mode: DispatchMode::QueueAfterActive,
                     intent: None,
                     source_plan: None,
+                    resolved_plan: None,
+                    continuation: None,
                     title_seed: None,
                 };
                 self.create_run(&message)
+            }
+            UpdateMetadata {
+                title,
+                regenerate_title,
+                branch,
+                worktree_path,
+                expected_worktree_path,
+                expected_empty,
+                limit_recovery,
+                linked_pull_request,
+                project_root,
+            } => {
+                let thread = self.state.thread.as_ref().unwrap().clone();
+                let current_worktree = thread
+                    .workspace
+                    .as_ref()
+                    .and_then(|workspace| workspace.worktree_path.clone());
+                if expected_worktree_path
+                    .as_ref()
+                    .is_some_and(|expected| *expected != current_worktree)
+                {
+                    return reject("worktree-changed");
+                }
+                if *expected_empty
+                    && (!self.state.messages.is_empty() || !self.state.runs.is_empty())
+                {
+                    return reject("thread-not-empty");
+                }
+                let title = title.as_deref().map(str::trim);
+                if title.is_some_and(str::is_empty) {
+                    return reject("title-required");
+                }
+                let blank = |value: &Option<Option<String>>| matches!(value, Some(Some(value)) if value.trim().is_empty());
+                if blank(branch) || blank(worktree_path) || blank(expected_worktree_path) {
+                    return reject("invalid-workspace");
+                }
+                if let Some(Some(update)) = limit_recovery {
+                    if update.auto_resume.is_none() && update.snooze.is_none() {
+                        return reject("invalid-limit-recovery");
+                    }
+                    if update.snooze == Some(true) && update.reset_at <= self.at {
+                        return reject("limit-reset-passed");
+                    }
+                    let failure = usage_limit_failure(&self.state);
+                    if thread.archived_at.is_some()
+                        || thread.settled == Some(true)
+                        || failure.as_ref().is_none_or(|(run, reset_at)| {
+                            run.id != update.run
+                                || reset_at.as_ref() != Some(&update.reset_at)
+                                || update.reset_at
+                                    <= run.completed_at.clone().unwrap_or(run.requested_at.clone())
+                        })
+                        || self
+                            .state
+                            .requests
+                            .iter()
+                            .any(|r| r.status == RequestStatus::Pending)
+                    {
+                        return reject("limit-changed");
+                    }
+                }
+                if let Some(title) = title {
+                    self.fact(FactBody::ThreadRenamed {
+                        title: title.to_owned(),
+                    });
+                }
+                if let Some(update) = limit_recovery {
+                    let previous = thread.limit_recovery.as_ref().filter(|previous| {
+                        update.as_ref().is_some_and(|update| {
+                            previous.run == update.run && previous.reset_at == update.reset_at
+                        })
+                    });
+                    let recovery = update.as_ref().map(|update| LimitRecovery {
+                        request: Some(id.clone()),
+                        run: update.run.clone(),
+                        reset_at: update.reset_at.clone(),
+                        auto_resume: update
+                            .auto_resume
+                            .or(previous.map(|p| p.auto_resume))
+                            .unwrap_or(false),
+                        snooze: update
+                            .snooze
+                            .or(previous.map(|p| p.snooze))
+                            .unwrap_or(false),
+                    });
+                    if let Some(recovery) = recovery
+                        .as_ref()
+                        .filter(|r| r.snooze && r.reset_at > self.at)
+                    {
+                        self.fact(FactBody::ThreadSnoozed {
+                            until: Some(recovery.reset_at.clone()),
+                        });
+                    } else if thread.limit_recovery.as_ref().is_some_and(|old| {
+                        old.snooze && thread.snoozed_until.as_ref() == Some(&old.reset_at)
+                    }) {
+                        self.fact(FactBody::ThreadSnoozed { until: None });
+                    }
+                    self.fact(FactBody::LimitRecoveryChanged { recovery });
+                }
+                if branch.is_some() || worktree_path.is_some() {
+                    let mut workspace = thread.workspace.clone().unwrap_or(Workspace {
+                        cwd: project_root.clone().unwrap_or_default(),
+                        worktree_path: None,
+                        branch: None,
+                    });
+                    if let Some(branch) = branch {
+                        workspace.branch = branch.as_deref().map(str::trim).map(str::to_owned);
+                    }
+                    if let Some(path) = worktree_path {
+                        workspace.worktree_path = path.clone();
+                        workspace.cwd = match path {
+                            Some(path) => path.clone(),
+                            None if current_worktree.as_ref() == Some(&workspace.cwd) => {
+                                project_root.clone().unwrap_or(workspace.cwd.clone())
+                            }
+                            None => workspace.cwd.clone(),
+                        };
+                    }
+                    self.fact(FactBody::WorkspaceBound {
+                        workspace: Some(workspace),
+                    });
+                    // T3 detaches the provider sessions when the worktree moves.
+                    if worktree_path
+                        .as_ref()
+                        .is_some_and(|path| *path != current_worktree)
+                    {
+                        self.effect(
+                            None,
+                            EffectBody::DetachSessions {
+                                reason: "Workspace changed.".into(),
+                                revoke_credentials: false,
+                                instance: None,
+                            },
+                        );
+                    }
+                }
+                if let Some(pull_request) = linked_pull_request {
+                    self.fact(FactBody::PullRequestLinked {
+                        pull_request: pull_request.clone(),
+                    });
+                }
+                match regenerate_title {
+                    Some(true) => {
+                        self.fact(FactBody::TitleRequested {
+                            request: id.clone(),
+                        });
+                        self.effect(
+                            None,
+                            EffectBody::GenerateTitle {
+                                request: id.clone(),
+                                message: None,
+                            },
+                        );
+                    }
+                    Some(false) if title.is_none() && thread_title_pending(&self.state) => {
+                        self.fact(FactBody::TitleRequestCleared);
+                    }
+                    _ => {}
+                }
+                Reply::Accepted
+            }
+            // T3 thread.auto-settle: any change after the sweep's snapshot, or
+            // an explicit settle or un-settle, wins over the sweep.
+            SettleAutomatically {
+                snapshot_at,
+                settled_at,
+            } => {
+                let thread = self.state.thread.as_ref().unwrap();
+                if thread.settled.is_some() || &thread.updated_at > snapshot_at {
+                    return reject("thread-changed");
+                }
+                self.command(
+                    id,
+                    &Settle {
+                        settled: true,
+                        at: settled_at.clone(),
+                    },
+                )
+            }
+            ImplementPlan { plan, run } => {
+                let Some(found) = self
+                    .state
+                    .plans
+                    .iter()
+                    .find(|p| &p.id == plan && p.kind == PlanKind::Proposed)
+                else {
+                    return reject("plan-not-found");
+                };
+                if found.implemented_by.is_none() {
+                    self.fact(FactBody::PlanImplemented {
+                        id: plan.clone(),
+                        run: run.clone(),
+                    });
+                }
+                Reply::Accepted
             }
             ReleasePrepared { run } => {
                 if self.state.active_run().is_some_and(|r| &r.id != run)
@@ -2814,6 +3153,8 @@ impl Decision {
                         mode: DispatchMode::QueueAfterActive,
                         intent: Some(DeliveryIntent::Auto),
                         source_plan: None,
+                        resolved_plan: None,
+                        continuation: None,
                         title_seed: None,
                     };
                     return self.create_run(&message);
@@ -3312,7 +3653,7 @@ impl Decision {
                                 task: task.clone(),
                                 message: message.clone(),
                             },
-                            message: SendMessage {
+                            message: Box::new(SendMessage {
                                 created_by: MessageAuthor::Agent,
                                 creation_source: "mcp".into(),
                                 id: message,
@@ -3322,8 +3663,10 @@ impl Decision {
                                 mode: DispatchMode::StartImmediately,
                                 intent: None,
                                 source_plan: None,
+                                resolved_plan: None,
+                                continuation: None,
                                 title_seed: None,
-                            },
+                            }),
                         }),
                     },
                 );
@@ -3572,6 +3915,8 @@ impl Decision {
                     mode: DispatchMode::QueueAfterActive,
                     intent: None,
                     source_plan: None,
+                    resolved_plan: None,
+                    continuation: None,
                     title_seed: None,
                 };
                 let reply = self.create_run(&message);
@@ -3765,6 +4110,7 @@ impl Decision {
                 code: code.and_then(provider_failure_code),
                 class: class.map(str::to_owned),
                 retryable: code.map(|_| false),
+                reset_at: None,
             },
         );
         self.fact(FactBody::ItemCompleted {
@@ -3788,6 +4134,15 @@ impl Decision {
         kind: &ProviderItem,
     ) -> TurnItemId {
         let id = TurnItemId::new(self.native_key("item", attempt, key)).unwrap();
+        if let ProviderItem::UsageLimit { limit, resets_at } = kind
+            && self.state.attempts.iter().any(|a| &a.id == attempt)
+        {
+            self.fact(FactBody::RateLimitRejected {
+                attempt: attempt.clone(),
+                limit: limit.clone().unwrap_or_default(),
+                resets_at: *resets_at,
+            });
+        }
         let item_kind = match kind {
             ProviderItem::Text => {
                 let message = MessageId::new(self.native_key("message", attempt, key)).unwrap();
@@ -3856,6 +4211,9 @@ impl Decision {
                 code: code.as_deref().and_then(provider_failure_code),
                 class: class.clone(),
                 retryable: *retryable,
+                reset_at: (class.as_deref() == Some("usage_limit"))
+                    .then(|| self.usage_limit_reset(attempt))
+                    .flatten(),
             },
         };
         if let Some(item) = self.state.items.iter().find(|i| i.id == id) {
@@ -3962,6 +4320,7 @@ impl Decision {
                     | ProviderEvent::BackgroundRoster { .. }
                     | ProviderEvent::Wake { .. }
                     | ProviderEvent::SessionClosed { .. }
+                    | ProviderEvent::RateLimits { .. }
             );
         if !child
             && run
@@ -3974,6 +4333,7 @@ impl Decision {
                         RunStatus::Completed | RunStatus::Waiting | RunStatus::Interrupted
                     )
                 }))
+            && !matches!(event, ProviderEvent::RateLimits { .. })
         {
             return Reply::Ignored;
         }
@@ -4035,6 +4395,51 @@ impl Decision {
                             }),
                         },
                     );
+                }
+            }
+            RateLimits { resets_at } => {
+                let instance = run.as_ref().map_or_else(
+                    || {
+                        self.state
+                            .thread
+                            .as_ref()
+                            .unwrap()
+                            .selection
+                            .instance
+                            .clone()
+                    },
+                    |run| run.selection.instance.clone(),
+                );
+                if self.state.rate_limit_resets.get(&instance) != Some(resets_at) {
+                    self.fact(FactBody::RateLimitsReported {
+                        instance: instance.clone(),
+                        resets_at: *resets_at,
+                    });
+                }
+                // T3 fills a stopped turn's missing reset once.
+                let reset = resets_at.and_then(|at| Timestamp::from_millis(at * 1000).ok());
+                let unfilled = self
+                    .state
+                    .items
+                    .iter()
+                    .filter(|item| {
+                        matches!(&item.kind, ItemKind::Error { class: Some(class), reset_at: None, .. }
+                            if class == "usage_limit")
+                            && item.run.as_ref().is_some_and(|id| {
+                                self.state.runs.iter().any(|run| {
+                                    &run.id == id && run.selection.instance == instance
+                                })
+                            })
+                    })
+                    .map(|item| (item.id.clone(), item.kind.clone()))
+                    .collect::<Vec<_>>();
+                if let Some(reset) = reset {
+                    for (id, mut kind) in unfilled {
+                        if let ItemKind::Error { reset_at, .. } = &mut kind {
+                            *reset_at = Some(reset.clone());
+                        }
+                        self.fact(FactBody::ItemDetailChanged { id, kind });
+                    }
                 }
             }
             PromptOffered { key } => self.fact(FactBody::PromptOffered {
@@ -4870,6 +5275,8 @@ impl Decision {
                     mode: DispatchMode::QueueAfterActive,
                     intent: None,
                     source_plan: None,
+                    resolved_plan: None,
+                    continuation: None,
                     title_seed: None,
                 };
                 let notification = background_notification(
@@ -5771,6 +6178,23 @@ pub fn maintenance(text: &str, attachments: &[Attachment]) -> Option<Maintenance
         "/logout" => Some(Maintenance::Logout),
         _ => None,
     }
+}
+/// T3 usageLimitBlockedRun and its latestRootProviderFailure: the latest
+/// executed run when it failed on a usage limit, with the limit's reset.
+pub fn usage_limit_failure(state: &State) -> Option<(&Run, Option<Timestamp>)> {
+    let run = latest_executed_run(state).filter(|run| run.status == RunStatus::Failed)?;
+    let failure = state
+        .items
+        .iter()
+        .filter(|item| item.run.as_ref() == Some(&run.id) && item.status == ItemStatus::Failed)
+        .filter_map(|item| match &item.kind {
+            ItemKind::Error {
+                class, reset_at, ..
+            } => Some((class.as_deref(), reset_at.clone())),
+            _ => None,
+        })
+        .next_back()?;
+    (failure.0 == Some("usage_limit")).then_some((run, failure.1))
 }
 /// T3 latestStableRun: the highest completed run with a checkpoint.
 pub fn latest_stable_run(state: &State) -> Option<&Run> {

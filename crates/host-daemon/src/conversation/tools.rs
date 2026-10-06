@@ -733,6 +733,8 @@ impl AgentTools {
                         mode,
                         intent,
                         source_plan: None,
+                        resolved_plan: None,
+                        continuation: None,
                         title_seed: None,
                     }),
                 )

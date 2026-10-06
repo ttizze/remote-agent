@@ -144,6 +144,8 @@ fn send() -> Command {
         mode: DispatchMode::StartImmediately,
         intent: None,
         source_plan: None,
+        resolved_plan: None,
+        continuation: None,
         title_seed: Some("Notes".into()),
     })
 }

@@ -35,6 +35,7 @@ pub struct ThreadShell {
     pub settled: Option<bool>,
     pub settled_at: Option<Timestamp>,
     pub snoozed_until: Option<Timestamp>,
+    pub snoozed_at: Option<Timestamp>,
     pub pinned_at: Option<Timestamp>,
     pub pin_order: Option<String>,
     pub active_order: Option<String>,
@@ -52,6 +53,9 @@ pub struct ThreadShell {
     pub activity_run_started_at: Option<Timestamp>,
     pub last_error: Option<String>,
     pub last_error_class: Option<String>,
+    pub usage_limit_reset_at: Option<Timestamp>,
+    pub limit_recovery: Option<LimitRecovery>,
+    pub linked_pull_request: Option<LinkedPullRequest>,
     pub pending_request: Option<PendingRequestSummary>,
     pub latest_user_message_at: Option<Timestamp>,
     pub latest_user_authored_message_at: Option<Timestamp>,
@@ -108,9 +112,12 @@ pub fn shell(state: &State) -> Option<ThreadShell> {
                     item.run.as_ref() == Some(&run.id) && item.status == ItemStatus::Failed
                 })
                 .filter_map(|item| match &item.kind {
-                    ItemKind::Error { message, class, .. } => {
-                        Some((message.clone(), class.clone()))
-                    }
+                    ItemKind::Error {
+                        message,
+                        class,
+                        reset_at,
+                        ..
+                    } => Some((message.clone(), class.clone(), reset_at.clone())),
                     _ => None,
                 })
                 .next_back()
@@ -148,6 +155,7 @@ pub fn shell(state: &State) -> Option<ThreadShell> {
         settled: thread.settled,
         settled_at: thread.settled_at.clone(),
         snoozed_until: thread.snoozed_until.clone(),
+        snoozed_at: thread.snoozed_at.clone(),
         pinned_at: thread.pinned_at.clone(),
         pin_order: thread.pin_order.clone(),
         active_order: thread.active_order.clone(),
@@ -163,8 +171,14 @@ pub fn shell(state: &State) -> Option<ThreadShell> {
         activity_run_status: activity.map(|run| run.status),
         activity_run_started_at: activity
             .map(|run| run.started_at.clone().unwrap_or(run.requested_at.clone())),
-        last_error: failure.as_ref().map(|(message, _)| message.clone()),
-        last_error_class: failure.and_then(|(_, class)| class),
+        last_error: failure.as_ref().map(|(message, ..)| message.clone()),
+        usage_limit_reset_at: failure
+            .as_ref()
+            .filter(|(_, class, _)| class.as_deref() == Some("usage_limit"))
+            .and_then(|(.., reset_at)| reset_at.clone()),
+        last_error_class: failure.and_then(|(_, class, _)| class),
+        limit_recovery: thread.limit_recovery.clone(),
+        linked_pull_request: thread.linked_pull_request.clone(),
         pending_request: state
             .requests
             .iter()
@@ -246,6 +260,8 @@ mod tests {
             mode,
             intent: None,
             source_plan: None,
+            resolved_plan: None,
+            continuation: None,
             title_seed: None,
         })
     }
