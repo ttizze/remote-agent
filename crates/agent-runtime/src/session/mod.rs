@@ -411,9 +411,11 @@ impl SessionManager {
         keys
     }
 
-    /// The working directories the thread uses in live provider processes.
+    /// The working directories of the thread's own live provider processes.
+    /// As in T3 CheckpointRestoreSafety, a shared app-server is left out: each
+    /// turn runs in its thread's workspace, which the caller already checks.
     pub fn session_cwds(&self, thread: &ThreadId) -> Vec<String> {
-        self.entries(|_| true)
+        self.entries(|slot| matches!(slot, Slot::Thread(_)))
             .into_iter()
             .filter_map(|entry| {
                 let members = entry.members.lock().expect("session members");

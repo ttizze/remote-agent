@@ -364,7 +364,7 @@ impl SessionManager {
     }
 }
 
-fn claude_launch(
+pub(super) fn claude_launch(
     target: &LaunchTarget,
     settings: &ClaudeSettings,
     native_session: Option<String>,

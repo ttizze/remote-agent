@@ -324,6 +324,29 @@ impl Rig {
     }
 }
 
+/// A live Claude process of `thread` opened in `cwd`, for tests outside the
+/// session module.
+pub(crate) async fn live_claude_process(sessions: &SessionManager, thread: &ThreadId, cwd: &str) {
+    let target = LaunchTarget {
+        key: SessionKey {
+            thread: thread.clone(),
+            instance: "claude".into(),
+        },
+        selection: selection(Driver::Claude, "claude-sonnet-4-6"),
+        runtime_mode: RuntimeMode::FullAccess,
+        interaction_mode: InteractionMode::Default,
+        workspace: Some(agent_domain::Workspace {
+            cwd: cwd.into(),
+            worktree_path: Some(cwd.into()),
+            branch: None,
+        }),
+    };
+    let launch = claude::claude_launch(&target, &ClaudeSettings::default(), None, None, None);
+    let Ok(_) = sessions.spawn(&target, Some(launch)).await else {
+        panic!("the fake Claude process opens");
+    };
+}
+
 fn options(idle: u64, pin: u64) -> SessionOptions {
     SessionOptions {
         idle_timeout: Duration::from_millis(idle),
