@@ -296,7 +296,39 @@ fn normalizes_records_to_the_context_schema() {
 #[test]
 fn rebinds_attachment_records_to_claimed_ids() {
     let mut message = context(vec![image(), skill()]);
-    message.remap_attachments(&HashMap::from([("att_1".into(), "chat:thread:att".into())]));
-    assert_eq!(message.records[0].0["attachmentId"], "chat:thread:att");
+    message.remap_attachments(&HashMap::from([("att_1".into(), "chat-thread-att".into())]));
+    assert_eq!(message.records[0].0["attachmentId"], "chat-thread-att");
     assert_eq!(message.records[1].0, skill());
+    assert_eq!(message.normalized().unwrap(), message);
+}
+
+fn id_text() -> impl proptest::strategy::Strategy<Value = String> {
+    use proptest::prelude::*;
+    let pieces =
+        prop::sample::select(&["a", "Z", "0", "_", "-", ":", ".", "/", "日", "𝟘", "é"][..]);
+    prop_oneof![
+        prop::collection::vec(pieces.clone(), 0..8),
+        prop::collection::vec(pieces, 120..136),
+    ]
+    .prop_map(|parts| parts.concat())
+}
+
+/// `ComposerContextId` and the context attachment ID: 1 to 128 characters of
+/// `[a-z0-9_-]`, ignoring case.
+fn schema_id(id: &str) -> bool {
+    (1..=128).contains(&id.chars().count())
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+proptest::proptest! {
+    #[test]
+    fn attachment_records_keep_ids_the_schema_accepts(attachment in id_text(), context_id in id_text()) {
+        let mut record = image();
+        record["attachmentId"] = json!(attachment);
+        record["contextId"] = json!(context_id);
+        let kept = context(vec![record]).normalized().unwrap().records.len() == 1;
+        proptest::prop_assert_eq!(kept, schema_id(&attachment) && schema_id(&context_id));
+    }
 }

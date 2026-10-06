@@ -6968,8 +6968,7 @@ impl ThreadMachine {
         }
     }
 }
-/// Schemas and budgets, shared by dispatch and question uploads. The Host
-/// names attachments `chat:…`, so the id character set is not checked.
+/// Schemas and budgets, shared by dispatch and question uploads.
 pub fn validate_attachments(files: &[Attachment]) -> Result<(), &'static str> {
     if files.len() > 100 {
         return Err("too-many-attachments");
@@ -6984,7 +6983,10 @@ pub fn validate_attachments(files: &[Attachment]) -> Result<(), &'static str> {
         if !ids.insert(&file.id) {
             return Err("duplicate-attachment-id");
         }
-        if !bounded(&file.id, 128) || !bounded(&file.name, 255) || !bounded(&file.mime_type, 100) {
+        if !crate::composer::attachment_id(&file.id)
+            || !bounded(&file.name, 255)
+            || !bounded(&file.mime_type, 100)
+        {
             return Err("invalid-attachment");
         }
         let mime = file.mime_type.trim().to_ascii_lowercase();

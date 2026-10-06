@@ -945,7 +945,7 @@ async fn conversation_calls_answer_with_typed_errors() {
                 attachments: vec![agent_domain::Attachment {
                     kind: agent_domain::AttachmentKind::File,
                     source: None,
-                    id: "pending:missing".into(),
+                    id: "pending-missing".into(),
                     name: "notes.md".into(),
                     mime_type: "text/markdown".into(),
                     path: "/etc/passwd".into(),

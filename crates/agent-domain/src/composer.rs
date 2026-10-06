@@ -34,6 +34,11 @@ static KIND: LazyLock<regex::Regex> =
 static ID: LazyLock<regex::Regex> =
     LazyLock::new(|| regex::Regex::new("(?i)^[a-z0-9_-]{1,128}$").expect("pattern compiles"));
 
+/// The attachment ID schema of messages, which trims before checking.
+pub(crate) fn attachment_id(id: &str) -> bool {
+    ID.is_match(id.trim_matches(js_space))
+}
+
 /// Field checks of the record schemas.
 struct Fields<'a>(&'a Map<String, Value>);
 impl Fields<'_> {
