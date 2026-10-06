@@ -316,7 +316,7 @@ impl Runtime {
     }
 
     /// Facts the state machine of one thread cannot read itself: another
-    /// thread's proposed plan, and the project root a cleared worktree falls
+    /// thread's proposed plan, and the project root a workspace update falls
     /// back to. A replayed command keeps its first result.
     async fn with_host_context(
         &self,
@@ -328,10 +328,8 @@ impl Runtime {
             if message.source_plan.as_ref().is_some_and(|source| source.thread != *thread))
             || matches!(
                 &command,
-                Command::UpdateMetadata {
-                    worktree_path: Some(None),
-                    ..
-                }
+                Command::UpdateMetadata { branch, worktree_path, .. }
+                    if branch.is_some() || worktree_path.is_some()
             );
         let lookup = id.clone();
         if !needed
@@ -360,11 +358,7 @@ impl Runtime {
                     });
                 }
             }
-            Command::UpdateMetadata {
-                worktree_path: Some(None),
-                project_root,
-                ..
-            } => {
+            Command::UpdateMetadata { project_root, .. } => {
                 let state = self.registry().state(thread).await?;
                 *project_root = state
                     .thread
