@@ -198,7 +198,7 @@ pub fn claude_skill_overrides(contents: &str) -> Vec<(String, ClaudeSkillOverrid
     let Some(overrides) = settings["skillOverrides"].as_object() else {
         return vec![];
     };
-    overrides
+    let mut parsed = overrides
         .iter()
         .map(|(name, value)| {
             let parsed = match value.as_str()? {
@@ -210,7 +210,9 @@ pub fn claude_skill_overrides(contents: &str) -> Vec<(String, ClaudeSkillOverrid
             Some((name.clone(), parsed))
         })
         .collect::<Option<Vec<_>>>()
-        .unwrap_or_default()
+        .unwrap_or_default();
+    parsed.sort_by(|a, b| a.0.cmp(&b.0));
+    parsed
 }
 /// JSON with `//` and `/* */` comments and trailing commas removed.
 fn lenient_json(text: &str) -> String {
