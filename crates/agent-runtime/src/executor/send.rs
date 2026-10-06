@@ -1,9 +1,9 @@
-use super::effect_command_id;
+use super::{WorkspaceFence, effect_command_id};
 use crate::{
     ActorRegistry, CommandOrigin, Committed, Durability, EffectError, EffectHandler, EffectJob,
     HostOperations, RuntimeError,
 };
-use agent_domain::{Command, CommandId, EffectBody, EffectResult, ThreadId};
+use agent_domain::{Command, CommandId, Effect, EffectBody, EffectResult, Reply, ThreadId};
 use futures_util::future::BoxFuture;
 use std::sync::Arc;
 
@@ -23,6 +23,7 @@ pub trait ThreadCommands: Send + Sync {
 pub struct RegistryThreads {
     pub registry: Arc<ActorRegistry>,
     pub ops: Arc<dyn HostOperations>,
+    pub workspaces: Arc<WorkspaceFence>,
 }
 
 impl ThreadCommands for RegistryThreads {
@@ -33,6 +34,13 @@ impl ThreadCommands for RegistryThreads {
         command: Command,
     ) -> BoxFuture<'_, Result<Committed, RuntimeError>> {
         Box::pin(async move {
+            // A created thread binds its workspace, which a file restore must see.
+            let _binding = match &command {
+                Command::AcceptFork { .. } | Command::AcceptDelegation { .. } => {
+                    Some(self.workspaces.bind().await)
+                }
+                _ => None,
+            };
             self.registry
                 .dispatch(&thread, id, command, CommandOrigin::Internal)
                 .await
@@ -54,6 +62,9 @@ impl ThreadCommands for RegistryThreads {
 
 /// A command from one thread's state machine to another thread (or itself). The
 /// command id `effect:{effect}` makes a retried delivery return the first result.
+/// A rejected command is not delivered: a rejected thread creation fails for good,
+/// a rejected continuation is retried, and either one that never lands is
+/// reported to the sending thread (`ThreadCommandFailed`).
 pub struct SendToThread {
     threads: Arc<dyn ThreadCommands>,
 }
@@ -68,7 +79,7 @@ impl SendToThread {
         effect_id: &str,
         target: &ThreadId,
         command: &Command,
-    ) -> Result<(), RuntimeError> {
+    ) -> Result<Reply, RuntimeError> {
         let command = match command {
             // The effect was recorded with `enabled: true`; the setting may have changed.
             Command::ContinueRestart { source, .. } => Command::ContinueRestart {
@@ -80,7 +91,7 @@ impl SendToThread {
         self.threads
             .dispatch(target.clone(), effect_command_id(effect_id), command)
             .await
-            .map(|_| ())
+            .map(|committed| committed.reply)
     }
 }
 
@@ -94,28 +105,39 @@ impl EffectHandler for SendToThread {
             let EffectBody::SendToThread { thread, command } = &job.effect.body else {
                 return Err(EffectError::Permanent("not a thread command".into()));
             };
-            let Err(error) = self.deliver(&job.effect.id, thread, command).await else {
-                return Ok(None);
+            let reason = match self.deliver(&job.effect.id, thread, command).await {
+                Ok(Reply::Rejected { reason }) => reason,
+                Ok(_) => return Ok(None),
+                Err(error) => return Err(EffectError::Retryable(error.to_string())),
             };
-            // A continuation that can never run settles its delegation as declined.
-            if !job.will_retry
-                && let Command::ContinueRestart { source, .. } = &**command
-            {
-                let declined = CommandId::new(format!("effect:{}:declined", job.effect.id))
-                    .expect("effect ids are nonempty");
-                let command = Command::ContinueRestart {
-                    source: source.clone(),
-                    enabled: false,
-                };
-                if let Err(declined) = self
-                    .threads
-                    .dispatch(thread.clone(), declined, command)
-                    .await
-                {
-                    tracing::warn!(%thread, error = %declined, "could not decline a failed restart continuation");
+            match &**command {
+                Command::AcceptFork { .. } | Command::AcceptDelegation { .. } => {
+                    Err(EffectError::Permanent(reason))
+                }
+                Command::ContinueRestart { .. } => Err(EffectError::Retryable(reason)),
+                // Other commands are the target's to accept or refuse.
+                _ => {
+                    tracing::debug!(%thread, %reason, "a thread refused a command from another thread");
+                    Ok(None)
                 }
             }
-            Err(EffectError::Retryable(error.to_string()))
+        })
+    }
+
+    fn failure(&self, effect: &Effect, error: &str) -> Option<EffectResult> {
+        let EffectBody::SendToThread { thread, command } = &effect.body else {
+            return None;
+        };
+        matches!(
+            **command,
+            Command::AcceptFork { .. }
+                | Command::AcceptDelegation { .. }
+                | Command::ContinueRestart { .. }
+        )
+        .then(|| EffectResult::ThreadCommandFailed {
+            thread: thread.clone(),
+            command: command.clone(),
+            reason: error.to_owned(),
         })
     }
 }

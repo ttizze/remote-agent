@@ -2,7 +2,7 @@ use super::{ExecutorContext, retry};
 use crate::{Durability, EffectError, EffectHandler, EffectJob, Store, StoreError};
 use agent_domain::{
     CapturedBaseline, CheckpointId, CheckpointScope, CheckpointScopeId, CheckpointStatus, Effect,
-    EffectBody, EffectResult, State, ThreadId,
+    EffectBody, EffectResult, Input, Run, RunAttemptId, State, ThreadId,
 };
 use base64::Engine as _;
 use futures_util::future::BoxFuture;
@@ -131,16 +131,10 @@ impl EffectHandler for BaselineBeforeStart {
                     .runs
                     .iter()
                     .find(|run| run.attempt.as_ref() == Some(attempt))
-                    && let Some(scope) = &run.checkpoint_scope
+                    && let Err(error) = self.baseline(&job.thread, &state, run, attempt).await
                 {
-                    let ordinal = run.ordinal.saturating_sub(1);
-                    if let Err(error) =
-                        capture_baseline(&self.context, scope, ordinal, &run.native_baseline_heads)
-                            .await
-                    {
-                        tracing::warn!(run = %run.id, %error,
-                            "checkpoint baseline capture failed; starting the provider without a baseline");
-                    }
+                    tracing::warn!(run = %run.id, %error,
+                        "checkpoint baseline capture failed; starting the provider without a baseline");
                 }
             }
             self.inner.run(job).await
@@ -151,17 +145,71 @@ impl EffectHandler for BaselineBeforeStart {
     }
 }
 
+impl BaselineBeforeStart {
+    /// A run that started outside workspace preparation (an imported, forked or
+    /// delegated thread) first gets the scope of the thread's directory.
+    async fn baseline(
+        &self,
+        thread: &ThreadId,
+        state: &State,
+        run: &Run,
+        attempt: &RunAttemptId,
+    ) -> Result<(), String> {
+        let scope = match &run.checkpoint_scope {
+            Some(scope) => scope.clone(),
+            None => {
+                let Some(cwd) = self.context.cwd(state) else {
+                    return Ok(());
+                };
+                let scope = checkpoint_scope(thread, &cwd);
+                self.context
+                    .input(
+                        thread,
+                        Input::CheckpointScope {
+                            run: Some(run.id.clone()),
+                            attempt: Some(attempt.clone()),
+                            scope: Some(scope.clone()),
+                        },
+                    )
+                    .await
+                    .map_err(|error| error.to_string())?;
+                scope
+            }
+        };
+        let ordinal = run.ordinal.saturating_sub(1);
+        // A rolled-back checkpoint's ref may outlive the rollback that made it stale.
+        let stale = state.checkpoints.iter().any(|checkpoint| {
+            checkpoint.scope.as_ref() == Some(&scope)
+                && checkpoint.run_ordinal == ordinal
+                && checkpoint.status == CheckpointStatus::Stale
+        });
+        capture_baseline(
+            &self.context,
+            &scope,
+            ordinal,
+            &run.native_baseline_heads,
+            stale,
+        )
+        .await
+    }
+}
+
 async fn capture_baseline(
     context: &ExecutorContext,
     scope: &CheckpointScope,
     ordinal: u64,
     heads: &Heads,
+    stale: bool,
 ) -> Result<(), String> {
     let ops = &context.ops;
     if !ops.is_git_repository(scope.cwd.clone()).await {
         return Ok(());
     }
     let reference = checkpoint_reference(&scope.id, ordinal);
+    if stale {
+        ops.delete_checkpoints(scope.cwd.clone(), vec![reference.clone()])
+            .await?;
+    }
     if !ops
         .has_checkpoint(scope.cwd.clone(), reference.clone())
         .await?
@@ -207,10 +255,14 @@ impl EffectHandler for CaptureCheckpoint {
             let ordinal = target.ordinal;
             let mut baselines = Vec::new();
             for baseline in BTreeSet::from([0, ordinal.saturating_sub(1)]) {
-                let exists = state.checkpoints.iter().any(|checkpoint| {
-                    checkpoint.scope.as_ref() == Some(scope) && checkpoint.run_ordinal == baseline
+                // A missing, failed or stale baseline is materialized again (T3
+                // CheckpointCaptureService skips only ready ones).
+                let ready = state.checkpoints.iter().any(|checkpoint| {
+                    checkpoint.scope.as_ref() == Some(scope)
+                        && checkpoint.run_ordinal == baseline
+                        && checkpoint.status == CheckpointStatus::Ready
                 });
-                if baseline >= ordinal || exists {
+                if baseline >= ordinal || ready {
                     continue;
                 }
                 let heads = if baseline + 1 == ordinal {
@@ -218,7 +270,10 @@ impl EffectHandler for CaptureCheckpoint {
                 } else {
                     Heads::new()
                 };
-                baselines.push(self.materialize(scope, baseline, heads).await?);
+                baselines.push(
+                    self.materialize(scope, baseline, heads, job.will_retry)
+                        .await?,
+                );
             }
             let status = capture(&self.0, scope, ordinal).await;
             self.0.ops.run_finalized(&job.thread, run, &scope.cwd);
@@ -241,12 +296,22 @@ impl CaptureCheckpoint {
         scope: &CheckpointScope,
         ordinal: u64,
         heads: Heads,
+        will_retry: bool,
     ) -> Result<CapturedBaseline, EffectError> {
         let (lookup, id) = (self.0.store.clone(), scope.id.clone());
-        let recorded = lookup
+        // The last attempt settles the run with the heads it has rather than
+        // leaving it waiting for a capture that will never run again.
+        let recorded = match lookup
             .blocking(move |store| store.checkpoint_baseline(&id, ordinal))
             .await
-            .map_err(retry)?;
+        {
+            Ok(recorded) => recorded,
+            Err(error) if will_retry => return Err(retry(error)),
+            Err(error) => {
+                tracing::warn!(scope = %scope.id, ordinal, %error, "recorded baseline heads are unavailable");
+                None
+            }
+        };
         let reference = checkpoint_reference(&scope.id, ordinal);
         let ops = &self.0.ops;
         let available = ops.is_git_repository(scope.cwd.clone()).await

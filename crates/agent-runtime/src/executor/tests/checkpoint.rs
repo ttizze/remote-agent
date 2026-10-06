@@ -238,3 +238,77 @@ async fn does_not_capture_a_stopped_run_that_a_rollback_already_discarded() {
             .all(|(_, status)| *status == crate::EffectStatus::Succeeded)
     );
 }
+
+// T3 CheckpointCaptureService.ts skips only ready baselines: one that was missing
+// because its lookup failed becomes ready once the ref can be read again.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_missing_baseline_is_materialized_again_by_a_later_capture() {
+    let rig = rig();
+    let id = tid("thread-missing-baseline");
+    rig.scoped(&id, root_workspace("/repo")).await;
+    let first = rig.send(&id, "first", "first").await;
+    rig.drain().await;
+    rig.ops.fail_lookup.store(true, Ordering::SeqCst);
+    rig.turn(&id, &first, "turn-1", RunStatus::Completed).await;
+    rig.drain().await;
+    assert_eq!(
+        statuses(&*rig.state(&id).await),
+        [
+            (0, CheckpointStatus::Missing, false),
+            (1, CheckpointStatus::Ready, true)
+        ]
+    );
+
+    rig.ops.fail_lookup.store(false, Ordering::SeqCst);
+    rig.completed_run(&id, "second", "turn-2").await;
+    assert_eq!(
+        statuses(&*rig.state(&id).await),
+        [
+            (0, CheckpointStatus::Ready, false),
+            (1, CheckpointStatus::Ready, true),
+            (2, CheckpointStatus::Ready, true)
+        ]
+    );
+}
+
+// T3 Orchestrator.ts prepares a root scope for every root run: a thread that never
+// went through workspace preparation (imported, forked or delegated) still
+// checkpoints its runs in a scope of its own.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_run_without_a_prepared_scope_checkpoints_in_its_threads_own_scope() {
+    let rig = rig();
+    let parent = tid("thread-scoped-parent");
+    let child = tid("thread-unscoped-child");
+    let parent_scope = rig.scoped(&parent, worktree("/wt")).await;
+    rig.create(&child, Some(worktree("/wt"))).await;
+    assert_eq!(rig.state(&child).await.checkpoint_scope, None);
+
+    let run = rig.completed_run(&child, "first", "turn-1").await;
+
+    let scope = checkpoint_scope(&child, "/wt");
+    assert_ne!(scope.id, parent_scope.id);
+    let state = rig.state(&child).await;
+    assert_eq!(state.checkpoint_scope.as_ref(), Some(&scope));
+    assert_eq!(
+        rig.run(&child, &run).await.checkpoint_scope,
+        Some(scope.clone())
+    );
+    assert_eq!(
+        statuses(&state),
+        [
+            (0, CheckpointStatus::Ready, false),
+            (1, CheckpointStatus::Ready, true)
+        ]
+    );
+    assert_eq!(
+        rig.run(&child, &run).await.checkpoint,
+        Some(checkpoint_id(&scope.id, 1))
+    );
+    assert!(
+        rig.ops
+            .refs
+            .lock()
+            .unwrap()
+            .contains(&("/wt".to_owned(), checkpoint_reference(&scope.id, 0)))
+    );
+}

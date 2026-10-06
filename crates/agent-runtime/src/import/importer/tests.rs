@@ -553,12 +553,7 @@ async fn the_first_run_imports_every_registered_project_once() {
     ]));
     let importer = Arc::new(scanner_importer(&h, &setup));
 
-    let counts = importer
-        .clone()
-        .spawn_first_run(projects.clone())
-        .await
-        .unwrap()
-        .unwrap();
+    let counts = importer.first_run(projects.as_ref()).await.unwrap();
     assert_eq!(
         counts,
         Some(ImportCounts {
@@ -568,14 +563,7 @@ async fn the_first_run_imports_every_registered_project_once() {
     );
     assert_eq!(h.state("import:codex:b").thread.unwrap().project, "second");
 
-    assert_eq!(
-        importer
-            .spawn_first_run(projects.clone())
-            .await
-            .unwrap()
-            .unwrap(),
-        None
-    );
+    assert_eq!(importer.first_run(projects.as_ref()).await.unwrap(), None);
     assert_eq!(projects.calls.load(Ordering::SeqCst), 1);
 }
 

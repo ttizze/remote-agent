@@ -241,7 +241,6 @@ fn fork_prepared(transcript: &str) -> FactBody {
             history: inherited,
             messages: vec![],
             workspace: None,
-            checkpoint_scope: None,
             context: HistoricalContext {
                 messages: vec![],
                 context: transcript.into(),

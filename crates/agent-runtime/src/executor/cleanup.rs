@@ -27,8 +27,7 @@ impl EffectHandler for DeleteAttachments {
     }
 }
 
-/// Closes the terminals of the thread's directory unless another live thread
-/// works in the same directory.
+/// Closes the thread's terminals (T3 `ResourceCleanupService`).
 pub(crate) struct CleanupTerminals(pub(crate) ExecutorContext);
 
 impl EffectHandler for CleanupTerminals {
@@ -37,28 +36,11 @@ impl EffectHandler for CleanupTerminals {
     }
     fn run(&self, job: EffectJob) -> BoxFuture<'_, Result<Option<EffectResult>, EffectError>> {
         Box::pin(async move {
-            let context = &self.0;
-            let state = context.state(&job.thread).await?;
-            let Some(cwd) = context.cwd(&state) else {
-                return Ok(None);
-            };
-            let others = context
-                .store
-                .blocking(|store| store.live_threads())
+            self.0
+                .ops
+                .cleanup_terminals(job.thread.clone())
                 .await
                 .map_err(retry)?;
-            let shared = others.iter().any(|other| {
-                other.id != job.thread
-                    && other
-                        .workspace
-                        .as_ref()
-                        .map(|workspace| workspace.cwd.clone())
-                        .or_else(|| context.ops.project(&other.project).map(|p| p.root))
-                        .is_some_and(|other| other == cwd)
-            });
-            if !shared {
-                context.ops.cleanup_terminals(cwd).await;
-            }
             Ok(None)
         })
     }

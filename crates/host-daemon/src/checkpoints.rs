@@ -322,6 +322,28 @@ impl Checkpoints {
         Ok(())
     }
 
+    /// Discards originals a recorded restore still keeps aside; the restored files stay.
+    pub(crate) async fn finish_restore(&self, cwd: &Path) -> Result<()> {
+        let cwd = dunce::canonicalize(cwd)?;
+        let root = checkout_root(&cwd).await?;
+        let _guard = self.lock(&root).lock_owned().await;
+        let git_dir = PathBuf::from(
+            text(
+                &root,
+                &["rev-parse", "--path-format=absolute", "--git-dir"],
+                None,
+            )
+            .await?,
+        );
+        for name in ["checkpoint-restore", "checkpoint-restore-completed"] {
+            let directory = git_dir.join(name);
+            if directory.exists() {
+                std::fs::remove_dir_all(directory)?;
+            }
+        }
+        Ok(())
+    }
+
     /// Stages the checkpoint's files under `cwd` in place, keeping the originals aside.
     pub(crate) async fn prepare_restore(
         &self,

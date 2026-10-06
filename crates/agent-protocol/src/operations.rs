@@ -344,6 +344,11 @@ pub struct ReadAccountUsage {
     pub id: String,
 }
 
+/// A thread's terminal identity, used by the Host's cleanup and every client.
+pub fn thread_terminal_handle(thread: &str) -> String {
+    format!("terminal:{thread}")
+}
+
 /// Shared terminal identity for a workspace, used by cleanup and every client.
 pub fn terminal_handle(cwd: &str) -> String {
     format!(

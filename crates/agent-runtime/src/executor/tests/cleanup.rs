@@ -43,7 +43,7 @@ async fn deletion_cleans_up_terminals_and_attachments_of_the_thread() {
     assert_eq!(
         rig.ops.logged(),
         [
-            "terminals /workspace/feature",
+            "terminals thread:delete",
             "delete-attachments thread:delete /attachments/thread:delete.png",
         ]
     );
@@ -57,8 +57,9 @@ async fn deletion_cleans_up_terminals_and_attachments_of_the_thread() {
     }
 }
 
+// T3 ResourceCleanupService.ts closes terminals by thread, whatever directory they share.
 #[tokio::test(flavor = "multi_thread")]
-async fn terminals_stay_open_while_another_thread_works_in_the_directory() {
+async fn only_the_threads_own_terminals_close_when_another_thread_shares_its_directory() {
     let rig = rig();
     let id = tid("thread:delete-shared");
     thread_with_attachment(&rig, &id, "/workspace/shared").await;
@@ -72,7 +73,10 @@ async fn terminals_stay_open_while_another_thread_works_in_the_directory() {
     rig.command(&id, Command::Delete).await;
     rig.drain().await;
 
-    assert!(rig.ops.logged_with("terminals").is_empty());
+    assert_eq!(
+        rig.ops.logged_with("terminals"),
+        ["terminals thread:delete-shared"]
+    );
     assert_eq!(rig.ops.logged_with("delete-attachments").len(), 1);
 }
 
@@ -86,5 +90,5 @@ async fn archiving_detaches_and_cleans_up_terminals_but_keeps_attachments() {
     rig.command(&id, Command::Archive { archived: true }).await;
     rig.drain().await;
 
-    assert_eq!(rig.ops.logged(), ["terminals /workspace/archived"]);
+    assert_eq!(rig.ops.logged(), ["terminals thread:archive"]);
 }

@@ -494,6 +494,9 @@ pub struct PendingRollback {
     pub command: CommandId,
     pub checkpoint: CheckpointId,
     pub restore_files: bool,
+    /// Provider instances whose native history the rollback may already have
+    /// rewound; a failed rollback resets their native sessions.
+    pub rewinding: BTreeSet<String>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PendingFork {
@@ -819,7 +822,6 @@ pub enum Command {
         history: Vec<Item>,
         messages: Vec<Message>,
         workspace: Option<Workspace>,
-        checkpoint_scope: Option<CheckpointScope>,
         context: HistoricalContext,
         native: Option<NativeBinding>,
     },
@@ -1290,6 +1292,13 @@ pub enum EffectResult {
         request: CommandId,
         title: Option<String>,
     },
+    /// A `SendToThread` command that the target rejected or that could not be
+    /// delivered, reported to the thread that sent it.
+    ThreadCommandFailed {
+        thread: ThreadId,
+        command: Box<Command>,
+        reason: String,
+    },
 }
 values! { ProviderOperation { Start, Steer, Interrupt, Respond, Compact, SetModel, SetRuntimeMode } }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1311,6 +1320,11 @@ pub enum Input {
     NativeSessionReset {
         instance: String,
     },
+    /// The rollback effect is about to rewind these provider instances.
+    RollbackRewindStarted {
+        command: CommandId,
+        instances: Vec<String>,
+    },
     Workspace {
         workspace: Option<Workspace>,
     },
@@ -1327,6 +1341,8 @@ pub enum Input {
     Recover {
         trigger: RecoveryTrigger,
         continue_after_restart: bool,
+        /// Waiting runs whose checkpoint capture is still queued to run.
+        capturing: BTreeSet<RunId>,
     },
     Timer,
 }

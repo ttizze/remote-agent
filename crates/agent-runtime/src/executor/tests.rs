@@ -35,11 +35,16 @@ pub(crate) struct FakeOps {
     pub(crate) refs: Mutex<BTreeSet<(String, String)>>,
     pub(crate) fail_capture: AtomicBool,
     pub(crate) fail_lookup: AtomicBool,
+    pub(crate) fail_commit: AtomicBool,
+    pub(crate) fail_delete: AtomicBool,
     /// Resolve paths on the real file system instead of as given.
     pub(crate) real_files: AtomicBool,
     pub(crate) worktree: Mutex<Option<Hook<WorktreeRequest, Result<CreatedWorktree, String>>>>,
     pub(crate) setup: Mutex<Option<Hook<SetupRequest, Result<(), String>>>>,
     pub(crate) on_restore: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    pub(crate) on_real_path: Mutex<Option<Hook<String, ()>>>,
+    /// Record each read of the restart-continuation setting.
+    pub(crate) log_settings: AtomicBool,
     pub(crate) titles: Mutex<VecDeque<Result<String, String>>>,
     pub(crate) generations: Mutex<Vec<TextGenerationRequest>>,
 }
@@ -54,10 +59,14 @@ impl FakeOps {
             refs: Mutex::new(BTreeSet::new()),
             fail_capture: AtomicBool::new(false),
             fail_lookup: AtomicBool::new(false),
+            fail_commit: AtomicBool::new(false),
+            fail_delete: AtomicBool::new(false),
             real_files: AtomicBool::new(false),
             worktree: Mutex::new(None),
             setup: Mutex::new(None),
             on_restore: Mutex::new(None),
+            on_real_path: Mutex::new(None),
+            log_settings: AtomicBool::new(false),
             titles: Mutex::new(VecDeque::new()),
             generations: Mutex::new(vec![]),
         })
@@ -94,6 +103,9 @@ impl PreparedRestore for FakeRestore {
     fn commit(self: Box<Self>) -> BoxFuture<'static, Result<(), String>> {
         Box::pin(async move {
             self.0.record("commit");
+            if self.0.fail_commit.load(Ordering::SeqCst) {
+                return Err("simulated commit failure".into());
+            }
             Ok(())
         })
     }
@@ -110,11 +122,18 @@ impl HostOperations for Ops {
     fn projects(&self) -> Vec<HostProject> {
         self.0.projects.lock().unwrap().clone()
     }
-    fn continue_after_restart(&self, _: &str) -> bool {
+    fn continue_after_restart(&self, project: &str) -> bool {
+        if self.0.log_settings.load(Ordering::SeqCst) {
+            self.0.record(format!("continue-setting {project}"));
+        }
         self.0.continue_enabled.load(Ordering::SeqCst)
     }
     fn real_path(&self, path: String) -> BoxFuture<'_, io::Result<Option<String>>> {
         Box::pin(async move {
+            let hook = self.0.on_real_path.lock().unwrap().clone();
+            if let Some(hook) = hook {
+                hook(path.clone()).await;
+            }
             if !self.0.real_files.load(Ordering::SeqCst) {
                 return Ok(Some(path));
             }
@@ -172,6 +191,12 @@ impl HostOperations for Ops {
             Ok(Box::new(FakeRestore(self.0.clone())) as Box<dyn PreparedRestore>)
         })
     }
+    fn finish_restore(&self, cwd: String) -> BoxFuture<'_, Result<(), String>> {
+        Box::pin(async move {
+            self.0.record(format!("finish-restore {cwd}"));
+            Ok(())
+        })
+    }
     fn delete_checkpoints(
         &self,
         cwd: String,
@@ -181,6 +206,9 @@ impl HostOperations for Ops {
             let ordinals: Vec<_> = references.iter().map(|r| ordinal(r)).collect();
             self.0
                 .record(format!("delete {cwd} {}", ordinals.join(",")));
+            if self.0.fail_delete.load(Ordering::SeqCst) {
+                return Err("simulated ref deletion failure".into());
+            }
             let mut refs = self.0.refs.lock().unwrap();
             for reference in references {
                 refs.remove(&(cwd.clone(), reference));
@@ -234,8 +262,11 @@ impl HostOperations for Ops {
             Ok(())
         })
     }
-    fn cleanup_terminals(&self, cwd: String) -> BoxFuture<'_, ()> {
-        Box::pin(async move { self.0.record(format!("terminals {cwd}")) })
+    fn cleanup_terminals(&self, thread: ThreadId) -> BoxFuture<'_, Result<(), String>> {
+        Box::pin(async move {
+            self.0.record(format!("terminals {thread}"));
+            Ok(())
+        })
     }
     fn generate_text(
         &self,
@@ -279,6 +310,7 @@ pub(crate) struct Rig {
     pub(crate) host: Arc<FakeHost>,
     pub(crate) ops: Arc<FakeOps>,
     pub(crate) context: ExecutorContext,
+    pub(crate) preparations: crate::Preparations,
     pub(crate) handlers: EffectHandlers,
     pub(crate) worker: Arc<EffectWorker>,
     pub(crate) clock: Arc<ManualClock>,
@@ -328,6 +360,7 @@ pub(crate) fn rig_with(options: RigOptions) -> Rig {
         registry: registry.clone(),
         sessions: sessions.clone(),
         ops: Arc::new(Ops(ops.clone())),
+        workspaces: Arc::new(WorkspaceFence::default()),
     };
     let mut handlers = with_runtime_handlers(EffectHandlers::default(), &context);
     if options.stub_start {
@@ -358,6 +391,7 @@ pub(crate) fn rig_with(options: RigOptions) -> Rig {
         host,
         ops,
         context,
+        preparations: crate::Preparations::default(),
         handlers,
         worker,
         clock,

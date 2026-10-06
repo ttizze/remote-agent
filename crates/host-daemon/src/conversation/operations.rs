@@ -370,11 +370,22 @@ impl HostOperations for HostIo {
     ) -> BoxFuture<'_, Result<(), String>> {
         Box::pin(async move { self.files.delete_claimed(paths).await.map_err(error) })
     }
-    fn cleanup_terminals(&self, cwd: String) -> BoxFuture<'_, ()> {
+    fn cleanup_terminals(&self, thread: ThreadId) -> BoxFuture<'_, Result<(), String>> {
         Box::pin(async move {
             self.terminals
-                .cleanup_handle(&agent_protocol::operations::terminal_handle(&cwd))
+                .cleanup_handle(&agent_protocol::operations::thread_terminal_handle(
+                    thread.as_str(),
+                ))
                 .await;
+            Ok(())
+        })
+    }
+    fn finish_restore(&self, cwd: String) -> BoxFuture<'_, Result<(), String>> {
+        Box::pin(async move {
+            self.checkpoints
+                .finish_restore(Path::new(&cwd))
+                .await
+                .map_err(error)
         })
     }
     fn generate_text(
