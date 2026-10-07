@@ -3,9 +3,9 @@ use super::control::ClaudeProgram;
 use crate::conversation::ProcessSpec;
 use agent_domain::Driver;
 use agent_providers::{read_frame, write_frame};
-use tokio::io::BufReader;
 use serde_json::{Value, json};
 use std::{io, path::Path, process::Stdio};
+use tokio::io::BufReader;
 
 impl ClaudeProgram {
     pub(crate) async fn sdk_requests(
@@ -24,16 +24,33 @@ impl ClaudeProgram {
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()?;
-        let mut writer = child.stdin.take().ok_or_else(|| io::Error::other("Claude SDK stdin missing"))?;
-        let mut reader = BufReader::new(child.stdout.take().ok_or_else(|| io::Error::other("Claude SDK stdout missing"))?);
+        let mut writer = child
+            .stdin
+            .take()
+            .ok_or_else(|| io::Error::other("Claude SDK stdin missing"))?;
+        let mut reader = BufReader::new(
+            child
+                .stdout
+                .take()
+                .ok_or_else(|| io::Error::other("Claude SDK stdout missing"))?,
+        );
         let mut line = Vec::new();
         let result = tokio::time::timeout(std::time::Duration::from_secs(30), async {
             let mut result = Value::Null;
             for (id, request) in requests.into_iter().enumerate() {
                 let id = id.to_string();
-                write_frame(&mut writer, &json!({"type":"control_request", "request_id":id, "request":request})).await?;
+                write_frame(
+                    &mut writer,
+                    &json!({"type":"control_request", "request_id":id, "request":request}),
+                )
+                .await?;
                 loop {
-                    let frame = read_frame(&mut reader, &mut line).await?.ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "Claude SDK closed before replying"))?;
+                    let frame = read_frame(&mut reader, &mut line).await?.ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::UnexpectedEof,
+                            "Claude SDK closed before replying",
+                        )
+                    })?;
                     if frame["type"] != "control_response" || frame["response"]["request_id"] != id
                     {
                         continue;

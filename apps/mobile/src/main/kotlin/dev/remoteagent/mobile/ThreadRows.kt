@@ -29,6 +29,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.Undo
 import androidx.compose.material.icons.outlined.AlarmOff
 import androidx.compose.material.icons.outlined.Check
+import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.ExpandMore
 import androidx.compose.material.icons.outlined.HourglassTop
 import androidx.compose.material.icons.outlined.PushPin
@@ -447,7 +448,13 @@ private fun SlimRow(row: ThreadRow) {
 }
 
 @Composable
-internal fun PendingTaskListRow(task: PendingTaskRow, onOpen: () -> Unit, onDelete: () -> Unit) {
+internal fun PendingTaskListRow(
+    task: PendingTaskRow,
+    status: String,
+    isDraft: Boolean,
+    onOpen: () -> Unit,
+    onDelete: () -> Unit,
+) {
     val colors = AppTheme.colors
     var menu by remember { mutableStateOf(false) }
     if (task.showPendingDivider) ShelfHeaderRow("Unsent", null)
@@ -468,7 +475,14 @@ internal fun PendingTaskListRow(task: PendingTaskRow, onOpen: () -> Unit, onDele
                     color = colors.foregroundMuted,
                     maxLines = 1,
                 )
-                Text("Sends on reconnect", style = AppTheme.caption, color = colors.foregroundTertiary)
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(3.5.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    val tint = if (isDraft) colors.amber else colors.foregroundTertiary
+                    if (isDraft) Icon(Icons.Outlined.Edit, null, Modifier.size(10.dp), tint = tint)
+                    Text(status, style = AppTheme.caption, color = tint)
+                }
             }
             Text(
                 task.title,

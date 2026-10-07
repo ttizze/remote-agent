@@ -522,6 +522,40 @@ pub enum PendingTaskKind {
     },
 }
 
+/// Native clients apply these decisions and choose their presentation surface.
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct PendingTaskActions {
+    pub open: crate::state::Intent,
+    pub discard: crate::state::Intent,
+    pub status: String,
+    pub is_draft: bool,
+}
+
+#[cfg_attr(feature = "bindings", uniffi::export)]
+pub fn pending_task_actions(kind: PendingTaskKind, project_id: String) -> PendingTaskActions {
+    use crate::state::Intent;
+    match kind {
+        PendingTaskKind::Queued {
+            command_id,
+            thread_id,
+        } => PendingTaskActions {
+            open: Intent::OpenThread { thread_id },
+            discard: Intent::DiscardPending { command_id },
+            status: "Sends on reconnect".into(),
+            is_draft: false,
+        },
+        PendingTaskKind::Draft { draft_key } => PendingTaskActions {
+            open: Intent::NewThread {
+                project_id: Some(project_id),
+            },
+            discard: Intent::DiscardDraft { draft_key },
+            status: "Draft".into(),
+            is_draft: true,
+        },
+    }
+}
+
 /// Unsent work that will become a thread.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]

@@ -198,15 +198,15 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
         }
     }
 
-    fun navigate(next: Route) {
+    fun navigate(next: Route, selection: Intent? = null) {
         when (next) {
             is Route.Thread -> {
                 draftEdits.reset()
-                perform(Intent.OpenThread(next.id))
+                perform(selection ?: Intent.OpenThread(next.id))
             }
             Route.NewTask -> {
                 draftEdits.reset()
-                perform(Intent.NewThread(snapshot.selectedProjectId()))
+                perform(selection ?: Intent.NewThread(snapshot.selectedProjectId()))
             }
             Route.Archived -> perform(Intent.ShowArchived(true))
             else -> Unit

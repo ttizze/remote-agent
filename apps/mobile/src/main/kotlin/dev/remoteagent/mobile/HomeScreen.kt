@@ -58,6 +58,7 @@ import dev.remoteagent.core.ThreadListItem
 import dev.remoteagent.core.ThreadListOptions
 import dev.remoteagent.core.ThreadRow
 import dev.remoteagent.core.TimestampFormat
+import dev.remoteagent.core.pendingTaskActions
 
 private const val SETTLED_INITIAL_COUNT = 10u
 private const val SETTLED_PAGE_COUNT = 25u
@@ -147,12 +148,23 @@ internal fun HomeScreen(model: AndroidAppModel) {
                                         rowDrivers(item.row, drivers.orEmpty()),
                                         rowActions,
                                     )
-                                is ThreadListItem.PendingTask ->
+                                is ThreadListItem.PendingTask -> {
+                                    val actions = pendingTaskActions(item.task.kind, item.task.projectId)
                                     PendingTaskListRow(
                                         item.task,
-                                        onOpen = { model.navigate(Route.Thread(item.task.threadId)) },
-                                        onDelete = { model.perform(Intent.DiscardPending(item.task.commandId)) },
+                                        status = actions.status,
+                                        isDraft = actions.isDraft,
+                                        onOpen = {
+                                            when (val open = actions.open) {
+                                                is Intent.OpenThread ->
+                                                    model.navigate(Route.Thread(open.threadId), open)
+                                                is Intent.NewThread -> model.navigate(Route.NewTask, open)
+                                                else -> Unit
+                                            }
+                                        },
+                                        onDelete = { model.perform(actions.discard) },
                                     )
+                                }
                                 is ThreadListItem.WorkingShelf ->
                                     ShelfHeaderRow("Working", item.shelf) { workingExpanded = !workingExpanded }
                                 is ThreadListItem.SnoozedShelf ->

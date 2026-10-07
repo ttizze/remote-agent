@@ -3,6 +3,9 @@ import test from "node:test";
 import { PassThrough, Writable } from "node:stream";
 import { EventEmitter, once } from "node:events";
 import { spawn } from "node:child_process";
+import { readFileSync } from "node:fs";
+import { createInterface } from "node:readline";
+import * as realSdk from "./process-sdk-fixture.mjs";
 import { fileURLToPath } from "node:url";
 import * as sdk from "./sdk.mjs";
 import { forkTranscript, runBridge } from "./bridge.mjs";
@@ -32,10 +35,6 @@ function harness() {
   const output = new Writable({ write(bytes, _encoding, done) {
     frames.push(JSON.parse(bytes.toString())); events.emit("frame"); done();
   } });
-  const fixture = fileURLToPath(new URL("./fake-cli.mjs", import.meta.url));
-  const realSdk = { query: ({ prompt, options }) => sdk.query({ prompt, options: { ...options,
-    spawnClaudeCodeProcess: (spec) => spawn(process.execPath, [fixture, ...spec.args], { cwd: spec.cwd, env: spec.env, stdio: ["pipe", "pipe", "pipe"] }),
-  } }) };
   const completion = runBridge(realSdk, "unused-claude", input, output);
   const send = (frame) => input.write(`${JSON.stringify(frame)}\n`);
   async function take(predicate) {
@@ -114,4 +113,23 @@ test("unknown SDK dialogs cancel immediately without blocking the conversation",
     h.send({ type: "user", uuid: "one", session_id: "", parent_tool_use_id: null, message: { role: "user", content: "future-dialog" } });
     assert.equal((await h.take((frame) => frame.type === "assistant")).message.content[0].text, "cancelled");
   } finally { h.input.end(); await h.completion; }
+});
+
+test("the actual worker exits after SDK failure while Host stdin stays open", { timeout: 10000 }, async () => {
+  const worker = readFileSync(new URL("./bridge.mjs", import.meta.url), "utf8");
+  const fixture = fileURLToPath(new URL("./process-sdk-fixture.mjs", import.meta.url));
+  const child = spawn(process.execPath, ["--input-type=module", "--eval", worker, fixture, "unused-claude"], { stdio: ["pipe", "pipe", "pipe"] });
+  child.stdin.on("error", () => {});
+  const lines = createInterface({ input: child.stdout })[Symbol.asyncIterator]();
+  const exit = once(child, "exit", { signal: AbortSignal.timeout(5000) });
+  try {
+    child.stdin.write(JSON.stringify({ type: "control_request", request_id: "initialize", request: { subtype: "initialize" } }) + "\n");
+    const initialized = JSON.parse((await lines.next()).value);
+    assert.equal(initialized.response.subtype, "success");
+    child.stdin.write(JSON.stringify({ type: "user", uuid: "one", session_id: "", parent_tool_use_id: null, message: { role: "user", content: "crash" } }) + "\n");
+    const failure = JSON.parse((await lines.next()).value);
+    assert.equal(failure.type, "sdk_error");
+    assert.match(failure.message, /7/);
+    assert.equal((await exit)[0], 0);
+  } finally { child.stdin.end(); child.kill(); }
 });

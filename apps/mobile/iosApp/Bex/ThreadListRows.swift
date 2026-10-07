@@ -194,6 +194,8 @@ struct PendingTaskRowView: View {
     let task: PendingTaskRow
     let icon: UIImage?
     let sidebar: Bool
+    let status: String
+    let isDraft: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -205,7 +207,12 @@ struct PendingTaskRowView: View {
                     ProjectGlyph(name: task.projectTitle, icon: icon)
                     Text(task.projectTitle).font(AppTheme.font(14, weight: .medium)).foregroundStyle(AppTheme.muted)
                         .lineLimit(1).frame(maxWidth: .infinity, alignment: .leading)
-                    Text("Sends on reconnect").font(AppTheme.font(13)).foregroundStyle(AppTheme.tertiary)
+                    HStack(spacing: 3.5) {
+                        if isDraft {
+                            Image(systemName: "square.and.pencil").font(AppTheme.font(10))
+                        }
+                        Text(status).font(AppTheme.font(13))
+                    }.foregroundStyle(isDraft ? AppTheme.amber : AppTheme.tertiary)
                 }
                 Text(task.title).font(AppTheme.font(16, weight: .medium)).lineLimit(1)
                 if let branch = task.branch {

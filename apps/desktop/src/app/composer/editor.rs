@@ -212,7 +212,9 @@ impl Desktop {
         cx: &mut Context<Self>,
     ) {
         self.composer.editor.update(cx, |editor, cx| {
-            editor.set_value(text, window, cx);
+            editor.replace_all(text, window, cx);
+            let end = editor.value().len();
+            editor.set_selected_range(end..end, cx);
             editor.focus(window, cx);
         });
     }
