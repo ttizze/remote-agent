@@ -43,6 +43,7 @@ impl Owner {
     /// The composer's text or cursor changed: loads the provider's commands
     /// for its directory and schedules the `@` path search.
     pub(super) fn update_composer_menu(&mut self, text: &str, cursor: u32, layout: TimelineLayout) {
+        self.state.sources.composer_layout = layout;
         let draft = self.state.current_draft();
         let cwd = self.state.composer_cwd();
         if !draft.instance_id.is_empty() && !cwd.is_empty() {

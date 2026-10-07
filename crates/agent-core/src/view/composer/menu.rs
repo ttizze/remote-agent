@@ -5,6 +5,7 @@ use super::commands::{
     detect_composer_trigger, has_compactable_conversation,
 };
 use crate::state::Snapshot;
+use crate::view::timeline::rows::TimelineLayout;
 use agent_domain::ThreadShell;
 use agent_protocol::workspace as w;
 
@@ -13,40 +14,72 @@ use agent_protocol::workspace as w;
 pub struct ComposerMenuView {
     pub trigger: Option<ComposerTrigger>,
     pub items: Vec<ComposerCommandItem>,
-    /// What the open menu says when nothing matches.
+    /// What the open menu says without items: its loading text, or that
+    /// nothing matched.
     pub empty_label: Option<String>,
-    /// The path search for the trigger's query has not answered yet.
+    /// The search behind the trigger has not answered yet.
     pub loading: bool,
 }
 
-/// The empty menu's text for a trigger. The Host looks up no pull requests,
-/// so that trigger never has a project to search.
-pub fn composer_menu_empty_label(kind: ComposerTriggerKind) -> &'static str {
-    match kind {
-        ComposerTriggerKind::Skill => "No skills found. Try / to browse provider commands.",
-        ComposerTriggerKind::Path => "No matching files or folders.",
-        ComposerTriggerKind::PullRequest => "Pull requests are not available for this project.",
-        ComposerTriggerKind::SlashCommand | ComposerTriggerKind::SlashModel => {
-            "No matching command."
+/// The empty menu's text for a trigger in each layout's wording. The Host
+/// looks up no pull requests, so that trigger never has a project to search.
+pub fn composer_menu_empty_label(
+    kind: ComposerTriggerKind,
+    layout: TimelineLayout,
+) -> &'static str {
+    match (layout, kind) {
+        (_, ComposerTriggerKind::Path) => "No matching files or folders.",
+        (TimelineLayout::Desktop, ComposerTriggerKind::Skill) => {
+            "No skills found. Try / to browse provider commands."
         }
+        (TimelineLayout::Desktop, ComposerTriggerKind::PullRequest) => {
+            "Pull requests are not available for this project."
+        }
+        (TimelineLayout::Desktop, _) => "No matching command.",
+        (TimelineLayout::Mobile, ComposerTriggerKind::Skill) => "No skills found.",
+        (TimelineLayout::Mobile, ComposerTriggerKind::PullRequest) => {
+            "Pull requests are unavailable for this project."
+        }
+        (TimelineLayout::Mobile, _) => "No matching commands.",
+    }
+}
+
+/// The menu's text while its search runs.
+pub fn composer_menu_loading_label(
+    kind: ComposerTriggerKind,
+    layout: TimelineLayout,
+) -> &'static str {
+    match (layout, kind) {
+        (TimelineLayout::Mobile, ComposerTriggerKind::Path) => "Searching files…",
+        (TimelineLayout::Mobile, _) => "Loading…",
+        (TimelineLayout::Desktop, ComposerTriggerKind::Skill) => "Searching workspace skills...",
+        (TimelineLayout::Desktop, ComposerTriggerKind::PullRequest) => "Finding pull request...",
+        (TimelineLayout::Desktop, _) => "Searching workspace files...",
     }
 }
 
 /// The menu for `text` with the cursor at `cursor` (UTF-16), from the
 /// provider's skills and commands and the `@` path search that
-/// `Intent::UpdateComposerMenu` loads.
+/// `Intent::UpdateComposerMenu` loads, worded for the layout it named.
 pub fn composer_menu(snapshot: &Snapshot, text: &str, cursor: u32) -> ComposerMenuView {
     let Some(trigger) = detect_composer_trigger(text, cursor) else {
         return ComposerMenuView::default();
     };
+    let layout = snapshot.sources.composer_layout;
     let loading = trigger.kind == ComposerTriggerKind::Path
         && !trigger.query.trim().is_empty()
         && !snapshot.composer_cwd().is_empty()
         && path_entries(snapshot, &trigger).is_none();
     let items = composer_menu_items(snapshot, &trigger);
     ComposerMenuView {
-        empty_label: (items.is_empty() && !loading)
-            .then(|| composer_menu_empty_label(trigger.kind).into()),
+        empty_label: items.is_empty().then(|| {
+            if loading {
+                composer_menu_loading_label(trigger.kind, layout)
+            } else {
+                composer_menu_empty_label(trigger.kind, layout)
+            }
+            .into()
+        }),
         trigger: Some(trigger),
         items,
         loading,
@@ -164,12 +197,16 @@ mod tests {
             Some("No matching files or folders.")
         );
         assert_eq!(
-            composer_menu_empty_label(ComposerTriggerKind::Skill),
+            composer_menu_empty_label(ComposerTriggerKind::Skill, TimelineLayout::Desktop),
             "No skills found. Try / to browse provider commands."
         );
         assert_eq!(
-            composer_menu_empty_label(ComposerTriggerKind::SlashCommand),
+            composer_menu_empty_label(ComposerTriggerKind::SlashCommand, TimelineLayout::Desktop),
             "No matching command."
+        );
+        assert_eq!(
+            composer_menu_empty_label(ComposerTriggerKind::SlashCommand, TimelineLayout::Mobile),
+            "No matching commands."
         );
         assert_eq!(
             composer_menu(&snapshot, "plain text", 10),
@@ -233,9 +270,10 @@ mod tests {
         let skill = composer_menu(&snapshot, "$dep", 4);
         assert_eq!(skill.items[0].label, "deploy");
 
+        snapshot.sources.composer_layout = TimelineLayout::Mobile;
         let pending = composer_menu(&snapshot, "@src", 4);
         assert!(pending.loading);
-        assert_eq!(pending.empty_label, None);
+        assert_eq!(pending.empty_label.as_deref(), Some("Searching files…"));
         snapshot.sources.entries.result = Some((
             EntryQuery {
                 cwd: "/repo".into(),

@@ -82,6 +82,8 @@ pub struct WorkspaceSources {
     pub vcs_status: BTreeMap<String, w::VcsStatus>,
     pub refs: BTreeMap<(String, RefScope), RefsEntry>,
     pub diff_preview: Option<DiffPreviewEntry>,
+    /// The layout the composer last reported, whose wording its menu uses.
+    pub composer_layout: crate::view::timeline::rows::TimelineLayout,
 }
 impl WorkspaceSources {
     pub fn provider_commands(&self, instance: &str, cwd: &str) -> Option<&w::ProviderCommands> {
