@@ -35,6 +35,11 @@ const DEFAULTS: &[(&str, &str, Option<&str>)] = &[
     ("mod+shift+]", "thread.next", Some("!terminalFocus")),
     ("mod+shift+s", "thread.settle", Some("!terminalFocus")),
     ("mod+shift+p", "thread.pin", Some("!terminalFocus")),
+    (
+        "mod+z",
+        "thread.undo",
+        Some("!terminalFocus && !editableFocus"),
+    ),
     ("mod+1", "thread.jump.1", Some("isDesktop")),
     ("mod+2", "thread.jump.2", Some("isDesktop")),
     ("mod+3", "thread.jump.3", Some("isDesktop")),
@@ -55,6 +60,8 @@ pub(crate) struct KeyContext {
     pub(crate) terminal_focus: bool,
     pub(crate) terminal_open: bool,
     pub(crate) composer_focus: bool,
+    /// A text field has focus, so it handles its own undo.
+    pub(crate) editable_focus: bool,
 }
 impl KeyContext {
     fn value(&self, name: &str) -> bool {
@@ -62,6 +69,7 @@ impl KeyContext {
             "terminalFocus" => self.terminal_focus,
             "terminalOpen" => self.terminal_open,
             "composerFocus" => self.composer_focus,
+            "editableFocus" => self.editable_focus,
             "isDesktop" | "true" => true,
             _ => false,
         }
@@ -253,6 +261,41 @@ impl Keymap {
             .map(|binding| binding.command)
     }
 
+    /// The shortcut that runs `command`, as menus and hints write it: `⇧⌘Z`
+    /// on macOS, `Ctrl+Shift+Z` elsewhere.
+    pub(crate) fn shortcut_label(&self, command: &str) -> Option<String> {
+        let binding = self
+            .bindings()
+            .into_iter()
+            .find(|binding| binding.command == command)?;
+        let parts: Vec<&str> = binding.key.split('+').collect();
+        let (key, modifiers) = parts.split_last()?;
+        let has = |name: &str| modifiers.contains(&name);
+        let mac = cfg!(target_os = "macos");
+        let key = key_caps(key).concat();
+        if mac {
+            return Some(format!(
+                "{}{}{}{}{key}",
+                if has("ctrl") { "⌃" } else { "" },
+                if has("alt") { "⌥" } else { "" },
+                if has("shift") { "⇧" } else { "" },
+                if has("mod") { "⌘" } else { "" },
+            ));
+        }
+        let mut words: Vec<String> = vec![];
+        if has("mod") || has("ctrl") {
+            words.push("Ctrl".into());
+        }
+        if has("alt") {
+            words.push("Alt".into());
+        }
+        if has("shift") {
+            words.push("Shift".into());
+        }
+        words.push(key);
+        Some(words.join("+"))
+    }
+
     /// The commands besides `command` that `key` also runs.
     pub(crate) fn conflicts(&self, key: &str, command: &str) -> Vec<String> {
         self.bindings()
@@ -375,6 +418,34 @@ mod tests {
             command_label("thread.editQueuedMessage"),
             "Queue: Edit Last Queued Message"
         );
+    }
+
+    // web keybindings.test.ts "thread undo shortcut"
+    #[test]
+    fn undo_runs_only_with_nothing_editable_focused() {
+        let keymap = Keymap::default();
+        assert_eq!(
+            keymap.resolve("mod+z", &KeyContext::default()).as_deref(),
+            Some("thread.undo")
+        );
+        for context in [
+            KeyContext {
+                editable_focus: true,
+                ..KeyContext::default()
+            },
+            KeyContext {
+                terminal_focus: true,
+                ..KeyContext::default()
+            },
+        ] {
+            assert_eq!(keymap.resolve("mod+z", &context), None);
+        }
+        let label = keymap.shortcut_label("thread.undo").unwrap();
+        if cfg!(target_os = "macos") {
+            assert_eq!(label, "⌘Z");
+        } else {
+            assert_eq!(label, "Ctrl+Z");
+        }
     }
 
     #[test]

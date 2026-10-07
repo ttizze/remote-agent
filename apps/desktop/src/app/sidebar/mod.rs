@@ -3,6 +3,10 @@
 mod drag;
 mod row;
 mod scope;
+mod sweep;
+mod undo;
+pub(crate) use drag::ThreadDrag;
+pub(crate) use sweep::SweepDrag;
 
 use super::{
     Desktop, Route,
@@ -46,6 +50,9 @@ pub(crate) struct SidebarState {
     search_index: usize,
     hovered: Option<String>,
     drag: Option<DragState>,
+    sweep: Option<sweep::SweepState>,
+    /// Redraws once the shown Undo expires, at that time.
+    undo_expiry: Option<(i64, Task<()>)>,
     scope: Option<ScopeMenu>,
     jump_hints: bool,
     jump_timer: Option<Task<()>>,
@@ -75,6 +82,8 @@ impl SidebarState {
             search_index: 0,
             hovered: None,
             drag: None,
+            sweep: None,
+            undo_expiry: None,
             scope: None,
             jump_hints: false,
             jump_timer: None,
@@ -182,8 +191,9 @@ pub(crate) fn window_drag(element: Div) -> Div {
 
 impl Desktop {
     pub(crate) fn render_sidebar(&mut self, _: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        if self.sidebar.drag.is_some() && !cx.has_active_drag() {
+        if !cx.has_active_drag() {
             self.sidebar.drag = None;
+            self.sidebar.sweep = None;
         }
         let metrics = ui::metrics();
         v_flex()
@@ -199,6 +209,7 @@ impl Desktop {
             .child(self.render_brand_row(cx))
             .child(self.render_thread_header(cx))
             .child(self.render_thread_list(cx))
+            .children(self.render_undo_notice(cx))
             .child(self.render_sidebar_footer(cx))
             .children(self.render_scope_menu(cx))
             .into_any_element()
@@ -451,6 +462,18 @@ impl Desktop {
             .flex_1()
             .min_h_0()
             .overflow_y_scroll()
+            .on_drag_move::<drag::ThreadDrag>(cx.listener(
+                |view, event: &DragMoveEvent<drag::ThreadDrag>, _, cx| {
+                    let x = event.event.position.x;
+                    let outside = x < event.bounds.left() || x > event.bounds.right();
+                    view.drag_across_list_edge(outside, cx);
+                },
+            ))
+            .on_drag_move::<SweepDrag>(cx.listener(
+                |view, event: &DragMoveEvent<SweepDrag>, _, cx| {
+                    view.sweep_moved(event.event.position.y, event.bounds, cx);
+                },
+            ))
             .child(list)
     }
 

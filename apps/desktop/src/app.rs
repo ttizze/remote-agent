@@ -586,6 +586,9 @@ impl Desktop {
         cx: &mut Context<Self>,
     ) -> bool {
         let keystroke = &event.keystroke;
+        if keystroke.key == "escape" && self.cancel_sweep(window, cx) {
+            return true;
+        }
         if keymap::is_modifier_only(keystroke) || self.settings.recording_shortcut() {
             return false;
         }
@@ -593,6 +596,10 @@ impl Desktop {
             terminal_focus: self.terminal_focused(window, cx),
             terminal_open: self.header_panels().terminal_open,
             composer_focus: self.composer_focused(window, cx),
+            editable_focus: window
+                .context_stack()
+                .iter()
+                .any(|context| context.contains("Input")),
         };
         let key = keymap::keystroke_key(keystroke);
         let Some(command) = self.keymap.resolve(&key, &context) else {
@@ -629,6 +636,7 @@ impl Desktop {
                     .or_else(|| self.snapshot.selected_project.clone());
                 self.new_thread(project, cx);
             }
+            "thread.undo" => return self.undo_thread_action(),
             "thread.previous" => self.select_adjacent_thread(false, cx),
             "thread.next" => self.select_adjacent_thread(true, cx),
             "thread.settle" => self.toggle_open_thread(
@@ -703,6 +711,11 @@ impl Render for Desktop {
                 }
             }))
             .on_modifiers_changed(cx.listener(Self::sidebar_modifiers_changed))
+            .on_drop(
+                cx.listener(|view, _: &sidebar::SweepDrag, window, cx| {
+                    view.finish_sweep(window, cx)
+                }),
+            )
             .relative()
             .size_full()
             .bg(color("canvas"))
