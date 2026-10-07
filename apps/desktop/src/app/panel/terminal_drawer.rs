@@ -811,6 +811,7 @@ mod tests {
             label: id.into(),
             status: "Running".into(),
             running: true,
+            running_process: false,
         }
     }
 

@@ -110,14 +110,10 @@ impl Desktop {
 
     /// Asks the Host for the panel's patch.
     fn load_diff(&mut self, panel: &DiffPanelView) {
-        let cwd = self.snapshot.cwd();
-        let Some(intent) = panel
-            .request
-            .as_ref()
-            .and_then(|request| request.intent((!cwd.is_empty()).then_some(cwd.as_str())))
-        else {
+        if panel.request.is_none() {
             return;
-        };
+        }
+        let intent = Intent::LoadDiff;
         self.panels.diff.loading = true;
         self.panels.diff.error = None;
         self.perform_then(intent, |view, result, _, cx| {
