@@ -236,8 +236,7 @@ pub(crate) fn assemble(
     let mobile_send = mobile_send_presentation(MobileSendInput {
         editing_queued_message: editing.is_some(),
         running: is_running,
-        // The Host steers the live turn of every provider it runs.
-        can_steer: true,
+        can_steer: agent_domain::TurnSupport::for_driver(draft.driver).steer,
         follow_up: snapshot.follow_up,
         delivery_deferred,
     });
