@@ -3,6 +3,36 @@ use crate::sync::fixtures::thread_state;
 use agent_domain::{ThreadId, shell};
 use rstest::rstest;
 
+// client-runtime providerSkills.ts resolveProviderSkillSourceKind.
+#[test]
+fn skill_sources_come_from_plugin_paths_then_the_scope() {
+    assert_eq!(
+        skill_source_kind("/home/me/.codex/plugins/x/SKILL.md", Some("user")),
+        SkillSourceKind::App
+    );
+    assert_eq!(
+        skill_source_kind("C:\\Users\\me\\.agents\\plugins\\x", None),
+        SkillSourceKind::App
+    );
+    assert_eq!(
+        skill_source_kind("/r/a", Some(" Repository ")),
+        SkillSourceKind::Repo
+    );
+    assert_eq!(
+        skill_source_kind("/r/a", Some("workspace")),
+        SkillSourceKind::Project
+    );
+    assert_eq!(
+        skill_source_kind("/r/a", Some("user")),
+        SkillSourceKind::Personal
+    );
+    assert_eq!(
+        skill_source_kind("/r/a", Some("system")),
+        SkillSourceKind::System
+    );
+    assert_eq!(skill_source_kind("/r/a", None).label(), "Provider");
+}
+
 fn utf16_len(text: &str) -> u32 {
     crate::js_text::utf16_len(text) as u32
 }
@@ -583,6 +613,7 @@ fn choosing_a_thread_inserts_its_link_and_attaches_it_once() {
         id: "thread:t1".into(),
         label: "Fix login".into(),
         description: "Thread".into(),
+        skill_source: None,
         target: ComposerCommandTarget::Thread {
             thread_id: "t1".into(),
             title: "Fix login".into(),

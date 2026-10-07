@@ -1,6 +1,7 @@
 //! The provider instances and model catalogue the Host serves
 //! (`host/provider/list`), as the model picker, the traits menu and thread
 //! rows present them.
+pub mod catalog_sheet;
 pub mod display;
 pub mod options;
 pub mod ordering;

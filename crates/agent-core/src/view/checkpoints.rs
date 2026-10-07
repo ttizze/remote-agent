@@ -544,6 +544,9 @@ pub struct GitDiffView {
     pub truncated: bool,
     /// `<head> → <base>` beside the base picker.
     pub comparison_label: Option<String>,
+    /// The mobile review section's subtitle: "Staged, unstaged, and untracked
+    /// files", `<base> ... <head>` or "Base branch unavailable".
+    pub subtitle: Option<String>,
     /// "Automatic" leads the list while the query is empty.
     pub base_ref_choices: Vec<BaseRefChoice>,
     pub base_refs_loading: bool,
@@ -690,6 +693,14 @@ pub fn git_diff_view(
             .is_none_or(|status| status.is_repo),
         loading: preview.is_some_and(|entry| entry.result.is_none() && entry.error.is_none()),
         error: preview.and_then(|entry| entry.error.clone()),
+        subtitle: source.map(|source| match (source.kind, &source.base_ref) {
+            (DiffSourceKind::WorkingTree, _) => "Staged, unstaged, and untracked files".into(),
+            (_, Some(base)) => format!(
+                "{base} ... {}",
+                source.head_ref.as_deref().unwrap_or("HEAD")
+            ),
+            (_, None) => "Base branch unavailable".into(),
+        }),
         comparison_label: base_ref
             .as_ref()
             .map(|base| format!("{} \u{2192} {base}", head.as_deref().unwrap_or("HEAD"))),

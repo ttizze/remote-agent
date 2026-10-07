@@ -245,12 +245,56 @@ pub struct ComposerCommandItem {
     pub label: String,
     pub description: String,
     pub target: ComposerCommandTarget,
+    /// A skill's source, for its badge and icon.
+    pub skill_source: Option<SkillSourceKind>,
+}
+
+/// Where a provider skill comes from, for its badge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
+pub enum SkillSourceKind {
+    App,
+    Repo,
+    Project,
+    Personal,
+    System,
+    #[default]
+    Other,
+}
+impl SkillSourceKind {
+    /// The badge text: "App", "Repo", "Project", "Personal", "System" or "Provider".
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::App => "App",
+            Self::Repo => "Repo",
+            Self::Project => "Project",
+            Self::Personal => "Personal",
+            Self::System => "System",
+            Self::Other => "Provider",
+        }
+    }
+}
+
+/// A plugin path names an app skill, else the provider's scope decides.
+pub fn skill_source_kind(path: &str, scope: Option<&str>) -> SkillSourceKind {
+    let path = path.replace('\\', "/");
+    if path.contains("/.codex/plugins/") || path.contains("/.agents/plugins/") {
+        return SkillSourceKind::App;
+    }
+    match scope.map(|scope| scope.trim().to_lowercase()).as_deref() {
+        Some("repo" | "repository") => SkillSourceKind::Repo,
+        Some("project" | "workspace" | "local") => SkillSourceKind::Project,
+        Some("user" | "personal") => SkillSourceKind::Personal,
+        Some("system") => SkillSourceKind::System,
+        _ => SkillSourceKind::Other,
+    }
 }
 
 /// A skill the selected provider offers for the project.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct ComposerSkill {
+    pub source: SkillSourceKind,
     pub name: String,
     pub display_name: Option<String>,
     pub short_description: Option<String>,
@@ -313,6 +357,7 @@ pub fn slash_command_items(
         id: format!("cmd:{}", command.name()),
         label: format!("/{}", command.name()),
         description: description.into(),
+        skill_source: None,
         target: ComposerCommandTarget::BuiltIn { command },
     })
     .collect();
@@ -340,6 +385,7 @@ pub fn slash_command_items(
             id: format!("pcmd:{}", command.name),
             label: format!("/{}", command.name),
             description: command.description.clone().unwrap_or_default(),
+            skill_source: None,
             target: ComposerCommandTarget::ProviderCommand {
                 name: command.name.clone(),
             },
@@ -403,6 +449,7 @@ fn skill_item(skill: &ComposerSkill, label: String) -> ComposerCommandItem {
         id: format!("skill:{}", skill.name),
         label,
         description: skill_description(skill),
+        skill_source: Some(skill.source),
         target: ComposerCommandTarget::Skill {
             name: skill.name.clone(),
         },
@@ -506,6 +553,7 @@ pub fn thread_items(
             id: format!("thread:{}", shell.id),
             label: shell.title.clone(),
             description: "Thread".into(),
+            skill_source: None,
             target: ComposerCommandTarget::Thread {
                 thread_id: shell.id.to_string(),
                 title: shell.title.clone(),
@@ -524,6 +572,7 @@ fn path_item(entry: &ComposerPathEntry) -> ComposerCommandItem {
         } else {
             String::new()
         },
+        skill_source: None,
         target: ComposerCommandTarget::Path {
             path: entry.path.clone(),
             directory: entry.directory,

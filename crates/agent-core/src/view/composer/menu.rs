@@ -104,6 +104,7 @@ fn path_entries<'a>(
 
 fn composer_skill(skill: &w::ProviderSkill) -> ComposerSkill {
     ComposerSkill {
+        source: super::commands::skill_source_kind(&skill.path, skill.scope.as_deref()),
         name: skill.name.clone(),
         display_name: skill.display_name.clone(),
         short_description: skill.short_description.clone(),

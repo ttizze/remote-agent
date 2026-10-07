@@ -221,6 +221,13 @@ impl Snapshot {
     ) -> ModelPickerView {
         default_model_picker(self, &self.picker_options(query, rail, toggled_legacy))
     }
+    /// The mobile thread settings sheet's model catalogue.
+    pub fn catalog_sheet(
+        &self,
+        options: crate::view::models::catalog_sheet::CatalogSheetOptions,
+    ) -> crate::view::models::catalog_sheet::CatalogSheetView {
+        crate::view::models::catalog_sheet::catalog_sheet(self, &options)
+    }
     pub fn traits(&self) -> TraitsView {
         traits(self, &self.current_draft(), true)
     }

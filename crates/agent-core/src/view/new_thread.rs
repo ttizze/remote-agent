@@ -71,6 +71,11 @@ pub struct NewThreadWorkspaceView {
     pub branch_label: String,
     /// "Branch", or "Base branch" for a new worktree.
     pub branch_role: String,
+    /// The desktop toolbar's label: "Select ref", the branch, or "From <base>"
+    /// (`origin/` only for a local base).
+    pub desktop_branch_label: String,
+    /// The directory the draft runs in: its worktree, else the project's root.
+    pub workspace_path: String,
     /// "Loading branches…" shows instead of the label.
     pub branches_loading: bool,
     /// The project's local branches matching the picker's query.
@@ -227,6 +232,25 @@ fn workspace_view(snapshot: &Snapshot) -> Option<NewThreadWorkspaceView> {
                 workspace.mode,
             )
         },
+        desktop_branch_label: match (branch.as_deref(), workspace.mode) {
+            (None, _) => "Select ref".into(),
+            (Some(name), ThreadWorkspaceMode::Worktree) => {
+                let remote = refs
+                    .and_then(|entry| entry.list.as_ref())
+                    .and_then(|list| list.refs.iter().find(|candidate| candidate.name == name))
+                    .is_some_and(|candidate| candidate.is_remote);
+                if workspace.start_from_origin && !remote {
+                    format!("From origin/{name}")
+                } else {
+                    format!("From {name}")
+                }
+            }
+            (Some(name), ThreadWorkspaceMode::Local) => name.into(),
+        },
+        workspace_path: workspace
+            .worktree_path
+            .clone()
+            .unwrap_or_else(|| root.clone()),
         branch_role: match workspace.mode {
             ThreadWorkspaceMode::Local => "Branch",
             ThreadWorkspaceMode::Worktree => "Base branch",

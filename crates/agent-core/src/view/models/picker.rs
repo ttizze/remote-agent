@@ -123,6 +123,8 @@ pub struct PickerRailItem {
     pub tooltip: String,
     pub selected: bool,
     pub disabled: bool,
+    /// The instance offers a model with the `new` badge (the rail's sparkle).
+    pub new_badge: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -136,6 +138,8 @@ pub struct ModelPickerRow {
     pub provider_name: String,
     pub favorite: bool,
     pub selected: bool,
+    /// `new` for a recently added model.
+    pub badge: Option<String>,
     /// Why choosing this model would fail; the row is disabled.
     pub disabled_reason: Option<String>,
 }
@@ -383,6 +387,7 @@ pub fn build_model_picker(
                 name: model.name.clone(),
                 provider_name: instance.display_name.clone(),
                 favorite: is_favorite(&item),
+                badge: model.badge.clone(),
                 disabled_reason: disabled_reason(&model.instance_id, &model.slug),
             }
         })
@@ -401,6 +406,7 @@ pub fn build_model_picker(
             label: "Favorites".into(),
             tooltip: "Favorites".into(),
             disabled: false,
+            new_badge: false,
         })
         .chain(available.into_iter().chain(locked).map(|instance| {
             let rail = PickerRail::instance(&instance.instance_id);
@@ -421,6 +427,9 @@ pub fn build_model_picker(
                     instance.display_name.clone()
                 },
                 disabled: !instance.picker_ready() || context_disabled,
+                new_badge: catalog
+                    .models_of(&instance.instance_id)
+                    .any(|model| model.badge.as_deref() == Some("new")),
             }
         }))
         .collect()

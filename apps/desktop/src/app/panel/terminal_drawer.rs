@@ -162,6 +162,7 @@ impl Desktop {
                     running_process: tab.is_some_and(|tab| tab.running_process),
                     menu_status: tab.map(|tab| tab.menu_status.clone()).unwrap_or_default(),
                     exited: tab.is_some_and(|tab| tab.exited),
+                    cwd: tab.map(|tab| tab.cwd.clone()).unwrap_or_default(),
                 }
             })
             .collect()
@@ -1188,6 +1189,7 @@ mod tests {
             running: true,
             running_process: false,
             exited: false,
+            cwd: String::new(),
             menu_status: "Ready".into(),
         }
     }
