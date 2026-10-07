@@ -2,7 +2,10 @@
 //! or rail selection shows.
 use super::{
     CatalogModel, ModelCatalog, ProviderInstance, catalog, default_instance_id,
-    ordering::{FavoriteModel, provider_model_key, sort_provider_model_items},
+    ordering::{
+        FavoriteModel, provider_model_key, sort_models_for_provider_instance,
+        sort_provider_model_items,
+    },
     search::{SearchableModel, build_model_picker_search_text, score_model_picker_search},
     switching::{
         HandoffFacts, started_thread_model_change_block, thread_allows_provider_switch,
@@ -158,6 +161,8 @@ pub struct ModelPickerOptions {
     /// The rail item the user chose; `None` opens on the initial one.
     pub rail: Option<PickerRail>,
     pub favorites: Vec<FavoriteModel>,
+    /// The user's model order per instance, by slug.
+    pub model_order: std::collections::HashMap<String, Vec<String>>,
 }
 
 /// The selected model, or the instance's first model when the selection is
@@ -277,23 +282,37 @@ pub fn build_model_picker(
                 PickerRail::Instance { instance_id } => &item.1.instance_id == instance_id,
             })
             .collect();
-        let favorites_rail = selected_rail == PickerRail::Favorites;
-        let order: Vec<String> = if favorites_rail {
-            catalog
-                .instances
-                .iter()
-                .map(|instance| instance.instance_id.clone())
-                .collect()
-        } else {
-            vec![]
-        };
-        sort_provider_model_items(
-            in_rail,
-            |(_, model)| (model.instance_id.as_str(), model.slug.as_str()),
-            &favorites,
-            !favorites_rail,
-            &order,
-        )
+        match &selected_rail {
+            PickerRail::Instance { instance_id } => {
+                let favorite_slugs: Vec<String> = options
+                    .favorites
+                    .iter()
+                    .filter(|favorite| &favorite.instance_id == instance_id)
+                    .map(|favorite| favorite.model.clone())
+                    .collect();
+                sort_models_for_provider_instance(
+                    in_rail,
+                    |(_, model)| model.slug.as_str(),
+                    options
+                        .model_order
+                        .get(instance_id)
+                        .map_or(&[][..], Vec::as_slice),
+                    &favorite_slugs,
+                    true,
+                )
+            }
+            PickerRail::Favorites => sort_provider_model_items(
+                in_rail,
+                |(_, model)| (model.instance_id.as_str(), model.slug.as_str()),
+                &favorites,
+                false,
+                &catalog
+                    .instances
+                    .iter()
+                    .map(|instance| instance.instance_id.clone())
+                    .collect::<Vec<_>>(),
+            ),
+        }
     };
     let rows: Vec<ModelPickerRow> = visible
         .into_iter()
@@ -686,6 +705,41 @@ mod tests {
             &Default::default(),
         );
         assert_eq!(empty.selected_rail, PickerRail::instance("codex"));
+    }
+
+    #[test]
+    fn an_instance_lists_favorites_then_the_users_order_then_the_catalogue() {
+        let catalog = two_provider_catalog();
+        let view = build_model_picker(
+            &catalog,
+            "codex",
+            "gpt-5.5",
+            None,
+            &|_, _| None,
+            &ModelPickerOptions {
+                rail: Some(PickerRail::instance("codex")),
+                model_order: [("codex".into(), vec!["gpt-5.4-mini".into()])].into(),
+                ..Default::default()
+            },
+        );
+        assert_eq!(slugs(&view), ["gpt-5.4-mini", "gpt-5.5"]);
+        let view = build_model_picker(
+            &catalog,
+            "codex",
+            "gpt-5.5",
+            None,
+            &|_, _| None,
+            &ModelPickerOptions {
+                rail: Some(PickerRail::instance("codex")),
+                favorites: vec![FavoriteModel {
+                    instance_id: "codex".into(),
+                    model: "gpt-5.5".into(),
+                }],
+                model_order: [("codex".into(), vec!["gpt-5.4-mini".into()])].into(),
+                ..Default::default()
+            },
+        );
+        assert_eq!(slugs(&view), ["gpt-5.5", "gpt-5.4-mini"]);
     }
 
     #[test]

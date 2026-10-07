@@ -156,6 +156,12 @@ impl Snapshot {
                 query,
                 rail,
                 favorites: self.preferences.favorite_models.clone(),
+                model_order: self
+                    .preferences
+                    .model_order
+                    .iter()
+                    .map(|(instance, models)| (instance.clone(), models.clone()))
+                    .collect(),
             },
         )
     }
