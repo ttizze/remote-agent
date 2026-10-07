@@ -5,7 +5,6 @@ import { EventEmitter, once } from "node:events";
 import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { createInterface } from "node:readline";
-import * as realSdk from "./process-sdk-fixture.mjs";
 import { fileURLToPath } from "node:url";
 import * as sdk from "./sdk.mjs";
 import { forkTranscript, runBridge } from "./bridge.mjs";
@@ -35,7 +34,7 @@ function harness() {
   const output = new Writable({ write(bytes, _encoding, done) {
     frames.push(JSON.parse(bytes.toString())); events.emit("frame"); done();
   } });
-  const completion = runBridge(realSdk, "unused-claude", input, output);
+  const completion = runBridge(sdk, fileURLToPath(new URL("./fake-cli.mjs", import.meta.url)), input, output);
   const send = (frame) => input.write(`${JSON.stringify(frame)}\n`);
   async function take(predicate) {
     for (;;) {
@@ -117,8 +116,9 @@ test("unknown SDK dialogs cancel immediately without blocking the conversation",
 
 test("the actual worker exits after SDK failure while Host stdin stays open", { timeout: 10000 }, async () => {
   const worker = readFileSync(new URL("./bridge.mjs", import.meta.url), "utf8");
-  const fixture = fileURLToPath(new URL("./process-sdk-fixture.mjs", import.meta.url));
-  const child = spawn(process.execPath, ["--input-type=module", "--eval", worker, fixture, "unused-claude"], { stdio: ["pipe", "pipe", "pipe"] });
+  const library = fileURLToPath(new URL("./sdk.mjs", import.meta.url));
+  const fixture = fileURLToPath(new URL("./fake-cli.mjs", import.meta.url));
+  const child = spawn(process.execPath, ["--input-type=module", "--eval", worker, library, fixture], { stdio: ["pipe", "pipe", "pipe"] });
   child.stdin.on("error", () => {});
   const lines = createInterface({ input: child.stdout })[Symbol.asyncIterator]();
   const exit = once(child, "exit", { signal: AbortSignal.timeout(5000) });

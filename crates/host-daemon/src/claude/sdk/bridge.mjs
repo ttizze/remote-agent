@@ -39,8 +39,7 @@ export async function runBridge(sdk, program, input, output) {
       else await new Promise((resolve) => { wake = resolve; });
     }
   }
-  async function ask(request, signal, nativeId) {
-    const id = nativeId;
+  async function ask(request, signal, id) {
     if (pending.has(id)) return pending.get(id).promise;
     let resolve;
     const promise = new Promise((done) => { resolve = done; });
