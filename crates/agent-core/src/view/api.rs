@@ -39,6 +39,15 @@ use crate::view::{
 use agent_domain::ThreadId;
 use chrono::{Local, TimeZone};
 
+/// A project icon's image bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct ProjectIconView {
+    pub hash: String,
+    pub mime_type: String,
+    pub data: Vec<u8>,
+}
+
 /// One provider instance's model order, by slug.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
@@ -281,6 +290,18 @@ impl Snapshot {
             diff_ignore_whitespace: preferences.diff_ignore_whitespace,
             follow_up: self.follow_up,
         }
+    }
+    /// The project's icon; `None` shows its initials. Clients cache the image
+    /// by `hash`.
+    pub fn project_icon(&self, project_id: String) -> Option<ProjectIconView> {
+        self.project_icons
+            .get(&project_id)
+            .and_then(|entry| entry.icon.as_ref())
+            .map(|icon| ProjectIconView {
+                hash: icon.hash.clone(),
+                mime_type: icon.mime_type.clone(),
+                data: icon.data.as_ref().clone(),
+            })
     }
     pub fn conversation_settings_loaded(&self) -> bool {
         self.conversation_settings.is_some()

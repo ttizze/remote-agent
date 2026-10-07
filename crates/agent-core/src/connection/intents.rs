@@ -397,6 +397,7 @@ impl Owner {
                 ])
             }
             Intent::WorkLocally => self.work_locally()?,
+            Intent::SetProjectIcon { project_id, path } => self.set_project_icon(project_id, path),
             Intent::ClearTerminal {
                 thread_id: id,
                 terminal_id,

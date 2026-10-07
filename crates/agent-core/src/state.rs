@@ -286,6 +286,8 @@ pub struct Snapshot {
     pub terminals: BTreeMap<String, Terminal>,
     /// Provider commands, path search, Git status, refs and diff previews.
     pub sources: WorkspaceSources,
+    /// By project id.
+    pub project_icons: BTreeMap<String, ProjectIconEntry>,
     /// What the Host's terminal metadata stream reports for every thread's
     /// terminals, by thread and terminal id.
     pub terminal_metadata:
@@ -983,6 +985,11 @@ pub enum Intent {
         project_id: String,
         branch: String,
         worktree_path: Option<String>,
+    },
+    /// Saves a project's icon file; `None` finds it automatically.
+    SetProjectIcon {
+        project_id: String,
+        path: Option<String>,
     },
     /// Prepares the workspace of a run whose preparation failed again.
     RetryPreparation {

@@ -420,6 +420,9 @@ impl Owner {
         self.complete_outbox();
         self.visit_selected();
         self.drain();
+        if location == ShellLocation::Active {
+            self.refresh_project_icons();
+        }
     }
 
     fn thread_applied(&mut self, thread: &ThreadId, applied: Applied) {

@@ -42,6 +42,7 @@ pub(super) enum Reply {
     Refs(w::RefList),
     DiffPreview(w::DiffPreviewResult),
     SetupCancelled(c::SetupCancelled),
+    ProjectIcon(Option<m::ProjectFavicon>),
     Done,
 }
 
@@ -67,6 +68,7 @@ async fn execute(peer: &Peer, call: &Call) -> Result<Reply, PeerError> {
         Call::VcsStatus(_) => Reply::VcsStatus(peer.request(call).await?),
         Call::ListRefs(_) => Reply::Refs(peer.request(call).await?),
         Call::DiffPreview(_) => Reply::DiffPreview(peer.request(call).await?),
+        Call::ProjectFavicon(_) => Reply::ProjectIcon(peer.request(call).await?),
         Call::ListAccounts(_) => Reply::Accounts(peer.request(call).await?),
         Call::StartAccountLogin(_) => Reply::Login(peer.request(call).await?),
         Call::HostStatus(_) => Reply::HostStatus(peer.request(call).await?),
@@ -341,6 +343,7 @@ impl Owner {
                     Call::ListRefs(request) => self.refs_finished(request, Err(&error)),
                     Call::DiffPreview(request) => self.diff_preview_finished(request, Err(&error)),
                     Call::CancelSetup(_) => self.work_locally = None,
+                    Call::ProjectFavicon(request) => self.project_icon_read(request, Err(())),
                     _ => {}
                 }
                 if let Call::ScanAgentSessions(_) = &call {
@@ -516,6 +519,11 @@ impl Owner {
                 if let Call::DiffPreview(request) = call {
                     self.diff_preview_finished(request, Ok(preview));
                     self.show_diff_preview();
+                }
+            }
+            Reply::ProjectIcon(favicon) => {
+                if let Call::ProjectFavicon(request) = call {
+                    self.project_icon_read(request, Ok(favicon));
                 }
             }
             Reply::SetupCancelled(cancelled) => {

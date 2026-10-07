@@ -64,9 +64,90 @@ impl Owner {
             Call::UpdateProject(op::UpdateProject {
                 project_id,
                 scripts: Some(scripts),
+                favicon_path: None,
             }),
             None,
         )
+    }
+
+    /// Saves the project's icon file, or `None` to find it automatically.
+    pub(super) fn set_project_icon(&mut self, project_id: String, path: Option<String>) -> Next {
+        Next::call(
+            Call::UpdateProject(op::UpdateProject {
+                project_id,
+                scripts: None,
+                favicon_path: Some(path),
+            }),
+            None,
+        )
+    }
+
+    /// Asks the Host for the icon of every listed project whose saved icon
+    /// or update time changed since its icon was read.
+    pub(super) fn refresh_project_icons(&mut self) {
+        if !self.connected() {
+            return;
+        }
+        let wanted: Vec<(String, String)> = self
+            .state
+            .shell_projects()
+            .iter()
+            .map(|project| (project.id.clone(), project_icon_version(project)))
+            .filter(|(id, version)| {
+                self.state
+                    .project_icons
+                    .get(id)
+                    .is_none_or(|icon| &icon.version != version && !icon.in_flight)
+            })
+            .collect();
+        for (project_id, version) in wanted {
+            let entry = self
+                .state
+                .project_icons
+                .entry(project_id.clone())
+                .or_default();
+            entry.in_flight = true;
+            entry.version = version;
+            let known_hash = entry.icon.as_ref().map(|icon| icon.hash.clone());
+            self.job(
+                Call::ProjectFavicon(m::ReadProjectFavicon {
+                    project_id,
+                    known_hash,
+                }),
+                None,
+                None,
+            );
+        }
+    }
+
+    pub(super) fn project_icon_read(
+        &mut self,
+        request: &m::ReadProjectFavicon,
+        result: Result<Option<m::ProjectFavicon>, ()>,
+    ) {
+        let Some(entry) = self.state.project_icons.get_mut(&request.project_id) else {
+            return;
+        };
+        entry.in_flight = false;
+        match result {
+            Ok(None) => entry.icon = None,
+            Ok(Some(favicon)) => {
+                let unchanged = entry
+                    .icon
+                    .as_ref()
+                    .is_some_and(|icon| icon.hash == favicon.hash);
+                if let Some(data) = favicon.data {
+                    entry.icon = Some(crate::state::ProjectIcon {
+                        hash: favicon.hash,
+                        mime_type: favicon.mime_type,
+                        data: std::sync::Arc::new(data),
+                    });
+                } else if !unchanged {
+                    entry.icon = None;
+                }
+            }
+            Err(()) => entry.version.clear(),
+        }
     }
 
     pub(super) fn scan_sessions(&mut self) -> Next {
@@ -204,4 +285,16 @@ impl Owner {
         }
         Ok(())
     }
+}
+
+/// What a project's icon depends on in its shell record.
+fn project_icon_version(project: &m::Project) -> String {
+    format!(
+        "{}|{}",
+        project.favicon_path.as_deref().unwrap_or_default(),
+        project
+            .updated_at
+            .as_ref()
+            .map_or(0, agent_domain::Timestamp::millis)
+    )
 }

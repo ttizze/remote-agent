@@ -93,3 +93,20 @@ impl WorkspaceSources {
         self.refs.get(&(cwd.to_owned(), scope))
     }
 }
+
+/// A project's icon as the Host served it, keyed by its content hash.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProjectIcon {
+    pub hash: String,
+    pub mime_type: String,
+    pub data: Arc<Vec<u8>>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ProjectIconEntry {
+    /// The project's saved icon path and update time the icon was read for.
+    pub version: String,
+    pub in_flight: bool,
+    /// `None` shows the project's initials.
+    pub icon: Option<ProjectIcon>,
+}
