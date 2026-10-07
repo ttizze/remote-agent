@@ -1,0 +1,10 @@
+experimental = ["wrapper-scripts"]
+
+[scripts.wrapper.macos-test-directory]
+command = { command-line = "scripts/run-macos-test.sh", relative-to = "workspace-root" }
+target-runner = "overrides-wrapper"
+
+[[profile.default.scripts]]
+platform = 'cfg(target_os = "macos")'
+list-wrapper = "macos-test-directory"
+run-wrapper = "macos-test-directory"
