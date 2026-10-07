@@ -4,7 +4,10 @@ use crate::app::ui::{color, icon};
 use agent_core::{
     state::Intent,
     view::{
-        composer::{commands::ComposerCommandTarget, menu::ComposerMenuView},
+        composer::{
+            commands::{ComposerCommandTarget, ComposerTriggerKind, SkillSourceKind},
+            menu::ComposerMenuView,
+        },
         timeline::rows::TimelineLayout,
     },
 };
@@ -123,7 +126,36 @@ impl Desktop {
             .menu
             .highlight
             .min(menu.items.len().saturating_sub(1));
+        let skill_trigger = menu
+            .trigger
+            .as_ref()
+            .is_some_and(|trigger| trigger.kind == ComposerTriggerKind::Skill);
         let rows = menu.items.into_iter().enumerate().map(|(index, item)| {
+            let source = item.skill_source.map(|source| {
+                let glyph = match source {
+                    SkillSourceKind::App => "blocks",
+                    SkillSourceKind::Repo | SkillSourceKind::Project => "folder",
+                    SkillSourceKind::Personal => "user-round",
+                    SkillSourceKind::System => "settings",
+                    SkillSourceKind::Other => "package",
+                };
+                let label = if skill_trigger {
+                    format!("{} Skill", source.label())
+                } else {
+                    source.label().to_owned()
+                };
+                h_flex()
+                    .flex_none()
+                    .ml_auto()
+                    .gap_1()
+                    .px_1p5()
+                    .rounded(px(4.))
+                    .bg(color("secondary"))
+                    .text_color(color("secondaryForeground"))
+                    .text_size(px(11.))
+                    .child(icon(glyph).size(px(12.)))
+                    .child(label)
+            });
             let leading = match &item.target {
                 ComposerCommandTarget::Path { directory, .. } => {
                     Some(if *directory { "folder" } else { "file" })
@@ -176,6 +208,7 @@ impl Desktop {
                         .text_color(color("textMuted"))
                         .child(item.description),
                 )
+                .children(source)
         });
         let content = match menu.empty_label {
             Some(label) => div()

@@ -162,6 +162,9 @@ impl DesktopAssets {
         "message-circle",
         "palette",
         "folder-git",
+        "blocks",
+        "user-round",
+        "package",
     ];
     /// Provider marks as `brand/<name>.svg`.
     const BRANDS: &[(&str, &[u8])] = &[

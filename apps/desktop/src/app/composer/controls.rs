@@ -543,7 +543,11 @@ impl Desktop {
             .label(workspace.workspace_label.clone())
             .dropdown_caret(true)
             .accessibility_label("Workspace")
-            .tooltip(workspace.workspace_label.clone())
+            .tooltip(if workspace.workspace_path.is_empty() {
+                workspace.workspace_label.clone()
+            } else {
+                workspace.workspace_path.clone()
+            })
             .dropdown_menu_with_anchor(Anchor::BottomLeft, move |menu, _, _| {
                 let local = view.clone();
                 let worktree = view.clone();
@@ -598,13 +602,13 @@ impl Desktop {
         let query = self.composer.branches.query.clone();
         let focus = query.read(cx).focus_handle(cx);
         let trigger = strip_control("new-thread-branch")
-            .disabled(workspace.branches_loading && workspace.branches.is_empty())
+            .disabled(workspace.branches_loading)
             .icon(icon("git-branch").size(px(12.)).opacity(0.7))
             .child(
                 div()
                     .max_w(px(240.))
                     .truncate()
-                    .child(workspace.branch_label.clone()),
+                    .child(workspace.desktop_branch_label.clone()),
             )
             .dropdown_caret(true)
             .accessibility_label(workspace.branch_role.clone());
@@ -965,6 +969,21 @@ fn rail_item(index: usize, item: &PickerRailItem, view: &WeakEntity<Desktop>) ->
                         .size(px(20.))
                         .text_color(color("warning"))
                         .into_any_element(),
+                })
+                .when(item.new_badge, |cell| {
+                    cell.child(
+                        div()
+                            .absolute()
+                            .right(px(-2.))
+                            .top(px(2.))
+                            .size(px(14.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_full()
+                            .text_color(color("updateForeground"))
+                            .child(icon("sparkles").size(px(8.))),
+                    )
                 }),
         )
         .into_any_element()
@@ -1012,11 +1031,36 @@ fn model_row(row: &ModelPickerRow, view: &WeakEntity<Desktop>) -> AnyElement {
                 .flex_1()
                 .min_w_0()
                 .child(
-                    div()
-                        .truncate()
-                        .text_xs()
-                        .font_weight(FontWeight::MEDIUM)
-                        .child(row.name.clone()),
+                    h_flex()
+                        .min_w_0()
+                        .gap_2()
+                        .child(
+                            div()
+                                .truncate()
+                                .text_xs()
+                                .font_weight(FontWeight::MEDIUM)
+                                .child(row.name.clone()),
+                        )
+                        .when(row.badge.as_deref() == Some("new"), |line| {
+                            line.child(
+                                div()
+                                    .id(SharedString::from(format!("model-new-{}", row.key)))
+                                    .flex_none()
+                                    .rounded(px(4.))
+                                    .border_1()
+                                    .border_color(color("update").opacity(0.35))
+                                    .bg(color("update").opacity(0.15))
+                                    .px(px(2.))
+                                    .text_size(px(10.))
+                                    .line_height(px(10.))
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(color("updateForeground"))
+                                    .tooltip(|window, cx| {
+                                        Tooltip::new("New model").build(window, cx)
+                                    })
+                                    .child("NEW"),
+                            )
+                        }),
                 )
                 .child(
                     h_flex()
