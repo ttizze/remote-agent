@@ -26,6 +26,7 @@ struct ThreadSettingsSheet: View {
                     Section {
                         ForEach(section.models, id: \.key) { row in
                             CatalogModelRow(row: row) { press(row) } star: {
+                                Haptics.selection()
                                 model.perform(.toggleFavoriteModel(instanceId: row.instanceId, model: row.slug))
                             }
                         }
@@ -92,6 +93,7 @@ struct ThreadSettingsSheet: View {
 
     /// Pressing the applied model drops the staged one; another model is staged.
     private func press(_ row: CatalogModelItem) {
+        Haptics.selection()
         staged = row.applied ? nil : StagedModel(key: row.key, instanceId: row.instanceId, driver: row.driver,
                                                  slug: row.slug)
     }
@@ -127,6 +129,7 @@ struct ThreadSettingsSheet: View {
 
     private func save() {
         if let staged {
+            Haptics.selection()
             model.perform(.setModel(instanceId: staged.instanceId, driver: staged.driver, model: staged.slug,
                                     options: []))
         }
@@ -336,6 +339,7 @@ struct ChoicePage: View {
     var body: some View {
         List(choices, id: \.id) { choice in
             Button {
+                Haptics.selection()
                 pick(choice.id)
                 dismiss()
             } label: {
@@ -355,7 +359,6 @@ struct ChoicePage: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .sensoryFeedback(.selection, trigger: selected)
         }
         .navigationTitle(title)
         .navigationBarTitleDisplayMode(.inline)

@@ -17,6 +17,7 @@ struct AgentsSheet: View {
                     }
                     ForEach(rows, id: \.id) { agent in
                         Button {
+                            Haptics.selection()
                             dismiss()
                             model.openThread(agent.childThreadId)
                         } label: {

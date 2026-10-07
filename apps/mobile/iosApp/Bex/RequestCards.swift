@@ -59,7 +59,7 @@ struct ApprovalCard: View {
             if let detail = approval.cardDetail {
                 Text(detail)
                     .font(approval.detailMonospace ? AppTheme.mono(13) : AppTheme.font(14))
-                    .foregroundStyle(AppTheme.muted).textSelection(.enabled).lineLimit(8)
+                    .foregroundStyle(AppTheme.muted).textSelection(.enabled)
             }
             if let notice = approval.unavailableNotice {
                 Text(notice).font(AppTheme.font(14)).foregroundStyle(AppTheme.muted)
@@ -197,6 +197,9 @@ private struct QuestionForm: View {
     let question: QuestionView
     let enabled: Bool
     @State private var custom = ""
+    /// Answers this field sent since it last took core's; their echoes do not
+    /// overwrite newer typing.
+    @State private var sent: Set<String> = []
 
     var body: some View {
         let draftKey = answerDraftKey(requestId: requestId, questionId: question.id)
@@ -209,6 +212,8 @@ private struct QuestionForm: View {
             }
             ForEach(question.options, id: \.value) { option in
                 Button {
+                    // Choosing an option may clear the typed answer; show what core keeps.
+                    sent.removeAll()
                     model.perform(.editAnswer(requestId: requestId, questionId: question.id,
                                               edit: .toggleOption(value: option.value)))
                 } label: {
@@ -255,12 +260,18 @@ private struct QuestionForm: View {
                     .disabled(!enabled)
                     .onChange(of: custom) { _, text in
                         guard text != question.customAnswer else { return }
+                        sent.insert(text)
                         model.perform(.editAnswer(requestId: requestId, questionId: question.id,
                                                   edit: .custom(text: text)))
                     }
             }
         }
         .onAppear { custom = question.customAnswer }
+        .onChange(of: question.customAnswer) { _, answer in
+            guard answer != custom, !sent.contains(answer) else { return }
+            sent = [answer]
+            custom = answer
+        }
     }
 
     private func symbol(_ selected: Bool) -> String {

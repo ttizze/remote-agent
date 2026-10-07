@@ -96,6 +96,7 @@ struct BranchPicker: View {
     /// A local branch checked out nowhere is switched to first; the picker
     /// stays open when that fails.
     private func select(_ branch: BranchChoice) {
+        Haptics.selection()
         switching = true
         model.perform(.selectNewThreadBranch(branch: branch.name, worktreePath: branch.worktreePath)) { result in
             switching = false

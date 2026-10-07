@@ -61,26 +61,31 @@ struct QueueSheet: View {
         return QueueRowActions(
             steer: {
                 if let runId {
+                    Haptics.selection()
                     model.perform(.queue(action: .steer(runId: runId)))
                 }
             },
             edit: {
                 if let runId {
+                    Haptics.selection()
                     model.perform(.queue(action: .edit(runId: runId)))
                     dismiss()
                 }
             },
             moveUp: {
                 guard let runId, index > 0 else { return }
+                Haptics.selection()
                 model.perform(.queue(action: .move(runId: runId, beforeRunId: rows[index - 1].runId)))
             },
             moveDown: {
                 guard let runId, index + 1 < rows.count else { return }
+                Haptics.selection()
                 let before = index + 2 < rows.count ? rows[index + 2].runId : nil
                 model.perform(.queue(action: .move(runId: runId, beforeRunId: before)))
             },
             remove: {
                 if let runId {
+                    Haptics.selection()
                     model.perform(.queue(action: .cancel(runId: runId)))
                 }
             }
@@ -92,6 +97,7 @@ struct QueueSheet: View {
               destination != source, destination != source + 1 else { return }
         let before = destination < rows.count ? rows[destination].runId : nil
         guard before != runId else { return }
+        Haptics.selection()
         model.perform(.queue(action: .move(runId: runId, beforeRunId: before)))
     }
 }

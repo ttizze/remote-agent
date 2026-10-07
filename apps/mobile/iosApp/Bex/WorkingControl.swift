@@ -16,7 +16,10 @@ struct WorkingControl: View {
                 capsule.transition(.opacity)
             }
             if control.showScrollToEnd {
-                Button(action: scrollToEnd) {
+                Button {
+                    Haptics.selection()
+                    scrollToEnd()
+                } label: {
                     Image(systemName: "chevron.down").font(.system(size: 14, weight: .semibold))
                         .frame(width: 38.5, height: 38.5)
                 }

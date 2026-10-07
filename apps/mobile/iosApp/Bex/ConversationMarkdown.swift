@@ -5,6 +5,7 @@ import UIKit
 struct ConversationMarkdown: View {
     let source: String
     @State private var blocks: [MarkdownBlock] = []
+    @Environment(\.markdownLinks) private var links
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
@@ -13,7 +14,7 @@ struct ConversationMarkdown: View {
                     if style.code {
                         VStack(alignment: .leading, spacing: 6) {
                             HStack {
-                                Spacer(); Button("Copy") { UIPasteboard.general.string = runs.map(\.text).joined() }
+                                Spacer(); Button("Copy") { Haptics.copy(runs.map(\.text).joined()) }
                                     .font(AppTheme.font(11))
                             }
                             ScrollView(.horizontal) { Text(runs.map(\.text).joined()).font(.system(
@@ -26,19 +27,27 @@ struct ConversationMarkdown: View {
                         )
                         .overlay(RoundedRectangle(cornerRadius: 10).stroke(AppTheme.border))
                     } else {
-                        HStack(alignment: .top, spacing: 8) {
-                            if let marker = style
-                                .marker {
-                                Text(marker).font(AppTheme.font(16)).foregroundStyle(AppTheme.tertiary)
-                            }
-                            Text(attributed(runs, header: style.header)).lineSpacing(4).textSelection(.enabled)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                        }.padding(.leading, style.quoted ? 12 : 0)
-                            .overlay(alignment: .leading) {
-                                if style.quoted {
-                                    Rectangle().fill(AppTheme.border).frame(width: 2)
+                        let text = runs.filter { $0.image == nil }
+                        if !text.isEmpty {
+                            HStack(alignment: .top, spacing: 8) {
+                                if let marker = style
+                                    .marker {
+                                    Text(marker).font(AppTheme.font(16)).foregroundStyle(AppTheme.tertiary)
                                 }
+                                Text(attributed(text, header: style.header)).lineSpacing(4).textSelection(.enabled)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }.padding(.leading, style.quoted ? 12 : 0)
+                                .overlay(alignment: .leading) {
+                                    if style.quoted {
+                                        Rectangle().fill(AppTheme.border).frame(width: 2)
+                                    }
+                                }
+                        }
+                        ForEach(Array(runs.enumerated()), id: \.offset) { _, run in
+                            if let image = run.image {
+                                MarkdownImage(href: image, alt: run.text)
                             }
+                        }
                     }
                 case let .table(_, rows):
                     ScrollView(.horizontal) {
@@ -57,6 +66,7 @@ struct ConversationMarkdown: View {
                 }
             }
         }.tint(AppTheme.color("mobileMarkdownLink"))
+            .environment(\.openURL, OpenURLAction { MarkdownLinkURL.open($0, links: links) })
             .task(id: source) {
                 let parsed = await Task.detached(priority: .userInitiated) { markdownBlocks(source: source) }.value
                 guard !Task.isCancelled else { return }
@@ -79,8 +89,7 @@ struct ConversationMarkdown: View {
             if run.strikethrough {
                 text.strikethroughStyle = .single
             }
-            if let link = run.link, let url = URL(string: link),
-               ["http", "https", "mailto"].contains(url.scheme?.lowercased() ?? "") {
+            if let link = run.link, let url = MarkdownLinkURL.url(for: link) {
                 text.link = url
             }
             result += text
