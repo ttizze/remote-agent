@@ -17,10 +17,16 @@ struct Composer: View {
     @StateObject private var dictation = DictationRecorder()
     @State private var preparation: DictationPreparation?
     @State private var transcribing = false
+    @AppStorage(ComposerEnterBehavior.storageKey) private var enterBehavior = ComposerEnterBehavior.send
 
     private var expanded: Bool {
         alwaysExpanded || focused
     }
+
+    /// The Liquid Glass card's drop shadow, deeper in dark mode.
+    private static let shadow = Color(uiColor: UIColor {
+        UIColor.black.withAlphaComponent($0.userInterfaceStyle == .dark ? 0.35 : 0.15)
+    })
 
     var body: some View {
         VStack(spacing: 7) {
@@ -42,10 +48,8 @@ struct Composer: View {
                     collapsedCapsule
                 }
             }
-            .background(AppTheme.color("mobileComposerSurface"),
-                        in: RoundedRectangle(cornerRadius: expanded ? 26 : 27))
-            .overlay(RoundedRectangle(cornerRadius: expanded ? 26 : 27).stroke(AppTheme.color("mobileComposerBorder")))
-            .shadow(color: .black.opacity(0.15), radius: 14, y: 6)
+            .glassEffect(.regular, in: RoundedRectangle(cornerRadius: expanded ? 26 : 27))
+            .shadow(color: Self.shadow, radius: 14, y: 6)
             .animation(.easeInOut(duration: 0.22), value: expanded)
         }
         .padding(.horizontal, 12)
@@ -61,10 +65,25 @@ struct Composer: View {
         .onChange(of: selection) { _, _ in updateMenu() }
         .onAppear(perform: updateMenu)
         .onDisappear(perform: cancelDictation)
-        .background {
-            Button("") { send(alternate: true) }
-                .keyboardShortcut(.return, modifiers: .command).hidden()
+    }
+
+    /// Return on a hardware keyboard: the plainer chord sends as configured and
+    /// adding Command sends the other way; text being composed is left alone.
+    private func returnKey(_ press: KeyPress) -> KeyPress.Result {
+        guard !UIResponder.isComposingText else { return .ignored }
+        let command = press.modifiers.contains(.command)
+        let shift = press.modifiers.contains(.shift)
+        switch enterBehavior {
+        case .send:
+            if shift, !command {
+                return .ignored
+            }
+            send(alternate: command)
+        case .newline:
+            guard command else { return .ignored }
+            send(alternate: shift)
         }
+        return .handled
     }
 
     private var editor: some View {
@@ -76,6 +95,7 @@ struct Composer: View {
         )
         .font(AppTheme.font(16))
         .focused($focused)
+        .onKeyPress(.return, phases: .down, action: returnKey)
         .disabled(composer.editor.disabled)
         .accessibilityIdentifier("composer.text")
     }
