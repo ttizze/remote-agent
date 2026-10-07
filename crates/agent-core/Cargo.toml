@@ -14,7 +14,7 @@ bindings = ["dep:uniffi", "dep:zeroize"]
 [dependencies]
 agent-protocol = { path = "../agent-protocol" }
 agent-transport = { path = "../agent-transport" }
-uniffi = { version = "=0.32.0", features = ["tokio"], optional = true }
+uniffi = { version = "=0.32.2", features = ["tokio"], optional = true }
 zeroize = { workspace = true, optional = true }
 uuid = { version = "1", features = ["v4", "serde", "v5"] }
 futures-util.workspace = true
