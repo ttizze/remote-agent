@@ -28,11 +28,10 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.AltRoute
 import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.ChevronRight
-import androidx.compose.material.icons.outlined.ExpandMore
+import androidx.compose.material.icons.outlined.Computer
 import androidx.compose.material.icons.outlined.Folder
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -46,6 +45,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -55,6 +56,7 @@ import androidx.compose.ui.unit.dp
 import dev.remoteagent.core.BranchChoice
 import dev.remoteagent.core.ComposerOptions
 import dev.remoteagent.core.ComposerShortcuts
+import dev.remoteagent.core.DraftHeroHeadlineKind
 import dev.remoteagent.core.Intent
 import dev.remoteagent.core.InteractionMode
 import dev.remoteagent.core.NewThreadView
@@ -159,13 +161,13 @@ private fun InlineControl(
     maxWidth: Dp,
     chevron: Boolean,
     icon: @Composable () -> Unit,
-    onClick: () -> Unit,
+    onClick: (() -> Unit)?,
 ) {
     Row(
         Modifier.heightIn(min = 44.dp)
             .widthIn(max = maxWidth)
             .clip(RoundedCornerShape(12.dp))
-            .clickable(onClick = onClick)
+            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
             .padding(horizontal = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -343,88 +345,60 @@ private fun BranchRow(branch: BranchChoice, shape: RoundedCornerShape, enabled: 
     }
 }
 
+/**
+ * The headline: "What should we work on?" with a "Choose a project" control for a draft without a project, else
+ * "What should we build in <project>?" whose project opens "Choose project". The Host the task runs on follows.
+ */
 @Composable
 private fun Hero(model: AndroidAppModel, view: NewThreadView) {
     val colors = AppTheme.colors
-    var menu by remember { mutableStateOf(false) }
-    var adding by remember { mutableStateOf(false) }
-    Column(Modifier.padding(horizontal = 24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-        Text(
-            view.hero.headingLabel,
-            style = AppTheme.largeTitle,
-            fontWeight = FontWeight.Bold,
-            color = colors.foreground,
-            textAlign = TextAlign.Center,
-        )
-        if (view.hero.projectMenu || view.hero.projectChoices.isEmpty())
-            Box(Modifier.padding(top = 14.dp)) {
-                Row(
-                    Modifier.border(1.dp, colors.border, CircleShape)
-                        .clickable { menu = true }
-                        .padding(horizontal = 14.dp, vertical = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                ) {
-                    Text(
-                        view.hero.projectLabel,
-                        style = AppTheme.footnote,
-                        fontWeight = FontWeight.Medium,
-                        color = colors.foreground,
-                    )
-                    Icon(Icons.Outlined.ExpandMore, null, Modifier.size(14.dp), tint = colors.iconMuted)
-                }
-                AnchoredMenu(menu, { menu = false }) {
-                    view.hero.projectChoices.forEach { choice ->
-                        DropdownMenuItem(
-                            text = {
-                                Text(
-                                    if (choice.selected) "✓  ${choice.name}" else choice.name,
-                                    style = AppTheme.footnote,
-                                )
-                            },
-                            leadingIcon = { ProjectFavicon(choice.projectId, 24.dp) },
-                            onClick = {
-                                menu = false
-                                model.perform(Intent.NewThread(choice.projectId))
-                            },
-                        )
-                    }
-                    DropdownMenuItem(
-                        text = { Text("Add project…", style = AppTheme.footnote) },
-                        onClick = {
-                            menu = false
-                            adding = true
-                        },
-                    )
-                }
-            }
+    val heading = AppTheme.largeTitle.copy(fontWeight = FontWeight.Medium, color = colors.foreground)
+    val chooseProject = { model.navigate(Route.ChooseProject) }
+    val environment = @Composable {
+        model.snapshot.hostName()?.let { host ->
+            InlineControl(
+                "on $host",
+                maxWidth = if (view.hero.kind == DraftHeroHeadlineKind.BUILD_IN) 260.dp else 170.dp,
+                chevron = false,
+                icon = { ControlIcon(Icons.Outlined.Computer) },
+                onClick = null,
+            )
+        }
     }
-    if (adding) AddProjectDialog(model) { adding = false }
-}
-
-/** Registers a project folder on the Host by its absolute path. */
-@Composable
-private fun AddProjectDialog(model: AndroidAppModel, onDismiss: () -> Unit) {
-    var path by remember { mutableStateOf("") }
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        containerColor = AppTheme.colors.cardAlt,
-        shape = RoundedCornerShape(28.dp),
-        title = { Text("Add project", style = AppTheme.title) },
-        text = { SettingsField(path, { path = it }, "Absolute path on the Host") },
-        confirmButton = {
-            TextButton(
-                onClick = {
-                    model.perform(Intent.AddProject(path.trim()))
-                    onDismiss()
-                },
-                enabled = path.isNotBlank(),
-            ) {
-                Text("Add", color = AppTheme.colors.foreground)
+    Column(Modifier.padding(horizontal = 24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+        if (view.hero.kind == DraftHeroHeadlineKind.BUILD_IN) {
+            Text("What should we build", style = heading, textAlign = TextAlign.Center)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("in ", style = heading)
+                Text(
+                    view.hero.projectLabel,
+                    Modifier.widthIn(max = 250.dp)
+                        .drawBehind {
+                            val y = size.height - 1.dp.toPx()
+                            drawLine(colors.foregroundMuted, Offset(0f, y), Offset(size.width, y), 1.dp.toPx())
+                        }
+                        .clickable(onClick = chooseProject),
+                    style = heading,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text("?", style = heading)
             }
-        },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel", color = AppTheme.colors.foreground) } },
-    )
+            Box(Modifier.padding(top = 24.dp)) { environment() }
+        } else {
+            Text(view.hero.headingLabel, style = heading, textAlign = TextAlign.Center)
+            Row(Modifier.padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                InlineControl(
+                    "Choose a project",
+                    maxWidth = 220.dp,
+                    chevron = true,
+                    icon = { ControlIcon(Icons.Outlined.Folder) },
+                    onClick = chooseProject,
+                )
+                environment()
+            }
+        }
+    }
 }
 
 @Composable

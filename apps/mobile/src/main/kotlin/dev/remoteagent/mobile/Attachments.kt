@@ -49,10 +49,13 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
+import dev.remoteagent.core.AnswerHistoryFile
+import dev.remoteagent.core.AnswerHistoryQuestion
 import dev.remoteagent.core.Attachment
 import dev.remoteagent.core.AttachmentKind
 import dev.remoteagent.core.DraftAttachment
@@ -207,6 +210,46 @@ private fun RemoteImage(model: AndroidAppModel, attachment: Attachment, width: D
         else CircularProgressIndicator(Modifier.size(16.dp), color = AppTheme.colors.iconMuted, strokeWidth = 2.dp)
     }
     if (preview && bitmap != null) ImagePreviewDialog(bitmap, attachment.name) { preview = false }
+}
+
+/** An answered request's questions with their answers and attached files; images show a preview. */
+@Composable
+internal fun AnswerHistory(model: AndroidAppModel, questions: List<AnswerHistoryQuestion>) {
+    val colors = AppTheme.colors
+    Column(
+        Modifier.padding(start = 24.dp, top = 3.5.dp, bottom = 3.5.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        questions.forEach { question ->
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                question.question?.let { Text(it, style = AppTheme.footnote, color = colors.foregroundMuted) }
+                question.answer?.let {
+                    Text(it, Modifier.padding(start = 12.dp), style = AppTheme.footnote, color = colors.foregroundMuted)
+                }
+                question.files.forEach { file -> AnswerFile(model, file) }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AnswerFile(model: AndroidAppModel, file: AnswerHistoryFile) {
+    val bitmap = if (file.image) rememberAttachmentImage(model, null, file.id) else null
+    var preview by remember { mutableStateOf(false) }
+    Column(
+        Modifier.clickable(enabled = bitmap != null) { preview = true },
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        if (bitmap != null)
+            Image(bitmap.asImageBitmap(), file.name, Modifier.size(160.dp, 96.dp), contentScale = ContentScale.Fit)
+        Text(
+            file.name,
+            style = AppTheme.footnote,
+            color = AppTheme.colors.foreground,
+            textDecoration = TextDecoration.Underline,
+        )
+    }
+    if (preview && bitmap != null) ImagePreviewDialog(bitmap, file.name) { preview = false }
 }
 
 @Composable

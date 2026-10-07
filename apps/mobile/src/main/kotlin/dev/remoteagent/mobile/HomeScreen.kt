@@ -173,7 +173,7 @@ internal fun HomeScreen(model: AndroidAppModel) {
         }
     }
     ThreadActionDialogs(model, actionState)
-    if (actionState.arranging) ArrangeSheet(model, list?.items.orEmpty()) { actionState.arranging = false }
+    if (actionState.arranging) ArrangeSheet(model) { actionState.arranging = false }
 }
 
 private const val MINUTE_MILLIS = 60_000L
@@ -326,7 +326,7 @@ private fun HomeFabs(model: AndroidAppModel, expanded: Boolean, modifier: Modifi
             }
         }
         ExtendedFloatingActionButton(
-            onClick = { model.navigate(Route.NewTask) },
+            onClick = { model.navigate(Route.ChooseProject) },
             expanded = expanded,
             icon = { Icon(Icons.Outlined.EditNote, null) },
             text = { Text("New thread", style = AppTheme.footnote, fontWeight = FontWeight.Medium) },
@@ -338,44 +338,3 @@ private fun HomeFabs(model: AndroidAppModel, expanded: Boolean, modifier: Modifi
 }
 
 private fun checked(label: String, on: Boolean) = if (on) "✓  $label" else label
-
-/** Move pinned and active threads up or down; core holds the order until the Host has it. */
-@Composable
-private fun ArrangeSheet(model: AndroidAppModel, items: List<ThreadListItem>, onDismiss: () -> Unit) {
-    val rows =
-        items
-            .filterIsInstance<ThreadListItem.Thread>()
-            .map { it.row }
-            .filter { it.canMoveUp || it.canMoveDown || it.pinned }
-    val actionState = rememberThreadActions()
-    val copy = rememberCopy()
-    BottomSheet(onDismiss, title = "Arrange threads") {
-        rows.forEach { row ->
-            Row(
-                Modifier.fillMaxWidth().heightIn(min = 56.dp).padding(horizontal = 20.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text(
-                    row.title,
-                    Modifier.weight(1f),
-                    style = AppTheme.body,
-                    maxLines = 1,
-                    color = AppTheme.colors.foreground,
-                )
-                row.menu
-                    .filter { it.action is ThreadMenuAction.Move }
-                    .forEach { item ->
-                        androidx.compose.material3.TextButton(
-                            onClick = {
-                                selectThreadMenuItem(model, actionState, row.id, row.title, row.pinned, item, copy)
-                            },
-                            enabled = item.enabled,
-                        ) {
-                            Text(item.label, style = AppTheme.caption, color = AppTheme.colors.foreground)
-                        }
-                    }
-            }
-            HorizontalDivider(color = AppTheme.colors.border)
-        }
-    }
-}

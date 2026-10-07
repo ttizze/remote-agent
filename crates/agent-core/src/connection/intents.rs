@@ -14,8 +14,11 @@ use crate::{
     peer::PeerError,
     protocol::Call,
     state::*,
-    view::attachments::{
-        AttachmentCandidate, AttachmentFileKind, admit_attachments, image_preparation_error,
+    view::{
+        attachments::{
+            AttachmentCandidate, AttachmentFileKind, admit_attachments, image_preparation_error,
+        },
+        models::staging::{remember_model_options, with_remembered_model_options},
     },
 };
 use agent_domain::{
@@ -420,6 +423,19 @@ impl Owner {
             } => {
                 self.restart_terminal(thread_id(id)?, terminal_id, op::TerminalSize { cols, rows })?
             }
+            Intent::SetTerminalFontSize { size } => {
+                self.state.preferences.terminal_font_size = Some(
+                    crate::view::terminals::text_size::normalize_terminal_font_size(Some(size)),
+                );
+                Next::Done
+            }
+            Intent::AttachTerminalOutput {
+                thread_id: id,
+                terminal_id,
+                output,
+                start,
+                end,
+            } => self.attach_terminal_output(thread_id(id)?, terminal_id, &output, start, end)?,
             Intent::SetFollowUpBehavior { behavior } => {
                 self.state.follow_up = behavior;
                 Next::Done
@@ -659,6 +675,33 @@ impl Owner {
                 let key = self.state.draft_key();
                 self.state.drafts.insert(key, draft);
                 self.thread_command(select_model_command(selection))
+            }
+            Intent::SaveStagedModel { staged } => {
+                let options = with_remembered_model_options(
+                    &self.state.preferences.model_options,
+                    &staged.instance_id,
+                    &staged.model,
+                    staged.options,
+                );
+                self.prepare(Intent::SetModel {
+                    instance_id: staged.instance_id,
+                    driver: staged.driver,
+                    model: staged.model,
+                    options,
+                })?
+            }
+            Intent::RememberModelOptions {
+                instance_id,
+                model,
+                options,
+            } => {
+                remember_model_options(
+                    &mut self.state.preferences.model_options,
+                    &instance_id,
+                    &model,
+                    &options,
+                );
+                Next::Done
             }
             Intent::SetRuntimeMode { mode } => {
                 self.update_draft(|draft| draft.runtime_mode = mode);

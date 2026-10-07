@@ -7,6 +7,7 @@ pub mod options;
 pub mod ordering;
 pub mod picker;
 pub mod search;
+pub mod staging;
 pub mod switching;
 pub mod traits;
 

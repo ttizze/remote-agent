@@ -115,6 +115,20 @@ internal fun Composer(model: AndroidAppModel, composer: ComposerView, onOpenSett
         rememberView(model.snapshot, value.text, value.selection) {
             if (value.selection.collapsed) it.composerMenu(value.text, value.selection.end.toUInt()) else null
         }
+    val (dictation, startDictation) = rememberDictation(model, composer.draftKey)
+    val voice = dictation.presentation
+    // The mic, then Stop or Send unless dictation holds the send.
+    val trailing: @Composable () -> Unit = {
+        DictationPrimaryAction(dictation, available = model.snapshot.connected(), onStart = startDictation)
+        if (voice.showsSend || composer.mobileShowsStop) PrimaryAction(model, composer)
+    }
+    val dictating: @Composable () -> Unit = {
+        Row(Modifier.fillMaxWidth().padding(horizontal = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+            DictationCancelAction(dictation)
+            DictationStatus(dictation, Modifier.weight(1f))
+            trailing()
+        }
+    }
     Column(
         Modifier.fillMaxWidth()
             .background(colors.composerPanel)
@@ -159,6 +173,7 @@ internal fun Composer(model: AndroidAppModel, composer: ComposerView, onOpenSett
                     },
                     modifier.onFocusChanged { focused = it.isFocused },
                     enabled = !composer.editor.disabled,
+                    readOnly = voice.blocksSubmission,
                     textStyle = AppTheme.body.copy(color = colors.foreground),
                     cursorBrush = SolidColor(colors.primary),
                     maxLines = if (expanded) Int.MAX_VALUE else 1,
@@ -184,17 +199,20 @@ internal fun Composer(model: AndroidAppModel, composer: ComposerView, onOpenSett
                             DraftAttachmentStrip(model, composer.attachments, null)
                         }
                     editor(Modifier.fillMaxWidth().heightIn(min = 72.dp, max = 160.dp).padding(horizontal = 14.dp))
-                    Row(
-                        Modifier.fillMaxWidth().padding(horizontal = 6.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    ) {
-                        AttachmentButton(model, composer.draftKey, enabled = !composer.editor.disabled)
-                        ModelControl(composer, onOpenSettings)
-                        Spacer(Modifier.weight(1f))
-                        PrimaryAction(model, composer)
-                    }
+                    if (voice.status != null) dictating()
+                    else
+                        Row(
+                            Modifier.fillMaxWidth().padding(horizontal = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            AttachmentButton(model, composer.draftKey, enabled = !composer.editor.disabled)
+                            ModelControl(composer, onOpenSettings)
+                            Spacer(Modifier.weight(1f))
+                            trailing()
+                        }
                 }
+            else if (voice.status != null) Box(Modifier.padding(vertical = 2.dp)) { dictating() }
             else
                 Row(
                     Modifier.padding(vertical = 2.dp, horizontal = 4.dp),
@@ -202,7 +220,7 @@ internal fun Composer(model: AndroidAppModel, composer: ComposerView, onOpenSett
                 ) {
                     AttachmentButton(model, composer.draftKey, enabled = !composer.editor.disabled)
                     editor(Modifier.weight(1f).heightIn(min = 36.dp).padding(horizontal = 4.dp))
-                    PrimaryAction(model, composer)
+                    trailing()
                 }
         }
     }

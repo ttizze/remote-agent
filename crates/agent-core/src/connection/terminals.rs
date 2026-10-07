@@ -8,7 +8,17 @@ use crate::{
     peer::PeerError,
     protocol::Call,
     state::{Terminal, TerminalPhase},
-    view::terminals::next_terminal_id,
+    view::{
+        composer::commands::TOO_MANY_CONTEXT_ITEMS,
+        terminals::{
+            next_terminal_id,
+            output_context::{
+                TerminalOutputContext, append_context_reference, terminal_output_selection,
+                visible_terminal_lines,
+            },
+            tab_label,
+        },
+    },
 };
 use agent_domain::ThreadId;
 use agent_protocol::operations::{self as op, thread_terminal_handle_for};
@@ -145,6 +155,47 @@ impl Owner {
             }),
             None,
         )
+    }
+
+    /// Adds lines `start..=end` (zero-based) of a captured viewport to the
+    /// thread's draft as a terminal context record.
+    pub(super) fn attach_terminal_output(
+        &mut self,
+        thread: ThreadId,
+        terminal_id: String,
+        output: &str,
+        start: u32,
+        end: u32,
+    ) -> Result<Next, PeerError> {
+        let selection = terminal_output_selection(&visible_terminal_lines(output), start, end);
+        if selection.too_large {
+            return Err(invalid("Select fewer lines to fit the context limit."));
+        }
+        if !selection.can_attach {
+            return Err(invalid("There is no visible output to attach."));
+        }
+        let mut draft = self.state.draft_for_thread(&thread);
+        let context = draft
+            .context
+            .get_or_insert_with(|| agent_domain::MessageContext {
+                version: 1,
+                records: vec![],
+            });
+        if context.records.len() >= agent_domain::COMPOSER_CONTEXT_MAX_RECORDS {
+            return Err(invalid(TOO_MANY_CONTEXT_ITEMS));
+        }
+        let attachment = TerminalOutputContext {
+            context_id: uuid::Uuid::new_v4().to_string(),
+            terminal_label: tab_label(&self.state, &thread, &terminal_id),
+            terminal_id,
+            line_start: start + 1,
+            line_end: end + 1,
+            text: selection.text,
+        };
+        context.records.push(agent_domain::Json(attachment.record()));
+        draft.text = append_context_reference(&draft.text, &attachment.reference());
+        self.state.drafts.insert(thread.to_string(), draft);
+        Ok(Next::Done)
     }
 
     /// Starts the terminal's shell again with an empty history.

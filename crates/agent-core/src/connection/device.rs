@@ -28,6 +28,7 @@ use crate::{
         models::{
             catalog,
             ordering::toggle_favorite,
+            staging::remember_model_options,
             traits::{TraitChange, select_trait, toggle_trait},
         },
         requests::{
@@ -248,6 +249,12 @@ impl Owner {
         let mut next = Next::Done;
         if let Some(options) = change.options {
             draft.options = options;
+            remember_model_options(
+                &mut self.state.preferences.model_options,
+                &draft.instance_id,
+                &draft.model,
+                &draft.options,
+            );
             let selection = draft.selection().map_err(invalid)?;
             self.state.default_draft.options = draft.options.clone();
             if let Some(thread) = self.state.selected_thread.clone() {
@@ -465,8 +472,31 @@ impl Owner {
             _ => section,
         };
         let threads = self.summaries();
-        let queued = queued_threads(&self.state);
+        let Some(thread) = threads
+            .iter()
+            .find(|thread| thread.id == moved && thread.archived_at.is_none())
+        else {
+            return Ok(Next::Done);
+        };
+        let id = ThreadId::new(moved).map_err(invalid)?;
+        // A drop names its section; the thread may come from another one.
+        let section = match destination {
+            MoveDestination::Drop {
+                section: Some(DropSection::Settled),
+                ..
+            } => return Ok(Next::Commands(vec![self.lifecycle(id, LifecycleAction::Settle)])),
+            MoveDestination::Drop {
+                section: Some(DropSection::Pinned),
+                ..
+            } => OrderSection::Pinned,
+            MoveDestination::Drop {
+                section: Some(DropSection::Active),
+                ..
+            } => OrderSection::Active,
+            _ => section,
+        };
         let now = now_ms() as i64;
+        let queued = queued_threads(&self.state);
         let ordered = ordered_section(&threads, section, None, now, &queued);
         let Some(assignments) =
             ThreadMovePlanner::new(&ordered, Some(&threads), section).plan(moved, destination)
@@ -484,18 +514,11 @@ impl Owner {
         let entries = assignments
             .into_iter()
             .map(|assignment| {
-                let thread = ThreadId::new(assignment.id).map_err(invalid)?;
-                Ok(self.lifecycle(
-                    thread,
-                    match section {
-                        OrderSection::Pinned => LifecycleAction::ReorderPinned {
-                            order: assignment.order_key,
-                        },
-                        OrderSection::Active => LifecycleAction::ReorderActive {
-                            order: assignment.order_key,
-                        },
-                    },
-                ))
+                let thread = ThreadId::new(assignment.id.clone()).map_err(invalid)?;
+                Ok(self.lifecycle(thread, match section {
+                    OrderSection::Pinned => LifecycleAction::ReorderPinned { order: assignment.order_key },
+                    OrderSection::Active => LifecycleAction::ReorderActive { order: assignment.order_key },
+                }))
             })
             .collect::<Result<Vec<_>, PeerError>>()?;
         self.state.thread_order = Some(ThreadOrderHold {

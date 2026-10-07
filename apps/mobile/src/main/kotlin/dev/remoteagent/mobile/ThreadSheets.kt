@@ -32,6 +32,7 @@ import androidx.compose.material.icons.outlined.FilterList
 import androidx.compose.material.icons.outlined.MoreVert
 import androidx.compose.material.icons.outlined.Star
 import androidx.compose.material.icons.outlined.StarBorder
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
@@ -68,8 +69,11 @@ import dev.remoteagent.core.QueueRowView
 import dev.remoteagent.core.QueueView
 import dev.remoteagent.core.SetupCardView
 import dev.remoteagent.core.SetupStageStatus
+import dev.remoteagent.core.StagedModel
 import dev.remoteagent.core.StatusTone
 import dev.remoteagent.core.TraitControl
+import dev.remoteagent.core.stagedModelAfterPress
+import dev.remoteagent.core.stagedModelKey
 
 /** A Material bottom sheet with the Android sheet header. */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -279,14 +283,43 @@ internal fun ThreadSettingsSheet(model: AndroidAppModel, composer: ComposerView,
     var filter by remember { mutableStateOf<CatalogFilter>(CatalogFilter.All) }
     var showLegacy by remember { mutableStateOf(false) }
     var overrides by remember { mutableStateOf(emptyList<String>()) }
-    var staged by remember { mutableStateOf<CatalogSheetItem.Model?>(null) }
+    var staged by remember { mutableStateOf<StagedModel?>(null) }
+    var unavailable by remember { mutableStateOf(false) }
     var choosing by remember { mutableStateOf<OptionScreen?>(null) }
-    val options = CatalogSheetOptions(filter, showLegacy, query, overrides, staged?.key)
+    val options = CatalogSheetOptions(filter, showLegacy, query, overrides, staged?.let(::stagedModelKey))
     val catalog by rememberView(model.snapshot, options) { it.catalogSheet(options) }
+    // While a model is staged the option rows describe and edit it; Save applies both.
+    val traits = staged?.let { model.snapshot.stagedModelTraits(it) } ?: composer.traits
     fun save() {
-        staged?.let { row -> model.perform(Intent.SetModel(row.instanceId, row.driver, row.slug, emptyList())) }
+        val pending = staged
+        if (pending != null && !model.snapshot.canSaveStagedModel(pending)) {
+            unavailable = true
+            return
+        }
+        pending?.let { model.perform(Intent.SaveStagedModel(it)) }
         onDismiss()
     }
+    fun editStaged(next: StagedModel) {
+        staged = next
+        model.perform(Intent.RememberModelOptions(next.instanceId, next.model, next.options))
+    }
+    if (unavailable)
+        AlertDialog(
+            onDismissRequest = { unavailable = false },
+            containerColor = colors.cardAlt,
+            shape = RoundedCornerShape(28.dp),
+            title = { Text("Model unavailable", style = AppTheme.title) },
+            text = {
+                Text(
+                    "Set up this provider on web or desktop, or select another model.",
+                    style = AppTheme.footnote,
+                    color = colors.foregroundSecondary,
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = { unavailable = false }) { Text("OK", color = colors.foreground) }
+            },
+        )
     val screen = choosing
     BottomSheet(
         onDismiss,
@@ -330,14 +363,15 @@ internal fun ThreadSettingsSheet(model: AndroidAppModel, composer: ComposerView,
                             item,
                             onFavorite = { model.perform(Intent.ToggleFavoriteModel(item.instanceId, item.slug)) },
                         ) {
-                            staged = if (item.applied) null else item
+                            val pressed = StagedModel(item.instanceId, item.driver, item.slug, emptyList())
+                            staged = stagedModelAfterPress(staged, pressed, item.applied)
                         }
                 }
             }
         }
         SheetSection("Options")
-        if (composer.traits.visible)
-            composer.traits.controls.forEach { control ->
+        if (traits.visible)
+            traits.controls.forEach { control ->
                 when (control) {
                     is TraitControl.Select ->
                         DisclosureRow(
@@ -352,11 +386,19 @@ internal fun ThreadSettingsSheet(model: AndroidAppModel, composer: ComposerView,
                                         OptionScreenChoice(it.label, null, it.id == control.selected)
                                     },
                                 ) { index ->
-                                    model.perform(Intent.SelectTrait(control.id, control.choices[index].id))
+                                    val choice = control.choices[index].id
+                                    val pending = staged
+                                    if (pending != null)
+                                        editStaged(model.snapshot.selectStagedTrait(pending, control.id, choice))
+                                    else model.perform(Intent.SelectTrait(control.id, choice))
                                 }
                         }
                     is TraitControl.Toggle ->
-                        SwitchRow(control.label, control.on) { model.perform(Intent.ToggleTrait(control.id, it)) }
+                        SwitchRow(control.label, control.on) { on ->
+                            val pending = staged
+                            if (pending != null) editStaged(model.snapshot.toggleStagedTrait(pending, control.id, on))
+                            else model.perform(Intent.ToggleTrait(control.id, on))
+                        }
                 }
             }
         val runtime = composer.controls

@@ -149,7 +149,7 @@ internal fun FeedRow(model: AndroidAppModel, row: TimelineRow, now: Long, action
         is TimelineRowKind.PendingMessage -> PendingBubble(model, kind.v1)
         is TimelineRowKind.AssistantMessage -> AssistantMessage(model, kind.v1, row.createdAt, actions)
         is TimelineRowKind.AssistantMeta -> MetaRow(kind.meta, row.createdAt, actions)
-        is TimelineRowKind.Work -> kind.rows.forEach { WorkRow(it, actions) }
+        is TimelineRowKind.Work -> kind.rows.forEach { WorkRow(model, it, actions) }
         is TimelineRowKind.LiveWork ->
             WorkLine(
                 icon = workIcon(kind.row),
@@ -405,7 +405,7 @@ private fun WorkLine(
 }
 
 @Composable
-private fun WorkRow(row: WorkLogRow, actions: FeedActions) {
+private fun WorkRow(model: AndroidAppModel, row: WorkLogRow, actions: FeedActions) {
     val colors = AppTheme.colors
     when (row) {
         is WorkLogRow.ProviderFailure -> {
@@ -476,7 +476,11 @@ private fun WorkRow(row: WorkLogRow, actions: FeedActions) {
                         color = colors.foregroundSecondary,
                     )
                 }
-                if (activity.expanded) activity.detail?.let { WorkDetail(it) }
+                if (activity.expanded)
+                    activity.detail?.let { detail ->
+                        detail.questionAnswer?.let { AnswerHistory(model, it) }
+                        WorkDetail(detail)
+                    }
             }
         }
     }

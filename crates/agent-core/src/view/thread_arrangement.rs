@@ -351,5 +351,21 @@ pub fn thread_arrangement_move(
     sections.drop(&threads, moved, source, above.section, target, placement)
 }
 
+/// A drag hovering a visible row uses the same landing rule as the native list.
+pub fn thread_arrangement_drop(
+    snapshot: &Snapshot,
+    now_ms: i64,
+    options: ArrangementOptions,
+    moved: &str,
+    target: &str,
+    after: bool,
+) -> Option<ArrangementDrop> {
+    if moved == target { return None; }
+    let view = thread_arrangement(snapshot, now_ms, options);
+    let index = view.rows.iter().position(|row| row.key == target)?;
+    let destination = index + usize::from(after || matches!(view.rows[index].kind, ArrangementRowKind::Header { .. }));
+    thread_arrangement_move(snapshot, now_ms, options, moved, destination as u32)
+}
+
 #[cfg(test)]
 mod tests;

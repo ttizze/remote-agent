@@ -20,7 +20,9 @@ use crate::view::work_log::presentation::{
 };
 use crate::view::work_log::tool_catalog::ToolLogo;
 use crate::view::work_log::turn_item::workspace_preparation_retry_run_ids;
-use crate::view::work_log::user_input::{has_question_answer, question_answer_preview};
+use crate::view::work_log::user_input::{
+    has_question_answer, question_answer_history, question_answer_preview,
+};
 use agent_domain::{
     Driver, Item, ItemKind, ItemStatus, State, ThreadId, Timestamp,
     WORKSPACE_PREPARATION_FAILURE_CODE,
@@ -277,7 +279,7 @@ pub fn work_log_row(
             output,
             failed_exit_code,
             viewed_image_path,
-            shows_question_answer: answer.is_some(),
+            question_answer: answer.map(question_answer_history),
         }),
     }))
 }

@@ -117,6 +117,88 @@ pub fn find_existing_add_project<'a>(projects: &'a [Project], path: &str) -> Opt
     find_project_by_path(projects, path)
 }
 
+/// A listed folder; choosing it puts `query` in the path field.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct FolderBrowserEntry {
+    pub name: String,
+    pub query: String,
+}
+
+/// The "Browse folders" list under the mobile path field.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct FolderBrowserView {
+    pub is_browsing: bool,
+    /// The folder to list with `Intent::ListFiles`.
+    pub directory_path: String,
+    /// The Host has listed `directory_path`.
+    pub listed: bool,
+    /// The ".." row's query.
+    pub parent_query: Option<String>,
+    pub entries: Vec<FolderBrowserEntry>,
+}
+
+/// The folders under the typed path that match its last segment, once the
+/// Host has listed that folder.
+pub fn folder_browser(
+    query: &str,
+    connected: bool,
+    listed: Option<(&str, &[FileEntry])>,
+) -> FolderBrowserView {
+    let browse = filesystem_browse_path(query, "", connected);
+    let listing = listed
+        .filter(|(path, _)| browse.is_browsing && *path == browse.directory_path)
+        .map(|(_, entries)| entries);
+    FolderBrowserView {
+        entries: listing
+            .map(|entries| {
+                filter_filesystem_browse_entries(entries, &browse.filter_query)
+                    .visible
+                    .into_iter()
+                    .map(|entry| FolderBrowserEntry {
+                        query: super::paths::append_browse_path_segment(
+                            &browse.directory_path,
+                            &entry.name,
+                        ),
+                        name: entry.name,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        listed: listing.is_some(),
+        parent_query: browse.parent_path.filter(|_| browse.can_browse_up),
+        is_browsing: browse.is_browsing,
+        directory_path: browse.directory_path,
+    }
+}
+
+/// What "Add project" does with the typed path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
+pub enum AddProjectTarget {
+    /// Register the folder with `Intent::AddProject`.
+    Add { path: String },
+    /// The folder is already this project: "Project already exists".
+    Existing { project_id: String, title: String },
+    Invalid { message: String },
+}
+
+/// The target of the mobile "Local folder" screen, which has no current
+/// project to resolve relative paths against.
+pub fn add_project_target(projects: &[Project], raw_path: &str) -> AddProjectTarget {
+    match resolve_add_project_path(raw_path, None, "") {
+        Err(message) => AddProjectTarget::Invalid { message },
+        Ok(path) => match find_existing_add_project(projects, &path) {
+            Some(project) => AddProjectTarget::Existing {
+                project_id: project.id.clone(),
+                title: project.name.clone(),
+            },
+            None => AddProjectTarget::Add { path },
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::paths::fixtures::project;
@@ -237,6 +319,54 @@ mod tests {
                 .map(|entry| entry.name)
                 .collect::<Vec<_>>(),
             ["alpha", "Alpha", "zeta"]
+        );
+    }
+
+    #[test]
+    fn the_browser_lists_matching_folders_once_their_parent_is_listed() {
+        let entries = [entry("app", true), entry("api", true), entry("docs", true)];
+        let waiting = folder_browser("~/projects/a", true, Some(("~/", &entries)));
+        assert!(waiting.is_browsing && !waiting.listed);
+        assert_eq!(waiting.directory_path, "~/projects/");
+        assert_eq!(waiting.parent_query.as_deref(), Some("~/"));
+        let listed = folder_browser("~/projects/a", true, Some(("~/projects/", &entries)));
+        assert_eq!(
+            listed.entries,
+            [
+                FolderBrowserEntry {
+                    name: "api".into(),
+                    query: "~/projects/api/".into()
+                },
+                FolderBrowserEntry {
+                    name: "app".into(),
+                    query: "~/projects/app/".into()
+                },
+            ]
+        );
+        assert!(!folder_browser("~/projects/", false, None).is_browsing);
+    }
+
+    #[test]
+    fn adding_a_registered_folder_opens_its_project() {
+        let projects = [project("app", "/work/app")];
+        assert_eq!(
+            add_project_target(&projects, "/work/app/"),
+            AddProjectTarget::Existing {
+                project_id: "app".into(),
+                title: "app".into()
+            }
+        );
+        assert_eq!(
+            add_project_target(&projects, " /work/new "),
+            AddProjectTarget::Add {
+                path: "/work/new".into()
+            }
+        );
+        assert_eq!(
+            add_project_target(&projects, "./new"),
+            AddProjectTarget::Invalid {
+                message: "Relative paths require an active project in this environment.".into()
+            }
         );
     }
 }

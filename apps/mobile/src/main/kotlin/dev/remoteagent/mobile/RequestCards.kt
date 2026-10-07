@@ -32,7 +32,9 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -241,12 +243,16 @@ private fun QuestionBlock(model: AndroidAppModel, requestId: String, question: Q
         val draftKey = answerDraftKey(requestId, question.id)
         AttachmentButton(model, draftKey, enabled = !disabled, compact = true)
         DraftAttachmentStrip(model, model.snapshot.draftAttachments(draftKey), draftKey, thumbnail = 72.dp)
+        // Typing stays local until core has it; otherwise the field shows core's answer, which an option can clear.
         var answer by remember(requestId, question.id) { mutableStateOf(question.customAnswer) }
+        var unsaved by remember(requestId, question.id) { mutableIntStateOf(0) }
+        LaunchedEffect(question.customAnswer, unsaved) { if (unsaved == 0) answer = question.customAnswer }
         SettingsField(
             answer,
             {
                 answer = it
-                model.perform(Intent.EditAnswer(requestId, question.id, AnswerEdit.Custom(it)))
+                unsaved += 1
+                model.perform(Intent.EditAnswer(requestId, question.id, AnswerEdit.Custom(it))) { unsaved -= 1 }
             },
             question.hint ?: "Type your answer",
         )

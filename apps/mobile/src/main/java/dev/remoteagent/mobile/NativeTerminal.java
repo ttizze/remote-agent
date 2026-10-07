@@ -19,18 +19,31 @@ public final class NativeTerminal implements TerminalSessionClient, TerminalView
     public boolean controlArmed;
     public boolean altArmed;
     public Runnable onModifiersReleased;
-    public NativeTerminal(Context context, TerminalSession.Transport transport, int background, int foreground, int cursor, int fontSize) {
+    private float fontSize;
+    public NativeTerminal(Context context, TerminalSession.Transport transport, int background, int foreground, int cursor, float fontSize) {
         view = new TerminalView(context, null);
         view.setTerminalViewClient(this);
         view.setBackgroundColor(background);
         view.setId(R.id.native_terminal);
-        view.setTextSize((int) (fontSize * context.getResources().getDisplayMetrics().scaledDensity));
+        setFontSize(fontSize);
         session = new TerminalSession(transport, this);
         session.getEmulator().mColors.mCurrentColors[com.termux.terminal.TextStyle.COLOR_INDEX_BACKGROUND] = background;
         session.getEmulator().mColors.mCurrentColors[com.termux.terminal.TextStyle.COLOR_INDEX_FOREGROUND] = foreground;
         session.getEmulator().mColors.mCurrentColors[com.termux.terminal.TextStyle.COLOR_INDEX_CURSOR] = cursor;
         view.attachSession(session);
         view.setFocusableInTouchMode(true);
+    }
+    /** Points, scaled like text; the grid follows the new cell size. */
+    public void setFontSize(float points) {
+        if (points == fontSize) return;
+        fontSize = points;
+        view.setTextSize(Math.round(points * view.getResources().getDisplayMetrics().scaledDensity));
+    }
+    /** The rows on screen now, from the top of the viewport. */
+    public String visibleText() {
+        var emulator = session.getEmulator();
+        int top = view.getTopRow();
+        return emulator.getScreen().getSelectedText(0, top, emulator.mColumns, top + emulator.mRows - 1, false);
     }
     public boolean feed(long next, byte[] bytes, int columns, int rows) {
         if (next <= sequence) return false;

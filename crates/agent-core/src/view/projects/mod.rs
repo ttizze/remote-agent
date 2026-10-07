@@ -3,5 +3,6 @@
 pub mod add;
 pub mod import;
 pub mod paths;
+pub mod picker;
 pub mod scripts;
 pub mod selection;

@@ -35,6 +35,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 
@@ -51,7 +52,11 @@ internal fun RemoteAgentApp(
     }
     BackHandler(model.stack.size > 1) { model.back() }
     AppMaterialTheme {
-        CompositionLocalProvider(LocalSnapshot provides model.snapshot) { AppSurface(model, requestQrScan) }
+        val context = LocalContext.current
+        val markdown = remember(model, context) { markdownActions(model, context) }
+        CompositionLocalProvider(LocalSnapshot provides model.snapshot, LocalMarkdownActions provides markdown) {
+            AppSurface(model, requestQrScan)
+        }
     }
 }
 
@@ -65,10 +70,13 @@ private fun AppSurface(model: AndroidAppModel, requestQrScan: (onContents: (Stri
                     Route.Pairing -> PairingScreen(model, requestQrScan)
                     Route.Home -> HomeScreen(model)
                     is Route.Thread -> ThreadScreen(model, route.id)
+                    Route.ChooseProject -> ChooseProjectScreen(model)
+                    Route.AddProject -> AddProjectScreen(model)
+                    Route.AddProjectLocal -> LocalFolderScreen(model)
                     Route.NewTask -> NewTaskScreen(model)
                     is Route.Terminal ->
                         TerminalScreen(model, route.threadId, route.terminalId, route.project, route.cwd)
-                    is Route.Workspace -> WorkspaceScreen(model, route.tab)
+                    is Route.Workspace -> WorkspaceScreen(model, route.tab, route.file)
                     is Route.Settings -> SettingsScreen(model, route.projectId)
                     Route.Archived -> ArchivedScreen(model)
                 }

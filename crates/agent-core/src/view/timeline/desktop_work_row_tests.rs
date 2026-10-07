@@ -76,7 +76,7 @@ fn leads_an_unanswered_question_row_with_the_question_text() {
     assert_eq!(collapsed.accessibility_label, "Which repository?");
     assert!(!collapsed.expanded);
     let expanded = row(&state, &entry, true);
-    assert!(expanded.detail.unwrap().shows_question_answer);
+    assert!(expanded.detail.unwrap().question_answer.is_some());
 }
 
 #[test]
