@@ -1585,3 +1585,29 @@ UniFFI の公開（`bindings/views.rs`）:
 - provider ごとの runtime mode と plan toggle、model option の記述は Host から届かないので、すべての mode と Plan を出す。
 - 接続状態は接続しているかどうかだけで、再接続中の環境名や理由は出ない。
 - 「Work locally」（setup を止めて checkout で送り直す）と、新しい task の下書きの project 選択時刻・branch は未実装。
+
+### Android クライアント（段階 4、2026-10-07）
+
+| T3 mobile | Android（`apps/mobile/src/main/kotlin/dev/remoteagent/mobile`） |
+|---|---|
+| `HomeScreen`、`HomeHeader.android`、`MaterialThreadListToolbar`、`AndroidHomeFab.android` | `HomeScreen.kt`（`Snapshot::thread_list`、空の状態は `ThreadListView.empty`） |
+| `thread-list-v2-items`（card・slim・unsent 行、shelf、Show more）、`thread-list-v2-row-appearance.android`、`thread-swipe-actions` | `ThreadRows.kt` |
+| long-press menu、`ThreadArrangementSheet` | `ThreadActions.kt`（`ThreadMenuItem`・`ThreadMenuAction`）、`HomeScreen.kt` の Arrange sheet（並べ替えは上下の移動） |
+| `CustomSnoozeSheet.android` | `CustomSnoozeDialog.kt`（`custom_snooze_until`） |
+| `ThreadRouteScreen`（Android header）、`ThreadDetailScreen`、`ThreadFeed`、`thread-work-log`、`thread-subagent-group`、`worktree-setup-card`、`floating-working-control` | `ThreadScreen.kt`、`FeedRows.kt`（`TimelineLayout::Mobile` の行） |
+| `PendingApprovalCard`、`PendingUserInputCard`、`RequestActionButton` | `RequestCards.kt` |
+| `ThreadComposer`、`ComposerToolbar`、`composerSendPresentation`、`ComposerCommandPopover` | `Composer.kt`（`ComposerView`、`Snapshot::composer_menu`） |
+| `ThreadQueueControl`、`ThreadAgentsSheet`、`ThreadSettingsSheet`・`ThreadSettingsRows.android`、`worktree-setup-sheet.android` | `ThreadSheets.kt` |
+| `NewTaskRouteScreen`・`NewTaskDraftScreen` | `NewTaskScreen.kt`（`Snapshot::new_thread`） |
+| `ThreadTerminalRouteScreen` | `TerminalScreen.kt`（`(thread, terminal_id)`、setup card の「Open terminal」は `setup-<script id>`） |
+| `SettingsRouteScreen`、`ArchivedThreadsScreen` | `SettingsScreen.kt`（`Snapshot::settings`・`setting_edit`、`Snapshot::archived`） |
+| `composerImages.ts` の写真の再符号化、`ComposerAttachmentStrip` | `AttachmentFiles.kt`・`Attachments.kt`（`admit_attachments`） |
+| `lib/mobileTheme`・既定の theme 変数 | `AppTheme.kt` |
+
+未対応（Host の data 待ち、または Android でまだ作っていないもの）:
+
+- Host から届かないもの: provider の option descriptor（trait の行が出ない場合がある）、`$` skill と provider の slash command、`@` の path 検索、branch の diff、terminal の metadata（label・実行中の process）。composer の menu は core の built-in の command と thread だけを出す。
+- 音声入力（mic）、git 操作と review の native diff、端末 preview、Material You の配色、prompt stash の UI、project の folder の閲覧（Add project は絶対 path の入力だけ）、既存 session の取り込み画面、新しい task の環境・branch の選択（intent がない）、「New thread on <branch>」は branch を運ばない（`NewThreadOnBranch` に対応する intent がない）。
+- 質問の回答に添付したファイルの一覧は出ない（view が件数だけを返す）。model を変えたときの option は引き継がない。thread 設定の「Legacy models」の切り替えはない。
+- setup card の「Open terminal」は Host が setup を thread の terminal で動かし `terminal_id` を埋めるまで出ない。Host の `StartTerminal` が thread と terminal id を運ぶまで、terminal は handle と cwd だけで開く。
+- 一覧の並べ替え（Arrange）は drag ではなく core の Move up / Move down を並べる。
