@@ -482,6 +482,23 @@ impl Owner {
         Ok(Next::Done)
     }
 
+    /// "New thread on <branch>": a local draft on that branch, in the worktree
+    /// that has it checked out.
+    pub(super) fn start_new_thread_on_branch(
+        &mut self,
+        branch: String,
+        worktree_path: Option<String>,
+    ) {
+        self.update_new_thread_draft(|draft| {
+            draft.workspace = Some(DraftWorkspace {
+                mode: ThreadWorkspaceMode::Local,
+                branch: Some(branch),
+                worktree_path,
+                start_from_origin: false,
+            })
+        });
+    }
+
     pub(super) fn set_new_thread_start_from_origin(&mut self, on: bool) -> Result<Next, PeerError> {
         let current = self.new_thread_workspace();
         self.update_new_thread_draft(|draft| {

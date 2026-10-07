@@ -386,7 +386,7 @@ impl Owner {
             } => {
                 self.select_thread(None);
                 self.state.selected_project = Some(project_id);
-                self.select_new_thread_branch(branch, worktree_path)?;
+                self.start_new_thread_on_branch(branch, worktree_path);
                 self.load_new_thread_branches(String::new());
                 Next::Done
             }

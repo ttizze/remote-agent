@@ -1529,3 +1529,140 @@ fn discarding_a_draft_removes_only_that_draft() {
         ["thread"]
     );
 }
+
+fn project_shell(owner: &mut Owner) {
+    owner.shell_update(
+        ShellLocation::Active,
+        ShellUpdate::Snapshot(ShellSnapshot {
+            snapshot_sequence: 1,
+            projects: vec![crate::models::Project {
+                id: "app".into(),
+                name: "App".into(),
+                roots: vec![crate::models::ProjectRoot {
+                    path: "/repo".into(),
+                }],
+                ..Default::default()
+            }],
+            threads: vec![],
+        }),
+    );
+}
+
+// mobile queries.ts useComposerPathSearch: the debounced query is asked once
+// and only its own answer is shown.
+#[test]
+fn a_path_trigger_waits_for_its_debounce_and_keeps_only_its_own_answer() {
+    use agent_protocol::workspace as w;
+    let mut owner = owner(Snapshot {
+        default_draft: draft(),
+        selected_project: Some("app".into()),
+        ..Snapshot::default()
+    });
+    project_shell(&mut owner);
+    owner.update_composer_menu(
+        "see @src",
+        8,
+        crate::view::timeline::rows::TimelineLayout::Mobile,
+    );
+    let entries = &owner.state.sources.entries;
+    let wanted = entries.wanted.clone().unwrap();
+    assert_eq!(
+        (wanted.cwd.as_str(), wanted.query.as_str(), wanted.limit),
+        ("/repo", "src", 20)
+    );
+    assert!(entries.due_at_ms.is_some());
+    let answer = |query: &str| {
+        (
+            w::SearchEntries {
+                cwd: "/repo".into(),
+                query: query.into(),
+                limit: 20,
+                kind: None,
+                image_only: false,
+            },
+            w::EntrySearch {
+                entries: vec![w::WorkspaceEntry {
+                    path: format!("{query}/lib.rs"),
+                    kind: w::EntryKind::File,
+                }],
+                truncated: false,
+            },
+        )
+    };
+    let (stale, found) = answer("sr");
+    owner.entries_found(&stale, found);
+    assert_eq!(owner.state.sources.entries.result, None);
+    let (current, found) = answer("src");
+    owner.entries_found(&current, found);
+    let menu = owner.state.composer_menu("see @src".into(), 8);
+    assert_eq!(menu.items[0].label, "lib.rs");
+    owner.update_composer_menu(
+        "plain",
+        5,
+        crate::view::timeline::rows::TimelineLayout::Mobile,
+    );
+    assert_eq!(owner.state.sources.entries.wanted, None);
+}
+
+// mobile ThreadRouteScreen handleWorkLocally.
+#[test]
+fn working_locally_relaunches_the_first_message_once_the_setup_is_cancelled() {
+    let mut state = thread_state("Thread");
+    state.messages.push(message("first", "Fix the bug"));
+    let mut owner = opened(state);
+    let next = owner.work_locally().unwrap();
+    assert!(
+        matches!(next, Next::Call(call, _) if matches!(*call, crate::protocol::Call::CancelSetup(_)))
+    );
+    owner.setup_cancelled(&thread_id(), false);
+    assert!(owner.state.outbox.entries.is_empty());
+    owner.work_locally().unwrap();
+    owner.setup_cancelled(&thread_id(), true);
+    let entry = owner.state.outbox.entries[0].clone();
+    let Request::Launch(launch) = &entry.request else {
+        panic!("launch")
+    };
+    assert_eq!(launch.project_id, "project");
+    assert_eq!(
+        launch.workspace,
+        agent_protocol::conversation::WorkspaceStrategy::Root { branch: None }
+    );
+    assert_eq!(launch.message.as_ref().unwrap().text, "Fix the bug");
+    assert!(entry.navigate);
+}
+
+// NewTaskDraftScreen initialProjectRef.branch: a local draft that reuses the
+// branch's worktree.
+#[test]
+fn a_new_thread_on_a_branch_opens_a_local_draft_in_its_worktree() {
+    let mut owner = owner(Snapshot {
+        default_draft: draft(),
+        ..Snapshot::default()
+    });
+    project_shell(&mut owner);
+    owner.state.workspace.worktree_settings = Some(crate::models::WorktreeSettings {
+        create_on_new_session: true,
+        ..Default::default()
+    });
+    let (sender, _receipt) = oneshot::channel();
+    owner.intent(
+        Intent::NewThreadOnBranch {
+            project_id: "app".into(),
+            branch: "fix".into(),
+            worktree_path: Some("/trees/fix".into()),
+        },
+        sender,
+    );
+    assert_eq!(owner.state.selected_project.as_deref(), Some("app"));
+    let workspace = owner.state.new_thread_workspace();
+    assert_eq!(
+        workspace,
+        DraftWorkspace {
+            mode: crate::view::projects::selection::ThreadWorkspaceMode::Local,
+            branch: Some("fix".into()),
+            worktree_path: Some("/trees/fix".into()),
+            start_from_origin: false,
+        }
+    );
+    assert_eq!(owner.state.composer_cwd(), "/trees/fix");
+}
