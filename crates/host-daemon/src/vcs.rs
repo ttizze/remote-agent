@@ -4,7 +4,8 @@
 //! HEAD and the base branch.
 use agent_protocol::workspace::{
     BranchChanges, DiffFile, DiffPreview, DiffPreviewResult, DiffSource, DiffSourceKind,
-    FileChangeTotals, ListRefs, RefKind, RefList, VcsRef, VcsStatus, WorkingTreeChanges,
+    FileChangeTotals, ListRefs, RefKind, RefList, SwitchRef, SwitchedRef, VcsRef, VcsStatus,
+    WorkingTreeChanges,
 };
 use anyhow::{Context as _, Result, anyhow};
 use std::{
@@ -996,6 +997,65 @@ pub(crate) async fn refs(request: ListRefs) -> Result<RefList> {
         return Err(anyhow!("invalid ref list request"));
     }
     tokio::task::spawn_blocking(move || list_refs(&request)).await?
+}
+
+/// The local branch that tracks `upstream`.
+fn tracking_branch(cwd: &Path, upstream: &str) -> Option<String> {
+    stdout(
+        cwd,
+        &[
+            "for-each-ref",
+            "--format=%(refname:short)\t%(upstream:short)",
+            "refs/heads",
+        ],
+    )?
+    .lines()
+    .filter_map(|line| line.trim().split_once('\t'))
+    .map(|(branch, upstream)| (branch.trim(), upstream.trim()))
+    .find(|(branch, candidate)| !branch.is_empty() && *candidate == upstream)
+    .map(|(branch, _)| branch.to_owned())
+}
+
+/// Checks out a branch: an existing local one, the local branch tracking a
+/// remote one, or a new local branch tracking it.
+fn checkout(request: &SwitchRef) -> Result<SwitchedRef> {
+    let cwd = Path::new(&request.cwd);
+    let name = request.ref_name.as_str();
+    let local = ref_exists(cwd, &format!("refs/heads/{name}"));
+    let remote = ref_exists(cwd, &format!("refs/remotes/{name}"));
+    let tracking = remote.then(|| tracking_branch(cwd, name)).flatten();
+    let tracked_name = name
+        .split_once('/')
+        .map(|(_, branch)| branch.trim())
+        .filter(|branch| !branch.is_empty());
+    let tracked_exists = remote
+        && tracked_name.is_some_and(|branch| ref_exists(cwd, &format!("refs/heads/{branch}")));
+    let mut args = match (local, remote, &tracking) {
+        (true, _, _) => vec!["checkout", name],
+        (false, true, None) if tracked_exists => vec!["checkout", name],
+        (false, true, None) => vec!["checkout", "--track", name],
+        (false, true, Some(branch)) => vec!["checkout", branch.as_str()],
+        (false, false, _) => vec!["checkout", name],
+    };
+    // A stale ref must not turn into a path checkout that discards local edits.
+    args.push("--");
+    let run = git(cwd, &args, Options::default())?;
+    if !run.ok() {
+        return Err(anyhow!(
+            "Git command failed in GitVcsDriver.switchRef.checkout ({}): git checkout failed",
+            request.cwd
+        ));
+    }
+    Ok(SwitchedRef {
+        ref_name: stdout(cwd, &["branch", "--show-current"]).filter(|name| !name.is_empty()),
+    })
+}
+
+pub(crate) async fn switch_ref(request: SwitchRef) -> Result<SwitchedRef> {
+    if request.ref_name.trim().is_empty() || request.ref_name.starts_with('-') {
+        return Err(anyhow!("invalid ref name"));
+    }
+    tokio::task::spawn_blocking(move || checkout(&request)).await?
 }
 
 #[cfg(test)]

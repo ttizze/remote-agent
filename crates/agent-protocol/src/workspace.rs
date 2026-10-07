@@ -179,6 +179,22 @@ pub struct RefList {
     pub total_count: u32,
 }
 
+/// `host/vcs/switchRef`: checks out a branch in a checkout, tracking a remote
+/// branch locally.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwitchRef {
+    pub cwd: String,
+    pub ref_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwitchedRef {
+    /// The branch checked out afterwards; `None` on a detached HEAD.
+    pub ref_name: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum DiffSourceKind {

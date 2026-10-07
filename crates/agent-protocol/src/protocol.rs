@@ -108,6 +108,7 @@ results! {
     TerminalMetadata(crate::operations::TerminalMetadataEvent),
     ProviderCommands(crate::workspace::ProviderCommands), EntrySearch(crate::workspace::EntrySearch),
     VcsStatus(crate::workspace::VcsStatus), RefList(crate::workspace::RefList),
+    SwitchedRef(crate::workspace::SwitchedRef),
     DiffPreview(crate::workspace::DiffPreviewResult),
     Files(crate::models::FileList), File(crate::models::FileContent), Grant(crate::models::TransferGrant),
     Transcription(crate::operations::Transcription),

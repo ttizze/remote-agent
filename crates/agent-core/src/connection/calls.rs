@@ -43,6 +43,7 @@ pub(super) enum Reply {
     DiffPreview(w::DiffPreviewResult),
     SetupCancelled(c::SetupCancelled),
     ProjectIcon(Option<m::ProjectFavicon>),
+    SwitchedRef(w::SwitchedRef),
     Done,
 }
 
@@ -69,6 +70,7 @@ async fn execute(peer: &Peer, call: &Call) -> Result<Reply, PeerError> {
         Call::ListRefs(_) => Reply::Refs(peer.request(call).await?),
         Call::DiffPreview(_) => Reply::DiffPreview(peer.request(call).await?),
         Call::ProjectFavicon(_) => Reply::ProjectIcon(peer.request(call).await?),
+        Call::SwitchRef(_) => Reply::SwitchedRef(peer.request(call).await?),
         Call::ListAccounts(_) => Reply::Accounts(peer.request(call).await?),
         Call::StartAccountLogin(_) => Reply::Login(peer.request(call).await?),
         Call::HostStatus(_) => Reply::HostStatus(peer.request(call).await?),
@@ -519,6 +521,11 @@ impl Owner {
                 if let Call::DiffPreview(request) = call {
                     self.diff_preview_finished(request, Ok(preview));
                     self.show_diff_preview();
+                }
+            }
+            Reply::SwitchedRef(switched) => {
+                if let Call::SwitchRef(request) = call {
+                    self.switched_ref(request, switched);
                 }
             }
             Reply::ProjectIcon(favicon) => {

@@ -510,6 +510,27 @@ impl Owner {
             .new_thread_project_root()
             .ok_or_else(|| invalid("Choose a project first"))?;
         let current = self.new_thread_workspace();
+        let is_current = self
+            .state
+            .sources
+            .refs(&root, RefScope::All)
+            .and_then(|entry| entry.list.as_ref())
+            .is_some_and(|list| {
+                list.refs
+                    .iter()
+                    .any(|candidate| candidate.name == branch && candidate.current)
+            });
+        // A local branch checked out nowhere is switched to first, as the
+        // reference new-task picker does.
+        if current.mode == ThreadWorkspaceMode::Local && worktree_path.is_none() && !is_current {
+            return Ok(Next::call(
+                Call::SwitchRef(w::SwitchRef {
+                    cwd: root,
+                    ref_name: branch,
+                }),
+                None,
+            ));
+        }
         let worktree_path = crate::view::new_thread::branch_worktree_path(
             current.mode,
             &root,
@@ -523,6 +544,32 @@ impl Owner {
             })
         });
         Ok(Next::Done)
+    }
+
+    /// The new-thread draft's checkout moved to `switched`.
+    pub(super) fn switched_ref(&mut self, request: &w::SwitchRef, switched: w::SwitchedRef) {
+        if self.state.new_thread_project_root().as_deref() != Some(request.cwd.as_str()) {
+            return;
+        }
+        let current = self.new_thread_workspace();
+        let branch = switched
+            .ref_name
+            .unwrap_or_else(|| request.ref_name.clone());
+        self.update_new_thread_draft(|draft| {
+            draft.workspace = Some(DraftWorkspace {
+                mode: ThreadWorkspaceMode::Local,
+                branch: Some(branch),
+                worktree_path: None,
+                ..current
+            })
+        });
+        let query = self
+            .state
+            .sources
+            .refs(&request.cwd, RefScope::All)
+            .map(|entry| entry.query.clone())
+            .unwrap_or_default();
+        self.load_new_thread_branches(query);
     }
 
     /// "New thread on <branch>": a local draft on that branch, in the worktree

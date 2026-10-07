@@ -349,3 +349,44 @@ fn refs_list_local_and_remote_branches_for_the_base_picker() {
     assert!(default.is_remote && default.is_default);
     assert!(refs.has_primary_remote);
 }
+
+// GitVcsDriverCore switchRef: a local branch, a remote branch tracked by a new
+// local branch, and the local branch already tracking it.
+#[test]
+fn switching_refs_checks_out_local_and_remote_branches() {
+    let directory = tempfile::tempdir().unwrap();
+    let remote = tempfile::tempdir().unwrap();
+    let cwd = directory.path();
+    let initial = repository_with_commit(cwd);
+    run(remote.path(), &["init", "--quiet", "--bare"]);
+    run(
+        cwd,
+        &["remote", "add", "origin", &remote.path().to_string_lossy()],
+    );
+    run(cwd, &["checkout", "--quiet", "-b", "feature/remote"]);
+    run(cwd, &["push", "--quiet", "origin", "feature/remote"]);
+    run(cwd, &["checkout", "--quiet", &initial]);
+    run(cwd, &["branch", "--quiet", "-D", "feature/remote"]);
+    run(cwd, &["branch", "--quiet", "local-only"]);
+    let switch = |name: &str| {
+        checkout(&SwitchRef {
+            cwd: cwd.to_string_lossy().into_owned(),
+            ref_name: name.into(),
+        })
+    };
+    assert_eq!(
+        switch("local-only").unwrap().ref_name.as_deref(),
+        Some("local-only")
+    );
+    assert_eq!(
+        switch("origin/feature/remote").unwrap().ref_name.as_deref(),
+        Some("feature/remote")
+    );
+    run(cwd, &["checkout", "--quiet", &initial]);
+    assert_eq!(
+        switch("origin/feature/remote").unwrap().ref_name.as_deref(),
+        Some("feature/remote")
+    );
+    let missing = switch("no-such-branch").unwrap_err().to_string();
+    assert!(missing.ends_with("git checkout failed"), "{missing}");
+}

@@ -71,6 +71,7 @@ contracts! {
     SearchEntries, "host/workspace/searchEntries" => (w::SearchEntries, w::EntrySearch) [clone],
     VcsStatus, "host/vcs/status" => (w::ReadVcsStatus, w::VcsStatus) [clone],
     ListRefs, "host/vcs/listRefs" => (w::ListRefs, w::RefList) [clone],
+    SwitchRef, "host/vcs/switchRef" => (w::SwitchRef, w::SwitchedRef),
     DiffPreview, "host/review/diffPreview" => (w::DiffPreview, w::DiffPreviewResult) [clone],
     Transcribe, "host/dictation/transcribe" => (op::Transcribe, op::Transcription),
     PrepareDictation, "host/dictation/prepare" => (op::DictationPreparation, m::Empty),

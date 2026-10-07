@@ -1741,3 +1741,60 @@ fn a_later_branch_page_joins_the_first() {
     assert_eq!(names, ["main", "dev", "topic"]);
     assert!(!view.has_more_branches);
 }
+
+// checkout-new-task-branch.ts: a local branch checked out nowhere is switched
+// to before the draft takes it.
+#[test]
+fn picking_another_local_branch_switches_the_checkout_first() {
+    use agent_protocol::workspace as w;
+    let mut owner = owner(Snapshot {
+        selected_project: Some("app".into()),
+        ..Snapshot::default()
+    });
+    project_shell(&mut owner);
+    let branch = |name: &str, current: bool| w::VcsRef {
+        name: name.into(),
+        is_remote: false,
+        remote_name: None,
+        current,
+        is_default: false,
+        worktree_path: current.then(|| "/repo".into()),
+    };
+    owner.state.sources.refs.insert(
+        ("/repo".into(), RefScope::All),
+        RefsEntry {
+            list: Some(w::RefList {
+                refs: vec![branch("main", true), branch("topic", false)],
+                is_repo: true,
+                has_primary_remote: false,
+                next_cursor: None,
+                total_count: 2,
+            }),
+            ..Default::default()
+        },
+    );
+    let next = owner
+        .select_new_thread_branch("main".into(), Some("/repo".into()))
+        .unwrap();
+    assert!(matches!(next, Next::Done));
+    let next = owner
+        .select_new_thread_branch("topic".into(), None)
+        .unwrap();
+    let Next::Call(call, _) = next else {
+        panic!("switch")
+    };
+    let crate::protocol::Call::SwitchRef(request) = *call else {
+        panic!("switch")
+    };
+    assert_eq!(request.ref_name, "topic");
+    owner.switched_ref(
+        &request,
+        w::SwitchedRef {
+            ref_name: Some("topic".into()),
+        },
+    );
+    assert_eq!(
+        owner.state.new_thread_workspace().branch.as_deref(),
+        Some("topic")
+    );
+}

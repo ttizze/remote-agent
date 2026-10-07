@@ -531,6 +531,10 @@ impl HostRpcService {
                     .await
                     .map_err(|error| Failure::new("vcs_refs_failed", error))?
                     .into(),
+                Call::SwitchRef(params) => crate::vcs::switch_ref(params.clone())
+                    .await
+                    .map_err(|error| Failure::new("vcs_switch_ref_failed", error))?
+                    .into(),
                 Call::DiffPreview(params) => crate::vcs::diff_preview(params.clone())
                     .await
                     .map_err(|error| Failure::new("diff_preview_failed", error))?
