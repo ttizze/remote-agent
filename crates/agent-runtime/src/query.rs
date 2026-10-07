@@ -43,37 +43,13 @@ impl ActorHandle {
 }
 
 impl ActorRegistry {
-    /// One visible item read on demand. A subagent item that a fork inherited
-    /// shows its task from the thread that ran it, up the fork's ancestors.
+    /// One visible item read on demand.
     pub async fn turn_item(
         &self,
         thread: &ThreadId,
         item: &TurnItemId,
     ) -> Result<Option<TurnItemDetail>, RuntimeError> {
-        const MAX_ANCESTORS: usize = 64;
-        let state = self.state(thread).await?;
-        let Some(mut detail) = turn_item(&state, item) else {
-            return Ok(None);
-        };
-        if let ItemKind::Subagent { task } = &detail.row.item.kind
-            && detail.row.inherited
-        {
-            let mut source = Some(detail.row.source.clone());
-            for _ in 0..MAX_ANCESTORS {
-                let Some(ancestor) = source.take() else {
-                    break;
-                };
-                let Ok(ancestor) = self.state(&ancestor).await else {
-                    break;
-                };
-                if let Some(found) = ancestor.tasks.iter().find(|found| &found.id == task) {
-                    detail.task = Some(detail_task(found));
-                    break;
-                }
-                source = ancestor.thread.as_ref().and_then(|t| t.parent.clone());
-            }
-        }
-        Ok(Some(detail))
+        Ok(turn_item(&*self.state(thread).await?, item))
     }
 }
 
@@ -81,8 +57,8 @@ impl ActorRegistry {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TurnItemDetail {
     pub row: HistoryRow,
-    /// The task a local subagent item shows, with its prompt, progress and
-    /// result.
+    /// The task a subagent item shows, with its prompt, progress and result;
+    /// an inherited item's as it was at the fork.
     pub task: Option<Task>,
 }
 
@@ -97,11 +73,13 @@ pub fn turn_item(state: &State, item: &TurnItemId) -> Option<TurnItemDetail> {
             let mut owned = row.owned(position);
             owned.item = detail_item(row.item);
             let task = match &row.item.kind {
-                ItemKind::Subagent { task } if !row.inherited => state
-                    .tasks
-                    .iter()
-                    .find(|candidate| &candidate.id == task)
-                    .map(detail_task),
+                ItemKind::Subagent { task } => match row.inherited {
+                    true => &state.inherited_tasks,
+                    false => &state.tasks,
+                }
+                .iter()
+                .find(|candidate| &candidate.id == task)
+                .map(detail_task),
                 _ => None,
             };
             TurnItemDetail { row: owned, task }

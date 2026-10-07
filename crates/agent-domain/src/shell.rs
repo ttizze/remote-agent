@@ -454,6 +454,7 @@ mod tests {
             boundary: 0,
             history: vec![],
             messages: vec![],
+            tasks: vec![],
         });
         assert_eq!(
             (fork.parent.as_ref(), fork.relationship_to_parent),

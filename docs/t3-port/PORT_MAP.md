@@ -1342,7 +1342,7 @@ Codex の app-server を instance ごとに共有し、起動設定・アカウ�
 | `Orchestrator.ts:8393-8569` dispatchCheckpointRollback（active run を確かめない）、`CheckpointRollbackService.ts` の runsToRollback | `agent_domain::tests::a_rollback_while_a_run_is_active_is_accepted_and_keeps_that_run`、`executor::tests::rollback::a_rollback_requested_while_a_turn_runs_executes_without_waiting_for_it`。 |
 | `AttachmentClaims.ts` claimPendingAttachments・validateAttachmentLimits、`ThreadMessageIntake.ts` の回答の claim と release、launchThread の release | `workspace_files::attachments::tests::claim_failures_say_why_in_the_reference_wording`、`a_question_response_is_bounded_and_released_as_a_whole`、`conversation::tests::conversation_calls_answer_with_typed_errors`（回答の上限で receipt が残らない）、`tools::tests::a_launch_that_was_not_accepted_releases_its_claimed_uploads`。 |
 | `composerContext.ts` の TrimmedNonEmptyString（decode 時の trim） | `composer::tests::records_are_trimmed_before_they_are_checked`。 |
-| `ThreadForkService.ts` の subagent 項目の複製 | `query::tests::a_forks_inherited_subagent_item_reads_its_task_from_the_source`。 |
+| `ThreadForkService.ts` の subagent 項目の複製 | `agent_domain::tests::fork::a_fork_keeps_its_subagent_tasks_as_they_were_at_the_fork`、`query::tests::a_forks_inherited_subagent_item_reads_its_task_as_it_was_at_the_fork`（fork の後の元の progress と result は見えず、client には送らない）。 |
 
 ### 段階 1・2 の検証記録（2026-10-06）
 

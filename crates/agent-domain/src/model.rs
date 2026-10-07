@@ -684,6 +684,8 @@ pub struct State {
     pub transfers: Vec<Transfer>,
     pub inherited_items: Vec<Item>,
     pub inherited_messages: Vec<Message>,
+    /// The tasks of inherited subagent items, as they were at the fork.
+    pub inherited_tasks: Vec<Task>,
     /// Requested rollbacks in order; the first one is executing.
     pub rollbacks: Vec<PendingRollback>,
     /// Captures that can be replayed after process loss, including their terminal status.
@@ -1011,6 +1013,7 @@ pub enum Command {
         boundary: u64,
         history: Vec<Item>,
         messages: Vec<Message>,
+        tasks: Vec<Task>,
         workspace: Option<Workspace>,
         arrangement: Box<ThreadArrangement>,
         context: HistoricalContext,
