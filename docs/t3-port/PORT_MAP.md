@@ -1645,13 +1645,12 @@ UniFFI の公開（`bindings/views.rs`）:
 | `composerImages.ts` の写真の再符号化、`ComposerAttachmentStrip` | `AttachmentFiles.kt`・`Attachments.kt`（`admit_attachments`） |
 | `lib/mobileTheme`・既定の theme 変数 | `AppTheme.kt` |
 
-未対応（Host の data 待ち、または Android でまだ作っていないもの）:
+未対応（2026-10-08 の統合の後、Android でまだ作っていないもの）:
 
-- Host から届かないもの: provider の option descriptor（trait の行が出ない場合がある）、`$` skill と provider の slash command、`@` の path 検索、branch の diff、terminal の metadata（label・実行中の process）。composer の menu は core の built-in の command と thread だけを出す。
-- 音声入力（mic）、git 操作と review の native diff、端末 preview、Material You の配色、prompt stash の UI、project の folder の閲覧（Add project は絶対 path の入力だけ）、既存 session の取り込み画面、新しい task の環境・branch の選択（intent がない）、「New thread on <branch>」は branch を運ばない（`NewThreadOnBranch` に対応する intent がない）。
-- 質問の回答に添付したファイルの一覧は出ない（view が件数だけを返す）。model を変えたときの option は引き継がない。thread 設定の「Legacy models」の切り替えはない。
-- setup card の「Open terminal」は Host が setup を thread の terminal で動かし `terminal_id` を埋めるまで出ない。Host の `StartTerminal` が thread と terminal id を運ぶまで、terminal は handle と cwd だけで開く。
-- 一覧の並べ替え（Arrange）は drag ではなく core の Move up / Move down を並べる。
+- 音声入力（mic）、git 操作（段階 6）、端末 preview、Material You の配色、project の folder の閲覧（Add project は絶対 path の入力だけ）と「Choose project」の全画面（dropdown のまま）、既存 session の取り込み画面。
+- terminal の「Text size」submenu と keyboard を閉じたときの bar（Attach output・Show keyboard）。
+- SVG の project icon は Android で描けないので folder の glyph にする。
+- model を変えたときの option は引き継がない。一覧の並べ替え（Arrange）は drag ではなく core の Move up / Move down を並べる。
 
 ### 段階 4 の統合: Host の data の接続（2026-10-08）
 
@@ -1681,3 +1680,17 @@ UniFFI の公開（`bindings/views.rs`）:
 - T3 の `newWorktreesStartFromOrigin` 設定。
 - context meter の resume compaction の帯（`should_offer_resume_compaction` は core にあるが画面に出していない）。
 - provider ごとの runtime mode。
+
+### 段階 4 の統合: 3 クライアント（2026-10-08）
+
+- iOS・Android・desktop は Host の data を core の view と intent だけで読む。配色は `theme()`、一覧の空の状態は `ThreadListView.empty`、設定の行は `setting_intent`・`setting_reset`、経過時間は `working_timer_label`・`working_duration_label`。
+- mobile の thread 設定の model の一覧は T3 mobile ThreadSettingsSheet と同じ catalogue（`view::models::catalog_sheet`: provider ごとの開閉、Show legacy models、All providers / Favorites / provider の filter、favorites を先頭、staged と applied、空の文言、Default）。desktop は T3 web の picker（`ModelPickerView.legacy` の「Legacy models」の行、New badge）。`legacy_models_hide_behind_the_switch_and_primary_sections_start_open`、`a_selected_legacy_model_stays_listed`。
+- composer の skill は T3 resolveProviderSkillSourceKind の出所（`ComposerCommandItem.skill_source`）で icon と badge を出す。`skill_sources_come_from_plugin_paths_then_the_scope`。
+- mobile の review の見出しは T3 reviewModel gitSubtitle（`GitDiffView.subtitle`）。mobile は T3 mobile と同じく base の picker を持たない。
+- mobile の setup card には T3 mobile と同じく「Open terminal」を出さない（desktop は T3 web と同じく出す）。
+- desktop は T3 web と同じく右の panel に browser と terminal の tab をいくつでも置き、drawer と panel の terminal は別々に持ち、終わった terminal は閉じ、thread details は浮いた card（狭いときは popover）にし、既存 session の取り込みは初回の onboarding だけで出し、設定に Appearance と Keybindings を足した（2026-10-08 に desktop の未承認の差を T3 に戻した）。
+
+未接続（2026-10-08 の時点）:
+
+- desktop: Appearance と Keybindings の値の保存（いまは起動中だけ）、Themes の grid と組み込みの palette、Contrast・Composer context・Motion・Advanced typography、keybindings.json、terminal の「Add to chat」、thread details の Workspace の節、branch picker の「Create new ref」。
+- iOS: composer の path の行の file 種別ごとの icon、icon の無い project の folder の symbol（いまは頭文字）。
