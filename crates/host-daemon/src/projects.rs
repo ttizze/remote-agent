@@ -150,10 +150,10 @@ fn now() -> agent_domain::Timestamp {
 /// `~`, `~/…` and `~\…` name the home directory.
 pub(crate) fn expand_home(path: &str) -> std::path::PathBuf {
     let home = || directories::BaseDirs::new().map(|dirs| dirs.home_dir().to_owned());
-    if path == "~" {
-        if let Some(home) = home() {
-            return home;
-        }
+    if path == "~"
+        && let Some(home) = home()
+    {
+        return home;
     }
     if let Some(rest) = path.strip_prefix("~/").or_else(|| path.strip_prefix("~\\"))
         && let Some(home) = home()

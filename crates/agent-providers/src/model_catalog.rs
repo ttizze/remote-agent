@@ -294,7 +294,7 @@ pub fn claude_upgrade_message(version: Option<&str>) -> Option<String> {
                 .then_some((minimum, entry.model.name.as_str()))
         })
         .collect();
-    unavailable.sort_by(|a, b| version_parts(a.0).cmp(&version_parts(b.0)));
+    unavailable.sort_by_key(|entry| version_parts(entry.0));
     let (minimum, name) = unavailable.first()?;
     let installed = version.map_or_else(|| "the installed version".to_owned(), |v| format!("v{v}"));
     Some(format!(

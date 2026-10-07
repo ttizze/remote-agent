@@ -1303,6 +1303,24 @@ Codex の app-server を instance ごとに共有し、起動設定・アカウ�
 
 公開しない T3 の tool（裏付けの機能がない）：`schedule_task`・`list_scheduled_tasks`・`update_scheduled_task`・`delete_scheduled_task`・`run_scheduled_task_now`（scheduler）、`t3_project_update`（Host が変えられる project の設定は scripts だけで、title・workspaceRoot・既定の model などを持たない）、`t3_project_delete`・`t3_project_clone`（project の削除・clone）、`t3_worktree_*`、`t3_attachment_*`、`t3_thread_send_attachments`、`t3_environment_*`、`t3_preview_*`・`preview_*`、`device_*`、pull request の tool。`orchestrator_capabilities` の `scheduledTasks` は false にする。
 
+### 段階 4: Host（2026-10-07）
+
+| T3 の原本 | 新設計の検証 |
+| --- | --- |
+| `terminal/Manager.test.ts`（subprocess の activity、ps の共有 snapshot、snapshot 失敗時の状態保持、backoff、closeIdle、runtime env、attach と再起動、thread 単位の close） | `terminals::tests` の `running_shells_report_their_command_on_the_metadata_stream`、`one_process_snapshot_names_each_shells_command`、`a_childless_copy_of_the_shell_is_not_a_command`、`failed_snapshots_back_off_up_to_a_minute`、`close_idle_closes_quiet_shells_only`、`shells_drop_host_variables_and_take_the_callers`、`devices_share_a_threads_terminals_across_disconnects`、`exited_terminals_stay_until_closed_and_restart_on_request`、`thread_cleanup_closes_only_that_threads_terminals_and_their_jobs`。 |
+| `contracts/terminal.test.ts`、`terminalLabels.ts` | `requests_validate_ids_sizes_and_environment`、`tab_labels_number_term_ids_and_keep_other_ids`。 |
+| `Manager.test.ts`「subscribes terminal metadata…」と `ThreadSettlementService.ts` の closeIdleTerminals | `conversation::tests::settling_a_thread_closes_its_idle_terminals_on_the_metadata_stream`。 |
+| `ProjectSetupScriptRunner.test.ts`、wrapCommandForCompletion | `conversation::setup::tests`（上の段階 3 の表を参照）。 |
+| `CodexProvider.test.ts`（capability の対応、優先 default）、`ModelManifest.test.ts`（legacy の分類）、`ClaudeModelCatalog.test.ts`（版による絞り込みと upgrade の文面） | `model_catalog::tests`。manifest の差し替えを使う件は同梱の manifest で同じ規則を確かめる。 |
+| `claudeModelOptions.test.ts` | `claude_models::tests::model_options_compile_suffixes_effort_and_settings`（manifest の descriptor から解決）。 |
+| `shared/model.test.ts`「descriptor helpers」 | `agent_domain::options::tests::selections_resolve_to_listed_choices_or_the_default`。 |
+| `ClaudeProvider.ts` の parseClaudeInitializationCommands と dedupeSlashCommands、`CodexProvider.ts` の parseCodexSkillsListResponse、`ProviderRegistry.ts` の upsertProviderWorkspaceSnapshot | `host_rpc::commands::tests`。Claude の skill の一覧は `claude::skills::tests`。 |
+| `WorkspaceEntries.test.ts`「search」、`WorkspaceSearchIndex.test.ts` の画像検索 | `workspace_search::tests`。typo は fff の代わりに Host の規則で確かめる。 |
+| `GitVcsDriverCore.test.ts`「review diff previews」の Changes 5 件と whitespace・単一 file、「repository status」、listRefs 2 件 | `vcs::tests`。 |
+| `ProjectFaviconResolver.ts` | `favicon::tests`。 |
+| `pathExpansion.ts` expandHomePath | `projects::tests::a_leading_tilde_names_the_home_directory`。 |
+| `Orchestrator.ts` の thread.settle / unsettle と自動の unsettle、lineage | `agent_domain::shell::tests::unsettling_records_when_the_thread_left_settled`、`rows_name_how_a_thread_came_from_its_parent`。 |
+
 ### 段階 1・2 の検証記録（2026-10-06）
 
 実装・テストの最終 revision は `4a52416ab649fa888b80322f7a2884715d270beb`。以後のコミットは検証記録のみ。新しい domain / provider 層の実装と上記の挙動検証を終え、push と PR 更新後にレビューを待つ。

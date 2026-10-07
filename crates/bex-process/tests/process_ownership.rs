@@ -140,6 +140,7 @@ fn abrupt_host_exit_terminates_owned_pty_and_shell_jobs() {
                     .into_owned(),
                 rows: 24,
                 cols: 80,
+                env: std::env::vars().collect(),
             };
             let mut input = child.stdin().take().unwrap();
             let mut bytes = serde_json::to_vec(&command).unwrap();

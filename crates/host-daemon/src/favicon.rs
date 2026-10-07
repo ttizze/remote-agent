@@ -63,8 +63,9 @@ static OBJECT_HREF: LazyLock<regex::Regex> = LazyLock::new(|| {
     regex::Regex::new(r#"(?i)\bhref\s*:\s*["']([^"'?]+)"#).expect("pattern compiles")
 });
 
-static CACHE: LazyLock<Mutex<HashMap<PathBuf, (Instant, Option<PathBuf>)>>> =
-    LazyLock::new(Mutex::default);
+/// When each root was looked up, and its icon.
+type Found = HashMap<PathBuf, (Instant, Option<PathBuf>)>;
+static CACHE: LazyLock<Mutex<Found>> = LazyLock::new(Mutex::default);
 
 /// The icon `href` of an HTML `<link>` or of object-like icon metadata whose
 /// `rel` and `href` share a brace-free run.
