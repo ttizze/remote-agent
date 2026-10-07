@@ -9,6 +9,7 @@ mod projects;
 mod streams;
 mod subscriptions;
 mod terminals;
+mod undo;
 mod workspace;
 
 use crate::{peer::PeerError, protocol::Call, state::Snapshot, transport};

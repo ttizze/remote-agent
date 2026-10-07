@@ -352,3 +352,22 @@ fn recognizes_videos_without_a_recorded_type(
 ) {
     assert_eq!(is_video(name, mime_type), video);
 }
+
+#[test]
+fn inserts_at_the_cursor_and_appends_at_the_end_with_boundary_spacing() {
+    let review = format_context_reference("review-comment", "rc-1", "a.ts L4");
+    let preview = format_context_reference("preview-annotation", "pa-1", "Checkout");
+    let inserted = insert_inline_context_references("ab", 1, std::slice::from_ref(&review));
+    assert_eq!(inserted.text, format!("a {review} b"));
+    assert_eq!(inserted.cursor as usize, 2 + review.len() + 1);
+    let append = |prompt: &str| {
+        insert_inline_context_references(
+            prompt,
+            prompt.encode_utf16().count() as u32,
+            std::slice::from_ref(&preview),
+        )
+        .text
+    };
+    assert_eq!(append("hello"), format!("hello {preview} "));
+    assert_eq!(append(""), format!("{preview} "));
+}

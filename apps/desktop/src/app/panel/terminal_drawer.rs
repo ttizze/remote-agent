@@ -7,16 +7,16 @@ use crate::{
         Desktop,
         ui::{color, icon, tint},
     },
-    terminal::Terminal,
+    terminal::{SelectionEvent, Terminal},
 };
 use agent_core::{
     connection::Outcome,
     state::{Intent, TerminalPhase},
-    view::terminals::TerminalTab,
+    view::{composer::terminal_context::TerminalContextSelection, terminals::TerminalTab},
 };
 use agent_protocol::operations::{TerminalSize, terminal_label, thread_terminal_handle_for};
 use gpui_kit::{
-    component::{Sizable, button::Button, h_flex, tooltip::Tooltip, v_flex},
+    component::{Sizable, button::Button, h_flex, menu::PopupMenuItem, tooltip::Tooltip, v_flex},
     prelude::FluentBuilder,
     *,
 };
@@ -228,14 +228,20 @@ impl Desktop {
         for id in &shown {
             let key = (thread.clone(), id.clone());
             if let std::collections::hash_map::Entry::Vacant(entry) = state.views.entry(key) {
-                entry.insert(Terminal::new(
+                let view = Terminal::new(
                     store.clone(),
                     self.snapshot.clone(),
                     thread.clone(),
                     id.clone(),
                     window,
                     cx,
-                ));
+                );
+                let terminal_id = id.clone();
+                cx.subscribe_in(&view, window, move |desktop, view, event, window, cx| {
+                    desktop.terminal_selection(&terminal_id, view, event, window, cx)
+                })
+                .detach();
+                entry.insert(view);
             }
         }
         for view in state.views.values() {
@@ -259,6 +265,87 @@ impl Desktop {
                 .insert((thread.clone(), id.clone()));
             self.close_terminals(thread.clone(), vec![id], window, cx);
         }
+    }
+
+    /// A finished selection offers "Add to chat" and "Copy" where it ended.
+    fn terminal_selection(
+        &mut self,
+        terminal_id: &str,
+        view: &Entity<Terminal>,
+        event: &SelectionEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            SelectionEvent::Released { position } => {
+                let can_add = self.composer_caret(cx).is_some();
+                let desktop = cx.entity().downgrade();
+                let (add, copy) = (view.downgrade(), view.downgrade());
+                let terminal_id = terminal_id.to_owned();
+                self.open_menu(*position, window, cx, move |menu, _, _| {
+                    let menu = if can_add {
+                        menu.item(PopupMenuItem::new("Add to chat").on_click(
+                            move |_, window, cx| {
+                                if let Some(view) = add.upgrade() {
+                                    let _ = desktop.update(cx, |desktop, cx| {
+                                        desktop.add_terminal_selection(
+                                            &terminal_id,
+                                            &view,
+                                            window,
+                                            cx,
+                                        )
+                                    });
+                                }
+                            },
+                        ))
+                    } else {
+                        menu
+                    };
+                    menu.item(PopupMenuItem::new("Copy").on_click(move |_, window, cx| {
+                        let _ = copy.update(cx, |view, cx| {
+                            view.copy_selection(cx);
+                            view.focus_handle().focus(window, cx);
+                        });
+                    }))
+                });
+            }
+            SelectionEvent::AddToChat => self.add_terminal_selection(terminal_id, view, window, cx),
+        }
+    }
+
+    /// Places the terminal's selected lines in the composer at its caret.
+    fn add_terminal_selection(
+        &mut self,
+        terminal_id: &str,
+        view: &Entity<Terminal>,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (Some(thread), Some((text, cursor)), Some(lines)) = (
+            self.thread_id(),
+            self.composer_caret(cx),
+            view.read(cx).selected_lines(),
+        ) else {
+            return;
+        };
+        let terminal_label = self
+            .snapshot
+            .terminals(thread)
+            .into_iter()
+            .find(|tab| tab.terminal_id == terminal_id)
+            .map_or_else(|| terminal_label(terminal_id), |tab| tab.label);
+        self.perform(Intent::AddTerminalContext {
+            text,
+            cursor,
+            selection: TerminalContextSelection {
+                terminal_id: terminal_id.to_owned(),
+                terminal_label,
+                line_start: lines.line_start,
+                line_end: lines.line_end,
+                text: lines.text,
+            },
+        });
+        view.update(cx, |view, cx| view.clear_selection(cx));
     }
 
     /// Selects a terminal of the thread and shows it where it is held.

@@ -6,8 +6,9 @@ use super::{
         menus::MenuSurface,
         ui::{self, color, driver_icon, icon, tint},
     },
-    drag::{DragPreview, ThreadDrag},
+    drag::{DragPreview, ThreadDrag, verb_badge_element},
     project_mark,
+    sweep::{SweepAction, SweepDrag, SweepPreview},
 };
 use agent_core::{
     state::{Intent, ThreadAction},
@@ -68,6 +69,25 @@ fn row_button(id: impl Into<ElementId>, tooltip: &'static str) -> Stateful<Div> 
         .text_color(color("textMuted"))
         .hover(|button| button.text_color(color("text")))
         .tooltip(move |window, cx| Tooltip::new(tooltip).build(window, cx))
+}
+
+/// A row action that, dragged, sweeps its section instead of lifting the row.
+fn sweepable(
+    button: Stateful<Div>,
+    origin: &str,
+    action: SweepAction,
+    desktop: WeakEntity<Desktop>,
+) -> Stateful<Div> {
+    let drag = SweepDrag {
+        origin: origin.to_owned(),
+        action,
+    };
+    button
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_drag(drag, move |drag, _, _, cx| {
+            let _ = desktop.update(cx, |view, cx| view.start_sweep(drag, cx));
+            cx.new(|_| SweepPreview)
+        })
 }
 
 fn element_id(kind: &str, key: &str) -> ElementId {
@@ -267,6 +287,60 @@ impl Desktop {
         }
     }
 
+    /// Lets files dropped on a thread's row open the thread and join its
+    /// draft, outlining the row while they hover. `plain` rows also take the
+    /// hover background.
+    fn file_drop_target(
+        &self,
+        row: Stateful<Div>,
+        thread_id: &str,
+        plain: bool,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let group: SharedString = format!("file-drop-{thread_id}").into();
+        let thread_id = thread_id.to_owned();
+        row.group(group.clone())
+            .when(plain, |row| {
+                row.drag_over::<ExternalPaths>(|row, _, _, _| row.bg(color("sidebarRowHover")))
+            })
+            .on_drop(cx.listener(move |view, paths: &ExternalPaths, _, cx| {
+                view.drop_files_on_thread(thread_id.clone(), paths, cx)
+            }))
+            .child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .rounded(px(8.))
+                    .border_1()
+                    .border_color(tint("accent", 0.7))
+                    .invisible()
+                    .group_drag_over::<ExternalPaths>(group, |outline| outline.visible()),
+            )
+    }
+
+    /// Files dropped on a row open its thread and join its draft; folders are
+    /// left out.
+    fn drop_files_on_thread(
+        &mut self,
+        thread_id: String,
+        paths: &ExternalPaths,
+        cx: &mut Context<Self>,
+    ) {
+        let files: Vec<_> = paths
+            .paths()
+            .iter()
+            .filter(|path| !path.is_dir())
+            .cloned()
+            .collect();
+        if files.is_empty() {
+            return;
+        }
+        if self.thread_id().as_deref() != Some(thread_id.as_str()) {
+            self.open_sidebar_thread(thread_id.clone(), cx);
+        }
+        self.attach_paths(thread_id, files);
+    }
+
     /// The thread menu, or the bulk menu when the row is part of a selection.
     fn row_menu(
         &mut self,
@@ -357,10 +431,17 @@ impl Desktop {
                 })
                 .child(label.clone()),
         };
+        let desktop = cx.entity().downgrade();
         let actions = row.actions.iter().map(|action| {
             let id = row.id.clone();
             let key = row.id.clone();
-            match action {
+            let sweep = match action {
+                SidebarRowAction::Settle => Some(SweepAction::Settle),
+                SidebarRowAction::Unsettle => Some(SweepAction::Unsettle),
+                SidebarRowAction::Wake => Some(SweepAction::Unsnooze),
+                SidebarRowAction::DiscardDraft | SidebarRowAction::Snooze => None,
+            };
+            let button = match action {
                 SidebarRowAction::DiscardDraft => {
                     row_button(element_id("discard", &key), "Discard draft")
                         .child(icon("x").size_3p5())
@@ -412,8 +493,25 @@ impl Desktop {
                             action: ThreadAction::Unsnooze,
                         });
                     })),
+            };
+            match sweep {
+                Some(action) => sweepable(button, &key, action, desktop.clone()),
+                None => button,
             }
         });
+        if let Some(sweep) = self
+            .sidebar
+            .sweep
+            .as_ref()
+            .filter(|sweep| sweep.keys.contains(&row.id))
+        {
+            return h_flex()
+                .ml_auto()
+                .h(px(if slim { 24. } else { 20. }))
+                .flex_shrink_0()
+                .items_center()
+                .child(verb_badge_element(sweep.action.verb()));
+        }
         h_flex()
             .ml_auto()
             .h(px(if slim { 24. } else { 20. }))
@@ -528,9 +626,15 @@ impl Desktop {
             .sidebar
             .drag
             .as_ref()
-            .is_some_and(|drag| drag.active == id);
+            .is_some_and(|drag| drag.active == id && !drag.context);
+        let swept = self
+            .sidebar
+            .sweep
+            .as_ref()
+            .is_some_and(|sweep| sweep.keys.contains(&id));
         let (background, hover_background) = match row.surface {
             SidebarRowSurface::Active => (Some(color("sidebarRowActive")), None),
+            _ if swept => (Some(color("sidebarRowSelected")), None),
             SidebarRowSurface::Selected => (Some(color("sidebarRowSelected")), None),
             SidebarRowSurface::Draft => (Some(tint("warning", 0.04)), Some(tint("warning", 0.08))),
             SidebarRowSurface::Receded | SidebarRowSurface::Plain => {
@@ -715,8 +819,8 @@ impl Desktop {
                 }),
             )
             .when(row.draggable && !renaming, |surface| {
-                surface.on_drag(drag, move |drag, _, _, cx| {
-                    let preview = cx.new(|_| DragPreview::new(drag.title.clone()));
+                surface.on_drag(drag, move |drag, grab, _, cx| {
+                    let preview = cx.new(|_| DragPreview::new(drag.title.clone(), grab));
                     let _ = desktop.update(cx, |view, cx| {
                         view.start_thread_drag(drag, preview.clone(), cx)
                     });
@@ -725,9 +829,20 @@ impl Desktop {
             })
             .child(body)
             .children(jump.map(|label| jump_badge(label, if slim { 36. } else { 78. })));
+        let plain = !matches!(
+            row.surface,
+            SidebarRowSurface::Active | SidebarRowSurface::Selected
+        );
+        let surface = self.file_drop_target(surface, &id, plain, cx);
+        let sweep_id = id.clone();
         let slot = div()
             .w_full()
             .when(!slim, |slot| slot.py_0p5())
+            .on_drag_move::<SweepDrag>(cx.listener(
+                move |view, event: &DragMoveEvent<SweepDrag>, _, _| {
+                    view.sweep_row_moved(&sweep_id, event.bounds.top())
+                },
+            ))
             .child(surface);
         self.drop_slot(slot.id(element_id("slot", &id)), id, cx)
             .into_any_element()
@@ -876,8 +991,9 @@ impl Desktop {
                         })),
                 )
         });
-        h_flex()
+        let row = h_flex()
             .id(("search-result", index))
+            .relative()
             .min_h_9()
             .w_full()
             .px_2p5()
@@ -936,7 +1052,8 @@ impl Desktop {
                             ),
                     )
                     .children(snippet),
-            )
+            );
+        self.file_drop_target(row, &result.id, !result.active, cx)
             .into_any_element()
     }
 

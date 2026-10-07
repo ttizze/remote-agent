@@ -3,4 +3,5 @@
 pub mod build;
 pub mod lifecycle;
 pub mod outbox;
+pub mod undo;
 pub mod workflows;

@@ -1285,6 +1285,19 @@ fn a_sweep_leaves_out_rows_that_cannot_apply_or_left_the_list() {
 }
 
 #[test]
+fn the_swept_row_is_the_one_at_the_pointer_within_the_visible_list() {
+    let rows =
+        [("a", 0.), ("b", 40.), ("c", 80.), ("d", 120.)].map(|(key, top)| (key.to_owned(), top));
+    let at = |y| sidebar_thread_key_at_y(&rows, y, 30., 100.);
+    assert_eq!(at(45.).as_deref(), Some("b"));
+    assert_eq!(at(79.).as_deref(), Some("b"));
+    // Above and below the visible part, the nearest visible row.
+    assert_eq!(at(-50.).as_deref(), Some("a"));
+    assert_eq!(at(500.).as_deref(), Some("c"));
+    assert_eq!(sidebar_thread_key_at_y(&[], 10., 0., 100.), None);
+}
+
+#[test]
 fn parking_the_open_thread_navigates_only_once_it_parked() {
     let now = ms("2026-09-12T10:00:00.000Z");
     let cases = [

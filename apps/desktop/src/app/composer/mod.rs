@@ -9,7 +9,8 @@ mod menu;
 
 use super::{
     Desktop, Views,
-    ui::{color, is_dark, metrics},
+    sidebar::ThreadDrag,
+    ui::{color, is_dark, metrics, tint},
 };
 use agent_core::{
     connection::Outcome,
@@ -267,6 +268,16 @@ impl Desktop {
             .border_color(outline())
             .shadow(composer_shadow())
             .text_color(color("text"))
+            .drag_over::<ThreadDrag>(|surface, _, _, _| {
+                surface
+                    .bg(tint("accentSurface", 0.45))
+                    .border_color(tint("accent", 0.7))
+            })
+            .on_drop(
+                cx.listener(|view, drag: &ThreadDrag, _, cx| {
+                    view.drop_threads_on_composer(drag, cx)
+                }),
+            )
             .child(body)
             .when_some(message, |surface, message| {
                 surface.child(
@@ -420,6 +431,12 @@ impl Desktop {
                 }
             }))
             .into_any_element()
+    }
+
+    /// The shown composer's text and caret (UTF-16), where added context goes.
+    pub(crate) fn composer_caret(&self, cx: &App) -> Option<(String, u32)> {
+        self.shown_composer()?;
+        Some(self.editor_text_and_cursor(cx))
     }
 
     /// The draft that picked or dropped files join: the answer being typed

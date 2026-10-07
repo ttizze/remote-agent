@@ -88,6 +88,7 @@ impl Owner {
             }
             _ => {}
         }
+        let undoing = matches!(intent, Intent::UndoThreadAction);
         match self.prepare(intent) {
             Err(error) => {
                 self.state.error = Some(crate::presentation::error::error_message(
@@ -102,6 +103,11 @@ impl Owner {
                 let _ = complete.send(Ok(outcome));
             }
             Ok(Next::Commands(mut entries)) => {
+                if !undoing {
+                    for entry in &entries {
+                        self.claim_undo(entry);
+                    }
+                }
                 let Some(last) = entries.pop() else {
                     let _ = complete.send(Ok(Outcome::Applied));
                     return;
@@ -209,10 +215,21 @@ impl Owner {
                 self.remove_draft_context(&context_id);
                 Next::Done
             }
+            Intent::AddTerminalContext {
+                text,
+                cursor,
+                selection,
+            } => self.add_terminal_context(text, cursor, &selection),
+            Intent::AddThreadContexts {
+                text,
+                cursor,
+                thread_ids,
+            } => self.add_thread_contexts(text, cursor, &thread_ids),
             Intent::DiscardDraft { draft_key } => {
-                self.state.drafts.remove(&draft_key);
+                self.discard_draft(draft_key);
                 Next::Done
             }
+            Intent::UndoThreadAction => self.undo_thread_action()?,
             Intent::SelectTrait {
                 descriptor_id,
                 choice,

@@ -308,6 +308,26 @@ pub fn resolve_sidebar_sweep_keys(
         .collect()
 }
 
+/// The thread row at pointer height `y`, clamped to the visible part of the
+/// list (`visible_top..visible_bottom`). A gap between rows resolves to the
+/// row above it. `rows` are each row's key and top edge, in list order.
+pub fn sidebar_thread_key_at_y(
+    rows: &[(String, f32)],
+    y: f32,
+    visible_top: f32,
+    visible_bottom: f32,
+) -> Option<String> {
+    let y = y.max(visible_top).min(visible_bottom - 1.);
+    let mut key = None;
+    for (row, top) in rows {
+        if key.is_some() && *top > y {
+            break;
+        }
+        key = Some(row.clone());
+    }
+    key
+}
+
 pub struct SidebarDropInput<'a> {
     pub active_key: &'a str,
     pub active_section: SidebarSection,

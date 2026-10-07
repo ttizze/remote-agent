@@ -22,7 +22,7 @@ use gpui_kit::{
     prelude::FluentBuilder,
     *,
 };
-use std::{ops::Range, sync::Arc};
+use std::{ops::Range, sync::Arc, time::Duration};
 
 const FONT_SIZE: f32 = 12.;
 const LINE_HEIGHT: f32 = 16.;
@@ -52,6 +52,27 @@ impl EventListener for TerminalEvents {
 enum Event {
     Clipboard(String),
     Error(String),
+}
+
+/// How long a double or triple click may continue before the selection's
+/// actions open.
+const MULTI_CLICK_INTERVAL: Duration = Duration::from_millis(500);
+
+/// What the user asked of the terminal's selection.
+pub(crate) enum SelectionEvent {
+    /// A selection gesture ended at `position`: offer its actions there.
+    Released {
+        position: Point<Pixels>,
+    },
+    AddToChat,
+}
+
+/// The selected text and the lines it spans, counted from 1 at the oldest
+/// line the terminal keeps.
+pub(crate) struct SelectedLines {
+    pub(crate) line_start: u32,
+    pub(crate) line_end: u32,
+    pub(crate) text: String,
 }
 
 /// Whether this view should attach to the terminal: it is not running for
@@ -84,8 +105,11 @@ pub(crate) struct Terminal {
     composition_selection: Range<usize>,
     selecting: bool,
     mouse_pressed: bool,
+    /// Opens the selection's actions once a multi-click had time to finish.
+    selection_actions: Option<Task<()>>,
     error: Option<String>,
 }
+impl EventEmitter<SelectionEvent> for Terminal {}
 impl Drop for Terminal {
     fn drop(&mut self) {
         // A closed terminal is gone from the snapshot; only a live one detaches.
@@ -157,6 +181,7 @@ impl Terminal {
                 composition_selection: 0..0,
                 selecting: false,
                 mouse_pressed: false,
+                selection_actions: None,
                 error: None,
             };
             view.set_snapshot(snapshot, cx);
@@ -275,7 +300,57 @@ impl Terminal {
             });
         }
     }
-    fn copy_selection(&self, cx: &mut Context<Self>) {
+    /// The selection, when it holds text.
+    pub(crate) fn selected_lines(&self) -> Option<SelectedLines> {
+        let range = self.term.selection.as_ref()?.to_range(&self.term)?;
+        let text = self.term.selection_to_string()?;
+        if text.trim_matches(['\r', '\n']).is_empty() {
+            return None;
+        }
+        let history = self.term.grid().history_size() as i32;
+        let line = |point: CellPoint| (point.line.0 + history + 1).max(1) as u32;
+        Some(SelectedLines {
+            line_start: line(range.start),
+            line_end: line(range.end),
+            text,
+        })
+    }
+    pub(crate) fn clear_selection(&mut self, cx: &mut Context<Self>) {
+        self.selection_actions = None;
+        self.term.selection = None;
+        cx.notify();
+    }
+    /// Offers the selection's actions after a selection gesture, leaving a
+    /// double or triple click time to finish.
+    fn selection_released(
+        &mut self,
+        position: Point<Pixels>,
+        clicks: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let delay = if clicks >= 2 {
+            MULTI_CLICK_INTERVAL
+        } else {
+            Duration::ZERO
+        };
+        self.selection_actions = Some(cx.spawn(async move |view, cx| {
+            if !delay.is_zero() {
+                cx.background_executor().timer(delay).await;
+            }
+            let _ = view.update(cx, |view, cx| {
+                view.selection_actions = None;
+                if view.selected_lines().is_some() {
+                    let bounds = view.bounds;
+                    let position = point(
+                        position.x.clamp(bounds.left(), bounds.right()),
+                        position.y.clamp(bounds.top(), bounds.bottom()),
+                    );
+                    cx.emit(SelectionEvent::Released { position });
+                }
+            });
+        }));
+    }
+    pub(crate) fn copy_selection(&self, cx: &mut Context<Self>) {
         if let Some(text) = self.term.selection_to_string() {
             cx.write_to_clipboard(ClipboardItem::new_string(text));
         }
@@ -292,6 +367,7 @@ impl Terminal {
     fn key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let key = &event.keystroke;
         let mods = key.modifiers;
+        self.selection_actions = None;
         if mods.platform && key.key == "c" {
             self.copy_selection(cx);
             cx.stop_propagation();
@@ -481,6 +557,7 @@ impl Render for Terminal {
                         MouseButton::Left,
                         cx.listener(|s, event: &MouseDownEvent, w, cx| {
                             s.focus.focus(w, cx);
+                            s.selection_actions = None;
                             if s.term.mode().intersects(TermMode::MOUSE_MODE)
                                 && !event.modifiers.shift
                             {
@@ -523,12 +600,15 @@ impl Render for Terminal {
                     }))
                     .on_mouse_up(
                         MouseButton::Left,
-                        cx.listener(|s, event: &MouseUpEvent, _, _| {
+                        cx.listener(|s, event: &MouseUpEvent, _, cx| {
                             if s.mouse_pressed {
                                 s.mouse_report(0, event.position, event.modifiers, true);
                                 s.mouse_pressed = false;
                             }
-                            s.selecting = false;
+                            if s.selecting {
+                                s.selecting = false;
+                                s.selection_released(event.position, event.click_count, cx);
+                            }
                         }),
                     )
                     .on_scroll_wheel(cx.listener(|s, event: &ScrollWheelEvent, _, cx| {
@@ -571,10 +651,21 @@ impl Render for Terminal {
                     })
                     .context_menu({
                         let terminal = cx.entity().downgrade();
-                        let selected = self.term.selection.is_some();
+                        let selected = self.selected_lines().is_some();
                         move |menu, _, _| {
-                            let (copy, paste) = (terminal.clone(), terminal.clone());
-                            menu.item(PopupMenuItem::new("Copy").disabled(!selected).on_click(
+                            let (add, copy, paste) =
+                                (terminal.clone(), terminal.clone(), terminal.clone());
+                            menu.item(
+                                PopupMenuItem::new("Add to chat")
+                                    .disabled(!selected)
+                                    .on_click(move |_, _, cx| {
+                                        let _ = add.update(cx, |view, cx| {
+                                            view.selection_actions = None;
+                                            cx.emit(SelectionEvent::AddToChat);
+                                        });
+                                    }),
+                            )
+                            .item(PopupMenuItem::new("Copy").disabled(!selected).on_click(
                                 move |_, _, cx| {
                                     let _ = copy.update(cx, |view, cx| view.copy_selection(cx));
                                 },

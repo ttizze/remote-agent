@@ -165,6 +165,7 @@ impl DesktopAssets {
         "blocks",
         "user-round",
         "package",
+        "messages-square",
     ];
     /// Provider marks as `brand/<name>.svg`.
     const BRANDS: &[(&str, &[u8])] = &[

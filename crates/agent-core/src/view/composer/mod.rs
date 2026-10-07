@@ -8,6 +8,7 @@ pub mod hero;
 pub mod menu;
 pub mod prompt;
 pub mod stash;
+pub mod terminal_context;
 pub mod view;
 
 /// `120000` as `120,000`, as the web formats counts in English.
