@@ -6,7 +6,6 @@ struct SetupCard: View {
     let card: SetupCardView
     let cancel: () -> Void
     let workLocally: () -> Void
-    let openTerminal: (String) -> Void
     @State private var showingDetails = false
 
     var body: some View {
@@ -26,10 +25,7 @@ struct SetupCard: View {
         }
         .padding(.vertical, 3.5)
         .sheet(isPresented: $showingDetails) {
-            SetupDetailsSheet(card: card, cancel: cancel, workLocally: workLocally, openTerminal: { id in
-                showingDetails = false
-                openTerminal(id)
-            })
+            SetupDetailsSheet(card: card, cancel: cancel, workLocally: workLocally)
         }
     }
 
@@ -41,12 +37,6 @@ struct SetupCard: View {
                 Text(elapsed).font(AppTheme.font(12)).monospacedDigit().foregroundStyle(AppTheme.muted)
             }
             Spacer()
-            if let terminal = card.openTerminalId {
-                Button { openTerminal(terminal) } label: {
-                    Label("Open terminal", systemImage: "terminal").font(AppTheme.font(12))
-                }
-                .buttonStyle(.plain).foregroundStyle(AppTheme.muted)
-            }
             Button { showingDetails = true } label: {
                 HStack(spacing: 3) {
                     if card.phase == .failed {
@@ -127,7 +117,6 @@ private struct SetupDetailsSheet: View {
     let card: SetupCardView
     let cancel: () -> Void
     let workLocally: () -> Void
-    let openTerminal: (String) -> Void
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
@@ -158,11 +147,6 @@ private struct SetupDetailsSheet: View {
                     }
                     if let error = card.error {
                         Text(error).font(AppTheme.font(13)).foregroundStyle(AppTheme.dangerForeground)
-                    }
-                    if let terminal = card.openTerminalId {
-                        Button("Open terminal") { openTerminal(terminal) }
-                            .font(AppTheme.font(14, weight: .medium))
-                            .padding(.top, 8)
                     }
                     if card.canCancel || card.canWorkLocally {
                         HStack(spacing: 16) {

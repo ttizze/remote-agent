@@ -74,7 +74,7 @@ struct TerminalScreen: View {
                     } else {
                         Label(tab.label, systemImage: "terminal")
                     }
-                    Text(tab.menuStatus)
+                    Text(tab.menuSubtitle)
                 }
             }
             Button { switchTo(nil) } label: {

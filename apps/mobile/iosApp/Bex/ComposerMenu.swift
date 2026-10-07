@@ -54,7 +54,7 @@ private struct CommandRow: View {
 
     var body: some View {
         HStack(spacing: 10) {
-            Image(systemName: item.target.symbol)
+            Image(systemName: item.skillSource?.symbol ?? item.target.symbol)
                 .font(.system(size: item.target.isPath ? 16 : 14))
                 .foregroundStyle(AppTheme.muted)
             label.font(AppTheme.font(16, weight: .medium)).foregroundStyle(AppTheme.text).lineLimit(1)
@@ -86,6 +86,18 @@ extension ComposerTriggerKind {
         case .path: "Files"
         case .pullRequest: "Pull requests"
         case .slashModel: nil
+        }
+    }
+}
+
+extension SkillSourceKind {
+    var symbol: String {
+        switch self {
+        case .app: "square.grid.2x2"
+        case .repo, .project: "folder"
+        case .personal: "person.crop.circle"
+        case .system: "gearshape"
+        case .other: "cube"
         }
     }
 }

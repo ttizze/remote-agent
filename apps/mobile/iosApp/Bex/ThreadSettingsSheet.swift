@@ -8,44 +8,37 @@ struct ThreadSettingsSheet: View {
     let controls: ComposerControls
     @Environment(\.dismiss) private var dismiss
     @State private var query = ""
-    @State private var rail: PickerRail?
-    @State private var staged: ModelPickerRow?
-    /// Instances whose "Legacy models" row was tapped since the sheet opened.
-    @State private var toggledLegacy: [String] = []
+    @State private var filter = CatalogFilter.all
+    @State private var showLegacy = false
+    /// Providers whose section was opened or closed since the sheet opened.
+    @State private var expansionOverrides: [String] = []
+    /// The model Save applies.
+    @State private var staged: StagedModel?
 
     var body: some View {
-        let picker = model.snapshot.modelPicker(query: query, rail: rail, toggledLegacy: toggledLegacy)
+        let catalog = model.snapshot.catalogSheet(options: CatalogSheetOptions(
+            filter: filter, showLegacy: showLegacy, query: query,
+            expansionOverrides: expansionOverrides, stagedKey: staged?.key
+        ))
         NavigationStack {
             List {
-                ForEach(groups(picker.rows), id: \.0) { provider, rows in
+                ForEach(sections(catalog.items), id: \.key) { section in
                     Section {
-                        ForEach(Array(rows.enumerated()), id: \.element.key) { index, row in
-                            if let legacy = picker.legacy, index == Int(legacy.currentCount) {
-                                legacyRow(legacy)
-                            }
-                            ModelRowView(row: row, selected: (staged?.key ?? selectedKey(picker)) == row.key) {
-                                staged = row
-                            } star: {
+                        ForEach(section.models, id: \.key) { row in
+                            CatalogModelRow(row: row) { press(row) } star: {
                                 model.perform(.toggleFavoriteModel(instanceId: row.instanceId, model: row.slug))
                             }
                         }
-                        if let legacy = picker.legacy, rows.count == Int(legacy.currentCount) {
-                            legacyRow(legacy)
-                        }
                     } header: {
-                        HStack(spacing: 6) {
-                            if let driver = rows.first?.driver {
-                                Image(driver.iconName).resizable().scaledToFit().frame(width: 15, height: 15)
-                            }
-                            Text(provider).font(AppTheme.font(14, weight: .medium)).foregroundStyle(AppTheme.muted)
+                        if let header = section.header {
+                            ProviderSectionHeader(header: header) { toggle(header.key) }
                         }
                     }
                 }
-                if let legacy = picker.legacy, picker.rows.isEmpty {
-                    legacyRow(legacy)
-                }
-                if let empty = picker.emptyLabel {
-                    Text(empty).font(AppTheme.font(14)).foregroundStyle(AppTheme.muted)
+                if catalog.items.isEmpty {
+                    Text(emptyLabel).font(AppTheme.font(14)).foregroundStyle(AppTheme.muted)
+                        .frame(maxWidth: .infinity).padding(.vertical, 56)
+                        .listRowBackground(Color.clear)
                 }
                 OptionsSection(model: model, controls: controls)
             }
@@ -57,7 +50,7 @@ struct ThreadSettingsSheet: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
-                ToolbarItem(placement: .primaryAction) { filterMenu(picker) }
+                ToolbarItem(placement: .primaryAction) { filterMenu(catalog) }
                 ToolbarItem(placement: .confirmationAction) {
                     Button(staged == nil ? "Done" : "Save", action: save)
                 }
@@ -66,67 +59,82 @@ struct ThreadSettingsSheet: View {
         .tint(AppTheme.color("mobilePrimaryText"))
     }
 
-    private func legacyRow(_ legacy: LegacyModelsSection) -> some View {
-        Button {
-            if let index = toggledLegacy.firstIndex(of: legacy.instanceId) {
-                toggledLegacy.remove(at: index)
-            } else {
-                toggledLegacy.append(legacy.instanceId)
-            }
-        } label: {
-            HStack(spacing: 8) {
-                Text(legacy.label).font(AppTheme.font(16, weight: .medium)).foregroundStyle(AppTheme.muted)
-                Spacer()
-                Text(legacy.detail).font(AppTheme.font(13)).foregroundStyle(AppTheme.tertiary)
-                Image(systemName: "chevron.down").font(.system(size: 12, weight: .semibold))
-                    .rotationEffect(.degrees(legacy.expanded ? 180 : 0))
-                    .foregroundStyle(AppTheme.tertiary)
-            }
-            .frame(minHeight: 38.5)
-            .contentShape(Rectangle())
+    private var emptyLabel: String {
+        let searching = !query.trimmingCharacters(in: .whitespaces).isEmpty
+        if filter == .favorites, !searching {
+            return "No favorite models"
         }
-        .buttonStyle(.plain)
-        .accessibilityValue(legacy.expanded ? "Expanded" : "Collapsed")
+        return filter != .all || searching ? "No matching models" : "No available models"
     }
 
-    private func selectedKey(_ picker: ModelPickerView) -> String? {
-        picker.rows.first(where: \.selected)?.key
-    }
-
-    private func groups(_ rows: [ModelPickerRow]) -> [(String, [ModelPickerRow])] {
-        var order: [String] = []
-        var grouped: [String: [ModelPickerRow]] = [:]
-        for row in rows {
-            if grouped[row.providerName] == nil {
-                order.append(row.providerName)
+    /// Each provider header with the model rows under it.
+    private func sections(_ items: [CatalogSheetItem]) -> [CatalogSection] {
+        var sections: [CatalogSection] = []
+        for item in items {
+            switch item {
+            case let .provider(key, instance, collapsible, collapsed, modelCount):
+                sections.append(CatalogSection(key: key, header: ProviderHeaderItem(
+                    key: key, instance: instance, collapsible: collapsible, collapsed: collapsed, modelCount: modelCount
+                ), models: []))
+            case let .model(key, instanceId, driver, slug, label, favorite, applied, displayed, isLegacy,
+                            unavailable, _, _):
+                let row = CatalogModelItem(key: key, instanceId: instanceId, driver: driver, slug: slug, label: label,
+                                           favorite: favorite, applied: applied, displayed: displayed,
+                                           isLegacy: isLegacy, unavailable: unavailable)
+                if sections.isEmpty {
+                    sections.append(CatalogSection(key: "models", header: nil, models: []))
+                }
+                sections[sections.count - 1].models.append(row)
             }
-            grouped[row.providerName, default: []].append(row)
         }
-        return order.map { ($0, grouped[$0] ?? []) }
+        return sections
     }
 
-    private func filterMenu(_ picker: ModelPickerView) -> some View {
+    private func toggle(_ provider: String) {
+        if let index = expansionOverrides.firstIndex(of: provider) {
+            expansionOverrides.remove(at: index)
+        } else {
+            expansionOverrides.append(provider)
+        }
+    }
+
+    /// Pressing the applied model drops the staged one; another model is staged.
+    private func press(_ row: CatalogModelItem) {
+        staged = row.applied ? nil : StagedModel(key: row.key, instanceId: row.instanceId, driver: row.driver,
+                                                 slug: row.slug)
+    }
+
+    private func filterMenu(_ catalog: CatalogSheetView) -> some View {
         Menu {
             Menu("Provider") {
-                Button { rail = nil } label: {
-                    Label("All providers", systemImage: rail == nil ? "checkmark" : "")
-                }
-                ForEach(Array(picker.rail.enumerated()), id: \.offset) { _, item in
-                    Button { rail = item.rail } label: {
-                        Label(item.label, systemImage: rail == item.rail ? "checkmark" : "")
-                    }
-                    .disabled(item.disabled)
+                filterButton("All providers", .all)
+                filterButton("Favorites", .favorites)
+                ForEach(catalog.providers, id: \.instanceId) { provider in
+                    filterButton(provider.displayName, .instance(instanceId: provider.instanceId))
                 }
             }
+            if catalog.hasLegacyModels {
+                Toggle("Show legacy models", isOn: $showLegacy)
+            }
         } label: {
-            Image(systemName: rail == nil ? "line.3.horizontal.decrease" : "line.3.horizontal.decrease.circle.fill")
+            Image(systemName: filter == .all && !showLegacy
+                ? "line.3.horizontal.decrease" : "line.3.horizontal.decrease.circle.fill")
         }
         .accessibilityLabel("Model filters")
     }
 
+    private func filterButton(_ title: String, _ value: CatalogFilter) -> some View {
+        Button { filter = value } label: {
+            if filter == value {
+                Label(title, systemImage: "checkmark")
+            } else {
+                Text(title)
+            }
+        }
+    }
+
     private func save() {
         if let staged {
-            guard staged.disabledReason == nil else { return }
             model.perform(.setModel(instanceId: staged.instanceId, driver: staged.driver, model: staged.slug,
                                     options: []))
         }
@@ -134,40 +142,115 @@ struct ThreadSettingsSheet: View {
     }
 }
 
-private struct ModelRowView: View {
-    let row: ModelPickerRow
-    let selected: Bool
+private struct StagedModel {
+    let key: String
+    let instanceId: String
+    let driver: Driver
+    let slug: String
+}
+
+private struct ProviderHeaderItem {
+    let key: String
+    let instance: ProviderInstance
+    let collapsible: Bool
+    let collapsed: Bool
+    let modelCount: UInt32
+}
+
+private struct CatalogModelItem {
+    let key: String
+    let instanceId: String
+    let driver: Driver
+    let slug: String
+    let label: String
+    let favorite: Bool
+    let applied: Bool
+    let displayed: Bool
+    let isLegacy: Bool
+    let unavailable: Bool
+}
+
+private struct CatalogSection {
+    let key: String
+    let header: ProviderHeaderItem?
+    var models: [CatalogModelItem]
+}
+
+/// A provider's icon and name; a collapsible one shows its count while closed.
+private struct ProviderSectionHeader: View {
+    let header: ProviderHeaderItem
+    let toggle: () -> Void
+
+    var body: some View {
+        if header.collapsible {
+            Button(action: toggle) { content.frame(minHeight: 44) }
+                .buttonStyle(.plain)
+                .accessibilityLabel("\(header.instance.displayName), \(header.modelCount) models")
+                .accessibilityValue(header.collapsed ? "Collapsed" : "Expanded")
+        } else {
+            content.frame(minHeight: 36).accessibilityAddTraits(.isHeader)
+        }
+    }
+
+    private var content: some View {
+        HStack(spacing: 8) {
+            Image(header.instance.driver.iconName).resizable().scaledToFit().frame(width: 15, height: 15)
+            Text(header.instance.displayName).font(AppTheme.font(14, weight: .medium))
+                .foregroundStyle(AppTheme.muted)
+            if header.collapsible {
+                Spacer()
+                if header.collapsed {
+                    Text("\(header.modelCount)").font(AppTheme.font(12, weight: .medium))
+                        .foregroundStyle(AppTheme.muted)
+                }
+                Image(systemName: header.collapsed ? "chevron.down" : "chevron.up").font(.system(size: 12))
+                    .foregroundStyle(AppTheme.color("mobileIconMuted"))
+            }
+        }
+        .textCase(nil)
+        .contentShape(Rectangle())
+    }
+}
+
+private struct CatalogModelRow: View {
+    let row: CatalogModelItem
     let select: () -> Void
     let star: () -> Void
 
     var body: some View {
         HStack(spacing: 8) {
             Button(action: select) {
-                HStack {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(row.name).font(AppTheme.font(16, weight: .medium)).foregroundStyle(AppTheme.text)
-                        if let reason = row.disabledReason {
-                            Text(reason).font(AppTheme.font(13)).foregroundStyle(AppTheme.muted)
-                        }
+                HStack(spacing: 8) {
+                    Text(row.label).font(AppTheme.font(16, weight: .medium)).foregroundStyle(AppTheme.text)
+                        .lineLimit(1)
+                    if row.isLegacy {
+                        Text("Legacy").font(AppTheme.font(10, weight: .bold)).foregroundStyle(AppTheme.muted)
+                            .padding(.horizontal, 6).padding(.vertical, 2)
+                            .background(AppTheme.subtle, in: RoundedRectangle(cornerRadius: 6))
                     }
-                    Spacer()
-                    if selected {
+                    if row.unavailable {
+                        Text("Unavailable").font(AppTheme.font(12)).foregroundStyle(AppTheme.text)
+                    }
+                    Spacer(minLength: 0)
+                    if row.displayed {
                         Image(systemName: "checkmark").font(.system(size: 16, weight: .semibold))
-                            .foregroundStyle(AppTheme.primary)
+                            .foregroundStyle(AppTheme.color("mobileIcon"))
                     }
                 }
+                .frame(minHeight: 44)
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .disabled(row.unavailable)
+            .accessibilityAddTraits(row.displayed ? .isSelected : [])
             Button(action: star) {
                 Image(systemName: row.favorite ? "star.fill" : "star").font(.system(size: 18))
+                    .foregroundStyle(AppTheme.color(row.favorite ? "mobileIcon" : "mobileIconMuted"))
                     .frame(width: 44, height: 44)
             }
             .buttonStyle(.plain)
-            .foregroundStyle(row.favorite ? AppTheme.amber : AppTheme.muted)
-            .accessibilityLabel(row.favorite ? "Remove from favorites" : "Add to favorites")
+            .accessibilityLabel("\(row.favorite ? "Remove from" : "Add to") favorites: \(row.label)")
         }
-        .frame(minHeight: 38.5)
     }
 }
 

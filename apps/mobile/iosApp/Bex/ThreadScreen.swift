@@ -128,8 +128,7 @@ struct ThreadScreen: View {
     @ViewBuilder
     private func setupCard(_ view: ThreadView) -> some View {
         if let card = view.setup.card, card.showInTimeline {
-            SetupCard(card: card, cancel: { model.perform(.cancelSetup) }, workLocally: { model.perform(.workLocally) },
-                      openTerminal: { routes.terminal($0) })
+            SetupCard(card: card, cancel: { model.perform(.cancelSetup) }, workLocally: { model.perform(.workLocally) })
                 .padding(.bottom, 10.5)
         }
     }
@@ -265,7 +264,7 @@ private struct TerminalMenu: View {
             ForEach((view?.terminals ?? []).filter(\.running), id: \.terminalId) { tab in
                 Button { open(tab.terminalId) } label: {
                     Label(tab.label, systemImage: "terminal")
-                    Text(tab.menuStatus)
+                    Text(tab.menuSubtitle)
                 }
             }
             Button { open(nil) } label: {
@@ -277,6 +276,14 @@ private struct TerminalMenu: View {
         }
         .accessibilityLabel("Terminal")
         .disabled(!model.snapshot.canOpenTerminal())
+    }
+}
+
+extension TerminalTab {
+    /// "Ready · app": the status, then the shell's folder.
+    var menuSubtitle: String {
+        let folder = URL(fileURLWithPath: cwd).lastPathComponent
+        return cwd.isEmpty || folder.isEmpty ? menuStatus : "\(menuStatus) · \(folder)"
     }
 }
 

@@ -24,7 +24,7 @@ struct ReviewScreen: View {
             } else if let message = diff?.emptyMessage, diff?.request == nil {
                 EmptyStateText(title: "No review diffs", detail: message)
             } else if files.isEmpty {
-                EmptyStateText(title: "No changes", detail: diff.map(emptyDetail) ?? "This diff is empty.")
+                EmptyStateText(title: "No changes", detail: git.map(emptyDetail) ?? "This diff is empty.")
             } else {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 0) {
@@ -68,17 +68,11 @@ struct ReviewScreen: View {
         diff?.scopes.contains { $0.selected && ($0.choice == .branch || $0.choice == .unstaged) } == true
     }
 
-    /// What an empty diff compares, like the section's subtitle.
-    private func emptyDetail(_ diff: DiffPanelView) -> String {
-        guard showsGitDiff(diff), let git = diff.git else { return "This diff is empty." }
+    private func emptyDetail(_ git: GitDiffView) -> String {
         if !git.isRepo {
             return "Turn diffs are unavailable because this project is not a git repository."
         }
-        if diff.scopes.contains(where: { $0.selected && $0.choice == .unstaged }) {
-            return "Staged, unstaged, and untracked files"
-        }
-        guard let base = git.baseRef else { return "Base branch unavailable" }
-        return "\(base) ... \(git.headRef ?? "HEAD")"
+        return git.subtitle ?? "This diff is empty."
     }
 
     private var visibleFiles: [WorkspaceDiffFile] {
