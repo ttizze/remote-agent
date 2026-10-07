@@ -17,7 +17,10 @@ use agent_runtime::{
     ShellSubscribe, ThreadSnapshot, ThreadSubscribe, WorkspaceStrategy, launch_thread_id,
 };
 use serde::Serialize;
-use std::{collections::VecDeque, path::Path};
+use std::{
+    collections::VecDeque,
+    path::{Path, PathBuf},
+};
 use tokio_util::sync::CancellationToken;
 
 type Result<T> = std::result::Result<T, ConversationError>;
@@ -230,26 +233,23 @@ impl Conversation {
     }
 
     /// Claims uploads into the thread's storage and rebinds the context records
-    /// that named them.
+    /// that named them; the copies it made.
     fn claim(
         &self,
         thread: &ThreadId,
         attachments: &mut Vec<Attachment>,
         context: Option<&mut MessageContext>,
-    ) -> Result<()> {
+    ) -> Result<Vec<PathBuf>> {
         if attachments.is_empty() {
-            return Ok(());
+            return Ok(vec![]);
         }
         let before: Vec<String> = attachments.iter().map(|file| file.id.clone()).collect();
-        *attachments = self
+        let claimed = self
             .resources
             .files
             .claim(thread.as_str(), attachments)
-            .map_err(|error| {
-                ConversationError::AttachmentUnavailable(format!(
-                    "attachment is unavailable: {error:#}"
-                ))
-            })?;
+            .map_err(ConversationError::AttachmentUnavailable)?;
+        *attachments = claimed.attachments;
         if let Some(context) = context {
             let claimed = before
                 .into_iter()
@@ -258,12 +258,12 @@ impl Conversation {
                 .collect();
             context.remap_attachments(&claimed);
         }
-        Ok(())
+        Ok(claimed.created)
     }
 
-    /// Message attachments are claimed into the thread's storage before the actor
-    /// sees them.
-    fn claim_command(&self, thread: &ThreadId, command: &mut Command) -> Result<()> {
+    /// Message and answer attachments are claimed into the thread's storage
+    /// before the actor sees them.
+    fn claim_command(&self, thread: &ThreadId, command: &mut Command) -> Result<Vec<PathBuf>> {
         match command {
             Command::Send(message) => {
                 self.claim(thread, &mut message.attachments, message.context.as_mut())
@@ -273,10 +273,12 @@ impl Conversation {
                 context,
                 ..
             } => self.claim(thread, attachments, context.as_mut()),
-            Command::Respond { attachments, .. } => attachments
-                .values_mut()
-                .try_for_each(|attachments| self.claim(thread, attachments, None)),
-            _ => Ok(()),
+            Command::Respond { attachments, .. } => self
+                .resources
+                .files
+                .claim_answers(thread.as_str(), attachments)
+                .map_err(ConversationError::AttachmentUnavailable),
+            _ => Ok(vec![]),
         }
     }
 
@@ -293,18 +295,30 @@ impl Conversation {
         {
             return Err(ConversationError::ProjectNotFound(project.clone()));
         }
-        self.claim_command(&params.thread_id, &mut command)?;
+        let claimed = self.claim_command(&params.thread_id, &mut command)?;
         let result = self
             .runtime
             .dispatch(params.thread_id.clone(), params.command_id.clone(), command)
-            .await
-            .map_err(|error| match error {
-                RuntimeError::Closed => ConversationError::Unavailable(error.to_string()),
-                RuntimeError::AttachmentUnavailable(message) => {
-                    ConversationError::AttachmentUnavailable(message)
-                }
-                error => unavailable(error),
-            })?;
+            .await;
+        // Copies of a command that was not accepted are released; after an
+        // uncertain failure they stay.
+        if matches!(
+            &result,
+            Err(RuntimeError::Closed | RuntimeError::AttachmentUnavailable(_))
+                | Ok(agent_runtime::Committed {
+                    reply: Reply::Rejected { .. },
+                    ..
+                })
+        ) {
+            self.resources.files.release(&claimed);
+        }
+        let result = result.map_err(|error| match error {
+            RuntimeError::Closed => ConversationError::Unavailable(error.to_string()),
+            RuntimeError::AttachmentUnavailable(message) => {
+                ConversationError::AttachmentUnavailable(message)
+            }
+            error => unavailable(error),
+        })?;
         match &result.reply {
             Reply::Rejected { reason } if reason == "command-id-conflict" => Err(
                 ConversationError::CommandIdConflict(params.command_id.clone()),
@@ -321,11 +335,12 @@ impl Conversation {
             .thread_id
             .clone()
             .unwrap_or_else(|| launch_thread_id(&params.command_id));
+        let mut claimed = vec![];
         let initial_message = match &params.message {
             Some(message) => {
                 let mut attachments = message.attachments.clone();
                 let mut context = message.context.clone();
-                self.claim(&thread, &mut attachments, context.as_mut())?;
+                claimed = self.claim(&thread, &mut attachments, context.as_mut())?;
                 Some(InitialMessage {
                     id: message.id.clone(),
                     text: message.text.clone(),
@@ -382,6 +397,11 @@ impl Conversation {
             .runtime
             .launch(request)
             .await
+            .inspect_err(|error| {
+                if error.not_accepted() {
+                    self.resources.files.release(&claimed);
+                }
+            })
             .map_err(|error| match error.kind {
                 LaunchFailure::ProjectNotFound => ConversationError::ProjectNotFound(error.project),
                 LaunchFailure::Conflict => ConversationError::CommandIdConflict(error.command),
@@ -521,15 +541,16 @@ impl Conversation {
     }
 
     async fn turn_item(&self, params: &wire::GetTurnItem) -> Result<Option<wire::TurnItemDetail>> {
-        let view = self.existing(&params.thread_id).await?;
-        Ok(
-            agent_runtime::turn_item(&view.state, &params.item_id).map(|detail| {
-                wire::TurnItemDetail {
-                    row: history_row(detail.row),
-                    task: detail.task,
-                }
-            }),
-        )
+        self.existing(&params.thread_id).await?;
+        let detail = self
+            .runtime
+            .turn_item(&params.thread_id, &params.item_id)
+            .await
+            .map_err(unavailable)?;
+        Ok(detail.map(|detail| wire::TurnItemDetail {
+            row: history_row(detail.row),
+            task: detail.task,
+        }))
     }
 
     async fn read_history(&self, params: &wire::ReadHistory) -> Result<wire::HistoryPage> {

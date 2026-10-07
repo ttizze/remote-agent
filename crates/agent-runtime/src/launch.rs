@@ -113,6 +113,21 @@ pub struct LaunchError {
     pub thread: Option<ThreadId>,
     pub cause: String,
 }
+impl LaunchError {
+    /// The launch failed before its thread could have taken the first message:
+    /// while resolving the project or reading the receipt, or because the
+    /// thread refused the create or the message. Other failures may follow the
+    /// message's commit.
+    pub fn not_accepted(&self) -> bool {
+        match self.operation {
+            LaunchOperation::ResolveProject | LaunchOperation::ReadReceipt => true,
+            LaunchOperation::CreateThread | LaunchOperation::DispatchMessage => {
+                self.kind != LaunchFailure::Unavailable
+            }
+            _ => false,
+        }
+    }
+}
 
 /// How far a launch's workspace preparation got.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

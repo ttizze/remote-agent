@@ -884,6 +884,47 @@ async fn conversation_calls_answer_with_typed_errors() {
         .await
         .unwrap();
     assert!(replayed.replayed);
+
+    // ThreadMessageIntake.ts: the attachments of a question response are
+    // bounded across its questions before dispatch, so no receipt remains.
+    let file = |index: usize| agent_domain::Attachment {
+        kind: agent_domain::AttachmentKind::File,
+        source: None,
+        id: format!("pending-{index}"),
+        name: "notes.md".into(),
+        mime_type: "text/markdown".into(),
+        path: String::new(),
+        size: 4,
+    };
+    let over_limit = host
+        .call::<wire::Committed>(dispatch(
+            &first,
+            "answer-over-limit",
+            Command::Respond {
+                request: agent_domain::RuntimeRequestId::new("question").unwrap(),
+                decision: None,
+                answers: None,
+                attachments: BTreeMap::from([
+                    ("a".to_owned(), (0..60).map(file).collect()),
+                    ("b".to_owned(), (60..120).map(file).collect()),
+                ]),
+            },
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(code(&over_limit), Some(ErrorCode::AttachmentUnavailable));
+    assert_eq!(
+        over_limit.message,
+        "You can attach up to 100 files per message or question response."
+    );
+    let receipt = host
+        .conversation
+        .runtime
+        .store()
+        .receipt(&self::command("answer-over-limit"))
+        .unwrap();
+    assert!(receipt.is_none());
+
     let second = ThreadId::new("thread:second").unwrap();
     let conflict = host
         .call::<wire::Committed>(dispatch(&second, "shared-id", create(&second)))
@@ -994,6 +1035,10 @@ async fn conversation_calls_answer_with_typed_errors() {
     assert_eq!(
         code(&missing_upload),
         Some(ErrorCode::AttachmentUnavailable)
+    );
+    assert_eq!(
+        missing_upload.message,
+        "Attachment 'notes.md' cannot be sent: attachment not found (removed or expired)."
     );
 
     let error: ConversationError = ConversationError::ProjectNotFound("p".into());

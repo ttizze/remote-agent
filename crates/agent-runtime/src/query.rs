@@ -3,7 +3,7 @@ use crate::sync::{
     HistoryPage, HistoryRow, InvalidCursor, PagePolicy, ProjectDirectory, client_state,
     detail_item, detail_task, history_before, js_space, recent_history, timeline,
 };
-use crate::{ActorHandle, RuntimeError, Store, StoreError};
+use crate::{ActorHandle, ActorRegistry, RuntimeError, Store, StoreError};
 use agent_domain::{ItemKind, State, Task, ThreadId, Timestamp, TurnItemId};
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
@@ -39,6 +39,41 @@ impl ActorHandle {
 
     pub async fn turn_item(&self, item: &TurnItemId) -> Result<Option<TurnItemDetail>, QueryError> {
         Ok(turn_item(&self.view().await?.state, item))
+    }
+}
+
+impl ActorRegistry {
+    /// One visible item read on demand. A subagent item that a fork inherited
+    /// shows its task from the thread that ran it, up the fork's ancestors.
+    pub async fn turn_item(
+        &self,
+        thread: &ThreadId,
+        item: &TurnItemId,
+    ) -> Result<Option<TurnItemDetail>, RuntimeError> {
+        const MAX_ANCESTORS: usize = 64;
+        let state = self.state(thread).await?;
+        let Some(mut detail) = turn_item(&state, item) else {
+            return Ok(None);
+        };
+        if let ItemKind::Subagent { task } = &detail.row.item.kind
+            && detail.row.inherited
+        {
+            let mut source = Some(detail.row.source.clone());
+            for _ in 0..MAX_ANCESTORS {
+                let Some(ancestor) = source.take() else {
+                    break;
+                };
+                let Ok(ancestor) = self.state(&ancestor).await else {
+                    break;
+                };
+                if let Some(found) = ancestor.tasks.iter().find(|found| &found.id == task) {
+                    detail.task = Some(detail_task(found));
+                    break;
+                }
+                source = ancestor.thread.as_ref().and_then(|t| t.parent.clone());
+            }
+        }
+        Ok(Some(detail))
     }
 }
 

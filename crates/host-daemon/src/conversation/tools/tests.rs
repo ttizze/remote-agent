@@ -1,5 +1,7 @@
 //! MCP service and toolkit tests over a fake orchestration backend.
-use super::backend::{Dispatched, Orchestration, ProjectFailure, ProviderModel, ProviderSnapshot};
+use super::backend::{
+    Dispatched, LaunchFailed, Orchestration, ProjectFailure, ProviderModel, ProviderSnapshot,
+};
 use super::*;
 use agent_domain::{
     Attachment, AttachmentKind, Attempt, AttemptStatus, Command, CompletionWake, DeliveryState,
@@ -30,6 +32,8 @@ struct Fake {
     projects: Mutex<Vec<HostProject>>,
     launches: Mutex<Vec<LaunchThread>>,
     claims: Mutex<Vec<(ThreadId, Vec<Attachment>)>>,
+    released: Mutex<Vec<PathBuf>>,
+    launch_failure: Mutex<Option<LaunchFailed>>,
     named: Mutex<Vec<String>>,
     created: Mutex<Vec<CreatedProject>>,
 }
@@ -179,7 +183,11 @@ impl Orchestration for Fake {
             ])
         })
     }
-    fn launch(&self, request: LaunchThread) -> BoxFuture<'_, Result<ThreadId, String>> {
+    fn launch(&self, request: LaunchThread) -> BoxFuture<'_, Result<ThreadId, LaunchFailed>> {
+        if let Some(failed) = *self.launch_failure.lock().unwrap() {
+            self.launches.lock().unwrap().push(request);
+            return Box::pin(async move { Err(failed) });
+        }
         let thread = request.thread.clone().unwrap();
         let mut launched =
             thread_record(thread.as_str(), &request.project, request.selection.clone());
@@ -207,12 +215,12 @@ impl Orchestration for Fake {
         &self,
         thread: &ThreadId,
         attachments: Vec<Attachment>,
-    ) -> BoxFuture<'_, Result<Vec<Attachment>, String>> {
+    ) -> BoxFuture<'_, Result<crate::workspace_files::Claimed, String>> {
         self.claims
             .lock()
             .unwrap()
             .push((thread.clone(), attachments.clone()));
-        let claimed = attachments
+        let claimed: Result<Vec<Attachment>, String> = attachments
             .into_iter()
             .map(|mut attachment| {
                 let token = attachment.id.strip_prefix("pending-").unwrap().to_owned();
@@ -224,7 +232,18 @@ impl Orchestration for Fake {
                 Ok(attachment)
             })
             .collect();
+        let claimed = claimed.map(|attachments| crate::workspace_files::Claimed {
+            created: attachments
+                .iter()
+                .map(|file| PathBuf::from(&file.path))
+                .collect(),
+            attachments,
+        });
         Box::pin(async move { claimed })
+    }
+    fn release_attachments(&self, created: Vec<PathBuf>) -> BoxFuture<'_, ()> {
+        self.released.lock().unwrap().extend(created);
+        Box::pin(async {})
     }
     fn providers(&self) -> BoxFuture<'_, Result<Vec<ProviderSnapshot>, String>> {
         let providers = self.providers.lock().unwrap().clone();
@@ -1638,6 +1657,34 @@ async fn launches_claim_pending_uploads_into_the_new_thread_and_reject_other_att
         assert_eq!(rejected["_tag"], "AiError", "{rejected}");
     }
     assert_eq!(fake.claims.lock().unwrap().len(), 3);
+    assert_eq!(fake.launches.lock().unwrap().len(), 2);
+}
+
+// ThreadMessageIntake.ts launchThread: a launch that fails before its thread
+// takes the message releases the claimed copies; after an uncertain failure
+// they stay.
+#[tokio::test]
+async fn a_launch_that_was_not_accepted_releases_its_claimed_uploads() {
+    let fake = Arc::new(Fake::default());
+    fake.put(active_state("source-thread", "codex"));
+    let tools = tools(&fake);
+    let launch = || {
+        call(
+            &tools,
+            "source-thread",
+            "thread_launch",
+            json!({"title":"Audit","attachments":[{"type":"file","id":"pending-notes","name":"notes.txt","mimeType":"text/plain","sizeBytes":12}]}),
+        )
+    };
+    *fake.launch_failure.lock().unwrap() = Some(LaunchFailed::Uncertain);
+    assert_eq!(launch().await["_tag"], "OrchestratorMcpFailure");
+    assert!(fake.released.lock().unwrap().is_empty());
+    *fake.launch_failure.lock().unwrap() = Some(LaunchFailed::NotAccepted);
+    assert_eq!(launch().await["_tag"], "OrchestratorMcpFailure");
+    assert_eq!(
+        *fake.released.lock().unwrap(),
+        [PathBuf::from("/claimed/notes")]
+    );
     assert_eq!(fake.launches.lock().unwrap().len(), 2);
 }
 

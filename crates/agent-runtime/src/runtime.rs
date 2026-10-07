@@ -473,6 +473,14 @@ impl Runtime {
         self.registry().get_or_load(thread).await?.view().await
     }
 
+    pub async fn turn_item(
+        &self,
+        thread: &ThreadId,
+        item: &agent_domain::TurnItemId,
+    ) -> Result<Option<crate::TurnItemDetail>, RuntimeError> {
+        self.registry().turn_item(thread, item).await
+    }
+
     /// The page before `cursor`, or the newest page.
     pub async fn history(
         &self,

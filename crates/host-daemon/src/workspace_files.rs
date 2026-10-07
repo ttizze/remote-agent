@@ -29,7 +29,7 @@ const EDIT_LIMIT: u64 = 1024 * 1024;
 pub(crate) const TRANSFER_LIMIT: u64 = 512 * 1024 * 1024;
 const GRANT_LIFETIME: Duration = Duration::from_secs(120);
 mod attachments;
-pub(crate) use attachments::is_pending_upload;
+pub(crate) use attachments::{Claimed, is_pending_upload};
 
 #[derive(Clone)]
 pub(crate) struct WorkspaceFiles {

@@ -106,6 +106,74 @@ fn array(value: &Value, max: usize, item: impl Fn(&Value) -> bool) -> bool {
         .is_some_and(|items| items.len() <= max && items.iter().all(item))
 }
 
+const KNOWN_KINDS: [&str; 9] = [
+    "image",
+    "file",
+    "terminal",
+    "element",
+    "preview-annotation",
+    "review-comment",
+    "mention",
+    "skill",
+    "thread",
+];
+
+/// The record with its trimmed-string fields trimmed, as decoding trims them
+/// before it checks them. `None` when no record schema can match: a kind that
+/// is a known one only once trimmed.
+fn trimmed_record(record: &Value) -> Option<Value> {
+    let mut record = record.clone();
+    let Some(object) = record.as_object_mut() else {
+        return Some(record);
+    };
+    fn trim(object: &mut Map<String, Value>, key: &str) {
+        if let Some(Value::String(text)) = object.get_mut(key) {
+            let trimmed = text.trim_matches(js_space);
+            if trimmed.len() != text.len() {
+                *text = trimmed.to_owned();
+            }
+        }
+    }
+    trim(object, "contextId");
+    let kind = object
+        .get("kind")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let keys: &[&str] = match kind.as_deref() {
+        None => &[],
+        Some("image" | "file") => &["attachmentId", "name", "mimeType"],
+        Some("terminal") => &["terminalId", "terminalLabel"],
+        Some("element") => &["tagName"],
+        Some("preview-annotation") => {
+            if let Some(Value::Array(elements)) = object.get_mut("elements") {
+                for element in elements.iter_mut().filter_map(Value::as_object_mut) {
+                    trim(element, "tagName");
+                }
+            }
+            &["screenshotContextId"]
+        }
+        Some("review-comment") => &["sectionId", "filePath"],
+        Some("mention") => &["path"],
+        Some("skill") => &["name"],
+        Some("thread") => &["environmentId", "threadId"],
+        Some(_) => {
+            trim(object, "kind");
+            if object
+                .get("kind")
+                .and_then(Value::as_str)
+                .is_some_and(|kind| KNOWN_KINDS.contains(&kind))
+            {
+                return None;
+            }
+            &[]
+        }
+    };
+    for key in keys {
+        trim(object, key);
+    }
+    Some(record)
+}
+
 /// Whether one record decodes as a `ComposerContextRecord`.
 fn valid_record(record: &Value) -> bool {
     let Some(object) = record.as_object() else {
@@ -230,8 +298,9 @@ impl MessageContext {
         let records: Vec<Json> = self
             .records
             .iter()
-            .filter(|record| valid_record(&record.0))
-            .cloned()
+            .filter_map(|record| trimmed_record(&record.0))
+            .filter(valid_record)
+            .map(Json)
             .collect();
         let mut ids = HashSet::new();
         records

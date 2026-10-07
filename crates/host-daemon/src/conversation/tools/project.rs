@@ -1,12 +1,12 @@
 //! The project toolkit: thread launch and the registered projects.
-use super::backend::{NamedProjectFailure, ProjectFailure};
+use super::backend::{LaunchFailed, NamedProjectFailure, ProjectFailure};
 use super::orchestrator::{parse_interaction_mode, parse_runtime_mode};
 use super::thread::{SelectionInput, model_selection_json};
 use super::{
     AgentTools, Outcome, Scope, ToolError, decode, failure, invalid, new_command, unavailable,
 };
 use crate::conversation::operations::CHATS_PROJECT;
-use crate::workspace_files::is_pending_upload;
+use crate::workspace_files::{Claimed, is_pending_upload};
 use agent_domain::{
     Attachment, AttachmentKind, InteractionMode, MessageAuthor, MessageId, RuntimeMode, ThreadId,
 };
@@ -237,14 +237,15 @@ impl AgentTools {
             None => caller.selection.clone(),
         };
         // Pending uploads are claimed into the new thread before it exists.
-        let attachments = if attachments.is_empty() {
-            attachments
+        let claimed = if attachments.is_empty() {
+            Claimed::default()
         } else {
             self.backend
                 .claim_attachments(&thread, attachments)
                 .await
                 .map_err(|error| failure("orchestration_error", error))?
         };
+        let (attachments, claimed) = (claimed.attachments, claimed.created);
         let initial_message =
             (input.message.is_some() || !attachments.is_empty()).then(|| InitialMessage {
                 id: Some(message.clone()),
@@ -270,8 +271,16 @@ impl AgentTools {
                 created_by: MessageAuthor::Agent,
                 creation_source: "mcp".into(),
             })
-            .await
-            .map_err(|_| unavailable())?;
+            .await;
+        let launched = match launched {
+            Ok(launched) => launched,
+            Err(failed) => {
+                if failed == LaunchFailed::NotAccepted {
+                    self.backend.release_attachments(claimed).await;
+                }
+                return Err(unavailable());
+            }
+        };
         let state = self.state(&launched).await.map_err(|_| unavailable())?;
         let thread = state.thread.as_ref().ok_or_else(unavailable)?;
         let run = state.runs.iter().find(|run| run.message == message);

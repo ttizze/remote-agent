@@ -3,7 +3,7 @@
 use super::ModelCatalog;
 use crate::conversation::ProjectCatalog;
 use crate::projects::NamedProjectError;
-use crate::workspace_files::WorkspaceFiles;
+use crate::workspace_files::{Claimed, WorkspaceFiles};
 use agent_domain::{
     Attachment, Command, CommandId, Driver, OptionDescriptor, Reply, State, ThreadId, ThreadShell,
 };
@@ -53,6 +53,14 @@ pub(crate) struct ProviderModel {
     pub(crate) options: Option<Vec<Value>>,
 }
 
+/// A failed launch: before its thread could take the first message, or
+/// possibly after.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LaunchFailed {
+    NotAccepted,
+    Uncertain,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ProjectFailure {
     Conflict,
@@ -84,14 +92,17 @@ pub(crate) trait Orchestration: Send + Sync {
         query: String,
         limit: Option<usize>,
     ) -> BoxFuture<'_, Result<Vec<SearchMatch>, String>>;
-    fn launch(&self, request: LaunchThread) -> BoxFuture<'_, Result<ThreadId, String>>;
+    fn launch(&self, request: LaunchThread) -> BoxFuture<'_, Result<ThreadId, LaunchFailed>>;
     /// Claims uploads into the thread's attachment storage, as a message's
-    /// intake does; the error says why an attachment cannot be sent.
+    /// intake does: the claimed attachments and the copies made. The error
+    /// says why an attachment cannot be sent.
     fn claim_attachments(
         &self,
         thread: &ThreadId,
         attachments: Vec<Attachment>,
-    ) -> BoxFuture<'_, Result<Vec<Attachment>, String>>;
+    ) -> BoxFuture<'_, Result<Claimed, String>>;
+    /// Removes the copies of a claim whose command was not accepted.
+    fn release_attachments(&self, created: Vec<PathBuf>) -> BoxFuture<'_, ()>;
     fn providers(&self) -> BoxFuture<'_, Result<Vec<ProviderSnapshot>, String>>;
     fn projects(&self) -> Vec<HostProject>;
     fn project_scripts(&self, project: &str) -> Vec<ProjectScript>;
@@ -196,23 +207,35 @@ impl Orchestration for HostOrchestration {
         &self,
         thread: &ThreadId,
         attachments: Vec<Attachment>,
-    ) -> BoxFuture<'_, Result<Vec<Attachment>, String>> {
+    ) -> BoxFuture<'_, Result<Claimed, String>> {
         let (files, thread) = (self.files.clone(), thread.clone());
         Box::pin(async move {
             tokio::task::spawn_blocking(move || files.claim(thread.as_str(), &attachments))
                 .await
                 .map_err(|error| error.to_string())?
-                .map_err(|error| format!("{error:#}"))
         })
     }
 
-    fn launch(&self, request: LaunchThread) -> BoxFuture<'_, Result<ThreadId, String>> {
+    fn release_attachments(&self, created: Vec<PathBuf>) -> BoxFuture<'_, ()> {
+        let files = self.files.clone();
+        Box::pin(async move {
+            let _ = tokio::task::spawn_blocking(move || files.release(&created)).await;
+        })
+    }
+
+    fn launch(&self, request: LaunchThread) -> BoxFuture<'_, Result<ThreadId, LaunchFailed>> {
         Box::pin(async move {
             self.runtime
                 .launch(request)
                 .await
                 .map(|reply| reply.thread)
-                .map_err(|error| error.to_string())
+                .map_err(|error| {
+                    if error.not_accepted() {
+                        LaunchFailed::NotAccepted
+                    } else {
+                        LaunchFailed::Uncertain
+                    }
+                })
         })
     }
 

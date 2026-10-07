@@ -293,6 +293,38 @@ fn normalizes_records_to_the_context_schema() {
     );
 }
 
+// composerContext.ts: TrimmedNonEmptyString fields are trimmed by decoding
+// before their checks, and the decoded record keeps the trimmed values.
+#[test]
+fn records_are_trimmed_before_they_are_checked() {
+    let mut padded = image();
+    for key in ["contextId", "attachmentId", "name", "mimeType"] {
+        padded[key] = json!(format!(" \u{feff}{}\n", padded[key].as_str().unwrap()));
+    }
+    padded["label"] = json!(" Shot ");
+    let mut expected = image();
+    expected["label"] = json!(" Shot ");
+    let mut mention = json!({ "version": 1, "contextId": "ctx_m", "kind": "mention", "label": "m", "path": "\tsrc/a.ts " });
+    let normalized = context(vec![padded, mention.clone()]).normalized().unwrap();
+    mention["path"] = json!("src/a.ts");
+    assert_eq!(normalized.records, [Json(expected), Json(mention)]);
+
+    // Only whitespace is empty once trimmed.
+    let mut blank = skill();
+    blank["name"] = json!("   ");
+    // A padded known kind matches no record schema; another kind is trimmed.
+    let mut known = image();
+    known["kind"] = json!(" image ");
+    let mut future = unknown();
+    future["kind"] = json!(" future ");
+    let normalized = context(vec![blank, known, future]).normalized().unwrap();
+    assert_eq!(normalized.records, [Json(unknown())]);
+    // Identities are compared trimmed.
+    let mut padded_id = terminal();
+    padded_id["contextId"] = json!(format!(" {} ", terminal()["contextId"].as_str().unwrap()));
+    assert_eq!(context(vec![terminal(), padded_id]).normalized(), None);
+}
+
 #[test]
 fn rebinds_attachment_records_to_claimed_ids() {
     let mut message = context(vec![image(), skill()]);

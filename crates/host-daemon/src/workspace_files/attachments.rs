@@ -41,12 +41,27 @@ impl<'a> From<&'a Attachment> for Limits<'a> {
         }
     }
 }
+/// The count and image budget of one message or question response.
+pub(crate) fn limit_error(attachments: &[Attachment]) -> Option<&'static str> {
+    if attachments.len() > MAX_ATTACHMENTS {
+        return Some("You can attach up to 100 files per message or question response.");
+    }
+    let image_bytes = attachments
+        .iter()
+        .filter(|a| a.kind == AttachmentKind::Image || native_image(&a.mime_type.to_lowercase()))
+        .fold(0u64, |total, a| total.saturating_add(a.size));
+    (image_bytes > MAX_MESSAGE_IMAGE_BYTES).then_some(
+        "Images can total up to 80 MiB per message or question response. Use smaller images or send fewer at once.",
+    )
+}
 fn validate<'a>(attachments: impl IntoIterator<Item = Limits<'a>>) -> Result<()> {
     let mut ids = std::collections::BTreeSet::new();
     let mut image_bytes = 0u64;
     for (index, a) in attachments.into_iter().enumerate() {
         if index == MAX_ATTACHMENTS {
-            return Err(anyhow!("You can attach up to 100 files per message."));
+            return Err(anyhow!(
+                "You can attach up to 100 files per message or question response."
+            ));
         }
         if !ids.insert(a.id) {
             return Err(anyhow!("Duplicate attachment ids are not allowed."));
@@ -75,7 +90,9 @@ fn validate<'a>(attachments: impl IntoIterator<Item = Limits<'a>>) -> Result<()>
         }
     }
     if image_bytes > MAX_MESSAGE_IMAGE_BYTES {
-        return Err(anyhow!("Images can total up to 80 MiB per message."));
+        return Err(anyhow!(
+            "Images can total up to 80 MiB per message or question response. Use smaller images or send fewer at once."
+        ));
     }
     Ok(())
 }
@@ -103,6 +120,13 @@ fn stored_path(root: &Path, id: &str) -> Option<PathBuf> {
 }
 fn claimed_id(thread: &str, token: &str) -> String {
     format!("chat-{}-{token}", hash(thread.as_bytes()))
+}
+
+/// What a claim made: the claimed attachments and the copies it created.
+#[derive(Debug, Default)]
+pub(crate) struct Claimed {
+    pub(crate) attachments: Vec<Attachment>,
+    pub(crate) created: Vec<PathBuf>,
 }
 
 struct NewClaims(Vec<PathBuf>);
@@ -250,65 +274,105 @@ impl WorkspaceFiles {
     }
 
     /// Claims a message's attachments for `thread`: pending uploads are copied
-    /// into the thread's storage and every path is the stored file's.
-    pub(crate) fn claim(&self, thread: &str, input: &[Attachment]) -> Result<Vec<Attachment>> {
+    /// into the thread's storage and every path is the stored file's. A
+    /// failure leaves no copy behind and says why the attachment cannot be sent.
+    pub(crate) fn claim(
+        &self,
+        thread: &str,
+        input: &[Attachment],
+    ) -> std::result::Result<Claimed, String> {
         if input.is_empty() {
-            return Ok(vec![]);
+            return Ok(Claimed::default());
         }
-        validate(input.iter().map(Limits::from))?;
+        if let Some(error) = limit_error(input) {
+            return Err(error.into());
+        }
+        let mut ids = std::collections::BTreeSet::new();
+        if !input.iter().all(|attachment| ids.insert(&attachment.id)) {
+            return Err("Duplicate attachment ids are not allowed.".into());
+        }
+        validate(input.iter().map(Limits::from)).map_err(|error| error.to_string())?;
         let _lock = self.writes.lock().unwrap_or_else(|e| e.into_inner());
         let directory = self.thread_attachment_directory(thread);
-        self.prepare_attachment_directory(&directory)?;
         let mut claimed = vec![];
         let mut created = NewClaims(vec![]);
         for attachment in input {
-            let (source, manifest) = self.manifest(&attachment.id)?;
+            let cannot = |reason: &str| {
+                format!("Attachment '{}' cannot be sent: {reason}.", attachment.name)
+            };
+            let failed = || {
+                format!(
+                    "Failed to claim attachment '{}' for this thread.",
+                    attachment.name
+                )
+            };
+            let pending = attachment.id.strip_prefix("pending-");
+            let (source, manifest) = self.manifest(&attachment.id).map_err(|_| {
+                cannot(if pending.is_some() {
+                    "attachment not found (removed or expired)"
+                } else {
+                    "attachment not found"
+                })
+            })?;
             let uploaded = &manifest.attachment;
-            if uploaded.name != attachment.name
-                || uploaded.mime_type != attachment.mime_type
-                || uploaded.size != attachment.size
-                || uploaded.kind != attachment.kind
+            if uploaded.size != attachment.size {
+                return Err(cannot("stored size does not match"));
+            }
+            if uploaded.kind != attachment.kind
+                || !uploaded
+                    .mime_type
+                    .eq_ignore_ascii_case(&attachment.mime_type)
             {
-                return Err(anyhow!("attachment metadata changed"));
+                return Err(cannot("attachment type does not match the upload"));
+            }
+            if uploaded.name != attachment.name {
+                return Err(cannot("attachment does not match the upload"));
             }
             let mut attachment = attachment.clone();
-            let target = match attachment.id.strip_prefix("pending-") {
+            let target = match pending {
                 Some(token) => {
-                    let mut file = File::open(&source)?;
-                    let (size, digest) = digest_file(&mut file)?;
-                    if size != attachment.size || digest != manifest.sha256 {
-                        return Err(anyhow!("pending attachment content changed"));
+                    attachment.mime_type = attachment.mime_type.to_lowercase();
+                    let (size, digest) = File::open(&source)
+                        .map_err(anyhow::Error::from)
+                        .and_then(|mut file| digest_file(&mut file))
+                        .map_err(|_| failed())?;
+                    if size != attachment.size {
+                        return Err(cannot("stored size does not match"));
+                    }
+                    if digest != manifest.sha256 {
+                        return Err(failed());
                     }
                     let id = claimed_id(thread, token);
-                    let target =
-                        stored_path(&self.upload_directory, &id).context("invalid claim id")?;
+                    let target = stored_path(&self.upload_directory, &id)
+                        .ok_or_else(|| cannot("invalid attachment id"))?;
                     attachment.id = id;
                     if target.exists() {
-                        let (_, saved) = self.manifest(&attachment.id)?;
+                        let (_, saved) = self.manifest(&attachment.id).map_err(|_| failed())?;
                         if saved.attachment.id != attachment.id
                             || saved.attachment.name != uploaded.name
                             || saved.attachment.size != uploaded.size
                             || saved.sha256 != digest
                         {
-                            return Err(anyhow!("attachment claim changed"));
+                            return Err(failed());
                         }
                     } else {
-                        let output = tempfile::NamedTempFile::new_in(&directory)?;
-                        fs::copy(&source, output.path())?;
-                        output.as_file().sync_all()?;
-                        output.persist_noclobber(&target)?;
+                        self.prepare_attachment_directory(&directory)
+                            .map_err(|_| failed())?;
+                        let output =
+                            tempfile::NamedTempFile::new_in(&directory).map_err(|_| failed())?;
+                        fs::copy(&source, output.path()).map_err(|_| failed())?;
+                        output.as_file().sync_all().map_err(|_| failed())?;
+                        output.persist_noclobber(&target).map_err(|_| failed())?;
                         created.0.push(target.clone());
-                        if let Err(e) = self.save_attachment_upload(
+                        self.save_attachment_upload(
                             &target,
                             attachment.id.clone(),
                             &attachment.name,
                             &attachment.mime_type,
                             size,
                             digest,
-                        ) {
-                            let _ = fs::remove_file(&target);
-                            return Err(e);
-                        }
+                        )
+                        .map_err(|_| failed())?;
                     }
                     target
                 }
@@ -317,8 +381,43 @@ impl WorkspaceFiles {
             attachment.path = target.to_string_lossy().into_owned();
             claimed.push(attachment);
         }
-        created.0.clear();
-        Ok(claimed)
+        Ok(Claimed {
+            attachments: claimed,
+            created: std::mem::take(&mut created.0),
+        })
+    }
+
+    /// Claims a question response's attachments question by question. The
+    /// limits hold across every question, and a failure releases every copy.
+    pub(crate) fn claim_answers(
+        &self,
+        thread: &str,
+        answers: &mut std::collections::BTreeMap<String, Vec<Attachment>>,
+    ) -> std::result::Result<Vec<PathBuf>, String> {
+        let all: Vec<Attachment> = answers.values().flatten().cloned().collect();
+        if let Some(error) = limit_error(&all) {
+            return Err(error.into());
+        }
+        let mut created = vec![];
+        for attachments in answers.values_mut() {
+            match self.claim(thread, attachments) {
+                Ok(claimed) => {
+                    *attachments = claimed.attachments;
+                    created.extend(claimed.created);
+                }
+                Err(error) => {
+                    self.release(&created);
+                    return Err(error);
+                }
+            }
+        }
+        Ok(created)
+    }
+
+    /// Removes the copies a claim made for a command that was not accepted.
+    pub(crate) fn release(&self, created: &[PathBuf]) {
+        let _lock = self.writes.lock().unwrap_or_else(|e| e.into_inner());
+        drop(NewClaims(created.to_vec()));
     }
 
     /// The stored bytes of a claimed image.
@@ -409,25 +508,27 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let files = WorkspaceFiles::new(directory.path().join("assets"));
         let pending = upload(&files, "token", b"original");
-        let claimed = files
+        let first = files
             .claim("thread", std::slice::from_ref(&pending))
             .unwrap();
+        let claimed = first.attachments;
         let stored = files.attachment_path(&claimed[0].id).unwrap();
+        assert_eq!(first.created, std::slice::from_ref(&stored));
         assert!(claimed[0].id.starts_with("chat-"));
         assert_eq!(claimed[0].path, stored.to_string_lossy());
         fs::write(&stored, b"edited").unwrap();
         // A resent claim keeps the stored copy and the original upload.
-        assert_eq!(
-            files
-                .claim("thread", std::slice::from_ref(&pending))
-                .unwrap(),
-            claimed
-        );
+        let resent = files
+            .claim("thread", std::slice::from_ref(&pending))
+            .unwrap();
+        assert_eq!(resent.attachments, claimed);
+        assert!(resent.created.is_empty());
         assert_eq!(fs::read(&stored).unwrap(), b"edited");
         assert_eq!(
             files
                 .claim("thread", std::slice::from_ref(&claimed[0]))
-                .unwrap(),
+                .unwrap()
+                .attachments,
             claimed
         );
         assert!(files.attachment_path("pending-../../checkout").is_err());
@@ -467,6 +568,124 @@ mod tests {
         assert!(files.claim("thread", &[first]).is_ok());
     }
 
+    // AttachmentClaims.ts claimPendingAttachments and getProviderAttachmentLimitError:
+    // why an attachment cannot be sent, in the reference's words.
+    #[test]
+    fn claim_failures_say_why_in_the_reference_wording() {
+        let directory = tempfile::tempdir().unwrap();
+        let files = WorkspaceFiles::new(directory.path().join("assets"));
+        let notes = upload(&files, "notes", b"original");
+        let claim = |input: &[Attachment]| files.claim("thread", input).unwrap_err();
+        assert_eq!(
+            claim(&[Attachment {
+                id: "pending-missing".into(),
+                ..notes.clone()
+            }]),
+            "Attachment 'notes.txt' cannot be sent: attachment not found (removed or expired)."
+        );
+        assert_eq!(
+            claim(&[Attachment {
+                size: 3,
+                ..notes.clone()
+            }]),
+            "Attachment 'notes.txt' cannot be sent: stored size does not match."
+        );
+        assert_eq!(
+            claim(&[Attachment {
+                mime_type: "text/markdown".into(),
+                ..notes.clone()
+            }]),
+            "Attachment 'notes.txt' cannot be sent: attachment type does not match the upload."
+        );
+        assert_eq!(
+            claim(&[notes.clone(), notes.clone()]),
+            "Duplicate attachment ids are not allowed."
+        );
+        let many: Vec<Attachment> = (0..101)
+            .map(|index| Attachment {
+                id: format!("pending-{index}"),
+                ..notes.clone()
+            })
+            .collect();
+        assert_eq!(
+            claim(&many),
+            "You can attach up to 100 files per message or question response."
+        );
+        let images: Vec<Attachment> = (0..9)
+            .map(|index| Attachment {
+                kind: AttachmentKind::Image,
+                id: format!("pending-image-{index}"),
+                name: "shot.png".into(),
+                mime_type: "image/png".into(),
+                size: 10 * 1024 * 1024,
+                ..notes.clone()
+            })
+            .collect();
+        assert_eq!(
+            claim(&images),
+            "Images can total up to 80 MiB per message or question response. Use smaller images or send fewer at once."
+        );
+        // An upload's MIME type is matched without case and claimed lowercase.
+        let upper = files
+            .claim(
+                "thread",
+                &[Attachment {
+                    mime_type: "TEXT/PLAIN".into(),
+                    ..notes
+                }],
+            )
+            .unwrap();
+        assert_eq!(upper.attachments[0].mime_type, "text/plain");
+    }
+
+    // ThreadMessageIntake.ts dispatchCommand: the limits of a question response
+    // hold across its questions, and a failure removes every copy made for it.
+    #[test]
+    fn a_question_response_is_bounded_and_released_as_a_whole() {
+        let directory = tempfile::tempdir().unwrap();
+        let files = WorkspaceFiles::new(directory.path().join("assets"));
+        let notes = upload(&files, "notes", b"original");
+        let mut over: std::collections::BTreeMap<String, Vec<Attachment>> = (0..2)
+            .map(|question| {
+                (
+                    format!("q{question}"),
+                    (0..60)
+                        .map(|index| Attachment {
+                            id: format!("pending-{question}-{index}"),
+                            ..notes.clone()
+                        })
+                        .collect(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            files.claim_answers("thread", &mut over).unwrap_err(),
+            "You can attach up to 100 files per message or question response."
+        );
+        let mut answers = std::collections::BTreeMap::from([
+            ("a".to_owned(), vec![notes.clone()]),
+            (
+                "b".to_owned(),
+                vec![Attachment {
+                    id: "pending-missing".into(),
+                    ..notes.clone()
+                }],
+            ),
+        ]);
+        assert!(files.claim_answers("thread", &mut answers).is_err());
+        let copies = || {
+            fs::read_dir(files.thread_attachment_directory("thread"))
+                .map_or(0, |entries| entries.count())
+        };
+        assert_eq!(copies(), 0);
+        let mut answers = std::collections::BTreeMap::from([("a".to_owned(), vec![notes])]);
+        let created = files.claim_answers("thread", &mut answers).unwrap();
+        assert_eq!(created.len(), 1);
+        assert!(answers["a"][0].id.starts_with("chat-"));
+        files.release(&created);
+        assert_eq!(copies(), 0);
+    }
+
     // Context records name uploads by attachment ID; a claim rebinds them to
     // the thread's copies, which the record schema must still accept.
     #[test]
@@ -498,7 +717,8 @@ mod tests {
         assert_eq!(context.normalized().unwrap(), context);
         let claimed = files
             .claim("thread-1", &[image.clone(), file.clone()])
-            .unwrap();
+            .unwrap()
+            .attachments;
         context.remap_attachments(&std::collections::HashMap::from([
             (image.id.clone(), claimed[0].id.clone()),
             (file.id.clone(), claimed[1].id.clone()),

@@ -509,3 +509,59 @@ fn reads_a_subagent_task_on_demand_within_the_detail_bound() {
     );
     assert_eq!(state.tasks[0].progress, Some(progress));
 }
+
+/// ThreadForkService.ts copies subagent items with their prompt, progress and
+/// result. A fork, and a fork of that fork, read the task of an inherited
+/// subagent item from the thread that ran it.
+#[tokio::test]
+async fn a_forks_inherited_subagent_item_reads_its_task_from_the_source() {
+    use crate::sync::history::tests::item;
+    use agent_domain::{CompletionWake, NodeId, RunAttemptId};
+    let (_dir, store) = temp_store();
+    let task = NodeId::new("child-agent").unwrap();
+    let mut source = Writer::create(&store, "thread:source", "project").await;
+    source
+        .commit(
+            1,
+            FactBody::TaskStarted {
+                original_message: None,
+                background: false,
+                id: task.clone(),
+                native_key: "child-agent".into(),
+                run: None,
+                attempt: RunAttemptId::new("attempt").unwrap(),
+                child: ThreadId::new("thread:child-agent").unwrap(),
+                parent: None,
+                prompt: "Inspect code".into(),
+                model: None,
+                wake: CompletionWake::Always,
+            },
+        )
+        .await;
+    let inherited = item(
+        "item-task",
+        1,
+        ItemKind::Subagent { task: task.clone() },
+        String::new(),
+    );
+    let fork = |parent: &str| FactBody::ForkAccepted {
+        parent: ThreadId::new(parent).unwrap(),
+        boundary: 1,
+        history: vec![inherited.clone()],
+        messages: vec![],
+    };
+    let mut first = Writer::create(&store, "thread:fork", "project").await;
+    first.commit(2, fork("thread:source")).await;
+    let mut second = Writer::create(&store, "thread:fork-of-fork", "project").await;
+    second.commit(3, fork("thread:fork")).await;
+    let registry = ActorRegistry::new(ActorContext::new(store));
+    for thread in ["thread:fork", "thread:fork-of-fork"] {
+        let detail = registry
+            .turn_item(&ThreadId::new(thread).unwrap(), &inherited.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(detail.row.inherited);
+        assert_eq!(detail.task.unwrap().prompt, "Inspect code", "{thread}");
+    }
+}
