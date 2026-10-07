@@ -310,6 +310,8 @@ pub struct Snapshot {
     /// The last setup a closed stream reported, kept for the card.
     pub held_setups: BTreeMap<ThreadId, WorktreeSetupSnapshot>,
     pub error_dismissals: crate::view::timeline::banners::ThreadErrorDismissals,
+    /// Thread actions that can still be undone.
+    pub thread_undo: crate::commands::undo::ThreadUndo,
     /// Timeline rows already built; every snapshot of the store shares them.
     pub timelines: Arc<std::sync::Mutex<crate::view::timeline::rows::TimelineCache>>,
 }
@@ -755,10 +757,25 @@ pub enum Intent {
     RemoveDraftContext {
         context_id: String,
     },
+    /// Adds terminal lines to the draft at `cursor` (UTF-16) of the composer's `text`.
+    AddTerminalContext {
+        text: String,
+        cursor: u32,
+        selection: crate::view::composer::terminal_context::TerminalContextSelection,
+    },
+    /// Attaches threads to the draft at `cursor` (UTF-16) of the composer's
+    /// `text`; threads already attached are skipped.
+    AddThreadContexts {
+        text: String,
+        cursor: u32,
+        thread_ids: Vec<String>,
+    },
     /// Drops an unsent draft: a thread's (its id) or a new thread's (`new:<project>`).
     DiscardDraft {
         draft_key: String,
     },
+    /// Restores the thread actions `Snapshot::thread_undo_notice` shows.
+    UndoThreadAction,
     /// `draft_key` is the composer's (or an answer's) key when the files were picked.
     AttachFiles {
         draft_key: String,

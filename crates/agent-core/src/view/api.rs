@@ -294,6 +294,13 @@ impl Snapshot {
     pub fn import_toast(&self) -> Option<ImportToast> {
         self.session_import.toast.clone()
     }
+    /// The Undo offered for the latest thread actions, until it expires.
+    pub fn thread_undo_notice(
+        &self,
+        now_ms: i64,
+    ) -> Option<crate::commands::undo::ThreadUndoNotice> {
+        self.thread_undo.notice(now_ms)
+    }
     pub fn stash(&self) -> Vec<StashEntryView> {
         stash_menu(&self.stash)
     }

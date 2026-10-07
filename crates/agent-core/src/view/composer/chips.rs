@@ -581,6 +581,32 @@ pub fn standalone_attachment_ids(
         .collect()
 }
 
+/// Puts context links (from `format_context_reference`) at the UTF-16
+/// `cursor`, padding with spaces only where words would otherwise join, and
+/// leaves the caret after the trailing space.
+pub fn insert_inline_context_references(
+    prompt: &str,
+    cursor: u32,
+    references: &[String],
+) -> super::commands::TextReplacement {
+    let units = utf16_units(prompt);
+    let start = (cursor as usize).min(units.len());
+    let boundary =
+        |unit: Option<&u16>| unit.is_none_or(|unit| matches!(*unit, 0x20 | 0x0a | 0x09 | 0x0d));
+    let leading = !boundary(start.checked_sub(1).and_then(|index| units.get(index)));
+    let end = if units.get(start) == Some(&0x20) {
+        start + 1
+    } else {
+        start
+    };
+    let text = format!(
+        "{}{} ",
+        if leading { " " } else { "" },
+        references.join(" ")
+    );
+    super::commands::replace_text_range(prompt, start as u32, end as u32, &text)
+}
+
 /// A sent message's Markdown for the mobile feed: each context link keeps its
 /// label, marked when its record is missing.
 pub fn mobile_message_markdown(text: &str, context: Option<&MessageContext>) -> String {

@@ -79,6 +79,7 @@ impl Owner {
                 DeliveryAction::Wait => {}
                 DeliveryAction::Remove => {
                     self.state_outbox().remove(&entry.id);
+                    self.state.thread_undo.failed(entry.id.as_str());
                     if entry.is_launch() {
                         self.finish(entry);
                     } else if let Some(waiter) = self.waiters.remove(&entry.id) {
@@ -219,6 +220,9 @@ impl Owner {
     }
 
     fn finish(&mut self, entry: PendingCommand) {
+        self.state
+            .thread_undo
+            .confirmed(entry.id.as_str(), super::owner::now_ms() as i64);
         let target = match &entry.request {
             Request::Launch(_) => Some(entry.thread.clone()),
             Request::Dispatch(dispatch) => match &dispatch.command {
@@ -289,6 +293,7 @@ impl Owner {
     /// A refused request: its preview disappears and the sent content returns
     /// to the composer.
     pub(super) fn fail(&mut self, entry: PendingCommand, reason: String) {
+        self.state.thread_undo.failed(entry.id.as_str());
         if self
             .state
             .thread_order

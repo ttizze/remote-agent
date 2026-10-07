@@ -12,11 +12,18 @@ use crate::{
     view::{
         checkpoints::{DiffScopeChoice, checkpoint_summaries, diff_panel},
         composer::{
+            chips::{format_context_reference, insert_inline_context_references},
             commands::{
-                ComposerTrigger, detect_composer_trigger, resolve_composer_command_selection,
+                ComposerTrigger, ThreadContextAttachment, detect_composer_trigger,
+                resolve_composer_command_selection,
             },
             menu::composer_menu_items,
             stash::{StashImages, evicted_entry_warning, new_stash_entry, restore_stash_entry},
+            terminal_context::{
+                TerminalContextSelection, is_same_terminal_range,
+                normalize_terminal_context_selection, terminal_context_record,
+                terminal_context_reference,
+            },
         },
         models::{
             catalog,
@@ -44,6 +51,24 @@ use std::{collections::BTreeMap, sync::Arc};
 
 fn context_id(record: &Json) -> Option<&str> {
     record.0.get("contextId").and_then(Value::as_str)
+}
+
+fn context_records(draft: &Draft) -> &[Json] {
+    draft
+        .context
+        .as_ref()
+        .map_or(&[][..], |context| context.records.as_slice())
+}
+
+fn push_context_record(draft: &mut Draft, record: Value) {
+    draft
+        .context
+        .get_or_insert_with(|| agent_domain::MessageContext {
+            version: 1,
+            records: vec![],
+        })
+        .records
+        .push(Json(record));
 }
 
 impl Owner {
@@ -77,14 +102,7 @@ impl Owner {
         draft.text = selection.text;
         if let Some(attachment) = selection.attach_thread {
             let environment = self.state.host_name.clone().unwrap_or_default();
-            draft
-                .context
-                .get_or_insert_with(|| agent_domain::MessageContext {
-                    version: 1,
-                    records: vec![],
-                })
-                .records
-                .push(Json(attachment.record(&environment)));
+            push_context_record(&mut draft, attachment.record(&environment));
         }
         if let Some(mode) = selection.interaction_mode {
             draft.interaction_mode = mode;
@@ -97,6 +115,79 @@ impl Owner {
         Ok(Next::Outcome(Outcome::ComposerEdited {
             cursor: selection.cursor,
         }))
+    }
+
+    /// Places the selected terminal lines at the caret, unless the draft
+    /// already holds that range.
+    pub(super) fn add_terminal_context(
+        &mut self,
+        text: String,
+        cursor: u32,
+        selection: &TerminalContextSelection,
+    ) -> Next {
+        let Some(selection) = normalize_terminal_context_selection(selection) else {
+            return Next::Done;
+        };
+        let mut draft = self.state.current_draft();
+        if context_records(&draft)
+            .iter()
+            .any(|record| is_same_terminal_range(&record.0, &selection))
+        {
+            return Next::Done;
+        }
+        let record = terminal_context_record(&uuid::Uuid::new_v4().to_string(), &selection);
+        let inserted =
+            insert_inline_context_references(&text, cursor, &[terminal_context_reference(&record)]);
+        draft.text = inserted.text;
+        push_context_record(&mut draft, record);
+        self.set_draft(draft);
+        Next::Outcome(Outcome::ComposerEdited {
+            cursor: inserted.cursor,
+        })
+    }
+
+    /// Places links to the threads at the caret, each thread once.
+    pub(super) fn add_thread_contexts(
+        &mut self,
+        text: String,
+        cursor: u32,
+        thread_ids: &[String],
+    ) -> Next {
+        let mut draft = self.state.current_draft();
+        let mut attached: Vec<String> = context_records(&draft)
+            .iter()
+            .filter_map(|record| context_id(record).map(str::to_owned))
+            .collect();
+        let environment = self.state.host_name.clone().unwrap_or_default();
+        let mut references = vec![];
+        for thread_id in thread_ids {
+            let Some(title) = ThreadId::new(thread_id.clone())
+                .ok()
+                .and_then(|id| self.state.thread_row(&id).map(|row| row.title.clone()))
+            else {
+                continue;
+            };
+            let attachment = ThreadContextAttachment::new(thread_id, &title);
+            if attached.contains(&attachment.context_id) {
+                continue;
+            }
+            attached.push(attachment.context_id.clone());
+            references.push(format_context_reference(
+                "thread",
+                &attachment.context_id,
+                &attachment.label,
+            ));
+            push_context_record(&mut draft, attachment.record(&environment));
+        }
+        if references.is_empty() {
+            return Next::Done;
+        }
+        let inserted = insert_inline_context_references(&text, cursor, &references);
+        draft.text = inserted.text;
+        self.set_draft(draft);
+        Next::Outcome(Outcome::ComposerEdited {
+            cursor: inserted.cursor,
+        })
     }
 
     /// Removes a context record and the links to it from the draft.

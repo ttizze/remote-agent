@@ -269,6 +269,162 @@ fn lifecycle_previews_show_until_the_shell_confirms_them() {
     assert_eq!(owner.state.shell_view().unwrap().threads[0], pinned);
 }
 
+fn now() -> i64 {
+    owner::now_ms() as i64
+}
+
+fn confirm_last(owner: &mut Owner, sequence: u64) {
+    let id = owner.state.outbox.entries.last().unwrap().id.clone();
+    owner.delivered(id, committed(sequence, Reply::Accepted));
+    owner.shell_update(
+        ShellLocation::Active,
+        ShellUpdate::ThreadUpdated {
+            sequence,
+            thread: Box::new(owner.state.thread_row(&thread_id()).unwrap().clone()),
+        },
+    );
+}
+
+fn lifecycle_commands(next: Next) -> Vec<Command> {
+    commands(next)
+        .into_iter()
+        .map(|entry| match entry.request {
+            Request::Dispatch(dispatch) => dispatch.command,
+            Request::Launch(_) => panic!("dispatch"),
+        })
+        .collect()
+}
+
+// web useThreadActions.undo.test.ts "re-pins and re-snoozes a thread that settling had cleared"
+#[test]
+fn undoing_a_settle_restores_the_pin_and_snooze_it_cleared() {
+    let mut owner = owner(Snapshot::default());
+    let mut pinned = row(&thread_id());
+    pinned.pinned_at = Some(at());
+    pinned.pin_order = Some("a0".into());
+    let until = agent_domain::Timestamp::parse("2030-01-01T09:00:00.000Z").unwrap();
+    pinned.snoozed_until = Some(until.clone());
+    live_shell(&mut owner, 1, vec![pinned]);
+    owner.intent(
+        Intent::Thread {
+            thread_id: thread_id().to_string(),
+            action: ThreadAction::Settle,
+        },
+        oneshot::channel().0,
+    );
+    assert_eq!(owner.state.thread_undo_notice(now()), None);
+    confirm_last(&mut owner, 2);
+    let notice = owner.state.thread_undo_notice(now()).unwrap();
+    assert_eq!(notice.label, "Settled 1 thread");
+    let restored = lifecycle_commands(owner.prepare(Intent::UndoThreadAction).unwrap());
+    assert_eq!(
+        restored,
+        [
+            Command::Settle {
+                settled: false,
+                at: None
+            },
+            Command::Pin {
+                pinned: true,
+                order: Some("a0".into())
+            },
+            Command::Snooze { until: Some(until) },
+        ]
+    );
+    assert_eq!(owner.state.thread_undo_notice(now()), None);
+}
+
+// web useThreadActions.undo.test.ts "shows no Undo when the archive failed" and
+// "unarchives and returns to the thread when archiving left it"
+#[test]
+fn an_archive_offers_undo_only_once_it_went_through() {
+    for accepted in [false, true] {
+        let mut owner = owner(Snapshot::default());
+        live_shell(&mut owner, 1, vec![row(&thread_id())]);
+        owner.select_thread(Some(thread_id()));
+        owner.intent(
+            Intent::Thread {
+                thread_id: thread_id().to_string(),
+                action: ThreadAction::Archive,
+            },
+            oneshot::channel().0,
+        );
+        let entry = owner.state.outbox.entries[0].clone();
+        if !accepted {
+            owner.fail(entry, "nope".into());
+            assert_eq!(owner.state.thread_undo_notice(now()), None);
+            continue;
+        }
+        confirm_last(&mut owner, 2);
+        assert_eq!(
+            owner.state.thread_undo_notice(now()).unwrap().action,
+            crate::commands::undo::ThreadUndoAction::Archived
+        );
+        owner.select_thread(None);
+        let restored = lifecycle_commands(owner.prepare(Intent::UndoThreadAction).unwrap());
+        assert_eq!(restored, [Command::Archive { archived: false }]);
+        assert_eq!(owner.state.selected_thread, Some(thread_id()));
+    }
+}
+
+// web useThreadActions.undo.test.ts "expires an older unpin Undo when the thread is settled"
+#[test]
+fn settling_expires_an_older_unpin_undo() {
+    let mut owner = owner(Snapshot::default());
+    let mut pinned = row(&thread_id());
+    pinned.pinned_at = Some(at());
+    live_shell(&mut owner, 1, vec![pinned]);
+    for (action, sequence) in [(ThreadAction::Unpin, 2), (ThreadAction::Settle, 3)] {
+        owner.intent(
+            Intent::Thread {
+                thread_id: thread_id().to_string(),
+                action,
+            },
+            oneshot::channel().0,
+        );
+        confirm_last(&mut owner, sequence);
+    }
+    let notice = owner.state.thread_undo_notice(now()).unwrap();
+    assert_eq!(notice.label, "Settled 1 thread");
+    owner.prepare(Intent::UndoThreadAction).unwrap();
+    assert_eq!(owner.state.thread_undo_notice(now()), None);
+}
+
+// web discardComposerDraft.test.ts
+#[test]
+fn a_discarded_draft_comes_back_unless_new_text_replaced_it() {
+    for typed_again in [false, true] {
+        let mut owner = owner(Snapshot::default());
+        let draft = Draft {
+            text: "half-written prompt".into(),
+            ..Draft::default()
+        };
+        owner.state.drafts.insert("new:app".into(), draft.clone());
+        owner
+            .prepare(Intent::DiscardDraft {
+                draft_key: "new:app".into(),
+            })
+            .unwrap();
+        assert!(!owner.state.drafts.contains_key("new:app"));
+        assert_eq!(
+            owner.state.thread_undo_notice(now()).unwrap().label,
+            "Discarded 1 draft"
+        );
+        if typed_again {
+            let newer = Draft {
+                text: "new reply".into(),
+                ..Draft::default()
+            };
+            owner.state.drafts.insert("new:app".into(), newer.clone());
+            assert!(owner.prepare(Intent::UndoThreadAction).is_err());
+            assert_eq!(owner.state.drafts["new:app"], newer);
+        } else {
+            owner.prepare(Intent::UndoThreadAction).unwrap();
+            assert_eq!(owner.state.drafts["new:app"], draft);
+        }
+    }
+}
+
 #[test]
 fn a_rollback_returns_the_rolled_back_message_to_the_composer_after_success_only() {
     for succeeded in [true, false] {
@@ -1527,6 +1683,93 @@ fn discarding_a_draft_removes_only_that_draft() {
     assert_eq!(
         owner.state.drafts.keys().cloned().collect::<Vec<_>>(),
         ["thread"]
+    );
+}
+
+fn context_records(owner: &Owner) -> Vec<serde_json::Value> {
+    owner
+        .state
+        .current_draft()
+        .context
+        .map(|context| context.records.into_iter().map(|record| record.0).collect())
+        .unwrap_or_default()
+}
+
+#[test]
+fn terminal_lines_join_the_draft_at_the_caret_once_per_range() {
+    let mut owner = owner(Snapshot {
+        default_draft: draft(),
+        ..Snapshot::default()
+    });
+    let selection = crate::view::composer::terminal_context::TerminalContextSelection {
+        terminal_id: "default".into(),
+        terminal_label: "Terminal 1".into(),
+        line_start: 4,
+        line_end: 4,
+        text: "\nls\n".into(),
+    };
+    let add = |owner: &mut Owner, text: &str, cursor| {
+        owner
+            .prepare(Intent::AddTerminalContext {
+                text: text.into(),
+                cursor,
+                selection: selection.clone(),
+            })
+            .unwrap()
+    };
+    let Next::Outcome(Outcome::ComposerEdited { cursor }) = add(&mut owner, "seeit", 3) else {
+        panic!("edited")
+    };
+    let records = context_records(&owner);
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0]["text"], "ls");
+    let link = format!(
+        "[Terminal 1 line 4](context://v1/terminal/{})",
+        records[0]["contextId"].as_str().unwrap()
+    );
+    assert_eq!(owner.state.current_draft().text, format!("see {link} it"));
+    assert_eq!(cursor as usize, 4 + link.len() + 1);
+    assert!(matches!(add(&mut owner, "", 0), Next::Done));
+    assert_eq!(context_records(&owner).len(), 1);
+}
+
+#[test]
+fn dropped_threads_attach_once_each_at_the_caret() {
+    let mut owner = owner(Snapshot {
+        default_draft: draft(),
+        ..Snapshot::default()
+    });
+    let first = ThreadId::new("first").unwrap();
+    let second = ThreadId::new("second").unwrap();
+    live_shell(&mut owner, 1, vec![row(&first), row(&second)]);
+    let drop = |owner: &mut Owner, ids: &[&str]| {
+        let text = owner.state.current_draft().text;
+        let cursor = text.encode_utf16().count() as u32;
+        owner
+            .prepare(Intent::AddThreadContexts {
+                text,
+                cursor,
+                thread_ids: ids.iter().map(|id| (*id).to_owned()).collect(),
+            })
+            .unwrap()
+    };
+    assert!(matches!(
+        drop(&mut owner, &["first", "gone"]),
+        Next::Outcome(Outcome::ComposerEdited { .. })
+    ));
+    assert!(matches!(
+        drop(&mut owner, &["first", "second"]),
+        Next::Outcome(Outcome::ComposerEdited { .. })
+    ));
+    assert!(matches!(drop(&mut owner, &["second"]), Next::Done));
+    let ids: Vec<_> = context_records(&owner)
+        .iter()
+        .map(|record| record["threadId"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(ids, ["first", "second"]);
+    assert_eq!(
+        owner.state.current_draft().text,
+        "[Thread](context://v1/thread/thread_first) [Thread](context://v1/thread/thread_second) "
     );
 }
 
