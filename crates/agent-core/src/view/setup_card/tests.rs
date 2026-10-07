@@ -594,19 +594,6 @@ fn mobile_cancel_waits_only_until_the_turn_starts() {
     assert!(!card(true).can_cancel);
 }
 
-#[rstest]
-#[case(-5, "0ms")]
-#[case(0, "1ms")]
-#[case(850, "850ms")]
-#[case(1_050, "1.1s")]
-#[case(9_960, "10s")]
-#[case(12_400, "12s")]
-#[case(60_000, "1m")]
-#[case(3_787_000, "1h 3m 7s")]
-fn formats_durations(#[case] duration_ms: i64, #[case] text: &str) {
-    assert_eq!(format_duration(duration_ms), text);
-}
-
 fn user_message(id: &str, run: &str) -> Message {
     Message {
         notification: None,

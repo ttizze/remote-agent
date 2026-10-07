@@ -4,6 +4,8 @@
 //! beside it.
 use crate::commands::workflows::{BackgroundTaskKind, PendingBackgroundTask, user_queued_runs};
 use crate::sync::thread::ThreadStatus;
+use crate::view::agents::format_subagent_display_title;
+use crate::view::time::format_duration;
 use agent_domain::{ItemKind, ItemStatus, RequestStatus, Run, RunStatus, State};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -346,40 +348,6 @@ pub struct PendingBackgroundWork {
     pub waiting: bool,
 }
 
-/// Codex task paths (`/root/…/luna_window_properties`) read as their last
-/// segment in title case.
-fn subagent_display_title(title: &str) -> String {
-    let display = match title.get(..9) {
-        Some(prefix) if prefix.eq_ignore_ascii_case("subagent:") => title[9..].trim_start(),
-        _ => title,
-    };
-    let Some(path) = display.strip_prefix("/root/") else {
-        return display.into();
-    };
-    let path = path.strip_suffix('/').unwrap_or(path);
-    let segments: Vec<&str> = path.split('/').collect();
-    if segments.iter().any(|segment| segment.is_empty()) {
-        return display.into();
-    }
-    let name = segments[segments.len() - 1]
-        .split(|c: char| c == '_' || c.is_whitespace())
-        .filter(|word| !word.is_empty())
-        .map(|word| {
-            let mut chars = word.chars();
-            chars
-                .next()
-                .map(|first| first.to_uppercase().chain(chars).collect::<String>())
-                .unwrap_or_default()
-        })
-        .collect::<Vec<_>>()
-        .join(" ");
-    if name.is_empty() {
-        display.into()
-    } else {
-        name
-    }
-}
-
 fn join_with_and(parts: &[String]) -> String {
     match parts {
         [] => String::new(),
@@ -405,7 +373,7 @@ pub fn present_pending_background_work(
             let description = task.description.as_deref().map(str::trim);
             let label = match description {
                 Some(description) if kind == BackgroundWorkKind::Subagent => {
-                    subagent_display_title(description).trim().to_owned()
+                    format_subagent_display_title(description).trim().to_owned()
                 }
                 description => description.unwrap_or_default().to_owned(),
             };
@@ -468,38 +436,6 @@ pub fn present_pending_background_work(
     })
 }
 
-/// A duration in the compact `1h 2m 3s` form; whole seconds from ten seconds.
-fn format_duration_ms(duration_ms: i64) -> String {
-    if duration_ms < 0 {
-        return "0ms".into();
-    }
-    if duration_ms < 1_000 {
-        return format!("{}ms", duration_ms.max(1));
-    }
-    if duration_ms < 10_000 {
-        let tenths = (duration_ms as f64 / 100.0).round() / 10.0;
-        return if tenths >= 10.0 {
-            "10s".into()
-        } else {
-            format!("{tenths:.1}s")
-        };
-    }
-    if duration_ms < 60_000 {
-        return format!("{}s", (duration_ms as f64 / 1_000.0).round() as i64);
-    }
-    let total = (duration_ms as f64 / 1_000.0).round() as i64;
-    let parts: Vec<String> = [
-        (total / 3_600, "h"),
-        (total % 3_600 / 60, "m"),
-        (total % 60, "s"),
-    ]
-    .into_iter()
-    .filter(|(value, _)| *value > 0)
-    .map(|(value, unit)| format!("{value}{unit}"))
-    .collect();
-    parts.join(" ")
-}
-
 /// "12s", "12m 04s", then "1h 2m 3s" from an hour.
 pub fn format_working_duration(started_at_ms: i64, now_ms: i64) -> String {
     if now_ms <= started_at_ms {
@@ -510,7 +446,7 @@ pub fn format_working_duration(started_at_ms: i64, now_ms: i64) -> String {
         return format!("{total_seconds}s");
     }
     if total_seconds >= 3_600 {
-        return format_duration_ms(total_seconds * 1_000);
+        return format_duration(total_seconds * 1_000);
     }
     format!("{}m {:02}s", total_seconds / 60, total_seconds % 60)
 }

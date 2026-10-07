@@ -2,10 +2,10 @@
 //! toggles, keeps one live slot and marks rows that continue a work log.
 use super::mobile::{
     ActivityGroup, FeedActivity, FeedInput, FeedLatestRun, FeedRow, FeedStatus, WorkToggle,
-    compact_work_entry_text, is_failed_error, single_row, split_activity_group,
+    is_failed_error, single_row, split_activity_group,
 };
-use crate::js_text::js_trim;
-use crate::view::timeline::timing::format_duration;
+use crate::js_text::{collapse_js_spaces, js_trim};
+use crate::view::time::format_duration;
 use crate::view::work_log::command_label::command_program_name;
 use crate::view::work_log::presentation::{
     ToolGroupAction, live_activity_tool_status, resolve_work_entry_tool_presentation,
@@ -251,7 +251,7 @@ fn derive_run_folds(
                 max_timestamp(terminal_end.as_ref(), &last_end),
             ),
         };
-        let duration = format_duration(elapsed as f64);
+        let duration = format_duration(elapsed);
         let stopped = latest.is_some_and(|latest| {
             matches!(latest.status, RunStatus::Interrupted | RunStatus::Cancelled)
         });
@@ -503,7 +503,7 @@ fn single_tool_call_label(activity: &FeedActivity, expanded: bool) -> String {
         if expanded {
             return "Thought".into();
         }
-        let preview = compact_work_entry_text(activity.work_entry.detail.as_deref().unwrap_or(""));
+        let preview = collapse_js_spaces(activity.work_entry.detail.as_deref().unwrap_or(""));
         return if preview.is_empty() {
             "Thought".into()
         } else {
@@ -528,7 +528,7 @@ fn single_tool_call_label(activity: &FeedActivity, expanded: bool) -> String {
 fn live_tool_activity_summary(activity: &FeedActivity, present_tense: bool) -> String {
     let status = live_activity_tool_status(Some(activity.lifecycle_status), present_tense);
     if activity.work_entry.item_type == Some(ItemType::Reasoning) {
-        let preview = compact_work_entry_text(activity.work_entry.detail.as_deref().unwrap_or(""));
+        let preview = collapse_js_spaces(activity.work_entry.detail.as_deref().unwrap_or(""));
         return if !preview.is_empty() {
             preview
         } else if status == ToolLifecycleStatus::InProgress {

@@ -2,7 +2,7 @@
 //! without cached raw output.
 use super::mobile::{FeedVisibility, format_item_full_detail, subagent_task};
 use crate::sync::Detail;
-use crate::view::timeline::timing::format_duration;
+use crate::view::time::format_duration;
 use crate::view::work_log::ItemType;
 use crate::view::work_log::item_detail::web_search_results;
 use crate::view::work_log::item_support::resolve_item_support;
@@ -161,7 +161,7 @@ pub fn build_activity_inspector(
         .map_or(now_ms, |completed| completed.millis());
     inspector.field(
         "Duration",
-        format_duration((end - item.started_at.millis()).max(0) as f64),
+        format_duration((end - item.started_at.millis()).max(0)),
     );
     if visibility != FeedVisibility::Local {
         inspector.field("Visibility", visibility.as_str().into());

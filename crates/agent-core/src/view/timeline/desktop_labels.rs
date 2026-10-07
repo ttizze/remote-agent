@@ -1,6 +1,6 @@
 //! Desktop work-log row labels: the collapsed heading of a call, its live
 //! present-tense form, and which calls an expanded group lists.
-use crate::js_text::{JS_SPACE, is_js_space, js_trim, utf16_len, utf16_skip};
+use crate::js_text::{collapse_js_spaces, is_js_space, js_trim, utf16_len, utf16_skip};
 use crate::presentation::markdown::links::{
     file_basename, format_file_path_position, is_windows_absolute_path, split_file_path_position,
     strip_slash_prefixed_windows_drive,
@@ -18,23 +18,13 @@ use crate::view::work_log::{
     },
 };
 use agent_domain::ItemKind;
-use regex::Regex;
 use serde_json::{Value, json};
-use std::sync::LazyLock;
-
-static JS_SPACES: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(&format!("{JS_SPACE}+")).expect("space pattern compiles"));
-
-/// JavaScript `text.trim().replace(/\s+/g, " ")`.
-pub(super) fn collapse_whitespace(text: &str) -> String {
-    JS_SPACES.replace_all(js_trim(text), " ").into_owned()
-}
 
 fn collapsed_detail(entry: &WorkLogEntry) -> Option<String> {
     entry
         .detail
         .as_deref()
-        .map(collapse_whitespace)
+        .map(collapse_js_spaces)
         .filter(|detail| !detail.is_empty())
 }
 

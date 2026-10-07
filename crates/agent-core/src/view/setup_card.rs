@@ -2,6 +2,7 @@
 //! stages, output and actions read.
 use crate::commands::outbox::Request;
 use crate::state::Snapshot;
+use crate::view::time::format_duration;
 use agent_domain::{
     Role, Run, RunStatus, State, ThreadId, Timestamp, WorktreeSetupPhase, WorktreeSetupSnapshot,
     WorktreeSetupStage, WorktreeSetupStageId, WorktreeSetupStageStatus,
@@ -556,39 +557,6 @@ fn output_rows(tail: &[String]) -> Vec<String> {
     let mut rows = vec![String::new(); SETUP_OUTPUT_TAIL_LINES - shown.len()];
     rows.extend(shown.iter().cloned());
     rows
-}
-
-/// "850ms", "4.2s", "12s", "1h 3m 7s".
-pub fn format_duration(duration_ms: i64) -> String {
-    if duration_ms < 0 {
-        return "0ms".into();
-    }
-    if duration_ms < 1_000 {
-        return format!("{}ms", duration_ms.max(1));
-    }
-    if duration_ms < 10_000 {
-        let tenths = (duration_ms as f64 / 100.0).round() / 10.0;
-        return if tenths >= 10.0 {
-            "10s".into()
-        } else {
-            format!("{tenths:.1}s")
-        };
-    }
-    if duration_ms < 60_000 {
-        return format!("{}s", (duration_ms as f64 / 1_000.0).round() as i64);
-    }
-    let total_seconds = (duration_ms as f64 / 1_000.0).round() as i64;
-    let (hours, minutes, seconds) = (
-        total_seconds / 3_600,
-        total_seconds % 3_600 / 60,
-        total_seconds % 60,
-    );
-    [(hours, "h"), (minutes, "m"), (seconds, "s")]
-        .into_iter()
-        .filter(|(value, _)| *value > 0)
-        .map(|(value, unit)| format!("{value}{unit}"))
-        .collect::<Vec<_>>()
-        .join(" ")
 }
 
 #[cfg(test)]

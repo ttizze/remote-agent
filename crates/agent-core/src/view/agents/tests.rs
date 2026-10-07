@@ -467,34 +467,6 @@ fn shows_readable_result_text_and_suppresses_generic_completion_messages() {
     );
     assert_eq!(subagent_card_detail(Some("  ")), None);
 }
-
-#[rstest]
-#[case(0, "1ms")]
-#[case(250, "250ms")]
-#[case(1_500, "1.5s")]
-#[case(9_950, "10s")]
-#[case(22_000, "22s")]
-#[case(60_000, "1m")]
-#[case(65_000, "1m 5s")]
-#[case(119_500, "2m")]
-#[case(3_599_499, "59m 59s")]
-#[case(3_599_500, "1h")]
-#[case(3_600_000, "1h")]
-#[case(3_601_000, "1h 1s")]
-#[case(3_660_000, "1h 1m")]
-#[case(3_661_000, "1h 1m 1s")]
-#[case(7_199_500, "2h")]
-#[case(25_190_000, "6h 59m 50s")]
-#[case(90_061_000, "25h 1m 1s")]
-fn formats_ms_as_duration(#[case] duration_ms: i64, #[case] expected: &str) {
-    assert_eq!(format_duration(duration_ms), expected);
-}
-
-#[test]
-fn handles_invalid_durations() {
-    assert_eq!(format_duration(-1), "0ms");
-}
-
 const STARTED_AT: i64 = 1_790_000_000_000;
 const COMPLETED_AT: i64 = STARTED_AT + 10_000;
 const NOW: i64 = STARTED_AT + 3_600_000;
@@ -589,4 +561,17 @@ fn names_a_catalog_model_by_its_slug_name_or_alias() {
     assert_eq!(label("my gpt MODEL"), "My GPT model");
     assert_eq!(label("5.4"), "My GPT model");
     assert_eq!(label("gpt-5.5"), "GPT-5.5");
+}
+
+#[test]
+fn formats_codex_task_paths_as_display_titles() {
+    for (title, expected) in [
+        ("Subagent: Review the parser", "Review the parser"),
+        ("subagent:/root/fix_parser_bug", "Fix Parser Bug"),
+        ("/root/a/b/write  tests/", "Write Tests"),
+        ("/root/__/", "/root/__/"),
+        ("/tmp/other", "/tmp/other"),
+    ] {
+        assert_eq!(format_subagent_display_title(title), expected, "{title}");
+    }
 }

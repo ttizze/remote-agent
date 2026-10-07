@@ -24,6 +24,18 @@ pub(crate) fn js_trim_start(text: &str) -> &str {
     text.trim_start_matches(is_js_space)
 }
 
+/// `text.replace(/\s+/g, " ").trim()`.
+pub(crate) fn collapse_js_spaces(text: &str) -> String {
+    let mut collapsed = String::with_capacity(text.len());
+    for word in text.split(is_js_space).filter(|word| !word.is_empty()) {
+        if !collapsed.is_empty() {
+            collapsed.push(' ');
+        }
+        collapsed.push_str(word);
+    }
+    collapsed
+}
+
 /// A regex whose `\s` and `\S` mean the JavaScript classes.
 pub(crate) fn js_regex(pattern: &str) -> Regex {
     let set = &JS_SPACE[1..JS_SPACE.len() - 1];
@@ -181,6 +193,13 @@ mod tests {
         assert_eq!(utf16_prefix("a😄b", 2), "a");
         assert_eq!(utf16_prefix("a😄b", 3), "a😄");
         assert_eq!(utf16_skip("a😄b", 3), "b");
+    }
+
+    #[test]
+    fn collapses_javascript_whitespace_runs() {
+        assert_eq!(collapse_js_spaces("\u{FEFF} a \n\t b\u{3000}"), "a b");
+        assert_eq!(collapse_js_spaces("a\u{85}b"), "a\u{85}b");
+        assert_eq!(collapse_js_spaces(" \n "), "");
     }
 
     #[test]

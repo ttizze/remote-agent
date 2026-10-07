@@ -2,7 +2,8 @@
 //! for …", output of superseded attempts, and the runs that stay open.
 use super::desktop::{TimelineLatestRun, is_compaction, is_work_where};
 use super::entries::{TimelineEntry, TimelineEntryKind, is_persistent_resource_card};
-use super::timing::{elapsed_ms, format_duration};
+use super::timing::elapsed_ms;
+use crate::view::time::format_duration;
 use crate::view::work_log::{
     ItemType, ToolLifecycleStatus, presentation::work_entry_display_indicates_tool_failure,
 };
@@ -393,7 +394,7 @@ pub(super) fn turn_folds(input: &TurnFoldInput<'_>) -> HashMap<String, TurnFold>
                 )
             }
         };
-        let duration = format_duration(elapsed as f64);
+        let duration = format_duration(elapsed);
         let label = if latest_interrupted {
             format!("You stopped after {duration}")
         } else {

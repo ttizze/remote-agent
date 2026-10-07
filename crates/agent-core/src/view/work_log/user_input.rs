@@ -1,25 +1,7 @@
 //! One-line previews of the answers given to a question request.
 use super::QuestionAnswer;
-use crate::js_text::{is_js_space, js_trim};
+use crate::js_text::collapse_js_spaces;
 use agent_domain::Answer;
-
-/// Runs of white space as one space, trimmed.
-fn collapsed(text: &str) -> String {
-    let mut result = String::new();
-    let mut in_space = false;
-    for c in text.chars() {
-        if is_js_space(c) {
-            if !in_space {
-                result.push(' ');
-            }
-            in_space = true;
-        } else {
-            result.push(c);
-            in_space = false;
-        }
-    }
-    js_trim(&result).to_owned()
-}
 
 pub fn question_answer_text(answer: &Answer) -> String {
     match answer {
@@ -37,7 +19,7 @@ pub fn question_text_preview(answer: &QuestionAnswer) -> String {
     answer
         .question_text
         .iter()
-        .map(|(_, text)| collapsed(text))
+        .map(|(_, text)| collapse_js_spaces(text))
         .filter(|text| !text.is_empty())
         .collect::<Vec<_>>()
         .join(" · ")
@@ -67,7 +49,7 @@ pub fn question_answer_preview(answer: &QuestionAnswer) -> String {
             .collect::<Vec<_>>()
             .join(" · ")
     };
-    collapsed(&preview)
+    collapse_js_spaces(&preview)
 }
 
 pub fn has_question_answer(answer: &QuestionAnswer) -> bool {

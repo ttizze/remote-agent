@@ -2,12 +2,13 @@
 //! grouped activities, before folds, tool toggles and the live slot are
 //! presented (see `mobile_presentation`).
 use crate::commands::outbox::PendingMessage;
-use crate::js_text::{is_js_space, js_trim};
+use crate::js_text::{collapse_js_spaces, js_trim};
+use crate::view::agents::format_subagent_display_title;
 use crate::view::timeline::entries::{
     ChatMessage, EntriesInput, TimelineEntryKind, derive_timeline_entries, file_change_paths,
     question_answer,
 };
-use crate::view::timeline::lifecycle::{HandoffDivider, format_subagent_display_title};
+use crate::view::timeline::lifecycle::HandoffDivider;
 use crate::view::work_log::command_label::command_display_text;
 use crate::view::work_log::item_detail::{turn_item_has_detail, turn_item_needs_detail_fetch};
 use crate::view::work_log::presentation::{
@@ -245,26 +246,6 @@ pub fn mobile_feed(state: &State, input: &FeedInput) -> Vec<FeedRow> {
     super::pending::append_pending_messages(presented, &feed, &input.pending)
 }
 
-pub(crate) fn compact_work_entry_text(value: &str) -> String {
-    let mut compacted = String::with_capacity(value.len());
-    let mut space = false;
-    for c in value.chars() {
-        if is_js_space(c) {
-            space = true;
-        } else {
-            if space {
-                compacted.push(' ');
-            }
-            space = false;
-            compacted.push(c);
-        }
-    }
-    if space {
-        compacted.push(' ');
-    }
-    js_trim(&compacted).to_owned()
-}
-
 /// The tool input and output a dynamic tool entry carries.
 fn entry_tool_data(entry: &WorkLogEntry) -> Option<Value> {
     match &entry.item.as_ref()?.kind {
@@ -293,7 +274,7 @@ pub fn work_entry_row_label(entry: &WorkLogEntry, expanded: bool) -> String {
         .as_deref()
         .filter(|command| !js_trim(command).is_empty())
     {
-        return compact_work_entry_text(&command_display_text(command));
+        return collapse_js_spaces(&command_display_text(command));
     }
     let action = tool_group_action(entry);
     let searching = matches!(
@@ -352,7 +333,7 @@ pub fn work_entry_row_label(entry: &WorkLogEntry, expanded: bool) -> String {
     }
     match preview.filter(|preview| !preview.is_empty()) {
         Some(preview) => {
-            let compacted = compact_work_entry_text(&preview);
+            let compacted = collapse_js_spaces(&preview);
             if compacted.is_empty() {
                 entry.label.clone()
             } else {

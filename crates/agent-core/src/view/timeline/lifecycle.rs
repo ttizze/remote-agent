@@ -1,13 +1,12 @@
 //! Lifecycle rows of the conversation: interrupts, compactions, forks,
 //! created threads, subagents and provider handoffs.
-use crate::js_text::{is_js_space, js_trim};
+use crate::js_text::js_trim;
+use crate::view::agents::{format_subagent_display_title, subagent_card_detail};
 use agent_domain::{
     ContextTransferId, Driver, Item, ItemKind, ItemStatus, NodeId, Notification,
     NotificationOutcome, Run, RunId, RunStatus, State, ThreadId, Timestamp, Transfer, TransferKind,
 };
-use regex::Regex;
 use std::collections::BTreeSet;
-use std::sync::LazyLock;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DividerTone {
@@ -268,37 +267,6 @@ pub fn subagent_notification_link(
     ))
 }
 
-static GENERIC_CHILD_END: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)^Child task ended with status\b").unwrap());
-static MARKDOWN_LINK: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\[([^\]]+)\]\([^)]*\)").unwrap());
-static LIST_BULLET: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?mR)^[ \t]*[-*][ \t]+").unwrap());
-
-/// One line of a markdown result: no list bullets, code ticks or link targets.
-fn plain_detail(text: &str) -> String {
-    let linked = MARKDOWN_LINK.replace_all(text, "$1");
-    let unticked = linked.replace('`', "");
-    let unbulleted = LIST_BULLET.replace_all(&unticked, "");
-    let mut collapsed = String::with_capacity(unbulleted.len());
-    let mut space = false;
-    for c in unbulleted.chars() {
-        if is_js_space(c) {
-            space = true;
-        } else {
-            if space {
-                collapsed.push(' ');
-            }
-            space = false;
-            collapsed.push(c);
-        }
-    }
-    if space {
-        collapsed.push(' ');
-    }
-    js_trim(&collapsed).to_owned()
-}
-
 fn present_subagent(
     state: &State,
     task_id: Option<&NodeId>,
@@ -328,10 +296,7 @@ fn present_subagent(
     } else {
         progress.or(result)
     };
-    let detail = raw
-        .filter(|raw| !GENERIC_CHILD_END.is_match(raw))
-        .map(plain_detail)
-        .filter(|detail| !detail.is_empty());
+    let detail = subagent_card_detail(raw);
     let title = format_subagent_display_title(
         task.and_then(|task| task.title.as_deref())
             .unwrap_or("Subagent"),
@@ -366,50 +331,6 @@ fn present_subagent(
         open_label: format!("Open {title}"),
         title,
     }
-}
-
-static TASK_PATH: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^/root/(?:[^/]+/)*([^/]+)/?$").unwrap());
-static SUBAGENT_PREFIX: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)^Subagent:[\s\x{feff}]*").unwrap());
-
-/// Codex task paths read as their last segment in title case.
-/// A private copy of the agents view helper of the same name.
-pub(crate) fn format_subagent_display_title(title: &str) -> String {
-    let display = SUBAGENT_PREFIX.replace(title, "").into_owned();
-    let Some(name) = TASK_PATH.captures(&display).map(|path| path[1].to_owned()) else {
-        return display;
-    };
-    let mut spaced = String::with_capacity(name.len());
-    let mut gap = false;
-    for c in name.chars() {
-        if c == '_' || is_js_space(c) {
-            gap = true;
-        } else {
-            if gap {
-                spaced.push(' ');
-            }
-            gap = false;
-            spaced.push(c);
-        }
-    }
-    if gap {
-        spaced.push(' ');
-    }
-    let mut titled = String::with_capacity(spaced.len());
-    let mut word_start = true;
-    for c in js_trim(&spaced).chars() {
-        if is_js_space(c) {
-            word_start = true;
-            titled.push(c);
-        } else if word_start {
-            word_start = false;
-            titled.extend(c.to_uppercase());
-        } else {
-            titled.push(c);
-        }
-    }
-    if titled.is_empty() { display } else { titled }
 }
 
 /// A provider instance and the model it ran, when known.
@@ -1097,18 +1018,5 @@ mod tests {
             ),
             None
         );
-    }
-
-    #[test]
-    fn formats_codex_task_paths_as_display_titles() {
-        for (title, expected) in [
-            ("Subagent: Review the parser", "Review the parser"),
-            ("subagent:/root/fix_parser_bug", "Fix Parser Bug"),
-            ("/root/a/b/write  tests/", "Write Tests"),
-            ("/root/__/", "/root/__/"),
-            ("/tmp/other", "/tmp/other"),
-        ] {
-            assert_eq!(format_subagent_display_title(title), expected, "{title}");
-        }
     }
 }

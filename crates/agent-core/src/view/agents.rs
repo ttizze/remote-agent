@@ -1,11 +1,15 @@
 //! Delegated agents: the current turn's roster and its composer pill, agent
 //! rows, and the summaries that timeline groups and lineage tooltips show.
+use crate::js_text::{JS_SPACE, collapse_js_spaces, is_js_space};
 use crate::models::{Model, Project};
 use crate::provider::ProviderKind;
 use crate::state::Snapshot;
+use crate::view::time::format_duration;
 use agent_domain::{
     Driver, ItemStatus, ModelSelection, RunId, State, Task, Thread, ThreadId, ThreadShell,
 };
+use regex::Regex;
+use std::sync::LazyLock;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
@@ -420,37 +424,6 @@ pub fn subagent_elapsed_ms(
     Some((end - start).max(0))
 }
 
-/// Durations as `250ms`, `1.5s`, `22s`, `1m 5s` or `1h 1m 1s`.
-pub fn format_duration(duration_ms: i64) -> String {
-    if duration_ms < 0 {
-        return "0ms".into();
-    }
-    if duration_ms < 1_000 {
-        return format!("{}ms", duration_ms.max(1));
-    }
-    if duration_ms < 10_000 {
-        let tenths = (duration_ms + 50) / 100;
-        return if tenths >= 100 {
-            "10s".into()
-        } else {
-            format!("{}.{}s", tenths / 10, tenths % 10)
-        };
-    }
-    let total_seconds = (duration_ms + 500) / 1_000;
-    if duration_ms < 60_000 {
-        return format!("{total_seconds}s");
-    }
-    let hours = total_seconds / 3_600;
-    let minutes = total_seconds % 3_600 / 60;
-    let seconds = total_seconds % 60;
-    [(hours, "h"), (minutes, "m"), (seconds, "s")]
-        .iter()
-        .filter(|(value, _)| *value > 0)
-        .map(|(value, unit)| format!("{value}{unit}"))
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
 /// Elapsed time as `5s`, `2m 05s` or `1h 02m`.
 pub fn format_elapsed(elapsed_ms: i64) -> String {
     let seconds = (elapsed_ms / 1_000).max(0);
@@ -546,24 +519,21 @@ pub fn agent_spawn_summary(statuses: &[ItemStatus], agent_count: u32) -> AgentSp
     }
 }
 
+static SUBAGENT_PREFIX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(&format!("(?i)^Subagent:{JS_SPACE}*")).unwrap());
+static TASK_PATH: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^/root/(?:[^/]+/)*([^/]+)/?$").unwrap());
+
 /// Codex task paths (`/root/…/my_worker`) read as `My Worker`; a
 /// `Subagent:` prefix is dropped.
 pub fn format_subagent_display_title(title: &str) -> String {
-    let display = match title.get(..9) {
-        Some(prefix) if prefix.eq_ignore_ascii_case("subagent:") => title[9..].trim_start(),
-        _ => title,
+    let display = SUBAGENT_PREFIX.replace(title, "");
+    let Some(path) = TASK_PATH.captures(&display) else {
+        return display.into_owned();
     };
-    let Some(path) = display.strip_prefix("/root/") else {
-        return display.into();
-    };
-    let path = path.strip_suffix('/').unwrap_or(path);
-    let segments: Vec<_> = path.split('/').collect();
-    if segments.iter().any(|segment| segment.is_empty()) {
-        return display.into();
-    }
-    let name = segments[segments.len() - 1].replace('_', " ");
-    let words: Vec<String> = name
-        .split_whitespace()
+    let words: Vec<String> = path[1]
+        .split(|c| c == '_' || is_js_space(c))
+        .filter(|word| !word.is_empty())
         .map(|word| {
             let mut chars = word.chars();
             chars
@@ -573,7 +543,7 @@ pub fn format_subagent_display_title(title: &str) -> String {
         })
         .collect();
     if words.is_empty() {
-        display.into()
+        display.into_owned()
     } else {
         words.join(" ")
     }
@@ -602,65 +572,24 @@ pub fn subagent_detail_preview(
     })
 }
 
-/// A detail as plain text for agent cards; the generic status fallback of a
-/// result says nothing and is dropped.
-pub fn subagent_card_detail(detail: Option<&str>) -> Option<String> {
-    let detail = detail.filter(|d| !d.is_empty())?;
-    const GENERIC: &str = "child task ended with status";
-    if let Some(prefix) = detail.get(..GENERIC.len())
-        && prefix.eq_ignore_ascii_case(GENERIC)
-        && !detail[GENERIC.len()..]
-            .chars()
-            .next()
-            .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
-    {
-        return None;
-    }
-    let text = strip_markdown_links(detail).replace('`', "");
-    let text = text
-        .split('\n')
-        .map(|line| {
-            let rest = line.trim_start_matches([' ', '\t']);
-            match rest.strip_prefix(['-', '*']) {
-                Some(after) if after.starts_with([' ', '\t']) => {
-                    after.trim_start_matches([' ', '\t'])
-                }
-                _ => line,
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    (!text.is_empty()).then_some(text)
-}
+static GENERIC_CHILD_END: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)^Child task ended with status(?-u:\b)").unwrap());
+static MARKDOWN_LINK: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\[([^\]]+)\]\([^)]*\)").unwrap());
+static LIST_BULLET: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?mR)^[ \t]*[-*][ \t]+").unwrap());
 
-/// `[label](target)` becomes `label`.
-fn strip_markdown_links(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut rest = text;
-    while let Some(start) = rest.find('[') {
-        out.push_str(&rest[..start]);
-        let candidate = &rest[start..];
-        let link = candidate[1..].find(']').and_then(|close| {
-            let label = &candidate[1..1 + close];
-            let after = &candidate[2 + close..];
-            let target = after.strip_prefix('(')?;
-            let end = target.find(')')?;
-            (!label.is_empty()).then(|| (label, 2 + close + 1 + end + 1))
-        });
-        match link {
-            Some((label, length)) => {
-                out.push_str(label);
-                rest = &candidate[length..];
-            }
-            None => {
-                out.push('[');
-                rest = &candidate[1..];
-            }
-        }
-    }
-    out.push_str(rest);
-    out
+/// A detail as one line of plain text for agent cards: no list bullets, code
+/// ticks or link targets. The generic status fallback of a result says
+/// nothing and is dropped.
+pub fn subagent_card_detail(detail: Option<&str>) -> Option<String> {
+    let detail = detail.filter(|detail| !GENERIC_CHILD_END.is_match(detail))?;
+    let linked = MARKDOWN_LINK.replace_all(detail, "$1");
+    let unbulleted = LIST_BULLET
+        .replace_all(&linked.replace('`', ""), "")
+        .into_owned();
+    let text = collapse_js_spaces(&unbulleted);
+    (!text.is_empty()).then_some(text)
 }
 
 /// The agent's model as its catalog names it, and the workspace details that

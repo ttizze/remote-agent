@@ -1,4 +1,4 @@
-//! Clock labels shared by list rows and snooze menus.
+//! Clock, age and duration labels the views share.
 use chrono::{DateTime, Datelike, NaiveDateTime, TimeZone, Timelike};
 
 /// The clock preference for wall-clock labels. `Locale` follows the default
@@ -94,6 +94,37 @@ pub fn compact_relative_time_label(timestamp_ms: i64, now_ms: i64) -> String {
     }
 }
 
+/// Durations as `250ms`, `1.5s`, `22s`, `1m 5s` or `1h 1m 1s`.
+pub fn format_duration(duration_ms: i64) -> String {
+    if duration_ms < 0 {
+        return "0ms".into();
+    }
+    if duration_ms < 1_000 {
+        return format!("{}ms", duration_ms.max(1));
+    }
+    if duration_ms < 10_000 {
+        let tenths = (duration_ms + 50) / 100;
+        return if tenths >= 100 {
+            "10s".into()
+        } else {
+            format!("{}.{}s", tenths / 10, tenths % 10)
+        };
+    }
+    let total_seconds = (duration_ms + 500) / 1_000;
+    if duration_ms < 60_000 {
+        return format!("{total_seconds}s");
+    }
+    let hours = total_seconds / 3_600;
+    let minutes = total_seconds % 3_600 / 60;
+    let seconds = total_seconds % 60;
+    [(hours, "h"), (minutes, "m"), (seconds, "s")]
+        .iter()
+        .filter(|(value, _)| *value > 0)
+        .map(|(value, unit)| format!("{value}{unit}"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 #[cfg(test)]
 pub(crate) mod fixtures {
     use chrono::{DateTime, Local, NaiveDate};
@@ -117,6 +148,36 @@ pub(crate) mod fixtures {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
+
+    #[rstest]
+    #[case(-5, "0ms")]
+    #[case(-1, "0ms")]
+    #[case(0, "1ms")]
+    #[case(250, "250ms")]
+    #[case(850, "850ms")]
+    #[case(1_050, "1.1s")]
+    #[case(1_500, "1.5s")]
+    #[case(9_950, "10s")]
+    #[case(9_960, "10s")]
+    #[case(12_400, "12s")]
+    #[case(22_000, "22s")]
+    #[case(60_000, "1m")]
+    #[case(65_000, "1m 5s")]
+    #[case(119_500, "2m")]
+    #[case(3_599_499, "59m 59s")]
+    #[case(3_599_500, "1h")]
+    #[case(3_600_000, "1h")]
+    #[case(3_601_000, "1h 1s")]
+    #[case(3_660_000, "1h 1m")]
+    #[case(3_661_000, "1h 1m 1s")]
+    #[case(3_787_000, "1h 3m 7s")]
+    #[case(7_199_500, "2h")]
+    #[case(25_190_000, "6h 59m 50s")]
+    #[case(90_061_000, "25h 1m 1s")]
+    fn formats_durations(#[case] duration_ms: i64, #[case] expected: &str) {
+        assert_eq!(format_duration(duration_ms), expected);
+    }
 
     #[test]
     fn relative_time_never_counts_seconds() {

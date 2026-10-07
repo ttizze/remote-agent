@@ -10,7 +10,8 @@ pub use super::work_row::{
     WorkLogRow, WorkRowIcon, WorkRowRole,
 };
 use crate::sync::Detail;
-use crate::view::timeline::timing::format_duration;
+use crate::view::agents::{active_status, summarize_subagent_statuses};
+use crate::view::time::format_duration;
 use crate::view::work_log::ToolSurface;
 use crate::view::work_log::item_detail::{ToolCallLines, tool_call_lines, turn_item_output_text};
 use crate::view::work_log::presentation::{
@@ -318,34 +319,6 @@ pub fn work_toggle_presentation(toggle: &WorkToggle) -> WorkTogglePresentation {
     }
 }
 
-fn subagent_active(status: ItemStatus) -> bool {
-    matches!(
-        status,
-        ItemStatus::Pending | ItemStatus::Running | ItemStatus::Waiting
-    )
-}
-
-/// Counts a group's states in the order a reader scans them: what still runs
-/// first, then outcomes.
-pub fn summarize_subagent_statuses(statuses: &[ItemStatus]) -> String {
-    let mut counts = [("working", 0), ("done", 0), ("failed", 0), ("stopped", 0)];
-    for status in statuses {
-        let index = match status {
-            ItemStatus::Pending | ItemStatus::Running | ItemStatus::Waiting => 0,
-            ItemStatus::Completed => 1,
-            ItemStatus::Failed => 2,
-            ItemStatus::Interrupted | ItemStatus::Cancelled => 3,
-        };
-        counts[index].1 += 1;
-    }
-    counts
-        .iter()
-        .filter(|(_, count)| *count > 0)
-        .map(|(key, count)| format!("{count} {key}"))
-        .collect::<Vec<_>>()
-        .join(" · ")
-}
-
 /// The timing of one subagent the elapsed time spans.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubagentTiming {
@@ -361,7 +334,7 @@ pub fn subagent_card_elapsed(agents: &[SubagentTiming], now_ms: i64) -> Option<S
         .filter_map(|agent| agent.started_at.as_ref().map(Timestamp::millis))
         .collect();
     let start = *starts.iter().min()?;
-    let live = agents.iter().any(|agent| subagent_active(agent.status));
+    let live = agents.iter().any(|agent| active_status(agent.status));
     // Settled agents without a completion must not keep counting their age.
     if !live && agents.iter().any(|agent| agent.completed_at.is_none()) {
         return None;
@@ -375,7 +348,7 @@ pub fn subagent_card_elapsed(agents: &[SubagentTiming], now_ms: i64) -> Option<S
             .max()?
     };
     let duration = end - start;
-    (duration > 0).then(|| format_duration(duration as f64))
+    (duration > 0).then(|| format_duration(duration))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -442,7 +415,7 @@ pub fn subagent_group_card(
     SubagentGroupCard {
         grouped,
         accessibility_label: format!("{label}, {summary}"),
-        tone: if statuses.iter().any(|status| subagent_active(*status)) {
+        tone: if statuses.iter().any(|status| active_status(*status)) {
             SubagentGroupTone::Active
         } else if statuses.contains(&ItemStatus::Failed) {
             SubagentGroupTone::Failed
