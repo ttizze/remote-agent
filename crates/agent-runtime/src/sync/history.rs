@@ -1,6 +1,6 @@
 //! Timeline windows and history pages. A row is one visible item (local or
 //! inherited) with the message and plan it shows.
-use super::wire::{TRUNCATION_MARKER, truncate_detail};
+use super::wire::TRUNCATION_MARKER;
 use agent_domain::{
     InputIntent, Item, ItemKind, Message, MessageAuthor, MessageId, Plan, RunAttemptId, RunId,
     RunStatus, State, ThreadId, TurnItemId,
@@ -279,18 +279,63 @@ pub(crate) fn select_older(
     }
 }
 
-/// Shortens the text of a finished row that alone exceeds the frame budget; later
-/// facts never append to it.
-fn fit_text(text: &mut String, budget: u64) {
-    let limit = (budget / 4) as usize;
-    if text.len() > limit {
-        *text = truncate_detail(text, limit.saturating_sub(TRUNCATION_MARKER.len())).into_owned();
+/// Bytes a character takes inside a JSON string.
+fn json_char_len(c: char) -> usize {
+    match c {
+        '"' | '\\' | '\u{8}' | '\u{c}' | '\n' | '\r' | '\t' => 2,
+        c if u32::from(c) < 0x20 => 6,
+        c => c.len_utf8(),
     }
 }
-pub(crate) fn fit_row(item: &mut Item, message: Option<&mut Message>, budget: u64) {
-    fit_text(&mut item.text, budget);
+fn json_text_len(text: &str) -> usize {
+    text.chars().map(json_char_len).sum()
+}
+/// Cuts `text` to at most `room` encoded bytes, ending with the transport
+/// marker; returns the encoded bytes it keeps.
+fn fit_text(text: &mut String, room: usize) -> usize {
+    let length = json_text_len(text);
+    if length <= room {
+        return length;
+    }
+    let mut kept = room.saturating_sub(json_text_len(TRUNCATION_MARKER));
+    let end = text
+        .char_indices()
+        .find(|&(_, c)| {
+            let fits = json_char_len(c) <= kept;
+            kept = kept.saturating_sub(json_char_len(c));
+            !fits
+        })
+        .map_or(text.len(), |(index, _)| index);
+    text.truncate(end);
+    text.push_str(TRUNCATION_MARKER);
+    json_text_len(text)
+}
+/// Shortens the texts of a finished row that alone exceeds `budget`: the item
+/// text, its message text and its plan markdown share the room the rest of the
+/// row leaves, each keeping as much as fits. `envelope` is the row's encoding
+/// outside the item, message and plan. Later facts never append to the row.
+pub(crate) fn fit_row(
+    item: &mut Item,
+    message: Option<&mut Message>,
+    plan: Option<&mut Plan>,
+    budget: u64,
+    envelope: u64,
+) {
+    let mut rest = envelope + json_len(item) - json_text_len(&item.text) as u64;
+    let mut texts = vec![&mut item.text];
     if let Some(message) = message {
-        fit_text(&mut message.text, budget);
+        rest += json_len(message) - json_text_len(&message.text) as u64;
+        texts.push(&mut message.text);
+    }
+    if let Some(plan) = plan {
+        rest += json_len(plan) - json_text_len(&plan.markdown) as u64;
+        texts.push(&mut plan.markdown);
+    }
+    texts.sort_by_cached_key(|text| json_text_len(text));
+    let mut room = usize::try_from(budget.saturating_sub(rest)).unwrap_or(usize::MAX);
+    let count = texts.len();
+    for (index, text) in texts.into_iter().enumerate() {
+        room = room.saturating_sub(fit_text(text, room / (count - index)));
     }
 }
 
@@ -301,8 +346,19 @@ fn page(rows: &[Row<'_>], selection: Selection, budget: u64) -> HistoryPage {
             .enumerate()
             .map(|(position, row)| {
                 let mut owned = row.owned(position);
-                if row.item.status.terminal() && page_row_bytes(row, position) > budget {
-                    fit_row(&mut owned.item, owned.message.as_mut(), budget);
+                let bytes = page_row_bytes(row, position);
+                if row.item.status.terminal() && bytes > budget {
+                    let envelope = bytes
+                        - json_len(row.item)
+                        - row.message.map_or(0, json_len)
+                        - row.plan.map_or(0, json_len);
+                    fit_row(
+                        &mut owned.item,
+                        owned.message.as_mut(),
+                        owned.plan.as_mut(),
+                        budget,
+                        envelope,
+                    );
                 }
                 owned
             })
@@ -495,7 +551,7 @@ pub fn bounded_state(state: &State, snapshot_seq: u64, policy: PagePolicy) -> Bo
             .chain(&mut bounded.inherited_items)
             .find(|item| &item.id == id)
         {
-            fit_row(item, message, window_policy.max_frame_bytes);
+            fit_row(item, message, None, window_policy.max_frame_bytes, 0);
         }
     }
     let payload_budget_exceeded = json_len(&bounded) > policy.max_encoded_bytes;

@@ -480,6 +480,17 @@ pub fn detail_item(item: &Item) -> Item {
     }
 }
 
+/// The task an on-demand item read returns: prompt, progress and result
+/// bounded like the item's withheld detail.
+pub fn detail_task(task: &Task) -> Task {
+    let bound = |text: &str| truncate_detail(text, MAX_ON_DEMAND_BYTES).into_owned();
+    let mut projected = task.clone();
+    projected.prompt = bound(&task.prompt);
+    projected.progress = task.progress.as_deref().map(bound);
+    projected.result = task.result.as_deref().map(bound);
+    projected
+}
+
 fn wire_task(task: &Task) -> Option<Task> {
     let prompt = truncate_detail(&task.prompt, MAX_DETAIL_STRING_BYTES);
     let progress = task
