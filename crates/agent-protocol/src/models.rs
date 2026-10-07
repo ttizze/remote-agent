@@ -197,6 +197,8 @@ pub struct ProviderInstance {
     pub unavailable_reason: Option<String>,
     pub show_interaction_mode_toggle: bool,
     pub reports_context_window: bool,
+    /// The permission modes the instance offers; empty offers all of them.
+    pub supported_runtime_modes: Vec<agent_domain::RuntimeMode>,
     pub models: Vec<Model>,
 }
 
@@ -250,6 +252,7 @@ pub enum AutoSettle {
 pub struct ProjectConversationSettings {
     pub auto_settle: Option<AutoSettle>,
     pub continue_after_restart: Option<bool>,
+    pub new_worktrees_start_from_origin: Option<bool>,
     pub branch_naming_mode: Option<agent_domain::BranchNamingMode>,
     pub branch_name_prefix: Option<String>,
     pub branch_name_instructions: Option<String>,
@@ -264,6 +267,8 @@ pub struct ConversationSettings {
     pub continue_after_restart: bool,
     pub snooze_limited_threads: bool,
     pub auto_resume_limited_threads: bool,
+    /// A new worktree starts from the latest matching branch on origin.
+    pub new_worktrees_start_from_origin: bool,
     /// How launches name the worktree branches they generate.
     pub branch_naming_mode: agent_domain::BranchNamingMode,
     pub branch_name_prefix: String,
@@ -278,6 +283,7 @@ impl Default for ConversationSettings {
             continue_after_restart: false,
             snooze_limited_threads: false,
             auto_resume_limited_threads: false,
+            new_worktrees_start_from_origin: true,
             branch_naming_mode: naming.mode,
             branch_name_prefix: naming.prefix,
             branch_name_instructions: naming.instructions,

@@ -30,13 +30,13 @@ pub(super) enum Next {
     /// Outbox entries in order; the last one resolves the intent.
     Commands(Vec<PendingCommand>),
     /// A request whose reply resolves the intent.
-    Call(Box<Call>, Option<(String, Draft)>),
+    Call(Box<Call>, Option<Box<(String, Draft)>>),
     /// Applied at once with this outcome.
     Outcome(Outcome),
 }
 impl Next {
     pub(super) fn call(call: Call, sent: Option<(String, Draft)>) -> Self {
-        Self::Call(Box::new(call), sent)
+        Self::Call(Box::new(call), sent.map(Box::new))
     }
 }
 
@@ -120,7 +120,7 @@ impl Owner {
                     self.state.error = Some(error.to_string());
                 }
             }
-            Ok(Next::Call(call, sent)) => self.job(*call, Some(complete), sent),
+            Ok(Next::Call(call, sent)) => self.job(*call, Some(complete), sent.map(|sent| *sent)),
         }
     }
 
@@ -147,6 +147,15 @@ impl Owner {
     }
 
     pub(super) fn prepare(&mut self, intent: Intent) -> Result<Next, PeerError> {
+        // The open draft is frozen as it was before this intent changes it.
+        self.state.freeze_open_draft();
+        let next = self.prepare_intent(intent);
+        self.state
+            .settle_new_thread_drafts(super::owner::now_ms() as i64);
+        next
+    }
+
+    fn prepare_intent(&mut self, intent: Intent) -> Result<Next, PeerError> {
         Ok(match intent {
             Intent::OpenThread { thread_id: id } => {
                 self.select_thread(Some(thread_id(id)?));
@@ -170,20 +179,8 @@ impl Owner {
                 Next::Done
             }
             Intent::Search { query } => {
-                self.state.search = query.clone();
-                self.state.search_matches.clear();
-                let query = query.trim();
-                if self.connected() && (2..=200).contains(&query.encode_utf16().count()) {
-                    Next::call(
-                        Call::Search(c::Search {
-                            query: query.into(),
-                            limit: Some(50),
-                        }),
-                        None,
-                    )
-                } else {
-                    Next::Done
-                }
+                self.search(query);
+                Next::Done
             }
             Intent::ReorderPinned {
                 thread_id: moved,

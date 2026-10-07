@@ -485,13 +485,27 @@ pub struct ThreadRow {
     pub menu: Vec<ThreadMenuItem>,
 }
 
-/// A new thread the device sent but the Host has not listed yet.
+/// What an unsent row is: a new thread waiting in the outbox, which sends
+/// itself once the Host is reachable, or new-thread composer work, which
+/// sends only when the user submits it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
+pub enum PendingTaskKind {
+    Queued {
+        command_id: String,
+        thread_id: String,
+    },
+    Draft {
+        draft_key: String,
+    },
+}
+
+/// Unsent work that will become a thread.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct PendingTaskRow {
     pub key: String,
-    pub command_id: String,
-    pub thread_id: String,
+    pub kind: PendingTaskKind,
     pub project_id: String,
     /// The project's name; its id while the shell does not list it.
     pub project_title: String,
@@ -858,23 +872,63 @@ fn launch_branch(workspace: &WorkspaceStrategy) -> Option<String> {
     }
 }
 
-/// New threads in the outbox the shell does not list yet, newest first.
+/// The title of an unsent thread: its prompt on one line, cut to 72
+/// characters, or "New thread".
+pub fn derive_thread_title_from_prompt(value: &str) -> String {
+    use crate::js_text::{collapse_js_spaces, is_js_space, utf16_len, utf16_prefix};
+    use crate::presentation::markdown::assistant_citations::assistant_citations_to_plain_text;
+    let compact = collapse_js_spaces(&assistant_citations_to_plain_text(value));
+    if compact.is_empty() {
+        return "New thread".into();
+    }
+    if utf16_len(&compact) <= 72 {
+        return compact;
+    }
+    format!(
+        "{}...",
+        utf16_prefix(&compact, 69).trim_end_matches(is_js_space)
+    )
+}
+
+fn draft_title(draft: &crate::state::Draft) -> String {
+    if !draft.text.trim().is_empty() {
+        return derive_thread_title_from_prompt(&draft.text);
+    }
+    quantity_label(draft.attachments.len(), "attachment")
+}
+
+fn quantity_label(count: usize, noun: &str) -> String {
+    if count == 1 {
+        format!("1 {noun}")
+    } else {
+        format!("{count} {noun}s")
+    }
+}
+
+/// Unsent work: new-thread drafts holding text or attachments, then new
+/// threads in the outbox the shell does not list yet, each kind newest
+/// first.
 pub fn pending_tasks(snapshot: &Snapshot, listed: &BTreeSet<&str>) -> Vec<PendingTaskRow> {
-    let mut tasks: Vec<PendingTaskRow> = snapshot
+    let project_title = |id: &str| {
+        snapshot
+            .shell_projects()
+            .iter()
+            .find(|project| project.id == id)
+            .map_or_else(|| id.to_owned(), |project| project.name.clone())
+    };
+    let queued = snapshot
         .outbox
         .pending_launches()
         .filter(|entry| !listed.contains(entry.thread.as_str()))
         .filter_map(|entry| match &entry.request {
             Request::Launch(launch) => Some(PendingTaskRow {
                 key: format!("pending-task:{}", entry.id),
-                command_id: entry.id.to_string(),
-                thread_id: entry.thread.to_string(),
+                kind: PendingTaskKind::Queued {
+                    command_id: entry.id.to_string(),
+                    thread_id: entry.thread.to_string(),
+                },
                 project_id: launch.project_id.clone(),
-                project_title: snapshot
-                    .shell_projects()
-                    .iter()
-                    .find(|project| project.id == launch.project_id)
-                    .map_or_else(|| launch.project_id.clone(), |project| project.name.clone()),
+                project_title: project_title(&launch.project_id),
                 title: launch.title.clone(),
                 branch: launch_branch(&launch.workspace),
                 created_at_ms: entry.created_at.millis(),
@@ -882,12 +936,33 @@ pub fn pending_tasks(snapshot: &Snapshot, listed: &BTreeSet<&str>) -> Vec<Pendin
                 show_trailing_divider: false,
             }),
             Request::Dispatch(_) => None,
+        });
+    let drafts = snapshot.drafts.iter().filter_map(|(key, draft)| {
+        let project = key.strip_prefix("new:")?;
+        (!draft.is_empty()).then(|| PendingTaskRow {
+            key: format!("draft-task:{key}"),
+            kind: PendingTaskKind::Draft {
+                draft_key: key.clone(),
+            },
+            project_id: project.into(),
+            project_title: project_title(project),
+            title: draft_title(draft),
+            branch: draft
+                .workspace
+                .as_ref()
+                .and_then(|workspace| workspace.branch.clone()),
+            created_at_ms: draft.created_at_ms.unwrap_or_default(),
+            show_pending_divider: false,
+            show_trailing_divider: false,
         })
-        .collect();
+    });
+    let mut tasks: Vec<PendingTaskRow> = drafts.chain(queued).collect();
+    // Drafts are what the user is writing now, so they lead.
     tasks.sort_by(|left, right| {
-        right
-            .created_at_ms
-            .cmp(&left.created_at_ms)
+        let is_queued = |task: &PendingTaskRow| matches!(task.kind, PendingTaskKind::Queued { .. });
+        is_queued(left)
+            .cmp(&is_queued(right))
+            .then_with(|| right.created_at_ms.cmp(&left.created_at_ms))
             .then_with(|| left.key.cmp(&right.key))
     });
     tasks
@@ -1007,9 +1082,10 @@ pub fn thread_list_at<Tz: TimeZone>(
             row.search_snippet = snippets.get(&row.id).map(|snippet| snippet.to_string());
         }
     }
-    let empty = items
-        .is_empty()
-        .then(|| thread_list_empty(snapshot, has_threads));
+    // A search shows no empty state while message matches may still arrive.
+    let empty = (items.is_empty()
+        && !(!search.is_empty() && crate::view::search::search_pending(snapshot)))
+    .then(|| thread_list_empty(snapshot, has_threads));
     ThreadListView {
         items,
         hidden_settled_count: count(layout.hidden_settled_count),

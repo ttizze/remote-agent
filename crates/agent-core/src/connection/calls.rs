@@ -344,6 +344,7 @@ impl Owner {
                     }
                     Call::ListRefs(request) => self.refs_finished(request, Err(&error)),
                     Call::DiffPreview(request) => self.diff_preview_finished(request, Err(&error)),
+                    Call::Search(params) => self.search_finished(&params.query, None),
                     Call::CancelSetup(_) => self.work_locally = None,
                     Call::ProjectFavicon(request) => self.project_icon_read(request, Err(())),
                     _ => {}
@@ -399,10 +400,8 @@ impl Owner {
                 self.state.providers = Some(providers);
             }
             Reply::Search(matches) => {
-                if let Call::Search(params) = call
-                    && params.query == self.state.search.trim()
-                {
-                    self.state.search_matches = matches;
+                if let Call::Search(params) = call {
+                    self.search_finished(&params.query, Some(matches));
                 }
             }
             Reply::ProjectAdded(id) => self.state.selected_project = Some(id),

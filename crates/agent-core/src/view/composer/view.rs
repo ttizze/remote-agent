@@ -137,8 +137,10 @@ fn provider_controls(catalog: &ModelCatalog, draft: &Draft) -> ProviderControls 
         known: catalog
             .instance(&draft.instance_id)
             .is_some_and(|instance| instance.picker_ready()),
-        // The Host does not advertise runtime modes per provider.
-        supported_runtime_modes: vec![],
+        supported_runtime_modes: catalog
+            .instance(&draft.instance_id)
+            .map(|instance| instance.supported_runtime_modes.clone())
+            .unwrap_or_default(),
         shows_interaction_toggle: catalog
             .instance(&draft.instance_id)
             .map(|instance| instance.show_interaction_mode_toggle),

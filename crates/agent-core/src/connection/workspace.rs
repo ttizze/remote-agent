@@ -14,7 +14,7 @@ use crate::{
     protocol::Call,
     state::{
         DiffPreviewEntry, DraftWorkspace, EntryQuery, PROVIDER_COMMANDS_RETRY_MS, RefScope,
-        RefsEntry,
+        RefsEntry, SearchRequest,
     },
     view::{
         checkpoints::DiffSelection,
@@ -24,7 +24,7 @@ use crate::{
     },
 };
 use agent_domain::{MessageId, Role, ThreadId};
-use agent_protocol::workspace as w;
+use agent_protocol::{conversation as c, workspace as w};
 use std::sync::Arc;
 
 /// How long the composer waits after typing before searching paths, and how
@@ -121,6 +121,34 @@ impl Owner {
         }
     }
 
+    /// The thread search query changed: message matches are asked once the
+    /// typing settles, and stay pending until the Host answers that query.
+    pub(super) fn search(&mut self, query: String) {
+        self.state.search_request = crate::view::search::content_search_query(&query)
+            .filter(|_| self.connected())
+            .map(|trimmed| SearchRequest {
+                query: trimmed.to_owned(),
+                due_at_ms: Some(now_ms() + crate::view::search::SEARCH_DEBOUNCE_MS),
+            });
+        self.state.search = query;
+        self.state.search_matches.clear();
+    }
+
+    /// The Host answered, or failed, the message search for `query`.
+    pub(super) fn search_finished(&mut self, query: &str, matches: Option<Vec<c::SearchMatch>>) {
+        if self
+            .state
+            .search_request
+            .as_ref()
+            .is_some_and(|request| request.query == query && request.due_at_ms.is_none())
+        {
+            self.state.search_request = None;
+            if let Some(matches) = matches {
+                self.state.search_matches = matches;
+            }
+        }
+    }
+
     /// The next time a debounced search or a provider command retry is due.
     pub(super) fn sources_deadline(&self) -> Option<u64> {
         let sources = &self.state.sources;
@@ -129,12 +157,40 @@ impl Owner {
             .values()
             .filter(|entry| !entry.in_flight)
             .filter_map(|entry| entry.retry_at_ms);
-        sources.entries.due_at_ms.into_iter().chain(retry).min()
+        let search = self
+            .state
+            .search_request
+            .as_ref()
+            .and_then(|request| request.due_at_ms);
+        sources
+            .entries
+            .due_at_ms
+            .into_iter()
+            .chain(search)
+            .chain(retry)
+            .min()
     }
 
-    /// Asks the debounced path search and retries the composer's provider
-    /// commands once their cooldown passes.
+    /// Asks the debounced path and message searches and retries the
+    /// composer's provider commands once their cooldown passes.
     pub(super) fn sources_tick(&mut self, now: u64) {
+        if let Some(request) = self
+            .state
+            .search_request
+            .as_mut()
+            .filter(|request| request.due_at_ms.is_some_and(|due| due <= now))
+        {
+            request.due_at_ms = None;
+            let query = request.query.clone();
+            self.job(
+                Call::Search(c::Search {
+                    query,
+                    limit: Some(crate::view::search::SEARCH_RESULT_LIMIT),
+                }),
+                None,
+                None,
+            );
+        }
         let entries = &mut self.state.sources.entries;
         if entries.due_at_ms.is_some_and(|due| due <= now) {
             entries.due_at_ms = None;
@@ -484,6 +540,7 @@ impl Owner {
             return Err(invalid("Choose a project first"));
         }
         let current = self.new_thread_workspace();
+        let start_from_origin = self.state.new_worktree_starts_from_origin(mode);
         let next = match mode {
             ThreadWorkspaceMode::Local => {
                 let local = self.state.new_thread_local_selection();
@@ -491,10 +548,14 @@ impl Owner {
                     mode,
                     branch: local.0,
                     worktree_path: local.1,
-                    ..current
+                    start_from_origin,
                 }
             }
-            ThreadWorkspaceMode::Worktree => DraftWorkspace { mode, ..current },
+            ThreadWorkspaceMode::Worktree => DraftWorkspace {
+                mode,
+                start_from_origin,
+                ..current
+            },
         };
         self.update_new_thread_draft(|draft| draft.workspace = Some(next));
         Ok(Next::Done)

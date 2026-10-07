@@ -50,6 +50,7 @@ pub enum SettingId {
     DefaultModel,
     DefaultPermissions,
     DefaultWorkspace,
+    StartFromOrigin,
 }
 
 /// Where a project page's value comes from.
@@ -135,6 +136,7 @@ pub struct SettingsView {
 pub struct ResolvedConversationSettings {
     pub auto_settle: (AutoSettle, SettingSource),
     pub continue_after_restart: (bool, SettingSource),
+    pub new_worktrees_start_from_origin: (bool, SettingSource),
 }
 
 pub fn resolve_project_settings(
@@ -156,7 +158,27 @@ pub fn resolve_project_settings(
             overrides.and_then(|project| project.continue_after_restart),
             host.continue_after_restart,
         ),
+        new_worktrees_start_from_origin: pick(
+            overrides.and_then(|project| project.new_worktrees_start_from_origin),
+            host.new_worktrees_start_from_origin,
+        ),
     }
+}
+
+/// Whether a project's new worktrees start from origin; on until the Host's
+/// settings are read.
+pub fn new_worktrees_start_from_origin(
+    host: Option<&ConversationSettings>,
+    project_id: Option<&str>,
+) -> bool {
+    host.map_or(
+        ConversationSettings::default().new_worktrees_start_from_origin,
+        |host| {
+            resolve_project_settings(host, project_id)
+                .new_worktrees_start_from_origin
+                .0
+        },
+    )
 }
 
 /// A Host conversation setting a project can override.
@@ -165,6 +187,7 @@ pub fn resolve_project_settings(
 pub enum ProjectSettingKey {
     AutoSettle,
     ContinueAfterRestart,
+    NewWorktreesStartFromOrigin,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -183,6 +206,9 @@ pub enum ConversationSettingChange {
     ContinueAfterRestart {
         on: bool,
     },
+    NewWorktreesStartFromOrigin {
+        on: bool,
+    },
     /// A project follows the Host's value again.
     Inherit {
         key: ProjectSettingKey,
@@ -197,6 +223,9 @@ fn clear(overrides: &mut ProjectConversationSettings, key: ProjectSettingKey) {
     match key {
         ProjectSettingKey::AutoSettle => overrides.auto_settle = None,
         ProjectSettingKey::ContinueAfterRestart => overrides.continue_after_restart = None,
+        ProjectSettingKey::NewWorktreesStartFromOrigin => {
+            overrides.new_worktrees_start_from_origin = None
+        }
     }
 }
 
@@ -233,6 +262,9 @@ pub fn plan_conversation_settings_update(
             ConversationSettingChange::ContinueAfterRestart { on } => {
                 next.continue_after_restart = *on
             }
+            ConversationSettingChange::NewWorktreesStartFromOrigin { on } => {
+                next.new_worktrees_start_from_origin = *on
+            }
             ConversationSettingChange::Inherit { .. } => return None,
         },
         SettingsScope::Project { project_id } => {
@@ -247,6 +279,9 @@ pub fn plan_conversation_settings_update(
                 }
                 ConversationSettingChange::ContinueAfterRestart { on } => {
                     overrides.continue_after_restart = Some(*on)
+                }
+                ConversationSettingChange::NewWorktreesStartFromOrigin { on } => {
+                    overrides.new_worktrees_start_from_origin = Some(*on)
                 }
                 ConversationSettingChange::Inherit { key } => clear(&mut overrides, *key),
                 ConversationSettingChange::AutoResumeLimitedThreads { .. }
@@ -358,6 +393,21 @@ fn continue_row(on: bool, source: Option<SettingSource>) -> SettingsRow {
             "Continue threads after restarts",
             Some(
                 "Automatically resume interrupted threads after an update, crash, or machine restart on the selected environments.",
+            ),
+            SettingControl::Switch { on },
+        )
+    }
+}
+
+fn start_from_origin_row(on: bool, source: Option<SettingSource>) -> SettingsRow {
+    SettingsRow {
+        resettable: on != ConversationSettings::default().new_worktrees_start_from_origin,
+        source,
+        ..row(
+            SettingId::StartFromOrigin,
+            "Start from origin",
+            Some(
+                "Creates the worktree from the latest matching branch on origin instead of your local branch.",
             ),
             SettingControl::Switch { on },
         )
@@ -557,6 +607,12 @@ fn host_sections(
             },
         ));
     }
+    if let Some(host) = host {
+        new_threads.push(start_from_origin_row(
+            host.new_worktrees_start_from_origin,
+            None,
+        ));
+    }
     sections.push(section("new-threads", "New threads", new_threads, None));
     sections
 }
@@ -610,6 +666,9 @@ pub fn setting_intent(
         }
         (SettingId::ContinueAfterRestart, SettingValue::Switch { on }) => {
             update(ConversationSettingChange::ContinueAfterRestart { on: *on })
+        }
+        (SettingId::StartFromOrigin, SettingValue::Switch { on }) => {
+            update(ConversationSettingChange::NewWorktreesStartFromOrigin { on: *on })
         }
         (SettingId::WorkingSection, SettingValue::Switch { on }) => {
             Some(Intent::SetWorkingSection { enabled: *on })
@@ -675,6 +734,7 @@ pub fn setting_reset_intent(scope: &SettingsScope, row: &SettingsRow) -> Option<
                 ProjectSettingKey::AutoSettle
             }
             SettingId::ContinueAfterRestart => ProjectSettingKey::ContinueAfterRestart,
+            SettingId::StartFromOrigin => ProjectSettingKey::NewWorktreesStartFromOrigin,
             _ => return None,
         };
         return update(ConversationSettingChange::Inherit { key });
@@ -702,6 +762,11 @@ pub fn setting_reset_intent(scope: &SettingsScope, row: &SettingsRow) -> Option<
         SettingId::ContinueAfterRestart => {
             update(ConversationSettingChange::ContinueAfterRestart {
                 on: defaults.continue_after_restart,
+            })
+        }
+        SettingId::StartFromOrigin => {
+            update(ConversationSettingChange::NewWorktreesStartFromOrigin {
+                on: defaults.new_worktrees_start_from_origin,
             })
         }
         SettingId::WorkingSection => Some(Intent::SetWorkingSection {
@@ -785,6 +850,15 @@ pub fn settings_view(
                         vec![continue_row(
                             resolved.continue_after_restart.0,
                             Some(resolved.continue_after_restart.1),
+                        )],
+                        None,
+                    ),
+                    section(
+                        "new-threads",
+                        "New threads",
+                        vec![start_from_origin_row(
+                            resolved.new_worktrees_start_from_origin.0,
+                            Some(resolved.new_worktrees_start_from_origin.1),
                         )],
                         None,
                     ),
@@ -943,6 +1017,65 @@ mod tests {
         assert_eq!(next.auto_settle, AutoSettle::AfterDays(7));
     }
 
+    // contracts settings.test.ts "defaults start-from-origin on" and "accepts
+    // start-from-origin updates"; a project can override it like T3's
+    // project-scoped server settings.
+    #[test]
+    fn start_from_origin_defaults_on_and_a_project_can_override_it() {
+        let decoded: ConversationSettings = serde_json::from_str("{}").unwrap();
+        assert!(decoded.new_worktrees_start_from_origin);
+        assert!(new_worktrees_start_from_origin(None, Some("p")));
+        let host = plan_conversation_settings_update(
+            &decoded,
+            &SettingsScope::Host,
+            &ConversationSettingChange::NewWorktreesStartFromOrigin { on: false },
+        )
+        .unwrap();
+        assert!(!new_worktrees_start_from_origin(Some(&host), Some("p")));
+        let host = plan_conversation_settings_update(
+            &host,
+            &project("p"),
+            &ConversationSettingChange::NewWorktreesStartFromOrigin { on: true },
+        )
+        .unwrap();
+        assert!(new_worktrees_start_from_origin(Some(&host), Some("p")));
+        assert!(!new_worktrees_start_from_origin(Some(&host), Some("q")));
+        let view = settings_view(
+            &Snapshot::default(),
+            Some(&host),
+            &project("p"),
+            TimestampFormat::Locale,
+        );
+        let row = view
+            .sections
+            .iter()
+            .flat_map(|section| &section.rows)
+            .find(|row| row.id == SettingId::StartFromOrigin)
+            .unwrap();
+        assert_eq!(
+            (&row.control, row.source),
+            (
+                &SettingControl::Switch { on: true },
+                Some(SettingSource::Project)
+            )
+        );
+        same(
+            setting_reset_intent(&project("p"), row),
+            Some(Intent::UpdateConversationSettings {
+                scope: project("p"),
+                change: ConversationSettingChange::Inherit {
+                    key: ProjectSettingKey::NewWorktreesStartFromOrigin,
+                },
+            }),
+        );
+        let cleared = clear_project_overrides(
+            &host,
+            "p",
+            &[ProjectSettingKey::NewWorktreesStartFromOrigin],
+        );
+        assert!(!cleared.project_overrides.contains_key("p"));
+    }
+
     #[test]
     fn the_days_field_commits_only_whole_days_in_range() {
         assert_eq!(parse_auto_settle_days("7"), Some(7));
@@ -1036,7 +1169,8 @@ mod tests {
                     vec![
                         SettingId::DefaultModel,
                         SettingId::DefaultPermissions,
-                        SettingId::DefaultWorkspace
+                        SettingId::DefaultWorkspace,
+                        SettingId::StartFromOrigin
                     ]
                 ),
             ]
@@ -1344,6 +1478,7 @@ mod tests {
                     vec![SettingId::AutoSettleInactiveThreads]
                 ),
                 ("behavior".into(), vec![SettingId::ContinueAfterRestart]),
+                ("new-threads".into(), vec![SettingId::StartFromOrigin]),
             ]
         );
         assert_eq!(

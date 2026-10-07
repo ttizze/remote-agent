@@ -888,6 +888,7 @@ impl HostRpcService {
             unavailable_reason: None,
             show_interaction_mode_toggle: true,
             reports_context_window: true,
+            supported_runtime_modes: vec![],
             models: vec![],
         };
         let mut codex = instance(Driver::Codex, "Codex");

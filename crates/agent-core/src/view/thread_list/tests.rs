@@ -67,8 +67,10 @@ fn set(values: &[&str]) -> BTreeSet<String> {
 fn pending_task(id: &str) -> PendingTaskRow {
     PendingTaskRow {
         key: format!("pending-task:{id}"),
-        command_id: format!("command-{id}"),
-        thread_id: format!("thread-{id}"),
+        kind: PendingTaskKind::Queued {
+            command_id: format!("command-{id}"),
+            thread_id: format!("thread-{id}"),
+        },
         project_id: "project-1".into(),
         project_title: "project-1".into(),
         title: id.into(),
@@ -1944,6 +1946,145 @@ mod snapshot {
             row(&view.items, "other").search_snippet.as_deref(),
             Some("say login")
         );
+    }
+
+    fn new_task_draft(text: &str, created_at_ms: i64) -> crate::state::Draft {
+        crate::state::Draft {
+            text: text.into(),
+            created_at_ms: Some(created_at_ms),
+            ..Default::default()
+        }
+    }
+
+    fn tasks(snapshot: &Snapshot) -> Vec<(bool, String, Option<String>)> {
+        pending_tasks(snapshot, &BTreeSet::new())
+            .into_iter()
+            .map(|task| {
+                (
+                    matches!(task.kind, PendingTaskKind::Draft { .. }),
+                    task.title,
+                    task.branch,
+                )
+            })
+            .collect()
+    }
+
+    // mobile pending-new-tasks-model.test.ts "surfaces every new-task draft
+    // with content alongside queued creations".
+    #[test]
+    fn surfaces_every_new_task_draft_with_content_alongside_queued_creations() {
+        let mut outbox = Outbox::default();
+        outbox.enqueue(launch("a", "project", "queued a")).unwrap();
+        let mut old = new_task_draft("first idea", now() - 3_600_000);
+        old.workspace = Some(crate::state::DraftWorkspace {
+            mode: crate::view::projects::selection::ThreadWorkspaceMode::Worktree,
+            branch: Some("main".into()),
+            worktree_path: None,
+            start_from_origin: false,
+        });
+        let snapshot = Snapshot {
+            outbox: Arc::new(outbox),
+            drafts: std::collections::BTreeMap::from([
+                ("new:project-old".to_string(), old),
+                (
+                    "new:project-new".to_string(),
+                    new_task_draft("second idea", now() + 3_600_000),
+                ),
+            ])
+            .into(),
+            ..Snapshot::default()
+        };
+        assert_eq!(
+            tasks(&snapshot),
+            [
+                (true, "second idea".to_string(), None),
+                (true, "first idea".to_string(), Some("main".to_string())),
+                (false, "queued a".to_string(), Some("feature".to_string())),
+            ]
+        );
+        let task = &pending_tasks(&snapshot, &BTreeSet::new())[1];
+        assert_eq!(
+            (task.key.as_str(), task.project_id.as_str(), &task.kind),
+            (
+                "draft-task:new:project-old",
+                "project-old",
+                &PendingTaskKind::Draft {
+                    draft_key: "new:project-old".into()
+                }
+            )
+        );
+        assert_eq!(task.created_at_ms, now() - 3_600_000);
+    }
+
+    // mobile pending-new-tasks-model.test.ts "hides settings-only drafts,
+    // unstamped drafts, and drafts for other surfaces" and "titles an
+    // attachment-only draft by its attachment count".
+    #[test]
+    fn hides_settings_only_drafts_and_titles_attachment_only_ones_by_count() {
+        let settings_only = crate::state::Draft {
+            model: "gpt".into(),
+            ..new_task_draft("", now())
+        };
+        let mut with_image = new_task_draft("", now());
+        with_image.attachments.push(crate::state::DraftAttachment {
+            id: "image-1".into(),
+            remote_id: None,
+            name: "image-1.png".into(),
+            mime_type: "image/png".into(),
+            kind: "image".into(),
+            size_bytes: 1,
+            local_path: "/tmp/image-1.png".into(),
+            status: "ready".into(),
+            error: None,
+        });
+        let mut snapshot = Snapshot {
+            drafts: std::collections::BTreeMap::from([
+                ("new:settings-only".to_string(), settings_only),
+                ("new:blank".to_string(), new_task_draft("   ", now())),
+                (
+                    "thread-1".to_string(),
+                    new_task_draft("thread composer text", now()),
+                ),
+            ])
+            .into(),
+            ..Snapshot::default()
+        };
+        assert!(tasks(&snapshot).is_empty());
+        snapshot.drafts.insert("new:with-image".into(), with_image);
+        assert_eq!(tasks(&snapshot), [(true, "1 attachment".to_string(), None)]);
+    }
+
+    // mobile projectThreadStartTurn.test.ts "keeps ordinary titles and the
+    // empty-prompt fallback".
+    #[test]
+    fn keeps_ordinary_titles_and_the_empty_prompt_fallback() {
+        assert_eq!(
+            derive_thread_title_from_prompt("  Fix\n the parser  "),
+            "Fix the parser"
+        );
+        assert_eq!(derive_thread_title_from_prompt(" \n "), "New thread");
+        assert_eq!(
+            derive_thread_title_from_prompt(&"a".repeat(80)),
+            format!("{}...", "a".repeat(69))
+        );
+    }
+
+    #[test]
+    fn a_new_thread_draft_is_stamped_when_it_gains_work_and_forgets_it_when_emptied() {
+        let mut snapshot = Snapshot::default();
+        snapshot
+            .drafts
+            .insert("new:app".into(), new_task_draft("", 0));
+        snapshot.drafts.get_mut("new:app").unwrap().created_at_ms = None;
+        snapshot.settle_new_thread_drafts(5);
+        assert_eq!(snapshot.drafts["new:app"].created_at_ms, None);
+        snapshot.drafts.get_mut("new:app").unwrap().text = "idea".into();
+        snapshot.settle_new_thread_drafts(7);
+        snapshot.settle_new_thread_drafts(9);
+        assert_eq!(snapshot.drafts["new:app"].created_at_ms, Some(7));
+        snapshot.drafts.get_mut("new:app").unwrap().text.clear();
+        snapshot.settle_new_thread_drafts(11);
+        assert_eq!(snapshot.drafts["new:app"].created_at_ms, None);
     }
 
     #[test]

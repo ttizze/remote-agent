@@ -447,10 +447,58 @@ fn new_thread_drafts_lead_the_sidebar_except_the_one_being_typed() {
             project_id: "alpha".into(),
             project_name: Some("Alpha".into()),
             preview: "Plan the release".into(),
+            active: false,
             accessibility_label: "Plan the release, Unsent draft, Alpha".into(),
         }]
     );
     assert_eq!(view.empty_state, None);
+}
+
+// web Sidebar SidebarDraftBlock: drafts are newest first, and the open draft
+// shows the row it had when it was opened, which never repaints while typing.
+#[test]
+fn drafts_are_newest_first_and_the_open_one_is_frozen_as_it_was_opened() {
+    let draft = |text: &str, at: i64| Draft {
+        text: text.into(),
+        created_at_ms: Some(at),
+        ..Draft::default()
+    };
+    let mut snapshot = snapshot(vec![thread("a", "alpha")]);
+    snapshot.drafts = Shared::from(BTreeMap::from([
+        ("new:chats".to_string(), draft("older", 1)),
+        ("new:alpha".to_string(), draft("newer", 2)),
+    ]));
+    snapshot.freeze_open_draft();
+    snapshot.drafts.get_mut("new:chats").unwrap().text = "older, edited".into();
+    let previews = |snapshot: &Snapshot| {
+        view(snapshot, &SidebarOptions::default())
+            .drafts
+            .into_iter()
+            .map(|row| (row.preview, row.active))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        previews(&snapshot),
+        [("newer".to_string(), false), ("older".to_string(), true)]
+    );
+    snapshot.selected_thread = Some(ThreadId::new("a").unwrap());
+    snapshot.freeze_open_draft();
+    assert_eq!(
+        previews(&snapshot),
+        [
+            ("newer".to_string(), false),
+            ("older, edited".to_string(), false)
+        ]
+    );
+    snapshot.drafts.get_mut("new:chats").unwrap().text.clear();
+    snapshot.selected_thread = None;
+    snapshot.freeze_open_draft();
+    snapshot.drafts.get_mut("new:chats").unwrap().text = "typed after opening".into();
+    assert_eq!(
+        previews(&snapshot),
+        [("newer".to_string(), false)],
+        "a draft opened empty has no row while it is open"
+    );
 }
 
 #[test]

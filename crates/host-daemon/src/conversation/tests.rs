@@ -138,6 +138,7 @@ impl tools::ModelCatalog for NoModels {
             unavailable_reason: None,
             show_interaction_mode_toggle: true,
             reports_context_window: true,
+            supported_runtime_modes: vec![],
             models: vec![],
         };
         let providers = vec![

@@ -50,6 +50,7 @@ impl Owner {
             &[
                 ProjectSettingKey::AutoSettle,
                 ProjectSettingKey::ContinueAfterRestart,
+                ProjectSettingKey::NewWorktreesStartFromOrigin,
             ],
         );
         Ok(Next::call(Call::UpdateConversationSettings(next), None))

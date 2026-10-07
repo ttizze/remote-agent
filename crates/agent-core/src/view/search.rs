@@ -179,17 +179,19 @@ pub struct SearchOptions {
     /// Thread ids in the list's order (pinned, active, working, snoozed,
     /// settled); results keep it and search only these.
     pub list_order: Vec<String>,
-    /// The device is still settling the query or the Host has not answered
-    /// it; the store does not record an unanswered search.
-    pub awaiting_matches: bool,
+}
+
+/// Message matches for the query may still arrive: the typing is settling or
+/// the Host has not answered.
+pub fn search_pending(snapshot: &Snapshot) -> bool {
+    snapshot.connected && snapshot.search_request.is_some()
 }
 
 /// Results for `Snapshot.search` among the listed threads of the active shell.
 pub fn search_view(snapshot: &Snapshot, now_ms: i64, options: &SearchOptions) -> SearchView {
     let query = snapshot.search.clone();
     let searching = !query.trim().is_empty();
-    let pending =
-        options.awaiting_matches && snapshot.connected && content_search_query(&query).is_some();
+    let pending = search_pending(snapshot);
     let shell = snapshot.shell_view();
     let rows: Vec<_> = shell
         .as_deref()
@@ -480,7 +482,6 @@ mod tests {
             list_order: ["thread-3", "thread-2", "thread-1", "thread-4", "gone"]
                 .map(String::from)
                 .to_vec(),
-            awaiting_matches: false,
         };
         let view = search_view(&snapshot, now, &options);
         assert!(view.searching);
@@ -510,10 +511,10 @@ mod tests {
     #[test]
     fn an_empty_search_says_whether_message_matches_may_still_arrive() {
         let mut snapshot = snapshot(vec![], vec![row("thread-1", "project-1", "Thread")]);
-        let mut options = SearchOptions {
+        let options = SearchOptions {
             list_order: vec!["thread-1".into()],
-            awaiting_matches: true,
         };
+        snapshot.connected = true;
         let view = search_view(&snapshot, 0, &options);
         assert!(!view.searching);
         assert!(view.results.is_empty());
@@ -523,13 +524,17 @@ mod tests {
         assert!(!view.pending);
         assert_eq!(view.empty_label.as_deref(), Some("No threads found"));
         snapshot.search = "needle".into();
+        snapshot.search_request = Some(crate::state::SearchRequest {
+            query: "needle".into(),
+            due_at_ms: None,
+        });
         let view = search_view(&snapshot, 0, &options);
         assert!(view.pending);
         assert_eq!(
             view.empty_label.as_deref(),
             Some("Searching thread messages…")
         );
-        options.awaiting_matches = false;
+        snapshot.search_request = None;
         let view = search_view(&snapshot, 0, &options);
         assert_eq!(view.empty_label.as_deref(), Some("No threads found"));
     }

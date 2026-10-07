@@ -52,6 +52,8 @@ pub struct ProviderInstance {
     pub show_interaction_mode_toggle: bool,
     /// The provider reports its context window, so the meter shows.
     pub reports_context_window: bool,
+    /// The permission modes the instance offers; empty offers all of them.
+    pub supported_runtime_modes: Vec<agent_domain::RuntimeMode>,
 }
 impl ProviderInstance {
     /// Can contribute models to an interactive picker.
@@ -158,6 +160,7 @@ fn entry(instance: &HostInstance) -> display::ProviderEntry {
         version: instance.version.clone(),
         show_interaction_mode_toggle: instance.show_interaction_mode_toggle,
         reports_context_window: instance.reports_context_window,
+        supported_runtime_modes: instance.supported_runtime_modes.clone(),
         ..display::ProviderEntry::new(&instance.instance, instance.driver)
     }
 }
@@ -262,6 +265,7 @@ pub(crate) mod fixtures {
             unavailable_reason: None,
             show_interaction_mode_toggle: true,
             reports_context_window: true,
+            supported_runtime_modes: vec![],
             models,
         }
     }
@@ -308,6 +312,10 @@ mod tests {
         );
         work.accent_color = Some("#aa3300".into());
         work.display_name = "Work".into();
+        work.supported_runtime_modes = vec![
+            agent_domain::RuntimeMode::ApprovalRequired,
+            agent_domain::RuntimeMode::FullAccess,
+        ];
         snapshot.providers = Some(vec![
             host_instance(
                 "codex",
@@ -328,6 +336,14 @@ mod tests {
             (work.display_name.as_str(), work.accent_color.as_deref()),
             ("Work", Some("#aa3300"))
         );
+        assert_eq!(
+            work.supported_runtime_modes,
+            [
+                agent_domain::RuntimeMode::ApprovalRequired,
+                agent_domain::RuntimeMode::FullAccess
+            ]
+        );
+        assert!(codex.supported_runtime_modes.is_empty());
         let claude = catalog.instance("claude").unwrap();
         assert_eq!(claude.status, ProviderStatus::Error);
         assert!(!claude.picker_ready());

@@ -210,6 +210,8 @@ pub struct SidebarDraftRow {
     pub project_id: String,
     pub project_name: Option<String>,
     pub preview: String,
+    /// The open draft, shown as it was when it was opened.
+    pub active: bool,
     pub accessibility_label: String,
 }
 
@@ -240,6 +242,8 @@ pub struct SidebarSearchResult {
 pub struct SidebarSearchView {
     pub query: String,
     pub results: Vec<SidebarSearchResult>,
+    /// Message matches may still arrive.
+    pub pending: bool,
     pub empty_label: Option<String>,
 }
 
@@ -732,17 +736,30 @@ fn draft_rows(
         .then(|| snapshot.new_thread_draft_key());
     let mut count = 0;
     let mut rows = vec![];
-    for (key, draft) in snapshot.drafts.iter() {
+    for (key, live) in snapshot.drafts.iter() {
         let Some(project) = key.strip_prefix("new:") else {
             continue;
         };
-        if draft.is_empty() || scope.is_some_and(|scope| scope != project) {
+        if live.is_empty() || scope.is_some_and(|scope| scope != project) {
             continue;
         }
         count += 1;
-        if open.as_deref() == Some(key.as_str()) {
-            continue;
-        }
+        let active = open.as_deref() == Some(key.as_str());
+        // The open draft keeps the row it had when it was opened, and has none
+        // when it was opened empty.
+        let draft = if active {
+            match snapshot
+                .frozen_open_draft
+                .as_ref()
+                .filter(|frozen| &frozen.key == key)
+                .and_then(|frozen| frozen.draft.as_ref())
+            {
+                Some(frozen) => frozen,
+                None => continue,
+            }
+        } else {
+            live
+        };
         let first_line = draft.text.trim().lines().next().unwrap_or_default();
         let attachments = draft.attachments.len();
         let preview = if first_line.is_empty() {
@@ -751,21 +768,27 @@ fn draft_rows(
             first_line.into()
         };
         let project_name = project_names.get(project).cloned();
-        rows.push(SidebarDraftRow {
-            draft_key: key.clone(),
-            project_id: project.into(),
-            accessibility_label: sidebar_row_accessibility(
-                &preview,
-                Some("Unsent draft"),
-                project_name.as_deref(),
-                false,
-            )
-            .label,
-            project_name,
-            preview,
-        });
+        rows.push((
+            draft.created_at_ms,
+            SidebarDraftRow {
+                draft_key: key.clone(),
+                project_id: project.into(),
+                accessibility_label: sidebar_row_accessibility(
+                    &preview,
+                    Some("Unsent draft"),
+                    project_name.as_deref(),
+                    active,
+                )
+                .label,
+                active,
+                project_name,
+                preview,
+            },
+        ));
     }
-    (rows, count)
+    // Newest first.
+    rows.sort_by(|(left, _), (right, _)| right.cmp(left));
+    (rows.into_iter().map(|(_, row)| row).collect(), count)
 }
 
 /// The sidebar at `now_ms`. With the Working section on, call
@@ -960,9 +983,18 @@ pub fn sidebar(
                 }
             })
             .collect();
+        let pending = crate::view::search::search_pending(snapshot);
         SidebarSearchView {
             query: snapshot.search.clone(),
-            empty_label: results.is_empty().then(|| "No threads found".into()),
+            empty_label: results.is_empty().then(|| {
+                if pending {
+                    "Searching thread messages…"
+                } else {
+                    "No threads found"
+                }
+                .into()
+            }),
+            pending,
             results,
         }
     });

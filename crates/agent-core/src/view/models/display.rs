@@ -19,6 +19,7 @@ pub struct ProviderEntry {
     pub version: Option<String>,
     pub show_interaction_mode_toggle: bool,
     pub reports_context_window: bool,
+    pub supported_runtime_modes: Vec<agent_domain::RuntimeMode>,
 }
 impl ProviderEntry {
     /// A ready, enabled instance with no Host-chosen name.
@@ -36,6 +37,7 @@ impl ProviderEntry {
             version: None,
             show_interaction_mode_toggle: true,
             reports_context_window: true,
+            supported_runtime_modes: vec![],
         }
     }
 }
@@ -166,6 +168,7 @@ pub fn provider_instances(entries: &[ProviderEntry]) -> Vec<ProviderInstance> {
                 version: entry.version.clone(),
                 show_interaction_mode_toggle: entry.show_interaction_mode_toggle,
                 reports_context_window: entry.reports_context_window,
+                supported_runtime_modes: entry.supported_runtime_modes.clone(),
             }
         })
         .collect()

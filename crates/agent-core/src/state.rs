@@ -81,6 +81,9 @@ pub struct Draft {
     pub context: Option<MessageContext>,
     /// Where a new thread's first run works; only new-thread drafts set it.
     pub workspace: Option<DraftWorkspace>,
+    /// When a new-thread draft first held work for its project; the list
+    /// orders unsent drafts by it.
+    pub created_at_ms: Option<i64>,
 }
 
 /// The new-thread composer's workspace choice.
@@ -107,6 +110,7 @@ impl Default for Draft {
             interaction_mode: InteractionMode::Default,
             context: None,
             workspace: None,
+            created_at_ms: None,
         }
     }
 }
@@ -257,6 +261,22 @@ pub struct PendingRollback {
     pub checkpoint: CheckpointId,
 }
 
+/// The open new-thread draft's key and, when it held work then, its copy at
+/// the moment it was opened.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FrozenDraft {
+    pub key: String,
+    pub draft: Option<Draft>,
+}
+
+/// A message search waiting for its answer: the trimmed query and, while the
+/// typing settles, when it is asked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchRequest {
+    pub query: String,
+    pub due_at_ms: Option<u64>,
+}
+
 #[derive(Debug, Clone, Default)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Object))]
 pub struct Snapshot {
@@ -280,6 +300,10 @@ pub struct Snapshot {
     pub editing_run: Option<RunId>,
     pub search: String,
     pub search_matches: Vec<SearchMatch>,
+    /// The message search the Host has not answered yet.
+    pub search_request: Option<SearchRequest>,
+    /// The open new-thread draft as it was when it was opened.
+    pub frozen_open_draft: Option<FrozenDraft>,
     /// The Host's provider instances and their models; `None` until listed.
     pub providers: Option<Vec<crate::models::ProviderInstance>>,
     pub workspace: Workspace,
@@ -362,6 +386,42 @@ impl Snapshot {
             .as_ref()
             .map(ToString::to_string)
             .unwrap_or_else(|| self.new_thread_draft_key())
+    }
+    /// Stamps new-thread drafts that just gained work with `now_ms`, forgets
+    /// the stamp of ones emptied again, and freezes the copy of the open
+    /// draft the sidebar shows when the open draft changed.
+    pub fn settle_new_thread_drafts(&mut self, now_ms: i64) {
+        let due: Vec<String> = self
+            .drafts
+            .iter()
+            .filter(|(key, draft)| {
+                key.starts_with("new:") && draft.created_at_ms.is_none() != draft.is_empty()
+            })
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in due {
+            if let Some(draft) = self.drafts.get_mut(&key) {
+                draft.created_at_ms = (!draft.is_empty()).then_some(now_ms);
+            }
+        }
+        self.freeze_open_draft();
+    }
+    /// Copies the open new-thread draft when the open draft changed.
+    pub fn freeze_open_draft(&mut self) {
+        let open = self
+            .selected_thread
+            .is_none()
+            .then(|| self.new_thread_draft_key());
+        if self.frozen_open_draft.as_ref().map(|frozen| &frozen.key) != open.as_ref() {
+            self.frozen_open_draft = open.map(|key| FrozenDraft {
+                draft: self
+                    .drafts
+                    .get(&key)
+                    .filter(|draft| !draft.is_empty())
+                    .cloned(),
+                key,
+            });
+        }
     }
     pub fn new_thread_draft_key(&self) -> String {
         format!(
@@ -493,8 +553,20 @@ impl Snapshot {
             mode,
             branch,
             worktree_path,
-            start_from_origin: false,
+            start_from_origin: self.new_worktree_starts_from_origin(mode),
         }
+    }
+    /// A new-thread draft's origin choice when its mode is set: on for a new
+    /// worktree when the project's setting says so.
+    pub fn new_worktree_starts_from_origin(
+        &self,
+        mode: crate::view::projects::selection::ThreadWorkspaceMode,
+    ) -> bool {
+        mode == crate::view::projects::selection::ThreadWorkspaceMode::Worktree
+            && crate::view::settings::new_worktrees_start_from_origin(
+                self.conversation_settings.as_ref(),
+                self.selected_project.as_deref(),
+            )
     }
     /// Where a thread's files and terminals open: its worktree or checkout,
     /// else its project's root.

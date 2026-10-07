@@ -425,6 +425,7 @@ mod settings_tests {
                 branch_naming_mode: Some(BranchNamingMode::Custom),
                 branch_name_prefix: None,
                 branch_name_instructions: Some(" Use ABC-123. ".into()),
+                new_worktrees_start_from_origin: None,
             },
         );
         saved.branch_name_prefix = " team/ ".into();

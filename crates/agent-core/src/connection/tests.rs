@@ -500,6 +500,44 @@ fn search_respects_server_limits_and_clear_remains_local() {
         ));
     }
     assert_eq!(owner.state.search, "a");
+    assert_eq!(owner.state.search_request, None);
+}
+
+// web queries.ts useThreadSearch: a query is asked once typing settles, is
+// pending until its own answer arrives, and a stale answer is dropped.
+#[test]
+fn a_message_search_is_pending_until_its_own_answer_arrives() {
+    use crate::state::SearchRequest;
+    let mut owner = owner(Snapshot::default());
+    owner.state.connected = true;
+    owner.state.search = "needle".into();
+    owner.state.search_request = Some(SearchRequest {
+        query: "needle".into(),
+        due_at_ms: Some(10),
+    });
+    assert_eq!(owner.sources_deadline(), Some(10));
+    owner.search_finished("needle", Some(vec![]));
+    assert!(owner.state.search_request.is_some(), "not asked yet");
+    owner.sources_tick(9);
+    assert_eq!(
+        owner.state.search_request.as_ref().unwrap().due_at_ms,
+        Some(10)
+    );
+    owner.sources_tick(10);
+    assert_eq!(owner.state.search_request.as_ref().unwrap().due_at_ms, None);
+    assert!(crate::view::search::search_pending(&owner.state));
+    let found = agent_protocol::conversation::SearchMatch {
+        thread_id: thread_id(),
+        project_id: "project".into(),
+        source: agent_protocol::conversation::SearchSource::User,
+        snippet: "needle".into(),
+        message_created_at: None,
+    };
+    owner.search_finished("needl", Some(vec![found.clone()]));
+    assert!(owner.state.search_matches.is_empty());
+    owner.search_finished("needle", Some(vec![found]));
+    assert_eq!(owner.state.search_matches.len(), 1);
+    assert!(!crate::view::search::search_pending(&owner.state));
 }
 
 #[test]
@@ -1797,4 +1835,47 @@ fn picking_another_local_branch_switches_the_checkout_first() {
         owner.state.new_thread_workspace().branch.as_deref(),
         Some("topic")
     );
+}
+
+// web chatThreadActions.test.ts "only applies the start-from-origin default
+// to new worktree drafts" and ChatView onEnvModeChange: a worktree draft
+// starts from origin when the project's setting says so, a local one never.
+#[test]
+fn only_applies_the_start_from_origin_default_to_new_worktree_drafts() {
+    use crate::view::projects::selection::ThreadWorkspaceMode;
+    let mut owner = owner(Snapshot {
+        default_draft: draft(),
+        selected_project: Some("app".into()),
+        ..Snapshot::default()
+    });
+    project_shell(&mut owner);
+    owner.state.workspace.worktree_settings = Some(crate::models::WorktreeSettings {
+        create_on_new_session: true,
+        ..Default::default()
+    });
+    let workspace = owner.state.new_thread_workspace();
+    assert_eq!(
+        (workspace.mode, workspace.start_from_origin),
+        (ThreadWorkspaceMode::Worktree, true)
+    );
+    owner
+        .set_new_thread_workspace(ThreadWorkspaceMode::Local)
+        .unwrap();
+    assert!(!owner.state.new_thread_workspace().start_from_origin);
+
+    let mut settings = crate::models::ConversationSettings::default();
+    settings.project_overrides.insert(
+        "app".into(),
+        crate::models::ProjectConversationSettings {
+            new_worktrees_start_from_origin: Some(false),
+            ..Default::default()
+        },
+    );
+    owner.state.conversation_settings = Some(settings);
+    owner
+        .set_new_thread_workspace(ThreadWorkspaceMode::Worktree)
+        .unwrap();
+    assert!(!owner.state.new_thread_workspace().start_from_origin);
+    owner.set_new_thread_start_from_origin(true).unwrap();
+    assert!(owner.state.new_thread_workspace().start_from_origin);
 }
