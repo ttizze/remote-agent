@@ -233,16 +233,21 @@ impl Orchestration for Fake {
             })
             .collect();
         let claimed = claimed.map(|attachments| crate::workspace_files::Claimed {
-            created: attachments
-                .iter()
-                .map(|file| PathBuf::from(&file.path))
-                .collect(),
+            copies: crate::workspace_files::Copies::untracked(
+                attachments
+                    .iter()
+                    .map(|file| PathBuf::from(&file.path))
+                    .collect(),
+            ),
             attachments,
         });
         Box::pin(async move { claimed })
     }
-    fn release_attachments(&self, created: Vec<PathBuf>) -> BoxFuture<'_, ()> {
-        self.released.lock().unwrap().extend(created);
+    fn release_attachments(&self, copies: crate::workspace_files::Copies) -> BoxFuture<'_, ()> {
+        self.released
+            .lock()
+            .unwrap()
+            .extend_from_slice(copies.paths());
         Box::pin(async {})
     }
     fn providers(&self) -> BoxFuture<'_, Result<Vec<ProviderSnapshot>, String>> {

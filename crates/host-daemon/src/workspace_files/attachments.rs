@@ -122,21 +122,70 @@ fn claimed_id(thread: &str, token: &str) -> String {
     format!("chat-{}-{token}", hash(thread.as_bytes()))
 }
 
-/// What a claim made: the claimed attachments and the copies it created.
+/// What a claim made: the claimed attachments and the thread copies it holds.
 #[derive(Debug, Default)]
 pub(crate) struct Claimed {
     pub(crate) attachments: Vec<Attachment>,
-    pub(crate) created: Vec<PathBuf>,
+    pub(crate) copies: Copies,
 }
 
-struct NewClaims(Vec<PathBuf>);
-impl Drop for NewClaims {
-    fn drop(&mut self) {
-        for path in &self.0 {
-            let _ = fs::remove_file(path);
-            let _ = fs::remove_file(path.with_extension("meta"));
+/// The thread copies one claim holds until its command's outcome is known.
+/// Claim ids are deterministic, so a resent or duplicate command's claim holds
+/// the same copy as the first. Releasing removes a copy only when the claim
+/// that made it is released, no other claim holds it and none was accepted.
+/// Dropping the hold keeps the copies: the command was accepted, or its outcome
+/// is unknown.
+#[derive(Default)]
+pub(crate) struct Copies {
+    files: Option<WorkspaceFiles>,
+    paths: Vec<PathBuf>,
+}
+impl std::fmt::Debug for Copies {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_list().entries(&self.paths).finish()
+    }
+}
+impl Copies {
+    /// The command was not accepted.
+    pub(crate) fn release(mut self) {
+        self.settle(false);
+    }
+    fn settle(&mut self, accepted: bool) {
+        if let Some(files) = self.files.take() {
+            let _lock = files.writes.lock().unwrap_or_else(|e| e.into_inner());
+            files.settle_locked(std::mem::take(&mut self.paths), accepted);
         }
     }
+    fn absorb(&mut self, mut other: Copies) {
+        if let Some(files) = other.files.take() {
+            self.files.get_or_insert(files);
+        }
+        self.paths.append(&mut other.paths);
+    }
+    #[cfg(test)]
+    pub(crate) fn paths(&self) -> &[PathBuf] {
+        &self.paths
+    }
+    /// Copies no storage tracks, for a backend that keeps none.
+    #[cfg(test)]
+    pub(crate) fn untracked(paths: Vec<PathBuf>) -> Self {
+        Self { files: None, paths }
+    }
+}
+impl Drop for Copies {
+    fn drop(&mut self) {
+        self.settle(true);
+    }
+}
+
+/// The claims that hold one thread copy while their commands are in flight.
+#[derive(Default)]
+pub(super) struct Holds {
+    claims: usize,
+    /// One of them made the copy.
+    made: bool,
+    /// One of them was accepted.
+    accepted: bool,
 }
 
 impl WorkspaceFiles {
@@ -293,9 +342,59 @@ impl WorkspaceFiles {
         }
         validate(input.iter().map(Limits::from)).map_err(|error| error.to_string())?;
         let _lock = self.writes.lock().unwrap_or_else(|e| e.into_inner());
+        let mut held = vec![];
+        match self.claim_locked(thread, input, &mut held) {
+            Ok(attachments) => Ok(Claimed {
+                attachments,
+                copies: Copies {
+                    files: Some(self.clone()),
+                    paths: held,
+                },
+            }),
+            Err(error) => {
+                self.settle_locked(held, false);
+                Err(error)
+            }
+        }
+    }
+
+    fn hold(&self, held: &mut Vec<PathBuf>, path: &Path, made: bool) {
+        let mut holds = self.claim_holds.lock().unwrap_or_else(|e| e.into_inner());
+        let hold = holds.entry(path.to_path_buf()).or_default();
+        hold.claims += 1;
+        hold.made |= made;
+        held.push(path.to_path_buf());
+    }
+
+    /// Ends the claims' holds; the caller holds the write lock.
+    fn settle_locked(&self, paths: Vec<PathBuf>, accepted: bool) {
+        let mut holds = self.claim_holds.lock().unwrap_or_else(|e| e.into_inner());
+        for path in paths {
+            let Some(hold) = holds.get_mut(&path) else {
+                continue;
+            };
+            hold.claims -= 1;
+            hold.accepted |= accepted;
+            if hold.claims > 0 {
+                continue;
+            }
+            let unused = hold.made && !hold.accepted;
+            holds.remove(&path);
+            if unused {
+                let _ = fs::remove_file(&path);
+                let _ = fs::remove_file(path.with_extension("meta"));
+            }
+        }
+    }
+
+    fn claim_locked(
+        &self,
+        thread: &str,
+        input: &[Attachment],
+        held: &mut Vec<PathBuf>,
+    ) -> std::result::Result<Vec<Attachment>, String> {
         let directory = self.thread_attachment_directory(thread);
         let mut claimed = vec![];
-        let mut created = NewClaims(vec![]);
         for attachment in input {
             let cannot = |reason: &str| {
                 format!("Attachment '{}' cannot be sent: {reason}.", attachment.name)
@@ -351,6 +450,7 @@ impl WorkspaceFiles {
                         {
                             return Err(failed());
                         }
+                        self.hold(held, &target, false);
                     } else {
                         self.prepare_attachment_directory(&directory)
                             .map_err(|_| failed())?;
@@ -359,7 +459,7 @@ impl WorkspaceFiles {
                         fs::copy(&source, output.path()).map_err(|_| failed())?;
                         output.as_file().sync_all().map_err(|_| failed())?;
                         output.persist_noclobber(&target).map_err(|_| failed())?;
-                        created.0.push(target.clone());
+                        self.hold(held, &target, true);
                         self.save_attachment_upload(
                             &target,
                             attachment.id.clone(),
@@ -372,15 +472,15 @@ impl WorkspaceFiles {
                     }
                     target
                 }
-                None => source,
+                None => {
+                    self.hold(held, &source, false);
+                    source
+                }
             };
             attachment.path = target.to_string_lossy().into_owned();
             claimed.push(attachment);
         }
-        Ok(Claimed {
-            attachments: claimed,
-            created: std::mem::take(&mut created.0),
-        })
+        Ok(claimed)
     }
 
     /// Claims a question response's attachments question by question. The
@@ -389,31 +489,25 @@ impl WorkspaceFiles {
         &self,
         thread: &str,
         answers: &mut std::collections::BTreeMap<String, Vec<Attachment>>,
-    ) -> std::result::Result<Vec<PathBuf>, String> {
+    ) -> std::result::Result<Copies, String> {
         let all: Vec<Attachment> = answers.values().flatten().cloned().collect();
         if let Some(error) = limit_error(&all) {
             return Err(error.into());
         }
-        let mut created = vec![];
+        let mut copies = Copies::default();
         for attachments in answers.values_mut() {
             match self.claim(thread, attachments) {
                 Ok(claimed) => {
                     *attachments = claimed.attachments;
-                    created.extend(claimed.created);
+                    copies.absorb(claimed.copies);
                 }
                 Err(error) => {
-                    self.release(&created);
+                    copies.release();
                     return Err(error);
                 }
             }
         }
-        Ok(created)
-    }
-
-    /// Removes the copies a claim made for a command that was not accepted.
-    pub(crate) fn release(&self, created: &[PathBuf]) {
-        let _lock = self.writes.lock().unwrap_or_else(|e| e.into_inner());
-        drop(NewClaims(created.to_vec()));
+        Ok(copies)
     }
 
     /// The stored bytes of a claimed image.
@@ -509,16 +603,16 @@ mod tests {
             .unwrap();
         let claimed = first.attachments;
         let stored = files.attachment_path(&claimed[0].id).unwrap();
-        assert_eq!(first.created, std::slice::from_ref(&stored));
+        assert_eq!(first.copies.paths(), std::slice::from_ref(&stored));
         assert!(claimed[0].id.starts_with("chat-"));
         assert_eq!(claimed[0].path, stored.to_string_lossy());
         fs::write(&stored, b"edited").unwrap();
-        // A resent claim keeps the stored copy and the original upload.
+        // A resent claim holds the stored copy and keeps the original upload.
         let resent = files
             .claim("thread", std::slice::from_ref(&pending))
             .unwrap();
         assert_eq!(resent.attachments, claimed);
-        assert!(resent.created.is_empty());
+        assert_eq!(resent.copies.paths(), std::slice::from_ref(&stored));
         assert_eq!(fs::read(&stored).unwrap(), b"edited");
         assert_eq!(
             files
@@ -685,10 +779,74 @@ mod tests {
         assert_eq!(copies(), 0);
         let mut answers = std::collections::BTreeMap::from([("a".to_owned(), vec![notes])]);
         let created = files.claim_answers("thread", &mut answers).unwrap();
-        assert_eq!(created.len(), 1);
+        assert_eq!(created.paths().len(), 1);
         assert!(answers["a"][0].id.starts_with("chat-"));
-        files.release(&created);
+        created.release();
         assert_eq!(copies(), 0);
+    }
+
+    // AttachmentClaims.ts copies each claim under a new id, so releasing one
+    // never touches another's copy. Here claim ids are deterministic and a
+    // duplicate command's claim holds the copy the first one made: releasing
+    // removes it only when no claim holding it was accepted.
+    #[test]
+    fn a_rejected_claim_never_removes_a_copy_an_accepted_claim_holds() {
+        let directory = tempfile::tempdir().unwrap();
+        let files = WorkspaceFiles::new(directory.path().join("assets"));
+        let claim = |token: &str| {
+            let pending = upload(&files, token, b"original");
+            let made = files
+                .claim("thread", std::slice::from_ref(&pending))
+                .unwrap();
+            let duplicate = files
+                .claim("thread", std::slice::from_ref(&pending))
+                .unwrap();
+            let path = PathBuf::from(&made.attachments[0].path);
+            assert_eq!(duplicate.attachments, made.attachments);
+            (made.copies, duplicate.copies, path)
+        };
+        let kept = |path: &Path| path.exists() && path.with_extension("meta").exists();
+
+        // The duplicate is accepted, then the claim that made the copy is rejected.
+        let (made, duplicate, path) = claim("accepted-first");
+        drop(duplicate);
+        made.release();
+        assert!(kept(&path));
+
+        // The claim that made the copy is rejected while the duplicate is in
+        // flight, and the duplicate is accepted.
+        let (made, duplicate, path) = claim("rejected-first");
+        made.release();
+        assert!(kept(&path));
+        drop(duplicate);
+        assert!(kept(&path));
+
+        // The claim that made the copy is accepted and the duplicate rejected.
+        let (made, duplicate, path) = claim("duplicate-rejected");
+        drop(made);
+        duplicate.release();
+        assert!(kept(&path));
+
+        // Neither is accepted.
+        let (made, duplicate, path) = claim("both-rejected");
+        duplicate.release();
+        assert!(kept(&path));
+        made.release();
+        assert!(!path.exists() && !path.with_extension("meta").exists());
+
+        // A copy an earlier accepted claim made outlives a rejected resend.
+        let pending = upload(&files, "resent", b"original");
+        let first = files
+            .claim("thread", std::slice::from_ref(&pending))
+            .unwrap();
+        let path = PathBuf::from(&first.attachments[0].path);
+        drop(first);
+        files
+            .claim("thread", std::slice::from_ref(&pending))
+            .unwrap()
+            .copies
+            .release();
+        assert!(kept(&path));
     }
 
     // Context records name uploads by attachment ID; a claim rebinds them to
