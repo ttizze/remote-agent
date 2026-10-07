@@ -42,7 +42,7 @@ When a new major becomes generally available, verify the vendor release, update 
 Clients render immutable `Snapshot` values and never re-derive presentation: `agent-core::presentation` produces `RenderedConversation` rows for GPUI directly and for mobile through the bindings. Add logic to core, not to a client. See [ADR 0005](docs/adr/0005-rust-store-and-one-iroh-client-path.md).
 Device storage uses the explicit [client state storage contract](docs/CLIENT_STATE_STORAGE.md).
 
-The session architecture, limits, local data and verification matrix are documented in [Session runtime](docs/SESSION_RUNTIME.md).
+The session architecture, limits, local data and verification matrix are documented in [Conversation runtime](docs/SESSION_RUNTIME.md).
 
 ## Run the Host
 
@@ -189,7 +189,7 @@ fixtures and acceptance runners are removed.
 
 ```sh
 scripts/dev-env.sh just unit-tests
-scripts/dev-env.sh cargo nextest run -p orchestration -p provider-adapters -p agent-protocol -p agent-transport -p agent-core -p host-daemon -p bex-desktop --lib --bins --features agent-core/bindings
+scripts/dev-env.sh cargo nextest run -p agent-domain -p agent-providers -p agent-runtime -p agent-protocol -p agent-transport -p agent-core -p host-daemon -p bex-desktop --lib --bins --features agent-core/bindings
 scripts/dev-env.sh scripts/build-agent-ios.sh simulator
 nix develop .#android --command ./gradlew :apps:mobile:assembleDebug
 ```

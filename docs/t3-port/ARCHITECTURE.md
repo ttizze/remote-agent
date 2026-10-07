@@ -16,7 +16,7 @@
 | --- | --- | --- |
 | `agent-domain` | ID、エンティティ、コマンド、事実（イベント）、スレッドの状態機械、事実から projection を作る fold。Host とクライアントで共有する。 | なし |
 | `agent-providers` | provider の通信を、正規化した provider コマンドと provider イベントに相互変換する。Codex app-server と Claude（SDK の制御手順を移植）。 | provider プロセスの stdio |
-| Host ランタイム（`host-daemon` 内） | スレッドごとの actor、SQLite、effect の実行、provider セッション管理、購読と同期、履歴の取り込み。 | SQLite、プロセス、Git、ファイル |
+| `agent-runtime`（Host ランタイム。`host-daemon` が RPC へ接続する） | スレッドごとの actor、SQLite、effect の実行、provider セッション管理、購読と同期、履歴の取り込み。 | SQLite、プロセス、Git、ファイル |
 | `agent-core` | 接続、購読、fold、表示用データ。UniFFI でモバイルへ公開する。 | iroh |
 | `agent-transport` | iroh と framing。変更しない。 | ネットワーク |
 
@@ -84,7 +84,7 @@ T3 と同じ契約にする。snapshot、`afterSequence` からの再送、synch
 ## 今のブランチから残すもの・作り直すもの
 
 - 残す: `agent-transport`、ペアリング、Host の会話以外の機能、各クライアントの画面のコード、`PORT_MAP.md` のファイル一覧。
-- 作り直す: `crates/orchestration`（`agent-domain` と Host ランタイムへ分ける）、`crates/provider-adapters`（`agent-providers` へ）、`host_rpc/service.rs` の会話部分、`agent-core` の同期と状態管理。
+- 作り直す: `crates/orchestration`（`agent-domain` と Host ランタイムへ分ける）、`crates/provider-adapters`（`agent-providers` へ）、`host_rpc/service.rs` の会話部分、`agent-core` の同期と状態管理。旧 crate は段階 5 で削除した。
 
 ## 決定事項
 
@@ -267,3 +267,4 @@ T3 と同じ契約にする。snapshot、`afterSequence` からの再送、synch
 - 2026-10-08: mobile の配色（T3 mobile の既定 palette と状態色）は core の `theme()` の `mobile*`・`status*` の token にし、iOS と Android はそれを読む。半透明の値は `#rrggbbaa` で表す。
 - 2026-10-08: mobile の thread 設定の model の一覧は T3 mobile ThreadSettingsSheet の catalogue を core（`catalog_sheet`）で作り、desktop は T3 web の picker（legacy の折りたたみの行）を使う。mobile の setup card は T3 mobile と同じく「Open terminal」を出さない。
 - 2026-10-08: desktop の段階 4 で T3 と違っていた点（右の panel の tab を種類ごとに1つ、terminal の tab と drawer の排他、終わった terminal を閉じない、thread details の固定の列、project の追加の後の既存 session の取り込み、設定の Appearance と Keybindings の欠如）は T3 に戻した。Appearance と Keybindings の値は core に保存の場所がまだ無いので起動中だけ持つ（未実装として残す）。
+- 2026-10-08: 段階 5 で `crates/orchestration` と `crates/provider-adapters` を削除した。protocol から旧 `orchestration/*` の Call と Body、cwd から作る terminal handle を消したので、旧 method は送ることも decode することもできない（2026-10-06 の「旧 RPC は `method_not_found`」はこの項で置き換える）。名前が衝突して接尾辞を付けていた会話の Call は `SubscribeThread`・`SubscribeShell`・`GetTurnItem`・`GetTurnDiff` にした（method 名は変えない）。Postcard は Call の variant を番号で送るので、旧 variant を消すと番号が変わる。ALPN を `remote-agent/streams/12` に上げ、Host と 3 クライアントは同じ revision から作る。`crate_boundaries` は `agent-domain` が I/O の依存を持たないこと、`agent-core` が `agent-runtime`・`agent-providers`・SQLite を含まないことを確かめる。

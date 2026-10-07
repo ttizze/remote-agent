@@ -7,7 +7,7 @@ use agent_domain::{
     Attachment, AttachmentKind, CheckpointId, Driver, InteractionMode, MessageContext,
     ModelSelection, RunId, RuntimeMode, State, ThreadId, ThreadShell, WorktreeSetupSnapshot,
 };
-use agent_protocol::conversation::{SearchMatch, ShellLocation, ShellSnapshot};
+use agent_protocol::conversation::{SearchMatch, ShellSnapshot};
 use serde::{Deserialize, Serialize};
 use std::{
     borrow::Cow,
@@ -731,12 +731,6 @@ impl Snapshot {
                 worktree_path.as_deref(),
                 &BTreeMap::new(),
             ),
-        }
-    }
-    pub fn shell_location(&self, location: ShellLocation) -> Option<&ShellCache> {
-        match location {
-            ShellLocation::Active => Some(&self.shell),
-            ShellLocation::Archived => self.archived.as_deref(),
         }
     }
 }

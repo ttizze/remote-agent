@@ -10,8 +10,6 @@ pub const DEFAULT_COMPOSER_PLACEHOLDER: &str =
     "Ask anything, @tag files/folders, $use skills, or / for commands";
 pub const DISCONNECTED_COMPOSER_PLACEHOLDER: &str =
     "Ask for changes, send follow-ups, or attach images";
-pub const MOBILE_THREAD_COMPOSER_PLACEHOLDER: &str = "Ask the repo agent, or run a command…";
-pub const MOBILE_NEW_TASK_COMPOSER_PLACEHOLDER: &str = "Ask anything…";
 
 /// What the composer is waiting on, in the order the placeholder considers it.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]

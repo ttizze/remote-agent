@@ -9,11 +9,6 @@ pub mod text_size;
 pub const SETUP_TERMINAL_PREFIX: &str = "setup-";
 const TERMINAL_PREFIX: &str = "term-";
 
-/// The terminal a project setup script runs in.
-pub fn setup_terminal_id(script_id: &str) -> String {
-    format!("{SETUP_TERMINAL_PREFIX}{script_id}")
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct TerminalTab {

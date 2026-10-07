@@ -56,7 +56,7 @@ async fn execute(peer: &Peer, call: &Call) -> Result<Reply, PeerError> {
         Call::ListFiles(_) => Reply::Files(peer.request(call).await?),
         Call::ReadFile(_) | Call::WriteFile(_) => Reply::File(peer.request(call).await?),
         Call::ReviewWorkspace(_) => Reply::Review(peer.request(call).await?),
-        Call::TurnDiff(_) => Reply::TurnDiff(peer.request(call).await?),
+        Call::GetTurnDiff(_) => Reply::TurnDiff(peer.request(call).await?),
         Call::ReadWorktreeSettings(_) | Call::UpdateWorktreeSettings(_) => {
             Reply::WorktreeSettings(peer.request(call).await?)
         }
@@ -462,7 +462,7 @@ impl Owner {
                 }
             }
             Reply::TurnDiff(diff) => {
-                if let Call::TurnDiff(request) = call
+                if let Call::GetTurnDiff(request) = call
                     && self.state.workspace.diff_request.as_ref() == Some(request)
                     && self.state.selected_thread.as_ref() == Some(&diff.thread_id)
                     && request.from_run_ordinal == diff.from_run_ordinal

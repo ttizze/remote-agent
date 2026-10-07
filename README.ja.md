@@ -42,7 +42,7 @@ Android 17では、LAN接続を開く前に付近のデバイスへのアクセ�
 クライアントは不変の`Snapshot`を描画し、表示内容を再計算しません。`agent-core::presentation`が生成する`RenderedConversation`の行を、GPUIは直接、モバイルはバインディング経由で使います。新しいロジックはクライアントではなくcoreに追加してください。[ADR 0005](docs/adr/0005-rust-store-and-one-iroh-client-path.md)を参照してください。
 端末への保存は[クライアント状態の保存契約](docs/CLIENT_STATE_STORAGE.md)に従います。
 
-セッション構造、制限、ローカルデータ、検証項目は[Session runtime](docs/SESSION_RUNTIME.md)に記載しています。
+セッション構造、制限、ローカルデータ、検証項目は[Conversation runtime](docs/SESSION_RUNTIME.md)に記載しています。
 
 ## Hostの起動
 
@@ -178,7 +178,7 @@ CI 待ち、cargo-mutants、E2E、Simulator UI テストは実行しません。
 旧会話の型・fixture・検証ランナーは削除しました。
 
 ```sh
-scripts/dev-env.sh cargo nextest run -p orchestration -p provider-adapters -p agent-protocol -p agent-transport -p agent-core -p host-daemon -p bex-desktop --lib --bins --features agent-core/bindings
+scripts/dev-env.sh cargo nextest run -p agent-domain -p agent-providers -p agent-runtime -p agent-protocol -p agent-transport -p agent-core -p host-daemon -p bex-desktop --lib --bins --features agent-core/bindings
 scripts/dev-env.sh scripts/build-agent-ios.sh simulator
 nix develop .#android --command ./gradlew :apps:mobile:assembleDebug
 ```

@@ -91,7 +91,7 @@ impl Owner {
             ShellLocation::Active => StreamKey::Shell,
             ShellLocation::Archived => StreamKey::Archive,
         };
-        self.open_stream(key, Call::ShellStream(request));
+        self.open_stream(key, Call::SubscribeShell(request));
     }
 
     pub(super) fn subscribe_thread(&mut self, thread: &ThreadId) {
@@ -105,7 +105,7 @@ impl Owner {
             Some(request) => {
                 self.open_stream(
                     StreamKey::Thread(thread.clone()),
-                    Call::ThreadStream(request),
+                    Call::SubscribeThread(request),
                 );
                 self.subscribe_setup(thread);
             }

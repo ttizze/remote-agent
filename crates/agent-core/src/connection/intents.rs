@@ -1358,7 +1358,7 @@ impl Owner {
                 };
                 self.state.workspace.review = None;
                 self.state.workspace.diff_request = Some(request.clone());
-                Next::call(Call::TurnDiff(request), None)
+                Next::call(Call::GetTurnDiff(request), None)
             }
             Intent::LoadWorktreeSettings => {
                 Next::call(Call::ReadWorktreeSettings(m::Empty {}), None)

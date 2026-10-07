@@ -214,20 +214,6 @@ impl ActorHandle {
         .await?
     }
 
-    /// Provider input that only waits for mailbox space.
-    pub async fn provider_nowait(
-        &self,
-        attempt: RunAttemptId,
-        event: ProviderEvent,
-    ) -> Result<(), RuntimeError> {
-        self.send(Mail::Provider {
-            attempt,
-            event: Box::new(event),
-            ack: None,
-        })
-        .await
-    }
-
     /// Feeds the result of an effect claimed by `worker` back and marks its outbox row
     /// succeeded in the same commit.
     pub async fn effect_result(

@@ -239,13 +239,6 @@ pub struct FeedInput {
     pub pending: Vec<PendingMessage>,
 }
 
-/// The presented feed with the undelivered messages after it.
-pub fn mobile_feed(state: &State, input: &FeedInput) -> Vec<FeedRow> {
-    let feed = build_thread_feed(state);
-    let presented = derive_thread_feed_presentation(&feed, input);
-    super::pending::append_pending_messages(presented, &feed, &input.pending)
-}
-
 /// The tool input and output a dynamic tool entry carries.
 fn entry_tool_data(entry: &WorkLogEntry) -> Option<Value> {
     match &entry.item.as_ref()?.kind {

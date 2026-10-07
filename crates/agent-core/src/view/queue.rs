@@ -2,7 +2,6 @@
 //! queue sheet on mobile.
 use crate::commands::outbox::{Outbox, Request};
 use crate::commands::workflows::queue_workflow;
-use crate::state::Snapshot;
 use crate::view::quantity;
 use agent_domain::{
     Attachment, AttachmentKind, Command, DispatchMode, RunId, State, context_references,
@@ -332,19 +331,6 @@ pub fn queue_view(
             .map(|queued| queued.run.to_string()),
         rows,
     }
-}
-
-/// The selected thread's queue.
-pub fn selected_queue_view(
-    snapshot: &Snapshot,
-    shortcuts: QueueShortcuts<'_>,
-) -> Option<QueueView> {
-    Some(queue_view(
-        snapshot.selected_state()?,
-        &snapshot.outbox,
-        snapshot.editing_run.as_ref(),
-        shortcuts,
-    ))
 }
 
 /// A row's measured layout in the queue sheet, before any drag offset.

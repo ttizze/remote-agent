@@ -50,7 +50,7 @@ val generateAgentBindings by
         inputs.dir(rootProject.file("crates/agent-core"))
         inputs.dir(rootProject.file("crates/agent-protocol"))
         inputs.dir(rootProject.file("crates/agent-transport"))
-        inputs.dir(rootProject.file("crates/orchestration"))
+        inputs.dir(rootProject.file("crates/agent-domain"))
         outputs.dir(rootProject.file("target/agent-bindings"))
     }
 val buildAgentAndroid by
@@ -76,7 +76,7 @@ val buildAgentAndroid by
         inputs.dir(rootProject.file("crates/agent-core"))
         inputs.dir(rootProject.file("crates/agent-protocol"))
         inputs.dir(rootProject.file("crates/agent-transport"))
-        inputs.dir(rootProject.file("crates/orchestration"))
+        inputs.dir(rootProject.file("crates/agent-domain"))
         outputs.dir(layout.buildDirectory.dir("generated/jniLibs"))
     }
 

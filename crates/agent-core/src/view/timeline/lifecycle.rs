@@ -136,18 +136,6 @@ pub enum LifecycleRow {
     Subagent(SubagentLink),
 }
 
-pub fn is_lifecycle_item(kind: &ItemKind) -> bool {
-    matches!(
-        kind,
-        ItemKind::RunInterruptRequest
-            | ItemKind::RunInterruptResult { .. }
-            | ItemKind::Compaction { .. }
-            | ItemKind::Fork { .. }
-            | ItemKind::Subagent { .. }
-            | ItemKind::ThreadCreated { .. }
-    )
-}
-
 /// `resource_summary` draws a created thread as a card instead of a work-log row.
 pub fn lifecycle_row(state: &State, item: &Item, resource_summary: bool) -> Option<LifecycleRow> {
     Some(match &item.kind {

@@ -129,10 +129,10 @@ jobs:
           cache-on-failure: true
       - name: Build desktop and Host
         run: nix develop .#native --command cargo build --locked --features agent-core/bindings -p codex-app-server -p bex-process -p bex-desktop -p host-daemon
-      - name: Orchestration and native contracts
-        run: nix develop .#native --command cargo nextest run --locked --no-fail-fast --features agent-core/bindings -p codex-app-server -p bex-process -p agent-protocol -p agent-transport -p agent-core -p host-daemon -p xtask -p orchestration -p provider-adapters
+      - name: Conversation and native contracts
+        run: nix develop .#native --command cargo nextest run --locked --no-fail-fast --features agent-core/bindings -p codex-app-server -p bex-process -p agent-protocol -p agent-transport -p agent-core -p host-daemon -p xtask -p agent-domain -p agent-providers -p agent-runtime
       - name: Documentation examples
-        run: nix develop .#native --command cargo test --locked --doc --features agent-core/bindings -p codex-app-server -p bex-process -p agent-protocol -p agent-transport -p agent-core -p host-daemon -p xtask -p orchestration -p provider-adapters
+        run: nix develop .#native --command cargo test --locked --doc --features agent-core/bindings -p codex-app-server -p bex-process -p agent-protocol -p agent-transport -p agent-core -p host-daemon -p xtask -p agent-domain -p agent-providers -p agent-runtime
   android:
     needs: changes
     if: needs.changes.outputs.android == 'true'
@@ -251,7 +251,7 @@ jobs:
         id: ios-cache
         with:
           path: ${{ env.BEX_IOS_SWIFT_CACHE_PATHS }}
-          key: ios-swift-xcode-26.6-${{ hashFiles('flake.lock', 'Cargo.lock', 'crates/agent-core/src/**', 'crates/agent-protocol/src/**', 'crates/orchestration/src/**', 'scripts/build-agent*.sh', 'apps/mobile/iosApp/**', 'apps/mobile/native-res/**') }}
+          key: ios-swift-xcode-26.6-${{ hashFiles('flake.lock', 'Cargo.lock', 'crates/agent-core/src/**', 'crates/agent-protocol/src/**', 'crates/agent-domain/src/**', 'scripts/build-agent*.sh', 'apps/mobile/iosApp/**', 'apps/mobile/native-res/**') }}
           restore-keys: ios-swift-xcode-26.6-
       - name: Build iPhone client
         run: |
@@ -294,7 +294,7 @@ jobs:
           cache-on-failure: true
       - name: Build desktop and Host
         run: cargo build --locked --features agent-core/bindings -p codex-app-server -p bex-process -p bex-desktop -p host-daemon
-      - name: Orchestration and native contracts
-        run: cargo nextest run --locked --no-fail-fast --features agent-core/bindings -p codex-app-server -p bex-process -p agent-protocol -p agent-transport -p agent-core -p host-daemon -p xtask -p orchestration -p provider-adapters
+      - name: Conversation and native contracts
+        run: cargo nextest run --locked --no-fail-fast --features agent-core/bindings -p codex-app-server -p bex-process -p agent-protocol -p agent-transport -p agent-core -p host-daemon -p xtask -p agent-domain -p agent-providers -p agent-runtime
       - name: Documentation examples
-        run: cargo test --locked --doc --features agent-core/bindings -p codex-app-server -p bex-process -p agent-protocol -p agent-transport -p agent-core -p host-daemon -p xtask -p orchestration -p provider-adapters
+        run: cargo test --locked --doc --features agent-core/bindings -p codex-app-server -p bex-process -p agent-protocol -p agent-transport -p agent-core -p host-daemon -p xtask -p agent-domain -p agent-providers -p agent-runtime

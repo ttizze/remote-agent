@@ -201,15 +201,15 @@ impl Conversation {
     /// Answers a conversation call, or `None` for other calls.
     pub(crate) async fn call(&self, call: &Call, cancel: CancellationToken) -> Option<HostReply> {
         let reply = match call {
-            Call::ThreadStream(params) => self.subscribe_thread(params, cancel).await,
-            Call::ShellStream(params) => self.subscribe_shell(params, cancel).await,
+            Call::SubscribeThread(params) => self.subscribe_thread(params, cancel).await,
+            Call::SubscribeShell(params) => self.subscribe_shell(params, cancel).await,
             Call::Dispatch(params) => self.dispatch(params).await.map(reply),
             Call::Launch(params) => self.launch(params).await.map(reply),
             Call::GetThread(params) => self.get_thread(params).await.map(reply),
-            Call::TurnItem(params) => self.turn_item(params).await.map(reply),
+            Call::GetTurnItem(params) => self.turn_item(params).await.map(reply),
             Call::ReadHistory(params) => self.read_history(params).await.map(reply),
             Call::Search(params) => self.search(params).map(reply),
-            Call::TurnDiff(params) => self.turn_diff(params).await.map(reply),
+            Call::GetTurnDiff(params) => self.turn_diff(params).await.map(reply),
             Call::ScanAgentSessions(_) => self.scan().await.map(reply),
             Call::ImportAgentSessions(params) => self.import(params).await.map(reply),
             Call::SetupStream(params) => Ok(self.subscribe_setup(params, cancel)),

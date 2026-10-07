@@ -312,7 +312,7 @@ async fn subscribe(
     after: Option<u64>,
 ) -> (Folded, crate::host_rpc::connections::HostSubscription) {
     let reply = host
-        .reply(Call::ThreadStream(wire::SubscribeThread {
+        .reply(Call::SubscribeThread(wire::SubscribeThread {
             thread_id: thread.clone(),
             after_sequence: after,
             request_completion_marker: true,
@@ -417,7 +417,7 @@ async fn a_launched_thread_streams_its_turn_and_reads_back_through_every_query()
         .find(|row| matches!(row.item.kind, ItemKind::AssistantMessage { .. }))
         .expect("the answer is in the history");
     let item: Option<wire::TurnItemDetail> = host
-        .call(Call::TurnItem(wire::GetTurnItem {
+        .call(Call::GetTurnItem(wire::GetTurnItem {
             thread_id: thread.clone(),
             item_id: assistant.item.id.clone(),
         }))
@@ -455,7 +455,7 @@ async fn a_launched_thread_streams_its_turn_and_reads_back_through_every_query()
     let diff = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             match host
-                .call::<wire::TurnDiff>(Call::TurnDiff(wire::GetTurnDiff {
+                .call::<wire::TurnDiff>(Call::GetTurnDiff(wire::GetTurnDiff {
                     thread_id: thread.clone(),
                     from_run_ordinal: 0,
                     to_run_ordinal: 1,
@@ -500,7 +500,7 @@ async fn a_stream_resumed_at_its_head_answers_without_replaying() {
     assert!(resumed.synchronized);
     assert_eq!(resumed.sequence, created.sequence);
     let quiet: wire::ThreadUpdate = host
-        .call(Call::ThreadStream(wire::SubscribeThread {
+        .call(Call::SubscribeThread(wire::SubscribeThread {
             thread_id: thread.clone(),
             after_sequence: Some(created.sequence),
             request_completion_marker: false,
@@ -614,7 +614,7 @@ async fn a_worktree_launch_runs_the_projects_setup_script() {
     let projects: Vec<Project> = host.call(Call::ListProjects(Empty {})).await.unwrap();
     assert_eq!(projects[0].scripts[0].id, "setup");
     let shell = host
-        .reply(Call::ShellStream(wire::SubscribeShell {
+        .reply(Call::SubscribeShell(wire::SubscribeShell {
             after_sequence: None,
             request_completion_marker: false,
             location: wire::ShellLocation::Active,
@@ -756,7 +756,7 @@ async fn a_turn_cut_by_shutdown_is_settled_when_the_host_starts_again() {
 async fn the_shell_stream_lists_projects_and_threads_then_follows_changes() {
     let host = host().await;
     let reply = host
-        .reply(Call::ShellStream(wire::SubscribeShell {
+        .reply(Call::SubscribeShell(wire::SubscribeShell {
             after_sequence: None,
             request_completion_marker: true,
             location: wire::ShellLocation::Active,
@@ -949,14 +949,14 @@ async fn conversation_calls_answer_with_typed_errors() {
             thread_id: missing.clone(),
             bounded: true,
         }),
-        Call::ThreadStream(wire::SubscribeThread {
+        Call::SubscribeThread(wire::SubscribeThread {
             thread_id: missing.clone(),
             after_sequence: None,
             request_completion_marker: false,
             accept_bounded_snapshot: false,
         }),
         // The typed missing-thread contract.
-        Call::TurnDiff(wire::GetTurnDiff {
+        Call::GetTurnDiff(wire::GetTurnDiff {
             thread_id: missing.clone(),
             from_run_ordinal: 0,
             to_run_ordinal: 1,
@@ -972,7 +972,7 @@ async fn conversation_calls_answer_with_typed_errors() {
     }
 
     let unavailable = host
-        .call::<wire::TurnDiff>(Call::TurnDiff(wire::GetTurnDiff {
+        .call::<wire::TurnDiff>(Call::GetTurnDiff(wire::GetTurnDiff {
             thread_id: first.clone(),
             from_run_ordinal: 0,
             to_run_ordinal: 1,
@@ -982,7 +982,7 @@ async fn conversation_calls_answer_with_typed_errors() {
         .unwrap_err();
     assert_eq!(code(&unavailable), Some(ErrorCode::CheckpointUnavailable));
     let same = host
-        .call::<wire::TurnDiff>(Call::TurnDiff(wire::GetTurnDiff {
+        .call::<wire::TurnDiff>(Call::GetTurnDiff(wire::GetTurnDiff {
             thread_id: missing,
             from_run_ordinal: 2,
             to_run_ordinal: 2,
@@ -1502,7 +1502,7 @@ async fn shell_projects_carry_their_repository_identity() {
         &["remote", "add", "origin", "git@github.com:Acme/widget.git"],
     );
     let shell = host
-        .reply(Call::ShellStream(wire::SubscribeShell {
+        .reply(Call::SubscribeShell(wire::SubscribeShell {
             after_sequence: None,
             request_completion_marker: false,
             location: wire::ShellLocation::Active,
@@ -1690,7 +1690,7 @@ async fn subscribed_shells_see_a_changed_remote_once_the_cached_identity_expires
         &["remote", "add", "origin", "git@github.com:Acme/widget.git"],
     );
     let shell = host
-        .reply(Call::ShellStream(wire::SubscribeShell {
+        .reply(Call::SubscribeShell(wire::SubscribeShell {
             after_sequence: None,
             request_completion_marker: false,
             location: wire::ShellLocation::Active,

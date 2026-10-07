@@ -100,28 +100,37 @@ fn reachable(
     names
 }
 
-#[test]
-fn production_orchestration_host_transport_and_protocol_stay_independent_of_clients() {
+fn production_dependencies(crate_name: &str, features: &[&str]) -> BTreeSet<String> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    reachable(
+        &root.join("crates").join(crate_name).join("Cargo.toml"),
+        features
+            .iter()
+            .map(|feature| (*feature).to_owned())
+            .collect(),
+        &mut BTreeSet::new(),
+    )
+}
+
+#[test]
+fn production_domain_host_transport_and_protocol_stay_independent_of_clients() {
     for crate_name in [
         "host-daemon",
         "agent-transport",
         "agent-protocol",
-        "orchestration",
+        "agent-domain",
     ] {
-        let names = reachable(
-            &root.join("crates").join(crate_name).join("Cargo.toml"),
-            BTreeSet::from(["default".to_owned()]),
-            &mut BTreeSet::new(),
-        );
+        let names = production_dependencies(crate_name, &["default"]);
         if matches!(crate_name, "host-daemon" | "agent-transport") {
             assert!(names.contains("agent-protocol"));
         }
-        let forbidden = if matches!(crate_name, "agent-protocol" | "orchestration") {
+        let forbidden = if matches!(crate_name, "agent-protocol" | "agent-domain") {
             &[
                 "agent-core",
                 "agent-transport",
                 "host-daemon",
+                "agent-runtime",
+                "agent-providers",
                 "agent-ffi",
                 "uniffi",
                 "iroh",
@@ -141,24 +150,32 @@ fn production_orchestration_host_transport_and_protocol_stay_independent_of_clie
     }
 }
 
+/// The domain is pure: commands, facts and folds with no I/O, so every
+/// production dependency is a data or text crate.
 #[test]
-fn runtime_feature_is_host_only() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let host = reachable(
-        &root.join("crates/host-daemon/Cargo.toml"),
-        BTreeSet::from(["default".into()]),
-        &mut BTreeSet::new(),
+fn domain_has_no_io_dependencies() {
+    let pure = BTreeSet::from(
+        ["chrono", "regex", "serde", "serde_json", "thiserror", "url"].map(str::to_owned),
     );
-    assert!(host.contains("rusqlite"));
-    for client in ["agent-core", "agent-ffi"] {
-        let dependencies = reachable(
-            &root.join(format!("crates/{client}/Cargo.toml")),
-            BTreeSet::from(["default".into()]),
-            &mut BTreeSet::new(),
-        );
-        assert!(
-            !dependencies.contains("rusqlite"),
-            "{client} pulls Host persistence into the client"
-        );
+    let names = production_dependencies("agent-domain", &["default"]);
+    let impure: Vec<_> = names.difference(&pure).collect();
+    assert!(impure.is_empty(), "agent-domain depends on {impure:?}");
+}
+
+#[test]
+fn runtime_and_host_persistence_stay_out_of_clients() {
+    assert!(production_dependencies("host-daemon", &["default"]).contains("rusqlite"));
+    for (client, features) in [
+        ("agent-core", &["default"][..]),
+        ("agent-core", &["default", "bindings"][..]),
+        ("agent-ffi", &["default"][..]),
+    ] {
+        let dependencies = production_dependencies(client, features);
+        for host_only in ["agent-runtime", "agent-providers", "rusqlite"] {
+            assert!(
+                !dependencies.contains(host_only),
+                "{client} {features:?} pulls {host_only} into the client"
+            );
+        }
     }
 }

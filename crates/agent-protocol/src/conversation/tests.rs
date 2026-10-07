@@ -315,7 +315,7 @@ fn requests_round_trip_and_join_the_call_table() {
         };
         round_trip(&subscribe);
         call_round_trip(
-            Call::ThreadStream(subscribe),
+            Call::SubscribeThread(subscribe),
             "conversation/subscribeThread",
         );
     }
@@ -327,7 +327,10 @@ fn requests_round_trip_and_join_the_call_table() {
         };
         round_trip(&location);
         round_trip(&subscribe);
-        call_round_trip(Call::ShellStream(subscribe), "conversation/subscribeShell");
+        call_round_trip(
+            Call::SubscribeShell(subscribe),
+            "conversation/subscribeShell",
+        );
     }
     let get = GetThread {
         thread_id: id("thread"),
@@ -340,7 +343,7 @@ fn requests_round_trip_and_join_the_call_table() {
         item_id: id("item"),
     };
     round_trip(&item);
-    call_round_trip(Call::TurnItem(item), "conversation/getTurnItem");
+    call_round_trip(Call::GetTurnItem(item), "conversation/getTurnItem");
     for cursor in [None, Some("eyJ2IjoxfQ".into())] {
         let history = ReadHistory {
             thread_id: id("thread"),
@@ -364,7 +367,7 @@ fn requests_round_trip_and_join_the_call_table() {
         ignore_whitespace: Some(true),
     };
     round_trip(&diff);
-    call_round_trip(Call::TurnDiff(diff), "conversation/turnDiff");
+    call_round_trip(Call::GetTurnDiff(diff), "conversation/turnDiff");
     round_trip(&ScanAgentSessions {});
     call_round_trip(
         Call::ScanAgentSessions(ScanAgentSessions {}),

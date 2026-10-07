@@ -342,10 +342,6 @@ pub fn is_markdown_file_link_label(label: &str, href: &str) -> bool {
     destination_path == label_path || destination_path.ends_with(&format!("/{label_path}"))
 }
 
-pub fn is_relative_file_path(path: &str) -> bool {
-    has_relative_path_prefix(path) || (!path.starts_with('/') && !is_windows_absolute_path(path))
-}
-
 fn looks_like_posix_filesystem_path(path: &str) -> bool {
     if !path.starts_with('/') {
         return false;

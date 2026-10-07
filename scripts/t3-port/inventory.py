@@ -13,10 +13,6 @@ ROOTS = ('apps/server/src/orchestration-v2', 'apps/server/src/project',
 DOCS = Path(__file__).resolve().parents[2] / 'docs/t3-port'
 
 
-def snake(name):
-    return re.sub(r'(?<!^)(?=[A-Z])', '_', name).replace('.', '_').replace('-', '_').lower()
-
-
 def category(path):
     name = path.name
     if name.endswith(('.test.ts', '.test.tsx', '.spec.ts', '.spec.tsx')):
@@ -26,28 +22,6 @@ def category(path):
     if name.endswith(('.ndjson', '.json')):
         return 'fixture'
     return 'source'
-
-
-def destination(path):
-    s = path.as_posix()
-    name = path.stem.replace('.test', '').replace('.spec', '')
-    name = name.split('.')[0]
-    if '/orchestration-v2/testkit/' in s:
-        sub = path.relative_to('apps/server/src/orchestration-v2/testkit')
-        if '/fixtures/' in s and path.suffix == '.ndjson':
-            return 'crates/provider-adapters/src/testkit/' + str(sub)
-        return 'crates/orchestration/src/testkit/' + '/'.join(snake(part) for part in sub.with_suffix('').parts) + '.rs'
-    if '/orchestration-v2/Adapters/' in s:
-        return f'crates/provider-adapters/src/{snake(name)}.rs'
-    if '/orchestration-v2/' in s:
-        return f'crates/orchestration/src/{snake(name)}.rs'
-    if '/project/' in s:
-        return f'crates/host-daemon/src/project/{snake(name)}.rs'
-    if 'packages/contracts/' in s:
-        return f'crates/orchestration/src/contracts/{snake(name)}.rs'
-    sub = path.relative_to('packages/client-runtime').as_posix()
-    sub = sub.removeprefix('src/').removesuffix('.ts').removesuffix('.tsx')
-    return 'crates/agent-core/src/' + '/'.join(snake(part) for part in sub.split('/')) + '.rs'
 
 
 def exclusion(path):
@@ -92,14 +66,13 @@ def scan(ref):
             if kind == 'source':
                 for match in re.finditer(r'(?m)^\s*(?:export\s+)?(?:async\s+)?(?:function\s+([A-Za-z_$][\w$]*)|const\s+([A-Za-z_$][\w$]*)\s*(?::[^=\n]+)?\s*=)', text):
                     symbols.append({'name': match[1] or match[2], 'line': text.count('\n', 0, match.start()) + 1,
-                                    'rust': None, 'status': '未照合'})
+                                    'status': '未照合'})
             cases = []
             if kind == 'test':
                 for match in re.finditer(r'\b(?:it|test)(?:\.(?:effect|scoped|live|skip|todo))?\s*\(\s*(["\x27`])([^\n]+?)\1', text):
-                    cases.append({'name': match[2], 'line': text.count('\n', 0, match.start()) + 1, 'rust': None, 'status': '未移植'})
+                    cases.append({'name': match[2], 'line': text.count('\n', 0, match.start()) + 1, 'status': '未移植'})
             records.append({'source': str(relative), 'sha256': hashlib.sha256(data).hexdigest(),
                             'lines': len(text.splitlines()), 'kind': kind,
-                            'rust': None if why else destination(relative),
                             'status': '対象外' if why else '未翻訳',
                             'reason': why, 'tests': [], 'symbols': symbols, 'cases': cases,
                             'reviewed_ranges': []})
@@ -128,17 +101,16 @@ def main():
         return
     path.write_text(json.dumps({'commit': COMMIT, 'files': inventory}, ensure_ascii=False, indent=2) + '\n')
     intro = (DOCS / 'PORT_MAP.md').read_text().split('<!-- generated inventory -->')[0]
-    out = [intro, '<!-- generated inventory -->\n', '\n## ファイル対応表\n\n予定の Rust パスは未翻訳行にも明記する。翻訳済みは production の呼出し経路・関数・移植テストを照合してから付ける。\n']
+    out = [intro, '<!-- generated inventory -->\n', '\n## ファイル対応表\n\n各ファイルの状態と対象外の理由を示す。新設計での対応先は「新設計の挙動テスト対応」以降に記録する。\n']
     for root in ROOTS:
         rows = [r for r in inventory if r['source'].startswith(root + '/')]
         production = [r for r in rows if r['kind'] == 'source']
         tests = [r for r in rows if r['kind'] == 'test']
         out += [f'\n### `{root}`\n\n本体 {len(production)} ファイル / {sum(r["lines"] for r in production):,} 行。テスト {len(tests)} ファイル / {sum(r["lines"] for r in tests):,} 行。testkit/fixture は別行で全件追跡する。\n',
-                '\n| T3 のファイル（行数） | Rust のモジュール／テスト | 移植した T3 テスト | 状態・理由 |\n|---|---|---|---|\n']
+                '\n| T3 のファイル（行数） | 移植した T3 テスト | 状態・理由 |\n|---|---|---|\n']
         for r in rows:
             tests = '<br>'.join(r['tests']) or '—'
-            rust = f'`{r["rust"]}`' if r['rust'] else '—'
-            out.append(f'| `{r["source"]}` ({r["lines"]}) | {rust} | {tests} | {r["status"]}' + (f'：{r["reason"]}' if r['reason'] else '') + ' |\n')
+            out.append(f'| `{r["source"]}` ({r["lines"]}) | {tests} | {r["status"]}' + (f'：{r["reason"]}' if r['reason'] else '') + ' |\n')
     (DOCS / 'PORT_MAP.md').write_text(''.join(out))
 
 

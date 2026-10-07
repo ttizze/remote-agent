@@ -101,10 +101,7 @@ pub const USAGE_LIMIT_TITLE: &str = "Usage limit reached";
 /// With a reset time, desktop reads "Resets <local time>" and mobile
 /// "Usage limit resets <local time>.".
 pub const RESET_UNAVAILABLE_DESKTOP: &str = "Reset time unavailable; retry manually";
-pub const RESET_UNAVAILABLE_MOBILE: &str =
-    "The provider did not report a reset time. Retry manually when your limit is available.";
 pub const LIMIT_RECOVERY_SAVING: &str = "Saving...";
-pub const LIMIT_RECOVERY_FAILED: &str = "Could not change limit recovery.";
 pub const LIMIT_RESET_PASSED: &str = "The reset time has passed. Retry the thread manually.";
 
 /// What the recovery banner offers for a run stopped by a usage limit.

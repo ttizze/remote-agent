@@ -11,9 +11,6 @@ use std::collections::BTreeSet;
 /// search cannot hold the Host's database.
 pub const SEARCH_QUERY_MIN_LENGTH: usize = 2;
 pub const SEARCH_QUERY_MAX_LENGTH: usize = 200;
-pub const SEARCH_RESULT_LIMIT: u32 = 50;
-/// How long typing settles before a message search starts.
-pub const SEARCH_DEBOUNCE_MS: u64 = 200;
 
 /// The trimmed query when the Host can search messages for it.
 pub fn content_search_query(query: &str) -> Option<&str> {
