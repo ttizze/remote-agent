@@ -355,7 +355,7 @@ impl Desktop {
             let query = self.composer.picker.query.read(cx).value().to_string();
             Rc::new(
                 self.snapshot
-                    .model_picker(query, self.composer.picker.rail.clone()),
+                    .model_picker(query, self.composer.picker.rail.clone(), vec![]),
             )
         });
         let query = self.composer.picker.query.clone();

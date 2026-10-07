@@ -69,10 +69,16 @@ pub struct PreferencesView {
 }
 
 impl Snapshot {
-    fn picker_options(&self, query: String, rail: Option<PickerRail>) -> ModelPickerOptions {
+    fn picker_options(
+        &self,
+        query: String,
+        rail: Option<PickerRail>,
+        toggled_legacy: Vec<String>,
+    ) -> ModelPickerOptions {
         ModelPickerOptions {
             query,
             rail,
+            toggled_legacy,
             favorites: self.preferences.favorite_models.clone(),
             model_order: self
                 .preferences
@@ -193,16 +199,28 @@ impl Snapshot {
     ) -> Option<crate::state::Intent> {
         setting_reset_intent(&scope, &row)
     }
-    pub fn model_picker(&self, query: String, rail: Option<PickerRail>) -> ModelPickerView {
+    /// `toggled_legacy` names the instances whose "Legacy models" row the
+    /// user toggled since the picker opened.
+    pub fn model_picker(
+        &self,
+        query: String,
+        rail: Option<PickerRail>,
+        toggled_legacy: Vec<String>,
+    ) -> ModelPickerView {
         model_picker(
             self,
             &self.current_draft(),
-            &self.picker_options(query, rail),
+            &self.picker_options(query, rail, toggled_legacy),
         )
     }
     /// The settings Model row's picker over the new-thread default.
-    pub fn default_model_picker(&self, query: String, rail: Option<PickerRail>) -> ModelPickerView {
-        default_model_picker(self, &self.picker_options(query, rail))
+    pub fn default_model_picker(
+        &self,
+        query: String,
+        rail: Option<PickerRail>,
+        toggled_legacy: Vec<String>,
+    ) -> ModelPickerView {
+        default_model_picker(self, &self.picker_options(query, rail, toggled_legacy))
     }
     pub fn traits(&self) -> TraitsView {
         traits(self, &self.current_draft(), true)

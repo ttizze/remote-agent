@@ -140,6 +140,21 @@ pub struct ModelPickerRow {
     pub disabled_reason: Option<String>,
 }
 
+/// The collapsible "Legacy models" row after an instance's current models.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct LegacyModelsSection {
+    pub key: String,
+    pub instance_id: String,
+    pub label: String,
+    /// "3 models".
+    pub detail: String,
+    /// The legacy rows follow the current ones in `rows`.
+    pub expanded: bool,
+    /// How many of `rows` come before the section row.
+    pub current_count: u32,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct ModelPickerView {
@@ -148,6 +163,9 @@ pub struct ModelPickerView {
     /// Empty while searching.
     pub rail: Vec<PickerRailItem>,
     pub rows: Vec<ModelPickerRow>,
+    /// Shown for one instance's rail when it has legacy models; never while
+    /// searching or on Favorites.
+    pub legacy: Option<LegacyModelsSection>,
     /// "No models found" when nothing matches.
     pub empty_label: Option<String>,
     /// Only the thread's own driver can be chosen.
@@ -163,6 +181,9 @@ pub struct ModelPickerOptions {
     pub favorites: Vec<FavoriteModel>,
     /// The user's model order per instance, by slug.
     pub model_order: std::collections::HashMap<String, Vec<String>>,
+    /// Instances whose "Legacy models" the user toggled since the picker
+    /// opened; it starts expanded when the selected model is legacy.
+    pub toggled_legacy: Vec<String>,
 }
 
 /// The selected model, or the instance's first model when the selection is
@@ -318,6 +339,36 @@ pub fn build_model_picker(
             ),
         }
     };
+    let mut legacy = None;
+    let visible = match (&selected_rail, searching) {
+        (PickerRail::Instance { instance_id }, false) => {
+            let (current, old): (Vec<_>, Vec<_>) =
+                visible.into_iter().partition(|(_, model)| !model.is_legacy);
+            if old.is_empty() {
+                current
+            } else {
+                let active_is_legacy = old.iter().any(|(_, model)| {
+                    Some(&model_picker_model_key(&model.instance_id, &model.slug))
+                        == active_key.as_ref()
+                });
+                let expanded = active_is_legacy != options.toggled_legacy.contains(instance_id);
+                legacy = Some(LegacyModelsSection {
+                    key: model_picker_legacy_section_key(instance_id),
+                    instance_id: instance_id.clone(),
+                    label: "Legacy models".into(),
+                    detail: format!("{} models", old.len()),
+                    expanded,
+                    current_count: current.len() as u32,
+                });
+                let mut rows = current;
+                if expanded {
+                    rows.extend(old);
+                }
+                rows
+            }
+        }
+        _ => visible,
+    };
     let rows: Vec<ModelPickerRow> = visible
         .into_iter()
         .map(|item| {
@@ -377,9 +428,10 @@ pub fn build_model_picker(
     ModelPickerView {
         trigger: trigger(catalog, active_instance, model),
         selected_rail,
-        empty_label: rows.is_empty().then(|| "No models found".into()),
+        empty_label: (rows.is_empty() && legacy.is_none()).then(|| "No models found".into()),
         rail,
         rows,
+        legacy,
         locked_driver,
     }
 }
@@ -619,6 +671,49 @@ mod tests {
         let empty = catalog_of(vec![instance("codex", Driver::Codex)], vec![]);
         assert_eq!(trigger(&empty, "codex", "").label, "Choose model");
         assert_eq!(trigger(&empty, "codex", "gpt-5").label, "gpt-5");
+    }
+
+    // ModelPickerContent.tsx legacySection: legacy models fold under one row
+    // that starts open when the selected model is legacy.
+    #[test]
+    fn legacy_models_fold_under_a_row_that_opens_for_a_legacy_selection() {
+        let legacy = |slug: &str| CatalogModel {
+            is_legacy: true,
+            ..super::super::fixtures::model("codex", slug, slug)
+        };
+        let catalog = catalog_of(
+            vec![instance("codex", Driver::Codex)],
+            vec![
+                super::super::fixtures::model("codex", "gpt-5.5", "GPT-5.5"),
+                legacy("gpt-4"),
+                legacy("gpt-3"),
+            ],
+        );
+        let options = ModelPickerOptions {
+            rail: Some(PickerRail::instance("codex")),
+            ..Default::default()
+        };
+        let view = build_model_picker(&catalog, "codex", "gpt-5.5", None, &|_, _| None, &options);
+        let section = view.legacy.clone().unwrap();
+        assert_eq!(
+            (
+                section.label.as_str(),
+                section.detail.as_str(),
+                section.expanded
+            ),
+            ("Legacy models", "2 models", false)
+        );
+        assert_eq!(view.rows.len(), 1);
+        let open = build_model_picker(&catalog, "codex", "gpt-4", None, &|_, _| None, &options);
+        assert!(open.legacy.unwrap().expanded);
+        assert_eq!(open.rows.len(), 3);
+        let toggled = ModelPickerOptions {
+            toggled_legacy: vec!["codex".into()],
+            ..options
+        };
+        let closed = build_model_picker(&catalog, "codex", "gpt-4", None, &|_, _| None, &toggled);
+        assert!(!closed.legacy.unwrap().expanded);
+        assert_eq!(closed.rows.len(), 1);
     }
 
     #[test]

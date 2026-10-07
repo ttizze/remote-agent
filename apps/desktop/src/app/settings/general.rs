@@ -326,7 +326,9 @@ impl Desktop {
         traits_label: Option<&str>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let picker = self.snapshot.default_model_picker(String::new(), None);
+        let picker = self
+            .snapshot
+            .default_model_picker(String::new(), None, vec![]);
         let driver = picker
             .trigger
             .instance
@@ -341,14 +343,14 @@ impl Desktop {
             .when_some(driver, |button, driver| button.icon(driver_icon(driver)))
             .dropdown_caret(true)
             .dropdown_menu_with_anchor(Anchor::TopRight, move |mut menu, _, _| {
-                let picker = snapshot.default_model_picker(String::new(), None);
+                let picker = snapshot.default_model_picker(String::new(), None, vec![]);
                 let mut any = false;
                 for rail in &picker.rail {
                     let PickerRail::Instance { .. } = &rail.rail else {
                         continue;
                     };
                     let rows = snapshot
-                        .default_model_picker(String::new(), Some(rail.rail.clone()))
+                        .default_model_picker(String::new(), Some(rail.rail.clone()), vec![])
                         .rows;
                     if rows.is_empty() {
                         continue;
