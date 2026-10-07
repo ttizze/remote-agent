@@ -3489,16 +3489,15 @@ impl Decision {
                 restore_files,
                 restore_refusal,
             } => {
-                // A run waiting for earlier rollbacks does not block another
-                // one, which executes after that run starts.
+                // An active run does not block a rollback: its effect follows
+                // the run's start in the thread's effect order, and one that
+                // waits for earlier rollbacks executes after that run starts.
                 let after_start = self
                     .state
                     .run_awaiting_rollback()
                     .filter(|_| !self.state.rollbacks.is_empty())
                     .map(|run| run.id.clone());
-                if (self.state.active_run().is_some() && after_start.is_none())
-                    || self.state.tasks.iter().any(|t| !t.status.terminal())
-                {
+                if self.state.tasks.iter().any(|t| !t.status.terminal()) {
                     return reject("provider-work-active");
                 }
                 // Rolling back targets the active provider thread: the instance

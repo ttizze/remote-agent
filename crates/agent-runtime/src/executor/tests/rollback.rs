@@ -925,3 +925,53 @@ async fn a_rollback_requested_while_a_message_waits_executes_after_its_turn_star
     assert_eq!(rolled_back(&state), [1, 2]);
     assert!(rig.run(&id, &waiting).await.attempt.is_some());
 }
+
+// Orchestrator.ts dispatchCheckpointRollback admits a rollback while a turn
+// runs. Its effect does not wait for the turn: CheckpointRollbackService
+// rewinds the runs that already ended, and the running turn goes on.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rollback_requested_while_a_turn_runs_executes_without_waiting_for_it() {
+    let rig = rig();
+    rig.host.respond(revert_replies(rig.ops.clone(), false));
+    let id = tid("rollback-during-a-turn");
+    let scope = rig.scoped(&id, worktree("/wt")).await;
+    rig.completed_run(&id, "first", "turn-1").await;
+    rig.completed_run(&id, "second", "turn-2").await;
+    let third = rig.send(&id, "third", "third").await;
+    rig.drain().await;
+    let attempt = rig.attempt(&id, &third).await;
+    for event in [
+        ProviderEvent::SessionReady {
+            native_thread: "native-thread".into(),
+        },
+        ProviderEvent::TurnStarted {
+            native_turn: Some("turn-3".into()),
+        },
+    ] {
+        rig.provider(&id, &attempt, event).await;
+    }
+    assert_eq!(rig.run(&id, &third).await.status, RunStatus::Running);
+    rig.ops.log.lock().unwrap().clear();
+
+    assert_eq!(rollback(&rig, &id, &scope, 1, false).await, Reply::Accepted);
+    rig.drain().await;
+    assert_eq!(rig.ops.logged_with("provider"), ["provider"]);
+    let state = rig.state(&id).await;
+    assert!(state.rollbacks.is_empty());
+    assert_eq!(state.rollback_failure, None);
+    assert_eq!(rolled_back(&state), [2]);
+    assert_eq!(rig.run(&id, &third).await.status, RunStatus::Running);
+
+    rig.provider(
+        &id,
+        &attempt,
+        ProviderEvent::TurnFinished {
+            status: RunStatus::Completed,
+            native_head: Some("turn-3".into()),
+        },
+    )
+    .await;
+    rig.drain().await;
+    assert_eq!(rig.run(&id, &third).await.status, RunStatus::Completed);
+    assert_eq!(rolled_back(&*rig.state(&id).await), [2]);
+}

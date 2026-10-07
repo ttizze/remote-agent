@@ -995,6 +995,87 @@ fn a_rollback_requested_while_a_run_waits_executes_after_that_run_starts() {
     assert_eq!(run(&s, &second).status, RunStatus::RolledBack);
     assert_eq!(run(&s, &waiting).status, RunStatus::Starting);
 }
+// Orchestrator.ts dispatchCheckpointRollback admits a rollback while a run is
+// active. Its effect follows the run's start in the thread's effect order and
+// rewinds only the runs that ended; the active run is not rolled back.
+#[test]
+fn a_rollback_while_a_run_is_active_is_accepted_and_keeps_that_run() {
+    let rollback = |checkpoint: &CheckpointId| Command::Rollback {
+        checkpoint: checkpoint.clone(),
+        restore_files: false,
+        restore_refusal: None,
+    };
+    let run = |s: &State, id: &RunId| s.runs.iter().find(|run| &run.id == id).unwrap().clone();
+    let effect_of = |step: &Step, key: &str| {
+        step.effects.iter().any(|effect| {
+            matches!(
+                &effect.body,
+                EffectBody::Rollback { command, providers, .. }
+                    if command.as_str() == key && providers.len() == 1
+            )
+        })
+    };
+    let mut s = state();
+    let (first, a) = running(&mut s, "first");
+    finish(&mut s, &a);
+    let cp_first = checkpoint(&mut s, &first, &a, "cp-first");
+    let (second, b) = running(&mut s, "second");
+    finish(&mut s, &b);
+    checkpoint(&mut s, &second, &b, "cp-second");
+
+    // A run whose start is on its way.
+    let Reply::Run(starting) = command(
+        &mut s,
+        "starting",
+        send_message("starting", DispatchMode::StartImmediately),
+    )
+    .reply
+    else {
+        panic!()
+    };
+    assert_eq!(run(&s, &starting).status, RunStatus::Starting);
+    let step = command(&mut s, "while-starting", rollback(&cp_first));
+    assert_eq!(step.reply, Reply::Accepted);
+    assert!(effect_of(&step, "while-starting"), "{:?}", step.effects);
+    result(
+        &mut s,
+        "done-starting",
+        EffectResult::RollbackFinished {
+            bindings: vec![],
+            command: CommandId::new("while-starting").unwrap(),
+        },
+    );
+    assert_eq!(run(&s, &second).status, RunStatus::RolledBack);
+    assert_eq!(run(&s, &starting).status, RunStatus::Starting);
+
+    // A run whose turn is running.
+    let mut s = state();
+    let (first, a) = running(&mut s, "first");
+    finish(&mut s, &a);
+    let cp_first = checkpoint(&mut s, &first, &a, "cp-first");
+    let (second, b) = running(&mut s, "second");
+    finish(&mut s, &b);
+    checkpoint(&mut s, &second, &b, "cp-second");
+    let (third, c) = running(&mut s, "third");
+    assert_eq!(run(&s, &third).status, RunStatus::Running);
+    let step = command(&mut s, "while-running", rollback(&cp_first));
+    assert_eq!(step.reply, Reply::Accepted);
+    assert!(effect_of(&step, "while-running"), "{:?}", step.effects);
+    result(
+        &mut s,
+        "done-running",
+        EffectResult::RollbackFinished {
+            bindings: vec![],
+            command: CommandId::new("while-running").unwrap(),
+        },
+    );
+    assert!(s.rollbacks.is_empty());
+    assert_eq!(run(&s, &second).status, RunStatus::RolledBack);
+    assert_eq!(run(&s, &third).status, RunStatus::Running);
+    finish(&mut s, &c);
+    assert_ne!(run(&s, &third).status, RunStatus::RolledBack);
+    assert!(run(&s, &third).status.terminal() || s.captures.contains_key(&third));
+}
 // A rollback that followed a waiting run no longer waits for it once that run
 // is stopped; a message sent afterwards starts after the rollback.
 #[test]
