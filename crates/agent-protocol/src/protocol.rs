@@ -90,7 +90,7 @@ results! {
     ThreadHistory(::orchestration::ThreadHistoryPage), Search(Vec<::orchestration::SearchMatch>), Projects(Vec<crate::models::Project>),
     Committed(crate::conversation::Committed), Launched(crate::conversation::Launched),
     ThreadUpdate(crate::conversation::ThreadUpdate), ShellUpdate(crate::conversation::ShellUpdate),
-    ThreadSnapshot(crate::conversation::ThreadSnapshot), HistoryRow(Option<crate::conversation::HistoryRow>),
+    ThreadSnapshot(crate::conversation::ThreadSnapshot), TurnItemDetail(Option<crate::conversation::TurnItemDetail>),
     HistoryPage(crate::conversation::HistoryPage), SearchMatches(Vec<crate::conversation::SearchMatch>),
     Diff(crate::conversation::TurnDiff), SessionScan(crate::conversation::SessionScan),
     ImportCounts(crate::conversation::ImportCounts),

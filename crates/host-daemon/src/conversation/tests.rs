@@ -415,14 +415,20 @@ async fn a_launched_thread_streams_its_turn_and_reads_back_through_every_query()
         .iter()
         .find(|row| matches!(row.item.kind, ItemKind::AssistantMessage { .. }))
         .expect("the answer is in the history");
-    let item: Option<wire::HistoryRow> = host
+    let item: Option<wire::TurnItemDetail> = host
         .call(Call::TurnItem(wire::GetTurnItem {
             thread_id: thread.clone(),
             item_id: assistant.item.id.clone(),
         }))
         .await
         .unwrap();
-    assert_eq!(item.as_ref(), Some(assistant));
+    assert_eq!(
+        item,
+        Some(wire::TurnItemDetail {
+            row: assistant.clone(),
+            task: None
+        })
+    );
 
     let found: Vec<wire::SearchMatch> = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
@@ -969,7 +975,7 @@ async fn conversation_calls_answer_with_typed_errors() {
                 attachments: vec![agent_domain::Attachment {
                     kind: agent_domain::AttachmentKind::File,
                     source: None,
-                    id: "pending:missing".into(),
+                    id: "pending-missing".into(),
                     name: "notes.md".into(),
                     mime_type: "text/markdown".into(),
                     path: "/etc/passwd".into(),
@@ -1373,7 +1379,74 @@ async fn agent_tools_delegate_create_queue_and_interrupt_through_the_runtime() {
     host.conversation.shutdown().await;
 }
 
-// Projects carry their repository identity.
+// OrchestratorMcpToolkit.integration.test.ts: a thread_send repeated with its
+// clientRequestId returns the first run. Here the retry arrives once that run is
+// running, so the same request now resolves to a steer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_retried_thread_send_returns_its_first_run_after_that_run_starts() {
+    let replay = Arc::new(ReplaySpawner {
+        transcript: SIMPLE,
+        spawned: Mutex::new(vec![]),
+    });
+    let host = host_with(Arc::new(HeldCodex), replay).await;
+    let parent: wire::Launched = host
+        .call(launch(&host, "parent", "[hold] parent work"))
+        .await
+        .unwrap();
+    let parent = parent.thread_id;
+    let target: wire::Launched = host
+        .call(launch(&host, "target", "first task"))
+        .await
+        .unwrap();
+    let target = target.thread_id;
+    eventually(&host, &target, |state| {
+        !state.runs.is_empty() && state.runs.iter().all(|run| run.status.terminal())
+    })
+    .await;
+    let send = json!({"threadId": target, "message": "[hold] next task", "clientRequestId": "loop-send-1"});
+    let sent = tool(&host, &parent, "thread_send", send.clone()).await;
+    assert_eq!(sent["delivery"], "started", "{sent}");
+    eventually(&host, &target, running).await;
+
+    let repeated = tool(&host, &parent, "thread_send", send).await;
+
+    assert_eq!(repeated["runId"], sent["runId"], "{repeated}");
+    assert_eq!(repeated["messageId"], sent["messageId"]);
+    assert_eq!(repeated["delivery"], "started");
+    let state = host
+        .conversation
+        .runtime
+        .state(&target)
+        .await
+        .unwrap()
+        .state;
+    assert_eq!(state.runs.len(), 2);
+    host.conversation.shutdown().await;
+}
+
+/// The next update of `project` on a shell stream.
+async fn project_update(
+    updates: &mut crate::host_rpc::connections::HostSubscription,
+    project: &str,
+) -> agent_protocol::models::Project {
+    loop {
+        let frame = tokio::time::timeout(Duration::from_secs(10), updates.recv())
+            .await
+            .expect("the project is updated")
+            .unwrap();
+        if let wire::ShellUpdate::ProjectUpdated {
+            project: updated, ..
+        } = protocol::decode::<wire::ShellUpdate>(&frame).unwrap()
+            && updated.id == project
+        {
+            return *updated;
+        }
+    }
+}
+
+// Projects carry their repository identity. Like any project read, the shell's
+// snapshot answers at once and resolves a missing identity in the background;
+// the shell then shows the project with it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn shell_projects_carry_their_repository_identity() {
     let host = host().await;
@@ -1381,15 +1454,6 @@ async fn shell_projects_carry_their_repository_identity() {
         &host.project_root,
         &["remote", "add", "origin", "git@github.com:Acme/widget.git"],
     );
-    let _: agent_protocol::models::Empty = host
-        .call(Call::UpdateProject(
-            agent_protocol::operations::UpdateProject {
-                project_id: host.project.clone(),
-                scripts: None,
-            },
-        ))
-        .await
-        .unwrap();
     let shell = host
         .reply(Call::ShellStream(wire::SubscribeShell {
             after_sequence: None,
@@ -1403,11 +1467,14 @@ async fn shell_projects_carry_their_repository_identity() {
     else {
         panic!("a snapshot opens the shell stream");
     };
-    let project = snapshot
-        .projects
-        .iter()
-        .find(|project| project.id == host.project)
-        .unwrap();
+    assert!(
+        snapshot
+            .projects
+            .iter()
+            .any(|project| project.id == host.project)
+    );
+    let mut updates = shell.updates.unwrap();
+    let project = project_update(&mut updates, &host.project).await;
     let identity = project.repository_identity.as_ref().unwrap();
     assert_eq!(identity.canonical_key, "github.com/acme/widget");
     assert_eq!(identity.provider.as_deref(), Some("github"));
@@ -1493,5 +1560,62 @@ async fn settling_a_thread_closes_its_idle_terminals_on_the_metadata_stream() {
     })
     .await
     .expect("settling closes the idle shell");
+    host.conversation.shutdown().await;
+}
+
+// A remote changed while a shell stays subscribed: once the cached identities
+// expire, the next project read resolves it again and the shell shows the new one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn subscribed_shells_see_a_changed_remote_once_the_cached_identity_expires() {
+    let host = host().await;
+    git(
+        &host.project_root,
+        &["remote", "add", "origin", "git@github.com:Acme/widget.git"],
+    );
+    let shell = host
+        .reply(Call::ShellStream(wire::SubscribeShell {
+            after_sequence: None,
+            request_completion_marker: false,
+            location: wire::ShellLocation::Active,
+        }))
+        .await;
+    let mut updates = shell.updates.unwrap();
+    let project = project_update(&mut updates, &host.project).await;
+    assert_eq!(
+        project.repository_identity.unwrap().canonical_key,
+        "github.com/acme/widget"
+    );
+
+    git(
+        &host.project_root,
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            "git@github.com:Acme/gadget.git",
+        ],
+    );
+    let identity_of = |projects: Vec<agent_protocol::models::Project>| {
+        projects
+            .into_iter()
+            .find(|project| project.id == host.project)
+            .and_then(|project| project.repository_identity)
+            .map(|identity| identity.canonical_key)
+    };
+    let clock = host.service.shared().projects.identities().clock().clone();
+    clock.advance(Duration::from_secs(16 * 60));
+    // The expired identity still answers while the new one resolves.
+    let listed: Vec<agent_protocol::models::Project> = host
+        .call(Call::ListProjects(agent_protocol::models::Empty {}))
+        .await
+        .unwrap();
+    assert_eq!(
+        identity_of(listed).as_deref(),
+        Some("github.com/acme/widget")
+    );
+    let project = project_update(&mut updates, &host.project).await;
+    let identity = project.repository_identity.unwrap();
+    assert_eq!(identity.canonical_key, "github.com/acme/gadget");
+    assert_eq!(identity.name.as_deref(), Some("gadget"));
     host.conversation.shutdown().await;
 }

@@ -2,12 +2,13 @@ use super::checkpoint::checkpoint_scope;
 use super::{ExecutorContext, effect_command_id};
 use crate::{
     Durability, EffectError, EffectHandler, EffectJob, LaunchOperation, LaunchRecord, LaunchStatus,
-    SetupEvent, SetupProgress, SetupRequest, SetupRun, SetupTracker, WorkspaceStrategy,
-    WorktreeRequest,
+    SetupEvent, SetupProgress, SetupRequest, SetupRun, SetupTracker, TextGenerationRequest,
+    WorkspaceStrategy, WorktreeRequest, branch_name_output_schema, branch_name_prompt,
+    generated_branch_name, is_temporary_worktree_branch,
 };
 use agent_domain::{
-    Command, CommandId, EffectBody, EffectResult, Input, PreparationPhase, RunId, RunStatus,
-    ThreadId, Workspace, WorktreeSetupPhase, WorktreeSetupScript, WorktreeSetupStageId,
+    BranchNamingMode, Command, CommandId, EffectBody, EffectResult, Input, PreparationPhase, RunId,
+    RunStatus, ThreadId, Workspace, WorktreeSetupPhase, WorktreeSetupScript, WorktreeSetupStageId,
     WorktreeSetupStageStatus,
 };
 use futures_util::future::BoxFuture;
@@ -148,6 +149,8 @@ async fn progress(
 struct Checkout {
     path: Option<String>,
     recorded: bool,
+    /// The Host is checking it out.
+    creating: bool,
 }
 
 /// Provisions the thread's workspace for its launch (reusing a worktree an earlier
@@ -174,7 +177,15 @@ pub async fn prepare_workspace(
         }
         _ => None,
     }) else {
-        return prepare(context, thread, prepared, None, &Mutex::default()).await;
+        return prepare(
+            context,
+            thread,
+            prepared,
+            None,
+            &Mutex::default(),
+            &CancellationToken::new(),
+        )
+        .await;
     };
     let setups = context.setups.clone();
     let stages: &[WorktreeSetupStageId] = if record.worktree_path.is_some() {
@@ -199,9 +210,22 @@ pub async fn prepare_workspace(
         Some(cancel.clone()),
     );
     let checkout = Mutex::new(Checkout::default());
-    let result = tokio::select! {
-        result = prepare(context, thread, prepared, Some(&setups), &checkout) => result,
-        () = cancel.cancelled() => Err(PrepareError::Cancelled),
+    let result = {
+        let preparation = prepare(context, thread, prepared, Some(&setups), &checkout, &cancel);
+        tokio::pin!(preparation);
+        tokio::select! {
+            biased;
+            result = &mut preparation => result,
+            () = cancel.cancelled() => {
+                // A checkout in progress stops its Git command and removes what
+                // it created; wait for that before cleaning up, so nothing it
+                // does outlives the cancellation or escapes the cleanup.
+                if checkout.lock().unwrap().creating {
+                    let _ = (&mut preparation).await;
+                }
+                Err(PrepareError::Cancelled)
+            }
+        }
     };
     let error = match result {
         Ok(mut done) => {
@@ -279,6 +303,7 @@ async fn prepare(
     prepared: Option<PreparedRun<'_>>,
     setups: Option<&Arc<SetupTracker>>,
     checkout: &Mutex<Checkout>,
+    cancel: &CancellationToken,
 ) -> Result<Prepared, PrepareError> {
     let run = prepared.as_ref().map(|prepared| prepared.run);
     let retry = |error: crate::RuntimeError| PrepareError::Retry(error.to_string());
@@ -309,14 +334,24 @@ async fn prepare(
             setups.stage_status(thread, id, status, None);
         }
     };
+    // A worktree the thread already has keeps its binding: rewriting it could
+    // undo the first attempt's branch rename.
+    let bound = |path: &str| {
+        current
+            .workspace
+            .clone()
+            .filter(|workspace| workspace.worktree_path.as_deref() == Some(path))
+    };
+    // Whether this attempt provides the worktree, so it names its branch.
+    let mut provided = false;
     let workspace = match (&record, strategy) {
         (Some(record), _) if record.worktree_path.is_some() => {
             let path = record.worktree_path.clone().unwrap_or_default();
-            Workspace {
+            bound(&path).unwrap_or(Workspace {
                 cwd: path.clone(),
                 worktree_path: Some(path),
                 branch: record.branch.clone(),
-            }
+            })
         }
         (
             Some(record),
@@ -341,6 +376,7 @@ async fn prepare(
                     }
                 })
             });
+            checkout.lock().unwrap().creating = true;
             let created = context
                 .ops
                 .create_worktree(WorktreeRequest {
@@ -351,10 +387,18 @@ async fn prepare(
                     branch,
                     start_from_origin,
                     progress: reporter.unwrap_or_default(),
+                    cancel: cancel.clone(),
                 })
-                .await
-                .map_err(failed(LaunchOperation::ProvisionWorktree))?;
-            checkout.lock().unwrap().path = Some(created.path.clone());
+                .await;
+            {
+                let mut checkout = checkout.lock().unwrap();
+                checkout.creating = false;
+                checkout.path = created.as_ref().ok().map(|created| created.path.clone());
+            }
+            if cancel.is_cancelled() {
+                return Err(PrepareError::Cancelled);
+            }
+            let created = created.map_err(failed(LaunchOperation::ProvisionWorktree))?;
             let now = context.registry.context().clock.now().millis();
             if let Err(error) = context
                 .store
@@ -388,17 +432,23 @@ async fn prepare(
                 WorktreeSetupStageId::Checkout,
                 WorktreeSetupStageStatus::Done,
             );
+            provided = true;
             Workspace {
                 cwd: created.path.clone(),
                 worktree_path: Some(created.path),
                 branch: created.branch,
             }
         }
-        (_, WorkspaceStrategy::ExistingWorktree { path, branch }) => Workspace {
-            cwd: path.clone(),
-            worktree_path: Some(path),
-            branch,
-        },
+        // Like the reference, a chosen worktree is bound as the launch named it,
+        // and its temporary branch is named again by every attempt.
+        (_, WorkspaceStrategy::ExistingWorktree { path, branch }) => {
+            provided = true;
+            Workspace {
+                cwd: path.clone(),
+                worktree_path: Some(path),
+                branch,
+            }
+        }
         (_, WorkspaceStrategy::Root { branch })
         | (None, WorkspaceStrategy::Worktree { branch, .. }) => {
             current.workspace.clone().unwrap_or(Workspace {
@@ -421,6 +471,32 @@ async fn prepare(
             .map_err(retry)?;
     }
     checkout.lock().unwrap().recorded = true;
+    // Like the reference, a temporary branch gets its generated name in the
+    // background, so naming never delays the setup or the turn.
+    if provided
+        && let (Some(path), Some(branch)) = (&workspace.worktree_path, &workspace.branch)
+        && is_temporary_worktree_branch(branch)
+        && let Some(message) = run
+            .and_then(|run| state.runs.iter().find(|candidate| &candidate.id == run))
+            .and_then(|run| {
+                state
+                    .messages
+                    .iter()
+                    .find(|message| message.id == run.message)
+            })
+    {
+        tokio::spawn(rename_branch(
+            context.clone(),
+            thread.clone(),
+            BranchRename {
+                project: current.project.clone(),
+                worktree: path.clone(),
+                branch: branch.clone(),
+                text: message.text.clone(),
+                attachments: message.attachments.clone(),
+            },
+        ));
+    }
     let scope = checkpoint_scope(thread, &workspace.cwd);
     if state.checkpoint_scope.as_ref() != Some(&scope) {
         context
@@ -540,6 +616,79 @@ async fn prepare(
             .map_err(|error| PrepareError::Retry(error.to_string()))?;
     }
     Ok(done)
+}
+
+/// A launch's temporary branch and the first message it is named after.
+struct BranchRename {
+    project: String,
+    worktree: String,
+    branch: String,
+    text: String,
+    attachments: Vec<agent_domain::Attachment>,
+}
+
+/// Generates a branch name from the launch's first message, renames the
+/// temporary branch, and shows the name on the thread while it still works in
+/// that worktree. Any failure keeps the temporary name.
+async fn rename_branch(context: ExecutorContext, thread: ThreadId, rename: BranchRename) {
+    let renamed = async {
+        let naming = context.ops.branch_naming(&rename.project);
+        let raw = context
+            .ops
+            .generate_text(TextGenerationRequest {
+                operation: "generateBranchName",
+                project: rename.project.clone(),
+                cwd: rename.worktree.clone(),
+                prompt: branch_name_prompt(&naming, &rename.text, &rename.attachments),
+                attachments: rename.attachments.clone(),
+                output_schema: branch_name_output_schema(),
+            })
+            .await?;
+        let generated = generated_branch_name(&raw, &naming)
+            .ok_or_else(|| "the model did not return a branch name".to_owned())?;
+        let renamed = context
+            .ops
+            .rename_branch(
+                rename.worktree.clone(),
+                rename.branch.clone(),
+                generated,
+                naming.mode == BranchNamingMode::Custom,
+            )
+            .await?;
+        let _binding = context.workspaces.bind().await;
+        let state = context
+            .registry
+            .state(&thread)
+            .await
+            .map_err(|error| error.to_string())?;
+        let Some(workspace) = state
+            .thread
+            .as_ref()
+            .and_then(|current| current.workspace.clone())
+            .filter(|workspace| workspace.worktree_path.as_deref() == Some(&rename.worktree))
+        else {
+            return Ok(());
+        };
+        if workspace.branch.as_deref() != Some(renamed.as_str()) {
+            context
+                .input(
+                    &thread,
+                    Input::Workspace {
+                        workspace: Some(Workspace {
+                            branch: Some(renamed),
+                            ..workspace
+                        }),
+                    },
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+        Ok::<_, String>(())
+    }
+    .await;
+    if let Err(error) = renamed {
+        tracing::warn!(%thread, branch = %rename.branch, %error, "thread worktree branch rename failed");
+    }
 }
 
 /// Prepares a deferred run's workspace, then releases the run to its provider.

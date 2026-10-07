@@ -428,6 +428,32 @@ fn replies_round_trip_inside_responses() {
     assert!(row.message.is_some());
     response_round_trip(Some(row.clone()));
     response_round_trip(None::<HistoryRow>);
+    response_round_trip(Some(TurnItemDetail {
+        row: row.clone(),
+        task: Some(Task {
+            original_message: None,
+            native_task: None,
+            background: false,
+            id: id("child-agent"),
+            native_key: "child-agent".into(),
+            run: None,
+            attempt: id("attempt"),
+            child_thread: id("child"),
+            parent_task: None,
+            prompt: "Inspect code".into(),
+            title: None,
+            started_at: at(),
+            completed_at: Some(at()),
+            model: None,
+            status: ItemStatus::Completed,
+            result: Some("Found it".into()),
+            progress: None,
+            wake: agent_domain::CompletionWake::Always,
+            delivery: agent_domain::DeliveryState::Pending,
+            generation: 0,
+        }),
+    }));
+    response_round_trip(None::<TurnItemDetail>);
     for next_cursor in [None, Some("older".into())] {
         response_round_trip(HistoryPage {
             rows: vec![row.clone()],

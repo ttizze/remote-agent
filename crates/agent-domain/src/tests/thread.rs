@@ -249,7 +249,10 @@ fn attachment(kind: AttachmentKind, mime: &str, size: u64) -> Attachment {
     Attachment {
         kind,
         source: None,
-        id: format!("chat:{mime}:{size}"),
+        id: format!(
+            "{}-{size}",
+            mime.replace(|c: char| !c.is_ascii_alphanumeric(), "_")
+        ),
         name: "file".into(),
         mime_type: mime.into(),
         path: "/tmp/file".into(),
@@ -297,4 +300,26 @@ fn attachments_follow_the_reference_schemas_and_image_budget() {
     extra.id = "extra".into();
     images.push(extra);
     assert_eq!(validate_attachments(&images), Err("total-images-too-large"));
+}
+
+proptest::proptest! {
+    // `ChatAttachmentId` trims, then takes 1 to 128 characters of
+    // `[a-z0-9_-]`, ignoring case.
+    #[test]
+    fn attachment_ids_follow_the_reference_schema(
+        id in proptest::strategy::Strategy::prop_map(
+            proptest::collection::vec(proptest::sample::select(&["a", "Z", "0", "_", "-", ":", "/", " ", "\t", "日"][..]), 0..140),
+            |parts| parts.concat(),
+        ),
+    ) {
+        let mut file = attachment(AttachmentKind::File, "text/plain", 1);
+        file.id = id.clone();
+        let trimmed = id.trim_matches([' ', '\t']);
+        let expected = (1..=128).contains(&trimmed.chars().count())
+            && trimmed.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+        proptest::prop_assert_eq!(
+            validate_attachments(&[file]),
+            if expected { Ok(()) } else { Err("invalid-attachment") }
+        );
+    }
 }

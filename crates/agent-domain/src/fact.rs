@@ -379,6 +379,7 @@ pub enum FactBody {
         command: CommandId,
         checkpoint: CheckpointId,
         restore_files: bool,
+        after_start: Option<RunId>,
     },
     RolledBack {
         command: CommandId,
@@ -1347,11 +1348,13 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
             command,
             checkpoint,
             restore_files,
+            after_start,
         } => {
             state.rollbacks.push(PendingRollback {
                 command: command.clone(),
                 checkpoint: checkpoint.clone(),
                 restore_files: *restore_files,
+                after_start: after_start.clone(),
                 rewinding: BTreeSet::new(),
             });
             state.rollback_failure = None;

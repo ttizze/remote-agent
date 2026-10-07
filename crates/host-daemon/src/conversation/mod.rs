@@ -71,6 +71,7 @@ pub(crate) struct Conversation {
     bridge: Arc<ToolBridge>,
     tools: Arc<AgentTools>,
     settled_terminals: OnceLock<tokio_util::task::AbortOnDropHandle<()>>,
+    identity_updates: std::sync::Mutex<Option<tokio_util::task::AbortOnDropHandle<()>>>,
 }
 
 impl Conversation {
@@ -107,6 +108,7 @@ impl Conversation {
         let tools = Arc::new(AgentTools::new(Arc::new(HostOrchestration {
             runtime: runtime.clone(),
             projects: resources.projects.clone(),
+            files: resources.files.clone(),
             models: config.models,
         })));
         Ok(Arc::new(Self {
@@ -115,6 +117,7 @@ impl Conversation {
             bridge,
             tools,
             settled_terminals: OnceLock::new(),
+            identity_updates: Default::default(),
         }))
     }
 
@@ -131,6 +134,16 @@ impl Conversation {
                     self.resources.terminals.clone(),
                 ),
             )));
+        *self
+            .identity_updates
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(
+            tokio_util::task::AbortOnDropHandle::new(tokio::spawn(identity_updates(
+                Arc::downgrade(&self.runtime),
+                self.resources.projects.clone(),
+                self.resources.projects.identities().subscribe(),
+            ))),
+        );
         self.bridge
             .serve(Arc::downgrade(&self.tools))
             .map_err(anyhow::Error::msg)
@@ -138,6 +151,10 @@ impl Conversation {
 
     /// Stops effects and provider processes; unfinished threads record the shutdown.
     pub(crate) async fn shutdown(&self) {
+        self.identity_updates
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take();
         self.runtime.shutdown().await;
     }
 
@@ -212,6 +229,13 @@ pub(crate) async fn project_added(
     if let Err(error) = projects.refresh().await {
         tracing::warn!(operation = "conversation.projects", message = %format_args!("{error:#}"));
     }
+    if let Some(added) = projects
+        .list()
+        .into_iter()
+        .find(|added| added.id == project)
+    {
+        projects.identities().invalidate([added.root.as_str()]);
+    }
     if let Err(error) = runtime.project_changed(project).await {
         tracing::warn!(operation = "conversation.projects", message = %error);
     }
@@ -221,4 +245,31 @@ pub(crate) async fn project_added(
             tracing::warn!(operation = "conversation.import", message = %error);
         }
     });
+}
+
+/// Shell subscribers see each project whose repository identity changed.
+async fn identity_updates(
+    runtime: std::sync::Weak<Runtime>,
+    projects: Arc<ProjectCatalog>,
+    mut changes: tokio::sync::broadcast::Receiver<String>,
+) {
+    loop {
+        let root = match changes.recv().await {
+            Ok(root) => root,
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+        };
+        let Some(runtime) = runtime.upgrade() else {
+            return;
+        };
+        for project in projects
+            .list()
+            .into_iter()
+            .filter(|project| project.root == root)
+        {
+            if let Err(error) = runtime.project_changed(&project.id).await {
+                tracing::warn!(operation = "conversation.projects", message = %error);
+            }
+        }
+    }
 }

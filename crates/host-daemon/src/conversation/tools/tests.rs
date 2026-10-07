@@ -2,11 +2,11 @@
 use super::backend::{Dispatched, Orchestration, ProjectFailure, ProviderModel, ProviderSnapshot};
 use super::*;
 use agent_domain::{
-    Attempt, AttemptStatus, Command, CompletionWake, DeliveryState, Driver, InputIntent,
-    InteractionMode, Item, ItemKind, ItemStatus, Message, MessageAuthor, MessageId, ModelSelection,
-    NodeId, Question, QuestionOption, Request, RequestBody, RequestStatus, ResponseCapability,
-    Role, Run, RunAttemptId, RunId, RunStatus, RuntimeMode, RuntimeRequestId, Task, Thread,
-    ThreadShell, Timestamp, TurnItemId,
+    Attachment, AttachmentKind, Attempt, AttemptStatus, Command, CompletionWake, DeliveryState,
+    Driver, InputIntent, InteractionMode, Item, ItemKind, ItemStatus, Message, MessageAuthor,
+    MessageId, ModelSelection, NodeId, Question, QuestionOption, Request, RequestBody,
+    RequestStatus, ResponseCapability, Role, Run, RunAttemptId, RunId, RunStatus, RuntimeMode,
+    RuntimeRequestId, Task, Thread, ThreadShell, Timestamp, TurnItemId,
 };
 use agent_protocol::models::ProjectScript;
 use agent_runtime::{HostProject, LaunchThread, SearchMatch};
@@ -25,9 +25,12 @@ struct Fake {
     unreadable: Mutex<HashSet<ThreadId>>,
     dispatched: Mutex<Vec<(ThreadId, CommandId, Command)>>,
     hook: Mutex<Option<Hook>>,
+    receipts: Mutex<HashMap<CommandId, (ThreadId, Command, Reply, u64)>>,
     providers: Mutex<Vec<ProviderSnapshot>>,
     projects: Mutex<Vec<HostProject>>,
     launches: Mutex<Vec<LaunchThread>>,
+    claims: Mutex<Vec<(ThreadId, Vec<Attachment>)>>,
+    named: Mutex<Vec<String>>,
     created: Mutex<Vec<CreatedProject>>,
 }
 impl Fake {
@@ -90,13 +93,56 @@ impl Orchestration for Fake {
         command: Command,
     ) -> BoxFuture<'_, Result<Dispatched, String>> {
         let mut dispatched = self.dispatched.lock().unwrap();
-        dispatched.push((thread.clone(), id, command.clone()));
+        dispatched.push((thread.clone(), id.clone(), command.clone()));
         let sequence = dispatched.len() as u64;
-        let reply = match self.hook.lock().unwrap().as_ref() {
-            Some(hook) => hook(thread, &command),
-            None => Ok(Reply::Accepted),
+        // Like the Host's actor, a resent command replays only when it is the
+        // same command for the same thread.
+        let mut receipts = self.receipts.lock().unwrap();
+        let reply = match receipts.get(&id) {
+            Some((receipt_thread, first, reply, sequence))
+                if receipt_thread == thread && *first == command =>
+            {
+                Ok(Dispatched {
+                    reply: reply.clone(),
+                    sequence: *sequence,
+                })
+            }
+            Some(_) => Ok(Dispatched {
+                reply: Reply::Rejected {
+                    reason: "command-id-conflict".into(),
+                },
+                sequence,
+            }),
+            None => {
+                let reply = match self.hook.lock().unwrap().as_ref() {
+                    Some(hook) => hook(thread, &command),
+                    None => Ok(Reply::Accepted),
+                };
+                if let Ok(reply) = &reply {
+                    receipts.insert(id, (thread.clone(), command, reply.clone(), sequence));
+                }
+                reply.map(|reply| Dispatched { reply, sequence })
+            }
         };
-        Box::pin(async move { reply.map(|reply| Dispatched { reply, sequence }) })
+        Box::pin(async move { reply })
+    }
+    fn receipt(
+        &self,
+        id: &CommandId,
+    ) -> BoxFuture<'_, Result<Option<super::backend::CommandReceipt>, String>> {
+        let receipt = self
+            .receipts
+            .lock()
+            .unwrap()
+            .get(id)
+            .map(
+                |(thread, _, reply, sequence)| super::backend::CommandReceipt {
+                    thread: thread.clone(),
+                    reply: reply.clone(),
+                    sequence: *sequence,
+                },
+            );
+        Box::pin(async move { Ok(receipt) })
     }
     fn shells(&self) -> BoxFuture<'_, Result<Vec<ThreadShell>, String>> {
         let shells = self
@@ -156,6 +202,30 @@ impl Orchestration for Fake {
         self.launches.lock().unwrap().push(request);
         Box::pin(async move { Ok(thread) })
     }
+    /// Claims every upload but `pending-missing` into `chat-<thread>-<token>`.
+    fn claim_attachments(
+        &self,
+        thread: &ThreadId,
+        attachments: Vec<Attachment>,
+    ) -> BoxFuture<'_, Result<Vec<Attachment>, String>> {
+        self.claims
+            .lock()
+            .unwrap()
+            .push((thread.clone(), attachments.clone()));
+        let claimed = attachments
+            .into_iter()
+            .map(|mut attachment| {
+                let token = attachment.id.strip_prefix("pending-").unwrap().to_owned();
+                if token == "missing" {
+                    return Err("attachment not found".to_owned());
+                }
+                attachment.id = format!("chat-{thread}-{token}");
+                attachment.path = format!("/claimed/{token}");
+                Ok(attachment)
+            })
+            .collect();
+        Box::pin(async move { claimed })
+    }
     fn providers(&self) -> BoxFuture<'_, Result<Vec<ProviderSnapshot>, String>> {
         let providers = self.providers.lock().unwrap().clone();
         Box::pin(async move { Ok(providers) })
@@ -189,6 +259,21 @@ impl Orchestration for Fake {
             root: root.to_string_lossy().into_owned(),
         };
         Box::pin(async move { Ok(project) })
+    }
+    /// Starts `project:named` in `/projects/pinball-stats`, whose commit fails.
+    fn create_named_project(
+        &self,
+        title: String,
+    ) -> BoxFuture<'_, Result<(HostProject, Option<String>), super::backend::NamedProjectFailure>>
+    {
+        self.named.lock().unwrap().push(title.clone());
+        let project = HostProject {
+            id: "project:named".into(),
+            name: title,
+            root: "/projects/pinball-stats".into(),
+        };
+        let commit_error = Some("Git has no name or email on this machine.".to_owned());
+        Box::pin(async move { Ok((project, commit_error)) })
     }
 }
 
@@ -1453,6 +1538,110 @@ async fn launches_threads_from_a_full_access_caller_and_scratch_threads_into_cha
 }
 
 #[tokio::test]
+async fn launches_claim_pending_uploads_into_the_new_thread_and_reject_other_attachments() {
+    let fake = Arc::new(Fake::default());
+    fake.put(active_state("source-thread", "codex"));
+    let tools = tools(&fake);
+    let file = |id: &str| json!({"type":"file","id":id,"name":"notes.txt","mimeType":"text/plain","sizeBytes":12});
+    let image = json!({"type":"image","id":"pending-shot","name":"shot.png","mimeType":"image/png","sizeBytes":0});
+    let launched = call(
+        &tools,
+        "source-thread",
+        "thread_launch",
+        json!({"title":"Audit","message":"Review these","attachments":[file("pending-notes"), image]}),
+    )
+    .await;
+    let thread = ThreadId::new(launched["threadId"].as_str().unwrap()).unwrap();
+    {
+        let claims = fake.claims.lock().unwrap();
+        assert_eq!(claims.len(), 1);
+        assert_eq!(claims[0].0, thread);
+        let launches = fake.launches.lock().unwrap();
+        let message = launches[0].initial_message.as_ref().unwrap();
+        assert_eq!(message.text, "Review these");
+        assert_eq!(
+            message
+                .attachments
+                .iter()
+                .map(|file| (file.kind, file.id.as_str(), file.path.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                (
+                    AttachmentKind::File,
+                    format!("chat-{thread}-notes").as_str(),
+                    "/claimed/notes"
+                ),
+                (
+                    AttachmentKind::Image,
+                    format!("chat-{thread}-shot").as_str(),
+                    "/claimed/shot"
+                ),
+            ]
+        );
+    }
+    assert_eq!(launched["status"], "preparing");
+
+    // Attachments alone still start the thread with an empty prompt.
+    call(
+        &tools,
+        "source-thread",
+        "thread_launch",
+        json!({"title":"Look","attachments":[file("pending-only")]}),
+    )
+    .await;
+    {
+        let launches = fake.launches.lock().unwrap();
+        let message = launches[1].initial_message.as_ref().unwrap();
+        assert_eq!(message.text, "");
+        assert_eq!(message.attachments.len(), 1);
+    }
+
+    // A claimed attachment belongs to another thread.
+    let claimed = call(
+        &tools,
+        "source-thread",
+        "thread_launch",
+        json!({"title":"Audit","attachments":[file("pending-notes"), file("chat-other-notes")]}),
+    )
+    .await;
+    assert_eq!(code(&claimed), "invalid_request");
+    assert_eq!(
+        claimed["message"],
+        "A new thread accepts only pending attachment uploads."
+    );
+    let missing = call(
+        &tools,
+        "source-thread",
+        "thread_launch",
+        json!({"title":"Audit","attachments":[file("pending-missing")]}),
+    )
+    .await;
+    assert_eq!(
+        missing,
+        json!({"_tag":"OrchestratorMcpFailure","code":"orchestration_error","message":"attachment not found"})
+    );
+    for invalid in [
+        json!({"type":"image","id":"pending-text","name":"a.txt","mimeType":"text/plain","sizeBytes":1}),
+        json!({"type":"file","id":"pending-empty","name":"a.txt","mimeType":"text/plain","sizeBytes":0}),
+        json!({"type":"file","id":"pending-big","name":"a.txt","mimeType":"text/plain","sizeBytes":50 * 1024 * 1024 + 1}),
+        json!({"type":"file","id":" ","name":"a.txt","mimeType":"text/plain","sizeBytes":1}),
+        json!({"type":"file","id":"pending:colon","name":"a.txt","mimeType":"text/plain","sizeBytes":1}),
+        json!({"type":"folder","id":"pending-dir","name":"a","mimeType":"inode/directory","sizeBytes":1}),
+    ] {
+        let rejected = call(
+            &tools,
+            "source-thread",
+            "thread_launch",
+            json!({"title":"Audit","attachments":[invalid]}),
+        )
+        .await;
+        assert_eq!(rejected["_tag"], "AiError", "{rejected}");
+    }
+    assert_eq!(fake.claims.lock().unwrap().len(), 3);
+    assert_eq!(fake.launches.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
 async fn creates_projects_from_a_path_and_rejects_fields_it_cannot_apply() {
     let fake = Arc::new(Fake::default());
     fake.put(active_state("source-thread", "codex"));
@@ -1499,6 +1688,7 @@ async fn creates_projects_from_a_path_and_rejects_fields_it_cannot_apply() {
     )
     .await;
     assert_eq!(blank["_tag"], "AiError");
+    // A path takes a default model, which a create does not record.
     let unkept = call(
         &tools,
         "source-thread",
@@ -1506,8 +1696,18 @@ async fn creates_projects_from_a_path_and_rejects_fields_it_cannot_apply() {
         json!({"title":"Modelled","workspaceRoot":"/work/modelled","defaultModelSelection":{"instanceId":"codex","model":"gpt-5"}}),
     )
     .await;
-    assert_eq!(code(&unkept), "invalid_request");
-    assert_eq!(fake.created.lock().unwrap().len(), 2);
+    assert_eq!(unkept["workspaceRoot"], "/work/modelled");
+    assert_eq!(unkept["defaultModelSelection"], Value::Null);
+    assert_eq!(fake.created.lock().unwrap().len(), 3);
+    let malformed = call(
+        &tools,
+        "source-thread",
+        "project_create",
+        json!({"title":"Modelled","workspaceRoot":"/work/malformed","defaultModelSelection":{"instanceId":" ","model":"gpt-5"}}),
+    )
+    .await;
+    assert_eq!(malformed["_tag"], "AiError");
+    assert_eq!(fake.created.lock().unwrap().len(), 3);
     for extra in [
         json!({"scripts":[]}),
         json!({"defaultModelSelection":{"instanceId":"codex","model":"gpt-5"}}),
@@ -1520,7 +1720,56 @@ async fn creates_projects_from_a_path_and_rejects_fields_it_cannot_apply() {
         let rejected = call(&tools, "source-thread", "project_create", input).await;
         assert_eq!(code(&rejected), "invalid_request");
     }
-    assert_eq!(fake.created.lock().unwrap().len(), 2);
+    assert_eq!(fake.created.lock().unwrap().len(), 3);
+    assert!(fake.named.lock().unwrap().is_empty());
+}
+
+// project/handlers.test.ts "starts a project from just a title when
+// workspaceRoot is omitted".
+#[tokio::test]
+async fn starts_a_project_from_just_a_title_when_workspace_root_is_omitted() {
+    let fake = Arc::new(Fake::default());
+    fake.put(active_state("source-thread", "codex"));
+    let tools = tools(&fake);
+    let handle = |input: Value| call(&tools, "source-thread", "project_create", input);
+
+    let result = handle(json!({"title":"Pinball Stats"})).await;
+    assert_eq!(result["id"], "project:named");
+    assert_eq!(result["workspaceRoot"], "/projects/pinball-stats");
+    assert_eq!(
+        result["commitError"],
+        "Git has no name or email on this machine."
+    );
+    assert_eq!(*fake.named.lock().unwrap(), ["Pinball Stats"]);
+
+    // A path still registers that folder, and never makes a named project.
+    handle(json!({"title":"Existing","workspaceRoot":"/work/existing"})).await;
+    assert_eq!(
+        fake.created
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(root, ..)| root.clone())
+            .collect::<Vec<_>>(),
+        [PathBuf::from("/work/existing")]
+    );
+
+    // Fields this mode cannot apply are rejected, not dropped.
+    for extra in [
+        json!({"scripts":[]}),
+        json!({"defaultModelSelection":{"instanceId":"codex","model":"gpt-5"}}),
+        json!({"defaultModelSelection":null}),
+        json!({"createWorkspaceRootIfMissing":true}),
+    ] {
+        let mut input = json!({"title":"Configured"});
+        input
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let rejected = handle(input).await;
+        assert_eq!(code(&rejected), "invalid_request");
+    }
+    assert_eq!(*fake.named.lock().unwrap(), ["Pinball Stats"]);
 }
 
 #[tokio::test]
@@ -2186,6 +2435,63 @@ async fn send_maps_modes_and_rejects_escalation() {
 }
 
 #[tokio::test]
+async fn a_retried_send_replays_its_receipt_after_the_target_starts_running() {
+    let fake = Arc::new(Fake::default());
+    fake.put(active_state("thread:caller", "codex"));
+    fake.put(thread_state("thread:target"));
+    let weak = Arc::downgrade(&fake);
+    fake.on_dispatch(move |thread, command| {
+        if let (Some(fake), Command::Send(sent)) = (weak.upgrade(), command) {
+            fake.edit(thread.as_str(), |state| {
+                let mut started = run("run:sent", 1, RunStatus::Starting, "codex");
+                started.message = sent.id.clone();
+                state.runs.push(started);
+                let mut message = message(sent.id.as_str(), Some("run:sent"), Role::User, "");
+                message.text = sent.text.clone();
+                state.messages.push(message);
+            });
+        }
+        Ok(Reply::Accepted)
+    });
+    let tools = tools(&fake);
+    let send = json!({"threadId":"thread:target","message":"Run the loop.","clientRequestId":"loop-send-1"});
+    let sent = call(&tools, "thread:caller", "thread_send", send.clone()).await;
+    assert_eq!(sent["delivery"], "started");
+    assert_eq!(sent["runId"], "run:sent");
+    // The response was lost and the run started before the retry: the retry now
+    // resolves to a steer, yet it is the same request.
+    fake.edit("thread:target", |state| {
+        state.runs[0].status = RunStatus::Running;
+        let attempt = attempt_for(&state.runs[0], AttemptStatus::Running);
+        state.attempts.push(attempt);
+    });
+    let retried = call(&tools, "thread:caller", "thread_send", send).await;
+    assert_eq!(retried["messageId"], sent["messageId"]);
+    assert_eq!(retried["runId"], sent["runId"]);
+    assert_eq!(retried["delivery"], "started");
+    assert_eq!(retried["status"], "running");
+    assert_eq!(fake.commands().len(), 1);
+    let mut runs = 0;
+    fake.edit("thread:target", |state| runs = state.runs.len());
+    assert_eq!(runs, 1);
+    // The receipt proves nothing for another thread.
+    fake.put(thread_state("thread:other"));
+    let elsewhere = call(
+        &tools,
+        "thread:caller",
+        "thread_send",
+        json!({"threadId":"thread:other","message":"Run the loop.","clientRequestId":"loop-send-1"}),
+    )
+    .await;
+    assert_eq!(code(&elsewhere), "orchestration_error");
+    assert_eq!(
+        elsewhere["message"],
+        "Unable to send to thread thread:other: command-id-conflict"
+    );
+    assert_eq!(fake.commands().len(), 1);
+}
+
+#[tokio::test]
 async fn transfers_and_configuration_read_the_addressed_thread() {
     let fake = Arc::new(Fake::default());
     let mut state = active_state("thread:caller", "codex");
@@ -2246,6 +2552,97 @@ async fn the_bridge_authenticates_its_scope_and_revoked_tokens_stop_working() {
     assert_eq!(
         bridge(listener.address(), request(token)).await,
         Err("Invalid orchestration scope".into())
+    );
+}
+
+#[tokio::test]
+async fn the_largest_valid_thread_read_reaches_the_provider_session() {
+    let fake = Arc::new(Fake::default());
+    let mut state = thread_state("thread:caller");
+    state
+        .runs
+        .push(run("run:1", 1, RunStatus::Completed, "codex"));
+    // A control character takes the most bytes once escaped, and the text is
+    // escaped again inside the result's JSON text.
+    let text = "\u{1}".repeat(50_000);
+    for index in 0..100u64 {
+        let id = format!("message:{index}");
+        state
+            .messages
+            .push(message(&id, Some("run:1"), Role::User, &text));
+        state.items.push(item(
+            &format!("item:{index}"),
+            Some("run:1"),
+            index,
+            ItemKind::UserMessage {
+                message: MessageId::new(&id).unwrap(),
+            },
+            "",
+        ));
+    }
+    fake.put(state);
+    let tools = Arc::new(tools(&fake));
+    let listener = ToolBridge::bind().unwrap();
+    let thread = ThreadId::new("thread:caller").unwrap();
+    let config = listener.provider_config(&thread, "codex").unwrap();
+    let token = config["env"][TOKEN_ENV].as_str().unwrap().to_owned();
+    listener.serve(Arc::downgrade(&tools)).unwrap();
+    let (provider, session) = tokio::io::duplex(64 * 1024);
+    let (session_input, session_output) = tokio::io::split(session);
+    let session = tokio::spawn(serve_stdio(
+        listener.address(),
+        token,
+        session_input,
+        session_output,
+    ));
+    let (provider_input, provider_output) = tokio::io::split(provider);
+    let mut requests = JsonlWriter::new(provider_output);
+    requests
+        .write_line(
+            &json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"thread_read","arguments":{"threadId":"thread:caller","limit":100,"maxCharsPerItem":50_000}}})
+                .to_string(),
+        )
+        .await
+        .unwrap();
+    let line = JsonlReader::new(provider_input)
+        .read_line()
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(line.len() > 6 * 1024 * 1024);
+    let response: Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(response["id"], 1);
+    let result = &response["result"];
+    assert_eq!(result["isError"], false);
+    let items = result["structuredContent"]["items"].as_array().unwrap();
+    assert_eq!(items.len(), 100);
+    assert!(
+        items
+            .iter()
+            .all(|item| item["text"] == text.as_str() && item["textTruncated"] == false)
+    );
+    assert_eq!(
+        result["content"][0]["text"].as_str().unwrap(),
+        result["structuredContent"].to_string()
+    );
+    drop(requests);
+    assert_eq!(session.await.unwrap(), Ok(()));
+}
+
+#[tokio::test]
+async fn a_result_beyond_the_framing_guard_is_answered_with_the_internal_tool_error() {
+    let (session, provider) = tokio::io::duplex(64 * 1024);
+    let mut output = JsonlWriter::with_max_message_bytes(session, 256);
+    answer(&mut output, &Ok(json!({"text": "x".repeat(1_000)}))).await;
+    drop(output);
+    let line = JsonlReader::new(provider)
+        .read_line()
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Result<Value, String>>(&line).unwrap(),
+        Ok(error_content(INTERNAL_TOOL_ERROR))
     );
 }
 

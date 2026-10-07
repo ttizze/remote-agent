@@ -16,7 +16,7 @@ pub(crate) use catalog::tools;
 
 use agent_domain::{CommandId, Reply, State, ThreadId};
 use agent_protocol::models::ProviderInstance;
-use agent_transport::peer::{JsonlReader, JsonlWriter};
+use agent_transport::peer::{JsonlError, JsonlReader, JsonlWriter};
 use backend::Orchestration;
 use futures_util::future::BoxFuture;
 use serde::{Deserialize, de::DeserializeOwned};
@@ -27,9 +27,16 @@ use std::{
     sync::{Arc, Mutex, Weak},
     time::Duration,
 };
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_util::sync::CancellationToken;
 
-const MAX_MESSAGE: usize = 6 * 1024 * 1024;
+/// Tool calls are bounded by their schemas. Results have no limit of their own:
+/// a valid `thread_read` carries up to 100 items of 50,000 characters twice, as
+/// structured content and as its JSON text, so the result direction keeps only
+/// the transport's framing guard.
+const MAX_REQUEST: usize = 1024 * 1024;
+/// Effect's `McpServer` answer to a tool whose result could not be delivered.
+const INTERNAL_TOOL_ERROR: &str = "Tool execution failed due to an internal server error.";
 const TOKEN_ENV: &str = "AGENT_TOOLS_TOKEN";
 pub(crate) const SERVER_NAME: &str = "orchestration";
 
@@ -95,8 +102,8 @@ impl ToolBridge {
                         calls.spawn(async move {
                             let _permit = permit;
                             let (read, write) = socket.into_split();
-                            let mut input = JsonlReader::with_max_message_bytes(read, 1024 * 1024);
-                            let mut output = JsonlWriter::with_max_message_bytes(write, MAX_MESSAGE);
+                            let mut input = JsonlReader::with_max_message_bytes(read, MAX_REQUEST);
+                            let mut output = JsonlWriter::new(write);
                             let Ok(Ok(Some(line))) = tokio::time::timeout(Duration::from_secs(5), input.read_line()).await else { return; };
                             let Ok(request) = serde_json::from_str::<BridgeRequest>(&line) else { return; };
                             let scope = scopes.lock().unwrap_or_else(|e| e.into_inner()).get(&request.token).cloned();
@@ -107,7 +114,7 @@ impl ToolBridge {
                                 },
                                 _ => Err("Invalid orchestration scope".into()),
                             };
-                            if let Ok(line) = serde_json::to_string(&result) { let _ = output.write_line(&line).await; }
+                            answer(&mut output, &result).await;
                         });
                     }
                 }
@@ -173,6 +180,34 @@ fn error_content(error: &str) -> Value {
     json!({"content":[{"type":"text","text":error}],"isError":true})
 }
 
+/// Writes one line, or the internal tool error in its place when the line
+/// exceeds the framing guard.
+async fn write_or_internal_error<W: AsyncWrite + Unpin>(
+    output: &mut JsonlWriter<W>,
+    line: &str,
+    internal_error: impl FnOnce() -> String,
+) -> Result<(), JsonlError> {
+    match output.write_line(line).await {
+        Err(error @ JsonlError::MessageTooLarge { .. }) => {
+            tracing::warn!(operation = "conversation.tools", message = %error, "replacing an undeliverable tool result");
+            output.write_line(&internal_error()).await
+        }
+        written => written,
+    }
+}
+
+/// The bridge's answer to one call.
+async fn answer<W: AsyncWrite + Unpin>(
+    output: &mut JsonlWriter<W>,
+    result: &Result<Value, String>,
+) {
+    let line = serde_json::to_string(result).expect("JSON values serialize");
+    let internal = || json!({"Ok": error_content(INTERNAL_TOOL_ERROR)}).to_string();
+    if let Err(error) = write_or_internal_error(output, &line, internal).await {
+        tracing::warn!(operation = "conversation.tools", message = %error, "could not answer a tool call");
+    }
+}
+
 /// The `agent-mcp` stdio server a provider session starts; it forwards tool calls
 /// to the Host's bridge with the session's token.
 pub async fn serve(address: SocketAddr) -> Result<(), String> {
@@ -180,8 +215,17 @@ pub async fn serve(address: SocketAddr) -> Result<(), String> {
         return Err("Local orchestration address required".into());
     }
     let token = std::env::var(TOKEN_ENV).map_err(|_| "Missing orchestration scope")?;
-    let mut input = JsonlReader::with_max_message_bytes(tokio::io::stdin(), 1024 * 1024);
-    let mut output = JsonlWriter::with_max_message_bytes(tokio::io::stdout(), MAX_MESSAGE);
+    serve_stdio(address, token, tokio::io::stdin(), tokio::io::stdout()).await
+}
+
+async fn serve_stdio(
+    address: SocketAddr,
+    token: String,
+    input: impl AsyncRead + Unpin,
+    output: impl AsyncWrite + Unpin,
+) -> Result<(), String> {
+    let mut input = JsonlReader::with_max_message_bytes(input, MAX_REQUEST);
+    let mut output = JsonlWriter::new(output);
     let mut calls = tokio::task::JoinSet::<(Value, Value)>::new();
     let mut pending = HashMap::<String, tokio::task::AbortHandle>::new();
     loop {
@@ -217,8 +261,11 @@ pub async fn serve(address: SocketAddr) -> Result<(), String> {
                 }; (id.clone(),response)
             }
         };
-        output
-            .write_line(&json!({"jsonrpc":"2.0","id":id,"result":response}).to_string())
+        let line = json!({"jsonrpc":"2.0","id":id,"result":response}).to_string();
+        let internal = || {
+            json!({"jsonrpc":"2.0","id":id,"result":error_content(INTERNAL_TOOL_ERROR)}).to_string()
+        };
+        write_or_internal_error(&mut output, &line, internal)
             .await
             .map_err(|e| e.to_string())?;
     }
@@ -231,12 +278,12 @@ async fn bridge(address: SocketAddr, request: BridgeRequest) -> Result<Value, St
         .await
         .map_err(|e| e.to_string())?;
     let (read, write) = socket.into_split();
-    let mut output = JsonlWriter::with_max_message_bytes(write, 1024 * 1024);
+    let mut output = JsonlWriter::with_max_message_bytes(write, MAX_REQUEST);
     output
         .write_line(&serde_json::to_string(&request).map_err(|e| e.to_string())?)
         .await
         .map_err(|e| e.to_string())?;
-    let line = JsonlReader::with_max_message_bytes(read, MAX_MESSAGE)
+    let line = JsonlReader::new(read)
         .read_line()
         .await
         .map_err(|e| e.to_string())?
@@ -446,12 +493,25 @@ impl AgentTools {
     async fn state(&self, thread: &ThreadId) -> Result<Arc<State>, String> {
         self.backend.state(thread).await
     }
+    /// A command already handled replays its receipt whatever it now carries: a
+    /// retry resolves its dispatch mode or target run from the current state,
+    /// which may have moved on since the first attempt. A receipt for another
+    /// thread is a conflict.
     async fn dispatch(
         &self,
         thread: &ThreadId,
         id: CommandId,
         command: agent_domain::Command,
     ) -> Result<u64, String> {
+        if let Some(receipt) = self.backend.receipt(&id).await? {
+            if receipt.thread != *thread {
+                return Err("command-id-conflict".into());
+            }
+            return match receipt.reply {
+                Reply::Rejected { reason } => Err(reason),
+                _ => Ok(receipt.sequence),
+            };
+        }
         let dispatched = self.backend.dispatch(thread, id, command).await?;
         match dispatched.reply {
             Reply::Rejected { reason } => Err(reason),

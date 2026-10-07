@@ -906,6 +906,176 @@ fn a_run_waiting_for_a_rollback_can_be_interrupted_and_later_messages_queue() {
     );
     assert_eq!(status(&s, &queued), RunStatus::Starting);
 }
+// Rollbacks and run starts execute in the order they were requested: a
+// rollback requested while a message waits for an earlier rollback executes
+// after that message's run starts.
+#[test]
+fn a_rollback_requested_while_a_run_waits_executes_after_that_run_starts() {
+    let mut s = state();
+    let (first, a) = running(&mut s, "first");
+    finish(&mut s, &a);
+    let cp_first = checkpoint(&mut s, &first, &a, "cp-first");
+    let (second, b) = running(&mut s, "second");
+    finish(&mut s, &b);
+    let cp_second = checkpoint(&mut s, &second, &b, "cp-second");
+    let rollback = |checkpoint: &CheckpointId| Command::Rollback {
+        checkpoint: checkpoint.clone(),
+        restore_files: false,
+        restore_refusal: None,
+    };
+    assert_eq!(
+        command(&mut s, "rollback", rollback(&cp_second)).reply,
+        Reply::Accepted
+    );
+    let Reply::Run(waiting) = command(
+        &mut s,
+        "send",
+        send_message("waiting", DispatchMode::StartImmediately),
+    )
+    .reply
+    else {
+        panic!()
+    };
+    let run = |s: &State, id: &RunId| s.runs.iter().find(|run| &run.id == id).unwrap().clone();
+    assert_eq!(run(&s, &waiting).status, RunStatus::Starting);
+    assert!(run(&s, &waiting).attempt.is_none());
+
+    let again = command(&mut s, "rollback-again", rollback(&cp_first));
+    assert_eq!(again.reply, Reply::Accepted);
+    assert!(again.effects.is_empty());
+    assert_eq!(s.rollbacks.len(), 2);
+    assert!(run(&s, &waiting).attempt.is_none());
+
+    // The first rollback's result starts the waiting run, then the second
+    // rollback follows its start.
+    let first_done = result(
+        &mut s,
+        "done",
+        EffectResult::RollbackFinished {
+            bindings: vec![],
+            command: CommandId::new("rollback").unwrap(),
+        },
+    );
+    let start = first_done.effects.iter().position(|effect| {
+        matches!(
+            effect.body,
+            EffectBody::Provider(ProviderCommand::Start { .. })
+        )
+    });
+    let second_rollback = first_done.effects.iter().position(|effect| {
+        matches!(
+            &effect.body,
+            EffectBody::Rollback { command, providers, .. }
+                if command.as_str() == "rollback-again" && providers.len() == 1
+        )
+    });
+    assert!(
+        matches!((start, second_rollback), (Some(start), Some(rollback)) if start < rollback),
+        "{:?}",
+        first_done.effects
+    );
+    assert!(run(&s, &waiting).attempt.is_some());
+    assert!(run(&s, &waiting).started_at.is_some());
+    assert_eq!(s.rollbacks.len(), 1);
+
+    let second_done = result(
+        &mut s,
+        "done-again",
+        EffectResult::RollbackFinished {
+            bindings: vec![],
+            command: CommandId::new("rollback-again").unwrap(),
+        },
+    );
+    assert!(s.rollbacks.is_empty());
+    assert!(s.rollback_failure.is_none());
+    assert!(!second_done.effects.iter().any(|effect| matches!(
+        effect.body,
+        EffectBody::Provider(ProviderCommand::Start { .. })
+    )));
+    assert_eq!(run(&s, &second).status, RunStatus::RolledBack);
+    assert_eq!(run(&s, &waiting).status, RunStatus::Starting);
+}
+// A rollback that followed a waiting run no longer waits for it once that run
+// is stopped; a message sent afterwards starts after the rollback.
+#[test]
+fn a_rollback_behind_a_stopped_waiting_run_executes_before_a_later_message() {
+    let mut s = state();
+    let (first, a) = running(&mut s, "first");
+    finish(&mut s, &a);
+    let cp_first = checkpoint(&mut s, &first, &a, "cp-first");
+    let (second, b) = running(&mut s, "second");
+    finish(&mut s, &b);
+    let cp_second = checkpoint(&mut s, &second, &b, "cp-second");
+    let rollback = |checkpoint: &CheckpointId| Command::Rollback {
+        checkpoint: checkpoint.clone(),
+        restore_files: false,
+        restore_refusal: None,
+    };
+    command(&mut s, "rollback", rollback(&cp_second));
+    let Reply::Run(waiting) = command(
+        &mut s,
+        "send",
+        send_message("waiting", DispatchMode::StartImmediately),
+    )
+    .reply
+    else {
+        panic!()
+    };
+    assert_eq!(
+        command(&mut s, "rollback-again", rollback(&cp_first)).reply,
+        Reply::Accepted
+    );
+    command(
+        &mut s,
+        "stop",
+        Command::Interrupt {
+            run: waiting.clone(),
+            hold_queue: false,
+            reason: None,
+        },
+    );
+    let Reply::Run(later) = command(
+        &mut s,
+        "send-later",
+        send_message("later", DispatchMode::StartImmediately),
+    )
+    .reply
+    else {
+        panic!()
+    };
+    let run = |s: &State, id: &RunId| s.runs.iter().find(|run| &run.id == id).unwrap().clone();
+    assert_eq!(run(&s, &waiting).status, RunStatus::Interrupted);
+    assert!(run(&s, &later).attempt.is_none());
+
+    let first_done = result(
+        &mut s,
+        "done",
+        EffectResult::RollbackFinished {
+            bindings: vec![],
+            command: CommandId::new("rollback").unwrap(),
+        },
+    );
+    assert!(matches!(
+        &first_done.effects[..],
+        [Effect { body: EffectBody::Rollback { command, .. }, .. }]
+            if command.as_str() == "rollback-again"
+    ));
+    assert!(run(&s, &later).attempt.is_none());
+    let second_done = result(
+        &mut s,
+        "done-again",
+        EffectResult::RollbackFinished {
+            bindings: vec![],
+            command: CommandId::new("rollback-again").unwrap(),
+        },
+    );
+    assert!(second_done.effects.iter().any(|effect| matches!(
+        effect.body,
+        EffectBody::Provider(ProviderCommand::Start { .. })
+    )));
+    assert!(run(&s, &later).attempt.is_some());
+    assert!(s.rollbacks.is_empty());
+}
 #[test]
 fn waiting_capture_survives_recovery_without_releasing_the_queue() {
     let mut s = state();

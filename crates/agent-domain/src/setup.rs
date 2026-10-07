@@ -81,3 +81,38 @@ pub struct WorktreeSetupSnapshot {
     pub error: Option<String>,
     pub sequence: u64,
 }
+
+/// How a launch names the worktree branch it generates from its first message.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BranchNamingMode {
+    /// The configured prefix, then the generated words.
+    #[default]
+    Static,
+    /// A semantic prefix the model chooses, such as `feat/`.
+    Semantic,
+    /// The model's complete name, following the user's instructions.
+    Custom,
+}
+
+/// The prefix of generated branch names until the user sets another.
+pub const DEFAULT_BRANCH_NAME_PREFIX: &str = "agent";
+
+/// The branch naming preferences that apply to a project.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BranchNaming {
+    pub mode: BranchNamingMode,
+    /// Used by the static mode.
+    pub prefix: String,
+    /// Used by the custom mode.
+    pub instructions: String,
+}
+impl Default for BranchNaming {
+    fn default() -> Self {
+        Self {
+            mode: BranchNamingMode::Static,
+            prefix: DEFAULT_BRANCH_NAME_PREFIX.into(),
+            instructions: String::new(),
+        }
+    }
+}

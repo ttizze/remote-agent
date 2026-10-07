@@ -124,7 +124,7 @@ fn frontmatter_block(contents: &str) -> Option<&str> {
     let rest = contents
         .strip_prefix("---\n")
         .or_else(|| contents.strip_prefix("---\r\n"))?;
-    (0..rest.len()).find_map(|index| {
+    rest.char_indices().find_map(|(index, _)| {
         let tail = &rest[index..];
         let tail = tail
             .strip_prefix("\r\n")
@@ -135,15 +135,33 @@ fn frontmatter_block(contents: &str) -> Option<&str> {
     })
 }
 /// Claude Code accepts plain scalars containing `: `; this quotes only those
-/// and leaves comments and YAML structure to the full-document parser.
+/// and leaves comments and YAML structure to the full-document parser. As in
+/// a multiline `^([\w-]+:[ \t]*)([^\r\n]*)` replacement, a line starts after
+/// any of `\n`, `\r`, U+2028 and U+2029, while its value runs to `\r` or `\n`.
 fn quote_plain_colon_scalars(frontmatter: &str) -> String {
     let mut repaired = String::with_capacity(frontmatter.len());
-    for line in frontmatter.split_inclusive('\n') {
-        let end = line.find(['\r', '\n']).unwrap_or(line.len());
-        let (text, ending) = line.split_at(end);
-        repaired.push_str(&quote_plain_colon_scalar(text).unwrap_or_else(|| text.to_owned()));
-        repaired.push_str(ending);
+    let mut copied = 0;
+    let mut line_start = Some(0);
+    while let Some(start) = line_start {
+        let mut scanned = start;
+        let line = &frontmatter[start..];
+        let text = &line[..line.find(['\r', '\n']).unwrap_or(line.len())];
+        if let Some(quoted) = quote_plain_colon_scalar(text) {
+            repaired.push_str(&frontmatter[copied..start]);
+            repaired.push_str(&quoted);
+            copied = start + text.len();
+            if text.ends_with(['\u{2028}', '\u{2029}']) {
+                line_start = Some(copied);
+                continue;
+            }
+            scanned = copied;
+        }
+        line_start = frontmatter[scanned..]
+            .char_indices()
+            .find(|(_, c)| matches!(c, '\n' | '\r' | '\u{2028}' | '\u{2029}'))
+            .map(|(index, c)| scanned + index + c.len_utf8());
     }
+    repaired.push_str(&frontmatter[copied..]);
     repaired
 }
 fn quote_plain_colon_scalar(line: &str) -> Option<String> {
@@ -498,6 +516,132 @@ mod tests {
             &["---", "just text", "---"],
         ] {
             assert_eq!(skill(malformed), None, "{malformed:?}");
+        }
+    }
+
+    #[test]
+    fn skill_frontmatter_with_multibyte_text_is_read() {
+        let skill = |lines: &[&str]| claude_skill_frontmatter(&lines.join("\n"));
+        assert_eq!(
+            skill(&[
+                "---",
+                "description: 日本語の説明",
+                "user-invocable: no",
+                "---"
+            ]),
+            Some(ClaudeSkillFrontmatter {
+                user_invocation_only: false,
+                user_invocable: false,
+                description: Some("日本語の説明".into()),
+            })
+        );
+        assert_eq!(
+            skill(&[
+                "---",
+                "description: 手順: デプロイを実行する",
+                "disable-model-invocation: true",
+                "---",
+                "本文",
+            ]),
+            Some(ClaudeSkillFrontmatter {
+                user_invocation_only: true,
+                user_invocable: true,
+                description: Some("手順: デプロイを実行する".into()),
+            })
+        );
+    }
+
+    // A multiline `^` also starts a line after `\r`, U+2028 and U+2029, and a
+    // value runs on to the next `\r` or `\n`.
+    #[test]
+    fn colon_scalars_are_quoted_on_every_line_start() {
+        assert_eq!(
+            quote_plain_colon_scalars("a: x\rb: c: d\ne: f: g # note"),
+            "a: x\rb: \"c: d\"\ne: \"f: g\" # note"
+        );
+        assert_eq!(
+            quote_plain_colon_scalars("a: b: c\u{2028}d: e: f\u{2029}g: h"),
+            "a: \"b: c\u{2028}d: e: f\u{2029}g: h\""
+        );
+        assert_eq!(
+            quote_plain_colon_scalars("a: b: c d\u{2028}\re: f: g"),
+            "a: \"b: c d\u{2028}\"\re: \"f: g\""
+        );
+        assert_eq!(
+            quote_plain_colon_scalars("x\u{2028}k: v: w"),
+            "x\u{2028}k: \"v: w\""
+        );
+    }
+
+    fn text_from(
+        pieces: &'static [&'static str],
+    ) -> impl proptest::strategy::Strategy<Value = String> {
+        use proptest::prelude::*;
+        prop::collection::vec(prop::sample::select(pieces), 0..48).prop_map(|parts| parts.concat())
+    }
+
+    /// The frontmatter pattern, `^` and `$` anchored to the whole text.
+    fn reference_frontmatter_block(contents: &str) -> Option<&str> {
+        regex::Regex::new(r"^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)")
+            .unwrap()
+            .captures(contents)
+            .map(|captures| captures.get(1).unwrap().as_str())
+    }
+
+    /// The repair replacement over lines split at `\r` and `\n`.
+    fn reference_quote_plain_colon_scalars(frontmatter: &str) -> String {
+        let line = regex::Regex::new(r"(?mR)^([A-Za-z0-9_-]+:[ \t]*)([^\r\n]*)").unwrap();
+        let comment = regex::Regex::new(r"[ \t]+#").unwrap();
+        let colon = regex::Regex::new(r":[ \t]").unwrap();
+        let indicator = regex::Regex::new(r#"^(?:["'\[\]{}|>&*!#%@`]|[-?:](?:[ \t]|$))"#).unwrap();
+        line.replace_all(frontmatter, |captures: &regex::Captures| {
+            let (prefix, value) = (&captures[1], &captures[2]);
+            let scalar = comment.split(value).next().unwrap_or("");
+            if !colon.is_match(scalar) || indicator.is_match(scalar) {
+                return captures[0].to_owned();
+            }
+            format!(
+                "{prefix}{}{}",
+                serde_json::Value::String(scalar.to_owned()),
+                &value[scalar.len()..]
+            )
+        })
+        .into_owned()
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn frontmatter_block_matches_the_pattern(
+            contents in text_from(&["---", "-", "\n", "\r", "\r\n", "a", " ", "日本語", "é", "𑿝"]),
+        ) {
+            proptest::prop_assert_eq!(frontmatter_block(&contents), reference_frontmatter_block(&contents));
+        }
+
+        #[test]
+        fn any_frontmatter_block_matches_the_pattern(body in proptest::prelude::any::<String>()) {
+            for contents in [format!("---\n{body}"), format!("---\r\n{body}\n---")] {
+                proptest::prop_assert_eq!(frontmatter_block(&contents), reference_frontmatter_block(&contents));
+            }
+        }
+
+        #[test]
+        fn colon_scalars_are_quoted_as_the_replacement_does(
+            frontmatter in text_from(&[
+                "key", "a-b_1", ":", ": ", " ", "\t", "#", " #", "\n", "\r", "\r\n",
+                "\"", "'", "[", "|", "-", "?", "x", "日本語", "\\",
+            ]),
+        ) {
+            proptest::prop_assert_eq!(
+                quote_plain_colon_scalars(&frontmatter),
+                reference_quote_plain_colon_scalars(&frontmatter)
+            );
+        }
+
+        #[test]
+        fn skill_files_never_panic(contents in proptest::prelude::any::<String>()) {
+            for contents in [contents.clone(), format!("---\n{contents}\n---\n"), format!("---\ndescription: {contents}\n---")] {
+                let _ = claude_skill_frontmatter(&contents);
+            }
         }
     }
 

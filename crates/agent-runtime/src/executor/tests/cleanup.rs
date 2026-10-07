@@ -7,7 +7,7 @@ fn image(path: &str) -> Attachment {
     Attachment {
         kind: AttachmentKind::Image,
         source: None,
-        id: path.into(),
+        id: "screen".into(),
         name: "screen.png".into(),
         mime_type: "image/png".into(),
         path: path.into(),

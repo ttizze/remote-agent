@@ -805,3 +805,139 @@ fn shortens_a_single_finished_row_that_alone_exceeds_the_frame_budget() {
     );
     assert_eq!(state.items[0].text.len(), HISTORY_FRAME_MAX_BYTES as usize);
 }
+
+fn proposed_plan(id: &str, text: String) -> (Item, Plan) {
+    let plan = PlanId::new(id).unwrap();
+    (
+        item(
+            "item-plan",
+            1,
+            ItemKind::ProposedPlan { plan: plan.clone() },
+            text.clone(),
+        ),
+        Plan {
+            kind: PlanKind::Proposed,
+            id: plan,
+            run: RunId::new("run-done").unwrap(),
+            native_key: "plan".into(),
+            markdown: text,
+            steps: vec![],
+            implemented_by: None,
+        },
+    )
+}
+
+// A finished plan that alone outgrows the frame is cut, plan markdown
+// included, so the page is sent and the next read moves past it.
+#[test]
+fn shortens_a_finished_plan_whose_markdown_alone_exceeds_the_frame_budget() {
+    let detail = "Plan step with \"quotes\" and 日本語.\n".repeat(17 * 1_048_576 / 40);
+    assert!(detail.len() > 16 * 1_048_576);
+    let mut state = created();
+    prompt(&mut state, 0, "prompt-0", MessageAuthor::User, "plan it");
+    let (plan_item, plan) = proposed_plan("plan-huge", detail.clone());
+    state.items.push(Item {
+        id: TurnItemId::new("item-1").unwrap(),
+        ordinal: 2,
+        ..plan_item
+    });
+    state.plans = vec![plan];
+    let page = recent_history(&state, 1, PagePolicy::RECENT);
+    let [row] = &page.rows[..] else {
+        panic!("{} rows", page.rows.len())
+    };
+    assert!(json_len(row) <= HISTORY_FRAME_MAX_BYTES);
+    for text in [&row.item.text, &row.plan.as_ref().unwrap().markdown] {
+        let kept = text.strip_suffix(super::TRUNCATION_MARKER).unwrap();
+        assert!(detail.starts_with(kept));
+        assert!(kept.len() > 1_048_576);
+    }
+    assert!(page.has_more);
+    let older = history_before(&state, page.next_cursor.as_deref().unwrap(), 1, None).unwrap();
+    assert_eq!(older.rows.len(), 1);
+    assert_eq!(older.rows[0].item.text, "plan it");
+
+    let mut alone = created();
+    let (plan_item, plan) = proposed_plan("plan-alone", detail.clone());
+    alone.items.push(plan_item);
+    alone.plans = vec![plan];
+    let page = recent_history(&alone, 1, PagePolicy::RECENT);
+    assert!(page.rows.iter().map(json_len).sum::<u64>() <= HISTORY_FRAME_MAX_BYTES);
+    assert!(!page.has_more);
+}
+
+fn fitted_text() -> impl proptest::strategy::Strategy<Value = String> {
+    use proptest::prelude::*;
+    prop::collection::vec(
+        prop::sample::select(
+            &[
+                "a", "\"", "\\", "\n", "\u{1}", "\u{7f}", "é", "日本", "😀", "\t",
+            ][..],
+        ),
+        0..400,
+    )
+    .prop_map(|parts| parts.concat())
+}
+
+proptest::proptest! {
+    // A fitted row fits its budget whenever the rest of the row and one marker
+    // per text do; each text is unchanged or a prefix followed by the marker,
+    // and a row that already fits is untouched.
+    #[test]
+    fn a_fitted_row_fits_its_budget(
+        item_text in fitted_text(),
+        message_text in proptest::option::of(fitted_text()),
+        plan_text in proptest::option::of(fitted_text()),
+        budget in 0u64..4_000,
+        envelope in 0u64..200,
+    ) {
+        let (mut fitted_item, plan) = proposed_plan("plan-fit", plan_text.clone().unwrap_or_default());
+        fitted_item.text = item_text.clone();
+        let mut fitted_message = message_text
+            .as_ref()
+            .map(|text| message("message-fit", None, Role::User, MessageAuthor::User, text));
+        let mut fitted_plan = plan_text.as_ref().map(|_| plan);
+        let measure = |item: &Item, message: Option<&Message>, plan: Option<&Plan>| {
+            envelope + json_len(item) + message.map_or(0, json_len) + plan.map_or(0, json_len)
+        };
+        let before = measure(&fitted_item, fitted_message.as_ref(), fitted_plan.as_ref());
+        let texts = 1 + usize::from(message_text.is_some()) + usize::from(plan_text.is_some());
+        let mut bare = (fitted_item.clone(), fitted_message.clone(), fitted_plan.clone());
+        bare.0.text = super::TRUNCATION_MARKER.into();
+        if let Some(message) = &mut bare.1 {
+            message.text = super::TRUNCATION_MARKER.into();
+        }
+        if let Some(plan) = &mut bare.2 {
+            plan.markdown = super::TRUNCATION_MARKER.into();
+        }
+        let floor = measure(&bare.0, bare.1.as_ref(), bare.2.as_ref());
+        fit_row(
+            &mut fitted_item,
+            fitted_message.as_mut(),
+            fitted_plan.as_mut(),
+            budget,
+            envelope,
+        );
+        let after = measure(&fitted_item, fitted_message.as_ref(), fitted_plan.as_ref());
+        if floor <= budget {
+            proptest::prop_assert!(after <= budget, "{} > {} ({} texts)", after, budget, texts);
+        }
+        if before <= budget {
+            proptest::prop_assert_eq!(after, before);
+        }
+        let pairs = [
+            (Some(item_text), Some(fitted_item.text)),
+            (message_text, fitted_message.map(|message| message.text)),
+            (plan_text, fitted_plan.map(|plan| plan.markdown)),
+        ];
+        for (original, fitted) in pairs {
+            if let (Some(original), Some(fitted)) = (original, fitted) {
+                let kept = fitted.strip_suffix(super::TRUNCATION_MARKER);
+                proptest::prop_assert!(
+                    fitted == original || kept.is_some_and(|kept| original.starts_with(kept)),
+                    "{:?} from {:?}", fitted, original
+                );
+            }
+        }
+    }
+}
