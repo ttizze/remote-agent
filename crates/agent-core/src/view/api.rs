@@ -152,7 +152,6 @@ impl Snapshot {
         };
         thread_menu(self, &thread_id, now_ms, &options)
     }
-    #[cfg_attr(feature = "bindings", uniffi::method(name = "thread"))]
     pub fn thread_screen(
         &self,
         thread_id: String,
@@ -320,6 +319,14 @@ impl Snapshot {
                 mime_type: icon.mime_type.clone(),
                 data: icon.data.as_ref().clone(),
             })
+    }
+    /// The hash of the project's icon, to look up a cached image without
+    /// copying its bytes.
+    pub fn project_icon_hash(&self, project_id: String) -> Option<String> {
+        self.project_icons
+            .get(&project_id)
+            .and_then(|entry| entry.icon.as_ref())
+            .map(|icon| icon.hash.clone())
     }
     pub fn conversation_settings_loaded(&self) -> bool {
         self.conversation_settings.is_some()

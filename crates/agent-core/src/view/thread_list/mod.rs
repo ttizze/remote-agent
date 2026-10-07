@@ -493,6 +493,8 @@ pub struct PendingTaskRow {
     pub command_id: String,
     pub thread_id: String,
     pub project_id: String,
+    /// The project's name; its id while the shell does not list it.
+    pub project_title: String,
     pub title: String,
     pub branch: Option<String>,
     pub created_at_ms: i64,
@@ -868,6 +870,11 @@ pub fn pending_tasks(snapshot: &Snapshot, listed: &BTreeSet<&str>) -> Vec<Pendin
                 command_id: entry.id.to_string(),
                 thread_id: entry.thread.to_string(),
                 project_id: launch.project_id.clone(),
+                project_title: snapshot
+                    .shell_projects()
+                    .iter()
+                    .find(|project| project.id == launch.project_id)
+                    .map_or_else(|| launch.project_id.clone(), |project| project.name.clone()),
                 title: launch.title.clone(),
                 branch: launch_branch(&launch.workspace),
                 created_at_ms: entry.created_at.millis(),

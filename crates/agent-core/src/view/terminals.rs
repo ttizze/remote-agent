@@ -22,6 +22,8 @@ pub struct TerminalTab {
     pub running: bool,
     /// The shell runs a command.
     pub running_process: bool,
+    /// The shell ended or failed to start.
+    pub exited: bool,
     /// The mobile terminal menu's status: "Task running", "Ready",
     /// "Starting", "Exited", "Error" or "Not started".
     pub menu_status: String,
@@ -162,6 +164,10 @@ pub fn terminal_tabs(snapshot: &Snapshot, thread: &ThreadId) -> Vec<TerminalTab>
             ),
             running_process: summary(&terminal.terminal_id)
                 .is_some_and(|summary| summary.has_running_subprocess),
+            exited: matches!(
+                terminal.phase,
+                TerminalPhase::Exited(_) | TerminalPhase::Failed(_)
+            ),
             menu_status: terminal_menu_status(
                 &terminal.phase,
                 summary(&terminal.terminal_id)
@@ -193,6 +199,7 @@ pub fn terminal_tabs(snapshot: &Snapshot, thread: &ThreadId) -> Vec<TerminalTab>
             .into(),
             running: true,
             running_process: summary.has_running_subprocess,
+            exited: false,
             menu_status: terminal_menu_status(
                 &match summary.status {
                     TerminalStatus::Starting => TerminalPhase::Starting,

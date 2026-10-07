@@ -32,6 +32,30 @@ pub struct BranchChoice {
     /// The worktree that has it checked out.
     pub worktree_path: Option<String>,
     pub selected: bool,
+    /// "current", "worktree", "remote" or "default".
+    pub badge: Option<String>,
+}
+
+/// The tag the branch picker shows beside a branch.
+pub fn branch_badge(
+    branch: &agent_protocol::workspace::VcsRef,
+    project_root: &str,
+) -> Option<&'static str> {
+    if branch.current {
+        Some("current")
+    } else if branch
+        .worktree_path
+        .as_deref()
+        .is_some_and(|path| path != project_root)
+    {
+        Some("worktree")
+    } else if branch.is_remote {
+        Some("remote")
+    } else if branch.is_default {
+        Some("default")
+    } else {
+        None
+    }
 }
 
 /// The new-thread workspace and branch controls.
@@ -174,6 +198,7 @@ fn workspace_view(snapshot: &Snapshot) -> Option<NewThreadWorkspaceView> {
                 .iter()
                 .filter(|candidate| !candidate.is_remote)
                 .map(|candidate| BranchChoice {
+                    badge: branch_badge(candidate, &root).map(Into::into),
                     selected: branch.as_deref() == Some(candidate.name.as_str()),
                     name: candidate.name.clone(),
                     current: candidate.current,

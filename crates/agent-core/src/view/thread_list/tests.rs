@@ -70,6 +70,7 @@ fn pending_task(id: &str) -> PendingTaskRow {
         command_id: format!("command-{id}"),
         thread_id: format!("thread-{id}"),
         project_id: "project-1".into(),
+        project_title: "project-1".into(),
         title: id.into(),
         branch: None,
         created_at_ms: now(),
