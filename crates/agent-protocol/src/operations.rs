@@ -353,9 +353,15 @@ pub struct ReadAccountUsage {
     pub id: String,
 }
 
-/// A thread's terminal identity, used by the Host's cleanup and every client.
+/// The prefix every terminal of a thread shares; the Host's cleanup matches it.
 pub fn thread_terminal_handle(thread: &str) -> String {
     format!("terminal:{thread}")
+}
+
+/// One terminal of a thread (`term-1`, `setup-<script>`), used by the Host and
+/// every client.
+pub fn thread_terminal_handle_for(thread: &str, terminal_id: &str) -> String {
+    format!("{}:{terminal_id}", thread_terminal_handle(thread))
 }
 
 /// Shared terminal identity for a workspace, used by cleanup and every client.
@@ -364,4 +370,16 @@ pub fn terminal_handle(cwd: &str) -> String {
         "bex-terminal-{}",
         uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, cwd.as_bytes())
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_thread_terminal_handle_extends_the_thread_prefix_with_its_id() {
+        let handle = thread_terminal_handle_for("thread:1", "setup-install");
+        assert_eq!(handle, "terminal:thread:1:setup-install");
+        assert!(handle.starts_with(&format!("{}:", thread_terminal_handle("thread:1"))));
+    }
 }
