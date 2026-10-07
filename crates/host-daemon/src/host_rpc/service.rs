@@ -790,7 +790,7 @@ impl HostRpcService {
                 .filter(|entry| Path::new(&cwd).starts_with(&entry.path))
             {
                 entry.threads.push(agent_protocol::models::WorktreeThread {
-                    id: legacy_thread_id(&shell.id)?,
+                    id: shell.id.clone(),
                     name: shell.title.clone(),
                     active,
                 });
@@ -820,9 +820,11 @@ impl HostRpcService {
         }
         if let Ok(conversation) = self.conversation() {
             for thread in entry.threads {
-                let thread = agent_domain::ThreadId::new(thread.id.as_str())
-                    .map_err(|error| Failure::new("worktree_remove_failed", error))?;
-                conversation.runtime.sessions().detach(&thread, true).await;
+                conversation
+                    .runtime
+                    .sessions()
+                    .detach(&thread.id, true)
+                    .await;
             }
         }
         self.inner
@@ -833,12 +835,6 @@ impl HostRpcService {
             .await
             .map_err(|error| Failure::new("worktree_remove_failed", error))
     }
-}
-
-/// The worktree list still names threads with the previous wire identity.
-fn legacy_thread_id(thread: &agent_domain::ThreadId) -> Result<orchestration::ThreadId, Failure> {
-    orchestration::ThreadId::new(thread.as_str())
-        .map_err(|error| Failure::new("worktree_list_failed", error))
 }
 
 fn provider_key(provider: ProviderKind) -> String {

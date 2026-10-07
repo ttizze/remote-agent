@@ -73,7 +73,7 @@ contracts! {
     ReadFile, "host/file/read" => (op::ListFiles, m::FileContent),
     WriteFile, "host/file/write" => (op::WriteFile, m::FileContent) [clone],
     Upload, "host/blob/upload" => (op::Upload, m::TransferGrant),
-    AttachmentPath, "orchestration/attachmentPath" => (String, String),
+    AttachmentPath, "host/attachment/path" => (String, String),
     Download, "host/blob/download" => (op::ListFiles, m::TransferGrant),
     ReadVisualization, "host/visualize/read" => (op::LoadVisualization, String) [clone],
     ReviewWorkspace, "host/workspace/review" => (op::ReviewWorkspace, m::WorkspaceReview) [clone],

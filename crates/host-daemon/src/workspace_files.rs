@@ -237,6 +237,7 @@ impl WorkspaceFiles {
                 if let Some(mime) = &params.attachment_mime_type {
                     Self::attachment_metadata(
                         "pending:validation".into(),
+                        &directory,
                         &params.file_name,
                         mime,
                         params.size,

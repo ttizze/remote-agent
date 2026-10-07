@@ -229,7 +229,7 @@ pub struct Worktree {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorktreeThread {
-    pub id: ::orchestration::ThreadId,
+    pub id: agent_domain::ThreadId,
     pub name: String,
     pub active: bool,
 }
@@ -284,7 +284,7 @@ pub struct TransferGrant {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct UploadedFile {
-    pub attachment: Option<orchestration::Attachment>,
+    pub attachment: Option<agent_domain::Attachment>,
     pub path: String,
     pub size: u64,
     pub sha256: [u8; 32],

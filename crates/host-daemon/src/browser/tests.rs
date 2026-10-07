@@ -1,5 +1,5 @@
 use super::*;
-use orchestration::ThreadId;
+use agent_domain::ThreadId;
 
 #[test]
 fn input_requires_the_displayed_tab_but_reads_and_selection_can_refresh_it() {

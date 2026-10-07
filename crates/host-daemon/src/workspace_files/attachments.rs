@@ -1,8 +1,7 @@
 //! Uploaded attachments and their claim by a thread's message. Paths given to the
 //! conversation come from this storage, never from the client.
 use super::*;
-use agent_domain::Attachment;
-use orchestration::Attachment as UploadedAttachment;
+use agent_domain::{Attachment, AttachmentKind};
 use serde::{Deserialize, Serialize};
 
 const MAX_ATTACHMENTS: usize = 100;
@@ -12,7 +11,7 @@ const MAX_MESSAGE_IMAGE_BYTES: u64 = 80 * 1024 * 1024;
 
 #[derive(Serialize, Deserialize)]
 struct Manifest {
-    attachment: UploadedAttachment,
+    attachment: Attachment,
     sha256: [u8; 32],
 }
 
@@ -31,22 +30,11 @@ struct Limits<'a> {
     mime: &'a str,
     size: u64,
 }
-impl<'a> From<&'a UploadedAttachment> for Limits<'a> {
-    fn from(a: &'a UploadedAttachment) -> Self {
-        Self {
-            id: &a.id,
-            image: a.kind == orchestration::AttachmentKind::Image,
-            name: &a.name,
-            mime: &a.mime_type,
-            size: a.size_bytes,
-        }
-    }
-}
 impl<'a> From<&'a Attachment> for Limits<'a> {
     fn from(a: &'a Attachment) -> Self {
         Self {
             id: &a.id,
-            image: a.kind == agent_domain::AttachmentKind::Image,
+            image: a.kind == AttachmentKind::Image,
             name: &a.name,
             mime: &a.mime_type,
             size: a.size,
@@ -171,21 +159,24 @@ impl WorkspaceFiles {
     }
     pub(super) fn attachment_metadata(
         id: String,
+        path: &Path,
         name: &str,
         mime: &str,
         size: u64,
-    ) -> Result<UploadedAttachment> {
+    ) -> Result<Attachment> {
         let mime = mime.to_ascii_lowercase();
-        let attachment = UploadedAttachment {
-            id,
+        let attachment = Attachment {
             kind: if native_image(&mime) {
-                orchestration::AttachmentKind::Image
+                AttachmentKind::Image
             } else {
-                orchestration::AttachmentKind::File
+                AttachmentKind::File
             },
+            source: None,
+            id,
             name: name.into(),
             mime_type: mime,
-            size_bytes: size,
+            path: path.to_string_lossy().into_owned(),
+            size,
         };
         validate([Limits::from(&attachment)])?;
         Ok(attachment)
@@ -198,9 +189,9 @@ impl WorkspaceFiles {
         mime: &str,
         size: u64,
         sha256: [u8; 32],
-    ) -> Result<UploadedAttachment> {
-        let attachment = Self::attachment_metadata(id, name, mime, size)?;
-        if attachment.kind == orchestration::AttachmentKind::Image {
+    ) -> Result<Attachment> {
+        let attachment = Self::attachment_metadata(id, path, name, mime, size)?;
+        if attachment.kind == AttachmentKind::Image {
             let mut bytes = [0; 16];
             let mut file = File::open(path)?;
             let count = file.read(&mut bytes)?;
@@ -267,9 +258,8 @@ impl WorkspaceFiles {
             let uploaded = &manifest.attachment;
             if uploaded.name != attachment.name
                 || uploaded.mime_type != attachment.mime_type
-                || uploaded.size_bytes != attachment.size
-                || (uploaded.kind == orchestration::AttachmentKind::Image)
-                    != (attachment.kind == agent_domain::AttachmentKind::Image)
+                || uploaded.size != attachment.size
+                || uploaded.kind != attachment.kind
             {
                 return Err(anyhow!("attachment metadata changed"));
             }
@@ -289,7 +279,7 @@ impl WorkspaceFiles {
                         let (_, saved) = self.manifest(&attachment.id)?;
                         if saved.attachment.id != attachment.id
                             || saved.attachment.name != uploaded.name
-                            || saved.attachment.size_bytes != uploaded.size_bytes
+                            || saved.attachment.size != uploaded.size
                             || saved.sha256 != digest
                         {
                             return Err(anyhow!("attachment claim changed"));
@@ -326,7 +316,7 @@ impl WorkspaceFiles {
     /// The stored bytes of a claimed image.
     pub(crate) fn image(&self, attachment: &Attachment) -> Result<Vec<u8>> {
         let (path, manifest) = self.manifest(&attachment.id)?;
-        if manifest.attachment.kind != orchestration::AttachmentKind::Image {
+        if manifest.attachment.kind != AttachmentKind::Image {
             return Err(anyhow!("attachment is not an image"));
         }
         read_bounded(&path, MAX_IMAGE_BYTES)
@@ -386,13 +376,8 @@ mod tests {
             )
             .unwrap();
         Attachment {
-            kind: agent_domain::AttachmentKind::File,
-            source: None,
-            id: uploaded.id,
-            name: uploaded.name,
-            mime_type: uploaded.mime_type,
             path: "/client/supplied/path".into(),
-            size: uploaded.size_bytes,
+            ..uploaded
         }
     }
 

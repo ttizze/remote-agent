@@ -6,7 +6,7 @@ pub const HEIGHT: u32 = 768;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct BrowserRequest {
-    pub thread_id: orchestration::ThreadId,
+    pub thread_id: agent_domain::ThreadId,
     pub tab_id: String,
     pub image_id: String,
     pub action: BrowserAction,
