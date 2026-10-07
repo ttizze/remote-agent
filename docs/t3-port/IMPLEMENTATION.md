@@ -18,3 +18,13 @@ Claude 接続は固定版の Agent SDK を Node 子プロセスから直接呼�
 ## 検証方針
 
 変更 crate の単体・property test、Rust lint、Host/GPUI の build、iOS Rust/Swift の build、Android の単体テストと assembleDebug を行う。CI の結果待ち、cargo-mutants、live-provider E2E、Simulator UI テストは行わない。pixel・実機操作の受入確認はこのビルド検証に含めない。稼働中 Host を再起動せず、main と他 worktree は変更しない。
+
+2026-10-08 の統合と SDK 接続で確認した結果:
+
+- `scripts/dev-env.sh just unit-tests`: Rust 3,370件が通過、手動・外部の5件は skip。agent-peer の5群と、公式 SDK の Node テスト8件も通過した。
+- workspace の clippy（全 target、`-D warnings`）、fmt、Host・GPUI・UniFFI の build が通過した。
+- iOS の Rust・Swift バインディングと Simulator 向け app build、Swiftformat・Swiftlint が通過した。
+- Android の両 ABI の Rust build、ktfmt・detekt、単体テスト7件、assembleDebug が通過した。Kotlin の最終確認では更新済みの共通バインディングと JNI を再利用した。
+- SDK・worker・fixture だけを `node_modules` のない場所へ置いても、SDK テスト8件が通過した。モデルや外部サービスは呼んでいない。
+
+macOS の SystemConfiguration は初回に実行ファイルの directory を CFBundle として走査する。Cargo の unpacked debug objects が多いと、通信テストの処理前に期限を超えた。Nextest の macOS runner は同じ inode の executable と supervisor を小さな directory に置いて実行する。期待値と timeout は変更していない。
