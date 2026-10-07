@@ -496,17 +496,32 @@ pub enum ThreadAction {
     Unpin,
     Settle,
     Unsettle,
-    Snooze { until: String },
+    Snooze {
+        until: String,
+    },
     Unsnooze,
-    Rename { title: String },
+    Rename {
+        title: String,
+    },
     RegenerateTitle,
     MarkUnread,
-    AutoSettle { enabled: bool },
+    AutoSettle {
+        enabled: bool,
+    },
     Archive,
     Unarchive,
     Delete,
-    PinReorder { order_key: String },
-    ActiveReorder { order_key: String },
+    PinReorder {
+        order_key: String,
+    },
+    ActiveReorder {
+        order_key: String,
+    },
+    /// Records a visit at `at` (milliseconds), as dismissing a Woke mark
+    /// does with the row's `woke_at`.
+    Visit {
+        at: i64,
+    },
 }
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
@@ -581,6 +596,10 @@ pub enum Intent {
     },
     RemoveDraftContext {
         context_id: String,
+    },
+    /// Drops an unsent draft: a thread's (its id) or a new thread's (`new:<project>`).
+    DiscardDraft {
+        draft_key: String,
     },
     /// `draft_key` is the composer's (or an answer's) key when the files were picked.
     AttachFiles {
@@ -793,6 +812,17 @@ pub enum Intent {
     },
     SetWorkingSection {
         enabled: bool,
+    },
+    /// The model new threads start with; an open thread keeps its own.
+    SetDefaultModel {
+        instance_id: String,
+        driver: Driver,
+        model: String,
+        options: Vec<ModelOption>,
+    },
+    /// The permissions new threads start with; an open thread keeps its own.
+    SetDefaultRuntimeMode {
+        mode: RuntimeMode,
     },
     ToggleFavoriteModel {
         instance_id: String,

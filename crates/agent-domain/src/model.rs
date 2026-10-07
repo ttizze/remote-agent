@@ -309,6 +309,10 @@ pub struct ToolPresentation {
     pub icon: Option<Json>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "tool presentations grow only when a client enables serde_json preserve_order"
+)]
 pub enum ItemKind {
     Fork {
         parent: ThreadId,
@@ -1165,6 +1169,10 @@ pub fn host_only_command(command: &Command) -> bool {
 }
 /// Provider keys are native identifiers, never application entity IDs.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "tool presentations grow only when a client enables serde_json preserve_order"
+)]
 pub enum ProviderItem {
     Text,
     Reasoning,

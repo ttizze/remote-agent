@@ -390,10 +390,13 @@ pub fn desktop_work_log_row(
             viewed_image_path.is_some() || answer.is_some() || turn_item_has_detail(item, state)
         }
     };
-    let opens_thread = match item.map(|item| &item.kind) {
-        Some(ItemKind::ThreadCreated { thread, .. }) => Some(thread.clone()),
-        Some(ItemKind::Notification { notification }) => notification.child_thread.clone(),
-        _ => None,
+    let (opens_thread, open_label) = match item.map(|item| &item.kind) {
+        Some(ItemKind::ThreadCreated { thread, .. }) => (Some(thread.clone()), Some("Open chat")),
+        Some(ItemKind::Notification { notification }) => (
+            notification.child_thread.clone(),
+            notification.child_thread.as_ref().map(|_| "Open subagent"),
+        ),
+        _ => (None, None),
     };
     let fetched = match detail {
         Some(Detail::Loaded(loaded))
@@ -491,6 +494,7 @@ pub fn desktop_work_log_row(
             WorkRowRole::None
         },
         opens_thread,
+        open_label: open_label.map(str::to_owned),
         can_expand,
         expanded,
         load_detail: expanded && can_expand && fetches && detail.is_none(),

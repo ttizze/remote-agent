@@ -1,21 +1,28 @@
-use super::*;
-pub(super) struct Dictation {
-    pub(super) id: uuid::Uuid,
+//! Recording a spoken prompt and sending it to the Host for transcription.
+use super::{Desktop, Update};
+use crate::platform;
+use agent_core::state::Intent;
+use gpui_kit::*;
+
+pub(crate) struct Dictation {
+    pub(crate) id: uuid::Uuid,
     key: String,
-    pub(super) label: &'static str,
-    pub(super) recording: bool,
+    pub(crate) label: &'static str,
+    pub(crate) recording: bool,
     control: Option<platform::Recording>,
     preparation: Option<agent_core::client::DictationPreparation>,
-    pub(super) level: f32,
+    pub(crate) level: f32,
 }
+
 impl Desktop {
-    pub(super) fn start_dictation(&mut self) {
+    /// Starts recording into the draft the composer shows.
+    pub(crate) fn start_dictation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.dictation.is_some() || !self.snapshot.connected {
             return;
         }
         let (tx, rx) = async_channel::bounded(64);
         match platform::start_recording(tx) {
-            Err(error) => self.error = error,
+            Err(error) => self.show_error(&error, window, cx),
             Ok(control) => {
                 let id = uuid::Uuid::new_v4();
                 let updates = self.updates.clone();
@@ -42,24 +49,38 @@ impl Desktop {
                 });
             }
         }
+        cx.notify();
     }
-    pub(super) fn finish_dictation(&mut self) {
+
+    /// Stops recording and transcribes what was said.
+    pub(crate) fn finish_dictation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(state) = &mut self.dictation
             && let Some(control) = &state.control
         {
             if let Err(error) = control.finish() {
-                self.error = error;
                 self.dictation = None;
+                self.show_error(&error, window, cx);
                 return;
             }
             state.recording = false;
             state.label = "Transcribing…";
         }
+        cx.notify();
     }
-    pub(super) fn cancel_recording(&mut self) {
+
+    pub(crate) fn cancel_dictation(&mut self, cx: &mut Context<Self>) {
         self.dictation = None;
+        cx.notify();
     }
-    pub(super) fn recording_update(&mut self, id: uuid::Uuid, event: platform::RecordingEvent) {
+
+    pub(super) fn recording_update(
+        &mut self,
+        id: uuid::Uuid,
+        event: platform::RecordingEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let store = self.store();
         let Some(state) = self.dictation.as_mut().filter(|state| state.id == id) else {
             return;
         };
@@ -73,10 +94,7 @@ impl Desktop {
             platform::RecordingEvent::Started => {
                 state.recording = true;
                 state.label = "Recording…";
-                state.preparation = self
-                    .session
-                    .as_ref()
-                    .map(|session| session.store.prepare_dictation());
+                state.preparation = store.as_ref().map(|store| store.prepare_dictation());
             }
             platform::RecordingEvent::Level(level) => {
                 if level.is_finite() {
@@ -84,18 +102,16 @@ impl Desktop {
                 }
             }
             platform::RecordingEvent::Finished(Err(error)) => {
-                self.error = error;
                 self.dictation = None;
+                self.show_error(&error, window, cx);
             }
             platform::RecordingEvent::Finished(Ok(audio)) => {
-                let preparation = state.preparation.as_ref();
                 let intent = Intent::Transcribe {
                     draft_key: state.key.clone(),
-                    preparation: preparation.as_ref().map(|p| p.id()),
+                    preparation: state.preparation.as_ref().map(|p| p.id()),
                     audio,
                 };
-                if let Some(session) = &self.session {
-                    let store = session.store.clone();
+                if let Some(store) = store {
                     let updates = self.updates.clone();
                     let epoch = self.epoch;
                     self.runtime.handle.spawn(async move {
@@ -111,5 +127,6 @@ impl Desktop {
                 state.label = "Transcribing…";
             }
         }
+        cx.notify();
     }
 }

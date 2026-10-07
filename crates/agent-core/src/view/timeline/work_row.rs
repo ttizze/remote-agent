@@ -104,6 +104,8 @@ pub struct WorkActivityRow {
     pub id: String,
     pub role: WorkRowRole,
     pub opens_thread: Option<ThreadId>,
+    /// The desktop's trailing button that opens `opens_thread`.
+    pub open_label: Option<String>,
     pub can_expand: bool,
     pub expanded: bool,
     /// Load the item's withheld detail; the row shows it once loaded.

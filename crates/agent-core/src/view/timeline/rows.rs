@@ -28,8 +28,8 @@ use crate::sync::{Detail, ThreadSync};
 use crate::view::work_log::ToolIcon;
 use crate::view::work_log::presentation::ToolGroupSummaryKind;
 use agent_domain::{
-    Attachment, InputIntent, Item, ItemKind, Message, MessageAuthor, MessageContext, MessageId,
-    RunAttemptId, RunId, State, ThreadId, ThreadShell, Timestamp, WorktreeSetupSnapshot,
+    Attachment, CommandId, InputIntent, Item, ItemKind, Message, MessageAuthor, MessageContext,
+    MessageId, RunAttemptId, RunId, State, ThreadId, ThreadShell, Timestamp, WorktreeSetupSnapshot,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
@@ -94,6 +94,8 @@ pub struct AssistantMessageRow {
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct PendingMessageRow {
+    /// The outbox entry, for `Intent::DiscardPending`.
+    pub command: CommandId,
     pub message: MessageId,
     pub text: String,
     pub attachments: Vec<Attachment>,
@@ -319,6 +321,7 @@ impl Context<'_> {
 
 fn pending_row(pending: &PendingMessage) -> TimelineRowKind {
     TimelineRowKind::PendingMessage(Box::new(PendingMessageRow {
+        command: pending.command.clone(),
         message: pending.id.clone(),
         text: pending.text.clone(),
         attachments: pending.attachments.clone(),
@@ -655,6 +658,7 @@ fn subagent_card(context: &Context<'_>, items: &[Arc<Item>]) -> SubagentGroupCar
     );
     subagent_group_card(
         state,
+        &group,
         &activities,
         context.options.expanded_work_groups.contains(&group),
         context.source.now_ms,
@@ -709,6 +713,7 @@ fn mobile_rows(context: &Context<'_>) -> Vec<TimelineRow> {
                 FeedRow::ActivityGroup(group) => match work_log_layout(&group.activities) {
                     WorkLogLayout::Subagents => TimelineRowKind::Subagents(subagent_group_card(
                         state,
+                        &group.id,
                         &group.activities,
                         context.options.expanded_work_groups.contains(&group.id),
                         context.source.now_ms,

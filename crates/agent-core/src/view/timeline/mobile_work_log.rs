@@ -268,6 +268,7 @@ pub fn work_log_row(
             "Long press to copy.".into()
         },
         opens_thread,
+        open_label: None,
         copy_text: activity.copy_text.clone(),
         detail: shows_detail.then(|| WorkActivityDetail {
             reasoning,
@@ -374,6 +375,8 @@ pub struct SubagentMember {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct SubagentGroupCard {
+    /// Toggles the card in `expanded_work_groups`.
+    pub group_id: String,
     pub grouped: bool,
     pub label: String,
     pub summary: String,
@@ -389,6 +392,7 @@ pub struct SubagentGroupCard {
 
 pub fn subagent_group_card(
     state: &State,
+    group_id: &str,
     activities: &[FeedActivity],
     expanded: bool,
     now_ms: i64,
@@ -419,6 +423,7 @@ pub fn subagent_group_card(
     let summary = summarize_subagent_statuses(&statuses);
     let timings: Vec<SubagentTiming> = agents.iter().map(|(_, timing)| timing.clone()).collect();
     SubagentGroupCard {
+        group_id: group_id.to_owned(),
         grouped,
         accessibility_label: format!("{label}, {summary}"),
         tone: if statuses.iter().any(|status| active_status(*status)) {

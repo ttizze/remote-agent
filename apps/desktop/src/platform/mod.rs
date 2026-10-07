@@ -1,4 +1,7 @@
-use agent_core::{state::Snapshot, store::Store};
+use agent_core::{
+    connection::{Store, StoreOptions},
+    state::Snapshot,
+};
 use agent_transport::transport::{Endpoint, Relays, Ticket};
 use host_daemon::local_host::{LocalHost, LocalHostRegistry, LocalHostState};
 use std::{
@@ -58,22 +61,22 @@ pub(crate) async fn ssh_invitation(
         .stderr(Stdio::null())
         .kill_on_drop(true)
         .spawn()
-        .map_err(|_| "SSHを起動できません。SSHがインストールされているか確認してください。")?;
+        .map_err(|_| "SSH could not start. Check that SSH is installed.")?;
     let result = tokio::time::timeout(Duration::from_secs(20), async {
         let mut contents = Vec::new();
         child.stdout.take().expect("SSH stdout is piped").take(64 * 1024 + 1)
             .read_to_end(&mut contents).await
-            .map_err(|_| "SSHの応答を読み取れません。")?;
+            .map_err(|_| "The SSH response could not be read.")?;
         if contents.len() > 64 * 1024 {
-            return Err("SSHの応答が長すぎます。".into());
+            return Err("The SSH response is too long.".into());
         }
-        let status = child.wait().await.map_err(|_| "SSHの終了を確認できません。")?;
+        let status = child.wait().await.map_err(|_| "SSH did not report how it exited.")?;
         if !status.success() {
-            return Err("接続できません。SSHの鍵と接続先を確認し、サーバーでBex Hostを起動してください。".into());
+            return Err("Cannot connect. Check the SSH key and destination, and start the Bex Host on the server.".into());
         }
-        serde_json::from_slice(&contents).map_err(|_| "Bexの接続情報を取得できません。接続先で host-daemon invite を実行できるか確認してください。".into())
+        serde_json::from_slice(&contents).map_err(|_| "The pairing details could not be read. Check that host-daemon invite runs on the server.".into())
     }).await;
-    result.map_err(|_| "SSH接続がタイムアウトしました。".to_owned())?
+    result.map_err(|_| "The SSH connection timed out.".to_owned())?
 }
 
 /// One identity with separate local and remote endpoints. Views own sessions.
@@ -88,6 +91,7 @@ impl Connections {
         self: &Arc<Self>,
         remote: Option<&str>,
         snapshot: Snapshot,
+        options: StoreOptions,
     ) -> anyhow::Result<Arc<Store>> {
         let startup = self.startup.lock().await;
         if let Some(remote) = remote {
@@ -101,10 +105,10 @@ impl Connections {
             };
             drop(startup);
             return Ok(Arc::new(
-                Store::connect(endpoint, &ticket, snapshot, None).await?,
+                Store::connect(endpoint, &ticket, snapshot, options, None).await?,
             ));
         }
-        let store = Arc::new(self.connect_local(snapshot).await?);
+        let store = Arc::new(self.connect_local(snapshot, options).await?);
         self.recover_local(store.clone());
         Ok(store)
     }
@@ -143,7 +147,11 @@ impl Connections {
         Ok(endpoint)
     }
 
-    async fn connect_local(&self, snapshot: Snapshot) -> anyhow::Result<Store> {
+    async fn connect_local(
+        &self,
+        snapshot: Snapshot,
+        options: StoreOptions,
+    ) -> anyhow::Result<Store> {
         let isolated = isolated_host()?;
         let mut child = None;
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
@@ -156,7 +164,13 @@ impl Connections {
                         let endpoint = self.endpoint_for(&location.directory, true).await?;
                         let attempt = tokio::time::timeout(
                             Duration::from_secs(1),
-                            Store::connect(endpoint, ticket, snapshot.clone(), None),
+                            Store::connect(
+                                endpoint,
+                                ticket,
+                                snapshot.clone(),
+                                options.clone(),
+                                None,
+                            ),
                         )
                         .await;
                         match attempt {

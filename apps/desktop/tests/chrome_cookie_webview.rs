@@ -266,7 +266,7 @@ fn native_phase(phase: &str, identifier: &str, url: &str, profile: &str) {
                     wait_for_import(&browser, cx).await;
                     browser.update(cx, |s, cx| {
                         assert!(s.error.is_empty(), "{}", s.error);
-                        assert!(s.import_notice.starts_with("Cookieを2件取り込みました"));
+                        assert!(s.import_notice.starts_with("Imported 2 cookies"));
                         assert!(s.webview.read(cx).raw().cookies().unwrap().iter().any(|cookie| cookie.name() == "scope-regression" && cookie.value() == "fixture"));
                     });
                     wait_for_page(&browser, "Logged in", cx).await;

@@ -22,9 +22,60 @@ pub fn working_started_at(
         })
 }
 
+/// The timeline's working row: "Setting up worktree…" while the worktree is
+/// prepared, "Compacting…" during a compaction, else "Working for 12s" from
+/// the row's start, or "Working..." before one is known.
+pub fn working_row_label(
+    started_at: Option<&Timestamp>,
+    now_ms: i64,
+    preparing_worktree: bool,
+    compacting: bool,
+) -> String {
+    if preparing_worktree {
+        return "Setting up worktree…".into();
+    }
+    if compacting {
+        return "Compacting…".into();
+    }
+    let Some(started_at) = started_at else {
+        return "Working...".into();
+    };
+    let seconds = (now_ms - started_at.millis()).max(0) / 1_000;
+    let timer = if seconds < 60 {
+        format!("{seconds}s")
+    } else {
+        crate::view::time::format_duration(seconds * 1_000)
+    };
+    format!("Working for {timer}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_working_row_counts_whole_seconds_from_its_start() {
+        let start = at("2026-03-09T10:00:00.000Z");
+        let after = |ms: i64| start.millis() + ms;
+        assert_eq!(
+            working_row_label(Some(&start), after(12_900), false, false),
+            "Working for 12s"
+        );
+        assert_eq!(
+            working_row_label(Some(&start), after(65_900), false, false),
+            "Working for 1m 5s"
+        );
+        assert_eq!(
+            working_row_label(Some(&start), after(-5_000), false, false),
+            "Working for 0s"
+        );
+        assert_eq!(working_row_label(None, 0, false, false), "Working...");
+        assert_eq!(
+            working_row_label(Some(&start), 0, true, true),
+            "Setting up worktree…"
+        );
+        assert_eq!(working_row_label(None, 0, false, true), "Compacting…");
+    }
 
     fn at(value: &str) -> Timestamp {
         Timestamp::parse(value).unwrap()

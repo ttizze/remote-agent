@@ -222,7 +222,7 @@ mod subagent_card {
             ..thread(vec![item("a"), item("b"), item("c")])
         };
         let activities = activities_of(&state);
-        let card = subagent_group_card(&state, &activities, false, 0);
+        let card = subagent_group_card(&state, "group", &activities, false, 0);
         assert!(card.grouped);
         assert_eq!(card.label, "3 subagents");
         assert_eq!(card.summary, "1 working · 1 done · 1 failed");
@@ -232,7 +232,7 @@ mod subagent_card {
         );
         assert_eq!(card.tone, SubagentGroupTone::Active);
         assert!(!card.shows_members);
-        let card = subagent_group_card(&state, &activities, true, 0);
+        let card = subagent_group_card(&state, "group", &activities, true, 0);
         assert!(card.shows_members);
         assert_eq!(
             card.members

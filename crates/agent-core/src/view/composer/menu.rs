@@ -1,7 +1,7 @@
 //! The composer's `/`, `$` and `@` menu for the current draft.
 use super::commands::{
-    ComposerCommandItem, ComposerCommandMenuInput, ComposerTrigger, composer_command_items,
-    detect_composer_trigger, has_compactable_conversation,
+    ComposerCommandItem, ComposerCommandMenuInput, ComposerTrigger, ComposerTriggerKind,
+    composer_command_items, detect_composer_trigger, has_compactable_conversation,
 };
 use crate::state::Snapshot;
 use agent_domain::ThreadShell;
@@ -11,6 +11,21 @@ use agent_domain::ThreadShell;
 pub struct ComposerMenuView {
     pub trigger: Option<ComposerTrigger>,
     pub items: Vec<ComposerCommandItem>,
+    /// What the open menu says when nothing matches.
+    pub empty_label: Option<String>,
+}
+
+/// The empty menu's text for a trigger. The Host looks up no pull requests,
+/// so that trigger never has a project to search.
+pub fn composer_menu_empty_label(kind: ComposerTriggerKind) -> &'static str {
+    match kind {
+        ComposerTriggerKind::Skill => "No skills found. Try / to browse provider commands.",
+        ComposerTriggerKind::Path => "No matching files or folders.",
+        ComposerTriggerKind::PullRequest => "Pull requests are not available for this project.",
+        ComposerTriggerKind::SlashCommand | ComposerTriggerKind::SlashModel => {
+            "No matching command."
+        }
+    }
 }
 
 /// The menu for `text` with the cursor at `cursor` (UTF-16). The Host lists
@@ -21,6 +36,9 @@ pub fn composer_menu(snapshot: &Snapshot, text: &str, cursor: u32) -> ComposerMe
     };
     let items = composer_menu_items(snapshot, &trigger);
     ComposerMenuView {
+        empty_label: items
+            .is_empty()
+            .then(|| composer_menu_empty_label(trigger.kind).into()),
         trigger: Some(trigger),
         items,
     }
@@ -62,4 +80,43 @@ pub(crate) fn composer_menu_items(
         threads: &threads,
         current_thread: thread.map(|id| id.as_str()),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_empty_menu_names_what_its_trigger_searched() {
+        let snapshot = Snapshot::default();
+        let path = composer_menu(&snapshot, "see @nothing-here", 17);
+        assert_eq!(
+            path.trigger.map(|trigger| trigger.kind),
+            Some(ComposerTriggerKind::Path)
+        );
+        assert!(path.items.is_empty());
+        assert_eq!(
+            path.empty_label.as_deref(),
+            Some("No matching files or folders.")
+        );
+        assert_eq!(
+            composer_menu_empty_label(ComposerTriggerKind::Skill),
+            "No skills found. Try / to browse provider commands."
+        );
+        assert_eq!(
+            composer_menu_empty_label(ComposerTriggerKind::SlashCommand),
+            "No matching command."
+        );
+        assert_eq!(
+            composer_menu(&snapshot, "plain text", 10),
+            ComposerMenuView::default()
+        );
+    }
+
+    #[test]
+    fn a_menu_with_items_has_no_empty_label() {
+        let menu = composer_menu(&Snapshot::default(), "/", 1);
+        assert!(!menu.items.is_empty());
+        assert_eq!(menu.empty_label, None);
+    }
 }

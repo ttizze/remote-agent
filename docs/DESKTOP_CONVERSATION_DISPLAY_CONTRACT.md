@@ -30,10 +30,14 @@ streaming follows only when already near the bottom.
 
 GPUI uses a 256 px sidebar, 52 px header, chat column up to 736 px and 540 px
 right tools. Pin drag uses shared fractional keys. Enter sends, Shift+Enter adds
-a newline, Alt+Enter steers. Diff, terminal, files and browser remain native.
-The Diff panel selects workspace changes, individual completed turns or all
-available turns. Shared core supplies ready checkpoint choices and file rows;
-late results cannot overwrite a different thread or turn-range selection.
+a newline, Mod+Enter or Mod+click on send performs the alternate follow-up
+(steer while the default queues). Diff, terminal, files and browser remain
+native. The Diff panel offers T3's scopes: Changes, Uncommitted, Latest turn and
+Turn N. Shared core supplies ready checkpoint choices and file rows; late
+results cannot overwrite a different thread or turn-range selection. Terminals
+belong to a thread and are keyed by (thread, terminal id); the bottom drawer
+shows the thread's tabs with split, new and close, and the setup card opens its
+script's terminal.
 
 ## Mobile
 

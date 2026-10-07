@@ -1,12 +1,15 @@
-use super::view::section_heading;
+//! Connections: this machine's Host (pairing other clients, the clients it
+//! trusts) and the environments this client connects to.
+use super::ui::{color, icon, tint};
 use crate::{Runtime, store_session::StoreSession};
 use agent_core::{
+    connection::{Outcome, StoreOptions},
     state::{Intent, Snapshot},
-    store::Outcome,
 };
 use agent_protocol::models::{Invitation, RemoteHost};
 use gpui_kit::{
     component::{
+        Disableable, Sizable, WindowExt,
         button::{Button, ButtonVariants},
         input::{Input, InputState, Textarea, TextareaState},
         menu::{DropdownMenu, PopupMenuItem},
@@ -17,7 +20,7 @@ use gpui_kit::{
 };
 use std::{io::Write, sync::Arc};
 
-pub(super) enum HostEvent {
+pub(crate) enum HostEvent {
     Selected(Option<RemoteHost>),
     Removed(String),
 }
@@ -36,19 +39,21 @@ enum Update {
 
 /// Local management is a separate view/session from the selected conversation
 /// host. The parent borrows this snapshot for the host menu, never its connection.
-pub(super) struct Hosts {
+pub(crate) struct Hosts {
     session: Option<StoreSession>,
     snapshot: Arc<Snapshot>,
     runtime: Runtime,
     updates: async_channel::Sender<Update>,
     pairing: Entity<TextareaState>,
     ssh: Entity<InputState>,
-    adding_remote: bool,
     use_ssh: bool,
     invitation: Option<(String, tempfile::NamedTempFile)>,
     busy: bool,
     connecting: bool,
     error: Option<String>,
+    /// The environment the window shows, `None` for this machine.
+    current: Option<String>,
+    current_connected: bool,
 }
 impl EventEmitter<HostEvent> for Hosts {}
 impl Hosts {
@@ -73,16 +78,17 @@ impl Hosts {
             updates,
             pairing: cx.new(|cx| {
                 TextareaState::new(window, cx)
-                    .placeholder("相手の端末で発行した招待を貼り付け")
+                    .placeholder("Paste the pairing code from the other environment")
                     .auto_grow(3, 6)
             }),
             ssh: cx.new(|cx| InputState::new(window, cx).placeholder("user@your-server")),
-            adding_remote: false,
             use_ssh: true,
             invitation: None,
             busy: false,
             connecting: false,
             error: None,
+            current: None,
+            current_connected: false,
         };
         view.connect();
         view
@@ -99,7 +105,9 @@ impl Hosts {
         let runtime = self.runtime.clone();
         self.runtime.handle.spawn(async move {
             StoreSession::publish(
-                connections.connect(None, Snapshot::default()).await,
+                connections
+                    .connect(None, Snapshot::default(), StoreOptions::default())
+                    .await,
                 runtime,
                 updates,
                 Update::Connected,
@@ -116,6 +124,19 @@ impl Hosts {
             self.dispatch(Intent::LoadHostManagement, Action::None);
         } else {
             self.connect();
+        }
+    }
+    /// Follows the environment the window is connected to.
+    pub(super) fn set_current(
+        &mut self,
+        current: Option<String>,
+        connected: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if self.current != current || self.current_connected != connected {
+            self.current = current;
+            self.current_connected = connected;
+            cx.notify();
         }
     }
     fn dispatch(&mut self, intent: Intent, action: Action) {
@@ -169,37 +190,16 @@ impl Hosts {
                     Ok(outcome) => match action {
                         Action::Invite => {
                             if let Some(invitation) = &self.snapshot.invitation {
-                                let result = (|| -> Result<_, String> {
-                                    let text = serde_json::to_string(invitation)
-                                        .map_err(|error| error.to_string())?;
-                                    let code = qrcode::QrCode::with_error_correction_level(
-                                        text.as_bytes(),
-                                        qrcode::EcLevel::M,
-                                    )
-                                    .map_err(|error| error.to_string())?;
-                                    let svg = code
-                                        .render::<qrcode::render::svg::Color>()
-                                        .min_dimensions(320, 320)
-                                        .build();
-                                    let mut file = tempfile::Builder::new()
-                                        .prefix("bex-invitation-")
-                                        .suffix(".svg")
-                                        .tempfile()
-                                        .map_err(|error| error.to_string())?;
-                                    file.write_all(svg.as_bytes())
-                                        .map_err(|error| error.to_string())?;
-                                    Ok((text, file))
-                                })();
-                                match result {
+                                match invitation_qr(invitation) {
                                     Ok(invitation) => self.invitation = Some(invitation),
                                     Err(error) => self.error = Some(error),
                                 }
                             }
                         }
                         Action::Pair => {
-                            self.adding_remote = false;
                             self.pairing
                                 .update(cx, |input, cx| input.set_value("", window, cx));
+                            window.close_dialog(cx);
                             if let Outcome::RemoteHostPaired { id } = outcome
                                 && let Some(host) =
                                     self.snapshot.remote_hosts.iter().find(|host| host.id == id)
@@ -224,235 +224,29 @@ impl Hosts {
             Action::Pair,
         );
     }
-
-    pub(super) fn connection_choices(
-        &self,
-        current: Option<&str>,
-        connected: bool,
-        agent_controls: Div,
-        cx: &Context<Self>,
-    ) -> Div {
-        let mut agent_controls = Some(agent_controls);
-        let mut choices = v_flex()
-            .rounded(px(10.))
-            .border_1()
-            .border_color(super::color("border"))
-            .overflow_hidden();
-        for (index, remote) in std::iter::once(None)
-            .chain(self.snapshot.remote_hosts.iter().map(Some))
-            .enumerate()
-        {
-            let selected = current == remote.map(|host| host.id.as_str());
-            let destination = remote.cloned();
-            let name = remote.map_or("このPC", |host| host.name.as_str());
-            let label = if selected {
-                if connected {
-                    "接続済み"
-                } else {
-                    "接続中…"
+    fn submit_pairing(&mut self, cx: &mut Context<Self>) {
+        if self.use_ssh {
+            self.busy = true;
+            self.error = None;
+            let destination = self.ssh.read(cx).value().to_string();
+            let updates = self.updates.clone();
+            self.runtime.handle.spawn(async move {
+                let result = crate::platform::ssh_invitation(&destination).await;
+                let _ = updates.send(Update::SshInvitation(result)).await;
+            });
+        } else {
+            match serde_json::from_str::<Invitation>(self.pairing.read(cx).value().as_ref()) {
+                Ok(invitation) => self.pair(invitation),
+                Err(_) => {
+                    self.error =
+                        Some("Paste the pairing code the other environment created.".into())
                 }
-            } else if remote.is_none() && self.snapshot.connected {
-                "利用可能"
-            } else {
-                "保存済み"
-            };
-            let mut card = v_flex()
-                .gap_3()
-                .p_4()
-                .border_b_1()
-                .border_color(super::color("border"))
-                .child(
-                    h_flex()
-                        .items_center()
-                        .gap_3()
-                        .child(
-                            Button::new(format!("onboarding-host-{index}"))
-                                .accessibility_label(name.to_owned())
-                                .child(
-                                    h_flex()
-                                        .w_full()
-                                        .gap_2()
-                                        .child(if remote.is_some() {
-                                            Icon::new(IconName::Network)
-                                        } else {
-                                            Icon::default().path("bex/monitor.svg")
-                                        })
-                                        .child(name.to_owned()),
-                                )
-                                .ghost()
-                                .flex_1()
-                                .on_click(cx.listener(move |_, _, _, cx| {
-                                    cx.emit(HostEvent::Selected(destination.clone()));
-                                })),
-                        )
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(if selected && connected {
-                                    super::color("successForeground")
-                                } else {
-                                    super::color("textMuted")
-                                })
-                                .child(label),
-                        )
-                        .when_some(remote, |row, remote| {
-                            let id = remote.id.clone();
-                            row.child(
-                                Button::new(format!("remove-{id}"))
-                                    .icon(IconName::Close)
-                                    .small()
-                                    .ghost()
-                                    .accessibility_label("保存した接続を削除")
-                                    .tooltip("保存した接続を削除")
-                                    .disabled(self.busy || !self.snapshot.connected)
-                                    .on_click(cx.listener(move |view, _, _, cx| {
-                                        view.dispatch(
-                                            Intent::RemoveRemoteHost { id: id.clone() },
-                                            Action::Remove(id.clone()),
-                                        );
-                                        cx.notify();
-                                    })),
-                            )
-                        }),
-                );
-            if selected {
-                let details = v_flex()
-                    .gap_2()
-                    .ml_8()
-                    .p_3()
-                    .rounded(px(6.))
-                    .bg(super::color("surface"))
-                    .children(agent_controls.take());
-                card = card.child(details);
             }
-            choices = choices.child(card);
         }
-        choices = choices.child(
-            Button::new("onboarding-add-remote")
-                .accessibility_label("接続先を追加")
-                .child(
-                    h_flex()
-                        .w_full()
-                        .gap_2()
-                        .child(Icon::new(IconName::Plus))
-                        .child("接続先を追加"),
-                )
-                .ghost()
-                .w_full()
-                .h(px(48.))
-                .px_4()
-                .text_color(super::color("accent"))
-                .disabled(self.busy)
-                .on_click(cx.listener(|view, _, _, cx| {
-                    view.adding_remote = !view.adding_remote;
-                    view.error = None;
-                    cx.notify();
-                })),
-        );
-        if self.adding_remote {
-            let disabled = self.busy || !self.snapshot.connected;
-            let mut methods = h_flex().gap_2();
-            for (id, label, use_ssh) in [
-                ("onboarding-use-ssh", "SSHで接続", true),
-                ("onboarding-use-invitation", "接続情報を貼り付け", false),
-            ] {
-                methods = methods.child(
-                    Button::new(id)
-                        .label(label)
-                        .small()
-                        .ghost()
-                        .selected(self.use_ssh == use_ssh)
-                        .disabled(disabled)
-                        .on_click(cx.listener(move |view, _, _, cx| {
-                            view.use_ssh = use_ssh;
-                            view.error = None;
-                            cx.notify();
-                        })),
-                );
-            }
-            let mut form = v_flex()
-                .gap_3()
-                .p_4()
-                .rounded(px(12.))
-                .border_1()
-                .border_color(super::color("border"))
-                .bg(super::color("surface"))
-                .mx_4()
-                .mb_4()
-                .child(methods);
-            if self.use_ssh {
-                form =
-                    form.child("SSH接続先")
-                        .child(
-                            Input::new(&self.ssh)
-                                .aria_label("SSH接続先")
-                                .disabled(disabled),
-                        )
-                        .child(div().text_xs().text_color(super::color("textMuted")).child(
-                            "SSHの鍵で接続でき、Bex Hostを起動済みのサーバーにつなぎます。",
-                        ));
-            } else {
-                form = form.child(
-                    Textarea::new(&self.pairing)
-                        .aria_label("接続情報")
-                        .readonly(disabled),
-                );
-            }
-            choices =
-                choices.child(
-                    form.child(
-                        Button::new("onboarding-pair")
-                            .label(if self.busy { "接続中…" } else { "接続" })
-                            .disabled(disabled)
-                            .on_click(cx.listener(|view, _, _, cx| {
-                                if view.use_ssh {
-                                    view.busy = true;
-                                    view.error = None;
-                                    let destination = view.ssh.read(cx).value().to_string();
-                                    let updates = view.updates.clone();
-                                    view.runtime.handle.spawn(async move {
-                                        let result =
-                                            crate::platform::ssh_invitation(&destination).await;
-                                        let _ = updates.send(Update::SshInvitation(result)).await;
-                                    });
-                                } else {
-                                    match serde_json::from_str::<Invitation>(
-                                        view.pairing.read(cx).value().as_ref(),
-                                    ) {
-                                        Ok(invitation) => view.pair(invitation),
-                                        Err(_) => view.error = Some(
-                                            "接続先で発行したBexの接続情報を貼り付けてください。"
-                                                .into(),
-                                        ),
-                                    }
-                                }
-                                cx.notify();
-                            })),
-                    ),
-                );
-        }
-        choices = choices.child(
-            h_flex()
-                .items_center()
-                .gap_3()
-                .p_4()
-                .border_t_1()
-                .border_color(super::color("border"))
-                .text_color(super::color("textMuted"))
-                .child(Icon::new(IconName::Network))
-                .child(div().flex_1().child("Bexの実行環境"))
-                .child(div().text_xs().child("今後対応")),
-        );
-        if let Some(error) = self.error.as_ref().or(self.snapshot.error.as_ref()) {
-            choices = choices.child(
-                div()
-                    .p_4()
-                    .text_color(super::color("errorForeground"))
-                    .child(agent_core::presentation::error::error_message(error)),
-            );
-        }
-        choices
+        cx.notify();
     }
+
+    /// The composer's environment picker: this machine and saved environments.
     pub(super) fn menu(
         owner: &Entity<Self>,
         id: &'static str,
@@ -475,10 +269,10 @@ impl Hosts {
         Button::new(id)
             .debug_selector(move || id.into())
             .disabled(disabled)
-            .accessibility_label(format!("実行先: {name}"))
-            .tooltip(format!("実行先: {name}"))
+            .accessibility_label(format!("Environment: {name}"))
+            .tooltip(format!("Environment: {name}"))
             .label(name)
-            .icon(Icon::default().path("bex/monitor.svg"))
+            .icon(icon("monitor"))
             .dropdown_caret(true)
             .h_8()
             .min_w_0()
@@ -488,7 +282,7 @@ impl Hosts {
             .dropdown_menu(move |mut menu, _, _| {
                 let local = owner.clone();
                 menu = menu.item(
-                    PopupMenuItem::new("この端末")
+                    PopupMenuItem::new("This machine")
                         .checked(current.is_none())
                         .on_click(move |_, _, cx| {
                             let _ = local.update(cx, |_, cx| cx.emit(HostEvent::Selected(None)));
@@ -510,179 +304,560 @@ impl Hosts {
                 menu
             })
     }
+
+    fn open_add_environment(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.error = None;
+        let hosts = cx.entity();
+        window.open_dialog(cx, move |dialog, window, cx| {
+            dialog
+                .title("Add Environment")
+                .w(px(560.))
+                .child(hosts.update(cx, |hosts, cx| hosts.render_add_environment(window, cx)))
+        });
+    }
+
+    fn render_add_environment(&mut self, _: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let disabled = self.busy || !self.snapshot.connected;
+        let mode = |id: &'static str,
+                    title: &'static str,
+                    description: &'static str,
+                    icon_name: &'static str,
+                    ssh: bool,
+                    selected: bool,
+                    cx: &mut Context<Self>| {
+            v_flex()
+                .id(id)
+                .flex_1()
+                .gap_1()
+                .p_3()
+                .rounded(px(10.))
+                .border_1()
+                .cursor_pointer()
+                .border_color(if selected {
+                    tint("messageAction", 0.7)
+                } else {
+                    tint("border", 0.7)
+                })
+                .when(selected, |card| card.bg(tint("messageAction", 0.08)))
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .text_sm()
+                        .font_medium()
+                        .child(icon(icon_name).size_4())
+                        .child(title),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(color("textMuted"))
+                        .child(description),
+                )
+                .on_click(cx.listener(move |hosts, _, _, cx| {
+                    hosts.use_ssh = ssh;
+                    hosts.error = None;
+                    cx.notify();
+                }))
+        };
+        let fields =
+            if self.use_ssh {
+                v_flex()
+                    .gap(px(6.))
+                    .child(div().text_xs().font_medium().child("SSH host"))
+                    .child(
+                        Input::new(&self.ssh)
+                            .aria_label("SSH host")
+                            .disabled(disabled),
+                    )
+                    .child(div().text_xs().text_color(color("textMuted")).child(
+                        "Connects with your SSH keys to a server where the Host is running.",
+                    ))
+            } else {
+                v_flex()
+                    .gap(px(6.))
+                    .child(div().text_xs().font_medium().child("Pairing code"))
+                    .child(
+                        Textarea::new(&self.pairing)
+                            .aria_label("Pairing code")
+                            .readonly(disabled),
+                    )
+            };
+        v_flex()
+            .gap_4()
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(color("textMuted"))
+                    .child("Pair another environment to this client."),
+            )
+            .child(
+                h_flex()
+                    .gap_3()
+                    .child(mode(
+                        "pair-remote",
+                        "Remote link",
+                        "Paste a pairing code from another environment.",
+                        "chevrons-left-right-ellipsis",
+                        false,
+                        !self.use_ssh,
+                        cx,
+                    ))
+                    .child(mode(
+                        "pair-ssh",
+                        "SSH",
+                        "Use local SSH config, agent, and tunnels for the backend.",
+                        "terminal",
+                        true,
+                        self.use_ssh,
+                        cx,
+                    )),
+            )
+            .child(fields)
+            .when_some(self.error.clone(), |form, error| {
+                form.child(
+                    div()
+                        .text_sm()
+                        .text_color(color("errorForeground"))
+                        .child(agent_core::presentation::error::error_message(&error)),
+                )
+            })
+            .child(
+                h_flex().justify_end().child(
+                    Button::new("pair-submit")
+                        .primary()
+                        .label(if self.busy {
+                            "Adding…"
+                        } else {
+                            "Add environment"
+                        })
+                        .disabled(disabled)
+                        .on_click(cx.listener(|hosts, _, _, cx| hosts.submit_pairing(cx))),
+                ),
+            )
+            .into_any_element()
+    }
 }
+
+/// The invitation as text and as a QR code image file.
+fn invitation_qr(invitation: &Invitation) -> Result<(String, tempfile::NamedTempFile), String> {
+    let text = serde_json::to_string(invitation).map_err(|error| error.to_string())?;
+    let code = qrcode::QrCode::with_error_correction_level(text.as_bytes(), qrcode::EcLevel::M)
+        .map_err(|error| error.to_string())?;
+    let svg = code
+        .render::<qrcode::render::svg::Color>()
+        .min_dimensions(320, 320)
+        .build();
+    let mut file = tempfile::Builder::new()
+        .prefix("pairing-")
+        .suffix(".svg")
+        .tempfile()
+        .map_err(|error| error.to_string())?;
+    file.write_all(svg.as_bytes())
+        .map_err(|error| error.to_string())?;
+    Ok((text, file))
+}
+
+fn section_title(
+    title: impl Into<SharedString>,
+    leading: Option<Icon>,
+    action: Option<AnyElement>,
+) -> Div {
+    h_flex()
+        .min_h_7()
+        .px_4()
+        .gap_4()
+        .justify_between()
+        .child(
+            h_flex()
+                .min_w_0()
+                .gap_2()
+                .text_sm()
+                .text_color(tint("text", 0.7))
+                .children(leading.map(|leading| leading.size_4()))
+                .child(div().truncate().child(title.into())),
+        )
+        .child(h_flex().min_h_7().justify_end().children(action))
+}
+
+fn card(rows: Vec<AnyElement>) -> Div {
+    v_flex()
+        .rounded(px(14.))
+        .border_1()
+        .border_color(tint("border", 0.6))
+        .bg(tint("surface", 0.4))
+        .children(rows.into_iter().enumerate().map(|(index, row)| {
+            div()
+                .when(index > 0, |line| {
+                    line.border_t_1().border_color(tint("border", 0.5))
+                })
+                .child(row)
+        }))
+}
+
+fn row(
+    title: impl IntoElement,
+    description: Option<AnyElement>,
+    control: Option<AnyElement>,
+) -> Div {
+    h_flex()
+        .px_4()
+        .py_3()
+        .gap_8()
+        .child(
+            v_flex()
+                .flex_1()
+                .min_w_0()
+                .gap_1()
+                .child(div().text_sm().font_medium().child(title))
+                .children(description.map(|description| {
+                    div()
+                        .text_xs()
+                        .text_color(tint("textMuted", 0.8))
+                        .child(description)
+                })),
+        )
+        .children(control.map(|control| h_flex().flex_shrink_0().gap_2().child(control)))
+}
+
 impl Render for Hosts {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let disabled = !self.snapshot.connected || self.busy;
-        let mut body = v_flex().w_full().gap_5();
+        let mut body = v_flex().w_full().gap_8();
+        if let Some(error) = self.error.as_ref().or(self.snapshot.error.as_ref()) {
+            body = body.child(
+                div()
+                    .px_4()
+                    .text_sm()
+                    .text_color(color("errorForeground"))
+                    .child(agent_core::presentation::error::error_message(error)),
+            );
+        }
         if !self.snapshot.connected {
-            return body
+            body = body.child(
+                v_flex()
+                    .gap(px(10.))
+                    .child(section_title("This machine", Some(icon("monitor")), None))
+                    .child(card(vec![
+                        row(
+                            "Host",
+                            Some(
+                                div()
+                                    .child("This machine's Host is not reachable.")
+                                    .into_any_element(),
+                            ),
+                            Some(
+                                Button::new("connect-host")
+                                    .outline()
+                                    .small()
+                                    .label(if self.connecting {
+                                        "Connecting…"
+                                    } else {
+                                        "Connect"
+                                    })
+                                    .disabled(self.connecting)
+                                    .on_click(cx.listener(|view, _, _, cx| {
+                                        view.connect();
+                                        cx.notify();
+                                    }))
+                                    .into_any_element(),
+                            ),
+                        )
+                        .into_any_element(),
+                    ])),
+            );
+            return body.into_any_element();
+        }
+        let machine = self
+            .snapshot
+            .host_status
+            .as_ref()
+            .map(|status| status.name.clone())
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| "This machine".into());
+        let mut pairing = row(
+            "Pairing link",
+            Some(
+                div()
+                    .child("Pair a phone or another client with this machine.")
+                    .into_any_element(),
+            ),
+            Some(
+                Button::new("invite")
+                    .outline()
+                    .small()
+                    .icon(icon("qr-code"))
+                    .label("Create link")
+                    .disabled(disabled)
+                    .on_click(cx.listener(|view, _, _, cx| {
+                        view.dispatch(Intent::CreateInvitation, Action::Invite);
+                        cx.notify();
+                    }))
+                    .into_any_element(),
+            ),
+        )
+        .into_any_element();
+        if let Some((_, file)) = &self.invitation {
+            pairing = v_flex()
+                .child(pairing)
                 .child(
-                    div()
-                        .text_color(super::color("textMuted"))
-                        .child("このPCの接続情報を読み込めません。"),
-                )
-                .child(
-                    Button::new("connect-host")
-                        .label(if self.connecting {
-                            "接続中…"
-                        } else {
-                            "Host に接続"
-                        })
-                        .disabled(self.connecting)
-                        .on_click(cx.listener(|view, _, _, cx| {
-                            view.connect();
-                            cx.notify();
-                        })),
+                    h_flex()
+                        .flex_wrap()
+                        .gap_5()
+                        .px_4()
+                        .pb_4()
+                        .child(
+                            div()
+                                .p_2()
+                                .rounded(px(10.))
+                                .bg(hsla(0., 0., 1., 1.))
+                                .child(img(file.path().to_path_buf()).w(px(184.)).h(px(184.))),
+                        )
+                        .child(
+                            v_flex()
+                                .flex_1()
+                                .min_w(px(200.))
+                                .gap_3()
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .font_medium()
+                                        .child("Pairing link — scan to open on another device"),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(color("textMuted"))
+                                        .child("Works once. Scan the QR code with the mobile app, or copy the pairing code and paste it into another client."),
+                                )
+                                .child(
+                                    Button::new("copy-invite")
+                                        .outline()
+                                        .small()
+                                        .icon(icon("copy"))
+                                        .label("Copy pairing code")
+                                        .on_click(cx.listener(|view, _, window, cx| {
+                                            if let Some((text, _)) = &view.invitation {
+                                                cx.write_to_clipboard(ClipboardItem::new_string(
+                                                    text.clone(),
+                                                ));
+                                                window.push_notification(
+                                                    notification::Notification::success(
+                                                        "Paste it into another client to finish pairing.",
+                                                    )
+                                                    .title("Pairing code copied"),
+                                                    cx,
+                                                );
+                                            }
+                                        })),
+                                ),
+                        ),
                 )
                 .into_any_element();
         }
         body = body.child(
-            h_flex()
-                .items_center()
-                .flex_wrap()
-                .gap_4()
-                .child(
-                    section_heading(
-                        "スマートフォンから接続",
-                        "このPCの会話を、iPhoneやAndroidから続けられます。",
-                    )
-                    .flex_1()
-                    .min_w(px(220.)),
-                )
-                .child(
-                    Button::new("invite")
-                        .label("接続用QRを表示")
-                        .icon(Icon::default().path("bex/qr-code.svg"))
-                        .primary()
-                        .disabled(disabled)
-                        .on_click(cx.listener(|view, _, _, cx| {
-                            view.dispatch(Intent::CreateInvitation, Action::Invite);
-                            cx.notify();
-                        })),
-                ),
+            v_flex()
+                .gap(px(10.))
+                .child(section_title(machine, Some(icon("monitor")), None))
+                .child(card(vec![pairing])),
         );
-        if let Some((_, file)) = &self.invitation {
-            body = body.child(
-                h_flex().flex_wrap().gap_5().p_4().rounded(px(10.))
-                    .border_1().border_color(super::color("border"))
-                    .child(img(file.path().to_path_buf()).w(px(200.)).h(px(200.)))
-                    .child(v_flex().flex_1().min_w(px(200.)).gap_3()
-                        .child(div().font_semibold().child("BexアプリでQRを読み取る"))
-                        .child(div().text_sm().text_color(super::color("textMuted"))
-                            .child("1回限りの招待です。QRを読み取るか、招待をコピーして相手の端末に貼り付けてください。"))
-                        .child(Button::new("copy-invite")
-                            .label("招待をコピー")
-                            .icon(IconName::Copy)
-                            .ghost()
-                            .on_click(cx.listener(|view, _, _, cx| {
-                                if let Some((text, _)) = &view.invitation {
-                                    cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
-                                }
-                            })))),
-            );
-        }
-        let mut devices = v_flex()
-            .gap_3()
-            .pt_6()
-            .border_t_1()
-            .border_color(super::color("border"))
-            .child(
-                h_flex()
-                    .items_center()
-                    .gap_3()
-                    .child(
-                        v_flex()
-                            .flex_1()
-                            .gap_1()
-                            .child(div().font_semibold().child("接続を許可した端末"))
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(super::color("textMuted"))
-                                    .child("このPCへアクセスできる端末を管理します。"),
+        let mut clients = Vec::new();
+        match &self.snapshot.host_status {
+            None => clients.push(row("Loading…", None, None).into_any_element()),
+            Some(status) if status.devices.is_empty() => clients.push(
+                div()
+                    .px_4()
+                    .py_3()
+                    .text_xs()
+                    .text_color(tint("textMuted", 0.6))
+                    .child("No pairing links or client sessions.")
+                    .into_any_element(),
+            ),
+            Some(status) => {
+                for (index, node) in status.devices.iter().enumerate() {
+                    let node = node.clone();
+                    clients.push(
+                        row(
+                            div()
+                                .truncate()
+                                .font_family("monospace")
+                                .child(node.clone()),
+                            None,
+                            Some(
+                                Button::new(("revoke", index))
+                                    .outline()
+                                    .small()
+                                    .label("Revoke")
+                                    .disabled(disabled)
+                                    .on_click(cx.listener(move |view, _, _, cx| {
+                                        view.dispatch(
+                                            Intent::RevokeDevice { id: node.clone() },
+                                            Action::None,
+                                        );
+                                        cx.notify();
+                                    }))
+                                    .into_any_element(),
                             ),
-                    )
-                    .child(
+                        )
+                        .into_any_element(),
+                    );
+                }
+            }
+        }
+        body = body.child(
+            v_flex()
+                .gap(px(10.))
+                .child(section_title(
+                    "Authorized clients",
+                    None,
+                    Some(
                         Button::new("refresh-hosts")
-                            .icon(IconName::RotateCw)
-                            .small()
+                            .icon(icon("refresh-cw"))
                             .ghost()
-                            .accessibility_label("接続一覧を更新")
-                            .tooltip("接続一覧を更新")
+                            .xsmall()
+                            .text_color(color("textMuted"))
+                            .accessibility_label("Refresh")
+                            .tooltip("Refresh")
                             .disabled(disabled)
                             .on_click(cx.listener(|view, _, _, cx| {
                                 view.refresh();
                                 cx.notify();
-                            })),
+                            }))
+                            .into_any_element(),
                     ),
-            );
-        if let Some(status) = &self.snapshot.host_status {
-            let mut list = v_flex()
-                .rounded(px(10.))
-                .border_1()
-                .border_color(super::color("border"))
-                .overflow_hidden();
-            if status.devices.is_empty() {
-                list = list.child(
-                    div()
-                        .p_4()
-                        .text_sm()
-                        .text_color(super::color("textMuted"))
-                        .child("接続を許可した端末はありません。"),
-                );
-            }
-            for (index, node) in status.devices.iter().enumerate() {
-                let node = node.clone();
-                list = list.child(
-                    h_flex()
-                        .items_center()
-                        .gap_4()
-                        .p_4()
-                        .when(index > 0, |row| {
-                            row.border_t_1().border_color(super::color("border"))
-                        })
-                        .child(Icon::new(IconName::Network).text_color(super::color("textMuted")))
-                        .child(
-                            v_flex()
-                                .flex_1()
-                                .min_w_0()
-                                .gap_1()
-                                .child(format!("端末 {}", index + 1))
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(super::color("textMuted"))
-                                        .text_ellipsis()
-                                        .child(node.clone()),
-                                ),
-                        )
-                        .child(
-                            Button::new(format!("revoke-{index}"))
-                                .label("接続を解除")
-                                .small()
-                                .ghost()
-                                .text_color(super::color("accent"))
-                                .disabled(disabled)
-                                .on_click(cx.listener(move |view, _, _, cx| {
-                                    view.dispatch(
-                                        Intent::RevokeDevice { id: node.clone() },
-                                        Action::None,
-                                    );
-                                    cx.notify();
-                                })),
-                        ),
-                );
-            }
-            devices = devices.child(list);
-        } else {
-            devices = devices.child(
-                div()
-                    .text_sm()
-                    .text_color(super::color("textMuted"))
-                    .child("端末を読み込み中…"),
+                ))
+                .child(card(clients)),
+        );
+        let mut environments = vec![self.environment_row(None, cx)];
+        for remote in self.snapshot.remote_hosts.clone() {
+            environments.push(self.environment_row(Some(remote), cx));
+        }
+        if self.snapshot.remote_hosts.is_empty() {
+            environments.push(
+                row(
+                    "No saved remote environments",
+                    Some(
+                        div()
+                            .child("Click “Add environment” to pair another environment.")
+                            .into_any_element(),
+                    ),
+                    None,
+                )
+                .into_any_element(),
             );
         }
-        body.child(devices).into_any_element()
+        body.child(
+            v_flex()
+                .gap(px(10.))
+                .child(section_title(
+                    "Environments",
+                    None,
+                    Some(
+                        Button::new("add-environment")
+                            .ghost()
+                            .xsmall()
+                            .icon(icon("plus"))
+                            .label("Add environment")
+                            .text_color(color("textMuted"))
+                            .disabled(disabled)
+                            .on_click(cx.listener(|view, _, window, cx| {
+                                view.open_add_environment(window, cx)
+                            }))
+                            .into_any_element(),
+                    ),
+                ))
+                .child(card(environments)),
+        )
+        .into_any_element()
+    }
+}
+
+impl Hosts {
+    /// One environment this client can show: this machine or a saved one.
+    fn environment_row(&self, remote: Option<RemoteHost>, cx: &mut Context<Self>) -> AnyElement {
+        let id = remote.as_ref().map(|host| host.id.clone());
+        let selected = self.current == id;
+        let name = remote
+            .as_ref()
+            .map_or_else(|| "This machine".to_owned(), |host| host.name.clone());
+        let status = if selected {
+            if self.current_connected {
+                "Connected"
+            } else {
+                "Connecting"
+            }
+        } else {
+            "Not connected"
+        };
+        let key = id.clone().unwrap_or_else(|| "local".into());
+        let destination = remote.clone();
+        let mut controls = h_flex().gap(px(6.));
+        if !selected {
+            controls = controls.child(
+                Button::new(SharedString::from(format!("connect-{key}")))
+                    .outline()
+                    .small()
+                    .label("Connect")
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        cx.emit(HostEvent::Selected(destination.clone()));
+                    })),
+            );
+        }
+        if let Some(remote_id) = id {
+            let owner = cx.entity().downgrade();
+            let disabled = self.busy || !self.snapshot.connected;
+            controls = controls.child(
+                Button::new(SharedString::from(format!("environment-menu-{key}")))
+                    .icon(icon("ellipsis"))
+                    .ghost()
+                    .xsmall()
+                    .text_color(color("textMuted"))
+                    .accessibility_label(format!("More actions for {name}"))
+                    .disabled(disabled)
+                    .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
+                        let owner = owner.clone();
+                        let remote_id = remote_id.clone();
+                        menu.item(PopupMenuItem::new("Remove from this device…").on_click(
+                            move |_, _, cx| {
+                                let id = remote_id.clone();
+                                let _ = owner.update(cx, |view, cx| {
+                                    view.dispatch(
+                                        Intent::RemoveRemoteHost { id: id.clone() },
+                                        Action::Remove(id),
+                                    );
+                                    cx.notify();
+                                });
+                            },
+                        ))
+                    }),
+            );
+        }
+        h_flex()
+            .px_4()
+            .py_3()
+            .gap_3()
+            .child(
+                icon(if remote.is_some() { "server" } else { "laptop" })
+                    .size_4()
+                    .text_color(color("textMuted")),
+            )
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap_1()
+                    .child(div().truncate().text_sm().font_medium().child(name))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(if selected && self.current_connected {
+                                color("successForeground")
+                            } else {
+                                tint("textMuted", 0.8)
+                            })
+                            .child(status),
+                    ),
+            )
+            .child(controls)
+            .into_any_element()
     }
 }

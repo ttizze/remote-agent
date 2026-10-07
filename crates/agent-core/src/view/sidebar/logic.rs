@@ -491,6 +491,63 @@ pub fn multi_select_thread_menu_items(
     ]
 }
 
+/// The confirmation before deleting a multi-selection.
+pub fn bulk_delete_confirmation(count: usize) -> String {
+    format!(
+        "Delete {count} thread{}?\nThis permanently clears conversation history for these threads.",
+        if count == 1 { "" } else { "s" }
+    )
+}
+
+/// Multi-selected rows and the row that anchors Shift+click ranges.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct SidebarSelection {
+    pub selected: Vec<String>,
+    pub anchor: Option<String>,
+}
+
+impl SidebarSelection {
+    /// Mod+click: toggles the row; a newly added row becomes the anchor.
+    pub fn toggle(&mut self, key: &str) {
+        if let Some(index) = self.selected.iter().position(|selected| selected == key) {
+            self.selected.remove(index);
+        } else {
+            self.selected.push(key.into());
+            self.anchor = Some(key.into());
+        }
+    }
+
+    /// Shift+click: adds every row between the anchor and `key` in `ordered`,
+    /// keeping the anchor; without a usable anchor it adds `key` and anchors it.
+    pub fn extend_to(&mut self, key: &str, ordered: &[String]) {
+        let range = self.anchor.as_deref().and_then(|anchor| {
+            let anchor = ordered.iter().position(|id| id == anchor)?;
+            let target = ordered.iter().position(|id| id == key)?;
+            Some(&ordered[anchor.min(target)..=anchor.max(target)])
+        });
+        let Some(range) = range else {
+            if !self.selected.iter().any(|selected| selected == key) {
+                self.selected.push(key.into());
+            }
+            self.anchor = Some(key.into());
+            return;
+        };
+        for id in range {
+            if !self.selected.contains(id) {
+                self.selected.push(id.clone());
+            }
+        }
+    }
+
+    /// A plain click opens the row: the selection clears and the row anchors
+    /// the next range.
+    pub fn open(&mut self, key: &str) {
+        self.selected.clear();
+        self.anchor = Some(key.into());
+    }
+}
+
 /// Counts only threads that can start a regeneration; a disabled progress
 /// item while every one is already regenerating.
 pub fn bulk_title_regeneration_menu_item(
