@@ -77,6 +77,7 @@ pub fn feed_submission_anchor(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum LiveFollowEvent {
     Reset,
     UserScrollBegin,
