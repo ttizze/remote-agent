@@ -70,8 +70,6 @@ pub fn resolve_timeline_is_at_end(state: Option<&TimelineEndState>) -> Option<bo
     Some(content_length - scroll - scroll_length <= TIMELINE_FOLLOW_REARM_THRESHOLD_PX)
 }
 
-/// The fewest turns that show a minimap.
-pub const TIMELINE_MINIMAP_MIN_ITEMS: usize = 2;
 const TIMELINE_MINIMAP_PERSISTENT_GUTTER: f64 = 48.0;
 const TIMELINE_MINIMAP_HIT_STRIP_LEFT: f64 = 12.0;
 const TIMELINE_MINIMAP_HIT_STRIP_MAX_WIDTH: f64 = 40.0;

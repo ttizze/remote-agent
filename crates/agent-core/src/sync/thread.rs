@@ -538,14 +538,6 @@ impl ThreadSync {
         true
     }
 
-    pub fn history_abandoned(&mut self, request: &str) {
-        let history = self.history.clear_loading(request);
-        if history != self.history {
-            self.history = history;
-            self.touch();
-        }
-    }
-
     /// Starts reading an item's withheld output unless it is loading or loaded.
     pub fn begin_detail(&mut self, item: &TurnItemId) -> bool {
         if matches!(

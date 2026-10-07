@@ -21,14 +21,8 @@ pub const MULTIPLE_CHOICE_HINT: &str = "Select one or more options.";
 pub const SUBMIT_ANSWERS: &str = "Submit answers";
 pub const DISMISS_QUESTION: &str = "Dismiss question without answering";
 pub const DISMISS_QUESTION_CARD: &str = "Dismiss without answering";
-pub const SHOW_QUESTION: &str = "Show the question and its options";
-pub const HIDE_QUESTION: &str = "Hide the question and its options";
 pub const COLLAPSE_USER_INPUT: &str = "Collapse user input";
 
-/// Reserve for a portrait iPhone keyboard until a real height is observed.
-pub const ESTIMATED_KEYBOARD_HEIGHT: f64 = 336.0;
-/// The question card's expand and collapse animation.
-pub const USER_INPUT_TOGGLE_DURATION_MS: u32 = 220;
 const PENDING_USER_INPUT_MAX_HEIGHT: f64 = 560.0;
 const PENDING_USER_INPUT_MIN_HEIGHT: f64 = 160.0;
 const PENDING_USER_INPUT_VERTICAL_GAP: f64 = 12.0;

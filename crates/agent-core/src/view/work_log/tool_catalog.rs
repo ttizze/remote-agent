@@ -362,10 +362,6 @@ pub fn resolve_tool_presentation(tool_name: Option<&str>) -> Option<ToolCatalogP
     })
 }
 
-pub fn resolve_tool_summary_action(tool_name: Option<&str>) -> Option<ToolSummaryAction> {
-    resolve_tool_definition(tool_name).map(|definition| definition.summary_action)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
