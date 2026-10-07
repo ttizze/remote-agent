@@ -6,6 +6,6 @@
     "vendor": "cp node_modules/lucide/dist/umd/lucide.min.js lucide.min.js && cp node_modules/lucide/LICENSE LUCIDE-LICENSE"
   },
   "dependencies": {
-    "lucide": "0.468.0"
+    "lucide": "1.49.0"
   }
 }
