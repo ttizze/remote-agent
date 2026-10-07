@@ -56,7 +56,7 @@ pub struct HostProject {
 }
 
 /// A worktree the Host checks out for a launch.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct WorktreeRequest {
     pub thread: ThreadId,
     pub project: String,
@@ -67,6 +67,9 @@ pub struct WorktreeRequest {
     pub start_from_origin: bool,
     /// Receives the fetch and checkout stages.
     pub progress: SetupProgress,
+    /// Stops the checkout: the Host stops its Git command and removes what it
+    /// created before the call returns.
+    pub cancel: tokio_util::sync::CancellationToken,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -206,6 +209,8 @@ pub trait HostOperations: Send + Sync {
         &self,
         request: WorktreeRequest,
     ) -> BoxFuture<'_, Result<CreatedWorktree, String>>;
+    /// Removes a checkout a launch gives up, with whatever its setup changed;
+    /// its branch stays.
     fn remove_worktree(
         &self,
         project_root: String,

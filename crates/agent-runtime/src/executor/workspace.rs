@@ -148,6 +148,8 @@ async fn progress(
 struct Checkout {
     path: Option<String>,
     recorded: bool,
+    /// The Host is checking it out.
+    creating: bool,
 }
 
 /// Provisions the thread's workspace for its launch (reusing a worktree an earlier
@@ -174,7 +176,15 @@ pub async fn prepare_workspace(
         }
         _ => None,
     }) else {
-        return prepare(context, thread, prepared, None, &Mutex::default()).await;
+        return prepare(
+            context,
+            thread,
+            prepared,
+            None,
+            &Mutex::default(),
+            &CancellationToken::new(),
+        )
+        .await;
     };
     let setups = context.setups.clone();
     let stages: &[WorktreeSetupStageId] = if record.worktree_path.is_some() {
@@ -199,9 +209,22 @@ pub async fn prepare_workspace(
         Some(cancel.clone()),
     );
     let checkout = Mutex::new(Checkout::default());
-    let result = tokio::select! {
-        result = prepare(context, thread, prepared, Some(&setups), &checkout) => result,
-        () = cancel.cancelled() => Err(PrepareError::Cancelled),
+    let result = {
+        let preparation = prepare(context, thread, prepared, Some(&setups), &checkout, &cancel);
+        tokio::pin!(preparation);
+        tokio::select! {
+            biased;
+            result = &mut preparation => result,
+            () = cancel.cancelled() => {
+                // A checkout in progress stops its Git command and removes what
+                // it created; wait for that before cleaning up, so nothing it
+                // does outlives the cancellation or escapes the cleanup.
+                if checkout.lock().unwrap().creating {
+                    let _ = (&mut preparation).await;
+                }
+                Err(PrepareError::Cancelled)
+            }
+        }
     };
     let error = match result {
         Ok(mut done) => {
@@ -279,6 +302,7 @@ async fn prepare(
     prepared: Option<PreparedRun<'_>>,
     setups: Option<&Arc<SetupTracker>>,
     checkout: &Mutex<Checkout>,
+    cancel: &CancellationToken,
 ) -> Result<Prepared, PrepareError> {
     let run = prepared.as_ref().map(|prepared| prepared.run);
     let retry = |error: crate::RuntimeError| PrepareError::Retry(error.to_string());
@@ -341,6 +365,7 @@ async fn prepare(
                     }
                 })
             });
+            checkout.lock().unwrap().creating = true;
             let created = context
                 .ops
                 .create_worktree(WorktreeRequest {
@@ -351,10 +376,18 @@ async fn prepare(
                     branch,
                     start_from_origin,
                     progress: reporter.unwrap_or_default(),
+                    cancel: cancel.clone(),
                 })
-                .await
-                .map_err(failed(LaunchOperation::ProvisionWorktree))?;
-            checkout.lock().unwrap().path = Some(created.path.clone());
+                .await;
+            {
+                let mut checkout = checkout.lock().unwrap();
+                checkout.creating = false;
+                checkout.path = created.as_ref().ok().map(|created| created.path.clone());
+            }
+            if cancel.is_cancelled() {
+                return Err(PrepareError::Cancelled);
+            }
+            let created = created.map_err(failed(LaunchOperation::ProvisionWorktree))?;
             let now = context.registry.context().clock.now().millis();
             if let Err(error) = context
                 .store

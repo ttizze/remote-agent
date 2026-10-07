@@ -1388,3 +1388,66 @@ async fn cancelling_a_setup_removes_its_worktree_and_fails_the_run() {
     assert_eq!(record.worktree_path, None);
     assert!(!rig.context.setups.cancel(&thread).await);
 }
+
+// A cancel during the checkout stops the Host's checkout and waits for it: the
+// cancellation reaches the Host, and a checkout that finished meanwhile is still
+// removed (the reference claims the checkout before it settles).
+#[tokio::test(flavor = "multi_thread")]
+async fn cancelling_during_the_checkout_waits_for_it_and_removes_what_it_made() {
+    use agent_domain::WorktreeSetupPhase;
+    let rig = rig();
+    let ops = rig.ops.clone();
+    *rig.ops.worktree.lock().unwrap() = Some(Arc::new(move |request| {
+        let ops = ops.clone();
+        Box::pin(async move {
+            request.cancel.cancelled().await;
+            // The Host is still finishing the checkout it was stopping.
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            ops.record("checkout-stopped");
+            Ok(CreatedWorktree {
+                path: "/repo-worktrees/late".into(),
+                branch: Some("agent/session-late".into()),
+            })
+        })
+    }));
+    let launched = launch_on(
+        &rig,
+        request(
+            "command:launch:cancel-checkout",
+            Some("thread:launch:cancel-checkout"),
+            Some("Cancel the checkout"),
+            worktree_strategy(),
+        ),
+    )
+    .await
+    .unwrap();
+    let thread = launched.thread.clone();
+    let cancelled = async {
+        until("the checkout runs", async || {
+            !rig.ops.logged_with("worktree").is_empty()
+        })
+        .await;
+        rig.context.setups.cancel(&thread).await
+    };
+    let ((), cancelled) = tokio::join!(rig.drain(), cancelled);
+    assert!(cancelled);
+    assert_eq!(
+        rig.context.setups.get(&thread).unwrap().phase,
+        WorktreeSetupPhase::Cancelled
+    );
+    let log = rig.ops.logged_with("");
+    let stopped = log.iter().position(|entry| entry == "checkout-stopped");
+    let removed = log
+        .iter()
+        .position(|entry| entry == "remove-worktree /repo-worktrees/late");
+    assert!(
+        stopped.is_some() && stopped < removed,
+        "the checkout stops before its removal: {log:?}"
+    );
+    let current = state(&rig, &thread).await;
+    assert_eq!(current.runs[0].status, RunStatus::Failed);
+    assert_eq!(error_text(&current).unwrap(), "Worktree setup cancelled.");
+    assert_eq!(current.thread.as_ref().unwrap().workspace, None);
+    let record = rig.context.store.thread_launch(&thread).unwrap().unwrap();
+    assert_eq!(record.worktree_path, None);
+}

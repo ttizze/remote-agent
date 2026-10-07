@@ -8,7 +8,9 @@ use std::{
     fs,
     io::Write,
     path::{Component, Path, PathBuf},
+    sync::Arc,
 };
+use tokio_util::sync::CancellationToken;
 
 #[derive(Default, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -22,7 +24,9 @@ struct State {
 
 pub(crate) struct Worktrees {
     path: PathBuf,
-    lock: tokio::sync::Mutex<()>,
+    /// Held by the blocking work itself, so a caller that stops waiting never
+    /// releases it while that work still reads or saves the state.
+    lock: Arc<tokio::sync::Mutex<()>>,
     /// The saved conversation settings, for synchronous reads.
     conversation: std::sync::RwLock<ConversationSettings>,
 }
@@ -31,9 +35,24 @@ impl Worktrees {
     pub(crate) fn new(project_state: &Path) -> Self {
         Self {
             path: project_state.with_file_name("bex-worktrees.json"),
-            lock: tokio::sync::Mutex::new(()),
+            lock: Default::default(),
             conversation: Default::default(),
         }
+    }
+
+    /// Runs `work` on the state file under the lock, which the work keeps
+    /// until it returns even when the caller stops waiting.
+    async fn locked<T: Send + 'static>(
+        &self,
+        work: impl FnOnce(&Path) -> Result<T> + Send + 'static,
+    ) -> Result<T> {
+        let guard = self.lock.clone().lock_owned().await;
+        let path = self.path.clone();
+        tokio::task::spawn_blocking(move || {
+            let _guard = guard;
+            work(&path)
+        })
+        .await?
     }
 
     /// The conversation settings as last loaded or saved.
@@ -49,18 +68,17 @@ impl Worktrees {
         &self,
         update: Option<ConversationSettings>,
     ) -> Result<ConversationSettings> {
-        let _guard = self.lock.lock().await;
-        let path = self.path.clone();
-        let settings = tokio::task::spawn_blocking(move || {
-            let mut state = read(&path)?;
-            if let Some(settings) = update {
-                settings.validate().map_err(|error| anyhow!(error))?;
-                state.conversation = settings;
-                save(&path, &state)?;
-            }
-            Ok::<_, anyhow::Error>(state.conversation)
-        })
-        .await??;
+        let settings = self
+            .locked(move |path| {
+                let mut state = read(path)?;
+                if let Some(settings) = update {
+                    settings.validate().map_err(|error| anyhow!(error))?;
+                    state.conversation = settings;
+                    save(path, &state)?;
+                }
+                Ok(state.conversation)
+            })
+            .await?;
         *self
             .conversation
             .write()
@@ -69,10 +87,8 @@ impl Worktrees {
     }
 
     pub(crate) async fn list(&self) -> Result<Vec<Worktree>> {
-        let _guard = self.lock.lock().await;
-        let path = self.path.clone();
-        tokio::task::spawn_blocking(move || {
-            let state = read(&path)?;
+        self.locked(move |path| {
+            let state = read(path)?;
             let mut entries = state
                 .workspace_roots
                 .into_iter()
@@ -91,14 +107,12 @@ impl Worktrees {
             entries.sort_by(|a, b| (&a.project_path, &a.path).cmp(&(&b.project_path, &b.path)));
             Ok(entries)
         })
-        .await?
+        .await
     }
 
     pub(crate) async fn remove(&self, target: String, require_merged: bool) -> Result<()> {
-        let _guard = self.lock.lock().await;
-        let path = self.path.clone();
-        tokio::task::spawn_blocking(move || {
-            let state = read(&path)?;
+        self.locked(move |path| {
+            let state = read(path)?;
             let root = state
                 .workspace_roots
                 .get(&target)
@@ -121,36 +135,45 @@ impl Worktrees {
                 // Keep the branch so commits remain reachable even if not merged.
                 crate::git::text(Path::new(root), &["worktree", "remove", "--", &target])?;
             }
-            // Only remove the empty session container used by the named-checkout layout.
-            // Old worktrees and any unrelated files in the container stay untouched.
-            let target_path = Path::new(&target);
-            if target_path.file_name() == Path::new(root).file_name()
-                && let Some(parent) = target_path.parent()
-                && parent
-                    .file_name()
-                    .is_some_and(|name| name.to_string_lossy().starts_with("session-"))
-            {
-                let _ = fs::remove_dir(parent);
-            }
+            remove_session_folder(&target, root);
             Ok(())
         })
-        .await?
+        .await
+    }
+
+    /// Removes a checkout a launch gives up, with whatever its setup changed,
+    /// and keeps its branch.
+    pub(crate) async fn abandon(&self, target: String) -> Result<()> {
+        self.locked(move |path| {
+            let state = read(path)?;
+            let root = state
+                .workspace_roots
+                .get(&target)
+                .context("Bexが作成したワークツリーではありません。")?;
+            if !already_removed(&target, root)? {
+                crate::git::text(
+                    Path::new(root),
+                    &["worktree", "remove", "--force", "--", &target],
+                )?;
+            }
+            remove_session_folder(&target, root);
+            Ok(())
+        })
+        .await
     }
 
     /// Recreate a deleted checkout at its persisted path so provider sessions
     /// and every client keep using the same working directory.
     pub(crate) async fn ensure_available(&self, cwd: &str) -> Result<Option<PathBuf>> {
-        let _guard = self.lock.lock().await;
-        let path = self.path.clone();
         let cwd = PathBuf::from(cwd);
-        tokio::task::spawn_blocking(move || {
+        self.locked(move |path| {
             match fs::metadata(&cwd) {
                 Ok(metadata) if metadata.is_dir() => return Ok(None),
                 Ok(_) => return Err(anyhow!("working directory is not a directory")),
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(error) => return Err(error.into()),
             }
-            let state = read(&path)?;
+            let state = read(path)?;
             let (target, project) = state
                 .workspace_roots
                 .iter()
@@ -166,7 +189,6 @@ impl Worktrees {
             }
             let root = Path::new(project);
             let branch = format!("agent/session-{}", uuid::Uuid::new_v4());
-            let relative_cwd = cwd.strip_prefix(destination)?;
             create_checkout(
                 root,
                 destination,
@@ -177,40 +199,50 @@ impl Worktrees {
                 } else {
                     &[]
                 },
-                relative_cwd,
+                &CancellationToken::new(),
             )?;
+            if !cwd.is_dir() {
+                return Err(anyhow!("working directory does not exist in the checkout"));
+            }
             Ok(Some(destination.to_path_buf()))
         })
-        .await?
+        .await
     }
 
     pub(crate) async fn settings(
         &self,
         update: Option<WorktreeSettings>,
     ) -> Result<WorktreeSettings> {
-        let _guard = self.lock.lock().await;
-        let path = self.path.clone();
-        tokio::task::spawn_blocking(move || {
-            let mut state = read(&path)?;
+        self.locked(move |path| {
+            let mut state = read(path)?;
             if let Some(settings) = update {
-
-                for entry in &settings.copy_paths { relative_path(entry)?; }
-                if !settings.worktree_directory.is_empty() && !Path::new(&settings.worktree_directory).is_absolute() {
-                    return Err(anyhow!("worktree directory must be an absolute path on the Host, or empty for the default"));
+                for entry in &settings.copy_paths {
+                    relative_path(entry)?;
+                }
+                if !settings.worktree_directory.is_empty()
+                    && !Path::new(&settings.worktree_directory).is_absolute()
+                {
+                    return Err(anyhow!(
+                        "worktree directory must be an absolute path on the Host, or empty for the default"
+                    ));
                 }
                 state.settings = settings;
-                save(&path, &state)?;
+                save(path, &state)?;
             }
             Ok(state.settings)
         })
         .await
-        ?
     }
 
     /// The checkout of `cwd`'s repository for `thread`, from `base_ref` or, with
     /// `start_from_origin`, from its origin branch when the repository has one.
-    /// Returns the working directory and the branch. The same thread always gets
+    /// Returns the checkout's root and its branch. The same thread always gets
     /// the same checkout, so a retry after a crash finds the one it created.
+    ///
+    /// Once `cancel` fires, or this call is dropped, the Git command running is
+    /// stopped and what the call created is removed; the state stays locked
+    /// until then.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn create(
         &self,
         thread: &str,
@@ -219,49 +251,68 @@ impl Worktrees {
         branch: Option<String>,
         start_from_origin: bool,
         progress: SetupProgress,
+        cancel: CancellationToken,
     ) -> Result<(PathBuf, String)> {
-        let _guard = self.lock.lock().await;
-        let path = self.path.clone();
         let (thread, cwd, base_ref) = (thread.to_owned(), PathBuf::from(cwd), base_ref.to_owned());
-        tokio::task::spawn_blocking(move || {
-            let mut state = read(&path)?;
-            let stage = |id, status| progress.report(SetupEvent::Stage(id, status));
-            let base = || {
-                // "Start from origin" applies only when the repository has an origin.
-                let from_origin = start_from_origin
-                    && crate::git::output(&cwd, &["remote", "get-url", "origin"]).is_ok();
-                stage(
-                    WorktreeSetupStageId::Fetch,
-                    if from_origin {
-                        WorktreeSetupStageStatus::Running
+        let stop = cancel.child_token();
+        let dropped = stop.clone().drop_guard();
+        let created = self
+            .locked(move |path| {
+                let cancel = stop;
+                let mut state = read(path)?;
+                let stage = |id, status| progress.report(SetupEvent::Stage(id, status));
+                let base = || {
+                    // "Start from origin" applies only when the repository has an origin.
+                    let from_origin = start_from_origin
+                        && crate::git::output(&cwd, &["remote", "get-url", "origin"]).is_ok();
+                    stage(
+                        WorktreeSetupStageId::Fetch,
+                        if from_origin {
+                            WorktreeSetupStageStatus::Running
+                        } else {
+                            WorktreeSetupStageStatus::Skipped
+                        },
+                    );
+                    let start = if from_origin {
+                        origin_start(&cwd, &base_ref, &cancel)?
                     } else {
-                        WorktreeSetupStageStatus::Skipped
-                    },
-                );
-                let start = if from_origin {
-                    origin_start(&cwd, &base_ref)?
-                } else {
-                    base_ref.clone()
+                        base_ref.clone()
+                    };
+                    if from_origin {
+                        stage(WorktreeSetupStageId::Fetch, WorktreeSetupStageStatus::Done);
+                    }
+                    stage(
+                        WorktreeSetupStageId::Checkout,
+                        WorktreeSetupStageStatus::Running,
+                    );
+                    Ok(start)
                 };
-                if from_origin {
-                    stage(WorktreeSetupStageId::Fetch, WorktreeSetupStageStatus::Done);
-                }
-                stage(
-                    WorktreeSetupStageId::Checkout,
-                    WorktreeSetupStageStatus::Running,
-                );
-                Ok(start)
-            };
-            checkout(&path, &mut state, &thread, &cwd, base, branch)
-        })
-        .await?
+                checkout(path, &mut state, &thread, &cwd, base, branch, &cancel)
+            })
+            .await;
+        dropped.disarm();
+        created
+    }
+}
+
+/// Removes the empty session folder of the named-checkout layout. Old worktrees
+/// and any unrelated files in the folder stay untouched.
+fn remove_session_folder(target: &str, root: &str) {
+    let target = Path::new(target);
+    if target.file_name() == Path::new(root).file_name()
+        && let Some(parent) = target.parent()
+        && parent
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy().starts_with("session-"))
+    {
+        let _ = fs::remove_dir(parent);
     }
 }
 
 /// The commit a worktree "started from origin" begins at: the fetched origin
 /// branch, or the local `base_ref` when origin has no such branch.
-fn origin_start(cwd: &Path, base_ref: &str) -> Result<String> {
-    fetch_origin(cwd, base_ref)?;
+fn origin_start(cwd: &Path, base_ref: &str, cancel: &CancellationToken) -> Result<String> {
+    fetch_origin(cwd, base_ref, cancel)?;
     let remote = format!("refs/remotes/origin/{base_ref}");
     if crate::git::output(cwd, &["show-ref", "--verify", "--quiet", &remote]).is_err() {
         return Ok(base_ref.to_owned());
@@ -277,7 +328,7 @@ fn origin_start(cwd: &Path, base_ref: &str) -> Result<String> {
 /// Fetches `origin`: the branch, or every branch when origin has no such
 /// branch. Failures report a fixed diagnosis, never Git's output, which can
 /// contain remote credentials.
-fn fetch_origin(cwd: &Path, base_ref: &str) -> Result<()> {
+fn fetch_origin(cwd: &Path, base_ref: &str, cancel: &CancellationToken) -> Result<()> {
     let fetch = |refspec: Option<&str>| {
         let mut command = std::process::Command::new("git");
         command
@@ -290,7 +341,7 @@ fn fetch_origin(cwd: &Path, base_ref: &str) -> Result<()> {
             .env("GIT_TERMINAL_PROMPT", "0")
             .env("SSH_ASKPASS", "")
             .env("SSH_ASKPASS_REQUIRE", "never");
-        let output = command.output().context("failed to run git")?;
+        let output = crate::git::run_cancellable(command, cancel)?;
         Ok::<_, anyhow::Error>((
             output.status.success(),
             String::from_utf8_lossy(&output.stderr).into_owned(),
@@ -441,6 +492,7 @@ fn checkout(
     cwd: &Path,
     base: impl FnOnce() -> Result<String>,
     branch: Option<String>,
+    cancel: &CancellationToken,
 ) -> Result<(PathBuf, String)> {
     // Branch names reach Git as arguments; reject what Git would not accept as
     // a branch before any Git command runs.
@@ -453,7 +505,6 @@ fn checkout(
     let cwd = dunce::canonicalize(cwd)?;
     let root =
         dunce::canonicalize(crate::git::text(&cwd, &["rev-parse", "--show-toplevel"])?.trim_end())?;
-    let relative_cwd = cwd.strip_prefix(&root)?;
     let original = match state
         .workspace_roots
         .get(root.to_str().context("project path is not UTF-8")?)
@@ -501,7 +552,7 @@ fn checkout(
         .to_owned();
     if registered(&root, &destination)? {
         if state.workspace_roots.contains_key(&key) {
-            return Ok((working_directory(&destination, relative_cwd)?, branch));
+            return Ok((destination, branch));
         }
         // An attempt that stopped before recording it may have left it incomplete.
         crate::git::text(&root, &["worktree", "remove", "--force", "--", &key])?;
@@ -520,7 +571,7 @@ fn checkout(
             true => None,
             false => Some(base()?),
         };
-        let target = create_checkout(
+        create_checkout(
             &root,
             &destination,
             &branch,
@@ -530,11 +581,11 @@ fn checkout(
             } else {
                 &[]
             },
-            relative_cwd,
+            cancel,
         )?;
-        Ok::<_, anyhow::Error>((target, base.is_some()))
+        Ok::<_, anyhow::Error>(base.is_some())
     })();
-    let (target, created_branch) = match created {
+    let created_branch = match created {
         Ok(created) => created,
         Err(error) => {
             if !branch_exists(&root, &branch) {
@@ -555,7 +606,7 @@ fn checkout(
             error,
         )
     })?;
-    Ok((target, branch))
+    Ok((destination, branch))
 }
 
 /// Where new checkouts of the repository at `root` go.
@@ -842,16 +893,17 @@ fn save(path: &Path, state: &State) -> Result<()> {
         .map_err(Into::into)
 }
 
-/// Fresh and recreated worktrees share checkout, copy and rollback rules. Without
-/// a `base` the existing `branch` is checked out and kept on failure.
+/// Fresh and recreated worktrees share checkout, submodule, copy and rollback
+/// rules. Without a `base` the existing `branch` is checked out and kept on
+/// failure. A cancelled checkout is removed like a failed one.
 fn create_checkout(
     source: &Path,
     destination: &Path,
     branch: &str,
     base: Option<&str>,
     copy_paths: &[String],
-    relative_cwd: &Path,
-) -> Result<PathBuf> {
+    cancel: &CancellationToken,
+) -> Result<()> {
     let destination_text = destination.to_str().context("worktree path is not UTF-8")?;
     if let Some(parent) = destination.parent() {
         crate::platform::create_state_directory(parent)?;
@@ -866,10 +918,18 @@ fn create_checkout(
     let created = base.is_some().then_some(branch);
     // Create the branch separately so a locked/missing checkout cannot leak it.
     // One --force replaces a missing registration but continues to respect locks.
-    if let Err(error) = crate::git::text(
+    if let Err(error) = crate::git::cancellable(
         source,
         &["worktree", "add", "--force", "--", destination_text, branch],
+        cancel,
     ) {
+        // A stopped checkout may have registered or written a partial worktree.
+        if error.is::<crate::git::Cancelled>() {
+            if registered(source, destination)? {
+                return Err(discard_checkout(source, destination, created, error));
+            }
+            let _ = fs::remove_dir_all(destination);
+        }
         let _ = fs::remove_dir(destination);
         let Some(branch) = created else {
             return Err(error);
@@ -882,6 +942,7 @@ fn create_checkout(
         );
     }
     let prepared = (|| {
+        update_submodules(destination, cancel)?;
         for entry in copy_paths {
             let relative = relative_path(entry)?;
             let path = source.join(relative);
@@ -893,21 +954,37 @@ fn create_checkout(
             no_symlinks(source, relative)?;
             copy(&path, &destination.join(relative))?;
         }
-        working_directory(destination, relative_cwd)
+        if cancel.is_cancelled() {
+            return Err(crate::git::Cancelled.into());
+        }
+        Ok(())
     })();
     prepared.map_err(|error| discard_checkout(source, destination, created, error))
 }
 
-fn working_directory(destination: &Path, relative_cwd: &Path) -> Result<PathBuf> {
-    let target = if relative_cwd.as_os_str().is_empty() {
-        destination.to_path_buf()
-    } else {
-        destination.join(relative_cwd)
-    };
-    if !target.is_dir() {
-        return Err(anyhow!("working directory does not exist in the checkout"));
+/// `git worktree add` leaves submodules empty. Like the reference, a checkout
+/// with `.gitmodules` initializes them recursively, best effort: a failure
+/// leaves them empty without failing the checkout. Only cancellation fails it.
+fn update_submodules(destination: &Path, cancel: &CancellationToken) -> Result<()> {
+    if !destination.join(".gitmodules").exists() {
+        return Ok(());
     }
-    Ok(target)
+    match crate::git::cancellable(
+        destination,
+        &["submodule", "update", "--init", "--recursive"],
+        cancel,
+    ) {
+        Err(error) if error.is::<crate::git::Cancelled>() => Err(error),
+        Err(error) => {
+            tracing::warn!(
+                path = %destination.display(),
+                error = %format!("{error:#}"),
+                "worktree submodule checkout failed; submodule paths are empty"
+            );
+            Ok(())
+        }
+        Ok(_) => Ok(()),
+    }
 }
 
 /// Removes the checkout and the branch it created, if any.
@@ -923,6 +1000,8 @@ fn discard_checkout(
             &[
                 "worktree",
                 "remove",
+                // A checkout stopped mid-way is still locked as initializing.
+                "--force",
                 "--force",
                 "--",
                 destination.to_str().context("worktree path is not UTF-8")?,
@@ -1124,6 +1203,7 @@ mod tests {
                 None,
                 false,
                 Default::default(),
+                Default::default(),
             )
         };
         let first = create("thread:retried").await.unwrap();
@@ -1167,6 +1247,360 @@ mod tests {
         );
     }
 
+    fn commit_file(root: &Path, file: &str, contents: &str) {
+        if let Some(parent) = Path::new(file).parent() {
+            fs::create_dir_all(root.join(parent)).unwrap();
+        }
+        commit(root, file, contents);
+    }
+
+    fn registered_paths(root: &Path) -> Vec<String> {
+        crate::git::text(root, &["worktree", "list", "--porcelain"])
+            .unwrap()
+            .lines()
+            .filter_map(|line| line.strip_prefix("worktree ").map(str::to_owned))
+            .collect()
+    }
+
+    // A project below the repository root records the checkout's root, which the
+    // reference binds as the thread's worktree, so giving the launch up removes
+    // it even after its setup changed tracked and untracked files. The branch
+    // stays, as the reference's forced removal keeps it.
+    #[tokio::test]
+    async fn a_subproject_checkout_is_recorded_and_abandoned_by_its_root() {
+        let repository = repository();
+        let root = dunce::canonicalize(repository.path()).unwrap();
+        commit_file(&root, "packages/app/source.txt", "app");
+        let directory = tempfile::tempdir().unwrap();
+        let projects = directory.path().join("projects.json");
+        let store = Worktrees::new(&projects);
+        let (checkout, branch) = store
+            .create(
+                &new_thread(),
+                root.join("packages/app").to_str().unwrap(),
+                "HEAD",
+                None,
+                false,
+                Default::default(),
+                Default::default(),
+            )
+            .await
+            .unwrap();
+        assert!(checkout.join("packages/app/source.txt").is_file());
+        assert!(
+            workspace_roots(&projects)
+                .await
+                .unwrap()
+                .contains_key(checkout.to_str().unwrap())
+        );
+        fs::write(checkout.join("tracked.txt"), "changed by setup\n").unwrap();
+        fs::create_dir_all(checkout.join("packages/app/node_modules/dependency")).unwrap();
+        fs::write(
+            checkout.join("packages/app/node_modules/dependency/index.js"),
+            "",
+        )
+        .unwrap();
+
+        store
+            .abandon(checkout.to_str().unwrap().to_owned())
+            .await
+            .unwrap();
+
+        assert!(!checkout.exists());
+        assert!(!checkout.parent().unwrap().exists());
+        assert_eq!(registered_paths(&root), [root.to_str().unwrap()]);
+        assert!(branch_exists(&root, &branch));
+    }
+
+    /// Makes `git worktree add` in `root` wait in its post-checkout hook, which
+    /// writes its process ID to the returned file first.
+    #[cfg(unix)]
+    fn slow_checkout_hook(root: &Path, hooks: &Path) -> PathBuf {
+        let marker = hooks.join("pid");
+        let hook = hooks.join("post-checkout");
+        fs::write(
+            &hook,
+            format!(
+                "#!/bin/sh\necho $$ > '{}.tmp'\nmv '{0}.tmp' '{0}'\nexec sleep 30\n",
+                marker.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+        crate::git::text(root, &["config", "core.hooksPath", hooks.to_str().unwrap()]).unwrap();
+        marker
+    }
+
+    #[cfg(unix)]
+    async fn hook_pid(marker: &Path) -> String {
+        for _ in 0..1000 {
+            if let Ok(pid) = fs::read_to_string(marker) {
+                return pid.trim().to_owned();
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("the checkout never reached its hook");
+    }
+
+    #[cfg(unix)]
+    async fn exited(pid: &str) -> bool {
+        for _ in 0..200 {
+            let alive = std::process::Command::new("kill")
+                .args(["-0", pid])
+                .stderr(std::process::Stdio::null())
+                .status()
+                .unwrap()
+                .success();
+            if !alive {
+                return true;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        false
+    }
+
+    // Cancelling a checkout stops Git and every process it started, and removes
+    // what the checkout created before the call returns.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_cancelled_checkout_stops_git_and_leaves_nothing_behind() {
+        let repository = repository();
+        let root = dunce::canonicalize(repository.path()).unwrap();
+        let hooks = tempfile::tempdir().unwrap();
+        let marker = slow_checkout_hook(&root, hooks.path());
+        let directory = tempfile::tempdir().unwrap();
+        let projects = directory.path().join("projects.json");
+        let store = Arc::new(Worktrees::new(&projects));
+        let cancel = CancellationToken::new();
+        let creating = tokio::spawn({
+            let (store, root, cancel) = (store.clone(), root.clone(), cancel.clone());
+            async move {
+                store
+                    .create(
+                        &new_thread(),
+                        root.to_str().unwrap(),
+                        "HEAD",
+                        None,
+                        false,
+                        Default::default(),
+                        cancel,
+                    )
+                    .await
+            }
+        });
+        let pid = hook_pid(&marker).await;
+        let started = std::time::Instant::now();
+        cancel.cancel();
+        let error = creating.await.unwrap().unwrap_err();
+        assert!(error.is::<crate::git::Cancelled>(), "{error:#}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        assert!(exited(&pid).await, "the hook Git started still runs");
+        assert_eq!(registered_paths(&root), [root.to_str().unwrap()]);
+        assert_eq!(
+            crate::git::text(&root, &["branch", "--format=%(refname:short)"]).unwrap(),
+            "main\n"
+        );
+        assert!(workspace_roots(&projects).await.unwrap().is_empty());
+        assert!(
+            fs::read_dir(root.join(".worktree"))
+                .unwrap()
+                .next()
+                .is_none()
+        );
+    }
+
+    // A caller that stops waiting stops the checkout too, and the state stays
+    // locked until it has: a later save is never overwritten by the stale state
+    // the stopped checkout read.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_abandoned_checkout_stops_before_the_state_is_released() {
+        let repository = repository();
+        let root = dunce::canonicalize(repository.path()).unwrap();
+        let hooks = tempfile::tempdir().unwrap();
+        let marker = slow_checkout_hook(&root, hooks.path());
+        let directory = tempfile::tempdir().unwrap();
+        let projects = directory.path().join("projects.json");
+        let store = Arc::new(Worktrees::new(&projects));
+        let creating = tokio::spawn({
+            let (store, root) = (store.clone(), root.clone());
+            async move {
+                store
+                    .create(
+                        &new_thread(),
+                        root.to_str().unwrap(),
+                        "HEAD",
+                        None,
+                        false,
+                        Default::default(),
+                        Default::default(),
+                    )
+                    .await
+            }
+        });
+        let pid = hook_pid(&marker).await;
+        creating.abort();
+        let settings = WorktreeSettings {
+            copy_on_create: true,
+            copy_paths: vec![".env".into()],
+            ..Default::default()
+        };
+        store.settings(Some(settings.clone())).await.unwrap();
+        assert!(exited(&pid).await, "the hook Git started still runs");
+        assert_eq!(registered_paths(&root), [root.to_str().unwrap()]);
+        let saved = read(&projects.with_file_name("bex-worktrees.json")).unwrap();
+        assert_eq!(saved.settings, settings);
+        assert!(saved.workspace_roots.is_empty());
+        assert!(saved.threads.is_empty());
+    }
+
+    /// Serves the files under `base` over HTTP, enough for Git's dumb protocol;
+    /// returns the base URL.
+    fn serve_dumb_http(base: PathBuf) -> String {
+        use std::io::{BufRead as _, BufReader};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                let base = base.clone();
+                std::thread::spawn(move || {
+                    let mut reader = BufReader::new(stream.try_clone().unwrap());
+                    let mut request = String::new();
+                    let _ = reader.read_line(&mut request);
+                    let mut header = String::new();
+                    while reader.read_line(&mut header).is_ok_and(|read| read > 2) {
+                        header.clear();
+                    }
+                    let path = request
+                        .split_whitespace()
+                        .nth(1)
+                        .and_then(|target| target.split('?').next())
+                        .unwrap_or("/");
+                    let body = (!path.contains(".."))
+                        .then(|| fs::read(base.join(path.trim_start_matches('/'))).ok())
+                        .flatten();
+                    let status = if body.is_some() {
+                        "200 OK"
+                    } else {
+                        "404 Not Found"
+                    };
+                    let body = body.unwrap_or_default();
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = stream.write_all(&body);
+                });
+            }
+        });
+        url
+    }
+
+    // GitVcsDriverCore createWorktree: a new checkout initializes its submodules
+    // recursively; a submodule that cannot be fetched stays empty without
+    // failing the checkout.
+    #[tokio::test]
+    async fn new_checkouts_initialize_submodules_recursively_best_effort() {
+        // Submodule clones refuse the file transport by default, so the
+        // submodules are served over Git's dumb HTTP protocol.
+        let served = tempfile::tempdir().unwrap();
+        let url = serve_dumb_http(served.path().to_owned());
+        let publish = |repository: &Path, name: &str| {
+            let bare = served.path().join(name);
+            crate::git::text(
+                repository,
+                &[
+                    "clone",
+                    "--quiet",
+                    "--bare",
+                    "--",
+                    repository.to_str().unwrap(),
+                    bare.to_str().unwrap(),
+                ],
+            )
+            .unwrap();
+            crate::git::text(&bare, &["update-server-info"]).unwrap();
+            format!("{url}/{name}")
+        };
+        let add = |repository: &Path, url: &str, name: &str| {
+            crate::git::text(
+                repository,
+                &["submodule", "add", "--quiet", "--", url, name],
+            )
+            .unwrap();
+            commit(
+                repository,
+                ".gitmodules",
+                &fs::read_to_string(repository.join(".gitmodules")).unwrap(),
+            );
+        };
+        let inner = repository();
+        let middle = repository();
+        let outer = repository();
+        add(middle.path(), &publish(inner.path(), "inner.git"), "inner");
+        add(outer.path(), &publish(middle.path(), "middle.git"), "lib");
+        let root = dunce::canonicalize(outer.path()).unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let store = Worktrees::new(&directory.path().join("projects.json"));
+        let (checkout, _) = store
+            .create(
+                &new_thread(),
+                root.to_str().unwrap(),
+                "HEAD",
+                None,
+                false,
+                Default::default(),
+                Default::default(),
+            )
+            .await
+            .unwrap();
+        assert!(checkout.join("lib/tracked.txt").is_file());
+        assert!(checkout.join("lib/inner/tracked.txt").is_file());
+
+        // A submodule whose source does not exist stays empty; the checkout stays.
+        let broken = repository();
+        let root = dunce::canonicalize(broken.path()).unwrap();
+        let missing = directory.path().join("missing");
+        fs::write(
+            root.join(".gitmodules"),
+            format!(
+                "[submodule \"gone\"]\n\tpath = gone\n\turl = {}\n",
+                missing.display()
+            ),
+        )
+        .unwrap();
+        crate::git::text(
+            &root,
+            &[
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                &format!("160000,{},gone", head(inner.path())),
+            ],
+        )
+        .unwrap();
+        commit(
+            &root,
+            ".gitmodules",
+            &fs::read_to_string(root.join(".gitmodules")).unwrap(),
+        );
+        let (checkout, _) = store
+            .create(
+                &new_thread(),
+                root.to_str().unwrap(),
+                "HEAD",
+                None,
+                false,
+                Default::default(),
+                Default::default(),
+            )
+            .await
+            .unwrap();
+        assert!(checkout.join("tracked.txt").is_file());
+        assert!(!checkout.join("gone/tracked.txt").exists());
+    }
+
     // A branch or base named like an option is never read as one: neither
     // deletes, forces or otherwise changes an existing branch.
     #[tokio::test]
@@ -1197,6 +1631,7 @@ mod tests {
                     base,
                     branch.map(str::to_owned),
                     false,
+                    Default::default(),
                     Default::default(),
                 )
                 .await
@@ -1248,6 +1683,7 @@ mod tests {
                 None,
                 true,
                 Default::default(),
+                Default::default(),
             )
         };
 
@@ -1287,6 +1723,7 @@ mod tests {
                 "main",
                 None,
                 true,
+                Default::default(),
                 Default::default(),
             )
             .await
@@ -1384,6 +1821,7 @@ mod tests {
                     "HEAD",
                     None,
                     false,
+                    Default::default(),
                     Default::default(),
                 )
                 .await
@@ -1554,6 +1992,7 @@ mod tests {
                 None,
                 false,
                 Default::default(),
+                Default::default(),
             )
             .await
             .unwrap()
@@ -1631,6 +2070,7 @@ mod tests {
                 None,
                 false,
                 Default::default(),
+                Default::default(),
             )
             .await
             .unwrap()
@@ -1642,6 +2082,7 @@ mod tests {
                 "HEAD",
                 None,
                 false,
+                Default::default(),
                 Default::default(),
             )
             .await
@@ -1752,6 +2193,7 @@ mod tests {
                 None,
                 false,
                 Default::default(),
+                Default::default(),
             )
             .await
             .unwrap()
@@ -1815,6 +2257,7 @@ mod tests {
                 None,
                 false,
                 Default::default(),
+                Default::default(),
             )
             .await
             .unwrap()
@@ -1863,7 +2306,8 @@ mod tests {
                         "HEAD",
                         None,
                         false,
-                        Default::default()
+                        Default::default(),
+                        Default::default(),
                     )
                     .await
                     .is_err(),
@@ -1941,6 +2385,7 @@ mod tests {
                 None,
                 false,
                 Default::default(),
+                Default::default(),
             )
             .await
             .unwrap()
@@ -1969,6 +2414,7 @@ mod tests {
                 None,
                 false,
                 Default::default(),
+                Default::default(),
             )
             .await
             .unwrap()
@@ -1985,7 +2431,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn existing_checkouts_keep_original_name_location_and_selected_subdirectory() {
+    async fn existing_checkouts_keep_original_name_and_location_and_return_the_checkout_root() {
         for registered in [false, true] {
             let repository = repository();
             let root = dunce::canonicalize(repository.path()).unwrap();
@@ -2044,22 +2490,22 @@ mod tests {
                     None,
                     false,
                     Default::default(),
+                    Default::default(),
                 )
                 .await
                 .unwrap()
                 .0;
-            let checkout = first.parent().unwrap().parent().unwrap();
-            assert_eq!(
-                first.strip_prefix(checkout).unwrap(),
-                Path::new("packages/app")
-            );
+            // Like the reference, a project below the repository root works in
+            // the root of its checkout, which is also what the thread records.
+            let checkout = first.as_path();
+            assert!(checkout.join("packages/app").is_dir());
             assert_eq!(checkout.file_name(), root.file_name());
             assert_eq!(
                 checkout.parent().unwrap().parent().unwrap(),
                 root.join(".worktree")
             );
             assert_eq!(
-                fs::read_to_string(first.join("source.txt")).unwrap(),
+                fs::read_to_string(first.join("packages/app/source.txt")).unwrap(),
                 "worktree-only commit"
             );
             assert_eq!(
@@ -2070,16 +2516,17 @@ mod tests {
             let second = Worktrees::new(&projects)
                 .create(
                     &new_thread(),
-                    first.to_str().unwrap(),
+                    first.join("packages/app").to_str().unwrap(),
                     "HEAD",
                     None,
                     false,
+                    Default::default(),
                     Default::default(),
                 )
                 .await
                 .unwrap()
                 .0;
-            let second_checkout = second.parent().unwrap().parent().unwrap();
+            let second_checkout = second.as_path();
             assert_eq!(second_checkout.file_name(), root.file_name());
             assert_eq!(
                 second_checkout.parent().unwrap().parent().unwrap(),
@@ -2109,7 +2556,7 @@ mod tests {
                 assert!(!legacy.exists());
                 assert!(root.join(".git/bex-worktrees").is_dir());
             }
-            assert!(first.join("source.txt").is_file());
+            assert!(first.join("packages/app/source.txt").is_file());
         }
     }
 
@@ -2130,6 +2577,7 @@ mod tests {
                     None,
                     false,
                     Default::default(),
+                    Default::default(),
                 )
                 .await
                 .is_err()
@@ -2143,6 +2591,7 @@ mod tests {
                     "HEAD",
                     None,
                     false,
+                    Default::default(),
                     Default::default(),
                 )
                 .await

@@ -476,6 +476,7 @@ impl HostOperations for HostIo {
                     request.branch,
                     request.start_from_origin,
                     request.progress,
+                    request.cancel,
                 )
                 .await
                 .map_err(error)?;
@@ -490,7 +491,7 @@ impl HostOperations for HostIo {
         _project_root: String,
         path: String,
     ) -> BoxFuture<'_, Result<(), String>> {
-        Box::pin(async move { self.worktrees.remove(path, false).await.map_err(error) })
+        Box::pin(async move { self.worktrees.abandon(path).await.map_err(error) })
     }
     fn thread_folder(
         &self,
