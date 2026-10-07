@@ -5,7 +5,7 @@ use crate::{
         Desktop,
         ui::{color, icon, icon_button, text_2xs, tint},
     },
-    diff::{DiffLayout, DiffView, diff_stat},
+    diff::{DiffLayout, DiffView, DiffViewEvent, diff_stat},
 };
 use agent_core::{
     state::Intent,
@@ -55,8 +55,19 @@ impl DiffState {
                 cx.notify();
             }
         }));
+        let view = cx.new(|_| DiffView::new("".into(), true));
+        subscriptions.push(cx.subscribe(&view, |desktop, _, event, cx| {
+            desktop.perform(match event {
+                DiffViewEvent::LoadMore => Intent::LoadMoreDiffFiles,
+                DiffViewEvent::Retry(path) => Intent::RevealDiffFile {
+                    path: path.clone(),
+                    retry: true,
+                },
+            });
+            cx.notify();
+        }));
         Self {
-            view: cx.new(|_| DiffView::new("".into(), true)),
+            view,
             base_open: false,
             base_query,
             wrap: crate::app::ui_word_wrap(),
@@ -96,6 +107,20 @@ impl Desktop {
                 self.panels.diff.loaded = key;
                 self.load_diff(&panel);
             }
+        }
+        // A diff too large to send whole shows file by file.
+        let files = panel
+            .git
+            .as_ref()
+            .and_then(|git| git.files_revision.clone())
+            .and_then(|key| Some((key, self.snapshot.review_files(thread.clone())?)));
+        if let Some((key, files)) = files {
+            let (layout, wrap) = (self.panels.diff.layout, self.panels.diff.wrap);
+            self.panels.diff.view.update(cx, |view, cx| {
+                view.set_files(&key, &files, cx);
+                view.set_layout(layout, wrap, cx);
+            });
+            return;
         }
         let review = self
             .snapshot
@@ -196,6 +221,13 @@ impl Desktop {
             Some(git) => git.loading,
             None => state.loading,
         };
+        // Totals of a diff shown file by file count every file of its list.
+        let file_totals = state
+            .view
+            .read(cx)
+            .file_totals()
+            .filter(|_| git.as_ref().is_some_and(|git| git.files_revision.is_some()));
+        let reading_files = file_totals.is_some_and(|(_, _, pending)| pending);
         let error = match &git {
             Some(git) => git.error.clone(),
             None => state.error.clone(),
@@ -205,7 +237,13 @@ impl Desktop {
         } else if let Some(message) = &panel.empty_message {
             empty_state(message)
         } else {
-            let content = if loading && (review.is_none() || checkout) {
+            let content = if file_totals.is_some() {
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .child(state.view.clone())
+                    .into_any_element()
+            } else if loading && (review.is_none() || checkout) {
                 empty_state(match panel.request {
                     Some(DiffRequest::Turn { .. }) => "Loading checkpoint diff...",
                     Some(DiffRequest::Unstaged { .. }) => "Loading uncommitted changes...",
@@ -225,9 +263,10 @@ impl Desktop {
                     _ => empty_state("No patch available for this selection."),
                 }
             };
-            let has_patch = review
-                .as_ref()
-                .is_some_and(|review| !review.diff.trim().is_empty());
+            let has_patch = file_totals.is_some()
+                || review
+                    .as_ref()
+                    .is_some_and(|review| !review.diff.trim().is_empty());
             v_flex()
                 .flex_1()
                 .min_h_0()
@@ -295,24 +334,35 @@ impl Desktop {
                         h_flex()
                             .flex_shrink_0()
                             .gap_1()
-                            .when_some(review.as_ref().filter(|_| file_count > 0), |row, review| {
-                                row.child(div().mr_1().child(diff_stat(
-                                    Some(review.additions),
-                                    Some(review.deletions),
-                                )))
-                            })
+                            .when_some(
+                                file_totals
+                                    .map(|(additions, deletions, _)| (additions, deletions))
+                                    .or_else(|| {
+                                        review
+                                            .as_ref()
+                                            .map(|review| (review.additions, review.deletions))
+                                    })
+                                    .filter(|_| file_count > 0),
+                                |row, (additions, deletions)| {
+                                    row.child(
+                                        div()
+                                            .mr_1()
+                                            .child(diff_stat(Some(additions), Some(deletions))),
+                                    )
+                                },
+                            )
                             .when(checkout && is_repo, |row| {
                                 row.child(
                                     icon_button(
                                         "refresh-diff",
                                         "refresh-cw",
-                                        if loading {
+                                        if loading || reading_files {
                                             "Refreshing diff\u{2026}"
                                         } else {
                                             "Refresh diff"
                                         },
                                     )
-                                    .loading(loading)
+                                    .loading(loading || reading_files)
                                     .on_click(cx.listener(
                                         move |view, _, _, cx| {
                                             if let Some((_, panel)) = view.diff_panel() {

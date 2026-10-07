@@ -1,7 +1,8 @@
 use crate::app::color;
+use agent_core::view::review_files::{ReviewFileStatus, ReviewFilesView};
 use gpui_kit::{
     component::{
-        Icon,
+        Icon, Sizable,
         button::{Button, ButtonVariants},
         h_flex, v_flex,
     },
@@ -45,6 +46,32 @@ enum SplitRow {
     Pair(Option<usize>, Option<usize>),
 }
 
+/// What the diff view asks of its owner.
+pub(crate) enum DiffViewEvent {
+    /// The loading boundary came into view: read the next files.
+    LoadMore,
+    /// Read this file's patch again.
+    Retry(String),
+}
+
+/// A diff shown file by file: the files whose patch settled, then a loading
+/// boundary for the rest.
+struct LazyFiles {
+    /// The files revision shown.
+    key: String,
+    /// By file, its status button: the icon, its label and whether it retries.
+    statuses: HashMap<usize, (&'static str, SharedString, bool)>,
+    /// Files with no rows to show: their header stays collapsed.
+    unavailable: HashSet<usize>,
+    placeholders: usize,
+    files: usize,
+    additions: u64,
+    deletions: u64,
+    pending: bool,
+    /// The revision at which the boundary last asked for more.
+    asked_at: Option<String>,
+}
+
 /// The patch is parsed only when its source changes. Both views reuse these rows.
 pub(crate) struct DiffView {
     source: SharedString,
@@ -61,7 +88,9 @@ pub(crate) struct DiffView {
     limit: Option<usize>,
     layout: DiffLayout,
     wrap: bool,
+    lazy: Option<LazyFiles>,
 }
+impl EventEmitter<DiffViewEvent> for DiffView {}
 impl DiffView {
     pub(crate) fn new(source: SharedString, scroll: bool) -> Self {
         let (rows, file_names) = parse(&source);
@@ -81,14 +110,16 @@ impl DiffView {
             limit: if scroll { None } else { Some(300) },
             layout: DiffLayout::Stacked,
             wrap: false,
+            lazy: None,
         };
         view.rebuild();
         view
     }
     pub(crate) fn set_source(&mut self, source: &str, cx: &mut Context<Self>) {
-        if self.source.as_ref() == source {
+        if self.lazy.is_none() && self.source.as_ref() == source {
             return;
         }
+        self.lazy = None;
         (self.rows, self.file_names) = parse(source);
         self.context_folds = context_folds(&self.rows);
         self.folded.clear();
@@ -96,6 +127,112 @@ impl DiffView {
         self.source = source.to_owned().into();
         self.rebuild();
         cx.notify();
+    }
+    /// Shows a diff file by file: the files whose patch settled, in order,
+    /// and a loading boundary for the rest. `key` changes with any file.
+    pub(crate) fn set_files(&mut self, key: &str, view: &ReviewFilesView, cx: &mut Context<Self>) {
+        if self.lazy.as_ref().is_some_and(|lazy| lazy.key == key) {
+            return;
+        }
+        // Folded files and opened context follow their file across updates.
+        let starts: HashMap<usize, usize> = self
+            .rows
+            .iter()
+            .enumerate()
+            .rev()
+            .map(|(ix, row)| (row.file, ix))
+            .collect();
+        let folded: HashSet<SharedString> = self
+            .folded
+            .iter()
+            .filter_map(|file| self.file_names.get(file).cloned())
+            .collect();
+        let expanded: HashSet<(SharedString, usize)> = self
+            .expanded_context
+            .iter()
+            .filter_map(|ix| {
+                let file = self.rows.get(*ix)?.file;
+                Some((self.file_names.get(&file)?.clone(), ix - starts.get(&file)?))
+            })
+            .collect();
+        let asked_at = self.lazy.take().and_then(|lazy| lazy.asked_at);
+        let mut lazy = LazyFiles {
+            key: key.to_owned(),
+            statuses: HashMap::new(),
+            unavailable: HashSet::new(),
+            placeholders: view.placeholder_count as usize,
+            files: view.files.len(),
+            additions: view.additions,
+            deletions: view.deletions,
+            pending: view.pending,
+            asked_at,
+        };
+        self.rows.clear();
+        self.file_names.clear();
+        self.folded.clear();
+        self.expanded_context.clear();
+        self.stats.clear();
+        for file in &view.files {
+            self.stats.insert(
+                file.path.clone(),
+                (Some(file.additions), Some(file.deletions)),
+            );
+            if file.status == ReviewFileStatus::Loading {
+                continue;
+            }
+            let id = self.file_names.len();
+            let name: SharedString = file.path.clone().into();
+            let start = self.rows.len();
+            self.rows.push(Row {
+                text: name.clone(),
+                old: None,
+                new: None,
+                kind: 'F',
+                file: id,
+            });
+            self.rows.extend(file.rows.iter().map(|row| Row {
+                text: row.text.clone().into(),
+                old: row.old.map(|n| n as usize),
+                new: row.new.map(|n| n as usize),
+                kind: row.kind.chars().next().unwrap_or('M'),
+                file: id,
+            }));
+            for (path, offset) in &expanded {
+                if *path == name {
+                    self.expanded_context.insert(start + offset);
+                }
+            }
+            if folded.contains(&name) {
+                self.folded.insert(id);
+            }
+            let retry = matches!(
+                file.status,
+                ReviewFileStatus::Failed | ReviewFileStatus::Unavailable
+            );
+            if retry {
+                lazy.unavailable.insert(id);
+            }
+            if let Some(notice) = &file.notice {
+                let icon = if retry { "rotate-cw" } else { "info" };
+                lazy.statuses
+                    .insert(id, (icon, notice.clone().into(), retry));
+            }
+            self.file_names.insert(id, name);
+        }
+        self.context_folds = context_folds(&self.rows);
+        self.source = SharedString::default();
+        self.lazy = Some(lazy);
+        let top = self.list.logical_scroll_top();
+        self.rebuild();
+        self.list.scroll_to(top);
+        cx.notify();
+    }
+    /// The totals of a diff shown file by file, which count every file, and
+    /// whether a file's patch is being read.
+    pub(crate) fn file_totals(&self) -> Option<(u64, u64, bool)> {
+        self.lazy
+            .as_ref()
+            .map(|lazy| (lazy.additions, lazy.deletions, lazy.pending))
     }
     /// Per-file line counts for the file headers, by path.
     pub(crate) fn set_stats(&mut self, stats: HashMap<String, (Option<u64>, Option<u64>)>) {
@@ -111,7 +248,9 @@ impl DiffView {
         cx.notify();
     }
     pub(crate) fn file_count(&self) -> usize {
-        self.file_names.len()
+        self.lazy
+            .as_ref()
+            .map_or(self.file_names.len(), |lazy| lazy.files)
     }
     pub(crate) fn all_folded(&self) -> bool {
         !self.file_names.is_empty() && self.file_names.keys().all(|f| self.folded.contains(f))
@@ -183,10 +322,78 @@ impl DiffView {
         self.split = split_rows(&kinds, &self.visible, |ix| {
             self.folded_context(ix).is_some()
         });
-        self.list.reset(match self.layout {
+        self.list
+            .reset(self.item_count() + usize::from(self.boundary() > 0));
+    }
+    fn item_count(&self) -> usize {
+        match self.layout {
             DiffLayout::Stacked => self.visible.len(),
             DiffLayout::Split => self.split.len(),
-        });
+        }
+    }
+    /// Placeholder headers after the shown files while files are unread.
+    fn boundary(&self) -> usize {
+        self.lazy.as_ref().map_or(0, |lazy| lazy.placeholders)
+    }
+    /// The loading boundary: placeholder headers that ask for the next files
+    /// once they come into view.
+    fn loading_boundary(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        if let Some(lazy) = self.lazy.as_mut()
+            && lazy.asked_at.as_ref() != Some(&lazy.key)
+        {
+            lazy.asked_at = Some(lazy.key.clone());
+            let view = cx.entity().downgrade();
+            cx.defer(move |cx| {
+                let _ = view.update(cx, |_, cx| cx.emit(DiffViewEvent::LoadMore));
+            });
+        }
+        let skeleton = || tint("textMuted", 0.15);
+        v_flex()
+            .id("diff-loading-boundary")
+            .w_full()
+            .children((0..self.boundary()).map(|_| {
+                h_flex()
+                    .h(px(32.))
+                    .w_full()
+                    .pl_2()
+                    .pr_3()
+                    .gap_2()
+                    .border_b_1()
+                    .border_color(tint("border", 0.4))
+                    .child(
+                        div()
+                            .size(px(20.))
+                            .flex()
+                            .flex_shrink_0()
+                            .items_center()
+                            .justify_center()
+                            .child(div().size(px(10.)).rounded_sm().bg(skeleton())),
+                    )
+                    .child(
+                        div()
+                            .size(px(20.))
+                            .flex_shrink_0()
+                            .rounded_sm()
+                            .bg(skeleton()),
+                    )
+                    .child(
+                        div()
+                            .w(relative(0.5))
+                            .max_w(px(256.))
+                            .h(px(12.))
+                            .rounded_full()
+                            .bg(skeleton()),
+                    )
+                    .child(
+                        h_flex()
+                            .ml_auto()
+                            .flex_shrink_0()
+                            .gap_2()
+                            .child(div().w(px(20.)).h(px(12.)).rounded_full().bg(skeleton()))
+                            .child(div().w(px(20.)).h(px(12.)).rounded_full().bg(skeleton())),
+                    )
+            }))
+            .into_any_element()
     }
     fn item(&self, ix: usize, cx: &Context<Self>) -> AnyElement {
         match self.layout {
@@ -205,9 +412,42 @@ impl DiffView {
     }
     fn file_header(&self, row: &Row, cx: &Context<Self>) -> AnyElement {
         let file = row.file;
-        let folded = self.folded.contains(&file);
+        let unavailable = self
+            .lazy
+            .as_ref()
+            .is_some_and(|lazy| lazy.unavailable.contains(&file));
+        let folded = unavailable || self.folded.contains(&file);
         let name = self.file_names.get(&file).unwrap_or(&row.text).clone();
         let stats = self.stats.get(name.as_ref()).copied();
+        let status = self
+            .lazy
+            .as_ref()
+            .and_then(|lazy| lazy.statuses.get(&file).cloned())
+            .map(|(icon_name, label, retry)| {
+                let path = name.to_string();
+                Button::new(("diff-file-status", file))
+                    .icon(
+                        Icon::default()
+                            .path(SharedString::from(format!("lucide/{icon_name}.svg")))
+                            .size_3(),
+                    )
+                    .ghost()
+                    .xsmall()
+                    .size(px(20.))
+                    .text_color(color("textMuted"))
+                    .tooltip(label.clone())
+                    .accessibility_label(if retry {
+                        label
+                    } else {
+                        "Partial diff preview".into()
+                    })
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        cx.stop_propagation();
+                        if retry {
+                            cx.emit(DiffViewEvent::Retry(path.clone()));
+                        }
+                    }))
+            });
         h_flex()
             .id(("diff-file", file))
             .w_full()
@@ -221,6 +461,9 @@ impl DiffView {
             .border_color(color("border"))
             .text_xs()
             .on_click(cx.listener(move |view, _, _, cx| {
+                if unavailable {
+                    return;
+                }
                 if !view.folded.remove(&file) {
                     view.folded.insert(file);
                 }
@@ -235,17 +478,19 @@ impl DiffView {
                         "lucide/chevron-down.svg"
                     })
                     .size_4()
-                    .text_color(color("textMuted")),
+                    .text_color(color("textMuted"))
+                    .when(unavailable, |icon| icon.opacity(0.5)),
             )
             .child(
                 div()
-                    .flex_1()
                     .min_w_0()
                     .truncate()
                     .font_family("Menlo")
                     .font_weight(FontWeight::MEDIUM)
                     .child(name),
             )
+            .children(status)
+            .child(div().flex_1())
             .when_some(stats, |header, (additions, deletions)| {
                 header.child(diff_stat(additions, deletions))
             })
@@ -405,7 +650,13 @@ impl Render for DiffView {
             return v_flex().size_full().bg(color("codeBackground")).child(
                 list(self.list.clone(), move |ix, _, cx| {
                     entity
-                        .update(cx, |view, cx| view.item(ix, cx))
+                        .update(cx, |view, cx| {
+                            if ix == view.item_count() {
+                                view.loading_boundary(cx)
+                            } else {
+                                view.item(ix, cx)
+                            }
+                        })
                         .unwrap_or_else(|_| div().into_any_element())
                 })
                 .flex_1()
