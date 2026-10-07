@@ -150,7 +150,7 @@ fn names_discarded_drafts() {
         claim,
         UndoRestore::Draft {
             key: "new:app".into(),
-            draft: Draft::default(),
+            draft: Box::default(),
         },
         0,
     );

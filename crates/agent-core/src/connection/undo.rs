@@ -106,7 +106,10 @@ impl Owner {
         undo.show(
             ThreadUndoAction::Discarded,
             claim,
-            UndoRestore::Draft { key, draft },
+            UndoRestore::Draft {
+                key,
+                draft: Box::new(draft),
+            },
             now_ms() as i64,
         );
     }
@@ -140,7 +143,7 @@ impl Owner {
                     {
                         error = Some("Failed to restore draft: The draft has new content.");
                     } else {
-                        self.state.drafts.insert(key, draft);
+                        self.state.drafts.insert(key, *draft);
                     }
                 }
             }

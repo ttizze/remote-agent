@@ -54,7 +54,7 @@ pub enum UndoRestore {
         reopen: bool,
     },
     /// The discarded draft under its key, unless new content replaced it.
-    Draft { key: String, draft: Draft },
+    Draft { key: String, draft: Box<Draft> },
 }
 
 /// One action kind on one thread or draft.
