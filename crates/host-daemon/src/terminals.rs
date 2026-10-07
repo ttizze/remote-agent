@@ -1,8 +1,8 @@
 //! Thread-owned PTYs, kept across transport disconnects. Any paired device may
 //! attach and every attached session receives the output; the Host itself opens
 //! terminals for setup scripts. The private supervisor pipe carries terminal I/O;
-//! only this owner publishes events. Each terminal's screen is kept in a history
-//! file, so a terminal opened again after a Host restart shows it.
+//! only this owner publishes events. Each terminal's output is kept as text in a
+//! history file, so a terminal opened again after a Host restart replays it.
 use crate::host_rpc::connections::{Connections, SessionId};
 use agent_domain::{ThreadId, Timestamp};
 use agent_protocol::{
@@ -31,7 +31,9 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
+mod history;
 pub(crate) mod processes;
+use history::{History, HistoryFiles, Limits};
 use processes::{ProcessSource, ProcessTable, Subprocess, poll_delay};
 
 const MAX_RETAINED_INACTIVE: usize = 128;
@@ -41,12 +43,8 @@ const DEFAULT_SIZE: TerminalSize = TerminalSize {
     cols: 120,
     rows: 30,
 };
-/// Lines a terminal keeps above its screen.
-const SCROLLBACK_LINES: usize = 5_000;
 /// Output is written to the history file at most this often.
 const PERSIST_DELAY: Duration = Duration::from_millis(40);
-/// A kept screen larger than one frame cannot be restored.
-const MAX_HISTORY_BYTES: usize = agent_protocol::protocol::MAX_FRAME_BYTES;
 /// Host variables a user's shell must not inherit.
 const ENV_BLOCKLIST: [&str; 3] = ["PORT", "ELECTRON_RENDERER_PORT", "ELECTRON_RUN_AS_NODE"];
 const APP_ENV_PREFIXES: [&str; 2] = ["BEX_", "VITE_"];
@@ -80,114 +78,30 @@ impl alacritty_terminal::grid::Dimensions for Dimensions {
     }
 }
 
+/// The Host's emulator of a terminal, which only answers its queries.
 fn new_screen(size: TerminalSize, replies: &Replies) -> alacritty_terminal::Term<Replies> {
     let config = alacritty_terminal::term::Config {
-        scrolling_history: SCROLLBACK_LINES,
+        scrolling_history: 0,
         ..Default::default()
     };
     alacritty_terminal::Term::new(config, &Dimensions(size), replies.clone())
 }
 
-/// What an empty terminal of this size shows.
-fn blank_screen(size: TerminalSize) -> Vec<u8> {
-    new_screen(size, &Replies::default()).ansi_checkpoint(None)
-}
-
-/// The history files, one per thread terminal, named from both IDs.
-#[derive(Clone)]
-struct HistoryFiles(PathBuf);
-impl HistoryFiles {
-    fn encoded(text: &str) -> String {
-        use base64::Engine;
-        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(text)
-    }
-    fn path(&self, thread: &ThreadId, terminal_id: &str) -> PathBuf {
-        self.0.join(format!(
-            "{}.{}.log",
-            Self::encoded(thread.as_str()),
-            Self::encoded(terminal_id)
-        ))
-    }
-    /// The kept screen; nothing when there is none or it cannot be restored.
-    async fn read(path: PathBuf) -> Vec<u8> {
-        tokio::task::spawn_blocking(move || {
-            use std::io::Read;
-            let file = match std::fs::File::open(&path) {
-                Ok(file) => file,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return vec![],
-                Err(error) => {
-                    tracing::warn!(operation = "host.terminal.history", message = %error);
-                    return vec![];
-                }
-            };
-            let mut data = vec![];
-            if let Err(error) = file
-                .take(MAX_HISTORY_BYTES as u64 + 1)
-                .read_to_end(&mut data)
-            {
-                tracing::warn!(operation = "host.terminal.history", message = %error);
-                return vec![];
-            }
-            if data.len() > MAX_HISTORY_BYTES {
-                return vec![];
-            }
-            data
-        })
-        .await
-        .unwrap_or_default()
-    }
-    async fn delete(path: PathBuf) {
-        let _ = tokio::task::spawn_blocking(move || {
-            if let Err(error) = std::fs::remove_file(&path)
-                && error.kind() != std::io::ErrorKind::NotFound
-            {
-                tracing::warn!(operation = "host.terminal.history", message = %error);
-            }
-        })
-        .await;
-    }
-    /// Deletes the history of every terminal the thread had.
-    async fn delete_thread(&self, thread: &ThreadId) {
-        let (directory, prefix) = (
-            self.0.clone(),
-            format!("{}.", Self::encoded(thread.as_str())),
-        );
-        let _ = tokio::task::spawn_blocking(move || {
-            let Ok(entries) = std::fs::read_dir(&directory) else {
-                return;
-            };
-            for entry in entries.flatten() {
-                if entry.file_name().to_string_lossy().starts_with(&prefix)
-                    && let Err(error) = std::fs::remove_file(entry.path())
-                {
-                    tracing::warn!(operation = "host.terminal.history", message = %error);
-                }
-            }
-        })
-        .await;
-    }
-}
-
-/// Writes one terminal's screen to its history file, a write at a time.
+/// Writes one terminal's history to its file, a write at a time.
 struct Saver {
     path: PathBuf,
     writing: Option<tokio::task::JoinHandle<()>>,
 }
 impl Saver {
-    async fn save(&mut self, data: Vec<u8>) {
+    async fn save(&mut self, text: String) {
         if let Some(writing) = self.writing.take() {
             let _ = writing.await;
         }
-        let path = self.path.clone();
-        self.writing = Some(tokio::task::spawn_blocking(move || {
-            if let Err(error) = crate::platform::save_private_bytes(&path, &data) {
-                tracing::warn!(operation = "host.terminal.history", message = %error);
-            }
-        }));
+        self.writing = Some(tokio::spawn(HistoryFiles::write(self.path.clone(), text)));
     }
-    /// Writes `data` and waits until it is on disk.
-    async fn flush(&mut self, data: Vec<u8>) {
-        self.save(data).await;
+    /// Writes `text` and waits until it is on disk.
+    async fn flush(&mut self, text: String) {
+        self.save(text).await;
         if let Some(writing) = self.writing.take() {
             let _ = writing.await;
         }
@@ -232,6 +146,7 @@ struct Channel {
     listeners: Mutex<Vec<mpsc::UnboundedSender<TerminalOutput>>>,
     /// Output chunks and input writes; only grows.
     activity: AtomicU64,
+    history: Mutex<History>,
 }
 impl Channel {
     fn publish(&self, event: &Notification) {
@@ -278,10 +193,8 @@ struct Record {
     updated_at: Timestamp,
     channel: Arc<Channel>,
     process: Option<Process>,
-    /// The last screen of a terminal that is not running.
-    screen: Vec<u8>,
     failure: Option<String>,
-    history: PathBuf,
+    history_file: PathBuf,
 }
 impl Record {
     fn summary(&self) -> TerminalSummary {
@@ -311,8 +224,8 @@ impl Record {
     fn touch(&mut self) {
         self.updated_at = now();
     }
-    /// Stops the shell and forgets the launch context and screen; the caller
-    /// waits for the returned process to finish.
+    /// Stops the shell and replaces the launch context; the caller waits for
+    /// the returned process to finish, then forgets the history.
     fn reset(
         &mut self,
         cwd: PathBuf,
@@ -326,7 +239,6 @@ impl Record {
         self.cwd = cwd;
         self.worktree_path = worktree_path;
         self.env = env;
-        self.screen.clear();
         stopping
     }
 }
@@ -379,8 +291,8 @@ impl Inner {
             self.upsert(record);
         }
     }
-    /// The process is gone; the record stays with its last screen until closed.
-    fn finished(&self, handle: &str, generation: u64, outcome: Outcome, screen: Vec<u8>) {
+    /// The process is gone; the record stays with its history until closed.
+    fn finished(&self, handle: &str, generation: u64, outcome: Outcome) {
         let mut records = self.records.lock().unwrap();
         let Some(record) = records.get_mut(handle).filter(|record| {
             record
@@ -393,7 +305,6 @@ impl Inner {
         record.process = None;
         record.pid = None;
         record.subprocess = Subprocess::Idle;
-        record.screen = screen;
         match outcome {
             Outcome::Exited(code) => {
                 record.status = TerminalStatus::Exited;
@@ -546,6 +457,20 @@ impl Terminals {
         interval: Duration,
         history: PathBuf,
     ) -> Self {
+        Self::with_history(
+            router,
+            processes,
+            interval,
+            HistoryFiles::new(history, Limits::default()),
+        )
+    }
+
+    fn with_history(
+        router: Connections,
+        processes: ProcessSource,
+        interval: Duration,
+        history: HistoryFiles,
+    ) -> Self {
         Self {
             inner: Arc::new(Inner {
                 router,
@@ -556,7 +481,7 @@ impl Terminals {
                 poll_interval: interval,
                 poller: OnceLock::new(),
                 generation: AtomicU64::new(0),
-                history: HistoryFiles(history),
+                history,
             }),
         }
     }
@@ -614,11 +539,18 @@ impl Terminals {
         });
     }
 
-    /// A new terminal for `request`, which runs in `cwd` at `size`.
-    fn record(&self, request: OpenTerminal, cwd: PathBuf, size: TerminalSize) -> Record {
+    /// A new terminal for `request`, which runs in `cwd` at `size` and keeps
+    /// `history`.
+    fn record(
+        &self,
+        request: OpenTerminal,
+        cwd: PathBuf,
+        size: TerminalSize,
+        history: History,
+    ) -> Record {
         let handle = thread_terminal_handle_for(request.thread.as_str(), &request.terminal_id);
         Record {
-            history: self
+            history_file: self
                 .inner
                 .history
                 .path(&request.thread, &request.terminal_id),
@@ -639,11 +571,24 @@ impl Terminals {
                 attached: Mutex::default(),
                 listeners: Mutex::default(),
                 activity: AtomicU64::new(0),
+                history: Mutex::new(history),
             }),
             process: None,
-            screen: vec![],
             failure: None,
         }
+    }
+
+    /// Empties the terminal's history and its file.
+    async fn forget_history(&self, handle: &str) {
+        let file = {
+            let records = self.inner.records.lock().unwrap();
+            let Some(record) = records.get(handle) else {
+                return;
+            };
+            record.channel.history.lock().unwrap().clear();
+            record.history_file.clone()
+        };
+        HistoryFiles::write(file, String::new()).await;
     }
 
     /// Opens the terminal: starts it, restarts it when it exited or its
@@ -659,8 +604,8 @@ impl Terminals {
         self.open_locked(request, cwd, size).await
     }
 
-    /// A terminal new to this Host starts on its kept screen; one that starts
-    /// again starts empty.
+    /// A terminal new to this Host starts with its kept history; one that
+    /// starts again starts empty.
     async fn open_locked(
         &self,
         request: OpenTerminal,
@@ -668,10 +613,22 @@ impl Terminals {
         size: TerminalSize,
     ) -> Result<(), String> {
         let handle = thread_terminal_handle_for(request.thread.as_str(), &request.terminal_id);
-        let (stopping, kept, history) = {
+        let known = self.inner.records.lock().unwrap().contains_key(&handle);
+        let kept = match known {
+            true => None,
+            false => Some(
+                self.inner
+                    .history
+                    .read(&request.thread, &request.terminal_id)
+                    .await?,
+            ),
+        };
+        let (stopping, reset) = {
             let mut records = self.inner.records.lock().unwrap();
             match records.get_mut(&handle) {
                 None => {
+                    let history =
+                        kept.unwrap_or_else(|| History::new(self.inner.history.limits(), ""));
                     let record = self.record(
                         OpenTerminal {
                             thread: request.thread.clone(),
@@ -683,30 +640,34 @@ impl Terminals {
                         },
                         cwd.clone(),
                         size,
+                        history,
                     );
-                    let history = record.history.clone();
                     records.insert(handle.clone(), record);
-                    (None, true, history)
+                    (None, false)
                 }
                 Some(record) => {
                     let changed = record.cwd != cwd
                         || record.env != request.env
                         || record.worktree_path != request.worktree_path;
-                    let stopping = (changed || record.process.is_none())
-                        .then(|| {
+                    match changed || record.process.is_none() {
+                        true => (
                             record.reset(
                                 cwd.clone(),
                                 request.worktree_path.clone(),
                                 request.env.clone(),
-                            )
-                        })
-                        .flatten();
-                    (stopping, false, record.history.clone())
+                            ),
+                            true,
+                        ),
+                        false => (None, false),
+                    }
                 }
             }
         };
         if let Some(finished) = stopping {
             wait(finished).await?;
+        }
+        if reset {
+            self.forget_history(&handle).await;
         }
         let (running, resize) = {
             let records = self.inner.records.lock().unwrap();
@@ -721,13 +682,7 @@ impl Terminals {
             )
         };
         if !running {
-            let initial = if kept {
-                HistoryFiles::read(history).await
-            } else {
-                HistoryFiles::delete(history).await;
-                vec![]
-            };
-            return self.start(&handle, size, initial).await;
+            return self.start(&handle, size).await;
         }
         if let Some(input) = resize {
             send(&input, Action::Resize(size)).await?;
@@ -739,14 +694,9 @@ impl Terminals {
         Ok(())
     }
 
-    /// Runs a new shell for the record under `handle`, its screen starting as
-    /// `initial`, and waits until it is up.
-    async fn start(
-        &self,
-        handle: &str,
-        size: TerminalSize,
-        initial: Vec<u8>,
-    ) -> Result<(), String> {
+    /// Runs a new shell for the record under `handle` and waits until it is
+    /// up.
+    async fn start(&self, handle: &str, size: TerminalSize) -> Result<(), String> {
         self.ensure_poller();
         let generation = self.inner.generation.fetch_add(1, Ordering::AcqRel) + 1;
         let (input, receiver) = mpsc::channel(32);
@@ -773,7 +723,7 @@ impl Terminals {
                 record.channel.clone(),
                 record.cwd.clone(),
                 shell_environment(&record.env),
-                record.history.clone(),
+                record.history_file.clone(),
             )
         };
         let (ready, started) = oneshot::channel();
@@ -792,9 +742,9 @@ impl Terminals {
                     writing: None,
                 },
             };
-            let (cleanup, outcome, screen) = worker.run(cwd, size, env, initial).await;
+            let (cleanup, outcome) = worker.run(cwd, size, env).await;
             if let Some(inner) = inner.upgrade() {
-                inner.finished(&handle, generation, outcome, screen);
+                inner.finished(&handle, generation, outcome);
             }
             complete.send_replace(Some(cleanup));
         });
@@ -863,7 +813,8 @@ impl Terminals {
                         code: record.exit_code.unwrap_or(0),
                     },
                 };
-                (record.screen.clone(), record.size, ended)
+                let history = record.channel.history.lock().unwrap().value();
+                (history.into_bytes(), record.size, ended)
             });
             (
                 record.channel.clone(),
@@ -905,15 +856,14 @@ impl Terminals {
             match &record.process {
                 Some(process) => (Some(process.input.clone()), None),
                 None => {
-                    record.screen = blank_screen(record.size);
+                    record.channel.history.lock().unwrap().clear();
                     record.touch();
                     (
                         None,
                         Some((
                             record.channel.clone(),
-                            record.screen.clone(),
                             record.size,
-                            record.history.clone(),
+                            record.history_file.clone(),
                         )),
                     )
                 }
@@ -921,11 +871,11 @@ impl Terminals {
         };
         match (input, cleared) {
             (Some(input), _) => send(&input, Action::Clear).await?,
-            (None, Some((channel, data, size, history))) => {
-                HistoryFiles::delete(history).await;
+            (None, Some((channel, size, file))) => {
+                HistoryFiles::write(file, String::new()).await;
                 channel.publish(&Notification::TerminalRestored {
                     handle,
-                    data,
+                    data: vec![],
                     cols: size.cols,
                     rows: size.rows,
                 });
@@ -944,13 +894,10 @@ impl Terminals {
         let lock = self.inner.lock(&params.thread);
         let _guard = lock.lock().await;
         let handle = params.handle();
-        let (stopping, history) = {
+        let stopping = {
             let mut records = self.inner.records.lock().unwrap();
             match records.get_mut(&handle) {
-                Some(record) => (
-                    record.reset(cwd, params.worktree_path.clone(), params.env.clone()),
-                    record.history.clone(),
-                ),
+                Some(record) => record.reset(cwd, params.worktree_path.clone(), params.env.clone()),
                 None => {
                     let record = self.record(
                         OpenTerminal {
@@ -963,18 +910,18 @@ impl Terminals {
                         },
                         cwd,
                         params.size,
+                        History::new(self.inner.history.limits(), ""),
                     );
-                    let history = record.history.clone();
                     records.insert(handle.clone(), record);
-                    (None, history)
+                    None
                 }
             }
         };
         if let Some(finished) = stopping {
             wait(finished).await?;
         }
-        HistoryFiles::delete(history).await;
-        self.start(&handle, params.size, vec![]).await?;
+        self.forget_history(&handle).await;
+        self.start(&handle, params.size).await?;
         Ok(Empty {})
     }
 
@@ -1066,7 +1013,7 @@ impl Terminals {
             None => Ok(()),
         };
         if delete_history {
-            HistoryFiles::delete(record.history).await;
+            HistoryFiles::delete(record.history_file).await;
         }
         stopped
     }
@@ -1187,7 +1134,7 @@ impl Terminals {
             .any(|record| record.running() && record.cwd.starts_with(path))
     }
 
-    /// Stops every shell; each writes its screen to its history first.
+    /// Stops every shell; each writes its history first.
     pub(crate) async fn shutdown(&self) {
         let processes: Vec<_> = self
             .inner
@@ -1274,20 +1221,23 @@ impl Worker {
     fn publish(&self, event: Notification) {
         self.channel.publish(&event);
     }
+    fn history(&self) -> String {
+        self.channel.history.lock().unwrap().value()
+    }
     async fn run(
         mut self,
         cwd: PathBuf,
         size: TerminalSize,
         env: BTreeMap<String, String>,
-        initial: Vec<u8>,
-    ) -> (Result<(), String>, Outcome, Vec<u8>) {
+    ) -> (Result<(), String>, Outcome) {
         let handle = self.channel.handle.clone();
         let mut pending: Option<(u64, Receipt)> = None;
         let replies = Replies::default();
         let mut screen = new_screen(size, &replies);
         let mut parser: alacritty_terminal::vte::ansi::Processor = Default::default();
-        // A kept screen restores state only; it asks the shell nothing.
-        parser.advance(&mut screen, &initial);
+        // The kept history places the cursor as a replaying client does; it
+        // has no queries, and nothing it asks is answered.
+        parser.advance(&mut screen, self.history().as_bytes());
         replies.0.lock().unwrap().clear();
         let mut persist_at: Option<tokio::time::Instant> = None;
         let mut cleanup = Ok(());
@@ -1314,14 +1264,14 @@ impl Worker {
                         }
                         _ = tokio::time::sleep_until(persist_at.unwrap_or_else(tokio::time::Instant::now)), if persist_at.is_some() => {
                             persist_at = None;
-                            self.saver.save(screen.ansi_checkpoint(None)).await;
+                            self.saver.save(self.history()).await;
                         }
                         line = output.read_line() => {
                             let line = line.map_err(|error| error.to_string())?.ok_or("terminal supervisor exited without a result")?;
                             match serde_json::from_str::<PtyEvent>(&line).map_err(|error| error.to_string())? {
                                 PtyEvent::Started { pid } => {
                                     if let Some(inner) = self.inner.upgrade() { inner.started(&handle, self.generation, pid); }
-                                    self.publish(Notification::TerminalRestored { handle: handle.clone(), data: screen.ansi_checkpoint(None), cols: size.cols, rows: size.rows });
+                                    self.publish(Notification::TerminalRestored { handle: handle.clone(), data: self.history().into_bytes(), cols: size.cols, rows: size.rows });
                                     if let Some(ready) = self.ready.take() { let _ = ready.send(Ok(())); }
                                 }
                                 PtyEvent::Output { data } => {
@@ -1345,7 +1295,9 @@ impl Worker {
                                         query_bytes.extend_from_slice(data.as_bytes());
                                         if query_bytes.len() > agent_protocol::protocol::MAX_FRAME_BYTES { return Err("terminal query replies exceed the buffer limit".into()); }
                                     }
-                                    persist_at.get_or_insert_with(|| tokio::time::Instant::now() + PERSIST_DELAY);
+                                    if self.channel.history.lock().unwrap().record(&data) {
+                                        persist_at.get_or_insert_with(|| tokio::time::Instant::now() + PERSIST_DELAY);
+                                    }
                                     self.channel.activity.fetch_add(1, Ordering::AcqRel);
                                     self.channel.observe(TerminalOutput::Data(data.clone()));
                                     self.publish(Notification::Output { handle: handle.clone(), data });
@@ -1375,9 +1327,7 @@ impl Worker {
                                         screen.resize(Dimensions(size));
                                         write(&mut stdin,&PtyCommand::Resize{id:0,rows:size.rows,cols:size.cols}).await?;
                                     }
-                                    let mut data=screen.ansi_checkpoint(parser.preceding_char());
-                                    data.extend(parser.checkpoint_tail());
-                                    let result=self.channel.send(session, Notification::TerminalRestored { handle: handle.clone(), data, cols: screen.columns() as u16, rows: screen.screen_lines() as u16 });
+                                    let result=self.channel.send(session, Notification::TerminalRestored { handle: handle.clone(), data: self.history().into_bytes(), cols: screen.columns() as u16, rows: screen.screen_lines() as u16 });
                                     let _=command.complete.send(result);
                                     continue;
                                 }
@@ -1387,9 +1337,9 @@ impl Worker {
                                     parser = Default::default();
                                     replies.0.lock().unwrap().clear();
                                     persist_at = None;
-                                    let data = screen.ansi_checkpoint(None);
-                                    self.saver.flush(data.clone()).await;
-                                    self.publish(Notification::TerminalRestored { handle: handle.clone(), data, cols: size.cols, rows: size.rows });
+                                    self.channel.history.lock().unwrap().clear();
+                                    self.saver.flush(String::new()).await;
+                                    self.publish(Notification::TerminalRestored { handle: handle.clone(), data: vec![], cols: size.cols, rows: size.rows });
                                     let _=command.complete.send(Ok(()));
                                     continue;
                                 }
@@ -1432,9 +1382,8 @@ impl Worker {
         if let Some((_, complete)) = pending {
             let _ = complete.send(Err("terminal has exited".into()));
         }
-        self.saver.flush(screen.ansi_checkpoint(None)).await;
-        let mut last = screen.ansi_checkpoint(parser.preceding_char());
-        last.extend(parser.checkpoint_tail());
+        self.channel.history.lock().unwrap().end();
+        self.saver.flush(self.history()).await;
         let outcome = match result {
             Ok(()) => Outcome::Exited(exit_code),
             Err(message) => {
@@ -1446,7 +1395,7 @@ impl Worker {
                 Outcome::Failed(message)
             }
         };
-        (cleanup, outcome, last)
+        (cleanup, outcome)
     }
 }
 async fn write(

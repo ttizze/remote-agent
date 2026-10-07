@@ -73,75 +73,6 @@ async fn notifications_until(
     seen
 }
 
-#[test]
-fn checkpoint_restores_screen_modes_and_split_sequences() {
-    use alacritty_terminal::{Term, term::Config, vte::ansi::Processor};
-    let size = TerminalSize { rows: 5, cols: 12 };
-    let basic = [
-        (
-            b"hello\r\nworld\x1b[31m!\x1b[3;8H".as_slice(),
-            b"again".as_slice(),
-        ),
-        (
-            b"original\x1b[?1049h\x1b[2;4r\x1b[?6hALT\x1b[?2004h",
-            b"\r\nmore\x1b[?1049l!",
-        ),
-        (b"012345678901", b"next"),
-        (b"hi\x1b[38;2;12;", b"34;56mcolor"),
-        (b"\xe6\x97", b"\xa5\xe6\x9c\xac"),
-        (b"abc\x1b[2J", b"\x1b[3b"),
-        (b"one\r\ntwo\r\nthree\r\nfour\r\nfive\r\nsix", b"\r\nseven"),
-    ];
-    let sequences = [
-        "日本語\r\n12345678901日\r\ne\u{301}\x1b[31;44;1mred\x1b[0m",
-        "abc\x1b7\r\nother\x1b8!",
-        "123456789012\x1b7\r\nnext\x1b8X",
-        "screen\x1b[?1049h\x1b[2;4r\x1b[?6hALT\x1b[?1049l!",
-        "abc\x1b]0;title\x1b\\hello\x1b[38;2;12;34;56mRGB",
-        "before\x1b[?2026hupdate\r\nmore\x1b[?2026lafter",
-    ];
-    let cases = basic.into_iter().chain(
-        sequences
-            .iter()
-            .flat_map(|text| (0..=text.len()).map(move |index| text.as_bytes().split_at(index))),
-    );
-    for (before, after) in cases {
-        let mut original = Term::new(Config::default(), &Dimensions(size), Replies::default());
-        let mut parser: Processor = Default::default();
-        parser.advance(&mut original, before);
-        let mut restored = Term::new(Config::default(), &Dimensions(size), Replies::default());
-        let mut reader: Processor = Default::default();
-        let mut checkpoint = original.ansi_checkpoint(parser.preceding_char());
-        checkpoint.extend(parser.checkpoint_tail());
-        reader.advance(&mut restored, &checkpoint);
-        parser.advance(&mut original, after);
-        reader.advance(&mut restored, after);
-        assert_eq!(original.mode(), restored.mode(), "{before:?}");
-        assert_eq!(
-            original.grid().cursor.point,
-            restored.grid().cursor.point,
-            "{before:?}"
-        );
-        assert_eq!(
-            original.grid().history_size(),
-            restored.grid().history_size(),
-            "{before:?}"
-        );
-        for row in -(original.grid().history_size() as i32)..5 {
-            for col in 0..12 {
-                use alacritty_terminal::index::{Column, Line};
-                let a = &original.grid()[Line(row)][Column(col)];
-                let b = &restored.grid()[Line(row)][Column(col)];
-                assert_eq!(
-                    (a.c, a.fg, a.bg, a.flags, a.zerowidth()),
-                    (b.c, b.fg, b.bg, b.flags, b.zerowidth()),
-                    "{before:?}, {row}:{col}"
-                );
-            }
-        }
-    }
-}
-
 // terminalLabels.ts getTerminalLabel.
 #[test]
 fn tab_labels_number_term_ids_and_keep_other_ids() {
@@ -499,7 +430,9 @@ async fn exited_terminals_stay_until_closed_and_restart_on_request() {
             matches!(event, Notification::Exited { .. })
         })
         .await;
-        assert!(matches!(replay[0], Notification::TerminalRestored { .. }));
+        assert!(
+            matches!(&replay[0], Notification::TerminalRestored { data, .. } if contains(data, "exit 3"))
+        );
         assert_eq!(terminals.summaries_now()[0].status, TerminalStatus::Exited);
         terminals
             .attach(
@@ -512,6 +445,11 @@ async fn exited_terminals_stay_until_closed_and_restart_on_request() {
             .await
             .unwrap();
         assert_eq!(terminals.summaries_now()[0].status, TerminalStatus::Running);
+        // Manager.test.ts "emits exited event and reopens with clean transcript
+        // after exit".
+        assert!(!contains(&restored(&mut session).await, "exit 3"));
+        let file = terminals.inner.history.path(&owner, "term-1");
+        assert!(!contains(&std::fs::read(&file).unwrap(), "exit 3"));
         let pid = terminals.summaries_now()[0].pid;
         terminals
             .open(OpenTerminal {
@@ -691,52 +629,6 @@ async fn restored(session: &mut crate::host_rpc::connections::HostSession) -> Ve
     }
 }
 
-// Manager.test.ts "caps persisted history to configured line limit" and "strips
-// replay-unsafe terminal query and reply sequences from persisted history": a
-// terminal keeps its newest 5000 lines, and its kept screen asks nothing when
-// it is restored.
-#[test]
-fn a_kept_screen_is_bounded_and_asks_nothing_when_restored() {
-    use alacritty_terminal::vte::ansi::Processor;
-    let size = TerminalSize { cols: 40, rows: 10 };
-    let replies = Replies::default();
-    let mut original = new_screen(size, &replies);
-    let mut parser: Processor = Default::default();
-    let mut output = String::new();
-    for line in 1..=6_000 {
-        output.push_str(&format!("line-{line}\r\n"));
-    }
-    output.push_str("\x1b[c\x1b[6n\x1b]10;?\x1b\\\x1b[>q\x1bP$qm\x1b\\done");
-    parser.advance(&mut original, output.as_bytes());
-    assert!(!replies.0.lock().unwrap().is_empty());
-    let kept = original.ansi_checkpoint(None);
-
-    let replies = Replies::default();
-    let mut restored = new_screen(size, &replies);
-    let mut reader: Processor = Default::default();
-    reader.advance(&mut restored, &kept);
-    assert!(replies.0.lock().unwrap().is_empty());
-    assert_eq!(restored.grid().history_size(), SCROLLBACK_LINES);
-    let text = |term: &alacritty_terminal::Term<Replies>| {
-        use alacritty_terminal::index::{Column, Line};
-        let lines = term.grid().history_size() as i32;
-        (-lines..size.rows as i32)
-            .map(|row| {
-                (0..size.cols as usize)
-                    .map(|col| term.grid()[Line(row)][Column(col)].c)
-                    .collect::<String>()
-                    .trim_end()
-                    .to_owned()
-            })
-            .collect::<Vec<_>>()
-    };
-    let lines = text(&restored);
-    assert_eq!(lines, text(&original));
-    assert!(!lines.iter().any(|line| line == "line-1"));
-    assert!(lines.iter().any(|line| line == "line-6000"));
-    assert_eq!(lines.last().map(String::as_str), Some("done"));
-}
-
 // Manager.test.ts "reports a missing cwd without an artificial cause", "reports
 // a cwd that is not a directory" and "preserves non-notFound cwd stat failures".
 #[cfg(unix)]
@@ -771,12 +663,63 @@ async fn a_terminal_needs_a_directory_it_can_reach() {
 }
 
 // Manager.test.ts "bounds persisted and attached history without truncating
-// live output" and the history read on first open: a terminal opened again
-// after the Host restarts shows its kept screen; closing it with its history
-// deletes that.
+// live output": attached sessions receive every output byte while the kept
+// history, and what a session attaching later replays, stays within its
+// limits.
 #[cfg(unix)]
 #[tokio::test]
-async fn a_terminal_shows_its_kept_screen_after_the_host_restarts() {
+async fn bounds_kept_history_without_truncating_live_output() {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let directory = tempfile::tempdir().unwrap();
+        let history = tempfile::tempdir().unwrap();
+        let cwd = directory.path().to_string_lossy().into_owned();
+        let owner = thread("thread-1");
+        let handle = thread_terminal_handle_for("thread-1", "term-1");
+        let router = Connections::new();
+        let terminals = Terminals::with_history(
+            router.clone(),
+            processes::system(),
+            POLL_INTERVAL,
+            HistoryFiles::new(
+                history.path().to_path_buf(),
+                Limits { lines: 5, bytes: 10 },
+            ),
+        );
+        let mut session = router.open_authenticated_session(Some("phone".into()));
+        terminals
+            .attach(session.id(), &start(&owner, "term-1", Some(&cwd)))
+            .await
+            .unwrap();
+        terminals
+            .request(
+                session.id(),
+                &write(&handle, "printf 'a%.0s' 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32\n"),
+            )
+            .await
+            .unwrap();
+        output_until(&mut session, &"a".repeat(32)).await;
+        let file = terminals.inner.history.path(&owner, "term-1");
+        terminals.close(&handle, false).await.unwrap();
+        let kept = std::fs::read_to_string(&file).unwrap();
+        assert!(kept.len() <= 10, "{kept:?}");
+        terminals
+            .attach(session.id(), &start(&owner, "term-1", Some(&cwd)))
+            .await
+            .unwrap();
+        // The new shell may already have added its prompt.
+        let replayed = restored(&mut session).await;
+        assert!(replayed.len() <= 10, "{replayed:?}");
+        terminals.shutdown().await;
+    })
+    .await
+    .expect("terminal history stalled");
+}
+
+// The history read on first open: a terminal opened again after the Host
+// restarts replays its kept output; closing it with its history deletes that.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_terminal_replays_its_history_after_the_host_restarts() {
     tokio::time::timeout(Duration::from_secs(30), async {
         let directory = tempfile::tempdir().unwrap();
         let history = tempfile::tempdir().unwrap();
@@ -833,7 +776,7 @@ async fn a_terminal_shows_its_kept_screen_after_the_host_restarts() {
 }
 
 // Manager.test.ts "clears transcript and emits cleared event": clearing empties
-// the kept screen and every attached screen while the shell keeps running; an
+// the history and every attached screen while the shell keeps running; an
 // exited terminal clears too.
 #[cfg(unix)]
 #[tokio::test]
@@ -864,7 +807,7 @@ async fn clearing_a_terminal_empties_its_screens_and_history() {
         terminals.request(session.id(), &clear).await.unwrap();
         assert!(!contains(&restored(&mut session).await, "before-2"));
         let file = terminals.inner.history.path(&owner, "term-1");
-        assert!(!contains(&std::fs::read(&file).unwrap(), "before-2"));
+        assert_eq!(std::fs::read(&file).unwrap(), b"");
         assert_eq!(terminals.summaries_now()[0].pid, pid);
         // A new screen still follows the shell.
         terminals
@@ -886,8 +829,8 @@ async fn clearing_a_terminal_empties_its_screens_and_history() {
         .await;
         assert!(contains(&std::fs::read(&file).unwrap(), "after-3"));
         terminals.request(session.id(), &clear).await.unwrap();
-        assert!(!contains(&restored(&mut session).await, "after-3"));
-        assert!(!file.exists());
+        assert_eq!(restored(&mut session).await, b"");
+        assert_eq!(std::fs::read(&file).unwrap(), b"");
         terminals
             .attach(session.id(), &start(&owner, "term-1", None))
             .await
