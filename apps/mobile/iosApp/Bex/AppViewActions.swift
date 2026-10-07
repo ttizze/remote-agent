@@ -52,6 +52,22 @@ extension BexAppViewModel {
         draftEdits.reset()
     }
 
+    func openPairing() {
+        persist()
+        connection?.cancel()
+        isConnecting = false
+        pairingError = nil
+        pairingInvitation = nil
+        screen = .pairing
+    }
+
+    func dismissPairing() {
+        connection?.cancel()
+        isConnecting = false
+        pairingInvitation = nil
+        screen = .profiles
+    }
+
     func showProfiles() {
         persist(); screen = .profiles
     }
@@ -68,12 +84,12 @@ extension BexAppViewModel {
         resetEditor(); screen = .thread; perform(.newThread(projectId: project ?? snapshot.selectedProjectId()))
     }
 
-    func send(_ behavior: SendBehavior = .default) {
-        perform(.send(behavior: behavior))
+    func send(alternate: Bool = false) {
+        perform(.send(alternate: alternate))
     }
 
-    func loadOlderHistory() {
-        perform(.loadHistory)
+    func loadEarlier() {
+        perform(.loadEarlier)
     }
 
     func scanned(_ contents: String?) {

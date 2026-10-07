@@ -2,29 +2,10 @@ import AgentCore
 import SwiftUI
 import UIKit
 
-struct ConversationDestination: View {
-    @ObservedObject var model: BexAppViewModel
-    @State private var showingTools = false
-    @State private var tab: WorkspaceTab = .terminal
-    @State private var showingDiff = false
-    var body: some View {
-        ThreadScreen(model: model) { tab, diff in
-            if let tab {
-                self.tab = tab
-            }
-            showingDiff = diff; showingTools = true
-        }
-        .navigationDestination(isPresented: $showingTools) {
-            WorkspaceToolsScreen(model: model, tab: $tab, showingDiff: $showingDiff) { showingTools = false }
-        }
-    }
-}
-
 enum WorkspaceTab: String, CaseIterable {
-    case terminal, browser, files
+    case files, browser
     var icon: String {
         switch self {
-        case .terminal: "terminal"
         case .browser: "globe"
         case .files: "folder"
         }
@@ -32,18 +13,18 @@ enum WorkspaceTab: String, CaseIterable {
 
     var label: String {
         switch self {
-        case .terminal: "Terminal"
         case .browser: "Browser"
         case .files: "Files"
         }
     }
 }
 
-private struct WorkspaceToolsScreen: View {
+/// A thread's files, and the Host browser it drives.
+struct WorkspaceToolsScreen: View {
     @ObservedObject var model: BexAppViewModel
-    @Binding var tab: WorkspaceTab
-    @Binding var showingDiff: Bool
+    @State private var tab = WorkspaceTab.files
     let close: () -> Void
+
     var body: some View {
         VStack(spacing: 0) {
             Picker("Workspace", selection: $tab) {
@@ -51,22 +32,21 @@ private struct WorkspaceToolsScreen: View {
             }.pickerStyle(.segmented).padding(12)
             Group {
                 if tab == .browser {
-                    if let thread = model
-                        .selectedThreadId {
+                    if let thread = model.selectedThreadId {
                         WorkspaceBrowserScreen(model: model, thread: thread).id(thread)
                     } else {
-                        Text("Start a thread to open its browser.").foregroundStyle(AppTheme.color("textMuted"))
+                        Text("Start a thread to open its browser.").foregroundStyle(AppTheme.muted)
                     }
                 } else if model.cwd.isEmpty {
-                    Text("Select a project folder.").foregroundStyle(AppTheme.color("textMuted"))
-                } else if tab == .terminal {
-                    TerminalScreen(model: model, cwd: model.cwd).id(model.cwd)
+                    EmptyStateText(title: "Files unavailable",
+                                   detail: "This thread does not have a workspace root yet.")
                 } else {
-                    WorkspaceScreen(model: model, root: model.cwd, showingDiff: $showingDiff, close: close)
+                    WorkspaceScreen(model: model, root: model.cwd, close: close)
                         .id("\(model.cwd):\(model.snapshot.selectedThreadId() ?? "new")")
                 }
             }
-        }.background(AppTheme.color("canvas")).navigationTitle(tab.label).navigationBarTitleDisplayMode(.inline)
+        }
+        .background(AppTheme.screen).navigationTitle(tab.label).navigationBarTitleDisplayMode(.inline)
     }
 }
 
@@ -120,7 +100,7 @@ private struct WorkspaceBrowserScreen: View {
                 Text(title).font(.caption).lineLimit(1).accessibilityIdentifier("browser.title")
             }
             if let message = error ?? connectionError {
-                BexNotice(text: message).padding(.horizontal)
+                NoticeText(text: message).padding(.horizontal)
             }
             if let dialog = frame?.dialog {
                 VStack {

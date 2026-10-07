@@ -10,27 +10,39 @@ final class BexAppViewModel: ObservableObject {
     @Published var isScanning = false
     @Published var isConnecting = false
     @Published var pairingError: String?
-    @Published private(set) var pairingInvitation: Invitation?
-    @Published var deleteThreadId: String?
+    @Published var pairingInvitation: Invitation?
     @Published var notice: String?
     @Published var profiles: [HostProfile] = []
     @Published private(set) var selectedProfileId: String?
     @Published var composerText = ""
     var draftEdits = DraftRevision()
     private var composerKey = ""
-    @Published private(set) var conversation = AgentCore.Snapshot.empty().conversation()
-    private var presentation: Task<Void, Never>?
-
-    var models: [Model] {
-        snapshot.models()
+    @Published var threadView: ThreadView?
+    @Published var disclosure = TimelineDisclosure.empty {
+        didSet {
+            if disclosure != oldValue {
+                schedulePresentation()
+            }
+        }
     }
+
+    @Published var showScrollToEnd = false {
+        didSet {
+            if showScrollToEnd != oldValue {
+                schedulePresentation()
+            }
+        }
+    }
+
+    var presentation: Task<Void, Never>?
+    var presentationTick: Task<Void, Never>?
 
     private(set) var store: AgentStore?
     private var initialization: Task<Void, Never>?
     private var observation: Task<Void, Never>?
     private var persistence: Task<Void, Never>?
     private var persistenceWrite: Task<Void, Never>?
-    private var connection: Task<Void, Never>?
+    var connection: Task<Void, Never>?
     private var pending: [(Intent, (Result<Outcome, Error>) -> Void)] = []
     private var operations: [UUID: Task<Void, Never>] = [:]
 
@@ -85,6 +97,8 @@ final class BexAppViewModel: ObservableObject {
         draftEdits.reset()
         presentation?.cancel()
         presentation = nil
+        presentationTick?.cancel()
+        threadView = nil
         connection?.cancel()
         observation?.cancel()
         cancelInitialization()
@@ -112,6 +126,7 @@ final class BexAppViewModel: ObservableObject {
             let snapshotRead = ProcessInfo.processInfo.systemUptime - preparationStarted
             let owner = try await AgentStore.offline(
                 persisted: bytes,
+                cacheDirectory: SnapshotFiles.cacheDirectory(id),
                 diagnosticsDirectory: SnapshotFiles.diagnosticsDirectory(id)
             )
             guard !Task.isCancelled, selectedProfileId == id else { try? await owner.shutdown(); return }
@@ -147,22 +162,6 @@ final class BexAppViewModel: ObservableObject {
         _ = await previousClosed
     }
 
-    func openPairing() {
-        persist()
-        connection?.cancel()
-        isConnecting = false
-        pairingError = nil
-        pairingInvitation = nil
-        screen = .pairing
-    }
-
-    func dismissPairing() {
-        connection?.cancel()
-        isConnecting = false
-        pairingInvitation = nil
-        screen = .profiles
-    }
-
     func preparePairing(_ contents: String) {
         guard !isConnecting else { return }
         pairingInvitation = nil
@@ -190,7 +189,10 @@ final class BexAppViewModel: ObservableObject {
                         identity: DeviceIdentity.loadOrGenerate(id),
                         invitation: invitation.invitation,
                         useRelays: true
-                    ), persisted: persisted, diagnosticsDirectory: SnapshotFiles.diagnosticsDirectory(id))
+                    ), persisted: persisted, cacheDirectory: SnapshotFiles.cacheDirectory(id),
+                    diagnosticsDirectory: SnapshotFiles.diagnosticsDirectory(
+                        id
+                    ))
                     guard let self, !Task.isCancelled else { try? await owner.shutdown(); return }
                     persist()
                     observation?.cancel()
@@ -259,6 +261,9 @@ extension BexAppViewModel {
         guard screen != .pairing, let owner = store,
               let profile = profiles.first(where: { $0.id == selectedProfileId }),
               !isConnecting || afterForeground else { return }
+        if afterForeground {
+            owner.appBecameActive()
+        }
         connection?.cancel()
         isConnecting = true
         notice = nil
@@ -329,7 +334,13 @@ extension BexAppViewModel {
         if snapshot.error() != next.error() {
             notice = next.error()
         }
+        let threadChanged = snapshot.selectedThreadId() != next.selectedThreadId()
         snapshot = next
+        if threadChanged {
+            threadView = nil
+            showScrollToEnd = false
+            disclosure = .empty
+        }
         let key = next.currentDraftKey()
         if key != composerKey {
             draftEdits.reset(); composerKey = key
@@ -343,37 +354,6 @@ extension BexAppViewModel {
         persistence = Task { [weak self] in
             do { try await Task.sleep(nanoseconds: 250_000_000) } catch { return }
             self?.persist()
-        }
-    }
-
-    private func schedulePresentation() {
-        if store == nil {
-            presentation?.cancel()
-            presentation = nil
-            conversation = snapshot.conversation()
-        } else if presentation == nil {
-            let expectedOwner = store
-            let expectedHost = selectedProfileId
-            presentation = Task { [weak self] in
-                guard let self else { return }
-                defer {
-                    if store === expectedOwner, selectedProfileId == expectedHost {
-                        presentation = nil
-                    }
-                }
-                while !Task.isCancelled {
-                    do { try await Task.sleep(for: .milliseconds(16)) } catch { return }
-                    let latest = snapshot
-                    let view = await Task.detached(priority: .userInitiated) { latest.conversation() }.value
-                    guard !Task.isCancelled, store === expectedOwner, selectedProfileId == expectedHost else { return }
-                    if snapshot.selectedThreadId() == latest.selectedThreadId() {
-                        conversation = view
-                    }
-                    if snapshot === latest {
-                        return
-                    }
-                }
-            }
         }
     }
 

@@ -79,7 +79,8 @@ struct ConversationMarkdown: View {
             if run.strikethrough {
                 text.strikethroughStyle = .single
             }
-            if let link = run.link, safeMarkdownUrl(url: link), let url = URL(string: link) {
+            if let link = run.link, let url = URL(string: link),
+               ["http", "https", "mailto"].contains(url.scheme?.lowercased() ?? "") {
                 text.link = url
             }
             result += text

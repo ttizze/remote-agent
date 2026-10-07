@@ -30,7 +30,7 @@ struct FileEditorSheet: View {
             VStack(alignment: .leading) {
                 Text(entry.path).font(.caption).foregroundColor(.secondary).textSelection(.enabled).padding(.horizontal)
                 if let error {
-                    BexNotice(text: error).padding(.horizontal)
+                    NoticeText(text: error).padding(.horizontal)
                 }
                 if busy {
                     ProgressView().padding()
