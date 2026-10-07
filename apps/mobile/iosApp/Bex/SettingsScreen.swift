@@ -47,7 +47,7 @@ struct SettingsScreen: View {
                 }
                 .padding(.horizontal, 16).padding(.vertical, 12)
             }
-            .background(AppTheme.color("surfaceOverlay").ignoresSafeArea())
+            .background(AppTheme.sheet.ignoresSafeArea())
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
@@ -126,7 +126,7 @@ private struct ConversationSettingsPage: View {
             }
         }
         .scrollContentBackground(.hidden)
-        .background(AppTheme.color("surfaceOverlay"))
+        .background(AppTheme.sheet)
         .navigationTitle(title)
         .navigationBarTitleDisplayMode(.inline)
     }
@@ -140,11 +140,11 @@ private struct SettingRowView: View {
         VStack(alignment: .leading, spacing: 4) {
             switch row.control {
             case let .switch(isOn):
-                Toggle(row.title, isOn: Binding(get: { isOn }, set: { apply(enabled: $0) }))
+                Toggle(row.title, isOn: Binding(get: { isOn }, set: { apply(.switch(on: $0)) }))
             case let .choice(choices, selected):
                 Text(row.title).font(AppTheme.font(16, weight: .medium))
                 ForEach(choices, id: \.id) { choice in
-                    Button { apply(choice: choice.id) } label: {
+                    Button { apply(.choice(id: choice.id)) } label: {
                         HStack {
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(choice.label).foregroundStyle(AppTheme.text)
@@ -160,11 +160,10 @@ private struct SettingRowView: View {
                         .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
-                    .disabled(row.id == .defaultPermissions)
                 }
             case let .number(value, min, max):
                 Stepper("\(row.title): \(value)", value: Binding(get: { Int(value) }, set: {
-                    model.perform(.updateConversationSettings(scope: .host, change: .autoSettle(days: UInt32($0))))
+                    apply(.number(value: UInt32($0)))
                 }), in: Int(min) ... Int(max))
             case let .model(modelLabel, traitsLabel):
                 HStack {
@@ -181,37 +180,9 @@ private struct SettingRowView: View {
         .font(AppTheme.font(16))
     }
 
-    private func apply(enabled: Bool) {
-        let change: ConversationSettingChange? = switch row.id {
-        case .autoResumeLimitedThreads: .autoResumeLimitedThreads(on: enabled)
-        case .snoozeLimitedThreads: .snoozeLimitedThreads(on: enabled)
-        case .continueAfterRestart: .continueAfterRestart(on: enabled)
-        case .autoSettleInactiveThreads: .autoSettle(days: enabled ? 3 : nil)
-        default: nil
-        }
-        if let change {
-            model.perform(.updateConversationSettings(scope: .host, change: change))
-        }
-    }
-
-    private func apply(choice: String) {
-        switch row.id {
-        case .followUpBehavior:
-            model.perform(.setFollowUpBehavior(behavior: choice == "steer" ? .steer : .queue))
-        case .timeFormat:
-            let format: TimestampFormat = switch choice {
-            case "12-hour": .twelveHour
-            case "24-hour": .twentyFourHour
-            default: .locale
-            }
-            model.perform(.setTimestampFormat(format: format))
-        case .defaultWorkspace:
-            if var settings = model.snapshot.worktreeSettings() {
-                settings.createOnNewSession = choice == "worktree"
-                model.perform(.saveWorktreeSettings(settings: settings))
-            }
-        default:
-            break
+    private func apply(_ value: SettingValue) {
+        if let intent = model.snapshot.settingIntent(scope: .host, id: row.id, value: value) {
+            model.perform(intent)
         }
     }
 }
@@ -258,7 +229,7 @@ private struct ProviderAccountsPage: View {
             }
         }
         .scrollContentBackground(.hidden)
-        .background(AppTheme.color("surfaceOverlay"))
+        .background(AppTheme.sheet)
         .navigationTitle("Provider accounts")
         .navigationBarTitleDisplayMode(.inline)
         .onAppear { model.perform(.loadAccounts) }
@@ -296,7 +267,7 @@ private struct ConnectionsScreen: View {
             }
         }
         .scrollContentBackground(.hidden)
-        .background(AppTheme.color("surfaceOverlay"))
+        .background(AppTheme.sheet)
         .navigationTitle("Environments")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {

@@ -128,7 +128,8 @@ struct ThreadScreen: View {
     @ViewBuilder
     private func setupCard(_ view: ThreadView) -> some View {
         if let card = view.setup.card, card.showInTimeline {
-            SetupCard(card: card, cancel: { model.perform(.cancelSetup) }, openTerminal: { routes.terminal($0) })
+            SetupCard(card: card, cancel: { model.perform(.cancelSetup) }, workLocally: { model.perform(.workLocally) },
+                      openTerminal: { routes.terminal($0) })
                 .padding(.bottom, 10.5)
         }
     }
@@ -257,15 +258,14 @@ private struct TerminalMenu: View {
                         }
                     }
                 } label: {
-                    Label(row.label, systemImage: "play")
+                    Label(row.label, systemImage: row.script.icon.symbol)
                     Text(row.script.command)
                 }
             }
-            Divider()
-            ForEach(view?.terminals ?? [], id: \.terminalId) { tab in
+            ForEach((view?.terminals ?? []).filter(\.running), id: \.terminalId) { tab in
                 Button { open(tab.terminalId) } label: {
                     Label(tab.label, systemImage: "terminal")
-                    Text(tab.status)
+                    Text(tab.menuStatus)
                 }
             }
             Button { open(nil) } label: {
@@ -277,6 +277,19 @@ private struct TerminalMenu: View {
         }
         .accessibilityLabel("Terminal")
         .disabled(!model.snapshot.canOpenTerminal())
+    }
+}
+
+extension ProjectScriptIcon {
+    var symbol: String {
+        switch self {
+        case .play: "play"
+        case .test: "flask"
+        case .lint: "checklist"
+        case .configure: "wrench.and.screwdriver"
+        case .build: "hammer"
+        case .debug: "ladybug"
+        }
     }
 }
 
@@ -354,7 +367,7 @@ private struct LimitRecoveryCard: View {
         .padding(10.5)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(AppTheme.screen, in: RoundedRectangle(cornerRadius: 10.5))
-        .overlay(RoundedRectangle(cornerRadius: 10.5).stroke(AppTheme.color("warningForeground").opacity(0.25)))
+        .overlay(RoundedRectangle(cornerRadius: 10.5).stroke(AppTheme.warningForeground.opacity(0.25)))
         .padding(.horizontal, 10.5)
     }
 }

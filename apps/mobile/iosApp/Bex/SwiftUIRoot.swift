@@ -63,6 +63,8 @@ private struct WorkspaceRoot: View {
     @State private var routes: [ThreadRoute] = []
     @State private var showingSettings = false
     @State private var showingNewTask = false
+    /// The new task opens on the draft core already prepared.
+    @State private var newTaskDraftOpen = false
     @State private var returnThread: String?
 
     var body: some View {
@@ -87,7 +89,7 @@ private struct WorkspaceRoot: View {
         }
         .sheet(isPresented: $showingSettings) { SettingsScreen(model: model) }
         .sheet(isPresented: $showingNewTask, onDismiss: restoreThread) {
-            NewTaskFlow(model: model) { _ in
+            NewTaskFlow(model: model, draftOpen: newTaskDraftOpen) { _ in
                 returnThread = nil
                 routes = []
                 model.screen = .thread
@@ -98,7 +100,8 @@ private struct WorkspaceRoot: View {
     }
 
     private func list(sidebar: Bool) -> some View {
-        ThreadListScreen(model: model, sidebar: sidebar, openSettings: { showingSettings = true }, newTask: newTask)
+        ThreadListScreen(model: model, sidebar: sidebar, openSettings: { showingSettings = true }, newTask: newTask,
+                         showNewTaskDraft: showNewTaskDraft)
     }
 
     @ViewBuilder
@@ -157,6 +160,13 @@ private struct WorkspaceRoot: View {
 
     private func newTask() {
         returnThread = model.selectedThreadId
+        newTaskDraftOpen = false
+        showingNewTask = true
+    }
+
+    private func showNewTaskDraft() {
+        returnThread = model.selectedThreadId
+        newTaskDraftOpen = true
         showingNewTask = true
     }
 

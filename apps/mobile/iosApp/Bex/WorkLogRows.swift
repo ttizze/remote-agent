@@ -10,7 +10,9 @@ struct WorkLogRowView: View {
         case let .activity(activity):
             ActivityRow(activity: activity, actions: actions)
         case let .providerFailure(failure):
-            ProviderFailureView(failure: failure)
+            ProviderFailureView(failure: failure, retry: failure.retryPreparation.map { run in
+                { actions.perform(.retryPreparation(runId: run)) }
+            })
         }
     }
 }
@@ -124,6 +126,8 @@ private struct ActivityDetailView: View {
 
 private struct ProviderFailureView: View {
     let failure: ProviderFailureRow
+    /// Retries the failed workspace preparation of the run.
+    let retry: (() -> Void)?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -134,11 +138,26 @@ private struct ProviderFailureView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                 Text(FeedTime.clock(failure.createdAt)).font(AppTheme.font(13)).foregroundStyle(AppTheme.tertiary)
             }
-            .foregroundStyle(failure.warning ? AppTheme.color("warningForeground") : AppTheme.rose)
+            .foregroundStyle(failure.warning ? AppTheme.warningForeground : AppTheme.rose)
             .frame(minHeight: 28)
             if !failure.message.isEmpty {
                 Text(failure.message).font(AppTheme.font(13)).foregroundStyle(AppTheme.muted)
                     .textSelection(.enabled).padding(.leading, 24.5)
+            }
+            if let retry {
+                Button(action: retry) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "arrow.clockwise").font(.system(size: 13))
+                            .foregroundStyle(AppTheme.color("mobileIcon"))
+                        Text("Retry").font(AppTheme.font(14, weight: .medium)).foregroundStyle(AppTheme.text)
+                    }
+                    .padding(.horizontal, 16).frame(minHeight: 44)
+                    .overlay(Capsule().stroke(AppTheme.border))
+                    .contentShape(Capsule())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Retry workspace preparation")
+                .padding(.leading, 28).padding(.top, 8)
             }
         }
         .onLongPressGesture { UIPasteboard.general.string = failure.copyText }
@@ -149,7 +168,7 @@ extension WorkLabelTone {
     var color: Color {
         switch self {
         case .default: AppTheme.muted
-        case .warning: AppTheme.color("warningForeground")
+        case .warning: AppTheme.warningForeground
         case .danger: AppTheme.rose
         }
     }
@@ -180,7 +199,7 @@ struct WorkIconView: View {
     private var color: Color {
         switch tone {
         case .default: AppTheme.muted
-        case .warning: AppTheme.color("warningForeground")
+        case .warning: AppTheme.warningForeground
         case .destructive: AppTheme.rose
         case .failed: AppTheme.dangerForeground.opacity(0.4)
         }

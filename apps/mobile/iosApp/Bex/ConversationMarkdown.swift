@@ -21,22 +21,22 @@ struct ConversationMarkdown: View {
                                 design: .monospaced
                             )).textSelection(.enabled) }
                         }.padding(12).background(
-                            AppTheme.color("codeBackground"),
+                            AppTheme.color("mobileMarkdownCode"),
                             in: RoundedRectangle(cornerRadius: 10)
                         )
-                        .overlay(RoundedRectangle(cornerRadius: 10).stroke(AppTheme.color("border")))
+                        .overlay(RoundedRectangle(cornerRadius: 10).stroke(AppTheme.border))
                     } else {
                         HStack(alignment: .top, spacing: 8) {
                             if let marker = style
                                 .marker {
-                                Text(marker).font(AppTheme.font(16)).foregroundStyle(AppTheme.color("textMuted"))
+                                Text(marker).font(AppTheme.font(16)).foregroundStyle(AppTheme.tertiary)
                             }
                             Text(attributed(runs, header: style.header)).lineSpacing(4).textSelection(.enabled)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                         }.padding(.leading, style.quoted ? 12 : 0)
                             .overlay(alignment: .leading) {
                                 if style.quoted {
-                                    Rectangle().fill(AppTheme.color("border")).frame(width: 2)
+                                    Rectangle().fill(AppTheme.border).frame(width: 2)
                                 }
                             }
                     }
@@ -49,10 +49,10 @@ struct ConversationMarkdown: View {
                                     header: nil
                                 )).font(AppTheme.font(12)).textSelection(.enabled) } }
                             }
-                        }.padding(12).background(AppTheme.color("surface"), in: RoundedRectangle(cornerRadius: 8))
+                        }.padding(12).background(AppTheme.card, in: RoundedRectangle(cornerRadius: 8))
                     }
                 case let .visualization(path):
-                    Text(path).font(AppTheme.font(12)).foregroundStyle(AppTheme.color("textMuted"))
+                    Text(path).font(AppTheme.font(12)).foregroundStyle(AppTheme.tertiary)
                         .textSelection(.enabled)
                 }
             }

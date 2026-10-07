@@ -91,7 +91,7 @@ extension View {
     func requestCard() -> some View {
         padding(14)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(AppTheme.color("surfaceRaised"), in: RoundedRectangle(cornerRadius: 20))
+            .background(AppTheme.cardAlt, in: RoundedRectangle(cornerRadius: 20))
             .overlay(RoundedRectangle(cornerRadius: 20).stroke(AppTheme.border))
     }
 }
@@ -135,7 +135,7 @@ struct QuestionCard: View {
             .accessibilityLabel("Stop")
         }
         .padding(.leading, 14).padding(.trailing, 5.25).padding(.vertical, 5.25)
-        .background(AppTheme.color("surfaceRaised"), in: Capsule())
+        .background(AppTheme.cardAlt, in: Capsule())
         .overlay(Capsule().stroke(AppTheme.border))
     }
 
@@ -226,8 +226,11 @@ private struct QuestionForm: View {
                     }
                     .padding(.horizontal, 12.25).padding(.vertical, 10.5)
                     .frame(minHeight: 42)
-                    .background(option.selected ? AppTheme.primary.opacity(0.1) : AppTheme.color("input").opacity(0.4),
-                                in: RoundedRectangle(cornerRadius: 14))
+                    .background(
+                        option.selected ? AppTheme.primary.opacity(0.1) : AppTheme.color("mobileInputBorder")
+                            .opacity(0.4),
+                        in: RoundedRectangle(cornerRadius: 14)
+                    )
                     .overlay(RoundedRectangle(cornerRadius: 14).stroke(
                         option.selected ? AppTheme.primary : AppTheme.border
                     ))
@@ -244,8 +247,11 @@ private struct QuestionForm: View {
                 TextField("Or type a custom answer", text: $custom, axis: .vertical)
                     .font(AppTheme.font(16))
                     .padding(12).frame(minHeight: 54, alignment: .topLeading)
-                    .background(AppTheme.color("input").opacity(0.4), in: RoundedRectangle(cornerRadius: 14))
-                    .overlay(RoundedRectangle(cornerRadius: 14).stroke(AppTheme.color("input")))
+                    .background(
+                        AppTheme.color("mobileInputBorder").opacity(0.4),
+                        in: RoundedRectangle(cornerRadius: 14)
+                    )
+                    .overlay(RoundedRectangle(cornerRadius: 14).stroke(AppTheme.color("mobileInputBorder")))
                     .disabled(!enabled)
                     .onChange(of: custom) { _, text in
                         guard text != question.customAnswer else { return }

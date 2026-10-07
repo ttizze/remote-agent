@@ -10,19 +10,27 @@ struct ThreadSettingsSheet: View {
     @State private var query = ""
     @State private var rail: PickerRail?
     @State private var staged: ModelPickerRow?
+    /// Instances whose "Legacy models" row was tapped since the sheet opened.
+    @State private var toggledLegacy: [String] = []
 
     var body: some View {
-        let picker = model.snapshot.modelPicker(query: query, rail: rail)
+        let picker = model.snapshot.modelPicker(query: query, rail: rail, toggledLegacy: toggledLegacy)
         NavigationStack {
             List {
                 ForEach(groups(picker.rows), id: \.0) { provider, rows in
                     Section {
-                        ForEach(rows, id: \.key) { row in
+                        ForEach(Array(rows.enumerated()), id: \.element.key) { index, row in
+                            if let legacy = picker.legacy, index == Int(legacy.currentCount) {
+                                legacyRow(legacy)
+                            }
                             ModelRowView(row: row, selected: (staged?.key ?? selectedKey(picker)) == row.key) {
                                 staged = row
                             } star: {
                                 model.perform(.toggleFavoriteModel(instanceId: row.instanceId, model: row.slug))
                             }
+                        }
+                        if let legacy = picker.legacy, rows.count == Int(legacy.currentCount) {
+                            legacyRow(legacy)
                         }
                     } header: {
                         HStack(spacing: 6) {
@@ -33,15 +41,17 @@ struct ThreadSettingsSheet: View {
                         }
                     }
                 }
-                if picker.rows.isEmpty {
-                    Text(picker.emptyLabel ?? (rail == .favorites ? "No favorite models" : "No available models"))
-                        .font(AppTheme.font(14)).foregroundStyle(AppTheme.muted)
+                if let legacy = picker.legacy, picker.rows.isEmpty {
+                    legacyRow(legacy)
+                }
+                if let empty = picker.emptyLabel {
+                    Text(empty).font(AppTheme.font(14)).foregroundStyle(AppTheme.muted)
                 }
                 OptionsSection(model: model, controls: controls)
             }
             .listStyle(.insetGrouped)
             .scrollContentBackground(.hidden)
-            .background(AppTheme.color("surfaceOverlay"))
+            .background(AppTheme.sheet)
             .searchable(text: $query, prompt: "Find a model")
             .navigationTitle("Thread settings")
             .navigationBarTitleDisplayMode(.inline)
@@ -54,6 +64,29 @@ struct ThreadSettingsSheet: View {
             }
         }
         .tint(AppTheme.color("mobilePrimaryText"))
+    }
+
+    private func legacyRow(_ legacy: LegacyModelsSection) -> some View {
+        Button {
+            if let index = toggledLegacy.firstIndex(of: legacy.instanceId) {
+                toggledLegacy.remove(at: index)
+            } else {
+                toggledLegacy.append(legacy.instanceId)
+            }
+        } label: {
+            HStack(spacing: 8) {
+                Text(legacy.label).font(AppTheme.font(16, weight: .medium)).foregroundStyle(AppTheme.muted)
+                Spacer()
+                Text(legacy.detail).font(AppTheme.font(13)).foregroundStyle(AppTheme.tertiary)
+                Image(systemName: "chevron.down").font(.system(size: 12, weight: .semibold))
+                    .rotationEffect(.degrees(legacy.expanded ? 180 : 0))
+                    .foregroundStyle(AppTheme.tertiary)
+            }
+            .frame(minHeight: 38.5)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityValue(legacy.expanded ? "Expanded" : "Collapsed")
     }
 
     private func selectedKey(_ picker: ModelPickerView) -> String? {

@@ -28,7 +28,7 @@ struct AgentsSheet: View {
                 }
                 .padding(.horizontal, 17.5)
             }
-            .background(AppTheme.color("surfaceOverlay"))
+            .background(AppTheme.sheet)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .principal) {

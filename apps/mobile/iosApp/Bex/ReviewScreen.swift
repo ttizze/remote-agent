@@ -11,22 +11,26 @@ struct ReviewScreen: View {
 
     var body: some View {
         let diff = model.threadView?.diff
+        let git = showsGitDiff(diff) ? diff?.git : nil
         Group {
-            if loading {
+            if loading || git?.loading == true {
                 VStack(spacing: 10) {
                     ProgressView()
                     Text("Loading diff…").font(AppTheme.font(14)).foregroundStyle(AppTheme.muted)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if let error {
+            } else if let error = error ?? git?.error {
                 EmptyStateText(title: "Review unavailable", detail: error)
             } else if let message = diff?.emptyMessage, diff?.request == nil {
                 EmptyStateText(title: "No review diffs", detail: message)
             } else if files.isEmpty {
-                EmptyStateText(title: "No changes", detail: "This diff is empty.")
+                EmptyStateText(title: "No changes", detail: diff.map(emptyDetail) ?? "This diff is empty.")
             } else {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 0) {
+                        if git?.truncated == true {
+                            PartialDiffNotice()
+                        }
                         ChangedFilesList(files: files, selected: $selectedFile)
                         ForEach(visibleFiles, id: \.path) { file in
                             DiffFileView(file: file)
@@ -57,6 +61,24 @@ struct ReviewScreen: View {
             }
         }
         .onAppear(perform: load)
+        .onChange(of: model.snapshot.reviewRevision()) { _, _ in parse(model.snapshot) }
+    }
+
+    private func showsGitDiff(_ diff: DiffPanelView?) -> Bool {
+        diff?.scopes.contains { $0.selected && ($0.choice == .branch || $0.choice == .unstaged) } == true
+    }
+
+    /// What an empty diff compares, like the section's subtitle.
+    private func emptyDetail(_ diff: DiffPanelView) -> String {
+        guard showsGitDiff(diff), let git = diff.git else { return "This diff is empty." }
+        if !git.isRepo {
+            return "Turn diffs are unavailable because this project is not a git repository."
+        }
+        if diff.scopes.contains(where: { $0.selected && $0.choice == .unstaged }) {
+            return "Staged, unstaged, and untracked files"
+        }
+        guard let base = git.baseRef else { return "Base branch unavailable" }
+        return "\(base) ... \(git.headRef ?? "HEAD")"
     }
 
     private var visibleFiles: [WorkspaceDiffFile] {
@@ -79,17 +101,21 @@ struct ReviewScreen: View {
                 error = failure.localizedDescription
                 return
             }
-            guard let review = snapshot.review() else {
-                loading = false
-                files = []
-                return
-            }
-            Task {
-                let loaded = await Task.detached(priority: .userInitiated) { review.diffFiles() }.value
-                files = loaded
-                selectedFile = nil
-                loading = false
-            }
+            parse(snapshot)
+        }
+    }
+
+    private func parse(_ snapshot: AgentCore.Snapshot) {
+        guard let review = snapshot.review() else {
+            loading = false
+            files = []
+            return
+        }
+        Task {
+            let loaded = await Task.detached(priority: .userInitiated) { review.diffFiles() }.value
+            files = loaded
+            selectedFile = nil
+            loading = false
         }
     }
 }
@@ -108,6 +134,7 @@ private struct ScopeMenu: View {
                         Text(scope.label)
                     }
                 }
+                .disabled(diff.git?.isRepo == false && (scope.choice == .branch || scope.choice == .unstaged))
             }
             if !diff.turns.isEmpty {
                 Menu("Turn") {
@@ -129,6 +156,21 @@ private struct ScopeMenu: View {
             Image(systemName: "ellipsis")
         }
         .accessibilityLabel("Select diff")
+    }
+}
+
+/// A diff cut at the Host's size cap.
+private struct PartialDiffNotice: View {
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text("PARTIAL DIFF").font(AppTheme.font(12, weight: .bold))
+            Text("Diff output hit the server size cap. Showing the available excerpt.").font(AppTheme.font(12))
+        }
+        .foregroundStyle(AppTheme.color("mobileWarningForeground"))
+        .padding(.horizontal, 16).padding(.vertical, 12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(AppTheme.color("mobileWarning"))
+        .overlay(alignment: .bottom) { Rectangle().fill(AppTheme.color("mobileWarningBorder")).frame(height: 1) }
     }
 }
 
@@ -172,7 +214,7 @@ private struct DiffFileView: View {
         VStack(alignment: .leading, spacing: 0) {
             Text(file.path).font(AppTheme.mono(12, weight: .bold)).padding(8)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .background(AppTheme.color("surfaceRaised"))
+                .background(AppTheme.cardAlt)
             ScrollView(.horizontal) {
                 VStack(alignment: .leading, spacing: 0) {
                     ForEach(Array(file.rows.enumerated()), id: \.offset) { _, row in

@@ -5,35 +5,43 @@ import SwiftUI
 struct CommandPopover: View {
     @ObservedObject var model: BexAppViewModel
     let text: String
+    /// UTF-16 offset of the caret.
+    let cursor: UInt32
 
     var body: some View {
-        let cursor = UInt32(text.utf16.count)
         let menu = model.snapshot.composerMenu(text: text, cursor: cursor)
-        if let trigger = menu.trigger {
+        if let trigger = menu.trigger, !menu.items.isEmpty || trigger.kind == .pullRequest {
             VStack(alignment: .leading, spacing: 0) {
-                Text(trigger.kind.header.uppercased()).font(AppTheme.font(11, weight: .bold)).tracking(0.8)
-                    .foregroundStyle(AppTheme.muted)
-                    .padding(.horizontal, 12.25).padding(.top, 8.75).padding(.bottom, 3.5)
+                if let header = trigger.kind.header {
+                    Text(header.uppercased()).font(AppTheme.font(10, weight: .bold)).tracking(0.8)
+                        .foregroundStyle(AppTheme.muted)
+                        .padding(.horizontal, 14).padding(.top, 10).padding(.bottom, 4)
+                }
                 if menu.items.isEmpty {
-                    Text(trigger.kind.emptyLabel).font(AppTheme.font(13)).foregroundStyle(AppTheme.tertiary)
-                        .padding(.horizontal, 12.25).padding(.vertical, 8.75)
+                    Text(menu.emptyLabel ?? "").font(AppTheme.font(12)).foregroundStyle(AppTheme.tertiary)
+                        .padding(.horizontal, 14).padding(.vertical, 10)
                 } else {
                     ScrollView {
                         VStack(spacing: 0) {
-                            ForEach(menu.items, id: \.id) { item in
+                            ForEach(Array(menu.items.enumerated()), id: \.element.id) { index, item in
                                 Button {
                                     model.perform(.selectComposerItem(text: text, cursor: cursor, itemId: item.id))
                                 } label: {
-                                    CommandRow(item: item)
+                                    CommandRow(item: item, skillPrefix: trigger.kind == .slashCommand)
                                 }
                                 .buttonStyle(.plain)
-                                Divider()
+                                if index < menu.items.count - 1 {
+                                    Rectangle().fill(AppTheme.border).frame(height: 0.5)
+                                }
                             }
                         }
                     }
+                    .scrollIndicators(.hidden)
                     .frame(maxHeight: 180)
+                    .fixedSize(horizontal: false, vertical: true)
                 }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
             .glassEffect(.clear, in: RoundedRectangle(cornerRadius: 16))
         }
     }
@@ -41,39 +49,43 @@ struct CommandPopover: View {
 
 private struct CommandRow: View {
     let item: ComposerCommandItem
+    /// A skill offered under `/` reads `skill:name`.
+    let skillPrefix: Bool
 
     var body: some View {
-        HStack(spacing: 8.75) {
-            Image(systemName: item.target.symbol).font(.system(size: 14)).foregroundStyle(AppTheme.muted)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(item.label).font(AppTheme.font(16, weight: .medium)).foregroundStyle(AppTheme.text)
-                if !item.description.isEmpty {
-                    Text(item.description).font(AppTheme.font(13)).foregroundStyle(AppTheme.muted).lineLimit(1)
-                }
+        HStack(spacing: 10) {
+            Image(systemName: item.target.symbol)
+                .font(.system(size: item.target.isPath ? 16 : 14))
+                .foregroundStyle(AppTheme.muted)
+            label.font(AppTheme.font(16, weight: .medium)).foregroundStyle(AppTheme.text).lineLimit(1)
+                .layoutPriority(1)
+            if !item.description.isEmpty {
+                Text(item.description).font(AppTheme.font(12)).foregroundStyle(AppTheme.muted).lineLimit(1)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            } else {
+                Spacer(minLength: 0)
             }
-            Spacer(minLength: 0)
         }
-        .padding(.horizontal, 12.25).padding(.vertical, 8.75)
+        .padding(.horizontal, 14).padding(.vertical, 10)
         .contentShape(Rectangle())
+    }
+
+    private var label: Text {
+        if skillPrefix, case let .skill(name) = item.target {
+            return Text("\(Text("skill:").foregroundStyle(AppTheme.muted))\(name)")
+        }
+        return Text(item.label)
     }
 }
 
 extension ComposerTriggerKind {
-    var header: String {
+    var header: String? {
         switch self {
-        case .slashCommand, .slashModel: "Commands"
+        case .slashCommand: "Commands"
         case .skill: "Skills"
         case .path: "Files"
         case .pullRequest: "Pull requests"
-        }
-    }
-
-    var emptyLabel: String {
-        switch self {
-        case .slashCommand, .slashModel: "No matching commands."
-        case .skill: "No skills found."
-        case .path: "No matching files or folders."
-        case .pullRequest: "No matching pull requests."
+        case .slashModel: nil
         }
     }
 }
@@ -87,5 +99,12 @@ extension ComposerCommandTarget {
         case .path: "doc"
         case .thread: "text.bubble"
         }
+    }
+
+    var isPath: Bool {
+        if case .path = self {
+            return true
+        }
+        return false
     }
 }

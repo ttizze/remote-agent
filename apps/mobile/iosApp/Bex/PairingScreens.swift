@@ -30,7 +30,7 @@ struct PairingScreen: View {
                             .font(.system(size: hostName == nil ? 36 : 24, weight: .medium))
                             .foregroundStyle(Color.accentColor)
                             .frame(width: hostName == nil ? 72 : 32, height: hostName == nil ? 72 : 32)
-                            .background(AppTheme.color("surface"))
+                            .background(AppTheme.card)
                             .clipShape(RoundedRectangle(cornerRadius: 28))
                         Text("どこでも、\nこれひとつで。")
                             .font(.system(size: hostName == nil ? 34 : 28, weight: .bold))
@@ -84,7 +84,7 @@ struct PairingScreen: View {
                         .font(.footnote)
                         .padding(16)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(AppTheme.color("surface"))
+                        .background(AppTheme.card)
                         .clipShape(RoundedRectangle(cornerRadius: 20))
                     } else {
                         VStack(spacing: 16) {
@@ -122,7 +122,7 @@ struct PairingScreen: View {
                             }
                         }
                         .padding(16)
-                        .background(AppTheme.color("surface"))
+                        .background(AppTheme.card)
                         .clipShape(RoundedRectangle(cornerRadius: 20))
                     }
                     if connecting {
@@ -151,7 +151,7 @@ struct PairingScreen: View {
             }
             .scrollDismissesKeyboard(.interactively)
         }
-        .background(AppTheme.color("canvas").ignoresSafeArea())
+        .background(AppTheme.screen.ignoresSafeArea())
         .navigationTitle("Bex")
         .toolbar {
             ToolbarItem(placement: .cancellationAction) {
@@ -199,7 +199,7 @@ struct ProfilesScreen: View {
                             }
                             .padding(20)
                             .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(AppTheme.color("surface"))
+                            .background(AppTheme.card)
                             .clipShape(RoundedRectangle(cornerRadius: 18))
                         }
                         .buttonStyle(.plain)
@@ -225,7 +225,7 @@ struct ProfilesScreen: View {
                 .frame(minHeight: geometry.size.height, alignment: .top)
             }
         }
-        .background(AppTheme.color("canvas").ignoresSafeArea())
+        .background(AppTheme.screen.ignoresSafeArea())
         .safeAreaInset(edge: .top, spacing: 0) {
             SettingsScopeBar { Text("すべてのプロジェクト") } environment: { Text("このiPhone") }
         }

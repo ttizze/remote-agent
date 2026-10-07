@@ -89,36 +89,32 @@ struct ThreadFilterMenu: View {
     }
 }
 
+/// Home without threads: core's connection or first-run state.
 struct ThreadListEmptyState: View {
-    @ObservedObject var model: BexAppViewModel
-    let newTask: () -> Void
+    let empty: ThreadListEmpty
+    let addEnvironment: (() -> Void)?
 
     var body: some View {
-        VStack(spacing: 12) {
-            if model.isConnecting || !model.isConnected {
-                if model.isConnecting {
-                    ProgressView()
+        VStack(spacing: 0) {
+            Text(empty.title).font(AppTheme.font(21, weight: .bold)).foregroundStyle(AppTheme.text)
+            Text(empty.detail).font(AppTheme.font(16)).foregroundStyle(AppTheme.muted).padding(.top, 8)
+            if let addEnvironment {
+                Button(action: addEnvironment) {
+                    Text("Add environment").font(AppTheme.font(14, weight: .bold))
+                        .foregroundStyle(AppTheme.color("mobilePrimaryForeground"))
+                        .padding(.horizontal, 20).padding(.vertical, 12)
+                        .background(AppTheme.primary, in: Capsule())
                 }
-                EmptyStateText(
-                    title: model.isConnecting ? "Connecting to environment" : "Environment unavailable",
-                    detail: model.isConnecting ? "Loading projects and threads from the saved environment."
-                        : model.notice ?? "The saved environment is offline. Check the URL or start the environment, "
-                        + "then retry."
-                )
-                if !model.isConnecting {
-                    Button("Retry") { model.connect(afterForeground: true) }
-                        .font(AppTheme.font(14, weight: .bold))
-                }
-            } else {
-                EmptyStateText(
-                    title: "No threads yet",
-                    detail: "Create a task to start a new coding runtime in one of your connected projects."
-                )
-                Button("New task", action: newTask).font(AppTheme.font(14, weight: .bold))
+                .buttonStyle(.plain)
+                .padding(.top, 20)
+            }
+            if empty.loading {
+                ProgressView().tint(AppTheme.color("mobileIconMuted")).padding(.top, 16)
             }
         }
+        .multilineTextAlignment(.center)
+        .padding(32)
         .frame(maxWidth: 430)
-        .padding(24)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }

@@ -7,8 +7,13 @@ struct Composer: View {
     let composer: ComposerView
     /// The new-task draft keeps the card open.
     var alwaysExpanded = false
+    /// Controls between the command menu and the card (the new task's workspace and branch).
+    var accessory: AnyView?
+    /// Why the message cannot be sent yet, beyond the composer's own state.
+    var sendBlockedReason: String?
     let openSettings: () -> Void
     @FocusState private var focused: Bool
+    @State private var selection: TextSelection?
     @StateObject private var dictation = DictationRecorder()
     @State private var preparation: DictationPreparation?
     @State private var transcribing = false
@@ -26,7 +31,10 @@ struct Composer: View {
                 Text(message).font(AppTheme.font(13)).foregroundStyle(AppTheme.muted)
                     .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 14)
             }
-            CommandPopover(model: model, text: model.composerText)
+            CommandPopover(model: model, text: model.composerText, cursor: cursor)
+            if let accessory {
+                accessory
+            }
             Group {
                 if expanded {
                     expandedCard
@@ -34,9 +42,9 @@ struct Composer: View {
                     collapsedCapsule
                 }
             }
-            .background(AppTheme.color("mobileComposer").opacity(0.94),
+            .background(AppTheme.color("mobileComposerSurface"),
                         in: RoundedRectangle(cornerRadius: expanded ? 26 : 27))
-            .overlay(RoundedRectangle(cornerRadius: expanded ? 26 : 27).stroke(AppTheme.border.opacity(0.8)))
+            .overlay(RoundedRectangle(cornerRadius: expanded ? 26 : 27).stroke(AppTheme.color("mobileComposerBorder")))
             .shadow(color: .black.opacity(0.15), radius: 14, y: 6)
             .animation(.easeInOut(duration: 0.22), value: expanded)
         }
@@ -49,6 +57,9 @@ struct Composer: View {
                 .ignoresSafeArea()
         }
         .onChange(of: model.selectedThreadId) { _, _ in cancelDictation() }
+        .onChange(of: model.composerText) { _, _ in updateMenu() }
+        .onChange(of: selection) { _, _ in updateMenu() }
+        .onAppear(perform: updateMenu)
         .onDisappear(perform: cancelDictation)
         .background {
             Button("") { send(alternate: true) }
@@ -60,6 +71,7 @@ struct Composer: View {
         TextField(
             composer.editor.placeholder,
             text: Binding(get: { model.composerText }, set: { model.editDraft($0) }),
+            selection: $selection,
             axis: .vertical
         )
         .font(AppTheme.font(16))
@@ -161,6 +173,7 @@ struct Composer: View {
             self.send(alternate: false)
         }
         .accessibilityLabel(send.label)
+        .accessibilityHint(sendBlockedReason ?? "")
         if send.offersFollowUpChoice, let action = send.action, sendEnabled {
             button.contextMenu {
                 Button { self.send(alternate: false) } label: {
@@ -181,7 +194,10 @@ struct Composer: View {
     }
 
     private var sendEnabled: Bool {
-        switch composer.primaryAction {
+        if sendBlockedReason != nil {
+            return false
+        }
+        return switch composer.primaryAction {
         case let .send(button): !button.disabled
         case let .implement(_, disabled, _): !disabled
         case let .refine(_, disabled): !disabled
@@ -200,6 +216,19 @@ struct Composer: View {
         case .implement, .refine: model.perform(.planFollowUp(newThread: false))
         default: model.send(alternate: alternate)
         }
+    }
+
+    /// The caret as a UTF-16 offset; the end of the text when there is no selection.
+    private var cursor: UInt32 {
+        let text = model.composerText
+        let length = text.utf16.count
+        guard case let .selection(range) = selection?.indices,
+              range.upperBound <= text.endIndex else { return UInt32(length) }
+        return UInt32(min(length, range.upperBound.utf16Offset(in: text)))
+    }
+
+    private func updateMenu() {
+        model.perform(.updateComposerMenu(text: model.composerText, cursor: cursor, layout: .mobile))
     }
 
     private func startDictation() {

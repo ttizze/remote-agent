@@ -12,6 +12,9 @@ struct TerminalScreen: View {
     @State private var session = UUID()
     @StateObject private var keys = TerminalKeys()
     @AppStorage("terminal.fontSize") private var fontSize = 10.5
+    /// The terminal last seen running here, so its exit can leave it.
+    @State private var runningTerminal: String?
+    @Environment(\.dismiss) private var dismiss
 
     var body: some View {
         VStack(spacing: 0) {
@@ -26,8 +29,13 @@ struct TerminalScreen: View {
             NativeTerminalView(model: model, threadId: threadId, terminal: terminalId,
                                opened: { terminalId = $0 }, keys: keys, fontSize: fontSize)
                 .id(session)
-            KeyBar(keys: keys)
+            KeyBar(keys: keys) {
+                if let terminalId {
+                    model.perform(.clearTerminal(threadId: threadId, terminalId: terminalId))
+                }
+            }
         }
+        .onChange(of: currentTab) { _, tab in followExit(tab) }
         .background(AppTheme.color("terminalBackground").ignoresSafeArea())
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
@@ -43,31 +51,35 @@ struct TerminalScreen: View {
         }
     }
 
+    private var tabs: [TerminalTab] {
+        model.snapshot.terminals(threadId: threadId)
+    }
+
+    private var currentTab: TerminalTab? {
+        tabs.first { $0.terminalId == terminalId }
+    }
+
     private var options: some View {
         Menu {
             Section("Text size") {
-                Button("A- \(String(format: "%.1f", fontSize - 0.5)) pt") { fontSize = max(6, fontSize - 0.5) }
-                Button("A+ \(String(format: "%.1f", fontSize + 0.5)) pt") { fontSize = min(14, fontSize + 0.5) }
+                Button("A- \(String(format: "%.1f", stepped(-1))) pt") { fontSize = stepped(-1) }
+                    .disabled(fontSize <= 6)
+                Button("A+ \(String(format: "%.1f", stepped(1))) pt") { fontSize = stepped(1) }
+                    .disabled(fontSize >= 14)
             }
-            ForEach(model.snapshot.terminals(threadId: threadId), id: \.terminalId) { tab in
+            ForEach(tabs.filter { $0.running || $0.terminalId == terminalId }, id: \.terminalId) { tab in
                 Button { switchTo(tab.terminalId) } label: {
                     if tab.terminalId == terminalId {
                         Label(tab.label, systemImage: "checkmark")
                     } else {
                         Label(tab.label, systemImage: "terminal")
                     }
-                    Text(tab.status)
+                    Text(tab.menuStatus)
                 }
             }
             Button { switchTo(nil) } label: {
                 Label("Open new terminal", systemImage: "plus")
-                Text("Start another shell for this thread")
-            }
-            if let terminalId {
-                Button("Close terminal", role: .destructive) {
-                    model.perform(.closeTerminal(threadId: threadId, terminalId: terminalId))
-                    switchTo(nil)
-                }
+                Text("Start another shell in \(workspaceName)")
             }
         } label: {
             Image(systemName: "terminal")
@@ -75,9 +87,43 @@ struct TerminalScreen: View {
         .accessibilityLabel("Terminal options")
     }
 
+    /// The text size one 0.5 pt step away, within 6–14 pt.
+    private func stepped(_ direction: Double) -> Double {
+        min(14, max(6, fontSize + direction * 0.5))
+    }
+
+    private var workspaceName: String {
+        let name = URL(fileURLWithPath: model.cwd).lastPathComponent
+        return model.cwd.isEmpty || name.isEmpty ? "this workspace" : name
+    }
+
     private func switchTo(_ terminal: String?) {
         terminalId = terminal
+        runningTerminal = nil
         session = UUID()
+    }
+
+    /// A shell that ends here is closed, and the screen moves to the nearest
+    /// live terminal before it, else after it, else back to the thread.
+    private func followExit(_ tab: TerminalTab?) {
+        guard let terminalId else { return }
+        if let tab, tab.running {
+            runningTerminal = terminalId
+            return
+        }
+        guard runningTerminal == terminalId, tab == nil || tab?.exited == true else { return }
+        runningTerminal = nil
+        let position = tabs.firstIndex { $0.terminalId == terminalId } ?? tabs.count
+        let before = tabs.prefix(position).filter(\.running)
+        let others = tabs.filter { $0.running && $0.terminalId != terminalId }
+        if tab != nil {
+            model.perform(.closeTerminal(threadId: threadId, terminalId: terminalId))
+        }
+        if let next = before.last ?? others.first {
+            switchTo(next.terminalId)
+        } else {
+            dismiss()
+        }
     }
 }
 
@@ -105,6 +151,7 @@ final class TerminalKeys: ObservableObject {
 
 private struct KeyBar: View {
     @ObservedObject var keys: TerminalKeys
+    let clear: () -> Void
 
     var body: some View {
         ScrollView(.horizontal) {
@@ -114,7 +161,7 @@ private struct KeyBar: View {
                 toggle("ALT", $keys.alt)
                 key("tab", [0x09])
                 Button("paste") { keys.paste?() }.buttonStyle(KeyStyle(active: false))
-                key("CLEAR", Array("clear\r".utf8))
+                Button("CLEAR", action: clear).buttonStyle(KeyStyle(active: false))
                 key("↑", [0x1B, 0x5B, 0x41])
                 key("↓", [0x1B, 0x5B, 0x42])
                 key("←", [0x1B, 0x5B, 0x44])

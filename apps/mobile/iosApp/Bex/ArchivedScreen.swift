@@ -20,7 +20,7 @@ struct ArchivedScreen: View {
                 EmptyStateText(title: empty.title, detail: empty.detail)
             }
             ForEach(view.groups, id: \.projectId) { group in
-                Section(group.title) {
+                Section {
                     ForEach(group.rows, id: \.threadId) { row in
                         VStack(alignment: .leading, spacing: 3) {
                             Text(row.title).font(AppTheme.font(16, weight: .medium))
@@ -41,13 +41,20 @@ struct ArchivedScreen: View {
                             }
                         }
                     }
+                } header: {
+                    HStack(spacing: 10) {
+                        ProjectGlyph(name: group.title, icon: ProjectIconImages.image(model.snapshot, group.projectId),
+                                     size: 18)
+                        Text(group.title.uppercased()).font(AppTheme.font(12, weight: .medium)).tracking(0.5)
+                            .foregroundStyle(AppTheme.muted).lineLimit(1)
+                    }
                 }
             }
         }
         .refreshable { model.perform(.refresh) }
         .searchable(text: $query)
         .scrollContentBackground(.hidden)
-        .background(AppTheme.color("surfaceOverlay"))
+        .background(AppTheme.sheet)
         .navigationTitle("Archived Threads")
         .navigationBarTitleDisplayMode(.inline)
         .onAppear { model.perform(.showArchived(open: true)) }

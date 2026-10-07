@@ -3,6 +3,7 @@ import SwiftUI
 
 struct ThreadListRowView: View {
     let row: ThreadRow
+    let icon: UIImage?
     let sidebar: Bool
     let open: () -> Void
 
@@ -45,7 +46,7 @@ struct ThreadListRowView: View {
     private var card: some View {
         VStack(alignment: .leading, spacing: 3.5) {
             HStack(spacing: 5.25) {
-                ProjectGlyph(name: row.projectTitle ?? "")
+                ProjectGlyph(name: row.projectTitle ?? "", icon: icon)
                 Text(row.projectTitle ?? "").font(AppTheme.font(14, weight: .medium))
                     .foregroundStyle(AppTheme.muted).lineLimit(1)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -77,7 +78,7 @@ struct ThreadListRowView: View {
 
     private var slim: some View {
         HStack(spacing: 8.75) {
-            ProjectGlyph(name: row.projectTitle ?? "").opacity(0.4)
+            ProjectGlyph(name: row.projectTitle ?? "", icon: icon).opacity(0.4)
             VStack(alignment: .leading, spacing: 2) {
                 Text(row.title).font(AppTheme.font(16)).foregroundStyle(AppTheme.muted).lineLimit(1)
                 if let snippet = row.searchSnippet {
@@ -107,7 +108,7 @@ struct ThreadListRowView: View {
 extension ThreadListStatus {
     var color: Color {
         switch self {
-        case .approval, .limited: AppTheme.color("warningForeground")
+        case .approval, .limited: AppTheme.warningForeground
         case .input: AppTheme.indigo
         case .working, .waiting: AppTheme.sky
         case .failed: AppTheme.dangerForeground
@@ -116,16 +117,43 @@ extension ThreadListStatus {
     }
 }
 
-/// A project's initial where the list shows its favicon.
+/// A project's icon from the Host, or its initial when it has none.
 struct ProjectGlyph: View {
     let name: String
+    let icon: UIImage?
+    var size: CGFloat = 15
 
     var body: some View {
-        Text(name.first.map { String($0).uppercased() } ?? "·")
-            .font(AppTheme.font(9, weight: .bold))
-            .foregroundStyle(AppTheme.muted)
-            .frame(width: 15, height: 15)
-            .background(AppTheme.subtle, in: RoundedRectangle(cornerRadius: 3.5))
+        if let icon {
+            Image(uiImage: icon).resizable().scaledToFit()
+                .frame(width: size, height: size)
+                .clipShape(RoundedRectangle(cornerRadius: size * 0.16))
+                .accessibilityLabel("\(name) favicon")
+        } else {
+            Text(name.first.map { String($0).uppercased() } ?? "·")
+                .font(AppTheme.font(size * 0.6, weight: .bold))
+                .foregroundStyle(AppTheme.muted)
+                .frame(width: size, height: size)
+                .background(AppTheme.subtle, in: RoundedRectangle(cornerRadius: size * 0.23))
+        }
+    }
+}
+
+/// Decoded project icons by content hash.
+@MainActor
+enum ProjectIconImages {
+    private static var decoded: [String: UIImage] = [:]
+
+    static func image(_ snapshot: AgentCore.Snapshot, _ projectId: String) -> UIImage? {
+        guard let hash = snapshot.projectIconHash(projectId: projectId) else { return nil }
+        if let image = decoded[hash] {
+            return image
+        }
+        guard let icon = snapshot.projectIcon(projectId: projectId), let image = UIImage(data: icon.data) else {
+            return nil
+        }
+        decoded[icon.hash] = image
+        return image
     }
 }
 
@@ -161,6 +189,7 @@ extension Driver {
 
 struct PendingTaskRowView: View {
     let task: PendingTaskRow
+    let icon: UIImage?
     let sidebar: Bool
 
     var body: some View {
@@ -170,7 +199,9 @@ struct PendingTaskRowView: View {
             }
             VStack(alignment: .leading, spacing: 3.5) {
                 HStack(spacing: 5.25) {
-                    Spacer()
+                    ProjectGlyph(name: task.projectTitle, icon: icon)
+                    Text(task.projectTitle).font(AppTheme.font(14, weight: .medium)).foregroundStyle(AppTheme.muted)
+                        .lineLimit(1).frame(maxWidth: .infinity, alignment: .leading)
                     Text("Sends on reconnect").font(AppTheme.font(13)).foregroundStyle(AppTheme.tertiary)
                 }
                 Text(task.title).font(AppTheme.font(16, weight: .medium)).lineLimit(1)

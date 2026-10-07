@@ -4,8 +4,8 @@ import SwiftUI
 /// "New task": choose a project, then write the first message.
 struct NewTaskFlow: View {
     @ObservedObject var model: BexAppViewModel
-    /// Opens the draft for this project directly.
-    var projectId: String?
+    /// Core already opened the draft (a new thread on a branch): show it directly.
+    var draftOpen = false
     let started: (String) -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var path: [String] = []
@@ -21,8 +21,8 @@ struct NewTaskFlow: View {
                 }
         }
         .onAppear {
-            if let projectId {
-                choose(projectId)
+            if draftOpen {
+                path = [model.snapshot.selectedProjectId() ?? "chats"]
             }
         }
         .onChange(of: model.selectedThreadId) { _, thread in
@@ -42,7 +42,7 @@ struct NewTaskFlow: View {
             VStack(spacing: 12) {
                 Button { choose(nil) } label: {
                     ProjectChoiceRow(symbol: "text.bubble", title: "No project",
-                                     subtitle: "Start a task without a project", glyph: nil)
+                                     subtitle: "Start a task without a project", glyph: nil, icon: nil)
                         .background(AppTheme.groupedCard, in: RoundedRectangle(cornerRadius: 24))
                 }
                 .buttonStyle(.plain)
@@ -54,7 +54,8 @@ struct NewTaskFlow: View {
                         ForEach(Array(projects.enumerated()), id: \.element.id) { index, project in
                             Button { choose(project.id) } label: {
                                 ProjectChoiceRow(symbol: nil, title: project.name,
-                                                 subtitle: project.roots.first?.path ?? "", glyph: project.name)
+                                                 subtitle: project.roots.first?.path ?? "", glyph: project.name,
+                                                 icon: ProjectIconImages.image(model.snapshot, project.id))
                             }
                             .buttonStyle(.plain)
                             .overlay(alignment: .top) {
@@ -69,7 +70,7 @@ struct NewTaskFlow: View {
             }
             .padding(.horizontal, 20).padding(.top, 8)
         }
-        .background(AppTheme.color("surfaceOverlay").ignoresSafeArea())
+        .background(AppTheme.sheet.ignoresSafeArea())
         .searchable(text: $query, prompt: "Search projects")
         .navigationTitle("Choose project")
         .navigationBarTitleDisplayMode(.inline)
@@ -102,25 +103,30 @@ private struct ProjectChoiceRow: View {
     let title: String
     let subtitle: String
     let glyph: String?
+    let icon: UIImage?
 
     var body: some View {
-        HStack(spacing: 10.5) {
-            if let symbol {
-                Image(systemName: symbol).font(.system(size: 18)).frame(width: 24.5, height: 24.5)
-            } else if let glyph {
-                ProjectGlyph(name: glyph).scaleEffect(20 / 15)
+        HStack(spacing: 12) {
+            Group {
+                if let symbol {
+                    Image(systemName: symbol).font(.system(size: 18))
+                } else if let glyph {
+                    ProjectGlyph(name: glyph, icon: icon, size: 20)
+                }
             }
+            .frame(width: 28, height: 28)
             VStack(alignment: .leading, spacing: 2) {
                 Text(title).font(AppTheme.font(16, weight: .bold)).foregroundStyle(AppTheme.text)
                 if !subtitle.isEmpty {
-                    Text(subtitle).font(AppTheme.font(13)).foregroundStyle(AppTheme.muted)
+                    Text(subtitle).font(AppTheme.font(12)).foregroundStyle(AppTheme.muted)
                         .lineLimit(1).truncationMode(.middle)
                 }
             }
             Spacer()
-            Image(systemName: "chevron.right").font(.system(size: 14)).foregroundStyle(AppTheme.muted)
+            Image(systemName: "chevron.right").font(.system(size: 14))
+                .foregroundStyle(AppTheme.color("mobileChevron"))
         }
-        .padding(.horizontal, 14).padding(.vertical, 12.25)
+        .padding(.horizontal, 16).padding(.vertical, 14)
         .contentShape(Rectangle())
     }
 }
@@ -130,6 +136,7 @@ private struct NewTaskDraft: View {
     @ObservedObject var model: BexAppViewModel
     let cancel: () -> Void
     @State private var showingSettings = false
+    @State private var showingBranches = false
 
     var body: some View {
         let view = model.snapshot.newThread(options: ComposerOptions(
@@ -158,19 +165,13 @@ private struct NewTaskDraft: View {
             .frame(maxWidth: .infinity)
             .padding(.top, 72).padding(.bottom, 236)
         }
-        .background(AppTheme.color("surfaceOverlay").ignoresSafeArea())
+        .background(AppTheme.sheet.ignoresSafeArea())
         .safeAreaInset(edge: .bottom, spacing: 0) {
-            VStack(spacing: 6) {
-                HStack(spacing: 6) {
-                    let worktree = model.snapshot.worktreeSettings()?.createOnNewSession == true
-                    Image(systemName: worktree ? "arrow.triangle.branch" : "folder").font(.system(size: 13))
-                    Text(worktree ? "New worktree" : "Current checkout").font(AppTheme.font(14, weight: .medium))
-                    Spacer()
-                }
-                .foregroundStyle(AppTheme.muted)
-                .padding(.horizontal, 19)
-                Composer(model: model, composer: view.composer, alwaysExpanded: true) { showingSettings = true }
-            }
+            Composer(
+                model: model, composer: view.composer, alwaysExpanded: true,
+                accessory: view.workspace.map { AnyView(workspaceControls($0)) },
+                sendBlockedReason: view.workspace?.blockedReason
+            ) { showingSettings = true }
         }
         .navigationBarBackButtonHidden(true)
         .toolbar {
@@ -179,5 +180,96 @@ private struct NewTaskDraft: View {
         .sheet(isPresented: $showingSettings) {
             ThreadSettingsSheet(model: model, controls: view.composer.controls)
         }
+        .navigationDestination(isPresented: $showingBranches) {
+            BranchPicker(model: model)
+        }
+        .task(id: view.projectId) {
+            if view.workspace != nil {
+                model.perform(.searchNewThreadBranches(query: ""))
+            }
+        }
+    }
+
+    private func workspaceControls(_ workspace: NewThreadWorkspaceView) -> some View {
+        HStack(spacing: 4) {
+            Button {
+                model.perform(.setNewThreadWorkspace(mode: workspace.mode == .local ? .worktree : .local))
+            } label: {
+                InlineControl(label: workspace.workspaceLabel, maxWidth: workspace.mode == .local ? 220 : 148,
+                              chevron: nil) {
+                    WorkspaceIcon(branched: workspace.mode == .worktree || workspace.inWorktree)
+                }
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(workspace.workspaceLabel)
+            .accessibilityHint(workspace
+                .mode == .local ? "Switches to a new worktree" : "Switches to the current checkout")
+            Button { showingBranches = true } label: {
+                InlineControl(label: workspace.branchLabel, maxWidth: 190, chevron: "chevron.right") {
+                    Image(systemName: "arrow.triangle.branch").font(.system(size: 14))
+                }
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("\(workspace.branchRole): \(workspace.branchLabel)")
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 8)
+        .padding(.bottom, 4)
+    }
+}
+
+/// A quiet control in the composer's context row: icon, label, optional chevron.
+private struct InlineControl<Icon: View>: View {
+    let label: String
+    let maxWidth: CGFloat
+    let chevron: String?
+    @ViewBuilder let icon: () -> Icon
+
+    var body: some View {
+        CappedWidth(maxWidth: maxWidth) {
+            HStack(spacing: 8) {
+                icon().frame(width: 16, height: 16).foregroundStyle(AppTheme.color("mobileIconMuted"))
+                Text(label).font(AppTheme.font(14, weight: .medium)).foregroundStyle(AppTheme.muted).lineLimit(1)
+                if let chevron {
+                    Image(systemName: chevron).font(.system(size: 10))
+                        .foregroundStyle(AppTheme.color("mobileIconMuted"))
+                }
+            }
+            .padding(.horizontal, 8)
+            .frame(height: 44)
+        }
+        .contentShape(RoundedRectangle(cornerRadius: 12))
+    }
+}
+
+/// Its content at its natural width, truncated past `maxWidth`.
+private struct CappedWidth: Layout {
+    let maxWidth: CGFloat
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache _: inout ()) -> CGSize {
+        subviews.first?.sizeThatFits(capped(proposal)) ?? .zero
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache _: inout ()) {
+        subviews.first?.place(at: bounds.origin, proposal: capped(proposal))
+    }
+
+    private func capped(_ proposal: ProposedViewSize) -> ProposedViewSize {
+        ProposedViewSize(width: min(proposal.width ?? maxWidth, maxWidth), height: proposal.height)
+    }
+}
+
+/// A folder, with a branch badge for a worktree.
+private struct WorkspaceIcon: View {
+    let branched: Bool
+
+    var body: some View {
+        Image(systemName: "folder").font(.system(size: 14))
+            .overlay(alignment: .bottomTrailing) {
+                if branched {
+                    Image(systemName: "arrow.triangle.branch").font(.system(size: 8))
+                        .offset(x: 4, y: 4)
+                }
+            }
     }
 }

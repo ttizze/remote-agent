@@ -33,6 +33,7 @@
 		5A5E8C4F9629E9D00DF994D9 /* FeedRows.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A3A7A464C54210A4FAD3E97 /* FeedRows.swift */; };
 		5A6701088574D428E35D0130 /* ImageSizing.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5AEFDBE4DCFF9C89A17F5B83 /* ImageSizing.swift */; };
 		5A3464748841BD1FE829AF2D /* NewTaskFlow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5AB4B825955B4BFAEDEF1AF2 /* NewTaskFlow.swift */; };
+		5A7E2C1D4B8F9A0E6D3C5B21 /* BranchPicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A7E2C1D4B8F9A0E6D3C5B22 /* BranchPicker.swift */; };
 		5AB24AE25FA5E3DC443AD077 /* PairingScreens.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5AE726FF210331264B7D2D85 /* PairingScreens.swift */; };
 		5A3E7F900DE1DD630BB482D0 /* QueueSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5AEEACADF6F84DFEDB2043CB /* QueueSheet.swift */; };
 		5AAAD5B74E2B6EA71FB97E12 /* RequestCards.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A5C8EB7A315858408A45DD4 /* RequestCards.swift */; };
@@ -83,6 +84,7 @@
 		5A3A7A464C54210A4FAD3E97 /* FeedRows.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FeedRows.swift; sourceTree = "<group>"; };
 		5AEFDBE4DCFF9C89A17F5B83 /* ImageSizing.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImageSizing.swift; sourceTree = "<group>"; };
 		5AB4B825955B4BFAEDEF1AF2 /* NewTaskFlow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewTaskFlow.swift; sourceTree = "<group>"; };
+		5A7E2C1D4B8F9A0E6D3C5B22 /* BranchPicker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BranchPicker.swift; sourceTree = "<group>"; };
 		5AE726FF210331264B7D2D85 /* PairingScreens.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PairingScreens.swift; sourceTree = "<group>"; };
 		5AEEACADF6F84DFEDB2043CB /* QueueSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QueueSheet.swift; sourceTree = "<group>"; };
 		5A5C8EB7A315858408A45DD4 /* RequestCards.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RequestCards.swift; sourceTree = "<group>"; };
@@ -147,6 +149,7 @@
 				5A3A7A464C54210A4FAD3E97 /* FeedRows.swift */,
 				5AEFDBE4DCFF9C89A17F5B83 /* ImageSizing.swift */,
 				5AB4B825955B4BFAEDEF1AF2 /* NewTaskFlow.swift */,
+				5A7E2C1D4B8F9A0E6D3C5B22 /* BranchPicker.swift */,
 				5AE726FF210331264B7D2D85 /* PairingScreens.swift */,
 				5AEEACADF6F84DFEDB2043CB /* QueueSheet.swift */,
 				5A5C8EB7A315858408A45DD4 /* RequestCards.swift */,
@@ -272,6 +275,7 @@
 				5A5E8C4F9629E9D00DF994D9 /* FeedRows.swift in Sources */,
 				5A6701088574D428E35D0130 /* ImageSizing.swift in Sources */,
 				5A3464748841BD1FE829AF2D /* NewTaskFlow.swift in Sources */,
+				5A7E2C1D4B8F9A0E6D3C5B21 /* BranchPicker.swift in Sources */,
 				5AB24AE25FA5E3DC443AD077 /* PairingScreens.swift in Sources */,
 				5A3E7F900DE1DD630BB482D0 /* QueueSheet.swift in Sources */,
 				5AAAD5B74E2B6EA71FB97E12 /* RequestCards.swift in Sources */,

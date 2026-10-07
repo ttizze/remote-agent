@@ -37,7 +37,7 @@ struct QueueSheet: View {
             }
             .listStyle(.plain)
             .scrollContentBackground(.hidden)
-            .background(AppTheme.color("surfaceOverlay"))
+            .background(AppTheme.sheet)
             .navigationTitle("Queued")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {

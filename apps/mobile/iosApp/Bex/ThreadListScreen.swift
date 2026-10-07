@@ -9,6 +9,8 @@ struct ThreadListScreen: View {
     var sidebar = false
     let openSettings: () -> Void
     let newTask: () -> Void
+    /// Shows the new task on the draft core already opened.
+    let showNewTaskDraft: () -> Void
     @State private var query = ""
     @AppStorage("threads.shelf.working") private var workingExpanded = false
     @AppStorage("threads.shelf.snoozed") private var snoozedExpanded = false
@@ -33,7 +35,7 @@ struct ThreadListScreen: View {
                     wokeAt = Date()
                 }
         }
-        .background((sidebar ? AppTheme.color("sidebar") : AppTheme.screen).ignoresSafeArea())
+        .background((sidebar ? AppTheme.color("mobileDrawer") : AppTheme.screen).ignoresSafeArea())
         .navigationBarTitleDisplayMode(.inline)
         .toolbar { toolbar }
         .searchable(text: $query, placement: sidebar ? .sidebar : .toolbar, prompt: "Search")
@@ -98,8 +100,8 @@ struct ThreadListScreen: View {
 
     @ViewBuilder
     private func content(_ list: ThreadListView, now: Int64) -> some View {
-        if !list.hasThreads, query.isEmpty {
-            ThreadListEmptyState(model: model, newTask: newTask)
+        if !list.hasThreads, let empty = list.empty {
+            ThreadListEmptyState(empty: empty, addEnvironment: model.isConnected ? nil : { model.openPairing() })
         } else {
             List {
                 ForEach(Array(list.items.enumerated()), id: \.offset) { _, item in
@@ -114,8 +116,8 @@ struct ThreadListScreen: View {
                         .listRowSeparator(.hidden)
                         .listRowBackground(Color.clear)
                 }
-                if list.items.isEmpty {
-                    emptyResults
+                if list.items.isEmpty, let empty = list.empty {
+                    EmptyStateText(title: empty.title, detail: empty.detail)
                         .listRowSeparator(.hidden)
                         .listRowBackground(Color.clear)
                 }
@@ -129,28 +131,16 @@ struct ThreadListScreen: View {
     }
 
     @ViewBuilder
-    private var emptyResults: some View {
-        let project = model.snapshot.selectedProjectId().flatMap { id in
-            model.snapshot.projects().first { $0.id == id }?.name
-        }
-        if !query.isEmpty {
-            EmptyStateText(title: "No results", detail: "No threads matching \"\(query)\".")
-        } else if let project {
-            EmptyStateText(title: "No threads in \(project)", detail: "Choose another project or create a new task.")
-        } else {
-            EmptyStateText(title: "No threads yet", detail: "Create a task to start a new coding session.")
-        }
-    }
-
-    @ViewBuilder
     private func itemView(_ item: ThreadListItem, now _: Int64) -> some View {
         switch item {
         case let .thread(row):
-            ThreadListRowView(row: row, sidebar: sidebar, open: { model.openThread(row.id) })
+            ThreadListRowView(row: row, icon: ProjectIconImages.image(model.snapshot, row.projectId), sidebar: sidebar,
+                              open: { model.openThread(row.id) })
                 .contextMenu { ThreadMenuItems(items: row.menu) { run($0, row: row) } }
                 .swipeActions(edge: .trailing, allowsFullSwipe: true) { swipeButtons(row) }
         case let .pendingTask(task):
-            PendingTaskRowView(task: task, sidebar: sidebar)
+            PendingTaskRowView(task: task, icon: ProjectIconImages.image(model.snapshot, task.projectId),
+                               sidebar: sidebar)
                 .contextMenu {
                     Button("Delete", systemImage: "trash", role: .destructive) {
                         model.perform(.discardPending(commandId: task.commandId))
@@ -175,7 +165,7 @@ struct ThreadListScreen: View {
             Button { swipe(secondary.action, row: row) } label: {
                 Label(secondary.label, systemImage: secondary.action.symbol)
             }
-            .tint(AppTheme.color("toolbarControl"))
+            .tint(AppTheme.card)
         }
     }
 
@@ -196,9 +186,9 @@ struct ThreadListScreen: View {
             }
             model.perform(.thread(threadId: row.id, action: value))
         case let .filterProject(projectId): model.perform(.filterProject(projectId: projectId))
-        case let .newThreadOnBranch(projectId, _, _):
-            model.perform(.newThread(projectId: projectId))
-            newTask()
+        case let .newThreadOnBranch(projectId, branch, worktreePath):
+            model.perform(.newThreadOnBranch(projectId: projectId, branch: branch, worktreePath: worktreePath))
+            showNewTaskDraft()
         case .customSnooze: customSnooze = row.id
         case .startRename:
             title = row.title

@@ -12,19 +12,12 @@ enum AppTheme {
     }
 
     static func uiColor(_ role: String) -> UIColor {
-        adaptive(light[role, default: "#27272a"], dark[role, default: "#f5f5f5"])
-    }
-
-    static func adaptive(_ lightHex: String, _ darkHex: String) -> UIColor {
-        let lightColor = hex(lightHex)
-        let darkColor = hex(darkHex)
+        let lightColor = hex(light[role, default: "#27272a"])
+        let darkColor = hex(dark[role, default: "#f5f5f5"])
         return UIColor { $0.userInterfaceStyle == .dark ? darkColor : lightColor }
     }
 
-    static func adaptiveColor(_ lightHex: String, _ darkHex: String) -> Color {
-        Color(uiColor: adaptive(lightHex, darkHex))
-    }
-
+    /// `#rrggbb` or `#rrggbbaa`.
     private static func hex(_ value: String) -> UIColor {
         let digits = UInt64(value.dropFirst(), radix: 16) ?? 0
         let hasAlpha = value.count == 9
@@ -50,62 +43,96 @@ enum AppTheme {
         .custom("Menlo", size: size).weight(weight)
     }
 
-    // Tailwind hues the mobile palette uses for status, in light / dark pairs.
-    static let sky = adaptiveColor("#0284c7", "#38bdf8")
-    static let indigo = adaptiveColor("#4f46e5", "#a5b4fc")
-    static let emerald = adaptiveColor("#047857", "#6ee7b7")
-    static let emeraldIcon = adaptiveColor("#059669", "#34d399")
-    static let rose = adaptiveColor("#e11d48", "#fb7185")
-    static let roseText = adaptiveColor("#be123c", "#fda4af")
-    static let amber = adaptiveColor("#b45309", "#fcd34d")
-    static let violet = adaptiveColor("#7c3aed", "#a78bfa")
+    static var sky: Color {
+        color("statusSky")
+    }
+
+    static var indigo: Color {
+        color("statusIndigo")
+    }
+
+    static var emerald: Color {
+        color("statusEmerald")
+    }
+
+    static var emeraldIcon: Color {
+        color("statusEmeraldIcon")
+    }
+
+    static var rose: Color {
+        color("statusRose")
+    }
+
+    static var roseText: Color {
+        color("statusRoseText")
+    }
+
+    static var amber: Color {
+        color("statusAmber")
+    }
+
+    static var violet: Color {
+        color("statusViolet")
+    }
 
     static var text: Color {
-        color("text")
+        color("mobileForeground")
     }
 
     static var muted: Color {
-        color("textMuted")
+        color("mobileForegroundMuted")
     }
 
     static var tertiary: Color {
-        color("textMuted").opacity(0.72)
+        color("mobileForegroundTertiary")
     }
 
     static var border: Color {
-        color("border")
+        color("mobileBorder")
     }
 
     static var borderSubtle: Color {
-        color("border").opacity(0.6)
+        color("mobileBorderSubtle")
     }
 
     static var screen: Color {
-        color("canvas")
+        color("mobileScreen")
+    }
+
+    static var sheet: Color {
+        color("mobileSheet")
     }
 
     static var primary: Color {
-        color("accent")
+        color("mobilePrimary")
     }
 
     static var danger: Color {
-        color("errorSurface")
+        color("mobileDanger")
     }
 
     static var dangerForeground: Color {
-        color("errorForeground")
+        color("mobileDangerForeground")
+    }
+
+    static var warningForeground: Color {
+        color("mobileWarningForeground")
     }
 
     static var subtle: Color {
-        color("accentSurface")
+        color("mobileSubtle")
     }
 
     static var subtleStrong: Color {
-        color("input")
+        color("mobileSubtleStrong")
     }
 
     static var card: Color {
-        color("surface")
+        color("mobileCard")
+    }
+
+    static var cardAlt: Color {
+        color("mobileCardAlt")
     }
 
     static var groupedCard: Color {

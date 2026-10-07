@@ -5,6 +5,7 @@ import SwiftUI
 struct SetupCard: View {
     let card: SetupCardView
     let cancel: () -> Void
+    let workLocally: () -> Void
     let openTerminal: (String) -> Void
     @State private var showingDetails = false
 
@@ -25,7 +26,7 @@ struct SetupCard: View {
         }
         .padding(.vertical, 3.5)
         .sheet(isPresented: $showingDetails) {
-            SetupDetailsSheet(card: card, cancel: cancel, openTerminal: { id in
+            SetupDetailsSheet(card: card, cancel: cancel, workLocally: workLocally, openTerminal: { id in
                 showingDetails = false
                 openTerminal(id)
             })
@@ -80,7 +81,7 @@ extension SetupTone {
     var color: Color {
         switch self {
         case .muted: AppTheme.muted
-        case .warning: AppTheme.color("warningForeground")
+        case .warning: AppTheme.warningForeground
         case .destructive: AppTheme.dangerForeground
         }
     }
@@ -125,6 +126,7 @@ private struct StageRow: View {
 private struct SetupDetailsSheet: View {
     let card: SetupCardView
     let cancel: () -> Void
+    let workLocally: () -> Void
     let openTerminal: (String) -> Void
     @Environment(\.dismiss) private var dismiss
 
@@ -142,7 +144,7 @@ private struct SetupDetailsSheet: View {
                                 .foregroundStyle(output.failed ? AppTheme.dangerForeground : AppTheme.text)
                                 .padding(8)
                                 .frame(maxWidth: .infinity, alignment: .leading)
-                                .background(output.failed ? AppTheme.danger : AppTheme.color("surfaceRaised"),
+                                .background(output.failed ? AppTheme.danger : AppTheme.cardAlt,
                                             in: RoundedRectangle(cornerRadius: 5.25))
                         }
                     }
@@ -157,19 +159,37 @@ private struct SetupDetailsSheet: View {
                     if let error = card.error {
                         Text(error).font(AppTheme.font(13)).foregroundStyle(AppTheme.dangerForeground)
                     }
-                    HStack(spacing: 16) {
-                        if let terminal = card.openTerminalId {
-                            Button("Open terminal") { openTerminal(terminal) }
-                        }
-                        if card.canCancel {
-                            Button("Cancel setup", role: .destructive) {
-                                cancel()
-                                dismiss()
+                    if let terminal = card.openTerminalId {
+                        Button("Open terminal") { openTerminal(terminal) }
+                            .font(AppTheme.font(14, weight: .medium))
+                            .padding(.top, 8)
+                    }
+                    if card.canCancel || card.canWorkLocally {
+                        HStack(spacing: 16) {
+                            Spacer()
+                            if card.canCancel {
+                                Button("Cancel setup") {
+                                    dismiss()
+                                    cancel()
+                                }
+                                .foregroundStyle(AppTheme.dangerForeground)
+                                .accessibilityLabel("Cancel worktree setup")
+                            }
+                            if card.canWorkLocally {
+                                Button("Work locally") {
+                                    dismiss()
+                                    workLocally()
+                                }
+                                .foregroundStyle(AppTheme.text)
                             }
                         }
+                        .buttonStyle(.plain)
+                        .font(AppTheme.font(14))
+                        .frame(minHeight: 44)
+                        .padding(.top, 4)
+                        .overlay(alignment: .top) { Rectangle().fill(AppTheme.border).frame(height: 1) }
+                        .padding(.top, 12)
                     }
-                    .font(AppTheme.font(14, weight: .medium))
-                    .padding(.top, 8)
                 }
                 .padding(.horizontal, 20).padding(.vertical, 12)
             }

@@ -10,7 +10,7 @@ struct AccountUsageView: View {
             if let usage {
                 if let error = usage.error {
                     Label(accountErrorMessage(message: error), systemImage: "exclamationmark.circle")
-                        .font(.caption).foregroundStyle(AppTheme.color("warningForeground"))
+                        .font(.caption).foregroundStyle(AppTheme.warningForeground)
                 }
                 ForEach(Array(usage.windows.enumerated()), id: \.offset) { _, window in
                     UsageWindowView(window: window)
@@ -38,7 +38,7 @@ private struct UsageWindowView: View {
             if let reset = window.resetsAt {
                 let date = Date(timeIntervalSince1970: Double(reset))
                 Text("リセット: \(date.formatted(date: .abbreviated, time: .shortened))")
-                    .font(AppTheme.font(11)).foregroundStyle(AppTheme.color("textMuted"))
+                    .font(AppTheme.font(11)).foregroundStyle(AppTheme.tertiary)
             }
         }
     }
@@ -106,7 +106,7 @@ struct AccountLoginSection: View {
             }
             if let error = loginError {
                 Text(accountErrorMessage(message: error)).font(.caption)
-                    .foregroundStyle(AppTheme.color("errorForeground"))
+                    .foregroundStyle(AppTheme.dangerForeground)
                 Button("認証状態を再確認", action: retry)
             }
         }

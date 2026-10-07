@@ -17,6 +17,7 @@ let package = Package(
                 "ArchivedScreen.swift",
                 "Assets.xcassets",
                 "BexIOSApp.swift",
+                "BranchPicker.swift",
                 "Composer.swift",
                 "ComposerAttachments.swift",
                 "ComposerMenu.swift",
