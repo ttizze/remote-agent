@@ -393,11 +393,14 @@ pub enum FactBody {
         command: CommandId,
         instances: Vec<String>,
     },
+    /// `tasks` are the inherited subagent items' tasks as they were at the
+    /// fork.
     ForkAccepted {
         parent: ThreadId,
         boundary: u64,
         history: Vec<Item>,
         messages: Vec<Message>,
+        tasks: Vec<Task>,
     },
     TransferOpened {
         native_source: Option<NativeBinding>,
@@ -1424,12 +1427,14 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
             boundary,
             history,
             messages,
+            tasks,
         } => {
             let t = state.thread.as_mut().ok_or(FoldError::Missing("thread"))?;
             t.parent = Some(parent.clone());
             t.fork_boundary = Some(*boundary);
             state.inherited_items = history.clone();
             state.inherited_messages = messages.clone();
+            state.inherited_tasks = tasks.clone();
         }
         TransferOpened {
             native_source,

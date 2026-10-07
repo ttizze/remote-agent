@@ -44,5 +44,3 @@ zeroize = "1.8.1"
 [patch.crates-io]
 # UDP rebind recovery: https://github.com/n0-computer/net-tools/pull/235
 netwatch = { git = "https://github.com/ttizze/net-tools", rev = "1d54cca14f47ebfa20a75234e8a08351d9f5a8d4" }
-alacritty_terminal = { path = "vendor/alacritty_terminal" }
-vte = { path = "vendor/vte" }

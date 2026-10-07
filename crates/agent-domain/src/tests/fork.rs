@@ -180,6 +180,50 @@ fn a_failed_native_fork_fails_the_run_and_the_next_message_retries_it() {
     assert!(native_fork(&retry).is_some());
 }
 
+// ThreadForkService.ts copies subagent items with their prompt, progress and
+// result: a fork, and a fork of that fork, keep the task as it was at the fork.
+#[test]
+fn a_fork_keeps_its_subagent_tasks_as_they_were_at_the_fork() {
+    let mut s = state();
+    let (run, a) = running(&mut s, "first");
+    provider(
+        &mut s,
+        "spawn",
+        &a,
+        ProviderEvent::SubagentStarted {
+            background: true,
+            native_thread: None,
+            key: "child".into(),
+            parent: None,
+            prompt: "Inspect code".into(),
+            model: None,
+        },
+    );
+    provider(
+        &mut s,
+        "progress",
+        &a,
+        ProviderEvent::SubagentProgress {
+            key: "child".into(),
+            progress: "Reading files".into(),
+            model: None,
+        },
+    );
+    finish(&mut s, &a);
+    let at_fork = s.tasks[0].clone();
+    let mut child = accept_child(&fork(&mut s, "fork", SourcePoint::Run(run)));
+    assert!(
+        child
+            .inherited_items
+            .iter()
+            .any(|item| matches!(&item.kind, ItemKind::Subagent { task } if task == &at_fork.id))
+    );
+    assert_eq!(child.inherited_tasks, std::slice::from_ref(&at_fork));
+    let child_run = completed(&mut child, "child request", "child answer");
+    let grandchild = accept_child(&fork(&mut child, "fork-again", SourcePoint::Run(child_run)));
+    assert_eq!(grandchild.inherited_tasks, [at_fork]);
+}
+
 // A fork of a fork keeps the inherited prefix and its message fields.
 #[test]
 fn forking_a_fork_keeps_the_ancestor_conversation_and_its_messages() {

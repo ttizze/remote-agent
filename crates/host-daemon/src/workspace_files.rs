@@ -29,7 +29,7 @@ const EDIT_LIMIT: u64 = 1024 * 1024;
 pub(crate) const TRANSFER_LIMIT: u64 = 512 * 1024 * 1024;
 const GRANT_LIFETIME: Duration = Duration::from_secs(120);
 mod attachments;
-pub(crate) use attachments::{Claimed, is_pending_upload};
+pub(crate) use attachments::{Claimed, Copies, is_pending_upload};
 
 #[derive(Clone)]
 pub(crate) struct WorkspaceFiles {
@@ -38,6 +38,8 @@ pub(crate) struct WorkspaceFiles {
     writes: Arc<Mutex<()>>,
     grants: Arc<Mutex<HashMap<[u8; 32], Grant>>>,
     pending_sweep: Arc<Mutex<Option<Instant>>>,
+    /// Taken while holding `writes`.
+    claim_holds: Arc<Mutex<HashMap<PathBuf, attachments::Holds>>>,
 }
 
 struct Grant {
@@ -64,6 +66,7 @@ impl WorkspaceFiles {
             writes: Default::default(),
             grants: Default::default(),
             pending_sweep: Default::default(),
+            claim_holds: Default::default(),
         }
     }
 

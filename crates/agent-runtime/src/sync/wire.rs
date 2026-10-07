@@ -1,6 +1,6 @@
-//! What clients receive. Storage keeps everything; delivery withholds tool output, file bodies and
-//! transfer transcripts, and bounds long detail text. `getTurnItem` reads the
-//! withheld parts with a larger bound.
+//! What clients receive. Storage keeps everything; delivery withholds tool output, file bodies,
+//! transfer transcripts and a fork's inherited tasks, and bounds long detail text. `getTurnItem`
+//! reads the withheld parts with a larger bound.
 use crate::StoredFact;
 use agent_domain::{FactBody, HistoricalContext, Item, ItemKind, ItemStatus, Json, State, Task};
 use regex::Regex;
@@ -530,7 +530,8 @@ fn projects_item(item: &Item) -> bool {
 }
 
 fn needs_projection(state: &State) -> bool {
-    state.transfers.iter().any(|t| carries_history(&t.history))
+    !state.inherited_tasks.is_empty()
+        || state.transfers.iter().any(|t| carries_history(&t.history))
         || state
             .items
             .iter()
@@ -545,6 +546,7 @@ pub fn client_state(state: &Arc<State>) -> Arc<State> {
         return state.clone();
     }
     let mut projected = State::clone(state);
+    projected.inherited_tasks.clear();
     for transfer in &mut projected.transfers {
         transfer.history = empty_history();
     }
@@ -579,20 +581,25 @@ fn client_fact(state: &State, body: &FactBody) -> Option<FactBody> {
             }
             Some(body)
         }
+        // `conversation/getTurnItem` reads the inherited tasks.
         FactBody::ForkAccepted {
             parent,
             boundary,
             history,
             messages,
-        } if history.iter().any(projects_item) => Some(FactBody::ForkAccepted {
-            parent: parent.clone(),
-            boundary: *boundary,
-            history: history
-                .iter()
-                .map(|item| wire_item(item).into_owned())
-                .collect(),
-            messages: messages.clone(),
-        }),
+            tasks,
+        } if !tasks.is_empty() || history.iter().any(projects_item) => {
+            Some(FactBody::ForkAccepted {
+                parent: parent.clone(),
+                boundary: *boundary,
+                history: history
+                    .iter()
+                    .map(|item| wire_item(item).into_owned())
+                    .collect(),
+                messages: messages.clone(),
+                tasks: vec![],
+            })
+        }
         FactBody::ItemStarted { id, kind, .. } if withholds_detail(kind) => {
             if let Some(item) = state.items.iter().find(|item| &item.id == id) {
                 return Some(FactBody::ItemProjected {

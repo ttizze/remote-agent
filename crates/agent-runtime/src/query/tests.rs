@@ -511,12 +511,12 @@ fn reads_a_subagent_task_on_demand_within_the_detail_bound() {
 }
 
 /// ThreadForkService.ts copies subagent items with their prompt, progress and
-/// result. A fork, and a fork of that fork, read the task of an inherited
-/// subagent item from the thread that ran it.
+/// result. A fork, and a fork of that fork, read an inherited subagent item's
+/// task as it was at the fork, whatever the source does after it.
 #[tokio::test]
-async fn a_forks_inherited_subagent_item_reads_its_task_from_the_source() {
+async fn a_forks_inherited_subagent_item_reads_its_task_as_it_was_at_the_fork() {
     use crate::sync::history::tests::item;
-    use agent_domain::{CompletionWake, NodeId, RunAttemptId};
+    use agent_domain::{CompletionWake, ItemStatus, NodeId, RunAttemptId};
     let (_dir, store) = temp_store();
     let task = NodeId::new("child-agent").unwrap();
     let mut source = Writer::create(&store, "thread:source", "project").await;
@@ -538,6 +538,17 @@ async fn a_forks_inherited_subagent_item_reads_its_task_from_the_source() {
             },
         )
         .await;
+    source
+        .commit(
+            1,
+            FactBody::TaskProgressed {
+                id: task.clone(),
+                progress: Some("Reading files".into()),
+                model: None,
+            },
+        )
+        .await;
+    let at_fork = source.state.tasks[0].clone();
     let inherited = item(
         "item-task",
         1,
@@ -549,19 +560,50 @@ async fn a_forks_inherited_subagent_item_reads_its_task_from_the_source() {
         boundary: 1,
         history: vec![inherited.clone()],
         messages: vec![],
+        tasks: vec![at_fork.clone()],
     };
     let mut first = Writer::create(&store, "thread:fork", "project").await;
     first.commit(2, fork("thread:source")).await;
     let mut second = Writer::create(&store, "thread:fork-of-fork", "project").await;
     second.commit(3, fork("thread:fork")).await;
+    source
+        .commit(
+            4,
+            FactBody::TaskProgressed {
+                id: task.clone(),
+                progress: Some("Writing the report".into()),
+                model: None,
+            },
+        )
+        .await;
+    source
+        .commit(
+            5,
+            FactBody::TaskFinished {
+                id: task.clone(),
+                status: ItemStatus::Completed,
+                result: "Found nothing".into(),
+            },
+        )
+        .await;
     let registry = ActorRegistry::new(ActorContext::new(store));
+    let now = registry
+        .state(&ThreadId::new("thread:source").unwrap())
+        .await
+        .unwrap();
+    assert_eq!(now.tasks[0].result.as_deref(), Some("Found nothing"));
     for thread in ["thread:fork", "thread:fork-of-fork"] {
+        let thread = ThreadId::new(thread).unwrap();
         let detail = registry
-            .turn_item(&ThreadId::new(thread).unwrap(), &inherited.id)
+            .turn_item(&thread, &inherited.id)
             .await
             .unwrap()
             .unwrap();
         assert!(detail.row.inherited);
-        assert_eq!(detail.task.unwrap().prompt, "Inspect code", "{thread}");
+        assert_eq!(detail.task.unwrap(), at_fork, "{thread}");
+        // Clients read the inherited tasks through this call only.
+        let state = registry.state(&thread).await.unwrap();
+        assert_eq!(state.inherited_tasks, std::slice::from_ref(&at_fork));
+        assert!(crate::sync::client_state(&state).inherited_tasks.is_empty());
     }
 }

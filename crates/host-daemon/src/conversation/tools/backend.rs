@@ -3,7 +3,7 @@
 use super::ModelCatalog;
 use crate::conversation::ProjectCatalog;
 use crate::projects::NamedProjectError;
-use crate::workspace_files::{Claimed, WorkspaceFiles};
+use crate::workspace_files::{Claimed, Copies, WorkspaceFiles};
 use agent_domain::{
     Attachment, Command, CommandId, Driver, OptionDescriptor, Reply, State, ThreadId, ThreadShell,
 };
@@ -94,15 +94,15 @@ pub(crate) trait Orchestration: Send + Sync {
     ) -> BoxFuture<'_, Result<Vec<SearchMatch>, String>>;
     fn launch(&self, request: LaunchThread) -> BoxFuture<'_, Result<ThreadId, LaunchFailed>>;
     /// Claims uploads into the thread's attachment storage, as a message's
-    /// intake does: the claimed attachments and the copies made. The error
+    /// intake does: the claimed attachments and the copies held. The error
     /// says why an attachment cannot be sent.
     fn claim_attachments(
         &self,
         thread: &ThreadId,
         attachments: Vec<Attachment>,
     ) -> BoxFuture<'_, Result<Claimed, String>>;
-    /// Removes the copies of a claim whose command was not accepted.
-    fn release_attachments(&self, created: Vec<PathBuf>) -> BoxFuture<'_, ()>;
+    /// Releases the copies of a claim whose command was not accepted.
+    fn release_attachments(&self, copies: Copies) -> BoxFuture<'_, ()>;
     fn providers(&self) -> BoxFuture<'_, Result<Vec<ProviderSnapshot>, String>>;
     fn projects(&self) -> Vec<HostProject>;
     fn project_scripts(&self, project: &str) -> Vec<ProjectScript>;
@@ -216,10 +216,9 @@ impl Orchestration for HostOrchestration {
         })
     }
 
-    fn release_attachments(&self, created: Vec<PathBuf>) -> BoxFuture<'_, ()> {
-        let files = self.files.clone();
+    fn release_attachments(&self, copies: Copies) -> BoxFuture<'_, ()> {
         Box::pin(async move {
-            let _ = tokio::task::spawn_blocking(move || files.release(&created)).await;
+            let _ = tokio::task::spawn_blocking(move || copies.release()).await;
         })
     }
 

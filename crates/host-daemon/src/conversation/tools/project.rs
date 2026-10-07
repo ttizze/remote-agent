@@ -245,7 +245,7 @@ impl AgentTools {
                 .await
                 .map_err(|error| failure("orchestration_error", error))?
         };
-        let (attachments, claimed) = (claimed.attachments, claimed.created);
+        let (attachments, claimed) = (claimed.attachments, claimed.copies);
         let initial_message =
             (input.message.is_some() || !attachments.is_empty()).then(|| InitialMessage {
                 id: Some(message.clone()),

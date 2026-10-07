@@ -452,6 +452,7 @@ fn forked_steered_turn(steers: usize) -> State {
             boundary: 1,
             history: source.items,
             messages: source.messages,
+            tasks: vec![],
         },
     );
     fork
@@ -497,6 +498,7 @@ fn bounds_inherited_messages_to_the_inherited_rows_in_the_window() {
             boundary: 15,
             history: source.items,
             messages: source.messages,
+            tasks: vec![],
         },
     );
     let bounded = bounded_state(&fork, 1, PagePolicy::RECENT);

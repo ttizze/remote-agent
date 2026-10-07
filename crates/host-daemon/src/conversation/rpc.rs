@@ -6,6 +6,7 @@ use super::{
 };
 use crate::checkpoints::DiffFormat;
 use crate::host_rpc::connections::{HostReply, HostSubscription};
+use crate::workspace_files::Copies;
 use agent_domain::{Attachment, Command, MessageAuthor, MessageContext, Reply, ThreadId};
 use agent_protocol::{
     conversation as wire,
@@ -17,10 +18,7 @@ use agent_runtime::{
     ShellSubscribe, ThreadSnapshot, ThreadSubscribe, WorkspaceStrategy, launch_thread_id,
 };
 use serde::Serialize;
-use std::{
-    collections::VecDeque,
-    path::{Path, PathBuf},
-};
+use std::{collections::VecDeque, path::Path};
 use tokio_util::sync::CancellationToken;
 
 type Result<T> = std::result::Result<T, ConversationError>;
@@ -233,15 +231,15 @@ impl Conversation {
     }
 
     /// Claims uploads into the thread's storage and rebinds the context records
-    /// that named them; the copies it made.
+    /// that named them; the copies it holds.
     fn claim(
         &self,
         thread: &ThreadId,
         attachments: &mut Vec<Attachment>,
         context: Option<&mut MessageContext>,
-    ) -> Result<Vec<PathBuf>> {
+    ) -> Result<Copies> {
         if attachments.is_empty() {
-            return Ok(vec![]);
+            return Ok(Copies::default());
         }
         let before: Vec<String> = attachments.iter().map(|file| file.id.clone()).collect();
         let claimed = self
@@ -258,12 +256,12 @@ impl Conversation {
                 .collect();
             context.remap_attachments(&claimed);
         }
-        Ok(claimed.created)
+        Ok(claimed.copies)
     }
 
     /// Message and answer attachments are claimed into the thread's storage
     /// before the actor sees them.
-    fn claim_command(&self, thread: &ThreadId, command: &mut Command) -> Result<Vec<PathBuf>> {
+    fn claim_command(&self, thread: &ThreadId, command: &mut Command) -> Result<Copies> {
         match command {
             Command::Send(message) => {
                 self.claim(thread, &mut message.attachments, message.context.as_mut())
@@ -278,7 +276,7 @@ impl Conversation {
                 .files
                 .claim_answers(thread.as_str(), attachments)
                 .map_err(ConversationError::AttachmentUnavailable),
-            _ => Ok(vec![]),
+            _ => Ok(Copies::default()),
         }
     }
 
@@ -300,8 +298,8 @@ impl Conversation {
             .runtime
             .dispatch(params.thread_id.clone(), params.command_id.clone(), command)
             .await;
-        // Copies of a command that was not accepted are released; after an
-        // uncertain failure they stay.
+        // Copies of a command that was not accepted are released; after
+        // acceptance or an uncertain failure they stay.
         if matches!(
             &result,
             Err(RuntimeError::Closed | RuntimeError::AttachmentUnavailable(_))
@@ -310,7 +308,7 @@ impl Conversation {
                     ..
                 })
         ) {
-            self.resources.files.release(&claimed);
+            claimed.release();
         }
         let result = result.map_err(|error| match error {
             RuntimeError::Closed => ConversationError::Unavailable(error.to_string()),
@@ -335,7 +333,7 @@ impl Conversation {
             .thread_id
             .clone()
             .unwrap_or_else(|| launch_thread_id(&params.command_id));
-        let mut claimed = vec![];
+        let mut claimed = Copies::default();
         let initial_message = match &params.message {
             Some(message) => {
                 let mut attachments = message.attachments.clone();
@@ -393,23 +391,18 @@ impl Conversation {
             ),
             initial_message,
         };
-        let launched = self
-            .runtime
-            .launch(request)
-            .await
-            .inspect_err(|error| {
-                if error.not_accepted() {
-                    self.resources.files.release(&claimed);
-                }
-            })
-            .map_err(|error| match error.kind {
-                LaunchFailure::ProjectNotFound => ConversationError::ProjectNotFound(error.project),
-                LaunchFailure::Conflict => ConversationError::CommandIdConflict(error.command),
-                LaunchFailure::ThreadNotFound => {
-                    ConversationError::ThreadNotFound(error.thread.unwrap_or(thread.clone()))
-                }
-                LaunchFailure::Rejected | LaunchFailure::Unavailable => unavailable(error),
-            })?;
+        let launched = self.runtime.launch(request).await;
+        if launched.as_ref().is_err_and(|error| error.not_accepted()) {
+            claimed.release();
+        }
+        let launched = launched.map_err(|error| match error.kind {
+            LaunchFailure::ProjectNotFound => ConversationError::ProjectNotFound(error.project),
+            LaunchFailure::Conflict => ConversationError::CommandIdConflict(error.command),
+            LaunchFailure::ThreadNotFound => {
+                ConversationError::ThreadNotFound(error.thread.unwrap_or(thread.clone()))
+            }
+            LaunchFailure::Rejected | LaunchFailure::Unavailable => unavailable(error),
+        })?;
         Ok(wire::Launched {
             thread_id: launched.thread,
             committed: committed(launched.committed),

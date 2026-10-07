@@ -3606,6 +3606,21 @@ impl Decision {
                         _ => None,
                     })
                     .collect();
+                // A fork keeps its subagent items' tasks as they are now.
+                let mut tasks: Vec<Task> = vec![];
+                for item in &history {
+                    if let ItemKind::Subagent { task } = &item.kind
+                        && !tasks.iter().any(|kept| &kept.id == task)
+                        && let Some(found) = self
+                            .state
+                            .tasks
+                            .iter()
+                            .chain(&self.state.inherited_tasks)
+                            .find(|found| &found.id == task)
+                    {
+                        tasks.push(found.clone());
+                    }
+                }
                 let context = prepare_history(&self.state, &history, run.ordinal);
                 // Only a provider-finished run has a stable native boundary.
                 let native = run
@@ -3651,6 +3666,7 @@ impl Decision {
                             boundary: run.ordinal,
                             history,
                             messages,
+                            tasks,
                             workspace: thread.workspace.clone(),
                             arrangement: Box::new(ThreadArrangement::of(&thread)),
                             context,
@@ -3673,6 +3689,7 @@ impl Decision {
                 boundary,
                 history,
                 messages,
+                tasks,
                 workspace,
                 arrangement,
                 context,
@@ -3705,6 +3722,7 @@ impl Decision {
                     boundary: *boundary,
                     history: history.clone(),
                     messages: messages.clone(),
+                    tasks: tasks.clone(),
                 });
                 let marker = TurnItemId::new(self.key("fork", thread.as_str())).unwrap();
                 self.item_start(
