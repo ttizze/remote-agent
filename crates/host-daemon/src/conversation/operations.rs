@@ -6,7 +6,7 @@ use crate::{
     ProjectStore, terminals::Terminals, workspace_files::WorkspaceFiles, worktrees::Worktrees,
 };
 use agent_domain::{AttachmentKind, CheckpointFile, ThreadId};
-use agent_protocol::models::{AutoSettle, Project, ProjectRoot, ProjectScript, RepositoryIdentity};
+use agent_protocol::models::{AutoSettle, Project, ProjectRoot, ProjectScript};
 use agent_runtime::{
     ConversationSettings, CreatedWorktree, HostOperations, HostProject, PreparedRestore,
     SetupRequest, SetupRun, StartedSetup, TextGenerationRequest, WorktreeRequest,
@@ -31,7 +31,7 @@ pub(crate) struct ProjectCatalog {
     store: ProjectStore,
     projects: RwLock<Vec<HostProject>>,
     scripts: RwLock<HashMap<String, Vec<ProjectScript>>>,
-    identities: RwLock<HashMap<String, RepositoryIdentity>>,
+    identities: crate::repository::ProjectIdentities,
     chats: tokio::sync::OnceCell<bool>,
 }
 
@@ -41,12 +41,16 @@ impl ProjectCatalog {
             store,
             projects: RwLock::new(vec![]),
             scripts: RwLock::default(),
-            identities: RwLock::default(),
+            identities: crate::repository::ProjectIdentities::system(Default::default()),
             chats: tokio::sync::OnceCell::new(),
         }
     }
     pub(crate) fn store(&self) -> &ProjectStore {
         &self.store
+    }
+    /// The projects' repository identities, resolved in the background.
+    pub(crate) fn identities(&self) -> &crate::repository::ProjectIdentities {
+        &self.identities
     }
     /// The chats folder, offered only when the Host's data directory is outside any
     /// Git work tree, whose status and checkpoints its folders would inherit.
@@ -85,15 +89,13 @@ impl ProjectCatalog {
         self.refresh().await?;
         Ok(())
     }
-    /// The project as clients see it.
+    /// The project as clients see it, with the repository identity at hand; a
+    /// missing or expired one resolves in the background.
     pub(crate) fn wire(&self, project: HostProject) -> Project {
         Project {
-            repository_identity: self
-                .identities
-                .read()
-                .unwrap_or_else(|error| error.into_inner())
-                .get(&project.id)
-                .cloned(),
+            repository_identity: (project.id != CHATS_PROJECT)
+                .then(|| self.identities.available(&project.root))
+                .flatten(),
             scripts: self.scripts(&project.id),
             id: project.id,
             name: project.name,
@@ -129,22 +131,6 @@ impl ProjectCatalog {
                 root: chats.to_string_lossy().into_owned(),
             });
         }
-        let roots: Vec<(String, String)> = projects
-            .iter()
-            .filter(|project| project.id != CHATS_PROJECT)
-            .map(|project| (project.id.clone(), project.root.clone()))
-            .collect();
-        let identities = tokio::task::spawn_blocking(move || {
-            roots
-                .into_iter()
-                .filter_map(|(id, root)| Some((id, crate::repository::resolve(Path::new(&root))?)))
-                .collect()
-        })
-        .await?;
-        *self
-            .identities
-            .write()
-            .unwrap_or_else(|error| error.into_inner()) = identities;
         *self
             .projects
             .write()
