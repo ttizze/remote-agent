@@ -548,9 +548,6 @@ mod tests {
         ModelCatalog {
             instances: vec![instance("claude", Driver::Claude)],
             models: vec![CatalogModel {
-                instance_id: "claude".into(),
-                slug: "claude-opus-5".into(),
-                name: "Claude Opus 5".into(),
                 is_default: true,
                 descriptors: vec![
                     OptionDescriptor::Select {
@@ -570,6 +567,7 @@ mod tests {
                         current: None,
                     },
                 ],
+                ..crate::view::models::fixtures::model("claude", "claude-opus-5", "Claude Opus 5")
             }],
         }
     }

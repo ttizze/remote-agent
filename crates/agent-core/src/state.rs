@@ -263,10 +263,14 @@ pub struct Snapshot {
     pub editing_run: Option<RunId>,
     pub search: String,
     pub search_matches: Vec<SearchMatch>,
-    pub models: Vec<crate::models::Model>,
-    pub model_errors: BTreeMap<String, String>,
+    /// The Host's provider instances and their models; `None` until listed.
+    pub providers: Option<Vec<crate::models::ProviderInstance>>,
     pub workspace: Workspace,
     pub terminals: BTreeMap<String, Terminal>,
+    /// What the Host's terminal metadata stream reports for every thread's
+    /// terminals, by thread and terminal id.
+    pub terminal_metadata:
+        BTreeMap<(ThreadId, String), agent_protocol::operations::TerminalSummary>,
     pub accounts: Option<agent_protocol::operations::Accounts>,
     pub account_login: Option<agent_protocol::operations::AccountLogin>,
     pub host_status: Option<crate::models::HostStatus>,
@@ -430,6 +434,43 @@ impl Snapshot {
             .map(|root| root.path.clone())
             .unwrap_or_default()
     }
+    /// A known terminal keeps the directory the Host reported; a new one opens
+    /// in the thread's worktree, else its project's root, with the project
+    /// script environment.
+    pub fn terminal_location(&self, thread: &ThreadId, terminal_id: &str) -> TerminalLocation {
+        let worktree_path = self
+            .thread_state(thread)
+            .and_then(|state| state.thread.as_ref())
+            .map(|thread| thread.workspace.as_ref())
+            .or_else(|| self.thread_row(thread).map(|row| row.workspace.as_ref()))
+            .flatten()
+            .and_then(|workspace| workspace.worktree_path.clone());
+        let project_root = self
+            .thread_project(thread)
+            .and_then(|project| {
+                self.shell_projects()
+                    .iter()
+                    .find(|candidate| candidate.id == project)
+            })
+            .and_then(|project| project.roots.first())
+            .map(|root| root.path.clone())
+            .unwrap_or_default();
+        let known = self
+            .terminal_metadata
+            .get(&(thread.clone(), terminal_id.to_owned()));
+        TerminalLocation {
+            thread: thread.clone(),
+            cwd: known.map_or_else(|| self.thread_cwd(thread), |summary| summary.cwd.clone()),
+            worktree_path: known.map_or(worktree_path.clone(), |summary| {
+                summary.worktree_path.clone()
+            }),
+            env: crate::view::projects::scripts::project_script_runtime_env(
+                &project_root,
+                worktree_path.as_deref(),
+                &BTreeMap::new(),
+            ),
+        }
+    }
     pub fn shell_location(&self, location: ShellLocation) -> Option<&ShellCache> {
         match location {
             ShellLocation::Active => Some(&self.shell),
@@ -472,6 +513,22 @@ pub struct Terminal {
     /// Written once the Host started the terminal (a project script's command).
     pub pending_input: Vec<u8>,
 }
+impl Terminal {
+    pub fn clear_output(&mut self) {
+        self.output.clear();
+        self.output_bytes = 0;
+    }
+}
+
+/// Where a thread's terminal opens and the environment its shell gets.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TerminalLocation {
+    pub thread: ThreadId,
+    pub cwd: String,
+    pub worktree_path: Option<String>,
+    pub env: BTreeMap<String, String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum TerminalPhase {
@@ -795,6 +852,18 @@ pub enum Intent {
     CloseTerminal {
         thread_id: String,
         terminal_id: String,
+    },
+    /// Empties the terminal's history and screens; the shell keeps running.
+    ClearTerminal {
+        thread_id: String,
+        terminal_id: String,
+    },
+    /// Starts a new shell with an empty history.
+    RestartTerminal {
+        thread_id: String,
+        terminal_id: String,
+        cols: u16,
+        rows: u16,
     },
     RunProjectScript {
         thread_id: String,

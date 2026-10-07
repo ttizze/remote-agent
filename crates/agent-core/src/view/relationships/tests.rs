@@ -1,8 +1,8 @@
 use super::*;
-use crate::models::{Model, ModelRef, Project, ProjectRoot};
-use crate::provider::ProviderKind;
+use crate::models::{Model, Project, ProjectRoot};
 use crate::sync::fixtures::thread_state;
 use crate::sync::{ShellCache, ThreadSync, fixtures::run};
+use crate::view::models::fixtures::{host_instance, host_model};
 use agent_domain::{
     CompletionWake, ContextDelivery, ContextTransferId, DeliveryState, HistoricalContext, NodeId,
     RunAttemptId, RunId, Timestamp, TransferKind, Workspace,
@@ -635,7 +635,11 @@ fn tooltip_snapshot(task: Task, child: Option<ThreadShell>, models: Vec<Model>) 
             project("other", "Other project", "/other"),
         ],
     );
-    snapshot.models = models;
+    snapshot.providers = Some(vec![host_instance(
+        "codex",
+        agent_domain::Driver::Codex,
+        models,
+    )]);
     snapshot
 }
 
@@ -655,19 +659,7 @@ fn worker(model: Option<&str>) -> Task {
 }
 
 fn catalog() -> Vec<Model> {
-    vec![Model {
-        id: "gpt-5.4".into(),
-        model: ModelRef {
-            provider: ProviderKind::Codex,
-            id: "gpt-5.4".into(),
-        },
-        display_name: "My GPT model".into(),
-        default_reasoning_effort: String::new(),
-        supported_reasoning_efforts: vec![],
-        service_tiers: None,
-        default_service_tier: None,
-        is_default: None,
-    }]
+    vec![host_model("gpt-5.4", "My GPT model")]
 }
 
 fn tooltip(snapshot: &Snapshot) -> LineageAgent {

@@ -690,6 +690,7 @@ impl Owner {
                 }
             }
             protocol::Notification::TerminalDetached { .. } => {}
+            protocol::Notification::TerminalClosed { handle } => self.terminal_closed(&handle),
         }
     }
 
@@ -702,8 +703,7 @@ impl Owner {
         if let Some(t) = self.state.terminals.get_mut(handle) {
             t.sequence += 1;
             if reset_size.is_some() {
-                t.output.clear();
-                t.output_bytes = 0;
+                t.clear_output();
             }
             t.output_bytes += data.len();
             t.output.push_back(Arc::new(TerminalOutput {

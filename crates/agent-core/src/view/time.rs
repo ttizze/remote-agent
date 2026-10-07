@@ -298,7 +298,10 @@ mod tests {
     #[case(65_400, "1m 5s")]
     #[case(3_661_900, "1h 1m 1s")]
     fn working_timer_floors_to_whole_seconds(#[case] elapsed_ms: i64, #[case] expected: &str) {
-        assert_eq!(format_working_timer(1_000_000, 1_000_000 + elapsed_ms), expected);
+        assert_eq!(
+            format_working_timer(1_000_000, 1_000_000 + elapsed_ms),
+            expected
+        );
     }
 
     #[test]

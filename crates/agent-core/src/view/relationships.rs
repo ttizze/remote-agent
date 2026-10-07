@@ -763,7 +763,7 @@ pub fn lineage_panel(snapshot: &Snapshot, thread: &ThreadId, now_ms: i64) -> Opt
     });
     let agent = |task: &Task, child: Option<&ThreadShell>, parent: Option<ThreadWorkspace>| {
         let selection = projection.and_then(|state| agents::task_selection(state, task, child));
-        let catalog = selection.map(|s| agents::catalog(&snapshot.models, s.driver));
+        let catalog = selection.map(|s| agents::catalog(snapshot, s));
         agents::subagent_metadata(MetadataInput {
             model: task.model.as_deref(),
             provider: selection

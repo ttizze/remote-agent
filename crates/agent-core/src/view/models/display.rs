@@ -13,6 +13,31 @@ pub struct ProviderEntry {
     pub accent_color: Option<String>,
     pub status: ProviderStatus,
     pub message: Option<String>,
+    pub enabled: bool,
+    pub installed: bool,
+    pub available: bool,
+    pub version: Option<String>,
+    pub show_interaction_mode_toggle: bool,
+    pub reports_context_window: bool,
+}
+impl ProviderEntry {
+    /// A ready, enabled instance with no Host-chosen name.
+    pub fn new(instance_id: &str, driver: Driver) -> Self {
+        Self {
+            instance_id: instance_id.into(),
+            driver,
+            display_name: None,
+            accent_color: None,
+            status: ProviderStatus::Ready,
+            message: None,
+            enabled: true,
+            installed: true,
+            available: true,
+            version: None,
+            show_interaction_mode_toggle: true,
+            reports_context_window: true,
+        }
+    }
 }
 
 /// Title-cases a slug: `codex_personal` is "Codex Personal",
@@ -135,6 +160,12 @@ pub fn provider_instances(entries: &[ProviderEntry]) -> Vec<ProviderInstance> {
                 accent_color,
                 status: entry.status,
                 message: entry.message.clone(),
+                enabled: entry.enabled,
+                installed: entry.installed,
+                available: entry.available,
+                version: entry.version.clone(),
+                show_interaction_mode_toggle: entry.show_interaction_mode_toggle,
+                reports_context_window: entry.reports_context_window,
             }
         })
         .collect()
@@ -165,12 +196,8 @@ mod tests {
 
     fn entry(instance_id: &str, driver: Driver, display_name: Option<&str>) -> ProviderEntry {
         ProviderEntry {
-            instance_id: instance_id.into(),
-            driver,
             display_name: display_name.map(Into::into),
-            accent_color: None,
-            status: ProviderStatus::Ready,
-            message: None,
+            ..ProviderEntry::new(instance_id, driver)
         }
     }
 

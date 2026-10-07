@@ -4,7 +4,7 @@
 //! Draft options are `key`/`value` strings; a toggle stores `"true"` or
 //! `"false"`.
 use super::CatalogModel;
-use crate::{models::Model, provider::ProviderKind, state::ModelOption};
+use crate::state::ModelOption;
 use agent_domain::Driver;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,6 +51,34 @@ impl OptionDescriptor {
                 .find(|choice| choice.is_default)
                 .map(|choice| choice.id.as_str()),
             Self::Toggle { .. } => None,
+        }
+    }
+}
+
+impl From<&agent_domain::OptionDescriptor> for OptionDescriptor {
+    fn from(descriptor: &agent_domain::OptionDescriptor) -> Self {
+        match descriptor {
+            agent_domain::OptionDescriptor::Select(select) => Self::Select {
+                id: select.id.clone(),
+                label: select.label.clone(),
+                choices: select
+                    .options
+                    .iter()
+                    .map(|choice| OptionChoice {
+                        id: choice.id.clone(),
+                        label: choice.label.clone(),
+                        description: choice.description.clone(),
+                        is_default: choice.is_default,
+                    })
+                    .collect(),
+                current: select.current_value.clone(),
+                prompt_injected: select.prompt_injected_values.clone(),
+            },
+            agent_domain::OptionDescriptor::Boolean(boolean) => Self::Toggle {
+                id: boolean.id.clone(),
+                label: boolean.label.clone(),
+                current: boolean.current_value,
+            },
         }
     }
 }
@@ -267,152 +295,6 @@ pub fn apply_option_selection(
     })
 }
 
-fn effort_label(effort: &str) -> String {
-    match effort {
-        "none" => "None",
-        "minimal" => "Minimal",
-        "low" => "Low",
-        "medium" => "Medium",
-        "high" => "High",
-        "xhigh" => "Extra High",
-        "max" => "Max",
-        "ultra" => "Ultra",
-        "ultracode" => "Ultracode",
-        "ultrathink" => "Ultrathink",
-        other => other,
-    }
-    .into()
-}
-
-const DEFAULT_SERVICE_TIER: &str = "default";
-
-/// Compares Codex model families without changing the routing slug.
-pub fn codex_model_family(slug: &str) -> &str {
-    if slug.starts_with("openai.gpt-") {
-        &slug["openai.".len()..]
-    } else {
-        slug
-    }
-}
-
-/// "gpt-5.3-codex-spark" reads "GPT-5.3-Codex-Spark".
-pub fn format_codex_model_name(name: &str) -> String {
-    let name = match name.get(..3) {
-        Some(head) if head.eq_ignore_ascii_case("gpt") => format!("GPT{}", &name[3..]),
-        _ => name.into(),
-    };
-    let mut out = String::with_capacity(name.len());
-    let mut after_dash = false;
-    for character in name.chars() {
-        if after_dash && character.is_ascii_lowercase() {
-            out.push(character.to_ascii_uppercase());
-        } else {
-            out.push(character);
-        }
-        after_dash = character == '-';
-    }
-    out
-}
-
-/// Reasoning and service-tier descriptors from a Codex catalogue entry.
-pub fn codex_model_descriptors(model: &Model) -> Vec<OptionDescriptor> {
-    let default_effort = if codex_model_family(&model.model.id) == "gpt-6-astra" {
-        "medium"
-    } else {
-        model.default_reasoning_effort.as_str()
-    };
-    let efforts: Vec<OptionChoice> = model
-        .supported_reasoning_efforts
-        .iter()
-        .map(|effort| OptionChoice {
-            id: effort.reasoning_effort.clone(),
-            label: effort_label(&effort.reasoning_effort),
-            description: None,
-            is_default: effort.reasoning_effort == default_effort,
-        })
-        .collect();
-    let mut descriptors = vec![];
-    if !efforts.is_empty() {
-        descriptors.push(OptionDescriptor::Select {
-            id: "reasoningEffort".into(),
-            label: "Reasoning".into(),
-            current: efforts
-                .iter()
-                .find(|choice| choice.is_default)
-                .map(|choice| choice.id.clone()),
-            choices: efforts,
-            prompt_injected: vec![],
-        });
-    }
-    let tiers = model.service_tiers.as_deref().unwrap_or_default();
-    if !tiers.is_empty() {
-        let default_tier = model
-            .default_service_tier
-            .as_deref()
-            .filter(|tier| tiers.iter().any(|candidate| candidate.id == *tier))
-            .unwrap_or(DEFAULT_SERVICE_TIER);
-        let choices = std::iter::once(OptionChoice {
-            id: DEFAULT_SERVICE_TIER.into(),
-            label: "Standard".into(),
-            description: None,
-            is_default: default_tier == DEFAULT_SERVICE_TIER,
-        })
-        .chain(tiers.iter().map(|tier| OptionChoice {
-            id: tier.id.clone(),
-            label: tier.name.clone().unwrap_or_else(|| tier.id.clone()),
-            description: (tier.id == "ultrafast").then(|| "Even faster, more expensive".into()),
-            is_default: tier.id == default_tier,
-        }))
-        .collect();
-        descriptors.push(OptionDescriptor::Select {
-            id: "serviceTier".into(),
-            label: "Service Tier".into(),
-            choices,
-            current: Some(default_tier.into()),
-            prompt_injected: vec![],
-        });
-    }
-    descriptors
-}
-
-/// The effort descriptor from a Claude catalogue entry. `ultrathink` is
-/// requested in the prompt.
-pub fn claude_model_descriptors(model: &Model) -> Vec<OptionDescriptor> {
-    let choices: Vec<OptionChoice> = model
-        .supported_reasoning_efforts
-        .iter()
-        .map(|effort| OptionChoice {
-            id: effort.reasoning_effort.clone(),
-            label: effort_label(&effort.reasoning_effort),
-            description: (effort.reasoning_effort == "ultracode")
-                .then(|| "xhigh effort plus multi-agent workflow orchestration".into()),
-            is_default: effort.reasoning_effort == model.default_reasoning_effort,
-        })
-        .collect();
-    if choices.is_empty() {
-        return vec![];
-    }
-    let prompt_injected = choices
-        .iter()
-        .filter(|choice| choice.id == "ultrathink")
-        .map(|choice| choice.id.clone())
-        .collect();
-    vec![OptionDescriptor::Select {
-        id: "effort".into(),
-        label: "Reasoning".into(),
-        choices,
-        current: None,
-        prompt_injected,
-    }]
-}
-
-pub fn model_descriptors(model: &Model) -> Vec<OptionDescriptor> {
-    match model.model.provider {
-        ProviderKind::Codex => codex_model_descriptors(model),
-        ProviderKind::Claude => claude_model_descriptors(model),
-    }
-}
-
 /// The catalogue slug a known alias stands for.
 pub(crate) fn normalize_model_slug(model: &str, driver: Driver) -> &str {
     match driver {
@@ -426,8 +308,8 @@ pub(crate) fn normalize_model_slug(model: &str, driver: Driver) -> &str {
     }
 }
 
-/// The catalogue slug a typed or stored model names: its slug, its name, or
-/// a known alias.
+/// The catalogue slug a typed or stored model names: its slug, its name, one
+/// of its aliases, or a known alias.
 pub fn resolve_selectable_model<'a>(
     driver: Driver,
     value: &str,
@@ -445,6 +327,14 @@ pub fn resolve_selectable_model<'a>(
                 .clone()
                 .into_iter()
                 .find(|model| model.name.to_lowercase() == value.to_lowercase())
+        })
+        .or_else(|| {
+            models.clone().into_iter().find(|model| {
+                model
+                    .aliases
+                    .iter()
+                    .any(|alias| alias.to_lowercase() == value.to_lowercase())
+            })
         })
         .or_else(|| {
             let normalized = normalize_model_slug(value, driver);
@@ -508,7 +398,6 @@ pub fn strip_ultrathink_prefix(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{ModelRef, ReasoningEffort, ServiceTier};
 
     pub fn choice(id: &str, label: &str, is_default: bool) -> OptionChoice {
         OptionChoice {
@@ -564,38 +453,6 @@ mod tests {
             current: current.map(Into::into),
             prompt_injected: vec![],
         }
-    }
-    fn codex_model(tiers: Vec<ServiceTier>, default_tier: Option<&str>) -> Model {
-        Model {
-            id: "gpt-test".into(),
-            model: ModelRef {
-                provider: ProviderKind::Codex,
-                id: "gpt-test".into(),
-            },
-            display_name: "GPT Test".into(),
-            default_reasoning_effort: "super-high".into(),
-            supported_reasoning_efforts: vec![ReasoningEffort {
-                reasoning_effort: "super-high".into(),
-            }],
-            service_tiers: Some(tiers),
-            default_service_tier: default_tier.map(Into::into),
-            is_default: Some(true),
-        }
-    }
-    fn tier(id: &str, name: &str) -> ServiceTier {
-        ServiceTier {
-            id: id.into(),
-            name: Some(name.into()),
-        }
-    }
-
-    #[test]
-    fn keeps_the_codex_catalog_display_formatting() {
-        assert_eq!(
-            format_codex_model_name("gpt-5.3-codex-spark"),
-            "GPT-5.3-Codex-Spark"
-        );
-        assert_eq!(format_codex_model_name("GPT Test"), "GPT Test");
     }
 
     #[test]
@@ -702,126 +559,6 @@ mod tests {
     }
 
     #[test]
-    fn maps_current_codex_model_capability_fields() {
-        let model = codex_model(
-            vec![tier("priority", "Fast"), tier("flex", "Flex")],
-            Some("flex"),
-        );
-        assert_eq!(
-            codex_model_descriptors(&model),
-            vec![
-                OptionDescriptor::Select {
-                    id: "reasoningEffort".into(),
-                    label: "Reasoning".into(),
-                    choices: vec![choice("super-high", "super-high", true)],
-                    current: Some("super-high".into()),
-                    prompt_injected: vec![],
-                },
-                OptionDescriptor::Select {
-                    id: "serviceTier".into(),
-                    label: "Service Tier".into(),
-                    choices: vec![
-                        choice("default", "Standard", false),
-                        choice("priority", "Fast", false),
-                        choice("flex", "Flex", true),
-                    ],
-                    current: Some("flex".into()),
-                    prompt_injected: vec![],
-                },
-            ]
-        );
-    }
-
-    #[test]
-    fn uses_standard_routing_when_the_catalog_has_no_default_service_tier() {
-        let mut model = codex_model(
-            vec![tier("priority", "Fast"), tier("ultrafast", "Ultrafast")],
-            None,
-        );
-        model.default_reasoning_effort = "medium".into();
-        model.supported_reasoning_efforts = vec![];
-        assert_eq!(
-            codex_model_descriptors(&model),
-            vec![OptionDescriptor::Select {
-                id: "serviceTier".into(),
-                label: "Service Tier".into(),
-                choices: vec![
-                    choice("default", "Standard", true),
-                    choice("priority", "Fast", false),
-                    OptionChoice {
-                        description: Some("Even faster, more expensive".into()),
-                        ..choice("ultrafast", "Ultrafast", false)
-                    },
-                ],
-                current: Some("default".into()),
-                prompt_injected: vec![],
-            }]
-        );
-    }
-
-    #[test]
-    fn the_flagship_codex_family_defaults_to_medium_reasoning() {
-        let mut model = codex_model(vec![], None);
-        model.model.id = "openai.gpt-6-astra".into();
-        model.default_reasoning_effort = "high".into();
-        model.supported_reasoning_efforts = ["medium", "high"]
-            .map(|effort| ReasoningEffort {
-                reasoning_effort: effort.into(),
-            })
-            .to_vec();
-        let descriptors = codex_model_descriptors(&model);
-        assert_eq!(descriptors.len(), 1);
-        assert_eq!(
-            option_current_value(&descriptors[0]),
-            Some(OptionValue::Choice {
-                id: "medium".into()
-            })
-        );
-    }
-
-    #[test]
-    fn claude_efforts_are_labelled_and_ultrathink_goes_in_the_prompt() {
-        let model = Model {
-            model: ModelRef {
-                provider: ProviderKind::Claude,
-                id: "claude-opus-5".into(),
-            },
-            supported_reasoning_efforts: ["high", "xhigh", "ultracode", "ultrathink"]
-                .map(|effort| ReasoningEffort {
-                    reasoning_effort: effort.into(),
-                })
-                .to_vec(),
-            default_reasoning_effort: "high".into(),
-            service_tiers: Some(vec![]),
-            ..codex_model(vec![], None)
-        };
-        let descriptors = model_descriptors(&model);
-        let [
-            OptionDescriptor::Select {
-                id,
-                choices,
-                prompt_injected,
-                current: None,
-                ..
-            },
-        ] = descriptors.as_slice()
-        else {
-            panic!("one effort select: {descriptors:?}");
-        };
-        assert_eq!(id, "effort");
-        assert_eq!(
-            choices
-                .iter()
-                .map(|choice| choice.label.as_str())
-                .collect::<Vec<_>>(),
-            ["High", "Extra High", "Ultracode", "Ultrathink"]
-        );
-        assert!(choices[0].is_default);
-        assert!(choices[2].description.is_some());
-        assert_eq!(prompt_injected, &["ultrathink"]);
-    }
-
-    #[test]
     fn updates_generic_select_options_without_knowing_provider_specific_ids() {
         let descriptors = option_descriptors(
             &[
@@ -913,6 +650,67 @@ mod tests {
             )
             .map(|model| model.slug.as_str()),
             Some("gpt-5.4")
+        );
+        let aliased = CatalogModel {
+            aliases: vec!["opus".into()],
+            ..super::super::fixtures::model("claude", "claude-opus-5", "Claude Opus 5")
+        };
+        assert_eq!(
+            resolve_selectable_model(Driver::Claude, "Opus", [&aliased])
+                .map(|model| model.slug.as_str()),
+            Some("claude-opus-5")
+        );
+    }
+
+    #[test]
+    fn host_descriptors_keep_their_choices_current_values_and_prompt_values() {
+        let host = agent_domain::OptionDescriptor::Select(agent_domain::SelectOption {
+            id: "effort".into(),
+            label: "Reasoning".into(),
+            description: None,
+            options: vec![
+                agent_domain::OptionChoice {
+                    id: "high".into(),
+                    label: "High".into(),
+                    description: None,
+                    is_default: true,
+                },
+                agent_domain::OptionChoice {
+                    id: "ultrathink".into(),
+                    label: "Ultrathink".into(),
+                    description: None,
+                    is_default: false,
+                },
+            ],
+            current_value: None,
+            prompt_injected_values: vec!["ultrathink".into()],
+        });
+        assert_eq!(
+            OptionDescriptor::from(&host),
+            OptionDescriptor::Select {
+                id: "effort".into(),
+                label: "Reasoning".into(),
+                choices: vec![
+                    choice("high", "High", true),
+                    choice("ultrathink", "Ultrathink", false)
+                ],
+                current: None,
+                prompt_injected: vec!["ultrathink".into()],
+            }
+        );
+        let toggle = agent_domain::OptionDescriptor::Boolean(agent_domain::BooleanOption {
+            id: "fastMode".into(),
+            label: "Fast Mode".into(),
+            description: None,
+            current_value: Some(false),
+        });
+        assert_eq!(
+            OptionDescriptor::from(&toggle),
+            OptionDescriptor::Toggle {
+                id: "fastMode".into(),
+                label: "Fast Mode".into(),
+                current: Some(false),
+            }
         );
     }
 }

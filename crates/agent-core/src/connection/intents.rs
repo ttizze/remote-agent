@@ -353,6 +353,18 @@ impl Owner {
                 thread_id: id,
                 terminal_id,
             } => self.close_terminal(&thread_id(id)?, &terminal_id),
+            Intent::ClearTerminal {
+                thread_id: id,
+                terminal_id,
+            } => self.clear_terminal(thread_id(id)?, terminal_id),
+            Intent::RestartTerminal {
+                thread_id: id,
+                terminal_id,
+                cols,
+                rows,
+            } => {
+                self.restart_terminal(thread_id(id)?, terminal_id, op::TerminalSize { cols, rows })?
+            }
             Intent::SetFollowUpBehavior { behavior } => {
                 self.state.follow_up = behavior;
                 Next::Done
@@ -1064,17 +1076,8 @@ impl Owner {
                     .attachment
                     .ok_or_else(|| invalid("Host did not return an attachment"))?;
                 Ok(agent_domain::Attachment {
-                    kind: if native_image(&remote.mime_type) {
-                        agent_domain::AttachmentKind::Image
-                    } else {
-                        agent_domain::AttachmentKind::File
-                    },
-                    source: None,
-                    id: remote.id,
-                    name: remote.name,
-                    mime_type: remote.mime_type,
                     path: String::new(),
-                    size: remote.size_bytes,
+                    ..remote
                 })
             });
             let _ = sender

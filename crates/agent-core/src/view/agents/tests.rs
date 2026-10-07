@@ -546,8 +546,8 @@ fn formats_reported_models_without_a_catalog(#[case] model: &str, #[case] expect
 #[test]
 fn names_a_catalog_model_by_its_slug_name_or_alias() {
     let models = [CatalogModel {
-        slug: "gpt-5.4".into(),
-        name: "My GPT model".into(),
+        aliases: vec!["work".into()],
+        ..crate::view::models::fixtures::model("codex", "gpt-5.4", "My GPT model")
     }];
     let label = |model| {
         subagent_metadata(MetadataInput {
@@ -560,6 +560,7 @@ fn names_a_catalog_model_by_its_slug_name_or_alias() {
     assert_eq!(label("gpt-5.4"), "My GPT model");
     assert_eq!(label("my gpt MODEL"), "My GPT model");
     assert_eq!(label("5.4"), "My GPT model");
+    assert_eq!(label("Work"), "My GPT model");
     assert_eq!(label("gpt-5.5"), "GPT-5.5");
 }
 

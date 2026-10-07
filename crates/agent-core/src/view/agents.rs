@@ -1,10 +1,9 @@
 //! Delegated agents: the current turn's roster and its composer pill, agent
 //! rows, and the summaries that timeline groups and lineage tooltips show.
 use crate::js_text::{JS_SPACE, collapse_js_spaces, is_js_space};
-use crate::models::{Model, Project};
-use crate::provider::ProviderKind;
+use crate::models::Project;
 use crate::state::Snapshot;
-use crate::view::models::options::{format_codex_model_name, normalize_model_slug};
+use crate::view::models::{CatalogModel, options::resolve_selectable_model};
 use crate::view::quantity;
 use crate::view::time::format_duration;
 use agent_domain::{
@@ -92,13 +91,6 @@ pub struct AgentSpawnSummary {
     pub lead: String,
     pub status: String,
     pub tone: StatusTone,
-}
-
-/// A model of a provider's catalog.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CatalogModel {
-    pub slug: String,
-    pub name: String,
 }
 
 /// The workspace fields of a thread that agent metadata compares.
@@ -344,7 +336,7 @@ pub fn agent_roster(snapshot: &Snapshot, thread: &ThreadId, now_ms: i64) -> Opti
     roster(state, now_ms, |task| {
         let child = snapshot.thread_row(&task.child_thread);
         let selection = task_selection(state, task, child);
-        let catalog = selection.map(|selection| catalog(&snapshot.models, selection.driver));
+        let catalog = selection.map(|selection| catalog(snapshot, selection));
         RowContext {
             metadata: subagent_metadata(MetadataInput {
                 model: task.model.as_deref(),
@@ -390,19 +382,12 @@ pub(crate) fn project<'a>(snapshot: &'a Snapshot, id: &str) -> Option<ProjectWor
         .map(ProjectWorkspace::of)
 }
 
-pub(crate) fn catalog(models: &[Model], driver: Driver) -> Vec<CatalogModel> {
-    models
-        .iter()
-        .filter(|model| {
-            matches!(
-                (model.model.provider, driver),
-                (ProviderKind::Codex, Driver::Codex) | (ProviderKind::Claude, Driver::Claude)
-            )
-        })
-        .map(|model| CatalogModel {
-            slug: model.model.id.clone(),
-            name: model.display_name.clone(),
-        })
+/// The models of the instance a selection runs on.
+pub(crate) fn catalog(snapshot: &Snapshot, selection: &ModelSelection) -> Vec<CatalogModel> {
+    crate::view::models::catalog(snapshot)
+        .models
+        .into_iter()
+        .filter(|model| model.instance_id == selection.instance)
         .collect()
 }
 
@@ -593,9 +578,9 @@ pub fn subagent_card_detail(detail: Option<&str>) -> Option<String> {
 pub fn subagent_metadata(input: MetadataInput) -> SubagentMetadata {
     let model = input.model.map(str::trim);
     let slug = match input.provider {
-        Some((driver, models)) => {
-            model.and_then(|model| resolve_selectable_model(driver, model, models))
-        }
+        Some((driver, models)) => model.and_then(|model| {
+            resolve_selectable_model(driver, model, models).map(|found| found.slug.clone())
+        }),
         None => model.map(str::to_owned),
     };
     let catalog_model = input
@@ -654,27 +639,23 @@ fn file_basename(path: &str) -> String {
     trimmed.rsplit(['/', '\\']).next().unwrap_or(trimmed).into()
 }
 
-fn resolve_selectable_model(
-    driver: Driver,
-    value: &str,
-    models: &[CatalogModel],
-) -> Option<String> {
-    let value = value.trim();
-    if value.is_empty() {
-        return None;
+/// "gpt-5.3-codex-spark" reads "GPT-5.3-Codex-Spark".
+fn format_codex_model_name(name: &str) -> String {
+    let name = match name.get(..3) {
+        Some(head) if head.eq_ignore_ascii_case("gpt") => format!("GPT{}", &name[3..]),
+        _ => name.into(),
+    };
+    let mut out = String::with_capacity(name.len());
+    let mut after_dash = false;
+    for character in name.chars() {
+        if after_dash && character.is_ascii_lowercase() {
+            out.push(character.to_ascii_uppercase());
+        } else {
+            out.push(character);
+        }
+        after_dash = character == '-';
     }
-    if let Some(model) = models.iter().find(|m| m.slug == value) {
-        return Some(model.slug.clone());
-    }
-    let lower = value.to_lowercase();
-    if let Some(model) = models.iter().find(|m| m.name.to_lowercase() == lower) {
-        return Some(model.slug.clone());
-    }
-    let normalized = normalize_model_slug(value, driver);
-    models
-        .iter()
-        .find(|m| m.slug == normalized)
-        .map(|m| m.slug.clone())
+    out
 }
 
 /// `gpt-5.3-codex` reads `GPT-5.3-Codex` and `claude-opus-4-6` reads

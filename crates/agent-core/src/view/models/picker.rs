@@ -190,11 +190,15 @@ pub fn trigger(catalog: &ModelCatalog, instance_id: &str, model: &str) -> ModelP
 
 fn describe_unavailable(instance: &ProviderInstance) -> String {
     let label = &instance.display_name;
+    if !instance.enabled || instance.status == super::ProviderStatus::Disabled {
+        return format!("{label} — Disabled in settings.");
+    }
     if instance.picker_ready() {
         return label.clone();
     }
     let kind = match instance.status {
         super::ProviderStatus::Error => "Unavailable",
+        super::ProviderStatus::Warning => "Limited",
         _ => "Not ready",
     };
     match instance.message.as_deref().map(str::trim) {
@@ -620,22 +624,8 @@ mod tests {
     #[test]
     fn keeps_instance_initials_visible_in_the_resting_trigger() {
         let instances = super::super::display::provider_instances(&[
-            super::super::display::ProviderEntry {
-                instance_id: "codex".into(),
-                driver: Driver::Codex,
-                display_name: None,
-                accent_color: None,
-                status: ProviderStatus::Ready,
-                message: None,
-            },
-            super::super::display::ProviderEntry {
-                instance_id: "codex_personal".into(),
-                driver: Driver::Codex,
-                display_name: None,
-                accent_color: None,
-                status: ProviderStatus::Ready,
-                message: None,
-            },
+            super::super::display::ProviderEntry::new("codex", Driver::Codex),
+            super::super::display::ProviderEntry::new("codex_personal", Driver::Codex),
         ]);
         let catalog = catalog_of(instances, vec![]);
         let trigger = trigger(&catalog, "codex_personal", "gpt-5");
@@ -845,17 +835,22 @@ mod tests {
     #[test]
     fn a_started_thread_without_loaded_state_locks_to_its_driver() {
         use crate::{
-            provider::ProviderKind, sync::fixtures::*, view::models::fixtures::host_model,
+            sync::fixtures::*,
+            view::models::fixtures::{host_instance, host_model},
         };
         let mut row = agent_domain::shell(&thread_state("Thread")).unwrap();
         row.latest_run = Some(agent_domain::RunId::new("run").unwrap());
         row.status = Some(agent_domain::RunStatus::Completed);
         let mut snapshot = Snapshot {
             selected_thread: Some(thread_id()),
-            models: vec![
-                host_model(ProviderKind::Codex, "gpt", "gpt"),
-                host_model(ProviderKind::Claude, "claude-opus-5", "Claude · Opus 5"),
-            ],
+            providers: Some(vec![
+                host_instance("codex", Driver::Codex, vec![host_model("gpt", "GPT")]),
+                host_instance(
+                    "claude",
+                    Driver::Claude,
+                    vec![host_model("claude-opus-5", "Claude · Opus 5")],
+                ),
+            ]),
             ..Snapshot::default()
         };
         let mut shell = crate::sync::ShellCache::default();

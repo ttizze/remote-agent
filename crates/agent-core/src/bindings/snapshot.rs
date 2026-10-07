@@ -2,22 +2,13 @@
 //! `sync` and `commands` results.
 use super::{AgentError, error};
 use crate::{
-    models::{FileContent, FileList, Model, Project, WorktreeSettings},
+    models::{FileContent, FileList, Project, WorktreeSettings},
     state::{Draft, Snapshot},
 };
 use agent_protocol::operations::{AccountLogin, Accounts};
 use std::sync::Arc;
 #[uniffi::export]
 impl Snapshot {
-    pub fn connection_setup(&self) -> crate::presentation::connections::ConnectionSetup {
-        crate::presentation::connections::connection_setup(self)
-    }
-    pub fn model_errors(&self) -> std::collections::HashMap<String, String> {
-        self.model_errors
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect()
-    }
     #[uniffi::constructor]
     pub fn empty() -> Arc<Self> {
         Arc::default()
@@ -70,9 +61,6 @@ impl Snapshot {
             .review
             .as_ref()
             .map(|_| format!("{}:{}", self.cwd(), self.workspace.review_generation))
-    }
-    pub fn models(&self) -> Vec<Model> {
-        self.models.clone()
     }
     pub fn current_draft_key(&self) -> String {
         self.draft_key()

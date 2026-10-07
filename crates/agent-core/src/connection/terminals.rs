@@ -28,7 +28,8 @@ impl Owner {
         input: Vec<u8>,
     ) -> Result<Next, PeerError> {
         let handle = handle(&thread, &terminal_id);
-        let cwd = self.state.thread_cwd(&thread);
+        let location = self.state.terminal_location(&thread, &terminal_id);
+        let cwd = location.cwd.clone();
         if cwd.is_empty() {
             return Err(invalid("The thread has no folder to open a terminal in"));
         }
@@ -47,9 +48,18 @@ impl Owner {
             output_bytes: previous.map_or(0, |t| t.output_bytes),
             pending_input: input,
         };
-        self.state.terminals.insert(handle.clone(), terminal);
+        let restart_if_not_running = !terminal.pending_input.is_empty();
+        self.state.terminals.insert(handle, terminal);
         Ok(Next::call(
-            Call::StartTerminal(op::StartTerminal { handle, cwd, size }),
+            Call::StartTerminal(op::StartTerminal {
+                thread: location.thread,
+                terminal_id,
+                cwd: Some(cwd),
+                worktree_path: location.worktree_path,
+                size,
+                env: location.env,
+                restart_if_not_running,
+            }),
             None,
         ))
     }
@@ -117,9 +127,74 @@ impl Owner {
         Next::call(
             Call::KillTerminal(op::TerminalKill {
                 process_handle: handle,
+                delete_history: true,
             }),
             None,
         )
+    }
+
+    /// Empties the terminal's history and every attached screen.
+    pub(super) fn clear_terminal(&mut self, thread: ThreadId, terminal_id: String) -> Next {
+        if let Some(terminal) = self.state.terminals.get_mut(&handle(&thread, &terminal_id)) {
+            terminal.clear_output();
+        }
+        Next::call(
+            Call::ClearTerminal(op::ClearTerminal {
+                thread,
+                terminal_id,
+            }),
+            None,
+        )
+    }
+
+    /// Starts the terminal's shell again with an empty history.
+    pub(super) fn restart_terminal(
+        &mut self,
+        thread: ThreadId,
+        terminal_id: String,
+        size: op::TerminalSize,
+    ) -> Result<Next, PeerError> {
+        let location = self.state.terminal_location(&thread, &terminal_id);
+        if location.cwd.is_empty() {
+            return Err(invalid("The thread has no folder to open a terminal in"));
+        }
+        let handle = handle(&thread, &terminal_id);
+        let group = self
+            .state
+            .terminals
+            .get(&handle)
+            .map_or_else(|| terminal_id.clone(), |terminal| terminal.group.clone());
+        self.state.terminals.insert(
+            handle,
+            Terminal {
+                thread: thread.clone(),
+                terminal_id: terminal_id.clone(),
+                group,
+                cwd: location.cwd.clone(),
+                size,
+                phase: TerminalPhase::Starting,
+                output: Default::default(),
+                sequence: 0,
+                output_bytes: 0,
+                pending_input: vec![],
+            },
+        );
+        Ok(Next::call(
+            Call::RestartTerminal(op::RestartTerminal {
+                thread,
+                terminal_id,
+                cwd: location.cwd,
+                worktree_path: location.worktree_path,
+                size,
+                env: location.env,
+            }),
+            None,
+        ))
+    }
+
+    /// The Host closed the terminal; its tab goes away.
+    pub(super) fn terminal_closed(&mut self, handle: &str) {
+        self.state.terminals.remove(handle);
     }
 
     /// Sends what waited for the terminal to start.

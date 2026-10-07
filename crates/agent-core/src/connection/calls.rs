@@ -19,7 +19,7 @@ pub(super) struct JobResult {
 
 pub(super) enum Reply {
     Search(Vec<c::SearchMatch>),
-    Models(op::ModelPage),
+    Providers(Vec<m::ProviderInstance>),
     ProjectAdded(String),
     Files(m::FileList),
     File(m::FileContent),
@@ -43,7 +43,7 @@ async fn execute(peer: &Peer, call: &Call) -> Result<Reply, PeerError> {
     Ok(match call {
         Call::Search(_) => Reply::Search(peer.request(call).await?),
         Call::AddProject(_) => Reply::ProjectAdded(peer.request(call).await?),
-        Call::ListModels(_) => Reply::Models(crate::client::models(peer).await?),
+        Call::ListProviders(_) => Reply::Providers(peer.request(call).await?),
         Call::ListFiles(_) => Reply::Files(peer.request(call).await?),
         Call::ReadFile(_) | Call::WriteFile(_) => Reply::File(peer.request(call).await?),
         Call::ReviewWorkspace(_) => Reply::Review(peer.request(call).await?),
@@ -94,10 +94,7 @@ pub fn turn_review(diff: c::TurnDiff) -> crate::models::WorkspaceReview {
 impl Owner {
     pub(super) fn refresh(&mut self) {
         for call in [
-            Call::ListModels(op::ListModels {
-                limit: 100,
-                cursor: None,
-            }),
+            Call::ListProviders(m::Empty {}),
             Call::ListAccounts(m::Empty {}),
         ] {
             self.job(call, None, None);
@@ -306,7 +303,7 @@ impl Owner {
             }),
             Ok(_) => match &call {
                 Call::StartTerminal(params) => {
-                    self.state.terminals.get(&params.handle).map(|terminal| {
+                    self.state.terminals.get(&params.handle()).map(|terminal| {
                         Outcome::TerminalOpened {
                             terminal_id: terminal.terminal_id.clone(),
                         }
@@ -320,7 +317,10 @@ impl Owner {
             Err(error) => {
                 if !cancelled
                     && (complete.is_some()
-                        || matches!(call, Call::StartTerminal(_) | Call::Transcribe(_)))
+                        || matches!(
+                            call,
+                            Call::StartTerminal(_) | Call::RestartTerminal(_) | Call::Transcribe(_)
+                        ))
                 {
                     self.state.error = Some(crate::presentation::error::error_message(
                         &error.to_string(),
@@ -333,8 +333,13 @@ impl Owner {
                         &error.to_string(),
                     ));
                 }
-                if let Call::StartTerminal(params) = &call
-                    && let Some(terminal) = self.state.terminals.get_mut(&params.handle)
+                let failed_terminal = match &call {
+                    Call::StartTerminal(params) => Some(params.handle()),
+                    Call::RestartTerminal(params) => Some(params.handle()),
+                    _ => None,
+                };
+                if let Some(handle) = failed_terminal
+                    && let Some(terminal) = self.state.terminals.get_mut(&handle)
                 {
                     terminal.phase = TerminalPhase::Failed(
                         crate::presentation::error::error_message(&error.to_string()),
@@ -358,42 +363,18 @@ impl Owner {
     fn reply(&mut self, call: &Call, reply: Reply, sent: Option<(String, Draft)>) {
         let workspace = &mut self.state.workspace;
         match reply {
-            Reply::Models(page) => {
-                self.state.models = page.data;
-                self.state.model_errors = page
-                    .provider_errors
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|(key, value)| {
-                        let text = value
-                            .as_str()
-                            .map_or_else(|| value.to_string(), str::to_owned);
-                        (key, text)
-                    })
-                    .collect();
+            Reply::Providers(providers) => {
                 if self.state.default_draft.model.is_empty()
-                    && let Some(model) = self
-                        .state
-                        .models
-                        .iter()
-                        .find(|model| model.is_default == Some(true))
-                        .or(self.state.models.first())
+                    && let Some((instance, model)) = crate::view::models::default_model(&providers)
                 {
-                    let (instance, driver) = match model.model.provider {
-                        crate::provider::ProviderKind::Codex => {
-                            ("codex", agent_domain::Driver::Codex)
-                        }
-                        crate::provider::ProviderKind::Claude => {
-                            ("claude", agent_domain::Driver::Claude)
-                        }
-                    };
                     self.state.default_draft = Draft {
-                        instance_id: instance.into(),
-                        driver,
-                        model: model.id.clone(),
+                        instance_id: instance.instance.clone(),
+                        driver: instance.driver,
+                        model: model.slug.clone(),
                         ..Draft::default()
                     };
                 }
+                self.state.providers = Some(providers);
             }
             Reply::Search(matches) => {
                 if let Call::Search(params) = call
@@ -498,7 +479,8 @@ impl Owner {
                 self.state.remote_hosts.retain(|host| host.id != params.id)
             }
             Call::Revoke(_) => self.job(Call::HostStatus(m::Empty {}), None, None),
-            Call::StartTerminal(params) => self.terminal_started(&params.handle),
+            Call::StartTerminal(params) => self.terminal_started(&params.handle()),
+            Call::RestartTerminal(params) => self.terminal_started(&params.handle()),
             Call::ResizeTerminal(params) => {
                 if let Some(terminal) = self.state.terminals.get_mut(&params.handle) {
                     terminal.size = params.size;

@@ -23,6 +23,9 @@ struct Project {
     pub roots: Vec<ProjectRoot>,
     pub scripts: Vec<ProjectScript>,
     pub repository_identity: Option<RepositoryIdentity>,
+    pub favicon_path: Option<String>,
+    pub created_at: Option<agent_domain::Timestamp>,
+    pub updated_at: Option<agent_domain::Timestamp>,
 }
 #[uniffi::remote(Record)]
 struct RepositoryIdentity {
@@ -66,31 +69,6 @@ struct ProjectRoot {
     pub path: String,
 }
 #[uniffi::remote(Record)]
-struct ModelRef {
-    pub provider: ProviderKind,
-    pub id: String,
-}
-#[uniffi::remote(Record)]
-struct Model {
-    pub id: String,
-    pub model: ModelRef,
-    pub display_name: String,
-    pub default_reasoning_effort: String,
-    pub supported_reasoning_efforts: Vec<ReasoningEffort>,
-    pub service_tiers: Option<Vec<ServiceTier>>,
-    pub default_service_tier: Option<String>,
-    pub is_default: Option<bool>,
-}
-#[uniffi::remote(Record)]
-struct ServiceTier {
-    pub id: String,
-    pub name: Option<String>,
-}
-#[uniffi::remote(Record)]
-struct ReasoningEffort {
-    pub reasoning_effort: String,
-}
-#[uniffi::remote(Record)]
 struct FileList {
     pub path: String,
     pub entries: Vec<FileEntry>,
@@ -128,7 +106,7 @@ struct Worktree {
 }
 #[uniffi::remote(Record)]
 struct WorktreeThread {
-    pub id: agent_protocol::orchestration::ThreadId,
+    pub id: agent_domain::ThreadId,
     pub name: String,
     pub active: bool,
 }
@@ -139,7 +117,7 @@ enum ProviderKind {
 }
 #[uniffi::remote(Record)]
 struct BrowserRequest {
-    pub thread_id: agent_protocol::orchestration::ThreadId,
+    pub thread_id: agent_domain::ThreadId,
     pub tab_id: String,
     pub image_id: String,
     pub action: BrowserAction,

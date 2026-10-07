@@ -291,6 +291,9 @@ mod tests {
             roots: vec![ProjectRoot { path: root.into() }],
             scripts: vec![],
             repository_identity: None,
+            favicon_path: None,
+            created_at: None,
+            updated_at: None,
         }
     }
 

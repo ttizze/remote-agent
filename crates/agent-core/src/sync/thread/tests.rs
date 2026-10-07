@@ -588,6 +588,7 @@ fn reports_folded_rollback_results() {
         command: command.clone(),
         checkpoint: agent_domain::CheckpointId::new("checkpoint").unwrap(),
         restore_files: false,
+        after_start: None,
         rewinding: Default::default(),
     });
     sync.apply(vec![snapshot(state, 2, None)]);

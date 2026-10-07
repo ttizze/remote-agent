@@ -831,6 +831,7 @@ mod tests {
             ProjectConversationSettings {
                 auto_settle: Some(AutoSettle::Never),
                 continue_after_restart: Some(true),
+                ..Default::default()
             }
         );
         assert_eq!(next.auto_settle, host.auto_settle);
@@ -854,6 +855,7 @@ mod tests {
             ProjectConversationSettings {
                 auto_settle: Some(AutoSettle::AfterDays(7)),
                 continue_after_restart: Some(true),
+                ..Default::default()
             },
         );
         let next = plan_conversation_settings_update(
@@ -869,6 +871,7 @@ mod tests {
             ProjectConversationSettings {
                 auto_settle: Some(AutoSettle::AfterDays(7)),
                 continue_after_restart: None,
+                ..Default::default()
             }
         );
         assert_eq!(
@@ -890,6 +893,7 @@ mod tests {
             ProjectConversationSettings {
                 auto_settle: Some(AutoSettle::Never),
                 continue_after_restart: Some(true),
+                ..Default::default()
             },
         );
         let cleared =
@@ -899,6 +903,7 @@ mod tests {
             ProjectConversationSettings {
                 auto_settle: None,
                 continue_after_restart: Some(true),
+                ..Default::default()
             }
         );
         let all = clear_project_overrides(
@@ -1271,13 +1276,21 @@ mod tests {
 
     #[test]
     fn the_default_model_picker_reads_the_new_thread_default_not_the_open_thread() {
-        use crate::provider::ProviderKind;
-        use crate::view::models::fixtures::host_model;
+        use crate::view::models::fixtures::{host_instance, host_model};
+        use agent_domain::Driver;
         let mut snapshot = Snapshot {
-            models: vec![
-                host_model(ProviderKind::Codex, "gpt-5.4", "gpt-5.4"),
-                host_model(ProviderKind::Claude, "sonnet", "Sonnet"),
-            ],
+            providers: Some(vec![
+                host_instance(
+                    "codex",
+                    Driver::Codex,
+                    vec![host_model("gpt-5.4", "gpt-5.4")],
+                ),
+                host_instance(
+                    "claude",
+                    Driver::Claude,
+                    vec![host_model("sonnet", "Sonnet")],
+                ),
+            ]),
             ..Snapshot::default()
         };
         snapshot.default_draft.instance_id = "claude".into();

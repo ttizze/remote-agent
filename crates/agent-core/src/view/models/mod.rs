@@ -1,8 +1,6 @@
-//! The provider instances and model catalogue the Host serves, as the model
-//! picker, the traits menu and thread rows present them.
-//!
-//! The Host serves one instance per driver whose id is the driver slug, and
-//! reports per-instance catalogue failures in `Snapshot::model_errors`.
+//! The provider instances and model catalogue the Host serves
+//! (`host/provider/list`), as the model picker, the traits menu and thread
+//! rows present them.
 pub mod display;
 pub mod options;
 pub mod ordering;
@@ -11,7 +9,7 @@ pub mod search;
 pub mod switching;
 pub mod traits;
 
-use crate::{models::Model, provider::ProviderKind, state::Snapshot};
+use crate::{models::ProviderInstance as HostInstance, state::Snapshot};
 use agent_domain::Driver;
 use options::OptionDescriptor;
 
@@ -22,8 +20,10 @@ pub enum ProviderStatus {
     /// The catalogue has not arrived yet.
     Loading,
     Ready,
-    /// The Host could not list this instance's models.
+    /// Usable with a caveat the message explains.
+    Warning,
     Error,
+    Disabled,
 }
 
 /// One configured provider instance, named and badged the same way in every
@@ -42,11 +42,20 @@ pub struct ProviderInstance {
     pub show_badge: bool,
     pub status: ProviderStatus,
     pub message: Option<String>,
+    pub enabled: bool,
+    pub installed: bool,
+    /// False when this Host cannot run the instance at all.
+    pub available: bool,
+    pub version: Option<String>,
+    /// The composer offers the plan mode toggle.
+    pub show_interaction_mode_toggle: bool,
+    /// The provider reports its context window, so the meter shows.
+    pub reports_context_window: bool,
 }
 impl ProviderInstance {
     /// Can contribute models to an interactive picker.
     pub fn picker_ready(&self) -> bool {
-        self.status == ProviderStatus::Ready
+        self.enabled && self.available && self.status == ProviderStatus::Ready
     }
 }
 
@@ -58,7 +67,12 @@ pub struct CatalogModel {
     pub instance_id: String,
     pub slug: String,
     pub name: String,
+    pub aliases: Vec<String>,
+    /// `new` for a recently added model.
+    pub badge: Option<String>,
     pub is_default: bool,
+    /// Listed under the picker's collapsed "Legacy models".
+    pub is_legacy: bool,
     pub descriptors: Vec<OptionDescriptor>,
 }
 
@@ -104,95 +118,155 @@ pub fn driver_display_name(driver: Driver) -> &'static str {
     }
 }
 
-fn driver_of(provider: ProviderKind) -> Driver {
-    match provider {
-        ProviderKind::Codex => Driver::Codex,
-        ProviderKind::Claude => Driver::Claude,
-    }
-}
-
 /// A Host model as the picker lists it.
-pub fn catalog_model(model: &Model) -> CatalogModel {
-    let driver = driver_of(model.model.provider);
+pub fn catalog_model(instance_id: &str, model: &crate::models::Model) -> CatalogModel {
     CatalogModel {
-        instance_id: default_instance_id(driver).into(),
-        slug: model.id.clone(),
-        name: match driver {
-            Driver::Codex => options::format_codex_model_name(&model.display_name),
-            Driver::Claude => model.display_name.clone(),
-        },
-        is_default: model.is_default == Some(true),
-        descriptors: options::model_descriptors(model),
+        instance_id: instance_id.into(),
+        slug: model.slug.clone(),
+        name: model.name.clone(),
+        aliases: model.aliases.clone(),
+        badge: model.badge.clone(),
+        is_default: model.is_default,
+        is_legacy: model.is_legacy,
+        descriptors: model
+            .option_descriptors
+            .iter()
+            .map(OptionDescriptor::from)
+            .collect(),
     }
 }
 
-/// The Host's instances and models. An instance is loading until the
-/// catalogue or its error arrives.
+fn entry(instance: &HostInstance) -> display::ProviderEntry {
+    use crate::models::ProviderStatus as Host;
+    display::ProviderEntry {
+        display_name: Some(instance.display_name.clone()),
+        accent_color: instance.accent_color.clone(),
+        status: match instance.status {
+            Host::Ready => ProviderStatus::Ready,
+            Host::Warning => ProviderStatus::Warning,
+            Host::Error => ProviderStatus::Error,
+            Host::Disabled => ProviderStatus::Disabled,
+        },
+        message: instance
+            .unavailable_reason
+            .clone()
+            .or_else(|| instance.message.clone()),
+        enabled: instance.enabled,
+        installed: instance.installed,
+        available: instance.unavailable_reason.is_none(),
+        version: instance.version.clone(),
+        show_interaction_mode_toggle: instance.show_interaction_mode_toggle,
+        reports_context_window: instance.reports_context_window,
+        ..display::ProviderEntry::new(&instance.instance, instance.driver)
+    }
+}
+
+/// The Host's instances and models. Until the Host lists them, each driver's
+/// default instance is loading.
 pub fn catalog(snapshot: &Snapshot) -> ModelCatalog {
-    let loaded = !snapshot.models.is_empty() || !snapshot.model_errors.is_empty();
-    let entries: Vec<_> = DRIVERS
-        .into_iter()
-        .map(|driver| {
-            let instance_id = default_instance_id(driver);
-            let error = snapshot.model_errors.get(instance_id);
-            display::ProviderEntry {
-                instance_id: instance_id.into(),
-                driver,
-                display_name: None,
-                accent_color: None,
-                status: match (loaded, error) {
-                    (false, _) => ProviderStatus::Loading,
-                    (true, Some(_)) => ProviderStatus::Error,
-                    (true, None) => ProviderStatus::Ready,
-                },
-                message: error.cloned(),
-            }
-        })
-        .collect();
+    let Some(providers) = &snapshot.providers else {
+        let entries: Vec<_> = DRIVERS
+            .into_iter()
+            .map(|driver| display::ProviderEntry {
+                status: ProviderStatus::Loading,
+                ..display::ProviderEntry::new(default_instance_id(driver), driver)
+            })
+            .collect();
+        return ModelCatalog {
+            instances: display::provider_instances(&entries),
+            models: vec![],
+        };
+    };
+    let entries: Vec<_> = providers.iter().map(entry).collect();
     ModelCatalog {
         instances: display::provider_instances(&entries),
-        models: snapshot.models.iter().map(catalog_model).collect(),
+        models: providers
+            .iter()
+            .flat_map(|instance| {
+                instance
+                    .models
+                    .iter()
+                    .map(|model| catalog_model(&instance.instance, model))
+            })
+            .collect(),
     }
+}
+
+/// The model a new draft starts with: the first ready instance (else the first
+/// selectable one that has not failed) and its default model, else its first.
+pub fn default_model(providers: &[HostInstance]) -> Option<(&HostInstance, &crate::models::Model)> {
+    use crate::models::ProviderStatus as Host;
+    let candidates = || {
+        providers.iter().filter(|instance| {
+            instance.enabled && instance.unavailable_reason.is_none() && !instance.models.is_empty()
+        })
+    };
+    let instance = candidates()
+        .find(|instance| instance.status == Host::Ready)
+        .or_else(|| candidates().find(|instance| instance.status != Host::Error))?;
+    let model = instance
+        .models
+        .iter()
+        .find(|model| model.is_default)
+        .or_else(|| instance.models.first())?;
+    Some((instance, model))
 }
 
 #[cfg(test)]
 pub(crate) mod fixtures {
     use super::*;
-    use crate::models::{ModelRef, ReasoningEffort, ServiceTier};
+    use agent_domain::{OptionChoice, OptionDescriptor as Descriptor, SelectOption};
 
-    pub fn host_model(provider: ProviderKind, id: &str, name: &str) -> Model {
-        Model {
-            id: id.into(),
-            model: ModelRef {
-                provider,
-                id: id.into(),
-            },
-            display_name: name.into(),
-            default_reasoning_effort: "high".into(),
-            supported_reasoning_efforts: ["medium", "high"]
-                .map(|effort| ReasoningEffort {
-                    reasoning_effort: effort.into(),
-                })
-                .to_vec(),
-            service_tiers: Some(vec![ServiceTier {
-                id: "priority".into(),
-                name: Some("Fast".into()),
-            }]),
-            default_service_tier: None,
-            is_default: None,
+    pub fn host_model(slug: &str, name: &str) -> crate::models::Model {
+        crate::models::Model {
+            slug: slug.into(),
+            name: name.into(),
+            aliases: vec![],
+            badge: None,
+            is_default: false,
+            is_legacy: false,
+            option_descriptors: vec![Descriptor::Select(SelectOption {
+                id: "reasoningEffort".into(),
+                label: "Reasoning".into(),
+                description: None,
+                options: ["medium", "high"]
+                    .map(|effort| OptionChoice {
+                        id: effort.into(),
+                        label: effort.into(),
+                        description: None,
+                        is_default: effort == "high",
+                    })
+                    .to_vec(),
+                current_value: Some("high".into()),
+                prompt_injected_values: vec![],
+            })],
+        }
+    }
+
+    pub fn host_instance(
+        instance: &str,
+        driver: Driver,
+        models: Vec<crate::models::Model>,
+    ) -> HostInstance {
+        HostInstance {
+            instance: instance.into(),
+            driver,
+            display_name: driver_display_name(driver).into(),
+            accent_color: None,
+            enabled: true,
+            installed: true,
+            version: None,
+            status: crate::models::ProviderStatus::Ready,
+            message: None,
+            unavailable_reason: None,
+            show_interaction_mode_toggle: true,
+            reports_context_window: true,
+            models,
         }
     }
 
     pub fn instance(instance_id: &str, driver: Driver) -> ProviderInstance {
-        display::provider_instances(&[display::ProviderEntry {
-            instance_id: instance_id.into(),
-            driver,
-            display_name: None,
-            accent_color: None,
-            status: ProviderStatus::Ready,
-            message: None,
-        }])
-        .remove(0)
+        display::provider_instances(&[display::ProviderEntry::new(instance_id, driver)]).remove(0)
     }
 
     pub fn model(instance_id: &str, slug: &str, name: &str) -> CatalogModel {
@@ -200,7 +274,10 @@ pub(crate) mod fixtures {
             instance_id: instance_id.into(),
             slug: slug.into(),
             name: name.into(),
+            aliases: vec![],
+            badge: None,
             is_default: false,
+            is_legacy: false,
             descriptors: vec![],
         }
     }
@@ -212,7 +289,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_host_catalogue_lists_both_instances_and_formats_codex_names() {
+    fn the_host_instances_carry_their_display_metadata_and_descriptors() {
         let mut snapshot = Snapshot::default();
         assert!(
             catalog(&snapshot)
@@ -220,24 +297,68 @@ mod tests {
                 .iter()
                 .all(|instance| instance.status == ProviderStatus::Loading)
         );
-        snapshot.models = vec![host_model(ProviderKind::Codex, "gpt-5.4", "gpt-5.4-codex")];
-        snapshot
-            .model_errors
-            .insert("claude".into(), "Claude Code is not signed in".into());
+        let mut claude = host_instance("claude", Driver::Claude, vec![]);
+        claude.status = crate::models::ProviderStatus::Error;
+        claude.message = Some("Claude Code is not signed in".into());
+        let mut work = host_instance(
+            "codex_work",
+            Driver::Codex,
+            vec![host_model("gpt-5.4", "GPT-5.4")],
+        );
+        work.accent_color = Some("#aa3300".into());
+        work.display_name = "Work".into();
+        snapshot.providers = Some(vec![
+            host_instance(
+                "codex",
+                Driver::Codex,
+                vec![host_model("gpt-5.5", "GPT-5.5")],
+            ),
+            work,
+            claude,
+        ]);
         let catalog = catalog(&snapshot);
         let codex = catalog.instance("codex").unwrap();
         assert_eq!(
             (codex.display_name.as_str(), codex.status, codex.show_badge),
-            ("Codex", ProviderStatus::Ready, false)
+            ("Codex", ProviderStatus::Ready, true)
+        );
+        let work = catalog.instance("codex_work").unwrap();
+        assert_eq!(
+            (work.display_name.as_str(), work.accent_color.as_deref()),
+            ("Work", Some("#aa3300"))
         );
         let claude = catalog.instance("claude").unwrap();
         assert_eq!(claude.status, ProviderStatus::Error);
+        assert!(!claude.picker_ready());
         assert_eq!(
             claude.message.as_deref(),
             Some("Claude Code is not signed in")
         );
-        assert_eq!(catalog.models[0].name, "GPT-5.4-Codex");
-        assert_eq!(catalog.models[0].instance_id, "codex");
+        let model = catalog.models_of("codex_work").next().unwrap();
+        assert_eq!(model.slug, "gpt-5.4");
+        assert_eq!(model.descriptors[0].id(), "reasoningEffort");
         assert_eq!(catalog.models_of("claude").count(), 0);
+    }
+
+    #[test]
+    fn a_new_draft_starts_on_the_first_ready_instances_default_model() {
+        let first = host_model("gpt-5.4", "GPT-5.4");
+        let mut second = host_model("gpt-5.5", "GPT-5.5");
+        second.is_default = true;
+        let mut disabled = host_instance("codex", Driver::Codex, vec![second.clone()]);
+        disabled.enabled = false;
+        let mut failed = host_instance("claude", Driver::Claude, vec![first.clone()]);
+        failed.status = crate::models::ProviderStatus::Error;
+        let providers = vec![
+            disabled,
+            failed,
+            host_instance("codex_work", Driver::Codex, vec![first, second]),
+        ];
+        let (instance, model) = default_model(&providers).unwrap();
+        assert_eq!(
+            (instance.instance.as_str(), model.slug.as_str()),
+            ("codex_work", "gpt-5.5")
+        );
+        assert!(default_model(&[]).is_none());
     }
 }

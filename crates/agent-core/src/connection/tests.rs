@@ -316,6 +316,7 @@ fn a_rollback_returns_the_rolled_back_message_to_the_composer_after_success_only
                     command: id.clone(),
                     checkpoint: CheckpointId::new("start").unwrap(),
                     restore_files: false,
+                    after_start: None,
                 }),
             )]),
         );
