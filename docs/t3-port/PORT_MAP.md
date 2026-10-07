@@ -1682,4 +1682,3 @@ UniFFI の公開（`bindings/views.rs`）:
 - `crate_boundaries` は `agent-domain` の依存が純粋な crate だけであること、`agent-core`（bindings の有無とも）と `agent-ffi` が `agent-runtime`・`agent-providers`・`rusqlite` を含まないことを確かめる。
 - 旧ランタイムを記述した文書（`SESSION_RUNTIME.md`、`BEX_PROTOCOL_DESIGN.md`、`BEX_PROTOCOL_NATIVE_CONTRACTS.md`、`CRATE_BOUNDARIES.md`、`IMPLEMENTATION.md`、`PLAN.md` の設計の節）を現在の設計に書き直し、旧コードの地図 `BEX_ARCHITECTURE_MAP.md` と、削除したテストを根拠にした `PR55_REVIEW.md`、この文書の「中断時の12ファイルの採否」を削除した。
 - どこからも参照されない core と runtime の定数・関数を削除した。T3 から移植してテストだけが使う関数（minimap、drag、citation など）は、未接続の T3 の挙動として残す。
-
