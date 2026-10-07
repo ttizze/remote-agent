@@ -1,6 +1,5 @@
 package dev.remoteagent.mobile
 
-import dev.remoteagent.core.CatalogFilter
 import dev.remoteagent.core.TerminalTab
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -23,12 +22,5 @@ class ScreenRulesTest {
         assertEquals("app", folderName("/Users/me/app/"))
         assertEquals("app", folderName("app"))
         assertNull(folderName("/"))
-    }
-
-    @Test
-    fun anEmptyCatalogSaysWhy() {
-        assertEquals("No favorite models", catalogEmptyLabel(CatalogFilter.Favorites, "opus"))
-        assertEquals("No matching models", catalogEmptyLabel(CatalogFilter.All, "opus"))
-        assertEquals("No available models", catalogEmptyLabel(CatalogFilter.Instance("codex"), " "))
     }
 }

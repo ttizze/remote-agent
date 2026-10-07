@@ -269,14 +269,6 @@ internal fun AgentsSheet(model: AndroidAppModel, roster: AgentRoster, onDismiss:
     }
 }
 
-/** Why the catalogue lists no model. */
-internal fun catalogEmptyLabel(filter: CatalogFilter, query: String): String =
-    when {
-        filter is CatalogFilter.Favorites -> "No favorite models"
-        query.isNotBlank() -> "No matching models"
-        else -> "No available models"
-    }
-
 /**
  * The model catalogue by provider, then Options and Runtime, then the legacy switch. A staged model applies on Save.
  */
@@ -320,14 +312,15 @@ internal fun ThreadSettingsSheet(model: AndroidAppModel, composer: ComposerView,
             Modifier.padding(start = 16.dp, end = 16.dp, bottom = 8.dp),
         )
         catalog?.let { view ->
-            if (view.items.none { it is CatalogSheetItem.Model })
+            view.emptyLabel?.let { empty ->
                 Text(
-                    catalogEmptyLabel(filter, query),
+                    empty,
                     Modifier.fillMaxWidth().padding(horizontal = 32.dp, vertical = 56.dp),
                     style = AppTheme.footnote,
                     color = colors.foregroundMuted,
                     textAlign = TextAlign.Center,
                 )
+            }
             view.items.forEach { item ->
                 when (item) {
                     is CatalogSheetItem.Provider ->
@@ -537,6 +530,7 @@ private fun CatalogModelRow(item: CatalogSheetItem.Model, onFavorite: () -> Unit
                     color = colors.foreground,
                     maxLines = 2,
                 )
+                if (item.isDefault) ModelBadge("Default", colors.subtleStrong)
                 if (item.isLegacy) ModelBadge("Legacy", colors.subtle)
                 if (item.unavailable) Text("Unavailable", style = AppTheme.label, color = colors.foreground)
             }

@@ -35,7 +35,7 @@ struct ThreadSettingsSheet: View {
                         }
                     }
                 }
-                if catalog.items.isEmpty {
+                if let emptyLabel = catalog.emptyLabel {
                     Text(emptyLabel).font(AppTheme.font(14)).foregroundStyle(AppTheme.muted)
                         .frame(maxWidth: .infinity).padding(.vertical, 56)
                         .listRowBackground(Color.clear)
@@ -59,14 +59,6 @@ struct ThreadSettingsSheet: View {
         .tint(AppTheme.color("mobilePrimaryText"))
     }
 
-    private var emptyLabel: String {
-        let searching = !query.trimmingCharacters(in: .whitespaces).isEmpty
-        if filter == .favorites, !searching {
-            return "No favorite models"
-        }
-        return filter != .all || searching ? "No matching models" : "No available models"
-    }
-
     /// Each provider header with the model rows under it.
     private func sections(_ items: [CatalogSheetItem]) -> [CatalogSection] {
         var sections: [CatalogSection] = []
@@ -77,10 +69,10 @@ struct ThreadSettingsSheet: View {
                     key: key, instance: instance, collapsible: collapsible, collapsed: collapsed, modelCount: modelCount
                 ), models: []))
             case let .model(key, instanceId, driver, slug, label, favorite, applied, displayed, isLegacy,
-                            unavailable, _, _):
+                            isDefault, unavailable, _, _):
                 let row = CatalogModelItem(key: key, instanceId: instanceId, driver: driver, slug: slug, label: label,
                                            favorite: favorite, applied: applied, displayed: displayed,
-                                           isLegacy: isLegacy, unavailable: unavailable)
+                                           isLegacy: isLegacy, isDefault: isDefault, unavailable: unavailable)
                 if sections.isEmpty {
                     sections.append(CatalogSection(key: "models", header: nil, models: []))
                 }
@@ -167,6 +159,7 @@ private struct CatalogModelItem {
     let applied: Bool
     let displayed: Bool
     let isLegacy: Bool
+    let isDefault: Bool
     let unavailable: Bool
 }
 
@@ -223,6 +216,11 @@ private struct CatalogModelRow: View {
                 HStack(spacing: 8) {
                     Text(row.label).font(AppTheme.font(16, weight: .medium)).foregroundStyle(AppTheme.text)
                         .lineLimit(1)
+                    if row.isDefault {
+                        Text("Default").font(AppTheme.font(10, weight: .bold)).foregroundStyle(AppTheme.muted)
+                            .padding(.horizontal, 6).padding(.vertical, 2)
+                            .background(AppTheme.subtleStrong, in: RoundedRectangle(cornerRadius: 6))
+                    }
                     if row.isLegacy {
                         Text("Legacy").font(AppTheme.font(10, weight: .bold)).foregroundStyle(AppTheme.muted)
                             .padding(.horizontal, 6).padding(.vertical, 2)

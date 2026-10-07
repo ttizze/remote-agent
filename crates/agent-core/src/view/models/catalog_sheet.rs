@@ -242,19 +242,21 @@ mod tests {
     fn snapshot() -> Snapshot {
         let mut legacy = host_model("gpt-4", "GPT-4");
         legacy.is_legacy = true;
-        let mut snapshot = Snapshot::default();
-        snapshot.providers = Some(vec![
-            host_instance(
-                "codex",
-                Driver::Codex,
-                vec![host_model("gpt-5.5", "GPT-5.5"), legacy],
-            ),
-            host_instance(
-                "codex_work",
-                Driver::Codex,
-                vec![host_model("gpt-5.4", "GPT-5.4")],
-            ),
-        ]);
+        let mut snapshot = Snapshot {
+            providers: Some(vec![
+                host_instance(
+                    "codex",
+                    Driver::Codex,
+                    vec![host_model("gpt-5.5", "GPT-5.5"), legacy],
+                ),
+                host_instance(
+                    "codex_work",
+                    Driver::Codex,
+                    vec![host_model("gpt-5.4", "GPT-5.4")],
+                ),
+            ]),
+            ..Snapshot::default()
+        };
         snapshot.default_draft.instance_id = "codex".into();
         snapshot.default_draft.model = "gpt-5.5".into();
         snapshot
