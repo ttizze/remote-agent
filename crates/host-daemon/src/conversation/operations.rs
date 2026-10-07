@@ -85,26 +85,50 @@ impl ProjectCatalog {
         &self,
         project: &str,
         scripts: Option<Vec<ProjectScript>>,
+        favicon_path: Option<Option<String>>,
     ) -> anyhow::Result<()> {
         let rootless = project == CHATS_PROJECT && self.chats_root().await.is_some();
-        self.store.update(project, scripts, rootless).await?;
+        self.store
+            .update(project, scripts, favicon_path, rootless)
+            .await?;
         self.refresh().await?;
         Ok(())
+    }
+    fn stored(&self, project: &str) -> Option<crate::projects::StoredProject> {
+        self.stored
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(project)
+            .cloned()
+    }
+    /// A project's root and saved icon path; an unknown project is looked up
+    /// again after rereading the projects.
+    pub(crate) async fn favicon_source(&self, project: &str) -> Option<(String, Option<String>)> {
+        let find = || {
+            self.list()
+                .into_iter()
+                .find(|listed| listed.id == project)
+                .map(|listed| {
+                    let saved = self.stored(project).and_then(|stored| stored.favicon_path);
+                    (listed.root, saved)
+                })
+        };
+        if let Some(found) = find() {
+            return Some(found);
+        }
+        self.refresh().await.ok()?;
+        find()
     }
     /// The project as clients see it, with the repository identity at hand; a
     /// missing or expired one resolves in the background.
     pub(crate) fn wire(&self, project: HostProject) -> Project {
-        let times = self
-            .stored
-            .read()
-            .unwrap_or_else(|error| error.into_inner())
-            .get(&project.id)
-            .map(|stored| (stored.created_at.clone(), stored.updated_at.clone()));
+        let stored = self.stored(&project.id);
         Project {
-            favicon_path: crate::favicon::resolve(Path::new(&project.root))
-                .map(|path| path.to_string_lossy().into_owned()),
-            created_at: times.as_ref().map(|(created, _)| created.clone()),
-            updated_at: times.map(|(_, updated)| updated),
+            favicon_path: stored
+                .as_ref()
+                .and_then(|stored| stored.favicon_path.clone()),
+            created_at: stored.as_ref().map(|stored| stored.created_at.clone()),
+            updated_at: stored.map(|stored| stored.updated_at),
             repository_identity: (project.id != CHATS_PROJECT)
                 .then(|| self.identities.available(&project.root))
                 .flatten(),

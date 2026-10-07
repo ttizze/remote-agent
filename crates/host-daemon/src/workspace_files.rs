@@ -121,7 +121,7 @@ impl WorkspaceFiles {
                 Ok(Body::from(visualization_document(fragment)))
             }
             Call::ListFiles(params) => {
-                let path = dunce::canonicalize(absolute_path(&params.path)?)?;
+                let path = listed_directory(&params.path)?;
                 let mut entries = Vec::new();
                 let mut truncated = false;
                 for entry in fs::read_dir(&path)? {
@@ -428,6 +428,15 @@ fn absolute_path(path: &impl AsRef<Path>) -> Result<&Path> {
         Err(anyhow!("an absolute filesystem path is required"))
     }
 }
+/// The folder a listing names. A leading `~` is the home directory, so the
+/// add-project browser can start at `~/`.
+fn listed_directory(path: &str) -> Result<PathBuf> {
+    let expanded = crate::projects::expand_home(path);
+    let absolute = absolute_path(&expanded)?;
+    Ok(dunce::canonicalize(crate::projects::normalize_lexically(
+        absolute,
+    ))?)
+}
 fn hash(bytes: &[u8]) -> String {
     URL_SAFE_NO_PAD.encode(digest::digest(&SHA256, bytes).as_ref())
 }
@@ -510,6 +519,37 @@ mod tests {
         };
         let token = &grant.token;
         stream.write_all(token).await.unwrap();
+    }
+
+    // WorkspaceEntries.ts browse: a path that is not explicitly relative has its
+    // leading `~` expanded, and `~` alone is the home folder itself.
+    #[test]
+    fn listings_start_from_the_home_folder_for_a_leading_tilde() {
+        let home = dunce::canonicalize(directories::BaseDirs::new().unwrap().home_dir()).unwrap();
+        assert_eq!(listed_directory("~").unwrap(), home);
+        assert_eq!(listed_directory("~/").unwrap(), home);
+        assert_eq!(listed_directory("~/./").unwrap(), home);
+        assert!(listed_directory("~/missing-folder-for-a-listing-test").is_err());
+        for relative in ["~other/", "./", "src"] {
+            assert!(listed_directory(relative).is_err(), "{relative}");
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(directory.path()).unwrap();
+        fs::create_dir(root.join("app")).unwrap();
+        let files = WorkspaceFiles::new(root.join("attachments"));
+        let Body::Files(listing) = files
+            .dispatch(
+                1,
+                Call::ListFiles(PathParams {
+                    path: format!("{}/app/../", root.display()),
+                }),
+            )
+            .unwrap()
+        else {
+            panic!("expected a listing")
+        };
+        assert_eq!(Path::new(&listing.path), root);
+        assert_eq!(listing.entries[0].name, "app");
     }
 
     #[test]

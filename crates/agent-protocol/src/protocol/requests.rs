@@ -63,6 +63,7 @@ contracts! {
     ListProjects, "host/project/list" => (m::Empty, Vec<m::Project>),
     AddProject, "host/project/add" => (op::AddProject, String) [clone],
     UpdateProject, "host/project/update" => (op::UpdateProject, m::Empty) [clone],
+    ProjectFavicon, "host/project/favicon" => (m::ReadProjectFavicon, Option<m::ProjectFavicon>) [clone],
     ReadPermissionSettings, "host/permissions/read" => (crate::permissions::ReadPermissionSettings, crate::permissions::PermissionSettings) [clone],
     UpdatePermissionSettings, "host/permissions/update" => (crate::permissions::UpdatePermissionSettings, crate::permissions::PermissionSettings) [clone],
     ListProviders, "host/provider/list" => (m::Empty, Vec<m::ProviderInstance>),

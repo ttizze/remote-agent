@@ -212,6 +212,9 @@ pub struct UpdateProject {
     pub project_id: String,
     #[serde(default)]
     pub scripts: Option<Vec<crate::models::ProjectScript>>,
+    /// `Some(None)` clears the saved icon path.
+    #[serde(default)]
+    pub favicon_path: Option<Option<String>>,
 }
 
 /// Opens a thread's terminal or attaches to it; the caller then receives its output.
@@ -581,6 +584,69 @@ mod terminal_tests {
             })
             .unwrap(),
             json!({"processHandle": "terminal:thread-1:term-1", "deleteHistory": true})
+        );
+    }
+
+    // The icon path update distinguishes unchanged, cleared and set, and the icon
+    // reply carries its bytes only when the client's copy is stale.
+    #[test]
+    fn project_favicon_requests_keep_their_wire_shape() {
+        use crate::models::{ProjectFavicon, ReadProjectFavicon};
+        use crate::protocol::{Response, decode, encode};
+        for favicon_path in [None, Some(None), Some(Some("brand/logo.svg".to_owned()))] {
+            let update = UpdateProject {
+                project_id: "p".into(),
+                scripts: None,
+                favicon_path: favicon_path.clone(),
+            };
+            let Call::UpdateProject(decoded) =
+                decode::<Call>(&encode(Call::UpdateProject(update)).unwrap()).unwrap()
+            else {
+                panic!("an update decodes as an update");
+            };
+            assert_eq!(decoded.favicon_path, favicon_path);
+        }
+        let read = ReadProjectFavicon {
+            project_id: "p".into(),
+            known_hash: Some("ab".into()),
+        };
+        assert_eq!(
+            serde_json::to_value(&read).unwrap(),
+            json!({"projectId": "p", "knownHash": "ab"})
+        );
+        assert_eq!(Call::ProjectFavicon(read).method(), "host/project/favicon");
+        for data in [None, Some(vec![0, 1, 255])] {
+            let favicon = ProjectFavicon {
+                hash: "ab".into(),
+                file_name: "vab-favicon.svg".into(),
+                mime_type: "image/svg+xml".into(),
+                data,
+            };
+            let bytes = encode(Response::from_result::<_, crate::error::RpcFailure>(Ok(
+                Some(favicon.clone()),
+            )))
+            .unwrap();
+            let Response::Success { result } =
+                decode::<Response<Option<ProjectFavicon>>>(&bytes).unwrap()
+            else {
+                panic!("the icon decodes");
+            };
+            assert_eq!(result, Some(favicon.clone()));
+            let value = serde_json::to_value(&favicon).unwrap();
+            assert_eq!(
+                serde_json::from_value::<ProjectFavicon>(value).unwrap(),
+                favicon
+            );
+        }
+        assert_eq!(
+            serde_json::to_value(ProjectFavicon {
+                hash: "ab".into(),
+                file_name: "vab-a.png".into(),
+                mime_type: "image/png".into(),
+                data: Some(vec![1, 2, 3]),
+            })
+            .unwrap()["data"],
+            json!("AQID")
         );
     }
 
