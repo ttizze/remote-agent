@@ -1,7 +1,7 @@
 use crate::models::WorkspaceReview;
 use std::collections::HashMap;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct DiffRow {
     pub text: String,

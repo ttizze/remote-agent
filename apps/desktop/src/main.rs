@@ -113,6 +113,7 @@ impl DesktopAssets {
         "redo-2",
         "refresh-cw",
         "rotate-ccw",
+        "rotate-cw",
         "rows-3",
         "search",
         "server",

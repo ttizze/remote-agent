@@ -19,6 +19,7 @@ pub mod queue;
 pub mod rejection;
 pub mod relationships;
 pub mod requests;
+pub mod review_files;
 pub mod search;
 pub mod search_ranking;
 pub mod settings;

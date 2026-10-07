@@ -266,9 +266,9 @@ internal fun ArrangeSheet(model: AndroidAppModel, onDismiss: () -> Unit) {
                                 style = AppTheme.body,
                                 fontWeight = FontWeight.Medium,
                                 color = colors.foreground,
-                                maxLines = if (lifted.drop?.action != null) 1 else 2,
+                                maxLines = if (lifted.drop?.label != null) 1 else 2,
                             )
-                            lifted.drop?.action?.let {
+                            lifted.drop?.label?.let {
                                 Text(it, style = AppTheme.caption, color = colors.foregroundMuted)
                             }
                         }
@@ -326,7 +326,7 @@ private fun ThreadRow(
                     .semantics {
                         contentDescription = "Reorder ${row.title}"
                         customActions =
-                            if (!!locked) emptyList()
+                            if (locked) emptyList()
                             else
                                 row.sectionMoves.map { action ->
                                     CustomAccessibilityAction(action.label) {
@@ -350,7 +350,7 @@ private fun ThreadRow(
                                     )
                     }
                     .pointerInput(!locked) {
-                        if (!!locked) return@pointerInput
+                        if (locked) return@pointerInput
                         var translation = 0f
                         detectDragGestures(
                             onDragStart = {
