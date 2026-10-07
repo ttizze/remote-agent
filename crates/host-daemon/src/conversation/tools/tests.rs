@@ -221,6 +221,7 @@ fn thread_record(id: &str, project: &str, selection: ModelSelection) -> Thread {
         deleted_at: None,
         settled: None,
         settled_at: None,
+        unsettled_at: None,
         snoozed_until: None,
         pinned_at: None,
         pin_order: None,

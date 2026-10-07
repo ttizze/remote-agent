@@ -116,6 +116,7 @@ impl Spawner for ReplaySpawner {
     }
 }
 
+/// Codex and Claude without a model catalog.
 struct NoModels;
 impl tools::ModelCatalog for NoModels {
     fn providers(
@@ -124,7 +125,26 @@ impl tools::ModelCatalog for NoModels {
         '_,
         Result<Vec<agent_protocol::models::ProviderInstance>, String>,
     > {
-        Box::pin(async { Ok(vec![]) })
+        let instance = |driver, name: &str| agent_protocol::models::ProviderInstance {
+            instance: name.to_lowercase(),
+            driver,
+            display_name: name.into(),
+            accent_color: None,
+            enabled: true,
+            installed: true,
+            version: None,
+            status: agent_protocol::models::ProviderStatus::Ready,
+            message: None,
+            unavailable_reason: None,
+            show_interaction_mode_toggle: true,
+            reports_context_window: true,
+            models: vec![],
+        };
+        let providers = vec![
+            instance(agent_domain::Driver::Codex, "Codex"),
+            instance(agent_domain::Driver::Claude, "Claude"),
+        ];
+        Box::pin(async move { Ok(providers) })
     }
 }
 

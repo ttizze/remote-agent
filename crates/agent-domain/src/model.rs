@@ -126,6 +126,8 @@ pub struct Thread {
     pub deleted_at: Option<Timestamp>,
     pub settled: Option<bool>,
     pub settled_at: Option<Timestamp>,
+    /// When the thread last left a settled state.
+    pub unsettled_at: Option<Timestamp>,
     pub snoozed_until: Option<Timestamp>,
     pub pinned_at: Option<Timestamp>,
     pub pin_order: Option<String>,

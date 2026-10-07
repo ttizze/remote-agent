@@ -14,6 +14,26 @@ pub struct PendingBackgroundSummary {
     pub kind: BackgroundKind,
     pub description: String,
 }
+/// How a thread came from its parent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ThreadRelationship {
+    Fork,
+    /// A delegated or provider-spawned child.
+    Subagent,
+}
+/// A pull request linked to a thread. Pull request sync arrives in stage 6;
+/// until then the list is empty.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PullRequestLink {
+    pub host: String,
+    pub repository: String,
+    pub number: u64,
+    pub url: String,
+    /// `manual`, `created`, `agent`, `stack` or `stack-dismissed`.
+    pub source: String,
+    pub linked_at: Timestamp,
+}
 /// Message bodies stay in the thread detail; unread state is derived by
 /// clients from `last_visited_at` and the latest completion.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -26,6 +46,8 @@ pub struct ThreadShell {
     pub interaction_mode: InteractionMode,
     pub workspace: Option<Workspace>,
     pub parent: Option<ThreadId>,
+    #[serde(default)]
+    pub relationship_to_parent: Option<ThreadRelationship>,
     pub fork_boundary: Option<u64>,
     pub imported: bool,
     pub created_by: MessageAuthor,
@@ -36,6 +58,8 @@ pub struct ThreadShell {
     pub deleted_at: Option<Timestamp>,
     pub settled: Option<bool>,
     pub settled_at: Option<Timestamp>,
+    #[serde(default)]
+    pub unsettled_at: Option<Timestamp>,
     pub snoozed_until: Option<Timestamp>,
     pub snoozed_at: Option<Timestamp>,
     pub pinned_at: Option<Timestamp>,
@@ -58,6 +82,8 @@ pub struct ThreadShell {
     pub usage_limit_reset_at: Option<Timestamp>,
     pub limit_recovery: Option<LimitRecovery>,
     pub linked_pull_request: Option<LinkedPullRequest>,
+    #[serde(default)]
+    pub pull_requests: Vec<PullRequestLink>,
     pub pending_request: Option<PendingRequestSummary>,
     pub latest_user_message_at: Option<Timestamp>,
     pub latest_user_authored_message_at: Option<Timestamp>,
@@ -148,6 +174,11 @@ pub fn shell(state: &State) -> Option<ThreadShell> {
         interaction_mode: thread.interaction_mode,
         workspace: thread.workspace.clone(),
         parent: thread.parent.clone(),
+        relationship_to_parent: if state.delegation.is_some() || state.native_parent.is_some() {
+            Some(ThreadRelationship::Subagent)
+        } else {
+            thread.parent.as_ref().map(|_| ThreadRelationship::Fork)
+        },
         fork_boundary: thread.fork_boundary,
         imported: thread.imported,
         created_by: thread.created_by,
@@ -158,6 +189,7 @@ pub fn shell(state: &State) -> Option<ThreadShell> {
         deleted_at: thread.deleted_at.clone(),
         settled: thread.settled,
         settled_at: thread.settled_at.clone(),
+        unsettled_at: thread.unsettled_at.clone(),
         snoozed_until: thread.snoozed_until.clone(),
         snoozed_at: thread.snoozed_at.clone(),
         pinned_at: thread.pinned_at.clone(),
@@ -183,6 +215,7 @@ pub fn shell(state: &State) -> Option<ThreadShell> {
         last_error_class: failure.and_then(|(_, class, _)| class),
         limit_recovery: thread.limit_recovery.clone(),
         linked_pull_request: thread.linked_pull_request.clone(),
+        pull_requests: vec![],
         pending_request: state
             .requests
             .iter()
@@ -382,6 +415,61 @@ mod tests {
         assert_eq!(row.provider_instance_history, ["codex"]);
         assert_eq!(row.item_count, row.visible_item_count);
         assert!(row.latest_user_authored_message_at.is_some());
+    }
+    // Orchestrator.ts thread.settle / thread.unsettle and the automatic
+    // unsettle of a settled thread that gets a message.
+    #[test]
+    fn unsettling_records_when_the_thread_left_settled() {
+        let mut state = thread();
+        let settle = |settled| Command::Settle { settled, at: None };
+        assert_eq!(shell(&state).unwrap().unsettled_at, None);
+        command(&mut state, "settle", settle(true));
+        assert_eq!(shell(&state).unwrap().unsettled_at, None);
+        command(&mut state, "unsettle", settle(false));
+        let unsettled = shell(&state).unwrap().unsettled_at;
+        assert_eq!(unsettled, Some(at()));
+        command(&mut state, "settle-again", settle(true));
+        assert_eq!(shell(&state).unwrap().unsettled_at, None);
+        command(
+            &mut state,
+            "message",
+            send("message", DispatchMode::StartImmediately),
+        );
+        let row = shell(&state).unwrap();
+        assert_eq!((row.settled, row.unsettled_at), (None, Some(at())));
+        assert_eq!(row.relationship_to_parent, None);
+        assert!(row.pull_requests.is_empty());
+    }
+    // threadRelationships.ts lineage: forks and delegated children.
+    #[test]
+    fn rows_name_how_a_thread_came_from_its_parent() {
+        let parent = ThreadId::new("parent").unwrap();
+        let with = |body: FactBody| {
+            let mut state = thread();
+            apply(&mut state, &Fact { at: at(), body }).unwrap();
+            shell(&state).unwrap()
+        };
+        let fork = with(FactBody::ForkAccepted {
+            parent: parent.clone(),
+            boundary: 0,
+            history: vec![],
+            messages: vec![],
+        });
+        assert_eq!(
+            (fork.parent.as_ref(), fork.relationship_to_parent),
+            (Some(&parent), Some(ThreadRelationship::Fork))
+        );
+        let child = with(FactBody::DelegationAccepted {
+            origin: Delegation {
+                parent: parent.clone(),
+                task: NodeId::new("task").unwrap(),
+                message: MessageId::new("message").unwrap(),
+            },
+        });
+        assert_eq!(
+            child.relationship_to_parent,
+            Some(ThreadRelationship::Subagent)
+        );
     }
     #[test]
     fn a_usage_limit_failure_stays_the_presented_run_until_replaced() {

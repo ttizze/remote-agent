@@ -32,6 +32,7 @@ pub(crate) struct ProjectCatalog {
     projects: RwLock<Vec<HostProject>>,
     scripts: RwLock<HashMap<String, Vec<ProjectScript>>>,
     identities: RwLock<HashMap<String, RepositoryIdentity>>,
+    stored: RwLock<HashMap<String, Project>>,
     chats: tokio::sync::OnceCell<bool>,
 }
 
@@ -42,6 +43,7 @@ impl ProjectCatalog {
             projects: RwLock::new(vec![]),
             scripts: RwLock::default(),
             identities: RwLock::default(),
+            stored: RwLock::default(),
             chats: tokio::sync::OnceCell::new(),
         }
     }
@@ -87,7 +89,18 @@ impl ProjectCatalog {
     }
     /// The project as clients see it.
     pub(crate) fn wire(&self, project: HostProject) -> Project {
+        let stored = self
+            .stored
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(&project.id)
+            .cloned()
+            .unwrap_or_default();
         Project {
+            favicon_path: crate::favicon::resolve(Path::new(&project.root))
+                .map(|path| path.to_string_lossy().into_owned()),
+            created_at: stored.created_at,
+            updated_at: stored.updated_at,
             repository_identity: self
                 .identities
                 .read()
@@ -110,6 +123,13 @@ impl ProjectCatalog {
             .unwrap_or_else(|error| error.into_inner()) = stored
             .iter()
             .map(|project| (project.id.clone(), project.scripts.clone()))
+            .collect();
+        *self
+            .stored
+            .write()
+            .unwrap_or_else(|error| error.into_inner()) = stored
+            .iter()
+            .map(|project| (project.id.clone(), project.clone()))
             .collect();
         let mut projects: Vec<HostProject> = stored
             .into_iter()

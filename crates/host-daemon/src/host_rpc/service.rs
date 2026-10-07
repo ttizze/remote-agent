@@ -453,7 +453,7 @@ impl HostRpcService {
                         .shared
                         .projects
                         .store()
-                        .register(Path::new(&params.cwd))
+                        .register(&crate::projects::expand_home(params.cwd.trim()))
                         .await
                         .map_err(|error| Failure::new("project_add_failed", error))?;
                     if let Ok(conversation) = self.conversation() {

@@ -351,12 +351,15 @@ fn environment(
     let mut env: BTreeMap<String, String> =
         base.into_iter().filter(|(key, _)| !blocked(key)).collect();
     for (key, value) in overlay {
-        let value = match (key.as_str(), home) {
-            ("CODEX_HOME" | "CLAUDE_CONFIG_DIR", Some(home)) if value == "~" => {
+        let home_relative = value
+            .strip_prefix("~/")
+            .or_else(|| value.strip_prefix("~\\"));
+        let value = match (key.as_str(), home, home_relative) {
+            ("CODEX_HOME" | "CLAUDE_CONFIG_DIR", Some(home), _) if value == "~" => {
                 home.to_string_lossy().into_owned()
             }
-            ("CODEX_HOME" | "CLAUDE_CONFIG_DIR", Some(home)) if value.starts_with("~/") => {
-                home.join(&value[2..]).to_string_lossy().into_owned()
+            ("CODEX_HOME" | "CLAUDE_CONFIG_DIR", Some(home), Some(rest)) => {
+                home.join(rest).to_string_lossy().into_owned()
             }
             _ => value.clone(),
         };
@@ -899,17 +902,6 @@ impl Terminals {
             .unwrap()
             .values()
             .any(|record| record.running() && record.cwd.starts_with(path))
-    }
-
-    pub(crate) fn running_threads(&self) -> BTreeSet<ThreadId> {
-        self.inner
-            .records
-            .lock()
-            .unwrap()
-            .values()
-            .filter(|record| record.status == TerminalStatus::Running)
-            .map(|record| record.thread.clone())
-            .collect()
     }
 
     pub(crate) async fn shutdown(&self) {

@@ -5,6 +5,7 @@ mod claude;
 mod codex_accounts;
 pub mod conversation;
 mod dictation;
+mod favicon;
 mod git;
 mod host_identity;
 mod host_rpc;

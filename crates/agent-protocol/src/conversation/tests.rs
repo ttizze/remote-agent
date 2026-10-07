@@ -73,6 +73,9 @@ fn project(id: &str) -> Project {
             path: format!("/work/{id}"),
         }],
         scripts: vec![],
+        favicon_path: None,
+        created_at: None,
+        updated_at: None,
     }
 }
 

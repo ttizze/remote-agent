@@ -704,6 +704,7 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
                 deleted_at: None,
                 settled: None,
                 settled_at: None,
+                unsettled_at: None,
                 snoozed_until: None,
                 pinned_at: None,
                 pin_order: None,
@@ -830,6 +831,9 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
         }
         ThreadUnsettled => {
             let t = state.thread.as_mut().ok_or(FoldError::Missing("thread"))?;
+            if t.settled == Some(true) {
+                t.unsettled_at = Some(at.clone());
+            }
             t.settled = None;
             t.settled_at = None;
         }
@@ -864,6 +868,11 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
         }
         ThreadSettled { settled, at } => {
             let t = state.thread.as_mut().ok_or(FoldError::Missing("thread"))?;
+            if *settled {
+                t.unsettled_at = None;
+            } else if t.settled != Some(false) {
+                t.unsettled_at = Some(at.clone());
+            }
             t.settled = Some(*settled);
             t.settled_at = settled.then(|| at.clone());
             if *settled {
@@ -1617,7 +1626,7 @@ pub fn text_chunks(text: &str) -> Vec<&str> {
 }
 /// Version of the folded `State` and `Fact` encodings. Stored snapshots with
 /// another value are rebuilt from facts.
-pub const STATE_FORMAT: u32 = 2;
+pub const STATE_FORMAT: u32 = 3;
 pub fn fold(initial: &State, facts: &[Fact]) -> Result<State, FoldError> {
     let mut state = initial.clone();
     for fact in facts {

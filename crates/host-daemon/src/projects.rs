@@ -76,8 +76,12 @@ impl ProjectStore {
             }
         }
         let id = uuid::Uuid::new_v4().to_string();
+        let now = now();
         projects.push(Project {
             repository_identity: None,
+            favicon_path: None,
+            created_at: Some(now.clone()),
+            updated_at: Some(now),
             id: id.clone(),
             name: name.map(str::to_owned).unwrap_or_else(|| {
                 root.file_name()
@@ -105,8 +109,8 @@ impl ProjectStore {
             Some(index) => index,
             None if rootless => {
                 projects.push(Project {
-                    repository_identity: None,
                     id: id.into(),
+                    created_at: Some(now()),
                     ..Project::default()
                 });
                 projects.len() - 1
@@ -115,6 +119,7 @@ impl ProjectStore {
         };
         if let Some(scripts) = scripts {
             projects[index].scripts = scripts;
+            projects[index].updated_at = Some(now());
         }
         self.save(&projects).await
     }
@@ -133,6 +138,29 @@ impl ProjectStore {
         })
         .await?
     }
+}
+
+fn now() -> agent_domain::Timestamp {
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_millis() as i64);
+    agent_domain::Timestamp::from_millis(millis).expect("the clock is within range")
+}
+
+/// `~`, `~/…` and `~\…` name the home directory.
+pub(crate) fn expand_home(path: &str) -> std::path::PathBuf {
+    let home = || directories::BaseDirs::new().map(|dirs| dirs.home_dir().to_owned());
+    if path == "~" {
+        if let Some(home) = home() {
+            return home;
+        }
+    }
+    if let Some(rest) = path.strip_prefix("~/").or_else(|| path.strip_prefix("~\\"))
+        && let Some(home) = home()
+    {
+        return home.join(rest);
+    }
+    std::path::PathBuf::from(path)
 }
 
 /// Trims the scripts' text fields and rejects empty ones.
@@ -228,6 +256,17 @@ pub(crate) fn claim_thread_folder(
 #[cfg(test)]
 mod tests {
     use super::*;
+    // pathExpansion.ts expandHomePath: `~` alone, `~/` and `~\` only.
+    #[test]
+    fn a_leading_tilde_names_the_home_directory() {
+        let home = directories::BaseDirs::new().unwrap().home_dir().to_owned();
+        assert_eq!(expand_home("~"), home);
+        assert_eq!(expand_home("~/src/app"), home.join("src/app"));
+        assert_eq!(expand_home("~\\src"), home.join("src"));
+        assert_eq!(expand_home("~other/src"), PathBuf::from("~other/src"));
+        assert_eq!(expand_home("/abs/~"), PathBuf::from("/abs/~"));
+    }
+
     #[tokio::test]
     async fn registration_is_durable_and_idempotent() {
         let directory = tempfile::tempdir().unwrap();
@@ -243,6 +282,8 @@ mod tests {
         assert_eq!(projects[0].id, registered);
         assert_eq!(projects[0].name, "project");
         assert_eq!(projects[0].roots[0].path, project.to_str().unwrap());
+        assert!(projects[0].created_at.is_some());
+        assert_eq!(projects[0].created_at, projects[0].updated_at);
         assert!(store.register(Path::new("relative")).await.is_err());
         assert_eq!(
             store.add(&project, Some("Renamed"), vec![]).await.unwrap(),
