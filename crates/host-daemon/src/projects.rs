@@ -6,6 +6,9 @@ use std::{
     sync::Arc,
 };
 
+mod named;
+pub(crate) use named::{Git, NamedProjectError, create_named_project};
+
 /// Whether a registration added the workspace or found it registered.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Registration {
@@ -31,6 +34,11 @@ impl ProjectStore {
     }
     pub(crate) fn chat_directory(&self) -> PathBuf {
         self.path.with_file_name("chats")
+    }
+    /// The folder that holds projects started from just a name, beside the chats
+    /// and away from folders the user organizes by hand.
+    pub(crate) fn named_project_directory(&self) -> PathBuf {
+        self.path.with_file_name("projects")
     }
 
     pub(crate) async fn load(&self) -> anyhow::Result<Vec<Project>> {

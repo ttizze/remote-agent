@@ -91,6 +91,10 @@ fn validate<'a>(attachments: impl IntoIterator<Item = Limits<'a>>) -> Result<()>
     }
     Ok(())
 }
+/// Whether the id names an upload no thread has claimed yet.
+pub(crate) fn is_pending_upload(id: &str) -> bool {
+    id.starts_with("pending-")
+}
 /// `pending-<token>` uploads and `chat-<thread hash>-<token>` claims. Both fit
 /// the attachment ID schema of messages and context records:
 /// `^[a-z0-9_-]{1,128}$`, ignoring case.

@@ -1355,6 +1355,51 @@ async fn agent_tools_delegate_create_queue_and_interrupt_through_the_runtime() {
     host.conversation.shutdown().await;
 }
 
+// OrchestratorMcpToolkit.integration.test.ts: a thread_send repeated with its
+// clientRequestId returns the first run. Here the retry arrives once that run is
+// running, so the same request now resolves to a steer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_retried_thread_send_returns_its_first_run_after_that_run_starts() {
+    let replay = Arc::new(ReplaySpawner {
+        transcript: SIMPLE,
+        spawned: Mutex::new(vec![]),
+    });
+    let host = host_with(Arc::new(HeldCodex), replay).await;
+    let parent: wire::Launched = host
+        .call(launch(&host, "parent", "[hold] parent work"))
+        .await
+        .unwrap();
+    let parent = parent.thread_id;
+    let target: wire::Launched = host
+        .call(launch(&host, "target", "first task"))
+        .await
+        .unwrap();
+    let target = target.thread_id;
+    eventually(&host, &target, |state| {
+        !state.runs.is_empty() && state.runs.iter().all(|run| run.status.terminal())
+    })
+    .await;
+    let send = json!({"threadId": target, "message": "[hold] next task", "clientRequestId": "loop-send-1"});
+    let sent = tool(&host, &parent, "thread_send", send.clone()).await;
+    assert_eq!(sent["delivery"], "started", "{sent}");
+    eventually(&host, &target, running).await;
+
+    let repeated = tool(&host, &parent, "thread_send", send).await;
+
+    assert_eq!(repeated["runId"], sent["runId"], "{repeated}");
+    assert_eq!(repeated["messageId"], sent["messageId"]);
+    assert_eq!(repeated["delivery"], "started");
+    let state = host
+        .conversation
+        .runtime
+        .state(&target)
+        .await
+        .unwrap()
+        .state;
+    assert_eq!(state.runs.len(), 2);
+    host.conversation.shutdown().await;
+}
+
 // Projects carry their repository identity.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn shell_projects_carry_their_repository_identity() {
