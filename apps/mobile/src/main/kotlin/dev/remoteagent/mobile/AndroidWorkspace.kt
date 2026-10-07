@@ -82,7 +82,7 @@ private const val BROWSER_REFRESH_MILLIS = 500L
 
 /** The open thread's files, diff and browser, each as its own screen. */
 @Composable
-internal fun WorkspaceScreen(model: AndroidAppModel, tab: WorkspaceTab) {
+internal fun WorkspaceScreen(model: AndroidAppModel, tab: WorkspaceTab, file: String? = null) {
     if (tab == WorkspaceTab.Diff) {
         ReviewScreen(model)
         return
@@ -90,7 +90,7 @@ internal fun WorkspaceScreen(model: AndroidAppModel, tab: WorkspaceTab) {
     ScreenScaffold(tab.name, onBack = model::back) {
         Column(Modifier.fillMaxSize()) {
             when (tab) {
-                WorkspaceTab.Files -> WorkspaceFiles(model, Modifier.weight(1f))
+                WorkspaceTab.Files -> WorkspaceFiles(model, file, Modifier.weight(1f))
                 WorkspaceTab.Diff -> Unit
                 WorkspaceTab.Browser -> WorkspaceBrowser(model, Modifier.weight(1f))
             }
@@ -101,12 +101,16 @@ internal fun WorkspaceScreen(model: AndroidAppModel, tab: WorkspaceTab) {
 @Composable
 // Declarative native layout; the conversation decisions are supplied by core.
 @Suppress("LongMethod", "CyclomaticComplexMethod")
-private fun WorkspaceFiles(model: AndroidAppModel, modifier: Modifier) {
+private fun WorkspaceFiles(model: AndroidAppModel, file: String?, modifier: Modifier) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    var directory by remember { mutableStateOf(model.snapshot.currentDirectory()) }
+    var directory by remember { mutableStateOf(file?.let { File(it).parent } ?: model.snapshot.currentDirectory()) }
     var path by remember { mutableStateOf(directory) }
-    var selected by remember { mutableStateOf<FileEntry?>(null) }
+    // A linked file opens over its folder.
+    var selected by remember {
+        mutableStateOf(file?.let { FileEntry(File(it).name, it, false, 0uL) })
+    }
+    LaunchedEffect(file) { file?.let { model.perform(Intent.ReadFile(it, false)) } }
     var error by remember { mutableStateOf<String?>(null) }
     var downloading by remember { mutableStateOf<Pair<String, String?>?>(null) }
     val download =

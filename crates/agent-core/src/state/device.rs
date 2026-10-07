@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Settings this device keeps across launches.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Preferences {
     pub timestamp_format: TimestampFormat,
     pub favorite_models: Vec<FavoriteModel>,
@@ -22,6 +22,10 @@ pub struct Preferences {
     pub diff_ignore_whitespace: bool,
     /// The script each project last ran, by project id.
     pub last_run_scripts: BTreeMap<String, String>,
+    /// The terminal's text size in points; `None` keeps the default.
+    pub terminal_font_size: Option<f64>,
+    /// Each model's last chosen options, which a newly picked model takes.
+    pub model_options: crate::view::models::staging::ModelOptionMemory,
 }
 impl Default for Preferences {
     fn default() -> Self {
@@ -32,6 +36,8 @@ impl Default for Preferences {
             working_section: false,
             diff_ignore_whitespace: true,
             last_run_scripts: BTreeMap::new(),
+            terminal_font_size: None,
+            model_options: BTreeMap::new(),
         }
     }
 }

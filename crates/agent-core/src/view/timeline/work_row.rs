@@ -138,7 +138,8 @@ pub struct WorkActivityDetail {
     pub output: Option<String>,
     pub failed_exit_code: Option<i64>,
     pub viewed_image_path: Option<String>,
-    pub shows_question_answer: bool,
+    /// The answered questions with their answers and files.
+    pub question_answer: Option<Vec<crate::view::work_log::user_input::AnswerHistoryQuestion>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

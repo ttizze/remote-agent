@@ -575,3 +575,35 @@ fn does_not_style_app_routes_as_file_links() {
         MarkdownLinkPresentation::Link { href: None }
     );
 }
+
+#[test]
+fn feed_links_open_workspace_files_at_their_line_and_web_pages_outside() {
+    assert_eq!(
+        markdown_link_target("src/main.rs#L20", Some("/work/app")),
+        MarkdownLinkTarget::File {
+            path: "/work/app/src/main.rs".into(),
+            line: Some(20)
+        }
+    );
+    assert_eq!(
+        markdown_link_target("/work/app/lib.rs", Some("/work/app/")),
+        MarkdownLinkTarget::File {
+            path: "/work/app/lib.rs".into(),
+            line: None
+        }
+    );
+    assert_eq!(
+        markdown_link_target("/elsewhere/lib.rs", Some("/work/app")),
+        MarkdownLinkTarget::None
+    );
+    assert_eq!(
+        markdown_link_target("https://example.com/a", Some("/work/app")),
+        MarkdownLinkTarget::Open {
+            url: "https://example.com/a".into()
+        }
+    );
+    assert_eq!(
+        markdown_link_target("/chat/settings", Some("/work/app")),
+        MarkdownLinkTarget::None
+    );
+}

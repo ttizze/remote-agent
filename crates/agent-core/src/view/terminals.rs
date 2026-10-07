@@ -3,6 +3,9 @@ use crate::state::{Snapshot, Terminal, TerminalOutput, TerminalPhase};
 use agent_domain::ThreadId;
 use agent_protocol::operations::thread_terminal_handle_for;
 
+pub mod output_context;
+pub mod text_size;
+
 pub const SETUP_TERMINAL_PREFIX: &str = "setup-";
 const TERMINAL_PREFIX: &str = "term-";
 
@@ -129,7 +132,8 @@ fn setup_label(snapshot: &Snapshot, thread: &ThreadId, script_id: &str) -> Strin
         .map_or_else(|| "Setup".into(), |script| script.name.clone())
 }
 
-fn tab_label(snapshot: &Snapshot, thread: &ThreadId, terminal_id: &str) -> String {
+/// The terminal's name: its setup script, the Host's title or "Terminal N".
+pub fn tab_label(snapshot: &Snapshot, thread: &ThreadId, terminal_id: &str) -> String {
     if let Some(script) = terminal_id.strip_prefix(SETUP_TERMINAL_PREFIX) {
         return setup_label(snapshot, thread, script);
     }

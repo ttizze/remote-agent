@@ -2,6 +2,7 @@ package dev.remoteagent.mobile
 
 import android.content.Context
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.ViewModel
@@ -9,6 +10,7 @@ import dev.remoteagent.core.AgentStore
 import dev.remoteagent.core.BrowserFrame
 import dev.remoteagent.core.BrowserRequest
 import dev.remoteagent.core.Connection
+import dev.remoteagent.core.DictationPreparation
 import dev.remoteagent.core.Intent
 import dev.remoteagent.core.Invitation
 import dev.remoteagent.core.Outcome
@@ -46,6 +48,13 @@ internal sealed interface Route {
 
     data class Thread(val id: String) : Route
 
+    /** "Choose project" before a new task's draft, or to change the draft's project. */
+    data object ChooseProject : Route
+
+    data object AddProject : Route
+
+    data object AddProjectLocal : Route
+
     data object NewTask : Route
 
     data class Terminal(
@@ -55,7 +64,8 @@ internal sealed interface Route {
         val cwd: String? = null,
     ) : Route
 
-    data class Workspace(val tab: WorkspaceTab) : Route
+    /** `file` opens that file of the Files tab. */
+    data class Workspace(val tab: WorkspaceTab, val file: String? = null) : Route
 
     data class Settings(val projectId: String? = null) : Route
 
@@ -206,6 +216,25 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
             else -> Unit
         }
         stack = stack + next
+    }
+
+    /**
+     * A project chosen on "Choose project" (`null` is "No project"): the draft beneath takes it, otherwise the new
+     * task's draft opens on it.
+     */
+    fun chooseProject(projectId: String?) {
+        draftEdits.reset()
+        perform(Intent.NewThread(projectId))
+        val below = stack.getOrNull(stack.size - 2)
+        stack = if (below == Route.NewTask) stack.dropLast(1) else stack + Route.NewTask
+    }
+
+    /** A project added (or found) from "Add project": the new task's draft opens on it in place of the flow. */
+    fun projectAdded(projectId: String) {
+        val flow = setOf(Route.ChooseProject, Route.AddProject, Route.AddProjectLocal, Route.NewTask)
+        draftEdits.reset()
+        perform(Intent.NewThread(projectId))
+        stack = stack.takeWhile { it !in flow } + Route.NewTask
     }
 
     /** Replaces the open thread, as a thread link inside a thread does. */
@@ -491,6 +520,18 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
         val result = block(store)
         if (host != profileId) throw CancellationException("Host changed")
         return result
+    }
+
+    /** Warms the Host's transcription while a recording runs; dropping it cancels. */
+    fun prepareDictation(): DictationPreparation? = owner?.prepareDictation()
+
+    /** Counts the app's moves to the background, which end a dictation. */
+    var backgrounds by mutableIntStateOf(0)
+        private set
+
+    fun background() {
+        backgrounds += 1
+        persist()
     }
 
     suspend fun download(path: String, destination: String) = withStore { it.downloadFile(path, destination) }

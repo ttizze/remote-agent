@@ -407,9 +407,11 @@ impl Owner {
             }
             Reply::ProjectAdded(id) => self.state.selected_project = Some(id),
             Reply::Files(files) => {
-                if matches!(call, Call::ListFiles(request) if workspace.requested_directory.as_ref() == Some(&request.path))
+                if let Call::ListFiles(request) = call
+                    && workspace.requested_directory.as_ref() == Some(&request.path)
                 {
                     workspace.directory = Some(files);
+                    workspace.listed_directory = Some(request.path.clone());
                 }
             }
             Reply::File(file) => {

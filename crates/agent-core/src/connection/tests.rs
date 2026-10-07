@@ -270,6 +270,41 @@ fn lifecycle_previews_show_until_the_shell_confirms_them() {
 }
 
 #[test]
+fn a_drop_on_another_section_changes_the_threads_state_with_its_key() {
+    use crate::view::thread_order::{DropSection, MoveDestination, OrderSection, Placement};
+    let mut owner = owner(Snapshot::default());
+    let other = ThreadId::new("other").unwrap();
+    live_shell(&mut owner, 1, vec![row(&thread_id()), row(&other)]);
+    let drop_on = |section| MoveDestination::Drop {
+        target: None,
+        section: Some(section),
+        placement: Placement::Before,
+    };
+    owner.intent(
+        Intent::MoveThread {
+            thread_id: thread_id().to_string(),
+            section: OrderSection::Active,
+            destination: drop_on(DropSection::Pinned),
+        },
+        oneshot::channel().0,
+    );
+    let shown = owner.state.shell_view().unwrap();
+    let pinned = shown.threads.iter().find(|row| row.id == thread_id()).unwrap();
+    assert!(pinned.pinned_at.is_some());
+    assert!(owner.state.thread_order.is_none());
+    let pending = owner.state.outbox.entries.len();
+    owner.intent(
+        Intent::MoveThread {
+            thread_id: other.to_string(),
+            section: OrderSection::Active,
+            destination: drop_on(DropSection::Settled),
+        },
+        oneshot::channel().0,
+    );
+    assert_eq!(owner.state.outbox.entries.len(), pending + 1);
+}
+
+#[test]
 fn a_rollback_returns_the_rolled_back_message_to_the_composer_after_success_only() {
     for succeeded in [true, false] {
         let mut state = thread_state("Thread");
@@ -1476,6 +1511,7 @@ fn preferences_change_on_the_device_and_survive_a_restart() {
             model: "gpt".into(),
         },
         Intent::SetDiffIgnoreWhitespace { ignore: false },
+        Intent::SetTerminalFontSize { size: 40.0 },
     ] {
         owner.prepare(intent).unwrap();
     }
@@ -1485,6 +1521,108 @@ fn preferences_change_on_the_device_and_survive_a_restart() {
     assert!(restored.preferences.working_section);
     assert!(!restored.preferences.diff_ignore_whitespace);
     assert_eq!(restored.preferences.favorite_models.len(), 1);
+    assert_eq!(restored.terminal_text_size().size, 14.0);
+}
+
+#[test]
+fn a_saved_staged_model_takes_the_options_it_was_last_given() {
+    use crate::view::models::{
+        fixtures::{host_instance, host_model},
+        staging::{StagedModel, remembered_model_options},
+    };
+    let effort = |value: &str| ModelOption {
+        key: "reasoningEffort".into(),
+        value: value.into(),
+    };
+    let mut owner = owner(Snapshot {
+        providers: Some(vec![host_instance(
+            "codex",
+            agent_domain::Driver::Codex,
+            vec![host_model("gpt-a", "A"), host_model("gpt-b", "B")],
+        )]),
+        ..Snapshot::default()
+    });
+    owner
+        .prepare(Intent::SetModel {
+            instance_id: "codex".into(),
+            driver: agent_domain::Driver::Codex,
+            model: "gpt-a".into(),
+            options: vec![],
+        })
+        .unwrap();
+    owner
+        .prepare(Intent::SelectTrait {
+            descriptor_id: "reasoningEffort".into(),
+            choice: "medium".into(),
+        })
+        .unwrap();
+    let memory = &owner.state.preferences.model_options;
+    assert_eq!(
+        remembered_model_options(memory, "codex", "gpt-a"),
+        Some(&vec![effort("medium")])
+    );
+    let staged = StagedModel {
+        instance_id: "codex".into(),
+        driver: agent_domain::Driver::Codex,
+        model: "gpt-b".into(),
+        options: vec![],
+    };
+    owner
+        .prepare(Intent::SaveStagedModel {
+            staged: staged.clone(),
+        })
+        .unwrap();
+    assert_eq!(owner.state.current_draft().model, "gpt-b");
+    assert!(owner.state.current_draft().options.is_empty());
+    owner
+        .prepare(Intent::RememberModelOptions {
+            instance_id: "codex".into(),
+            model: "gpt-a".into(),
+            options: vec![effort("high")],
+        })
+        .unwrap();
+    owner
+        .prepare(Intent::SaveStagedModel {
+            staged: StagedModel {
+                model: "gpt-a".into(),
+                ..staged
+            },
+        })
+        .unwrap();
+    let draft = owner.state.current_draft();
+    assert_eq!(draft.model, "gpt-a");
+    assert_eq!(draft.options, [effort("high")]);
+}
+
+#[test]
+fn attached_terminal_output_joins_the_threads_draft_as_a_context_link() {
+    let mut owner = opened(thread_state("Thread"));
+    let thread = thread_id().to_string();
+    owner
+        .prepare(Intent::EditDraft {
+            text: "see".into(),
+            base_text: None,
+        })
+        .unwrap();
+    let attach = |start, end| Intent::AttachTerminalOutput {
+        thread_id: thread.clone(),
+        terminal_id: "term-2".into(),
+        output: "$ make\nok\n\n".into(),
+        start,
+        end,
+    };
+    assert!(owner.prepare(attach(0, 5)).is_err());
+    owner.prepare(attach(0, 1)).unwrap();
+    let draft = owner.state.current_draft();
+    let record = &draft.context.as_ref().unwrap().records[0].0;
+    assert_eq!(record["kind"], "terminal");
+    assert_eq!(record["text"], "$ make\nok");
+    assert_eq!(record["label"], "Terminal 2 · visible lines 1–2");
+    let id = record["contextId"].as_str().unwrap();
+    assert_eq!(
+        draft.text,
+        format!("see [Terminal 2 · visible lines 1–2](context://v1/terminal/{id}) ")
+    );
 }
 
 #[test]

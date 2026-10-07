@@ -585,6 +585,8 @@ pub struct Workspace {
     pub requested_directory: Option<String>,
     pub requested_file: Option<String>,
     pub directory: Option<crate::models::FileList>,
+    /// The requested path `directory` lists.
+    pub listed_directory: Option<String>,
     pub file: Option<Arc<crate::models::FileContent>>,
     pub file_drafts: BTreeMap<String, Arc<FileDraft>>,
     pub review_generation: u64,
@@ -784,6 +786,17 @@ pub enum Intent {
     SetModel {
         instance_id: String,
         driver: Driver,
+        model: String,
+        options: Vec<ModelOption>,
+    },
+    /// The mobile settings sheet's Save: the staged model with the options
+    /// it was last given, else the staged ones.
+    SaveStagedModel {
+        staged: crate::view::models::staging::StagedModel,
+    },
+    /// Options chosen for a staged model, which it takes when picked again.
+    RememberModelOptions {
+        instance_id: String,
         model: String,
         options: Vec<ModelOption>,
     },
@@ -1013,6 +1026,19 @@ pub enum Intent {
         terminal_id: String,
         cols: u16,
         rows: u16,
+    },
+    /// The terminal text size of this device, in points.
+    SetTerminalFontSize {
+        size: f64,
+    },
+    /// Adds lines `start..=end` (zero-based) of a terminal's captured viewport
+    /// to the thread's draft as context.
+    AttachTerminalOutput {
+        thread_id: String,
+        terminal_id: String,
+        output: String,
+        start: u32,
+        end: u32,
     },
     RunProjectScript {
         thread_id: String,

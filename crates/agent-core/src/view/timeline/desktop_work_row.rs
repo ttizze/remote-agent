@@ -22,7 +22,7 @@ use crate::view::work_log::tool_activity::claude_skill_invocation;
 use crate::view::work_log::tool_catalog::ToolLogo;
 use crate::view::work_log::turn_item::workspace_preparation_retry_run_ids;
 use crate::view::work_log::user_input::{
-    has_question_answer, question_answer_preview, question_text_preview,
+    has_question_answer, question_answer_history, question_answer_preview, question_text_preview,
 };
 use crate::view::work_log::{
     ItemType, SourceActivity, ToolLifecycleStatus, ToolSurface, WorkLogEntry, WorkTone,
@@ -426,7 +426,7 @@ pub fn desktop_work_log_row(
         output: None,
         failed_exit_code: None,
         viewed_image_path: viewed_image_path.clone(),
-        shows_question_answer: answer.is_some(),
+        question_answer: answer.map(question_answer_history),
     };
     if expanded && reasoning {
         panel.reasoning = entry.detail.clone();
@@ -483,7 +483,7 @@ pub fn desktop_work_log_row(
             || panel.full_detail.is_some()
             || panel.output.is_some()
             || panel.viewed_image_path.is_some()
-            || panel.shows_question_answer);
+            || panel.question_answer.is_some());
     WorkLogRow::Activity(Box::new(WorkActivityRow {
         id: entry.id.clone(),
         role: if can_expand {

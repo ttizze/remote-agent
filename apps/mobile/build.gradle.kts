@@ -146,4 +146,6 @@ dependencies {
     implementation("androidx.camera:camera-lifecycle:1.6.1")
     implementation("androidx.camera:camera-view:1.6.1")
     implementation("com.google.mlkit:barcode-scanning:17.3.0")
+    // Project icons may be SVG, which the platform image decoders do not read.
+    implementation("com.caverock:androidsvg-aar:1.4")
 }

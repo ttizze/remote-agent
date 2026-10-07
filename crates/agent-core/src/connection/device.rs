@@ -21,6 +21,7 @@ use crate::{
         models::{
             catalog,
             ordering::toggle_favorite,
+            staging::remember_model_options,
             traits::{TraitChange, select_trait, toggle_trait},
         },
         requests::{
@@ -29,7 +30,10 @@ use crate::{
         },
         sidebar::SidebarThreadDropPlan,
         thread_list::{ordered_section, queued_threads},
-        thread_order::{MoveDestination, OrderSection, PendingThreadOrder, ThreadMovePlanner},
+        thread_order::{
+            DropSection, MoveDestination, OrderSection, PendingThreadOrder, ThreadMovePlanner,
+            thread_drop_lifecycle,
+        },
         thread_summary::ThreadSummary,
         timeline::banners::{
             RecoveryAction, RecoveryToggle, toggle_limit_recovery, usage_limit_recovery,
@@ -130,6 +134,12 @@ impl Owner {
         let mut next = Next::Done;
         if let Some(options) = change.options {
             draft.options = options;
+            remember_model_options(
+                &mut self.state.preferences.model_options,
+                &draft.instance_id,
+                &draft.model,
+                &draft.options,
+            );
             let selection = draft.selection().map_err(invalid)?;
             self.state.default_draft.options = draft.options.clone();
             if let Some(thread) = self.state.selected_thread.clone() {
@@ -327,13 +337,78 @@ impl Owner {
             return Ok(Next::Done);
         }
         let threads = self.summaries();
+        let Some(thread) = threads
+            .iter()
+            .find(|thread| thread.id == moved && thread.archived_at.is_none())
+        else {
+            return Ok(Next::Done);
+        };
+        let id = ThreadId::new(moved).map_err(invalid)?;
+        // A drop names its section; the thread may come from another one.
+        let section = match destination {
+            MoveDestination::Drop {
+                section: Some(DropSection::Settled),
+                ..
+            } => return Ok(Next::Commands(vec![self.lifecycle(id, LifecycleAction::Settle)])),
+            MoveDestination::Drop {
+                section: Some(DropSection::Pinned),
+                ..
+            } => OrderSection::Pinned,
+            MoveDestination::Drop {
+                section: Some(DropSection::Active),
+                ..
+            } => OrderSection::Active,
+            _ => section,
+        };
+        let now = now_ms() as i64;
         let queued = queued_threads(&self.state);
-        let ordered = ordered_section(&threads, section, None, now_ms() as i64, &queued);
+        let ordered = ordered_section(&threads, section, None, now, &queued);
         let Some(assignments) =
             ThreadMovePlanner::new(&ordered, Some(&threads), section).plan(moved, destination)
         else {
             return Ok(Next::Done);
         };
+        let reorder = |assignment: crate::view::thread_sort::OrderAssignment| match section {
+            OrderSection::Pinned => LifecycleAction::ReorderPinned {
+                order: assignment.order_key,
+            },
+            OrderSection::Active => LifecycleAction::ReorderActive {
+                order: assignment.order_key,
+            },
+        };
+        if !ordered.iter().any(|row| row.id == moved) {
+            // Joining the section changes the thread's state before its key.
+            let lifecycle = thread_drop_lifecycle(thread, section, now);
+            let mut actions: Vec<(ThreadId, LifecycleAction)> = vec![];
+            if lifecycle.pin {
+                let order = assignments
+                    .iter()
+                    .find(|assignment| assignment.id == moved)
+                    .map(|assignment| assignment.order_key.clone());
+                actions.push((id.clone(), LifecycleAction::Pin { order }));
+            }
+            for (apply, action) in [
+                (lifecycle.unpin, LifecycleAction::Unpin),
+                (lifecycle.unsettle, LifecycleAction::Unsettle),
+                (lifecycle.unsnooze, LifecycleAction::Unsnooze),
+            ] {
+                if apply {
+                    actions.push((id.clone(), action));
+                }
+            }
+            for assignment in assignments {
+                if lifecycle.pin && assignment.id == moved {
+                    continue;
+                }
+                actions.push((ThreadId::new(assignment.id.clone()).map_err(invalid)?, reorder(assignment)));
+            }
+            return Ok(Next::Commands(
+                actions
+                    .into_iter()
+                    .map(|(thread, action)| self.lifecycle(thread, action))
+                    .collect(),
+            ));
+        }
         let Some(order) =
             PendingThreadOrder::begin(section, &ordered, moved, destination, &assignments)
         else {
@@ -342,18 +417,8 @@ impl Owner {
         let entries = assignments
             .into_iter()
             .map(|assignment| {
-                let thread = ThreadId::new(assignment.id).map_err(invalid)?;
-                Ok(self.lifecycle(
-                    thread,
-                    match section {
-                        OrderSection::Pinned => LifecycleAction::ReorderPinned {
-                            order: assignment.order_key,
-                        },
-                        OrderSection::Active => LifecycleAction::ReorderActive {
-                            order: assignment.order_key,
-                        },
-                    },
-                ))
+                let thread = ThreadId::new(assignment.id.clone()).map_err(invalid)?;
+                Ok(self.lifecycle(thread, reorder(assignment)))
             })
             .collect::<Result<Vec<_>, PeerError>>()?;
         self.state.thread_order = Some(ThreadOrderHold {

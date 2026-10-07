@@ -1,6 +1,7 @@
 //! The conversation views apps render. Each getter calls one `view` function
 //! with the device state the snapshot holds.
 use crate::commands::build::FollowUpBehavior;
+use crate::presentation::markdown::links::MarkdownLinkTarget;
 use crate::state::{DraftAttachment, Snapshot};
 use crate::view::{
     archived::{ArchivedOptions, ArchivedView, archived_view},
@@ -12,13 +13,17 @@ use crate::view::{
         view::ComposerOptions,
     },
     models::{
+        catalog,
         ordering::FavoriteModel,
         picker::{ModelPickerOptions, ModelPickerView, PickerRail, model_picker},
+        staging::{self, StagedModel},
         traits::{TraitsView, traits},
     },
     new_thread::{NewThreadView, new_thread_view},
     projects::{
+        add::{AddProjectTarget, FolderBrowserView, add_project_target, folder_browser},
         import::{ImportToast, SessionImportView, session_import_view},
+        picker::{ProjectPickerView, project_picker},
         scripts::{ProjectScriptsView, project_scripts},
     },
     search::{SearchOptions, SearchView, search_view},
@@ -28,9 +33,18 @@ use crate::view::{
     },
     sidebar::{SidebarOptions, SidebarThreadDropPlan, SidebarView, plan_sidebar_drop, sidebar},
     snooze::{CustomSnoozeInput, SnoozePreset, resolve_custom_snooze, resolve_snooze_presets},
-    terminals::{TerminalTab, TerminalView, terminal_tabs, terminal_view},
+    terminals::{
+        TerminalTab, TerminalView,
+        output_context::TerminalOutputSelection,
+        terminal_tabs, terminal_view,
+        text_size::{TerminalTextSize, terminal_text_size},
+    },
     thread::{ThreadView, ThreadViewOptions, selected_thread_view, thread_view},
-    thread_list::{ThreadListHolds, ThreadListOptions, ThreadListView, thread_list},
+    thread_arrangement::{
+        Arrangement, ArrangementDrop, ArrangementOptions, ThreadArrangementView,
+    },
+    thread_list::{ThreadListHolds, ThreadListOptions, ThreadListView, queued_threads, thread_list},
+    thread_summary::ThreadSummary,
     thread_menu::{ThreadMenuOptions, ThreadMenuView, thread_menu},
     time::TimestampFormat,
     timeline::mobile_follow::LiveFollowEvent,
@@ -345,6 +359,146 @@ impl Snapshot {
             .map(|draft| draft.attachments.clone())
             .unwrap_or_default()
     }
+    /// The terminal's text size and the menu's "Text size" steps.
+    pub fn terminal_text_size(&self) -> TerminalTextSize {
+        terminal_text_size(self.preferences.terminal_font_size)
+    }
+    /// The mobile "Choose project" screen for the search text.
+    pub fn project_picker(&self, query: String) -> ProjectPickerView {
+        project_picker(self, &query)
+    }
+    /// The folders the add-project path field browses; list `directory_path`
+    /// with `Intent::ListFiles` until `listed`.
+    pub fn folder_browser(&self, query: String) -> FolderBrowserView {
+        let listed = self
+            .workspace
+            .listed_directory
+            .as_deref()
+            .zip(self.workspace.directory.as_ref())
+            .map(|(path, list)| (path, list.entries.as_slice()));
+        folder_browser(&query, self.connected, listed)
+    }
+    /// What adding the typed folder does.
+    pub fn add_project_target(&self, raw_path: String) -> AddProjectTarget {
+        add_project_target(self.shell_projects(), &raw_path)
+    }
+    /// The settings sheet's option rows while a model is staged.
+    pub fn staged_model_traits(&self, staged: StagedModel) -> TraitsView {
+        staging::staged_model_traits(&catalog(self), &staged)
+    }
+    /// The staged model after choosing a select option; remember its options
+    /// with `Intent::RememberModelOptions`.
+    pub fn select_staged_trait(
+        &self,
+        staged: StagedModel,
+        descriptor_id: String,
+        choice: String,
+    ) -> StagedModel {
+        staging::select_staged_trait(&catalog(self), staged, &descriptor_id, &choice)
+    }
+    /// The staged model after switching a toggle option.
+    pub fn toggle_staged_trait(
+        &self,
+        staged: StagedModel,
+        descriptor_id: String,
+        on: bool,
+    ) -> StagedModel {
+        staging::toggle_staged_trait(&catalog(self), staged, &descriptor_id, on)
+    }
+    /// Save is possible while the staged model's provider still offers it.
+    pub fn can_save_staged_model(&self, staged: StagedModel) -> bool {
+        staging::can_save_staged_model(&catalog(self), &staged)
+    }
+    /// What tapping `href` in the open thread's feed does.
+    pub fn markdown_link_target(&self, href: String) -> MarkdownLinkTarget {
+        let root = self.cwd();
+        crate::presentation::markdown::links::markdown_link_target(&href, Some(&root))
+    }
+    /// The mobile "Arrange threads" sheet.
+    pub fn thread_arrangement(
+        &self,
+        now_ms: i64,
+        options: ArrangementOptions,
+    ) -> ThreadArrangementView {
+        self.with_arrangement(now_ms, |arrangement| arrangement.view(options))
+    }
+    /// Where dropping `thread_id` before (or `after`) the row `target_key`
+    /// lands; `None` where it does nothing.
+    pub fn thread_arrangement_drop(
+        &self,
+        now_ms: i64,
+        thread_id: String,
+        target_key: String,
+        after: bool,
+    ) -> Option<ArrangementDrop> {
+        self.with_arrangement(now_ms, |arrangement| {
+            arrangement.drop(&thread_id, &target_key, after)
+        })
+    }
+}
+
+impl Snapshot {
+    fn with_arrangement<T>(&self, now_ms: i64, build: impl FnOnce(&Arrangement) -> T) -> T {
+        let threads: Vec<ThreadSummary> = self
+            .shell_view()
+            .map(|shell| shell.threads.iter().map(ThreadSummary::from_shell).collect())
+            .unwrap_or_default();
+        let queued = queued_threads(self);
+        let pending = self
+            .thread_order
+            .as_ref()
+            .and_then(|hold| hold.order.refresh(&threads, now_ms, &queued));
+        let working = self
+            .preferences
+            .working_section
+            .then_some(&self.inbox_returns);
+        build(&Arrangement::new(
+            &threads,
+            now_ms,
+            pending.as_ref(),
+            &queued,
+            working,
+        ))
+    }
+}
+
+/// The staged model's `CatalogSheetOptions.staged_key`.
+#[cfg_attr(feature = "bindings", uniffi::export)]
+pub fn staged_model_key(staged: StagedModel) -> String {
+    staged.key()
+}
+
+/// The staged model after pressing a catalogue model.
+#[cfg_attr(feature = "bindings", uniffi::export)]
+pub fn staged_model_after_press(
+    current: Option<StagedModel>,
+    pressed: StagedModel,
+    pressed_is_applied: bool,
+) -> Option<StagedModel> {
+    staging::staged_model_after_press(current, pressed, pressed_is_applied)
+}
+
+/// The add-project path field's first text: the configured folder, or home.
+#[cfg_attr(feature = "bindings", uniffi::export)]
+pub fn add_project_initial_query(base_directory: Option<String>) -> String {
+    crate::view::projects::add::add_project_initial_query(base_directory.as_deref())
+}
+
+/// The lines of a terminal viewport captured to attach to a draft.
+#[cfg_attr(feature = "bindings", uniffi::export)]
+pub fn visible_terminal_lines(output: String) -> Vec<String> {
+    crate::view::terminals::output_context::visible_terminal_lines(&output)
+}
+
+/// Lines `start..=end` (zero-based) of a captured viewport and whether they
+/// can be attached.
+#[cfg_attr(feature = "bindings", uniffi::export)]
+pub fn terminal_output_selection(
+    lines: Vec<String>,
+    start: u32,
+    end: u32,
+) -> TerminalOutputSelection {
+    crate::view::terminals::output_context::terminal_output_selection(&lines, start, end)
 }
 
 /// How to bring a list showing `previous` rows to `next`.

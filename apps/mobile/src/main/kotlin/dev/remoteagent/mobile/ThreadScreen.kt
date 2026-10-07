@@ -29,6 +29,7 @@ import androidx.compose.material.icons.outlined.ArrowDownward
 import androidx.compose.material.icons.outlined.ChevronRight
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Folder
+import androidx.compose.material.icons.outlined.KeyboardArrowUp
 import androidx.compose.material.icons.outlined.Terminal
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
@@ -68,6 +69,7 @@ import dev.remoteagent.core.ThreadView
 import dev.remoteagent.core.ThreadViewOptions
 import dev.remoteagent.core.TimelineDisclosure
 import dev.remoteagent.core.TimelineLayout
+import dev.remoteagent.core.TimelineRowKind
 import dev.remoteagent.core.WorkingControlView
 import kotlinx.coroutines.launch
 
@@ -273,41 +275,21 @@ private fun Feed(
     onSetupDetails: () -> Unit,
 ) {
     val rows = remember(view.rowsRevision) { view.rows.asReversed() }
-    val reachedStart by remember {
-        derivedStateOf {
-            val last = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
-            last >= listState.layoutInfo.totalItemsCount - 2
-        }
-    }
-    LaunchedEffect(reachedStart, view.history.hasMore, view.history.loading) {
-        if (reachedStart && view.history.hasMore && !view.history.loading) model.perform(Intent.LoadEarlier)
-    }
     LazyColumn(
         Modifier.fillMaxSize().widthIn(max = 960.dp),
         state = listState,
         reverseLayout = true,
         contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 56.dp),
     ) {
-        view.setup.card
-            ?.takeIf { it.showInTimeline }
-            ?.let { card -> item(key = "setup") { SetupCard(card, onSetupDetails) } }
-        items(rows, key = { it.id }) { row -> FeedRow(model, row, now, actions) }
-        if (view.history.loading || view.history.error != null)
-            item(key = "history") {
-                Box(Modifier.fillMaxWidth().padding(12.dp), contentAlignment = Alignment.Center) {
-                    val error = view.history.error
-                    if (error != null)
-                        TextButton(onClick = { model.perform(Intent.LoadEarlier) }) {
-                            Text(error, style = AppTheme.caption, color = AppTheme.colors.dangerForeground)
-                        }
-                    else
-                        CircularProgressIndicator(
-                            Modifier.size(18.dp),
-                            color = AppTheme.colors.iconMuted,
-                            strokeWidth = 2.dp,
-                        )
-                }
-            }
+        // The setup card follows the first user message; the list runs newest first.
+        val setup = view.setup.card?.takeIf { it.showInTimeline }
+        val anchor = rows.indexOfLast { it.kind is TimelineRowKind.UserMessage || it.kind is TimelineRowKind.PendingMessage }
+        rows.forEachIndexed { index, row ->
+            if (setup != null && index == anchor) item(key = "setup") { SetupCard(setup, onSetupDetails) }
+            item(key = row.id) { FeedRow(model, row, now, actions) }
+        }
+        if (view.history.hasMore || view.history.error != null)
+            item(key = "history") { LoadEarlierControl(view, onLoad = { model.perform(Intent.LoadEarlier) }) }
         if (rows.isEmpty() && view.syncStatus != ThreadStatus.LIVE)
             item(key = "loading") {
                 Box(Modifier.fillMaxWidth().padding(32.dp), contentAlignment = Alignment.Center) {
@@ -318,6 +300,46 @@ private fun Feed(
                     )
                 }
             }
+    }
+}
+
+/** "Load earlier activity" above the oldest row, and why the last load failed. */
+@Composable
+private fun LoadEarlierControl(view: ThreadView, onLoad: () -> Unit) {
+    val colors = AppTheme.colors
+    val loading = view.history.loading
+    Column(
+        Modifier.fillMaxWidth().padding(start = 8.dp, end = 8.dp, bottom = 12.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        if (view.history.hasMore)
+            Surface(
+                onClick = onLoad,
+                enabled = !loading,
+                shape = CircleShape,
+                color = colors.card.copy(alpha = 0.8f),
+                border = BorderStroke(1.dp, colors.border.copy(alpha = 0.6f)),
+            ) {
+                Row(
+                    Modifier.heightIn(min = 36.dp).padding(horizontal = 16.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    if (loading)
+                        CircularProgressIndicator(Modifier.size(12.dp), color = colors.primary, strokeWidth = 2.dp)
+                    else Icon(Icons.Outlined.KeyboardArrowUp, null, Modifier.size(12.dp), tint = colors.primary)
+                    Text(
+                        if (loading) "Loading earlier activity…" else "Load earlier activity",
+                        style = AppTheme.footnote,
+                        fontWeight = FontWeight.Medium,
+                        color = colors.foreground,
+                    )
+                }
+            }
+        view.history.error?.let {
+            Text(it, style = AppTheme.caption, color = colors.iconMuted, textAlign = TextAlign.Center)
+        }
     }
 }
 

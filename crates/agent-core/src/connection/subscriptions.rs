@@ -226,6 +226,7 @@ impl Owner {
         workspace.review = None;
         workspace.diff_request = None;
         workspace.directory = None;
+        workspace.listed_directory = None;
         workspace.file = None;
         workspace.requested_directory = None;
         workspace.requested_file = None;

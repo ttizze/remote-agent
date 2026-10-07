@@ -402,6 +402,7 @@ pub fn thread_drag_action(source: DragSection, destination: DragSection) -> Opti
 
 /// How far a row shifts while a lifted row hovers at `insertion_offset`; hit
 /// testing keeps the original layout.
+#[cfg_attr(feature = "bindings", uniffi::export)]
 pub fn drag_gap_offset(
     row_offset: f64,
     source_offset: f64,
