@@ -137,13 +137,78 @@ fn provider_controls(catalog: &ModelCatalog, draft: &Draft) -> ProviderControls 
         known: catalog
             .instance(&draft.instance_id)
             .is_some_and(|instance| instance.picker_ready()),
-        // The Host does not advertise runtime modes or the plan toggle per provider.
+        // The Host does not advertise runtime modes per provider.
         supported_runtime_modes: vec![],
-        shows_interaction_toggle: None,
+        shows_interaction_toggle: catalog
+            .instance(&draft.instance_id)
+            .map(|instance| instance.show_interaction_mode_toggle),
         model_label: catalog
             .models_of(&draft.instance_id)
             .find(|model| model.slug == draft.model)
             .map(|model| model.name.clone()),
+    }
+}
+
+/// "Compact context" in the context meter: offered when the provider has a
+/// `/compact` command for the composer's directory, and disabled while the
+/// thread is busy or has nothing to compact.
+fn compact_control(
+    snapshot: &Snapshot,
+    draft: &Draft,
+    thread: Option<&ThreadComposer<'_>>,
+    busy: bool,
+) -> CompactControl {
+    let available = snapshot
+        .sources
+        .provider_commands(&draft.instance_id, &snapshot.composer_cwd())
+        .is_some_and(|commands| {
+            commands
+                .slash_commands
+                .iter()
+                .any(|command| command.name == "compact")
+        });
+    let compactable = thread.is_some_and(|thread| {
+        thread.state.is_some_and(|state| {
+            crate::view::composer::commands::has_compactable_conversation(
+                state,
+                snapshot
+                    .thread(thread.thread)
+                    .is_some_and(|sync| sync.history.has_more),
+                thread
+                    .shell
+                    .and_then(|shell| shell.latest_user_message_at.as_ref()),
+            )
+        })
+    });
+    let has_project = thread.is_some_and(|thread| {
+        thread
+            .state
+            .and_then(|state| state.thread.as_ref())
+            .is_some_and(|current| {
+                snapshot
+                    .shell_projects()
+                    .iter()
+                    .any(|project| project.id == current.project)
+            })
+    });
+    let disabled = !available
+        || !has_project
+        || !compactable
+        || busy
+        || thread.is_some_and(|thread| thread.preparing_worktree);
+    CompactControl {
+        available,
+        disabled,
+        disabled_reason: disabled.then(|| {
+            if !has_project {
+                "Choose a project before compacting"
+            } else if !available {
+                "Compaction is unavailable for this provider"
+            } else {
+                "Compacting is unavailable right now"
+            }
+            .into()
+        }),
     }
 }
 
@@ -261,10 +326,15 @@ pub(crate) fn assemble(
         is_connecting: false,
         phase: thread.map(|_| session_phase(runtime.as_ref())),
     });
+    let compact = compact_control(
+        snapshot,
+        &draft,
+        thread.as_ref(),
+        is_running || approval_pending || questions.is_some() || plan_follow_up,
+    );
     let context_meter = state.and_then(latest_context_window).map(|usage| {
         let name = context_window_model_display_name(&draft.model, provider.model_label.as_deref());
-        // The Host lists no provider commands, so `/compact` is not offered.
-        context_window_meter(&usage, Some(&name), &CompactControl::default())
+        context_window_meter(&usage, Some(&name), &compact)
     });
     let threads = snapshot
         .shell_view()

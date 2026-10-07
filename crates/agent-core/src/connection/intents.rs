@@ -397,6 +397,7 @@ impl Owner {
                 ])
             }
             Intent::WorkLocally => self.work_locally()?,
+            Intent::CompactContext => self.compact_context()?,
             Intent::SetProjectIcon { project_id, path } => self.set_project_icon(project_id, path),
             Intent::ClearTerminal {
                 thread_id: id,
@@ -837,6 +838,27 @@ impl Owner {
         cleared.context = None;
         self.state.drafts.insert(key, cleared);
         Ok(Next::Commands(vec![entry]))
+    }
+
+    fn compact_context(&mut self) -> Result<Next, PeerError> {
+        let thread = self.selected()?;
+        let selection = self.state.current_draft().selection().map_err(invalid)?;
+        let command = send_command(StartTurn {
+            message: TurnMessage {
+                id: MessageId::new(new_id("message")).map_err(invalid)?,
+                text: "/compact".into(),
+                attachments: vec![],
+                context: None,
+            },
+            selection: Some(selection),
+            title_seed: None,
+            source_plan: None,
+            dispatch: resolve_composer_dispatch_mode(false, false, Some(self.state.follow_up))
+                .into(),
+            continuation: None,
+            creation_source: self.options.creation_source.clone(),
+        });
+        Ok(Next::Commands(vec![self.command(thread, command)]))
     }
 
     fn plan_follow_up(&mut self, new_thread: bool) -> Result<Next, PeerError> {

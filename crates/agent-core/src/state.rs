@@ -779,6 +779,8 @@ pub enum Intent {
     },
     Stop,
     StopSessions,
+    /// Sends `/compact` to the open thread; the draft stays as it is.
+    CompactContext,
     SetModel {
         instance_id: String,
         driver: Driver,
