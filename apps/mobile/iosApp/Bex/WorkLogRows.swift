@@ -11,7 +11,10 @@ struct WorkLogRowView: View {
             ActivityRow(activity: activity, actions: actions)
         case let .providerFailure(failure):
             ProviderFailureView(failure: failure, retry: failure.retryPreparation.map { run in
-                { actions.perform(.retryPreparation(runId: run)) }
+                {
+                    Haptics.selection()
+                    actions.perform(.retryPreparation(runId: run))
+                }
             })
         }
     }
@@ -51,7 +54,7 @@ private struct ActivityRow: View {
             .contentShape(Rectangle())
             .onTapGesture(perform: tap)
             .onLongPressGesture {
-                UIPasteboard.general.string = activity.copyText
+                Haptics.copy(activity.copyText)
                 copied = true
                 Task {
                     try? await Task.sleep(for: .seconds(1.2))
@@ -82,6 +85,7 @@ private struct ActivityRow: View {
         if !activity.expanded, activity.loadDetail {
             actions.perform(.loadItemDetail(itemId: activity.id))
         }
+        Haptics.selection()
         withAnimation(.easeOut(duration: 0.14)) {
             actions.toggle(\.expandedEntries, activity.id)
         }
@@ -160,7 +164,7 @@ private struct ProviderFailureView: View {
                 .padding(.leading, 28).padding(.top, 8)
             }
         }
-        .onLongPressGesture { UIPasteboard.general.string = failure.copyText }
+        .onLongPressGesture { Haptics.copy(failure.copyText) }
     }
 }
 

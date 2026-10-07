@@ -17,6 +17,9 @@ struct SettingsScreen: View {
                             ConnectionsScreen(model: model, close: { dismiss() })
                         }
                     }
+                    SettingsGroup(title: "Interface") {
+                        SettingsLink(symbol: "keyboard", label: "Keyboard") { KeyboardSettingsPage() }
+                    }
                     SettingsGroup(title: "Projects & threads") {
                         SettingsLink(symbol: "text.bubble", label: "Thread behavior") {
                             ConversationSettingsPage(model: model, title: "Thread behavior",
@@ -96,6 +99,74 @@ struct SettingsLink<Destination: View>: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+    }
+}
+
+/// What Return does in the composer on a hardware keyboard.
+enum ComposerEnterBehavior: String, CaseIterable {
+    /// Return sends; Shift-Return inserts a new line.
+    case send
+    /// Return inserts a new line; Command-Return sends.
+    case newline
+
+    static let storageKey = "composer.enterBehavior"
+
+    var label: String {
+        switch self {
+        case .send: "Send message"
+        case .newline: "Insert new line"
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .send: "Return sends the message. Shift-Return inserts a new line."
+        case .newline: "Return inserts a new line. Command-Return sends the message."
+        }
+    }
+}
+
+/// "Keyboard": the Return key's behavior with a hardware keyboard.
+private struct KeyboardSettingsPage: View {
+    @AppStorage(ComposerEnterBehavior.storageKey) private var behavior = ComposerEnterBehavior.send
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                SettingsGroup(title: "Return key") {
+                    ForEach(Array(ComposerEnterBehavior.allCases.enumerated()), id: \.element) { index, option in
+                        Button { behavior = option } label: {
+                            HStack(spacing: 16) {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(option.label).font(AppTheme.font(18)).foregroundStyle(AppTheme.text)
+                                    Text(option.detail).font(AppTheme.font(14)).foregroundStyle(AppTheme.muted)
+                                }
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                if behavior == option {
+                                    Image(systemName: "checkmark").font(.system(size: 18, weight: .semibold))
+                                        .foregroundStyle(AppTheme.text)
+                                }
+                            }
+                            .padding(16)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityAddTraits(behavior == option ? [.isSelected] : [])
+                        .overlay(alignment: .top) {
+                            if index > 0 {
+                                Rectangle().fill(AppTheme.borderSubtle).frame(height: 1)
+                            }
+                        }
+                    }
+                }
+                Text("Applies to the composer when a hardware keyboard is connected.")
+                    .font(AppTheme.font(14)).foregroundStyle(AppTheme.muted).padding(.horizontal, 8)
+            }
+            .padding(.horizontal, 20).padding(.top, 16)
+        }
+        .background(AppTheme.sheet.ignoresSafeArea())
+        .navigationTitle("Keyboard")
+        .navigationBarTitleDisplayMode(.inline)
     }
 }
 

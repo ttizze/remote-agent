@@ -1431,6 +1431,62 @@ fn stamps_queued_outbox_messages_onto_the_matching_row() {
 }
 
 #[test]
+fn names_each_swipe_action_and_what_a_swipe_offers_for_assistive_technologies() {
+    let items = tick_list(&tick_threads(), base(), vec![], Tick::default());
+    let ready = row(&items, "tick-ready");
+    assert_eq!(ready.swipe_primary.accessibility_label, "Settle tick ready");
+    assert_eq!(
+        ready
+            .swipe_secondary
+            .as_ref()
+            .map(|button| button.accessibility_label.as_str()),
+        Some("Choose when to snooze tick ready")
+    );
+    assert_eq!(
+        ready.swipe_hint,
+        "Opens the thread. Swipe left for settle and snooze actions."
+    );
+    let settled = row(&items, "tick-settled");
+    assert_eq!(
+        settled.swipe_primary.accessibility_label,
+        "Un-settle tick settled"
+    );
+    let snoozed = row(&items, "tick-snoozed");
+    assert_eq!(
+        snoozed.swipe_primary.accessibility_label,
+        "Wake tick snoozed now"
+    );
+    assert_eq!(snoozed.swipe_hint, "Opens the thread. Swipe left to wake.");
+}
+
+#[test]
+fn shows_the_last_error_of_failed_and_limited_threads_only() {
+    let failed = |id: &str, class: Option<&str>, status: RuntimeStatus| ThreadSummary {
+        runtime: Some(RuntimeSummary {
+            last_error: Some(format!("{id} error")),
+            last_error_class: class.map(String::from),
+            ..runtime(status)
+        }),
+        ..thread(id, id)
+    };
+    let threads = vec![
+        failed("failed", None, RuntimeStatus::Failed),
+        failed("limited", Some("usage_limit"), RuntimeStatus::Failed),
+        failed("recovered", None, RuntimeStatus::Completed),
+    ];
+    let items = tick_list(&threads, base(), vec![], Tick::default());
+    assert_eq!(
+        row(&items, "failed").error_text.as_deref(),
+        Some("failed error")
+    );
+    assert_eq!(
+        row(&items, "limited").error_text.as_deref(),
+        Some("limited error")
+    );
+    assert_eq!(row(&items, "recovered").error_text, None);
+}
+
+#[test]
 fn stamps_move_availability_on_card_rows_only() {
     let threads = stamp_threads();
     let open_moves = MoveAvailability {

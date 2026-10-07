@@ -1592,6 +1592,103 @@ fn a_stashed_draft_restores_its_text_and_uploaded_files() {
 }
 
 #[test]
+fn a_drop_from_another_section_changes_its_lifecycle_and_takes_its_slot() {
+    use crate::view::thread_order::{DropSection, MoveDestination, OrderSection, Placement};
+    let id = |value: &str| ThreadId::new(value).unwrap();
+    let mut pinned = row(&id("pinned"));
+    pinned.pinned_at = Some(at());
+    let mut settled = row(&id("settled"));
+    settled.settled = Some(true);
+    let mut owner = owner(Snapshot::default());
+    live_shell(&mut owner, 1, vec![pinned, settled, row(&id("active"))]);
+    let sent = |owner: &mut Owner, moved: &str, section: DropSection| {
+        let order = if section == DropSection::Pinned {
+            OrderSection::Pinned
+        } else {
+            OrderSection::Active
+        };
+        commands(
+            owner
+                .prepare(Intent::MoveThread {
+                    thread_id: moved.into(),
+                    section: order,
+                    destination: MoveDestination::Drop {
+                        target: None,
+                        section: Some(section),
+                        placement: Placement::Before,
+                    },
+                })
+                .unwrap(),
+        )
+        .into_iter()
+        .map(|entry| {
+            let Request::Dispatch(dispatch) = entry.request else {
+                panic!("dispatch")
+            };
+            (entry.thread.to_string(), dispatch.command)
+        })
+        .collect::<Vec<_>>()
+    };
+    let unsettled = sent(&mut owner, "settled", DropSection::Active);
+    assert!(matches!(
+        &unsettled[0],
+        (thread, Command::Settle { settled: false, .. }) if thread == "settled"
+    ));
+    assert!(
+        unsettled[1..]
+            .iter()
+            .all(|(_, command)| matches!(command, Command::ReorderActive { .. }))
+    );
+    let pinned = sent(&mut owner, "active", DropSection::Pinned);
+    assert!(matches!(
+        &pinned[0],
+        (thread, Command::Pin { pinned: true, order: Some(_) }) if thread == "active"
+    ));
+    assert!(
+        pinned
+            .iter()
+            .all(|(thread, command)| thread != "active" || matches!(command, Command::Pin { .. }))
+    );
+    let settle = sent(&mut owner, "pinned", DropSection::Settled);
+    assert!(matches!(
+        settle.as_slice(),
+        [(thread, Command::Settle { settled: true, .. })] if thread == "pinned"
+    ));
+}
+
+#[test]
+fn attached_terminal_output_joins_the_draft_as_a_linked_record() {
+    let mut owner = opened(thread_state("Thread"));
+    owner.state.drafts.insert(
+        thread_id().to_string(),
+        Draft {
+            text: "Why does this fail?".into(),
+            ..draft()
+        },
+    );
+    let output = crate::view::terminals::TerminalOutputContext {
+        terminal_id: "term-1".into(),
+        terminal_label: "Terminal 1".into(),
+        line_start: 2,
+        line_end: 4,
+        text: "error[E0308]: mismatched types".into(),
+    };
+    owner
+        .prepare(Intent::AttachTerminalOutput { output })
+        .unwrap();
+    let draft = owner.state.current_draft();
+    let records = &draft.context.as_ref().unwrap().records;
+    assert_eq!(records.len(), 1);
+    let id = records[0].0["contextId"].as_str().unwrap();
+    assert_eq!(
+        draft.text,
+        format!(
+            "Why does this fail? [Terminal 1 · visible lines 2–4](context://v1/terminal/{id}) "
+        )
+    );
+}
+
+#[test]
 fn a_closed_setup_stream_keeps_its_last_snapshot_for_the_card() {
     let mut owner = opened(thread_state("Thread"));
     let setup = agent_domain::WorktreeSetupSnapshot {

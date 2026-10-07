@@ -21,6 +21,7 @@ struct ThreadScreen: View {
     @State private var showingAgents = false
     @State private var showingSettings = false
     @State private var forkingRun: String?
+    @State private var openedFile: FileTarget?
     private let endId = "feed-end"
 
     var body: some View {
@@ -45,6 +46,10 @@ struct ThreadScreen: View {
         .toolbar { header }
         .sheet(isPresented: $showingQueue) { QueueSheet(model: model) }
         .sheet(isPresented: $showingAgents) { AgentsSheet(model: model) }
+        .sheet(item: $openedFile) { ThreadFileSheet(model: model, target: $0) }
+        .environment(\.markdownLinks, MarkdownLinkOpener(
+            workspaceRoot: model.cwd.isEmpty ? nil : model.cwd, openFile: { openedFile = $0 }
+        ))
         .sheet(isPresented: $showingSettings) {
             if let controls = model.threadView?.composer.controls {
                 ThreadSettingsSheet(model: model, controls: controls)
@@ -87,6 +92,7 @@ struct ThreadScreen: View {
                     following = feedLiveFollow(current: following, event: .reset)
                     reader.scrollTo(endId, anchor: .bottom)
                 }
+                .modifier(StreamingHaptics(thread: view.threadId, streaming: view.streamingMessage))
                 .safeAreaInset(edge: .bottom, spacing: 0) {
                     bottom(view) {
                         following = feedLiveFollow(current: following, event: .reset)
@@ -175,6 +181,7 @@ struct ThreadScreen: View {
             perform: { model.perform($0) },
             toggle: { model.toggle($0, $1) },
             fork: { run in
+                Haptics.selection()
                 forkingRun = run
                 model.perform(.fork(sourceThreadId: view.threadId, runId: run)) { result in
                     forkingRun = nil

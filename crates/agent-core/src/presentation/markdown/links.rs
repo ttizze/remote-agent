@@ -518,6 +518,7 @@ macro_rules! file_icons {
     ($($variant:ident => $name:literal,)*) => {
         /// File chip icons, named after the Pierre icon set's assets.
         #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        #[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
         pub enum MarkdownFileIcon { $($variant,)* }
 
         impl MarkdownFileIcon {
@@ -718,6 +719,110 @@ pub fn markdown_inline_code_presentation(content: &str) -> Option<MarkdownFileLi
     match markdown_link_presentation(&inline_code_file_path_candidate(content)?) {
         MarkdownLinkPresentation::File { link } => Some(link),
         _ => None,
+    }
+}
+
+/// A Host path, as the mobile file screen tells workspace files from others.
+pub fn is_absolute_file_path(value: &str) -> bool {
+    value.starts_with('/') || is_windows_absolute_path(value)
+}
+
+fn normalize_relative_path(value: &str) -> Option<String> {
+    let mut segments: Vec<&str> = vec![];
+    for segment in value.split(['/', '\\']) {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                segments.pop()?;
+            }
+            _ => segments.push(segment),
+        }
+    }
+    (!segments.is_empty()).then(|| segments.join("/"))
+}
+
+/// A link target as a path inside the workspace: relative paths normalized,
+/// absolute ones under `workspace_root` made relative; `None` outside it.
+pub fn workspace_file_path(workspace_root: Option<&str>, target: &str) -> Option<String> {
+    if !is_absolute_file_path(target) {
+        if target.starts_with("~/") || target.starts_with("~\\") {
+            return None;
+        }
+        return normalize_relative_path(target);
+    }
+    let root = workspace_root.filter(|root| !root.is_empty())?;
+    let normalized_target = target.replace('\\', "/");
+    let normalized_root = root.replace('\\', "/");
+    let normalized_root = normalized_root.trim_end_matches('/');
+    let case_insensitive = is_windows_absolute_path(target) || is_windows_absolute_path(root);
+    let (comparable_target, comparable_root) = if case_insensitive {
+        (
+            normalized_target.to_lowercase(),
+            normalized_root.to_lowercase(),
+        )
+    } else {
+        (normalized_target.clone(), normalized_root.to_owned())
+    };
+    if !comparable_target.starts_with(&format!("{comparable_root}/")) {
+        return None;
+    }
+    let relative = utf16_skip(&normalized_target, utf16_len(normalized_root) + 1);
+    // `/repo/../x` starts with the root but escapes it.
+    if relative.split('/').any(|segment| segment == "..") {
+        return None;
+    }
+    normalize_relative_path(relative)
+}
+
+/// The file screen's subtitle: the project and the file's folder, or only the
+/// folder of a Host file outside the workspace.
+pub fn file_header_subtitle(project_name: &str, path: &str) -> String {
+    let parent = &path[..path.rfind(['/', '\\']).unwrap_or(0)];
+    if is_absolute_file_path(path) {
+        parent.to_owned()
+    } else {
+        [project_name, parent]
+            .into_iter()
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join(" · ")
+    }
+}
+
+/// What tapping a link in a conversation does.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
+pub enum MarkdownLinkAction {
+    /// A file of the thread's workspace, by its workspace-relative path.
+    WorkspaceFile { path: String, line: Option<u64> },
+    /// A Host file outside the workspace, such as a report in a temp directory.
+    HostFile { path: String, line: Option<u64> },
+    /// Web, mail and phone links open outside the app.
+    External { url: String },
+    /// Nothing the app can open.
+    Nothing,
+}
+
+pub fn markdown_link_action(href: &str, workspace_root: Option<&str>) -> MarkdownLinkAction {
+    match markdown_link_presentation(href) {
+        MarkdownLinkPresentation::File { link } => {
+            match workspace_file_path(workspace_root, &link.path) {
+                Some(path) => MarkdownLinkAction::WorkspaceFile {
+                    path,
+                    line: link.line,
+                },
+                None if is_absolute_file_path(&link.path) => MarkdownLinkAction::HostFile {
+                    path: link.path,
+                    line: link.line,
+                },
+                None => MarkdownLinkAction::Nothing,
+            }
+        }
+        MarkdownLinkPresentation::External { href, .. }
+        | MarkdownLinkPresentation::Link { href: Some(href) } => {
+            MarkdownLinkAction::External { url: href }
+        }
+        MarkdownLinkPresentation::Link { href: None } => MarkdownLinkAction::Nothing,
     }
 }
 

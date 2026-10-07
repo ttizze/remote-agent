@@ -225,6 +225,7 @@ impl Owner {
                 cursor,
                 thread_ids,
             } => self.add_thread_contexts(text, cursor, &thread_ids),
+            Intent::AttachTerminalOutput { output } => self.attach_terminal_output(&output)?,
             Intent::DiscardDraft { draft_key } => {
                 self.discard_draft(draft_key);
                 Next::Done

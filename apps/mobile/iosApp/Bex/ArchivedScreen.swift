@@ -68,6 +68,7 @@ struct ArchivedScreen: View {
         )) {
             if let (row, action) = confirming {
                 Button(action.label, role: .destructive) {
+                    Haptics.light()
                     model.perform(.thread(threadId: row.threadId, action: action.action))
                 }
             }
@@ -81,6 +82,7 @@ struct ArchivedScreen: View {
         if action.confirmation != nil {
             confirming = (row, action)
         } else {
+            Haptics.light()
             model.perform(.thread(threadId: row.threadId, action: action.action))
         }
     }

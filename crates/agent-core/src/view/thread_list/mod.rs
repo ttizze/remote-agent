@@ -434,13 +434,31 @@ fn item(thread: &ThreadSummary, variant: RowVariant, snoozed: bool) -> LayoutIte
 pub struct SwipeButton {
     pub action: SwipeAction,
     pub label: String,
+    /// What the button does to this thread, for assistive technologies.
+    pub accessibility_label: String,
 }
-impl From<SwipeAction> for SwipeButton {
-    fn from(action: SwipeAction) -> Self {
+impl SwipeButton {
+    fn new(action: SwipeAction, title: &str) -> Self {
         Self {
             action,
             label: action.label().into(),
+            accessibility_label: match action {
+                SwipeAction::Settle => format!("Settle {title}"),
+                SwipeAction::Unsettle => format!("Un-settle {title}"),
+                SwipeAction::Snooze => format!("Choose when to snooze {title}"),
+                SwipeAction::Unsnooze => format!("Wake {title} now"),
+            },
         }
+    }
+}
+
+/// The row's accessibility hint, naming what a left swipe offers.
+fn swipe_hint(swipe: &SwipeActions) -> String {
+    let primary = swipe.primary.label().to_lowercase();
+    if swipe.secondary.is_some() {
+        format!("Opens the thread. Swipe left for {primary} and snooze actions.")
+    } else {
+        format!("Opens the thread. Swipe left to {primary}.")
     }
 }
 
@@ -461,6 +479,8 @@ pub struct ThreadRow {
     pub status: ThreadListStatus,
     /// The status word, or "Done" for a completion the user has not opened.
     pub status_label: Option<String>,
+    /// The runtime's last error, under the title of a failed or limited card.
+    pub error_text: Option<String>,
     pub unread: bool,
     /// Blank while a status label or the wake countdown takes its place.
     pub time_label: String,
@@ -476,6 +496,8 @@ pub struct ThreadRow {
     /// Provider instances for the trailing icon stack, back to front.
     pub provider_instances: Vec<String>,
     pub search_snippet: Option<String>,
+    /// The accessibility hint naming what a left swipe offers.
+    pub swipe_hint: String,
     pub swipe_primary: SwipeButton,
     pub swipe_secondary: Option<SwipeButton>,
     /// The "Snooze until" choices of the swipe and the menu; empty when the
@@ -631,6 +653,9 @@ fn thread_row(item: &LayoutItem, input: &ListItemsInput, queued: &BTreeSet<Strin
             .label()
             .or(unread.then_some("Done"))
             .map(String::from),
+        error_text: matches!(status, ThreadListStatus::Failed | ThreadListStatus::Limited)
+            .then(|| thread.runtime.as_ref()?.last_error.clone())
+            .flatten(),
         unread,
         time_label,
         snooze_wake_label,
@@ -641,8 +666,11 @@ fn thread_row(item: &LayoutItem, input: &ListItemsInput, queued: &BTreeSet<Strin
         show_trailing_divider: false,
         provider_instances: thread.provider_stack(),
         search_snippet: None,
-        swipe_primary: swipe.primary.into(),
-        swipe_secondary: swipe.secondary.map(Into::into),
+        swipe_hint: swipe_hint(&swipe),
+        swipe_primary: SwipeButton::new(swipe.primary, &thread.title),
+        swipe_secondary: swipe
+            .secondary
+            .map(|action| SwipeButton::new(action, &thread.title)),
         snooze_options,
         menu,
     }

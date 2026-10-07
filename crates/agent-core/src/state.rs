@@ -847,6 +847,10 @@ pub enum Intent {
         cursor: u32,
         thread_ids: Vec<String>,
     },
+    /// Adds visible terminal lines to the open thread's draft as context.
+    AttachTerminalOutput {
+        output: crate::view::terminals::TerminalOutputContext,
+    },
     /// Drops an unsent draft: a thread's (its id) or a new thread's (`new:<project>`).
     DiscardDraft {
         draft_key: String,

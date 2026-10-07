@@ -41,11 +41,13 @@ struct FeedRowView: View, Equatable {
                 text: message.text, attachments: message.attachments, createdAt: row.createdAt,
                 badge: message.badge, attribution: message.decorations.attribution, actions: actions
             )
+            .modifier(EntryFade(createdAt: row.createdAt, rises: true))
         case let .pendingMessage(message):
             UserBubble(
                 text: message.text, attachments: message.attachments, createdAt: nil,
                 badge: nil, attribution: nil, actions: actions
             )
+            .modifier(EntryFade(createdAt: row.createdAt, rises: true))
         case let .assistantMessage(message):
             VStack(alignment: .leading, spacing: 3.5) {
                 if !message.text.isEmpty {
@@ -59,6 +61,7 @@ struct FeedRowView: View, Equatable {
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
+            .modifier(EntryFade(createdAt: row.createdAt, rises: false))
         case let .assistantMeta(_, meta):
             AssistantMetaRow(meta: meta, createdAt: row.createdAt, forking: forking, fork: actions.fork)
         default:
@@ -83,7 +86,10 @@ private struct WorkFeedRow: View {
         case let .liveWork(_, entry, _, _, _, _):
             WorkLogRowView(row: entry, actions: actions)
         case let .workToggle(toggle):
-            WorkToggleView(toggle: toggle) { actions.toggle(\.expandedWorkGroups, toggle.groupId) }
+            WorkToggleView(toggle: toggle) {
+                Haptics.selection()
+                actions.toggle(\.expandedWorkGroups, toggle.groupId)
+            }
         case .thinking:
             ThinkingRow()
         case .working:
@@ -101,8 +107,11 @@ private struct WorkFeedRow: View {
         case let .lifecycle(lifecycle):
             LifecycleRowView(row: lifecycle, actions: actions)
         case let .subagents(card):
-            SubagentGroupView(card: card, toggle: { actions.toggle(\.expandedWorkGroups, row.id) },
-                              open: actions.openThread)
+            SubagentGroupView(card: card, toggle: {
+                Haptics.selection()
+                actions.toggle(\.expandedWorkGroups, row.id)
+            },
+            open: actions.openThread)
         case let .handoff(divider):
             HandoffRow(divider: divider)
         case let .proposedPlan(plan):
@@ -175,7 +184,7 @@ struct CopyButton: View {
 
     var body: some View {
         Button {
-            UIPasteboard.general.string = text
+            Haptics.copy(text)
             copied = true
             Task {
                 try? await Task.sleep(for: .seconds(1.2))
@@ -254,5 +263,54 @@ struct FoldRowView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+    }
+}
+
+/// A message that appears moments after it was written fades in; a user's
+/// message also rises into place.
+private struct EntryFade: ViewModifier {
+    let rises: Bool
+    @State private var shown: Bool
+
+    init(createdAt: Int64?, rises: Bool) {
+        self.rises = rises
+        let now = Int64(Date().timeIntervalSince1970 * 1000)
+        _shown = State(initialValue: !feedEntryFadesIn(createdAtMs: createdAt, nowMs: now))
+    }
+
+    func body(content: Content) -> some View {
+        content
+            .opacity(shown ? 1 : 0)
+            .offset(y: shown || !rises ? 0 : 25)
+            .onAppear {
+                guard !shown else { return }
+                withAnimation(.easeInOut(duration: 0.22)) { shown = true }
+            }
+    }
+}
+
+/// A selection tick as a response starts streaming into the feed and, at most
+/// every 320 ms, as its text grows.
+struct StreamingHaptics: ViewModifier {
+    let thread: String
+    let streaming: StreamingMessageMark?
+    @State private var last: StreamHaptic?
+
+    func body(content: Content) -> some View {
+        content.onChange(of: Watch(thread: thread, streaming: streaming), initial: true) { _, watch in
+            let next = streamHaptic(
+                previous: last, threadId: watch.thread, streaming: watch.streaming,
+                nowMs: Int64(Date().timeIntervalSince1970 * 1000)
+            )
+            if next.tick {
+                Haptics.selection()
+            }
+            last = next
+        }
+    }
+
+    private struct Watch: Equatable {
+        let thread: String
+        let streaming: StreamingMessageMark?
     }
 }

@@ -14,6 +14,10 @@ struct TerminalScreen: View {
     @AppStorage("terminal.fontSize") private var fontSize = 10.5
     /// The terminal last seen running here, so its exit can leave it.
     @State private var runningTerminal: String?
+    /// The visible lines captured for the attach sheet.
+    @State private var captured: [String]?
+    @State private var noOutput = false
+    @State private var attachError: String?
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
@@ -29,6 +33,15 @@ struct TerminalScreen: View {
             NativeTerminalView(model: model, threadId: threadId, terminal: terminalId,
                                opened: { terminalId = $0 }, keys: keys, fontSize: fontSize)
                 .id(session)
+            if let terminalId {
+                Button { capture(terminalId) } label: {
+                    Text("Attach visible output").font(AppTheme.font(16))
+                        .foregroundStyle(AppTheme.color("terminalForeground"))
+                        .padding(.horizontal, 16).padding(.vertical, 8)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .buttonStyle(.plain)
+            }
             KeyBar(keys: keys) {
                 if let terminalId {
                     model.perform(.clearTerminal(threadId: threadId, terminalId: terminalId))
@@ -36,6 +49,28 @@ struct TerminalScreen: View {
             }
         }
         .onChange(of: currentTab) { _, tab in followExit(tab) }
+        .sheet(isPresented: Binding(get: { captured != nil }, set: {
+            if !$0 {
+                captured = nil
+            }
+        })) {
+            if let captured, let terminalId {
+                TerminalContextSheet(lines: captured, terminalId: terminalId,
+                                     terminalLabel: currentTab?.label ?? "Terminal", attach: attach)
+            }
+        }
+        .alert("No terminal output", isPresented: $noOutput) {} message: {
+            Text("There is no visible output to attach.")
+        }
+        .alert("Too many context items", isPresented: Binding(
+            get: { attachError != nil }, set: {
+                if !$0 {
+                    attachError = nil
+                }
+            }
+        )) {} message: {
+            Text("Remove some context from the draft and try again.")
+        }
         .background(AppTheme.color("terminalBackground").ignoresSafeArea())
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
@@ -87,6 +122,28 @@ struct TerminalScreen: View {
         .accessibilityLabel("Terminal options")
     }
 
+    /// Freezes the visible output for the attach sheet.
+    private func capture(_: String) {
+        UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+        let text = keys.capture?() ?? ""
+        if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            noOutput = true
+        } else {
+            captured = visibleOutputLines(text: text)
+        }
+    }
+
+    /// Adds the chosen lines to the thread's draft and returns to the thread.
+    private func attach(_ output: TerminalOutputContext) {
+        model.perform(.attachTerminalOutput(output: output)) { result in
+            captured = nil
+            switch result {
+            case .success: dismiss()
+            case let .failure(error): attachError = error.localizedDescription
+            }
+        }
+    }
+
     /// The text size one 0.5 pt step away, within 6–14 pt.
     private func stepped(_ direction: Double) -> Double {
         min(14, max(6, fontSize + direction * 0.5))
@@ -127,88 +184,6 @@ struct TerminalScreen: View {
     }
 }
 
-/// Sticky modifiers and keys the software keyboard lacks.
-@MainActor
-final class TerminalKeys: ObservableObject {
-    @Published var control = false
-    @Published var alt = false
-    var send: ((Data) -> Void)?
-    var paste: (() -> Void)?
-
-    func transform(_ bytes: [UInt8]) -> [UInt8] {
-        var output = bytes
-        if control, let first = output.first {
-            output[0] = first & 0x1F
-            control = false
-        }
-        if alt {
-            output.insert(0x1B, at: 0)
-            alt = false
-        }
-        return output
-    }
-}
-
-private struct KeyBar: View {
-    @ObservedObject var keys: TerminalKeys
-    let clear: () -> Void
-
-    var body: some View {
-        ScrollView(.horizontal) {
-            HStack(spacing: 6) {
-                key("esc", [0x1B])
-                toggle("CTRL", $keys.control)
-                toggle("ALT", $keys.alt)
-                key("tab", [0x09])
-                Button("paste") { keys.paste?() }.buttonStyle(KeyStyle(active: false))
-                Button("CLEAR", action: clear).buttonStyle(KeyStyle(active: false))
-                key("↑", [0x1B, 0x5B, 0x41])
-                key("↓", [0x1B, 0x5B, 0x42])
-                key("←", [0x1B, 0x5B, 0x44])
-                key("→", [0x1B, 0x5B, 0x43])
-                key("~", Array("~".utf8))
-                key("|", Array("|".utf8))
-                key("/", Array("/".utf8))
-                key("-", Array("-".utf8))
-                Button {
-                    UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil,
-                                                    for: nil)
-                } label: { Image(systemName: "keyboard.chevron.compact.down") }
-                    .buttonStyle(KeyStyle(active: false))
-                    .accessibilityLabel("Dismiss keyboard")
-            }
-            .padding(.horizontal, 8).padding(.vertical, 4)
-        }
-        .scrollIndicators(.hidden)
-        .frame(minHeight: 52)
-        .overlay(alignment: .top) { Rectangle().fill(AppTheme.border).frame(height: 1) }
-    }
-
-    private func key(_ label: String, _ bytes: [UInt8]) -> some View {
-        Button(label) { keys.send?(Data(keys.transform(bytes))) }
-            .buttonStyle(KeyStyle(active: false))
-    }
-
-    private func toggle(_ label: String, _ value: Binding<Bool>) -> some View {
-        Button(label) { value.wrappedValue.toggle() }
-            .buttonStyle(KeyStyle(active: value.wrappedValue))
-    }
-}
-
-private struct KeyStyle: ButtonStyle {
-    let active: Bool
-
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .font(AppTheme.font(14, weight: .bold))
-            .foregroundStyle(AppTheme.color("terminalForeground"))
-            .padding(.horizontal, 12)
-            .frame(minWidth: 44, minHeight: 38.5)
-            .background(active || configuration.isPressed ? AppTheme.subtleStrong : AppTheme.subtle, in: Capsule())
-            .overlay(Capsule().stroke(AppTheme.border))
-    }
-}
-
 private struct NativeTerminalView: UIViewRepresentable {
     @ObservedObject var model: BexAppViewModel
     let threadId: String
@@ -231,6 +206,11 @@ private struct NativeTerminalView: UIViewRepresentable {
         view.inputAccessoryView = nil
         view.accessibilityIdentifier = "terminal.screen"
         keys.paste = { [weak view] in view?.paste(nil) }
+        keys.capture = { [weak view] in
+            view?.terminalStateSnapshot().visibleRows
+                .map { $0.text.replacingOccurrences(of: "\\s+$", with: "", options: .regularExpression) }
+                .joined(separator: "\n") ?? ""
+        }
         return view
     }
 

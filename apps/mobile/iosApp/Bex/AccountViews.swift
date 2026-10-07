@@ -83,7 +83,7 @@ struct AccountLoginSection: View {
                     Text(login.userCode).font(.title2.monospaced()).textSelection(.enabled)
                         .accessibilityIdentifier("model.login.code")
                     Spacer()
-                    Button("コピー") { UIPasteboard.general.string = login.userCode }
+                    Button("コピー") { Haptics.copy(login.userCode) }
                 }
             }
             if let url = URL(string: login.verificationUrl), url.scheme == "https" {

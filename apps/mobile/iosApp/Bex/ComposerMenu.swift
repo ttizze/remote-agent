@@ -13,7 +13,7 @@ struct CommandPopover: View {
         if let trigger = menu.trigger, !menu.items.isEmpty || trigger.kind == .pullRequest {
             VStack(alignment: .leading, spacing: 0) {
                 if let header = trigger.kind.header {
-                    Text(header.uppercased()).font(AppTheme.font(10, weight: .bold)).tracking(0.8)
+                    Text(header.uppercased()).font(AppTheme.font(11, weight: .bold)).tracking(0.8)
                         .foregroundStyle(AppTheme.muted)
                         .padding(.horizontal, 14).padding(.top, 10).padding(.bottom, 4)
                 }
@@ -54,9 +54,7 @@ private struct CommandRow: View {
 
     var body: some View {
         HStack(spacing: 10) {
-            Image(systemName: item.skillSource?.symbol ?? item.target.symbol)
-                .font(.system(size: item.target.isPath ? 16 : 14))
-                .foregroundStyle(AppTheme.muted)
+            icon
             label.font(AppTheme.font(16, weight: .medium)).foregroundStyle(AppTheme.text).lineLimit(1)
                 .layoutPriority(1)
             if !item.description.isEmpty {
@@ -68,6 +66,17 @@ private struct CommandRow: View {
         }
         .padding(.horizontal, 14).padding(.vertical, 10)
         .contentShape(Rectangle())
+    }
+
+    @ViewBuilder
+    private var icon: some View {
+        if let fileIcon = item.fileIcon {
+            FileIconImage(icon: fileIcon, size: 16)
+        } else {
+            Image(systemName: item.skillSource?.symbol ?? item.target.symbol)
+                .font(.system(size: item.target.isPath ? 16 : 14))
+                .foregroundStyle(AppTheme.tertiary)
+        }
     }
 
     private var label: Text {
@@ -107,8 +116,7 @@ extension ComposerCommandTarget {
         switch self {
         case .builtIn, .providerCommand: "terminal"
         case .skill: "square.grid.2x2"
-        case .path(_, directory: true): "folder"
-        case .path: "doc"
+        case .path: "folder"
         case .thread: "text.bubble"
         }
     }
@@ -118,5 +126,18 @@ extension ComposerCommandTarget {
             return true
         }
         return false
+    }
+}
+
+/// A file type's icon from the bundled Pierre set.
+struct FileIconImage: View {
+    let icon: MarkdownFileIcon
+    var size: CGFloat = 16
+
+    var body: some View {
+        // The generated cases read as the asset names (`typescript`, `cpp`, …).
+        Image("pierre_\(String(describing: icon))").resizable().scaledToFit()
+            .frame(width: size, height: size)
+            .accessibilityHidden(true)
     }
 }

@@ -21,6 +21,7 @@ use crate::view::terminals::{TerminalTab, terminal_tabs};
 use crate::view::timeline::banners::{
     ThreadErrorBanner, UsageLimitRecovery, thread_error_banner, usage_limit_recovery,
 };
+use crate::view::timeline::mobile_follow::{StreamingMessageMark, latest_streaming_message};
 use crate::view::timeline::rows::{
     ChangedFilesExpansion, TimelineLayout, TimelineOptions, TimelineRow, TimelineSource,
 };
@@ -84,6 +85,8 @@ pub struct ThreadView {
     pub rows: Vec<TimelineRow>,
     /// Advances whenever `rows` change; equal revisions mean equal rows.
     pub rows_revision: u64,
+    /// The response streaming into the feed, for its haptic ticks.
+    pub streaming_message: Option<StreamingMessageMark>,
     pub history: ThreadHistoryView,
     pub composer: ComposerView,
     pub queue: Option<QueueView>,
@@ -289,6 +292,7 @@ pub fn thread_view(
         header: snapshot_thread_header(snapshot, thread, &options.panels),
         rows: timeline.rows.as_ref().clone(),
         rows_revision: timeline.revision,
+        streaming_message: latest_streaming_message(&timeline.rows),
         history: ThreadHistoryView {
             has_more: sync.history.has_more,
             loading: sync.history.loading,

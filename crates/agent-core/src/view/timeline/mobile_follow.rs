@@ -1,5 +1,6 @@
 //! When the mobile feed and its tool groups follow new content, and where a
 //! re-rendered tool group resumes scrolling.
+use super::rows::{TimelineRow, TimelineRowKind};
 use agent_domain::MessageId;
 
 /// Where a tool group's scrolling stood: its visible row and the offset in it.
@@ -121,10 +122,143 @@ pub fn feed_live_follow(current: bool, event: LiveFollowEvent) -> bool {
     }
 }
 
+/// How long after it was written a message still fades in when it appears.
+const FRESH_ENTRY_WINDOW_MS: i64 = 3_000;
+
+/// A message the feed shows within moments of its creation fades in; older
+/// ones, such as history loaded on opening a thread, appear at once.
+pub fn feed_entry_fades_in(created_at_ms: Option<i64>, now_ms: i64) -> bool {
+    created_at_ms.is_some_and(|created| now_ms - created < FRESH_ENTRY_WINDOW_MS)
+}
+
+/// The newest streaming response and how much of its text has arrived.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct StreamingMessageMark {
+    pub message_id: String,
+    pub text_length: u64,
+}
+
+/// The last assistant message of the feed that is still streaming.
+pub fn latest_streaming_message(rows: &[TimelineRow]) -> Option<StreamingMessageMark> {
+    rows.iter().rev().find_map(|row| match &row.kind {
+        TimelineRowKind::AssistantMessage(message) if message.streaming => {
+            Some(StreamingMessageMark {
+                message_id: message.message.to_string(),
+                text_length: message.text.len() as u64,
+            })
+        }
+        _ => None,
+    })
+}
+
+/// Growing text ticks at most this often; a new response always ticks.
+const STREAM_HAPTIC_INTERVAL_MS: i64 = 320;
+
+/// What the feed's streaming haptic last saw, and whether this step ticks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct StreamHaptic {
+    pub thread_id: String,
+    pub streaming: Option<StreamingMessageMark>,
+    pub last_tick_ms: Option<i64>,
+    pub tick: bool,
+}
+
+/// A selection tick when a response starts streaming or its text grows. The
+/// first look at a thread only records what is already streaming.
+pub fn stream_haptic(
+    previous: Option<StreamHaptic>,
+    thread_id: &str,
+    streaming: Option<StreamingMessageMark>,
+    now_ms: i64,
+) -> StreamHaptic {
+    let last_tick_ms = previous.as_ref().and_then(|seen| seen.last_tick_ms);
+    let mut next = StreamHaptic {
+        thread_id: thread_id.to_owned(),
+        streaming: streaming.clone(),
+        last_tick_ms,
+        tick: false,
+    };
+    let Some(previous) = previous.filter(|seen| seen.thread_id == thread_id) else {
+        return next;
+    };
+    let Some(latest) = streaming else {
+        return next;
+    };
+    let new_stream = previous
+        .streaming
+        .as_ref()
+        .is_none_or(|seen| seen.message_id != latest.message_id);
+    let grew = previous.streaming.as_ref().is_some_and(|seen| {
+        seen.message_id == latest.message_id && latest.text_length > seen.text_length
+    });
+    let throttled = last_tick_ms.is_some_and(|at| now_ms - at < STREAM_HAPTIC_INTERVAL_MS);
+    if new_stream || (grew && !throttled) {
+        next.tick = true;
+        next.last_tick_ms = Some(now_ms);
+    }
+    next
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use rstest::rstest;
+
+    fn mark(id: &str, length: u64) -> Option<StreamingMessageMark> {
+        Some(StreamingMessageMark {
+            message_id: id.into(),
+            text_length: length,
+        })
+    }
+
+    #[test]
+    fn the_first_look_at_a_thread_records_its_stream_without_a_tick() {
+        let first = stream_haptic(None, "t1", mark("m1", 10), 1_000);
+        assert!(!first.tick);
+        let other_thread = stream_haptic(Some(first), "t2", mark("m2", 5), 1_100);
+        assert!(!other_thread.tick);
+        assert_eq!(other_thread.streaming, mark("m2", 5));
+    }
+
+    #[test]
+    fn a_new_response_ticks_and_growing_text_ticks_at_most_every_320_ms() {
+        let seen = stream_haptic(None, "t1", None, 0);
+        let started = stream_haptic(Some(seen), "t1", mark("m1", 1), 1_000);
+        assert!(started.tick);
+        let soon = stream_haptic(Some(started), "t1", mark("m1", 2), 1_200);
+        assert!(!soon.tick);
+        assert_eq!(soon.last_tick_ms, Some(1_000));
+        let later = stream_haptic(Some(soon), "t1", mark("m1", 3), 1_320);
+        assert!(later.tick);
+        let still = stream_haptic(Some(later.clone()), "t1", mark("m1", 3), 2_000);
+        assert!(!still.tick);
+        let next_response = stream_haptic(Some(later), "t1", mark("m2", 1), 1_330);
+        assert!(next_response.tick);
+    }
+
+    #[test]
+    fn a_finished_stream_forgets_its_message() {
+        let seen = stream_haptic(None, "t1", mark("m1", 4), 0);
+        let done = stream_haptic(Some(seen), "t1", None, 500);
+        assert!(!done.tick);
+        assert_eq!(done.streaming, None);
+        assert!(stream_haptic(Some(done), "t1", mark("m1", 5), 600).tick);
+    }
+
+    #[rstest]
+    #[case::just_written(Some(10_000), 10_500, true)]
+    #[case::at_the_window_edge(Some(10_000), 12_999, true)]
+    #[case::past_the_window(Some(10_000), 13_000, false)]
+    #[case::without_a_time(None, 10_000, false)]
+    fn only_messages_written_moments_ago_fade_in(
+        #[case] created_at_ms: Option<i64>,
+        #[case] now_ms: i64,
+        #[case] expected: bool,
+    ) {
+        assert_eq!(feed_entry_fades_in(created_at_ms, now_ms), expected);
+    }
 
     fn ids(ids: &[&str]) -> Vec<String> {
         ids.iter().map(|id| (*id).to_owned()).collect()
