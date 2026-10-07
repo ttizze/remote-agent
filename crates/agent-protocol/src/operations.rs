@@ -245,6 +245,46 @@ impl StartTerminal {
     }
 }
 
+/// Clears a thread's terminal: its history and every attached screen.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClearTerminal {
+    pub thread: agent_domain::ThreadId,
+    pub terminal_id: String,
+}
+impl ClearTerminal {
+    pub fn handle(&self) -> String {
+        thread_terminal_handle_for(self.thread.as_str(), &self.terminal_id)
+    }
+}
+
+/// Starts a thread's terminal again in `cwd` with an empty history, stopping
+/// its shell when one runs; opens the terminal when it does not exist.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RestartTerminal {
+    pub thread: agent_domain::ThreadId,
+    pub terminal_id: String,
+    pub cwd: String,
+    pub worktree_path: Option<String>,
+    pub size: TerminalSize,
+    /// Variables added to the shell's environment.
+    pub env: std::collections::BTreeMap<String, String>,
+}
+impl RestartTerminal {
+    pub fn handle(&self) -> String {
+        thread_terminal_handle_for(self.thread.as_str(), &self.terminal_id)
+    }
+    pub fn validate(&self) -> Result<(), String> {
+        validate_terminal_id(&self.terminal_id)?;
+        validate_terminal_env(&self.env)?;
+        if self.cwd.trim().is_empty() {
+            return Err("terminal directory is empty".into());
+        }
+        self.size.validate()
+    }
+}
+
 pub fn validate_terminal_id(terminal_id: &str) -> Result<(), String> {
     if terminal_id.trim().is_empty()
         || terminal_id.trim() != terminal_id
@@ -397,6 +437,8 @@ pub struct TerminalWrite {
 #[serde(rename_all = "camelCase")]
 pub struct TerminalKill {
     pub process_handle: String,
+    /// Also deletes the terminal's history.
+    pub delete_history: bool,
 }
 /// Shared xterm palette, also used for Host-owned terminal-query replies.
 pub fn terminal_color(index: u16) -> u32 {
@@ -473,4 +515,72 @@ pub fn terminal_handle(cwd: &str) -> String {
         "bex-terminal-{}",
         uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, cwd.as_bytes())
     )
+}
+
+#[cfg(test)]
+mod terminal_tests {
+    use super::*;
+    use crate::protocol::Call;
+    use serde_json::json;
+
+    // contracts/terminal.ts TerminalClearInput, TerminalRestartInput and the
+    // deleteHistory flag of TerminalCloseInput.
+    #[test]
+    fn clear_restart_and_kill_requests_keep_their_wire_shape() {
+        let thread = agent_domain::ThreadId::new("thread-1").unwrap();
+        let clear = ClearTerminal {
+            thread: thread.clone(),
+            terminal_id: "term-1".into(),
+        };
+        assert_eq!(
+            serde_json::to_value(&clear).unwrap(),
+            json!({"thread": "thread-1", "terminalId": "term-1"})
+        );
+        assert_eq!(clear.handle(), "terminal:thread-1:term-1");
+        assert_eq!(Call::ClearTerminal(clear).method(), "host/terminal/clear");
+        let restart = RestartTerminal {
+            thread,
+            terminal_id: "term-1".into(),
+            cwd: " /work ".into(),
+            worktree_path: None,
+            size: TerminalSize { cols: 80, rows: 24 },
+            env: std::collections::BTreeMap::new(),
+        };
+        assert_eq!(
+            serde_json::to_value(&restart).unwrap(),
+            json!({
+                "thread": "thread-1", "terminalId": "term-1", "cwd": " /work ",
+                "worktreePath": null, "size": {"cols": 80, "rows": 24}, "env": {},
+            })
+        );
+        assert!(restart.validate().is_ok());
+        for invalid in [
+            RestartTerminal {
+                cwd: "  ".into(),
+                ..restart.clone()
+            },
+            RestartTerminal {
+                terminal_id: String::new(),
+                ..restart.clone()
+            },
+            RestartTerminal {
+                size: TerminalSize { cols: 0, rows: 24 },
+                ..restart.clone()
+            },
+        ] {
+            assert!(invalid.validate().is_err(), "{invalid:?}");
+        }
+        assert_eq!(
+            Call::RestartTerminal(restart).method(),
+            "host/terminal/restart"
+        );
+        assert_eq!(
+            serde_json::to_value(TerminalKill {
+                process_handle: "terminal:thread-1:term-1".into(),
+                delete_history: true,
+            })
+            .unwrap(),
+            json!({"processHandle": "terminal:thread-1:term-1", "deleteHistory": true})
+        );
+    }
 }

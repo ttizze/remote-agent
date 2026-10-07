@@ -1,14 +1,15 @@
 //! Thread-owned PTYs, kept across transport disconnects. Any paired device may
 //! attach and every attached session receives the output; the Host itself opens
 //! terminals for setup scripts. The private supervisor pipe carries terminal I/O;
-//! only this owner publishes events.
+//! only this owner publishes events. Each terminal's screen is kept in a history
+//! file, so a terminal opened again after a Host restart shows it.
 use crate::host_rpc::connections::{Connections, SessionId};
 use agent_domain::{ThreadId, Timestamp};
 use agent_protocol::{
     models::Empty,
     operations::{
-        StartTerminal, TerminalMetadataEvent, TerminalSize, TerminalStatus, TerminalSummary,
-        terminal_label, thread_terminal_handle_for,
+        ClearTerminal, RestartTerminal, StartTerminal, TerminalMetadataEvent, TerminalSize,
+        TerminalStatus, TerminalSummary, terminal_label, thread_terminal_handle_for,
     },
     protocol::{Call, Notification},
 };
@@ -40,6 +41,12 @@ const DEFAULT_SIZE: TerminalSize = TerminalSize {
     cols: 120,
     rows: 30,
 };
+/// Lines a terminal keeps above its screen.
+const SCROLLBACK_LINES: usize = 5_000;
+/// Output is written to the history file at most this often.
+const PERSIST_DELAY: Duration = Duration::from_millis(40);
+/// A kept screen larger than one frame cannot be restored.
+const MAX_HISTORY_BYTES: usize = agent_protocol::protocol::MAX_FRAME_BYTES;
 /// Host variables a user's shell must not inherit.
 const ENV_BLOCKLIST: [&str; 3] = ["PORT", "ELECTRON_RENDERER_PORT", "ELECTRON_RUN_AS_NODE"];
 const APP_ENV_PREFIXES: [&str; 2] = ["BEX_", "VITE_"];
@@ -73,6 +80,120 @@ impl alacritty_terminal::grid::Dimensions for Dimensions {
     }
 }
 
+fn new_screen(size: TerminalSize, replies: &Replies) -> alacritty_terminal::Term<Replies> {
+    let config = alacritty_terminal::term::Config {
+        scrolling_history: SCROLLBACK_LINES,
+        ..Default::default()
+    };
+    alacritty_terminal::Term::new(config, &Dimensions(size), replies.clone())
+}
+
+/// What an empty terminal of this size shows.
+fn blank_screen(size: TerminalSize) -> Vec<u8> {
+    new_screen(size, &Replies::default()).ansi_checkpoint(None)
+}
+
+/// The history files, one per thread terminal, named from both IDs.
+#[derive(Clone)]
+struct HistoryFiles(PathBuf);
+impl HistoryFiles {
+    fn encoded(text: &str) -> String {
+        use base64::Engine;
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(text)
+    }
+    fn path(&self, thread: &ThreadId, terminal_id: &str) -> PathBuf {
+        self.0.join(format!(
+            "{}.{}.log",
+            Self::encoded(thread.as_str()),
+            Self::encoded(terminal_id)
+        ))
+    }
+    /// The kept screen; nothing when there is none or it cannot be restored.
+    async fn read(path: PathBuf) -> Vec<u8> {
+        tokio::task::spawn_blocking(move || {
+            use std::io::Read;
+            let file = match std::fs::File::open(&path) {
+                Ok(file) => file,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return vec![],
+                Err(error) => {
+                    tracing::warn!(operation = "host.terminal.history", message = %error);
+                    return vec![];
+                }
+            };
+            let mut data = vec![];
+            if let Err(error) = file
+                .take(MAX_HISTORY_BYTES as u64 + 1)
+                .read_to_end(&mut data)
+            {
+                tracing::warn!(operation = "host.terminal.history", message = %error);
+                return vec![];
+            }
+            if data.len() > MAX_HISTORY_BYTES {
+                return vec![];
+            }
+            data
+        })
+        .await
+        .unwrap_or_default()
+    }
+    async fn delete(path: PathBuf) {
+        let _ = tokio::task::spawn_blocking(move || {
+            if let Err(error) = std::fs::remove_file(&path)
+                && error.kind() != std::io::ErrorKind::NotFound
+            {
+                tracing::warn!(operation = "host.terminal.history", message = %error);
+            }
+        })
+        .await;
+    }
+    /// Deletes the history of every terminal the thread had.
+    async fn delete_thread(&self, thread: &ThreadId) {
+        let (directory, prefix) = (
+            self.0.clone(),
+            format!("{}.", Self::encoded(thread.as_str())),
+        );
+        let _ = tokio::task::spawn_blocking(move || {
+            let Ok(entries) = std::fs::read_dir(&directory) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                if entry.file_name().to_string_lossy().starts_with(&prefix)
+                    && let Err(error) = std::fs::remove_file(entry.path())
+                {
+                    tracing::warn!(operation = "host.terminal.history", message = %error);
+                }
+            }
+        })
+        .await;
+    }
+}
+
+/// Writes one terminal's screen to its history file, a write at a time.
+struct Saver {
+    path: PathBuf,
+    writing: Option<tokio::task::JoinHandle<()>>,
+}
+impl Saver {
+    async fn save(&mut self, data: Vec<u8>) {
+        if let Some(writing) = self.writing.take() {
+            let _ = writing.await;
+        }
+        let path = self.path.clone();
+        self.writing = Some(tokio::task::spawn_blocking(move || {
+            if let Err(error) = crate::platform::save_private_bytes(&path, &data) {
+                tracing::warn!(operation = "host.terminal.history", message = %error);
+            }
+        }));
+    }
+    /// Writes `data` and waits until it is on disk.
+    async fn flush(&mut self, data: Vec<u8>) {
+        self.save(data).await;
+        if let Some(writing) = self.writing.take() {
+            let _ = writing.await;
+        }
+    }
+}
+
 /// A terminal the Host opens for itself, such as a setup script's.
 pub(crate) struct OpenTerminal {
     pub(crate) thread: ThreadId,
@@ -100,6 +221,7 @@ enum Action {
     Write(Vec<u8>),
     Resize(TerminalSize),
     Attach(SessionId, TerminalSize),
+    Clear,
 }
 
 /// Delivery shared by every process a terminal runs over its lifetime.
@@ -159,6 +281,7 @@ struct Record {
     /// The last screen of a terminal that is not running.
     screen: Vec<u8>,
     failure: Option<String>,
+    history: PathBuf,
 }
 impl Record {
     fn summary(&self) -> TerminalSummary {
@@ -188,6 +311,24 @@ impl Record {
     fn touch(&mut self) {
         self.updated_at = now();
     }
+    /// Stops the shell and forgets the launch context and screen; the caller
+    /// waits for the returned process to finish.
+    fn reset(
+        &mut self,
+        cwd: PathBuf,
+        worktree_path: Option<String>,
+        env: BTreeMap<String, String>,
+    ) -> Option<watch::Receiver<Option<Result<(), String>>>> {
+        let stopping = self.process.take().map(|process| {
+            process.stop.cancel();
+            process.finished
+        });
+        self.cwd = cwd;
+        self.worktree_path = worktree_path;
+        self.env = env;
+        self.screen.clear();
+        stopping
+    }
 }
 
 fn now() -> Timestamp {
@@ -207,6 +348,7 @@ struct Inner {
     poll_interval: Duration,
     poller: OnceLock<tokio_util::task::AbortOnDropHandle<()>>,
     generation: AtomicU64,
+    history: HistoryFiles,
 }
 impl Inner {
     fn upsert(&self, record: &Record) {
@@ -269,6 +411,7 @@ impl Inner {
         Self::evict(&mut records);
     }
     /// Keeps the newest inactive terminals; older ones go without an event.
+    /// Their history stays.
     fn evict(records: &mut HashMap<String, Record>) {
         let mut inactive: Vec<(Timestamp, String)> = records
             .iter()
@@ -370,26 +513,38 @@ fn environment(
     env
 }
 
+/// The terminal's working directory, which must exist as a directory.
 async fn directory(cwd: &str) -> Result<PathBuf, String> {
-    let resolved = tokio::fs::canonicalize(cwd)
-        .await
-        .map_err(|_| format!("Terminal cwd does not exist: {cwd}"))?;
-    let resolved = dunce::simplified(&resolved).to_owned();
-    if !resolved.is_dir() {
+    let metadata = match tokio::fs::metadata(cwd).await {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(format!("Terminal cwd does not exist: {cwd}"));
+        }
+        Err(_) => return Err(format!("Failed to access terminal cwd: {cwd}")),
+    };
+    if !metadata.is_dir() {
         return Err(format!("Terminal cwd is not a directory: {cwd}"));
     }
-    Ok(resolved)
+    let resolved = tokio::fs::canonicalize(cwd)
+        .await
+        .map_err(|_| format!("Failed to access terminal cwd: {cwd}"))?;
+    Ok(dunce::simplified(&resolved).to_owned())
+}
+
+fn unknown(thread: &ThreadId, terminal_id: &str) -> String {
+    format!("Unknown terminal thread: {thread}, terminal: {terminal_id}")
 }
 
 impl Terminals {
-    pub(crate) fn new(router: Connections) -> Self {
-        Self::with_processes(router, processes::system(), POLL_INTERVAL)
+    pub(crate) fn new(router: Connections, history: PathBuf) -> Self {
+        Self::with_processes(router, processes::system(), POLL_INTERVAL, history)
     }
 
     pub(crate) fn with_processes(
         router: Connections,
         processes: ProcessSource,
         interval: Duration,
+        history: PathBuf,
     ) -> Self {
         Self {
             inner: Arc::new(Inner {
@@ -401,6 +556,7 @@ impl Terminals {
                 poll_interval: interval,
                 poller: OnceLock::new(),
                 generation: AtomicU64::new(0),
+                history: HistoryFiles(history),
             }),
         }
     }
@@ -458,6 +614,38 @@ impl Terminals {
         });
     }
 
+    /// A new terminal for `request`, which runs in `cwd` at `size`.
+    fn record(&self, request: OpenTerminal, cwd: PathBuf, size: TerminalSize) -> Record {
+        let handle = thread_terminal_handle_for(request.thread.as_str(), &request.terminal_id);
+        Record {
+            history: self
+                .inner
+                .history
+                .path(&request.thread, &request.terminal_id),
+            thread: request.thread,
+            terminal_id: request.terminal_id,
+            cwd,
+            worktree_path: request.worktree_path,
+            env: request.env,
+            size,
+            status: TerminalStatus::Starting,
+            pid: None,
+            exit_code: None,
+            subprocess: Subprocess::Idle,
+            updated_at: now(),
+            channel: Arc::new(Channel {
+                handle,
+                router: self.inner.router.clone(),
+                attached: Mutex::default(),
+                listeners: Mutex::default(),
+                activity: AtomicU64::new(0),
+            }),
+            process: None,
+            screen: vec![],
+            failure: None,
+        }
+    }
+
     /// Opens the terminal: starts it, restarts it when it exited or its
     /// directory or environment changed, or resizes the running shell.
     pub(crate) async fn open(&self, request: OpenTerminal) -> Result<(), String> {
@@ -465,12 +653,14 @@ impl Terminals {
         agent_protocol::operations::validate_terminal_env(&request.env)?;
         let size = request.size.unwrap_or(DEFAULT_SIZE);
         size.validate()?;
-        let cwd = directory(&request.cwd).await?;
+        let cwd = directory(request.cwd.trim()).await?;
         let lock = self.inner.lock(&request.thread);
         let _guard = lock.lock().await;
         self.open_locked(request, cwd, size).await
     }
 
+    /// A terminal new to this Host starts on its kept screen; one that starts
+    /// again starts empty.
     async fn open_locked(
         &self,
         request: OpenTerminal,
@@ -478,81 +668,66 @@ impl Terminals {
         size: TerminalSize,
     ) -> Result<(), String> {
         let handle = thread_terminal_handle_for(request.thread.as_str(), &request.terminal_id);
-        let stopping = {
+        let (stopping, kept, history) = {
             let mut records = self.inner.records.lock().unwrap();
             match records.get_mut(&handle) {
                 None => {
-                    records.insert(
-                        handle.clone(),
-                        Record {
+                    let record = self.record(
+                        OpenTerminal {
                             thread: request.thread.clone(),
                             terminal_id: request.terminal_id.clone(),
-                            cwd: cwd.clone(),
+                            cwd: request.cwd.clone(),
                             worktree_path: request.worktree_path.clone(),
                             env: request.env.clone(),
-                            size,
-                            status: TerminalStatus::Starting,
-                            pid: None,
-                            exit_code: None,
-                            subprocess: Subprocess::Idle,
-                            updated_at: now(),
-                            channel: Arc::new(Channel {
-                                handle: handle.clone(),
-                                router: self.inner.router.clone(),
-                                attached: Mutex::default(),
-                                listeners: Mutex::default(),
-                                activity: AtomicU64::new(0),
-                            }),
-                            process: None,
-                            screen: vec![],
-                            failure: None,
+                            size: Some(size),
                         },
+                        cwd.clone(),
+                        size,
                     );
-                    None
+                    let history = record.history.clone();
+                    records.insert(handle.clone(), record);
+                    (None, true, history)
                 }
                 Some(record) => {
                     let changed = record.cwd != cwd
                         || record.env != request.env
                         || record.worktree_path != request.worktree_path;
-                    let stopping = if changed {
-                        record.process.take().map(|process| {
-                            process.stop.cancel();
-                            process.finished
+                    let stopping = (changed || record.process.is_none())
+                        .then(|| {
+                            record.reset(
+                                cwd.clone(),
+                                request.worktree_path.clone(),
+                                request.env.clone(),
+                            )
                         })
-                    } else {
-                        None
-                    };
-                    if changed || record.process.is_none() {
-                        record.cwd = cwd.clone();
-                        record.env = request.env.clone();
-                        record.worktree_path = request.worktree_path.clone();
-                        record.screen.clear();
-                    }
-                    stopping
+                        .flatten();
+                    (stopping, false, record.history.clone())
                 }
             }
         };
         if let Some(finished) = stopping {
             wait(finished).await?;
         }
-        let resize = {
+        let (running, resize) = {
             let records = self.inner.records.lock().unwrap();
             let record = records.get(&handle).ok_or("terminal was closed")?;
-            record
-                .process
-                .as_ref()
-                .filter(|_| record.size != size)
-                .map(|process| process.input.clone())
+            (
+                record.process.is_some(),
+                record
+                    .process
+                    .as_ref()
+                    .filter(|_| record.size != size)
+                    .map(|process| process.input.clone()),
+            )
         };
-        let running = self
-            .inner
-            .records
-            .lock()
-            .unwrap()
-            .get(&handle)
-            .is_some_and(|record| record.process.is_some());
         if !running {
-            return self.start(&handle, size).await;
+            let initial = if kept {
+                HistoryFiles::read(history).await
+            } else {
+                HistoryFiles::delete(history).await;
+                vec![]
+            };
+            return self.start(&handle, size, initial).await;
         }
         if let Some(input) = resize {
             send(&input, Action::Resize(size)).await?;
@@ -564,14 +739,20 @@ impl Terminals {
         Ok(())
     }
 
-    /// Runs a new shell for the record under `handle` and waits until it is up.
-    async fn start(&self, handle: &str, size: TerminalSize) -> Result<(), String> {
+    /// Runs a new shell for the record under `handle`, its screen starting as
+    /// `initial`, and waits until it is up.
+    async fn start(
+        &self,
+        handle: &str,
+        size: TerminalSize,
+        initial: Vec<u8>,
+    ) -> Result<(), String> {
         self.ensure_poller();
         let generation = self.inner.generation.fetch_add(1, Ordering::AcqRel) + 1;
         let (input, receiver) = mpsc::channel(32);
         let (complete, finished) = watch::channel(None);
         let stop = CancellationToken::new();
-        let (channel, cwd, env) = {
+        let (channel, cwd, env, history) = {
             let mut records = self.inner.records.lock().unwrap();
             let record = records.get_mut(handle).ok_or("terminal was closed")?;
             record.process = Some(Process {
@@ -592,6 +773,7 @@ impl Terminals {
                 record.channel.clone(),
                 record.cwd.clone(),
                 shell_environment(&record.env),
+                record.history.clone(),
             )
         };
         let (ready, started) = oneshot::channel();
@@ -605,8 +787,12 @@ impl Terminals {
                 stop,
                 input: receiver,
                 ready: Some(ready),
+                saver: Saver {
+                    path: history,
+                    writing: None,
+                },
             };
-            let (cleanup, outcome, screen) = worker.run(cwd, size, env).await;
+            let (cleanup, outcome, screen) = worker.run(cwd, size, env, initial).await;
             if let Some(inner) = inner.upgrade() {
                 inner.finished(&handle, generation, outcome, screen);
             }
@@ -630,7 +816,7 @@ impl Terminals {
         self.inner.router.ensure_session(session)?;
         let handle = params.handle();
         let cwd = match &params.cwd {
-            Some(cwd) => Some(directory(cwd).await?),
+            Some(cwd) => Some(directory(cwd.trim()).await?),
             None => None,
         };
         let lock = self.inner.lock(&params.thread);
@@ -646,10 +832,7 @@ impl Terminals {
         };
         if open {
             let Some(cwd) = cwd else {
-                return Err(format!(
-                    "Unknown terminal thread: {}, terminal: {}",
-                    params.thread, params.terminal_id
-                ));
+                return Err(unknown(&params.thread, &params.terminal_id));
             };
             self.open_locked(
                 OpenTerminal {
@@ -704,6 +887,94 @@ impl Terminals {
             }
             (None, None) => return Err("terminal was closed".into()),
         }
+        Ok(Empty {})
+    }
+
+    /// `host/terminal/clear`: empties the terminal's history and every
+    /// attached screen; a running shell keeps running.
+    pub(crate) async fn clear(&self, params: &ClearTerminal) -> Result<Empty, String> {
+        agent_protocol::operations::validate_terminal_id(&params.terminal_id)?;
+        let lock = self.inner.lock(&params.thread);
+        let _guard = lock.lock().await;
+        let handle = params.handle();
+        let (input, cleared) = {
+            let mut records = self.inner.records.lock().unwrap();
+            let record = records
+                .get_mut(&handle)
+                .ok_or_else(|| unknown(&params.thread, &params.terminal_id))?;
+            match &record.process {
+                Some(process) => (Some(process.input.clone()), None),
+                None => {
+                    record.screen = blank_screen(record.size);
+                    record.touch();
+                    (
+                        None,
+                        Some((
+                            record.channel.clone(),
+                            record.screen.clone(),
+                            record.size,
+                            record.history.clone(),
+                        )),
+                    )
+                }
+            }
+        };
+        match (input, cleared) {
+            (Some(input), _) => send(&input, Action::Clear).await?,
+            (None, Some((channel, data, size, history))) => {
+                HistoryFiles::delete(history).await;
+                channel.publish(&Notification::TerminalRestored {
+                    handle,
+                    data,
+                    cols: size.cols,
+                    rows: size.rows,
+                });
+            }
+            (None, None) => {}
+        }
+        Ok(Empty {})
+    }
+
+    /// `host/terminal/restart`: a new shell in `cwd` with an empty history,
+    /// after stopping the running one; opens the terminal when it does not
+    /// exist.
+    pub(crate) async fn restart(&self, params: &RestartTerminal) -> Result<Empty, String> {
+        params.validate()?;
+        let cwd = directory(params.cwd.trim()).await?;
+        let lock = self.inner.lock(&params.thread);
+        let _guard = lock.lock().await;
+        let handle = params.handle();
+        let (stopping, history) = {
+            let mut records = self.inner.records.lock().unwrap();
+            match records.get_mut(&handle) {
+                Some(record) => (
+                    record.reset(cwd, params.worktree_path.clone(), params.env.clone()),
+                    record.history.clone(),
+                ),
+                None => {
+                    let record = self.record(
+                        OpenTerminal {
+                            thread: params.thread.clone(),
+                            terminal_id: params.terminal_id.clone(),
+                            cwd: params.cwd.clone(),
+                            worktree_path: params.worktree_path.clone(),
+                            env: params.env.clone(),
+                            size: Some(params.size),
+                        },
+                        cwd,
+                        params.size,
+                    );
+                    let history = record.history.clone();
+                    records.insert(handle.clone(), record);
+                    (None, history)
+                }
+            }
+        };
+        if let Some(finished) = stopping {
+            wait(finished).await?;
+        }
+        HistoryFiles::delete(history).await;
+        self.start(&handle, params.size, vec![]).await?;
         Ok(Empty {})
     }
 
@@ -762,14 +1033,20 @@ impl Terminals {
                     record.channel.attached.lock().unwrap().remove(&session);
                 }
             }
-            Call::KillTerminal(params) => self.close(&params.process_handle).await?,
+            Call::KillTerminal(params) => {
+                self.close(&params.process_handle, params.delete_history)
+                    .await?
+            }
+            Call::ClearTerminal(params) => return self.clear(params).await,
+            Call::RestartTerminal(params) => return self.restart(params).await,
             _ => return Err("unknown terminal operation".into()),
         }
         Ok(Empty {})
     }
 
-    /// Stops the terminal's shell and forgets it.
-    pub(crate) async fn close(&self, handle: &str) -> Result<(), String> {
+    /// Stops the terminal's shell and forgets it; its history stays unless
+    /// `delete_history`.
+    pub(crate) async fn close(&self, handle: &str, delete_history: bool) -> Result<(), String> {
         let Some(record) = self.inner.records.lock().unwrap().remove(handle) else {
             return Ok(());
         };
@@ -781,16 +1058,20 @@ impl Terminals {
             handle: handle.to_owned(),
         });
         record.channel.observe(TerminalOutput::Closed);
-        match record.process {
+        let stopped = match record.process {
             Some(process) => {
                 process.stop.cancel();
                 wait(process.finished).await
             }
             None => Ok(()),
+        };
+        if delete_history {
+            HistoryFiles::delete(record.history).await;
         }
+        stopped
     }
 
-    /// Closes every terminal of the thread.
+    /// Closes every terminal of the thread and deletes their history.
     pub(crate) async fn close_thread(&self, thread: &ThreadId) {
         let lock = self.inner.lock(thread);
         let _guard = lock.lock().await;
@@ -804,15 +1085,17 @@ impl Terminals {
             .map(|(handle, _)| handle.clone())
             .collect();
         for handle in handles {
-            if let Err(error) = self.close(&handle).await {
+            if let Err(error) = self.close(&handle, false).await {
                 tracing::warn!(operation = "host.terminal.cleanup", message = %error);
             }
         }
+        self.inner.history.delete_thread(thread).await;
         self.inner.locks.lock().unwrap().remove(thread);
     }
 
     /// Closes the thread's running shells that run nothing and saw no input or
-    /// output during the check. A failed check closes nothing.
+    /// output during the check, keeping their history. A failed check closes
+    /// nothing.
     pub(crate) async fn close_idle(&self, thread: &ThreadId, terminal_id: Option<&str>) {
         let lock = self.inner.lock(thread);
         let _guard = lock.lock().await;
@@ -855,7 +1138,7 @@ impl Terminals {
                 .is_some_and(|record| record.channel.activity.load(Ordering::Acquire) == mark);
             if unchanged
                 && !table.subprocess(pid).running()
-                && let Err(error) = self.close(&handle).await
+                && let Err(error) = self.close(&handle, false).await
             {
                 tracing::warn!(operation = "host.terminal.close_idle", message = %error);
             }
@@ -904,6 +1187,7 @@ impl Terminals {
             .any(|record| record.running() && record.cwd.starts_with(path))
     }
 
+    /// Stops every shell; each writes its screen to its history first.
     pub(crate) async fn shutdown(&self) {
         let processes: Vec<_> = self
             .inner
@@ -984,6 +1268,7 @@ struct Worker {
     stop: CancellationToken,
     input: mpsc::Receiver<Command>,
     ready: Option<Receipt>,
+    saver: Saver,
 }
 impl Worker {
     fn publish(&self, event: Notification) {
@@ -994,16 +1279,17 @@ impl Worker {
         cwd: PathBuf,
         size: TerminalSize,
         env: BTreeMap<String, String>,
+        initial: Vec<u8>,
     ) -> (Result<(), String>, Outcome, Vec<u8>) {
         let handle = self.channel.handle.clone();
         let mut pending: Option<(u64, Receipt)> = None;
         let replies = Replies::default();
-        let mut screen = alacritty_terminal::Term::new(
-            alacritty_terminal::term::Config::default(),
-            &Dimensions(size),
-            replies.clone(),
-        );
+        let mut screen = new_screen(size, &replies);
         let mut parser: alacritty_terminal::vte::ansi::Processor = Default::default();
+        // A kept screen restores state only; it asks the shell nothing.
+        parser.advance(&mut screen, &initial);
+        replies.0.lock().unwrap().clear();
+        let mut persist_at: Option<tokio::time::Instant> = None;
         let mut cleanup = Ok(());
         let mut exit_code = None;
         let result = async {
@@ -1025,6 +1311,10 @@ impl Worker {
                         _ = std::future::ready(()), if !query_in_flight && !query_bytes.is_empty() => {
                             query_in_flight = true;
                             write(&mut stdin, &PtyCommand::Write {id:bex_process::TERMINAL_QUERY_REPLY_ID,data:std::mem::take(&mut query_bytes)}).await?;
+                        }
+                        _ = tokio::time::sleep_until(persist_at.unwrap_or_else(tokio::time::Instant::now)), if persist_at.is_some() => {
+                            persist_at = None;
+                            self.saver.save(screen.ansi_checkpoint(None)).await;
                         }
                         line = output.read_line() => {
                             let line = line.map_err(|error| error.to_string())?.ok_or("terminal supervisor exited without a result")?;
@@ -1055,6 +1345,7 @@ impl Worker {
                                         query_bytes.extend_from_slice(data.as_bytes());
                                         if query_bytes.len() > agent_protocol::protocol::MAX_FRAME_BYTES { return Err("terminal query replies exceed the buffer limit".into()); }
                                     }
+                                    persist_at.get_or_insert_with(|| tokio::time::Instant::now() + PERSIST_DELAY);
                                     self.channel.activity.fetch_add(1, Ordering::AcqRel);
                                     self.channel.observe(TerminalOutput::Data(data.clone()));
                                     self.publish(Notification::Output { handle: handle.clone(), data });
@@ -1078,28 +1369,44 @@ impl Worker {
                         }
                         command = self.input.recv(), if self.ready.is_none() && pending.is_none() => {
                             let Some(command) = command else { return Ok(()) };
-                            if let Action::Attach(session, size) = command.action {
-                                if screen.columns()!=usize::from(size.cols) || screen.screen_lines()!=usize::from(size.rows) {
-                                    screen.resize(Dimensions(size));
-                                    write(&mut stdin,&PtyCommand::Resize{id:0,rows:size.rows,cols:size.cols}).await?;
+                            match command.action {
+                                Action::Attach(session, size) => {
+                                    if screen.columns()!=usize::from(size.cols) || screen.screen_lines()!=usize::from(size.rows) {
+                                        screen.resize(Dimensions(size));
+                                        write(&mut stdin,&PtyCommand::Resize{id:0,rows:size.rows,cols:size.cols}).await?;
+                                    }
+                                    let mut data=screen.ansi_checkpoint(parser.preceding_char());
+                                    data.extend(parser.checkpoint_tail());
+                                    let result=self.channel.send(session, Notification::TerminalRestored { handle: handle.clone(), data, cols: screen.columns() as u16, rows: screen.screen_lines() as u16 });
+                                    let _=command.complete.send(result);
+                                    continue;
                                 }
-                                let mut data=screen.ansi_checkpoint(parser.preceding_char());
-                                data.extend(parser.checkpoint_tail());
-                                let result=self.channel.send(session, Notification::TerminalRestored { handle: handle.clone(), data, cols: screen.columns() as u16, rows: screen.screen_lines() as u16 });
-                                let _=command.complete.send(result);
-                                continue;
-                            }
-                            next_id = next_id.checked_add(1).ok_or("terminal operation ID exhausted")?;
-                            if next_id == bex_process::TERMINAL_QUERY_REPLY_ID { return Err("terminal operation ID exhausted".into()); }
-                            let action = match command.action {
-                                Action::Write(data) => PtyCommand::Write {id:next_id,data},
-                                Action::Resize(size) => {screen.resize(Dimensions(size)); PtyCommand::Resize {id:next_id,rows:size.rows,cols:size.cols}},
-                                Action::Attach(_, _) => unreachable!(),
-                            };
-                            pending = Some((next_id, command.complete));
-                            tokio::select! {
-                                _ = self.stop.cancelled() => return Ok(()),
-                                result = write(&mut stdin, &action) => result?,
+                                Action::Clear => {
+                                    let size = TerminalSize { cols: screen.columns() as u16, rows: screen.screen_lines() as u16 };
+                                    screen = new_screen(size, &replies);
+                                    parser = Default::default();
+                                    replies.0.lock().unwrap().clear();
+                                    persist_at = None;
+                                    let data = screen.ansi_checkpoint(None);
+                                    self.saver.flush(data.clone()).await;
+                                    self.publish(Notification::TerminalRestored { handle: handle.clone(), data, cols: size.cols, rows: size.rows });
+                                    let _=command.complete.send(Ok(()));
+                                    continue;
+                                }
+                                action => {
+                                    next_id = next_id.checked_add(1).ok_or("terminal operation ID exhausted")?;
+                                    if next_id == bex_process::TERMINAL_QUERY_REPLY_ID { return Err("terminal operation ID exhausted".into()); }
+                                    let action = match action {
+                                        Action::Write(data) => PtyCommand::Write {id:next_id,data},
+                                        Action::Resize(size) => {screen.resize(Dimensions(size)); PtyCommand::Resize {id:next_id,rows:size.rows,cols:size.cols}},
+                                        Action::Attach(..) | Action::Clear => unreachable!(),
+                                    };
+                                    pending = Some((next_id, command.complete));
+                                    tokio::select! {
+                                        _ = self.stop.cancelled() => return Ok(()),
+                                        result = write(&mut stdin, &action) => result?,
+                                    }
+                                }
                             }
                         }
                     }
@@ -1125,6 +1432,7 @@ impl Worker {
         if let Some((_, complete)) = pending {
             let _ = complete.send(Err("terminal has exited".into()));
         }
+        self.saver.flush(screen.ansi_checkpoint(None)).await;
         let mut last = screen.ansi_checkpoint(parser.preceding_char());
         last.extend(parser.checkpoint_tail());
         let outcome = match result {

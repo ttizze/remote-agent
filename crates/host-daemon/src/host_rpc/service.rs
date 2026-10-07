@@ -124,6 +124,7 @@ impl HostRpcService {
         projects: ProjectStore,
     ) -> anyhow::Result<Self> {
         let connections = Connections::new();
+        let terminal_history = projects.path().with_file_name("terminals");
         let shared = SharedResources {
             files: crate::workspace_files::WorkspaceFiles::new(
                 projects.path().with_file_name("attachments"),
@@ -131,7 +132,10 @@ impl HostRpcService {
             worktrees: Arc::new(crate::worktrees::Worktrees::new(projects.path())),
             projects: Arc::new(ProjectCatalog::new(projects)),
             checkpoints: Arc::default(),
-            terminals: Arc::new(crate::terminals::Terminals::new(connections.clone())),
+            terminals: Arc::new(crate::terminals::Terminals::new(
+                connections.clone(),
+                terminal_history,
+            )),
         };
         let resources = Arc::new(HostResources {
             codex: Arc::new(CodexResources::new(codex.clone())),
@@ -437,6 +441,7 @@ impl HostRpcService {
         let _workspace = if matches!(
             request,
             Call::StartTerminal(_)
+                | Call::RestartTerminal(_)
                 | Call::WriteFile(_)
                 | Call::Upload(_)
                 | Call::AttachmentPath(_)
@@ -596,7 +601,9 @@ impl HostRpcService {
                 Call::WriteTerminal(_)
                 | Call::ResizeTerminal(_)
                 | Call::KillTerminal(_)
-                | Call::DetachTerminal(_) => (resources
+                | Call::DetachTerminal(_)
+                | Call::ClearTerminal(_)
+                | Call::RestartTerminal(_) => (resources
                     .shared
                     .terminals
                     .request(session, request)

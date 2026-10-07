@@ -1,6 +1,6 @@
 # Native terminal
 
-The Host owns each PTY and its Alacritty terminal state. A terminal is scoped to an authenticated device and a working directory. Closing its UI detaches; reopening the UI, restarting a client or reconnecting the transport attaches to the existing shell. Exiting the shell, choosing **終了**, revoking the device or shutting down the Host ends it. Host restarts do not preserve processes.
+The Host owns each PTY and its Alacritty terminal state. A terminal is scoped to an authenticated device and a working directory. Closing its UI detaches; reopening the UI, restarting a client or reconnecting the transport attaches to the existing shell. Exiting the shell, choosing **終了**, revoking the device or shutting down the Host ends it. Host restarts do not preserve processes; each terminal keeps its screen and 5,000 lines of scrollback in a history file, and opening it again after a restart starts a new shell below them. Clearing or restarting a terminal empties its history.
 
 Clients use the existing authenticated iroh connection and agent-core operations:
 

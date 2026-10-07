@@ -6,6 +6,9 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 const MAX_POLL_INTERVAL: Duration = Duration::from_secs(60);
 const PS_TIMEOUT: Duration = Duration::from_secs(1);
 const PS_MAX_OUTPUT_BYTES: usize = 524_288;
+const WINDOWS_TIMEOUT: Duration = Duration::from_millis(1500);
+const WINDOWS_MAX_OUTPUT_BYTES: usize = 262_144;
+const WINDOWS_LISTING: &str = "Get-CimInstance Win32_Process -ErrorAction Stop | ForEach-Object { Write-Output \"$($_.ProcessId)|$($_.ParentProcessId)|$($_.Name)\" }";
 
 pub(crate) type ProcessSource =
     Arc<dyn Fn() -> BoxFuture<'static, Result<ProcessTable, String>> + Send + Sync>;
@@ -49,6 +52,25 @@ impl ProcessTable {
                 continue;
             }
             table.insert(pid, ppid, command);
+        }
+        table
+    }
+
+    /// `pid|ppid|name` lines of the Windows process listing.
+    pub(crate) fn parse_windows(stdout: &str) -> Self {
+        let mut table = Self::default();
+        for line in stdout.lines() {
+            let mut fields = line.trim().split('|');
+            let (Some(pid), Some(ppid)) = (fields.next(), fields.next()) else {
+                continue;
+            };
+            let (Ok(pid), Ok(ppid)) = (pid.trim().parse::<u32>(), ppid.trim().parse::<u32>())
+            else {
+                continue;
+            };
+            if pid > 0 {
+                table.insert(pid, ppid, fields.next().unwrap_or_default());
+            }
         }
         table
     }
@@ -111,33 +133,44 @@ pub(crate) fn poll_delay(interval: Duration, failures: u32) -> Duration {
         .min(MAX_POLL_INTERVAL)
 }
 
-/// `ps` on Unix; a partial or failed listing is not a snapshot.
+/// `ps` on Unix and the CIM process listing on Windows; a partial or failed
+/// listing is not a snapshot.
 pub(super) fn system() -> ProcessSource {
-    let program = ["/bin/ps", "/usr/bin/ps"]
-        .into_iter()
-        .find(|path| std::path::Path::new(path).is_file())
-        .unwrap_or("ps");
+    let program = if cfg!(windows) {
+        "powershell.exe"
+    } else {
+        ["/bin/ps", "/usr/bin/ps"]
+            .into_iter()
+            .find(|path| std::path::Path::new(path).is_file())
+            .unwrap_or("ps")
+    };
     Arc::new(move || {
         Box::pin(async move {
-            if cfg!(windows) {
-                return Err("process snapshots are unavailable on this platform".into());
-            }
             let mut command = tokio::process::Command::new(program);
+            let (timeout, limit) = if cfg!(windows) {
+                command.args(["-NoProfile", "-NonInteractive", "-Command", WINDOWS_LISTING]);
+                (WINDOWS_TIMEOUT, WINDOWS_MAX_OUTPUT_BYTES)
+            } else {
+                command.args(["-eo", "pid=,ppid=,comm="]);
+                (PS_TIMEOUT, PS_MAX_OUTPUT_BYTES)
+            };
             command
-                .args(["-eo", "pid=,ppid=,comm="])
                 .stdin(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
                 .kill_on_drop(true);
-            let output = tokio::time::timeout(PS_TIMEOUT, command.output())
+            let output = tokio::time::timeout(timeout, command.output())
                 .await
-                .map_err(|_| "ps timed out".to_owned())?
+                .map_err(|_| format!("{program} timed out"))?
                 .map_err(|error| error.to_string())?;
-            if !output.status.success() || output.stdout.len() > PS_MAX_OUTPUT_BYTES {
-                return Err(format!("ps failed: {}", output.status));
+            if !output.status.success() || output.stdout.len() > limit {
+                return Err(format!("{program} failed: {}", output.status));
             }
-            Ok(ProcessTable::parse(&String::from_utf8_lossy(
-                &output.stdout,
-            )))
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            Ok(if cfg!(windows) {
+                ProcessTable::parse_windows(&stdout)
+            } else {
+                ProcessTable::parse(&stdout)
+            })
         })
     })
 }

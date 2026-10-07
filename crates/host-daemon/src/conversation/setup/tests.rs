@@ -187,10 +187,12 @@ async fn setup_runs_in_the_threads_terminal_and_reports_its_exit_code() {
         let cwd = worktree.to_str().unwrap();
         let thread = ThreadId::new("thread-1").unwrap();
         // Nothing else runs in the shell; a real snapshot could race its prompt.
+        let history = tempfile::tempdir().unwrap();
         let terminals = Arc::new(Terminals::with_processes(
             Connections::new(),
             Arc::new(|| Box::pin(async { Ok(Default::default()) })),
             Duration::from_secs(3600),
+            history.path().to_path_buf(),
         ));
         let command = "printf '%s|%s|%s|%s|%s|%s' \"$PWD\" \"$PROJECT_ROOT\" \
                        \"$WORKTREE_PATH\" \"${COLORTERM-unset}\" \"$NO_COLOR\" \

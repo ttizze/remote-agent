@@ -97,6 +97,8 @@ contracts! {
     ReadAccountLogin, "host/account/login/status" => (op::ReadAccountLogin, op::AccountLoginStatus) [clone],
     CancelAccountLogin, "host/account/login/cancel" => (op::CancelAccountLogin, m::Empty) [clone],
     StartTerminal, "host/terminal/start" => (op::StartTerminal, m::Empty) [clone],
+    ClearTerminal, "host/terminal/clear" => (op::ClearTerminal, m::Empty) [clone],
+    RestartTerminal, "host/terminal/restart" => (op::RestartTerminal, m::Empty) [clone],
     TerminalMetadata, "host/terminal/subscribeMetadata" => (m::Empty, op::TerminalMetadataEvent),
     ResizeTerminal, "host/terminal/resize" => (op::ResizeTerminal, m::Empty) [clone],
     WriteTerminal, "host/terminal/write" => (op::TerminalWrite, m::Empty),
