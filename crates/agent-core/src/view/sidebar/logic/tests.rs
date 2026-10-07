@@ -221,7 +221,7 @@ fn a_missing_visit_marker_reads_as_seen() {
 
 #[test]
 fn inactive_working_and_waiting_threads_recede_even_when_unread_and_woke() {
-    for status in [SidebarThreadStatus::Working, SidebarThreadStatus::Waiting] {
+    for status in [ThreadListStatus::Working, ThreadListStatus::Waiting] {
         assert!(should_recede_sidebar_thread(
             status, true, true, false, false
         ));
@@ -231,9 +231,9 @@ fn inactive_working_and_waiting_threads_recede_even_when_unread_and_woke() {
 #[test]
 fn unread_ready_approval_and_input_threads_stay_prominent() {
     for status in [
-        SidebarThreadStatus::Ready,
-        SidebarThreadStatus::Approval,
-        SidebarThreadStatus::Input,
+        ThreadListStatus::Ready,
+        ThreadListStatus::Approval,
+        ThreadListStatus::Input,
     ] {
         assert!(!should_recede_sidebar_thread(
             status, true, false, false, false
@@ -243,7 +243,7 @@ fn unread_ready_approval_and_input_threads_stay_prominent() {
 
 #[test]
 fn active_and_selected_working_threads_stay_prominent() {
-    let working = SidebarThreadStatus::Working;
+    let working = ThreadListStatus::Working;
     assert!(!should_recede_sidebar_thread(
         working, true, true, true, false
     ));
@@ -256,7 +256,7 @@ fn active_and_selected_working_threads_stay_prominent() {
 fn input_required_threads_stay_prominent_read_or_unread() {
     for unread in [false, true] {
         assert!(!should_recede_sidebar_thread(
-            SidebarThreadStatus::Input,
+            ThreadListStatus::Input,
             unread,
             false,
             false,
@@ -409,10 +409,7 @@ fn approval_outranks_a_running_runtime() {
         has_pending_approvals: true,
         ..with_runtime(RuntimeStatus::Running)
     };
-    assert_eq!(
-        resolve_sidebar_thread_status(&thread),
-        SidebarThreadStatus::Approval
-    );
+    assert_eq!(thread_list_status(&thread), ThreadListStatus::Approval);
 }
 
 #[test]
@@ -421,23 +418,17 @@ fn awaiting_input_outranks_a_running_runtime_below_approval() {
         has_pending_user_input: true,
         ..with_runtime(RuntimeStatus::Running)
     };
-    assert_eq!(
-        resolve_sidebar_thread_status(&thread),
-        SidebarThreadStatus::Input
-    );
+    assert_eq!(thread_list_status(&thread), ThreadListStatus::Input);
     thread.has_pending_approvals = true;
-    assert_eq!(
-        resolve_sidebar_thread_status(&thread),
-        SidebarThreadStatus::Approval
-    );
+    assert_eq!(thread_list_status(&thread), ThreadListStatus::Approval);
 }
 
 #[test]
 fn running_and_starting_runtimes_are_working() {
     for status in [RuntimeStatus::Running, RuntimeStatus::Starting] {
         assert_eq!(
-            resolve_sidebar_thread_status(&with_runtime(status)),
-            SidebarThreadStatus::Working
+            thread_list_status(&with_runtime(status)),
+            ThreadListStatus::Working
         );
     }
 }
@@ -453,23 +444,23 @@ fn usage_limit_stops_stay_limited_and_visible_until_the_thread_recovers() {
         ..summary("thread")
     };
     assert_eq!(
-        resolve_sidebar_thread_status(&limited(RuntimeStatus::Failed)),
-        SidebarThreadStatus::Limited
+        thread_list_status(&limited(RuntimeStatus::Failed)),
+        ThreadListStatus::Limited
     );
     assert_eq!(
-        resolve_sidebar_thread_status(&limited(RuntimeStatus::Running)),
-        SidebarThreadStatus::Working
+        thread_list_status(&limited(RuntimeStatus::Running)),
+        ThreadListStatus::Working
     );
     assert_eq!(
-        resolve_sidebar_thread_status(&limited(RuntimeStatus::Completed)),
-        SidebarThreadStatus::Ready
+        thread_list_status(&limited(RuntimeStatus::Completed)),
+        ThreadListStatus::Ready
     );
     assert_eq!(
-        resolve_sidebar_top_status(SidebarThreadStatus::Limited, false, false),
+        resolve_sidebar_top_status(ThreadListStatus::Limited, false, false),
         Some(SidebarTopStatus::Limited)
     );
     assert!(!should_recede_sidebar_thread(
-        SidebarThreadStatus::Limited,
+        ThreadListStatus::Limited,
         false,
         false,
         false,
@@ -487,39 +478,39 @@ fn failed_only_while_the_latest_run_failed() {
         ..summary("thread")
     };
     assert_eq!(
-        resolve_sidebar_thread_status(&errored(RuntimeStatus::Failed)),
-        SidebarThreadStatus::Failed
+        thread_list_status(&errored(RuntimeStatus::Failed)),
+        ThreadListStatus::Failed
     );
     assert_eq!(
-        resolve_sidebar_thread_status(&errored(RuntimeStatus::Completed)),
-        SidebarThreadStatus::Ready
+        thread_list_status(&errored(RuntimeStatus::Completed)),
+        ThreadListStatus::Ready
     );
     assert_eq!(
-        resolve_sidebar_thread_status(&errored(RuntimeStatus::Idle)),
-        SidebarThreadStatus::Waiting
+        thread_list_status(&errored(RuntimeStatus::Idle)),
+        ThreadListStatus::Waiting
     );
 }
 
 #[test]
 fn no_runtime_is_ready() {
     assert_eq!(
-        resolve_sidebar_thread_status(&summary("thread")),
-        SidebarThreadStatus::Ready
+        thread_list_status(&summary("thread")),
+        ThreadListStatus::Ready
     );
 }
 
 #[test]
 fn a_waiting_runtime_shows_ahead_of_unread_and_woke() {
     assert_eq!(
-        resolve_sidebar_top_status(SidebarThreadStatus::Waiting, true, true),
+        resolve_sidebar_top_status(ThreadListStatus::Waiting, true, true),
         Some(SidebarTopStatus::Waiting)
     );
 }
 
 #[test]
 fn waiting_stays_static_while_working_shows_its_duration() {
-    assert!(!should_show_sidebar_duration(SidebarThreadStatus::Waiting));
-    assert!(should_show_sidebar_duration(SidebarThreadStatus::Working));
+    assert!(!should_show_sidebar_duration(ThreadListStatus::Waiting));
+    assert!(should_show_sidebar_duration(ThreadListStatus::Working));
 }
 
 fn content(ids: &[&str]) -> BTreeSet<String> {
@@ -1374,14 +1365,14 @@ fn a_completed_thread_reads_by_whether_its_background_roster_wakes_it() {
     for (kind, status, top, receded, pill) in [
         (
             BackgroundKind::Command,
-            SidebarThreadStatus::Ready,
+            ThreadListStatus::Ready,
             SidebarTopStatus::Done,
             false,
             ThreadStatusPill::Completed,
         ),
         (
             BackgroundKind::Monitor,
-            SidebarThreadStatus::Waiting,
+            ThreadListStatus::Waiting,
             SidebarTopStatus::Waiting,
             true,
             ThreadStatusPill::Waiting,
@@ -1402,7 +1393,7 @@ fn a_completed_thread_reads_by_whether_its_background_roster_wakes_it() {
         }];
         let thread = ThreadSummary::from_shell(&shell);
         let unread = thread.has_unseen_completion();
-        let resolved = resolve_sidebar_thread_status(&thread);
+        let resolved = thread_list_status(&thread);
         assert!(unread);
         assert_eq!(resolved, status);
         assert_eq!(

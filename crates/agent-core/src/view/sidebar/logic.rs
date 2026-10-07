@@ -1,13 +1,14 @@
 //! Desktop sidebar rules: shelves and drag and drop across them, row status,
 //! recede and labels, search, bulk menus, project order and traversal.
+use crate::view::collation::locale_compare;
 use crate::view::snooze::effective_snoozed;
 pub use crate::view::thread_order::DropSection;
-use crate::view::thread_sort::locale_compare;
 use crate::view::thread_sort::{
     OrderAssignment, ThreadSortOrder, plan_pinned_reorder, sort_threads, thread_sort_timestamp,
 };
 use crate::view::thread_summary::{
-    RuntimeStatus, SettledOverride, ThreadSummary, background_work_holds_completion,
+    RuntimeStatus, SettledOverride, ThreadListStatus, ThreadSummary,
+    background_work_holds_completion, thread_list_status,
 };
 use agent_domain::InteractionMode;
 use std::collections::{BTreeMap, BTreeSet};
@@ -541,57 +542,21 @@ pub fn sidebar_fork_parent_thread_id(thread: &ThreadSummary) -> Option<&str> {
     thread.forked.then_some(thread.parent.as_deref()).flatten()
 }
 
-/// Seven states, three colors: approval, working and failure. Ready is the
-/// unlabeled rest; Waiting is a stop held by background work that will wake
-/// the agent.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
-pub enum SidebarThreadStatus {
-    Approval,
-    Input,
-    Working,
-    Waiting,
-    Failed,
-    Limited,
-    Ready,
-}
-
-pub fn resolve_sidebar_thread_status(thread: &ThreadSummary) -> SidebarThreadStatus {
-    if thread.has_pending_approvals {
-        return SidebarThreadStatus::Approval;
-    }
-    if thread.has_pending_user_input {
-        return SidebarThreadStatus::Input;
-    }
-    let Some(runtime) = &thread.runtime else {
-        return SidebarThreadStatus::Ready;
-    };
-    match runtime.status {
-        status if status.is_active() => SidebarThreadStatus::Working,
-        RuntimeStatus::Idle => SidebarThreadStatus::Waiting,
-        RuntimeStatus::Failed if runtime.last_error_class.as_deref() == Some("usage_limit") => {
-            SidebarThreadStatus::Limited
-        }
-        RuntimeStatus::Failed => SidebarThreadStatus::Failed,
-        _ => SidebarThreadStatus::Ready,
-    }
-}
-
 /// Background work recedes unless it is open or selected; ready and approval
 /// rows keep their unread and wake prominence.
 pub fn should_recede_sidebar_thread(
-    status: SidebarThreadStatus,
+    status: ThreadListStatus,
     unread: bool,
     woke: bool,
     active: bool,
     selected: bool,
 ) -> bool {
-    if active || selected || status == SidebarThreadStatus::Input {
+    if active || selected || status == ThreadListStatus::Input {
         return false;
     }
     match status {
-        SidebarThreadStatus::Working | SidebarThreadStatus::Waiting => true,
-        SidebarThreadStatus::Ready | SidebarThreadStatus::Approval => !unread && !woke,
+        ThreadListStatus::Working | ThreadListStatus::Waiting => true,
+        ThreadListStatus::Ready | ThreadListStatus::Approval => !unread && !woke,
         _ => false,
     }
 }
@@ -625,25 +590,25 @@ impl SidebarTopStatus {
 }
 
 pub fn resolve_sidebar_top_status(
-    status: SidebarThreadStatus,
+    status: ThreadListStatus,
     unread: bool,
     woke: bool,
 ) -> Option<SidebarTopStatus> {
     Some(match status {
-        SidebarThreadStatus::Working => SidebarTopStatus::Working,
-        SidebarThreadStatus::Waiting => SidebarTopStatus::Waiting,
-        SidebarThreadStatus::Approval => SidebarTopStatus::Approval,
-        SidebarThreadStatus::Input => SidebarTopStatus::Input,
-        SidebarThreadStatus::Failed => SidebarTopStatus::Failed,
-        SidebarThreadStatus::Limited => SidebarTopStatus::Limited,
-        SidebarThreadStatus::Ready if woke => SidebarTopStatus::Woke,
-        SidebarThreadStatus::Ready if unread => SidebarTopStatus::Done,
-        SidebarThreadStatus::Ready => return None,
+        ThreadListStatus::Working => SidebarTopStatus::Working,
+        ThreadListStatus::Waiting => SidebarTopStatus::Waiting,
+        ThreadListStatus::Approval => SidebarTopStatus::Approval,
+        ThreadListStatus::Input => SidebarTopStatus::Input,
+        ThreadListStatus::Failed => SidebarTopStatus::Failed,
+        ThreadListStatus::Limited => SidebarTopStatus::Limited,
+        ThreadListStatus::Ready if woke => SidebarTopStatus::Woke,
+        ThreadListStatus::Ready if unread => SidebarTopStatus::Done,
+        ThreadListStatus::Ready => return None,
     })
 }
 
-pub fn should_show_sidebar_duration(status: SidebarThreadStatus) -> bool {
-    status == SidebarThreadStatus::Working
+pub fn should_show_sidebar_duration(status: ThreadListStatus) -> bool {
+    status == ThreadListStatus::Working
 }
 
 /// "42s", "5m", "1h 30m"; negative elapsed time reads "0s".

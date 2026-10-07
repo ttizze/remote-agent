@@ -38,11 +38,7 @@ pub fn thread_feed_run_is_unsettled(run: Option<&FeedLatestRun>) -> bool {
     if run.status == RunStatus::Queued {
         return false;
     }
-    run.completed_at.is_none()
-        || matches!(
-            run.status,
-            RunStatus::Preparing | RunStatus::Starting | RunStatus::Running | RunStatus::Waiting
-        )
+    run.completed_at.is_none() || run.status.blocking()
 }
 
 fn unsettled_run_id(run: Option<&FeedLatestRun>) -> Option<RunId> {

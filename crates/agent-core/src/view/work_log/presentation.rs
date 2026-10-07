@@ -12,6 +12,7 @@ use super::tool_summary::{
 };
 use super::{ItemType, ToolLifecycleStatus, ToolSource, ToolSourceKind, WorkLogEntry, WorkTone};
 use crate::js_text::{js_to_fixed, js_trim, utf16_prefix};
+use crate::view::quantity;
 use agent_domain::{Item, ItemKind, ItemStatus, Json, ThreadId};
 use regex::Regex;
 use serde_json::{Value, json};
@@ -473,20 +474,16 @@ fn tool_group_action_count(action: ToolGroupAction, entries: &[&WorkLogEntry]) -
     changed_files.len() + edits_without_file_details
 }
 
-fn plural(count: usize, singular: &str, plural: &str) -> String {
-    format!("{count} {}", if count == 1 { singular } else { plural })
-}
-
 fn tool_group_action_label(action: ToolGroupAction, count: usize) -> String {
     match action {
-        ToolGroupAction::Read => format!("Read {}", plural(count, "file", "files")),
-        ToolGroupAction::Edit => format!("Changed {}", plural(count, "file", "files")),
-        ToolGroupAction::Command => format!("Ran {}", plural(count, "command", "commands")),
-        ToolGroupAction::ThreadCreate => format!("Created {}", plural(count, "thread", "threads")),
-        ToolGroupAction::Search => format!("Searched the web {}", plural(count, "time", "times")),
-        ToolGroupAction::CodeSearch => format!("Searched code {}", plural(count, "time", "times")),
-        ToolGroupAction::Other => format!("Used {}", plural(count, "tool", "tools")),
-        ToolGroupAction::Update => format!("Received {}", plural(count, "update", "updates")),
+        ToolGroupAction::Read => format!("Read {}", quantity(count, "file")),
+        ToolGroupAction::Edit => format!("Changed {}", quantity(count, "file")),
+        ToolGroupAction::Command => format!("Ran {}", quantity(count, "command")),
+        ToolGroupAction::ThreadCreate => format!("Created {}", quantity(count, "thread")),
+        ToolGroupAction::Search => format!("Searched the web {}", quantity(count, "time")),
+        ToolGroupAction::CodeSearch => format!("Searched code {}", quantity(count, "time")),
+        ToolGroupAction::Other => format!("Used {}", quantity(count, "tool")),
+        ToolGroupAction::Update => format!("Received {}", quantity(count, "update")),
     }
 }
 

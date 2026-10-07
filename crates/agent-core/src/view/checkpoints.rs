@@ -1,6 +1,8 @@
 //! Checkpoints of a thread's runs, the diff panel scope and the requests a
 //! scope produces, and which user messages can be edited from.
 use crate::state::Intent;
+use crate::view::quantity;
+use crate::view::timeline::changed_files::{summarize_diff_stats, turn_diff_summary};
 use agent_domain::{CheckpointStatus, InputIntent, ItemKind, Role, State, ThreadId};
 use agent_protocol::conversation::{GetTurnDiff, TurnDiff};
 use std::collections::BTreeMap;
@@ -68,49 +70,39 @@ pub fn checkpoint_summaries(state: &State) -> Vec<CheckpointSummary> {
         .checkpoints
         .iter()
         .filter_map(|checkpoint| {
-            let run_id = checkpoint.run.as_ref()?;
-            let run = state.runs.iter().find(|run| &run.id == run_id);
-            let assistant_message_id = state
-                .messages
-                .iter()
-                .rev()
-                .find(|message| {
-                    message.run.as_ref() == Some(run_id) && message.role == Role::Assistant
-                })
-                .map(|message| message.id.to_string());
-            let files: Vec<ChangedFile> = checkpoint
-                .files
-                .iter()
-                .map(|file| ChangedFile {
-                    path: file.path.clone(),
-                    kind: file.kind.clone(),
-                    additions: file.additions,
-                    deletions: file.deletions,
-                })
-                .collect();
+            let summary = turn_diff_summary(state, checkpoint)?;
+            let stat = summarize_diff_stats(&summary.files);
             Some(CheckpointSummary {
-                checkpoint_id: checkpoint.id.to_string(),
+                checkpoint_id: summary.checkpoint.to_string(),
                 scope_id: checkpoint.scope.as_ref().map(|scope| scope.id.to_string()),
-                run_id: run_id.to_string(),
-                turn_count: checkpoint.run_ordinal,
+                run_id: summary.run.to_string(),
+                turn_count: summary.checkpoint_turn_count,
                 checkpoint_ref: checkpoint.file_ref.clone(),
-                status: checkpoint.status.into(),
-                additions: files.iter().map(|file| file.additions).sum(),
-                deletions: files.iter().map(|file| file.deletions).sum(),
-                changed_files_label: changed_files_label(files.len()),
-                files,
-                assistant_message_id,
-                completed_at_ms: run
+                status: summary.status.into(),
+                additions: stat.additions,
+                deletions: stat.deletions,
+                changed_files_label: quantity(summary.files.len(), "changed file"),
+                files: summary
+                    .files
+                    .iter()
+                    .map(|file| ChangedFile {
+                        path: file.path.clone(),
+                        kind: file.kind.clone(),
+                        additions: file.additions,
+                        deletions: file.deletions,
+                    })
+                    .collect(),
+                assistant_message_id: summary.assistant_message.map(|id| id.to_string()),
+                completed_at_ms: state
+                    .runs
+                    .iter()
+                    .find(|run| run.id == summary.run)
                     .and_then(|run| run.completed_at.as_ref())
                     .map(|at| at.millis()),
-                can_roll_back: checkpoint.status == CheckpointStatus::Ready,
+                can_roll_back: summary.status == CheckpointStatus::Ready,
             })
         })
         .collect()
-}
-
-fn changed_files_label(count: usize) -> String {
-    format!("{count} changed file{}", if count == 1 { "" } else { "s" })
 }
 
 /// "Edit from here" on a user message rolls back to the checkpoint before its

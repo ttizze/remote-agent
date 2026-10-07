@@ -4,6 +4,8 @@ use crate::js_text::{JS_SPACE, collapse_js_spaces, is_js_space};
 use crate::models::{Model, Project};
 use crate::provider::ProviderKind;
 use crate::state::Snapshot;
+use crate::view::models::options::format_codex_model_name;
+use crate::view::quantity;
 use crate::view::time::format_duration;
 use agent_domain::{
     Driver, ItemStatus, ModelSelection, RunId, State, Task, Thread, ThreadId, ThreadShell,
@@ -225,10 +227,7 @@ fn pill(turn: &TurnTasks) -> Option<AgentPill> {
     } else {
         AgentPill {
             label: format!("{total} done"),
-            accessibility_label: format!(
-                "{total} {} done",
-                if total == 1 { "agent" } else { "agents" }
-            ),
+            accessibility_label: format!("{} done", quantity(total, "agent")),
         }
     })
 }
@@ -444,9 +443,9 @@ pub fn subagent_group_summary(statuses: &[ItemStatus]) -> SubagentGroupSummary {
     let count = statuses.len();
     SubagentGroupSummary {
         label: format!(
-            "{} {count} {}",
+            "{} {}",
             if active { "Kicked off" } else { "Ran" },
-            if count == 1 { "subagent" } else { "subagents" }
+            quantity(count, "subagent")
         ),
         active,
         failed: statuses.contains(&ItemStatus::Failed),
@@ -483,10 +482,7 @@ pub fn agent_spawn_summary(statuses: &[ItemStatus], agent_count: u32) -> AgentSp
     let stopped = count(|s| matches!(s, ItemStatus::Cancelled | ItemStatus::Interrupted));
     let live = working > 0;
     let subjects = if agent_count > 0 {
-        format!(
-            "{agent_count} subagent{}",
-            if agent_count == 1 { "" } else { "s" }
-        )
+        quantity(agent_count as usize, "subagent")
     } else {
         "subagents".into()
     };
@@ -709,20 +705,7 @@ pub fn format_model_slug_name(slug: &str) -> String {
             .is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_digit()))
     };
     if numbered("gpt") {
-        let mut out = String::from(prefix);
-        out.push_str("GPT");
-        let mut chars = name[3..].chars().peekable();
-        while let Some(c) = chars.next() {
-            out.push(c);
-            if c == '-'
-                && let Some(next) = chars.peek().copied()
-                && next.is_ascii_lowercase()
-            {
-                out.push(next.to_ascii_uppercase());
-                chars.next();
-            }
-        }
-        return out;
+        return format!("{prefix}{}", format_codex_model_name(name));
     }
     let family = [
         "claude-opus",

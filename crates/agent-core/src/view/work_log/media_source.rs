@@ -2,7 +2,7 @@
 //! Filesystem paths belong to the Host and never reach an image view directly.
 use crate::presentation::markdown::links::{
     file_basename, is_windows_absolute_path, normalize_markdown_link_destination,
-    safe_decode_uri_component, split_markdown_link_search_and_hash,
+    parse_file_url_href, safe_decode_uri_component, split_markdown_link_search_and_hash,
     strip_slash_prefixed_windows_drive,
 };
 use regex::Regex;
@@ -22,25 +22,6 @@ static URI_SCHEME: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^[A-Za-z][A-Za-z0-9+.-]*:").expect("scheme pattern compiles"));
 static POSITION_SUFFIX: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r":[0-9]+(?::[0-9]+)?$").expect("position pattern compiles"));
-
-/// A `file:` URL as a host path, still percent-encoded. A non-localhost
-/// authority becomes a UNC share.
-fn parse_file_url_path(href: &str) -> Option<String> {
-    let parsed = url::Url::parse(href).ok()?;
-    if parsed.scheme() != "file" {
-        return None;
-    }
-    let host = parsed
-        .host_str()
-        .filter(|host| !host.eq_ignore_ascii_case("localhost"))
-        .unwrap_or("");
-    let path = if host.is_empty() {
-        parsed.path().to_owned()
-    } else {
-        format!("\\\\{host}{}", parsed.path().replace('/', "\\"))
-    };
-    (!path.is_empty()).then(|| strip_slash_prefixed_windows_drive(&path))
-}
 
 fn join_workspace_path(workspace_root: &str, relative_path: &str) -> String {
     let separator = if is_windows_absolute_path(workspace_root) {
@@ -74,7 +55,7 @@ pub fn classify_markdown_image_source(
         .get(..5)
         .is_some_and(|scheme| scheme.eq_ignore_ascii_case("file:"))
     {
-        return match parse_file_url_path(source) {
+        return match parse_file_url_href(source).map(|url| url.path) {
             Some(path) => MarkdownImageSource::WorkspaceFile {
                 path: strip_slash_prefixed_windows_drive(&safe_decode_uri_component(&path)),
             },

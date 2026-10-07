@@ -4,28 +4,11 @@ use super::RowVariant;
 use crate::state::ThreadAction;
 use crate::view::snooze::SnoozePreset;
 use crate::view::thread_menu::{
-    ThreadMenuAction, ThreadMenuChild, ThreadMenuItem, ThreadMenuItemId, child,
+    ThreadMenuAction, ThreadMenuChild, ThreadMenuItem, ThreadMenuItemId, child, entry,
+    thread_action,
 };
 use crate::view::thread_sort::MoveDirection;
 use crate::view::thread_summary::ThreadSummary;
-
-fn entry(id: ThreadMenuItemId, label: &str, action: Option<ThreadMenuAction>) -> ThreadMenuItem {
-    ThreadMenuItem {
-        id,
-        label: label.into(),
-        icon: None,
-        enabled: true,
-        destructive: false,
-        separator_before: false,
-        action,
-        confirmation: None,
-        children: vec![],
-    }
-}
-
-fn thread(action: ThreadAction) -> Option<ThreadMenuAction> {
-    Some(ThreadMenuAction::Thread { action })
-}
 
 /// The presets, each with its wake time, then "Custom…". A picked preset is
 /// re-resolved with `resolve_snooze_menu_selection` by its id.
@@ -63,7 +46,7 @@ pub fn title_regeneration_menu_item(regenerating: bool) -> ThreadMenuItem {
         entry(
             ThreadMenuItemId::RegenerateTitle,
             "Regenerate title",
-            thread(ThreadAction::RegenerateTitle),
+            thread_action(ThreadAction::RegenerateTitle),
         )
     }
 }
@@ -109,10 +92,14 @@ pub fn thread_row_menu(row: &ThreadSummary, context: &RowMenuContext) -> Vec<Thr
         menu.push(entry(
             Id::Unsnooze,
             "Wake thread",
-            thread(ThreadAction::Unsnooze),
+            thread_action(ThreadAction::Unsnooze),
         ));
     } else if card {
-        menu.push(entry(Id::Settle, "Settle", thread(ThreadAction::Settle)));
+        menu.push(entry(
+            Id::Settle,
+            "Settle",
+            thread_action(ThreadAction::Settle),
+        ));
         if !context.snooze_options.is_empty() {
             menu.push(ThreadMenuItem {
                 children: context.snooze_options.to_vec(),
@@ -123,7 +110,7 @@ pub fn thread_row_menu(row: &ThreadSummary, context: &RowMenuContext) -> Vec<Thr
         menu.push(entry(
             Id::Unsettle,
             "Un-settle",
-            thread(ThreadAction::Unsettle),
+            thread_action(ThreadAction::Unsettle),
         ));
     }
     if !context.snoozed {
@@ -153,9 +140,9 @@ pub fn thread_row_menu(row: &ThreadSummary, context: &RowMenuContext) -> Vec<Thr
             }
         }
         menu.push(if row.pinned_at.is_some() {
-            entry(Id::Unpin, "Unpin", thread(ThreadAction::Unpin))
+            entry(Id::Unpin, "Unpin", thread_action(ThreadAction::Unpin))
         } else {
-            entry(Id::Pin, "Pin", thread(ThreadAction::Pin))
+            entry(Id::Pin, "Pin", thread_action(ThreadAction::Pin))
         });
     }
     menu.push(entry(
@@ -184,29 +171,7 @@ pub fn thread_row_menu(row: &ThreadSummary, context: &RowMenuContext) -> Vec<Thr
     });
     menu.push(ThreadMenuItem {
         destructive: true,
-        ..entry(Id::Delete, "Delete", thread(ThreadAction::Delete))
+        ..entry(Id::Delete, "Delete", thread_action(ThreadAction::Delete))
     });
     menu
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
-pub enum TitleRename {
-    Rename { title: String },
-    Noop,
-    RejectEmpty,
-}
-
-/// The trimmed title to save, or why nothing is saved.
-pub fn resolve_thread_title_rename(title: &str, original: &str) -> TitleRename {
-    let title = title.trim();
-    if title.is_empty() {
-        TitleRename::RejectEmpty
-    } else if title == original {
-        TitleRename::Noop
-    } else {
-        TitleRename::Rename {
-            title: title.into(),
-        }
-    }
 }

@@ -9,12 +9,15 @@ use crate::state::Snapshot;
 use crate::view::inbox::{
     InboxReturns, is_thread_working, sort_inbox_threads_by_return, sort_working_threads_by_send,
 };
+use crate::view::quantity;
 use crate::view::snooze::{can_snooze, effective_snoozed, snooze_wake_label, thread_woke_at};
 use crate::view::thread_sort::{
     settled_thread_timestamp, sort_active_threads_by_order_key, sort_pinned_threads_by_order_key,
     sort_settled_threads,
 };
-use crate::view::thread_summary::{SettledOverride, ThreadSummary};
+use crate::view::thread_summary::{
+    SettledOverride, ThreadListStatus, ThreadSummary, thread_list_status,
+};
 use agent_protocol::conversation::SearchSource;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -138,7 +141,7 @@ pub struct SidebarThreadRow {
     pub active: bool,
     /// Multi-selected.
     pub selected: bool,
-    pub status: SidebarThreadStatus,
+    pub status: ThreadListStatus,
     pub top_status: Option<SidebarTopStatus>,
     /// Where a working row's duration counts from.
     pub working_started_at: Option<i64>,
@@ -537,7 +540,7 @@ fn thread_row(
             .get(&thread.id)
             .is_some_and(|draft| !draft.is_empty());
     let unread = thread.has_unseen_completion();
-    let status = resolve_sidebar_thread_status(thread);
+    let status = thread_list_status(thread);
     let woke_at = thread_woke_at(thread, now_ms).filter(|woke| {
         thread.last_visited_at.is_none_or(|visited| visited < *woke)
             && thread.settled_override != Some(SettledOverride::Settled)
@@ -588,7 +591,7 @@ fn thread_row(
             };
             let tone = if recede {
                 SidebarTitleTone::SecondaryDim
-            } else if active || woke || status == SidebarThreadStatus::Input {
+            } else if active || woke || status == ThreadListStatus::Input {
                 SidebarTitleTone::Prominent
             } else if unread {
                 SidebarTitleTone::Muted
@@ -614,9 +617,9 @@ fn thread_row(
             .collect();
             let tone = if recede {
                 SidebarTitleTone::Secondary
-            } else if unread || woke || status == SidebarThreadStatus::Input {
+            } else if unread || woke || status == ThreadListStatus::Input {
                 SidebarTitleTone::Prominent
-            } else if status == SidebarThreadStatus::Failed {
+            } else if status == ThreadListStatus::Failed {
                 SidebarTitleTone::Failed
             } else {
                 SidebarTitleTone::Normal
@@ -669,7 +672,7 @@ fn thread_row(
         unread,
         woke_at,
         recede,
-        faded: recede && status == SidebarThreadStatus::Working,
+        faded: recede && status == ThreadListStatus::Working,
         surface,
         title_tone,
         title_regenerating: thread.title_regenerating,
@@ -734,10 +737,7 @@ fn draft_rows(
         let first_line = draft.text.trim().lines().next().unwrap_or_default();
         let attachments = draft.attachments.len();
         let preview = if first_line.is_empty() {
-            format!(
-                "{attachments} attachment{}",
-                if attachments == 1 { "" } else { "s" }
-            )
+            quantity(attachments, "attachment")
         } else {
             first_line.into()
         };

@@ -45,6 +45,54 @@ impl RuntimeStatus {
     }
 }
 
+/// Colour distinguishes approval, input, active work and failures; ready is
+/// the unlabeled resting state, and waiting is the agent parked on open
+/// background work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
+pub enum ThreadListStatus {
+    Approval,
+    Input,
+    Working,
+    Waiting,
+    Failed,
+    Limited,
+    Ready,
+}
+impl ThreadListStatus {
+    pub fn label(self) -> Option<&'static str> {
+        match self {
+            Self::Approval => Some("Approval"),
+            Self::Input => Some("Input"),
+            Self::Working => Some("Working"),
+            Self::Failed => Some("Failed"),
+            Self::Limited => Some("Limited"),
+            Self::Waiting | Self::Ready => None,
+        }
+    }
+}
+
+pub fn thread_list_status(thread: &ThreadSummary) -> ThreadListStatus {
+    if thread.has_pending_approvals {
+        return ThreadListStatus::Approval;
+    }
+    if thread.has_pending_user_input {
+        return ThreadListStatus::Input;
+    }
+    let Some(runtime) = &thread.runtime else {
+        return ThreadListStatus::Ready;
+    };
+    match runtime.status {
+        status if status.is_active() => ThreadListStatus::Working,
+        RuntimeStatus::Idle => ThreadListStatus::Waiting,
+        RuntimeStatus::Failed if runtime.last_error_class.as_deref() == Some("usage_limit") => {
+            ThreadListStatus::Limited
+        }
+        RuntimeStatus::Failed => ThreadListStatus::Failed,
+        _ => ThreadListStatus::Ready,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunSummary {
     pub id: String,

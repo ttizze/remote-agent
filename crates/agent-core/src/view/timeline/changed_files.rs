@@ -1,7 +1,10 @@
 //! The changed-files card under an assistant response: a summary, a folder
 //! tree with line stats, and which checkpoint each response shows.
-use agent_domain::{CheckpointFile, CheckpointId, CheckpointStatus, MessageId, Role, RunId, State};
-use std::cmp::Ordering;
+use crate::view::collation::numeric_locale_compare;
+use crate::view::quantity;
+use agent_domain::{
+    Checkpoint, CheckpointFile, CheckpointId, CheckpointStatus, MessageId, Role, RunId, State,
+};
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
@@ -53,59 +56,6 @@ pub fn has_non_zero_stat(stat: DiffStat) -> bool {
     stat.additions > 0 || stat.deletions > 0
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum CollationClass {
-    Space,
-    Punctuation,
-    Digit,
-    Letter,
-}
-
-/// Root-collation rank of the ASCII marks, as `localeCompare` orders them
-/// before digits and letters.
-const MARKS: &str = "_-,;:!?.'\"()[]{}@*/\\&#%`^+<=>|~$";
-
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
-enum CollationKey {
-    Char(u32),
-    /// A digit run compares by value: its length without leading zeros, then digits.
-    Number(usize, String),
-}
-
-fn collation_elements(text: &str) -> Vec<(CollationClass, CollationKey)> {
-    let mut elements = vec![];
-    let mut chars = text.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c.is_ascii_digit() {
-            let mut digits = String::from(c);
-            while let Some(next) = chars.peek().copied().filter(char::is_ascii_digit) {
-                digits.push(next);
-                chars.next();
-            }
-            let value = digits.trim_start_matches('0').to_owned();
-            elements.push((
-                CollationClass::Digit,
-                CollationKey::Number(value.len(), value),
-            ));
-        } else if c.is_whitespace() {
-            elements.push((CollationClass::Space, CollationKey::Char(c as u32)));
-        } else if c.is_alphabetic() {
-            let lower = c.to_lowercase().next().unwrap_or(c);
-            elements.push((CollationClass::Letter, CollationKey::Char(lower as u32)));
-        } else {
-            let rank = MARKS.find(c).map_or(c as u32, |rank| rank as u32);
-            elements.push((CollationClass::Punctuation, CollationKey::Char(rank)));
-        }
-    }
-    elements
-}
-
-/// `localeCompare` with numeric collation and base sensitivity: case is
-/// ignored and digit runs compare by value.
-fn compare_names(a: &str, b: &str) -> Ordering {
-    collation_elements(a).cmp(&collation_elements(b))
-}
-
 #[derive(Default)]
 struct MutableDirectory {
     name: String,
@@ -151,9 +101,9 @@ fn compact(node: DiffTreeNode) -> DiffTreeNode {
 
 fn into_nodes(directory: MutableDirectory) -> Vec<DiffTreeNode> {
     let mut directories = directory.directories;
-    directories.sort_by(|a, b| compare_names(&a.name, &b.name));
+    directories.sort_by(|a, b| numeric_locale_compare(&a.name, &b.name));
     let mut files = directory.files;
-    files.sort_by(|a, b| compare_names(a.name(), b.name()));
+    files.sort_by(|a, b| numeric_locale_compare(a.name(), b.name()));
     directories
         .into_iter()
         .map(|subdirectory| {
@@ -368,11 +318,7 @@ pub fn changed_files_card(
     );
     ChangedFilesCard {
         run: run.clone(),
-        title: format!(
-            "{} changed file{}",
-            files.len(),
-            if files.len() == 1 { "" } else { "s" }
-        ),
+        title: quantity(files.len(), "changed file"),
         stat: has_non_zero_stat(stat).then(|| diff_stat_label(stat)),
         toggle_all_label: files
             .iter()
@@ -419,28 +365,29 @@ pub struct TurnDiffSummary {
     pub assistant_message: Option<MessageId>,
 }
 
+/// `None` for a checkpoint that belongs to no run.
+pub(crate) fn turn_diff_summary(state: &State, checkpoint: &Checkpoint) -> Option<TurnDiffSummary> {
+    let run = checkpoint.run.clone()?;
+    Some(TurnDiffSummary {
+        checkpoint: checkpoint.id.clone(),
+        checkpoint_turn_count: checkpoint.run_ordinal,
+        status: checkpoint.status,
+        files: checkpoint.files.clone(),
+        assistant_message: state
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.run.as_ref() == Some(&run) && message.role == Role::Assistant)
+            .map(|message| message.id.clone()),
+        run,
+    })
+}
+
 pub fn turn_diff_summaries(state: &State) -> Vec<TurnDiffSummary> {
     state
         .checkpoints
         .iter()
-        .filter_map(|checkpoint| {
-            let run = checkpoint.run.clone()?;
-            Some(TurnDiffSummary {
-                checkpoint: checkpoint.id.clone(),
-                checkpoint_turn_count: checkpoint.run_ordinal,
-                status: checkpoint.status,
-                files: checkpoint.files.clone(),
-                assistant_message: state
-                    .messages
-                    .iter()
-                    .rev()
-                    .find(|message| {
-                        message.run.as_ref() == Some(&run) && message.role == Role::Assistant
-                    })
-                    .map(|message| message.id.clone()),
-                run,
-            })
-        })
+        .filter_map(|checkpoint| turn_diff_summary(state, checkpoint))
         .collect()
 }
 
@@ -629,20 +576,6 @@ mod tests {
         assert_eq!(
             names,
             [(" a".into(), " a".into()), ("a".into(), "a".into())] as [(String, String); 2]
-        );
-    }
-
-    #[test]
-    fn sorts_names_like_numeric_locale_compare() {
-        let mut names = vec![
-            "B.txt", "a.txt", "_c.txt", "src-a.ts", "src.ts", "A.txt", "10.txt", "9.txt",
-        ];
-        names.sort_by(|a, b| compare_names(a, b));
-        assert_eq!(
-            names,
-            [
-                "_c.txt", "9.txt", "10.txt", "a.txt", "A.txt", "B.txt", "src-a.ts", "src.ts"
-            ]
         );
     }
 

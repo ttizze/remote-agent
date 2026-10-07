@@ -439,15 +439,21 @@ pub fn thread_title_seed(
 
 pub const PLAN_IMPLEMENTATION_PROMPT_PREFIX: &str = "PLEASE IMPLEMENT THIS PLAN:\n";
 
+/// The heading text of an ATX heading line (`#` to `######` after up to three spaces).
+pub(crate) fn atx_heading(line: &str) -> Option<&str> {
+    let indent = line.len() - line.trim_start_matches(' ').len();
+    let rest = &line[indent..];
+    let hashes = rest.len() - rest.trim_start_matches('#').len();
+    let after = &rest[hashes..];
+    (indent <= 3 && (1..=6).contains(&hashes) && after.starts_with(char::is_whitespace))
+        .then(|| after.trim())
+}
+
 pub fn proposed_plan_title(markdown: &str) -> Option<String> {
     markdown.lines().find_map(|line| {
-        let indent = line.len() - line.trim_start_matches(' ').len();
-        let rest = &line[indent..];
-        let hashes = rest.len() - rest.trim_start_matches('#').len();
-        let after = &rest[hashes..];
-        (indent <= 3 && (1..=6).contains(&hashes) && after.starts_with(char::is_whitespace))
-            .then(|| after.trim().to_owned())
+        atx_heading(line)
             .filter(|title| !title.is_empty())
+            .map(str::to_owned)
     })
 }
 

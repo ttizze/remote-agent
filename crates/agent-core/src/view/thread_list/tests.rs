@@ -3,7 +3,7 @@ use crate::view::thread_menu::{ThreadMenuAction, ThreadMenuChild, ThreadMenuItem
 use crate::view::thread_order::MoveDestination;
 use crate::view::thread_sort::{MoveDirection, OrderAssignment, plan_pinned_move};
 use crate::view::thread_summary::{
-    RunSummary, RuntimeSummary,
+    RunSummary, RuntimeStatus, RuntimeSummary,
     fixtures::{ms, run, runtime, summary},
 };
 use crate::view::time::fixtures::local;
@@ -1784,28 +1784,6 @@ fn shows_and_disables_the_pending_regeneration() {
     let item = title_regeneration_menu_item(true);
     assert_eq!(item.label, "Regenerating…");
     assert!(!item.enabled);
-}
-
-#[test]
-fn trims_a_changed_title() {
-    assert_eq!(
-        resolve_thread_title_rename("  New title ", "Old"),
-        TitleRename::Rename {
-            title: "New title".into()
-        }
-    );
-}
-
-#[test]
-fn rejects_empty_and_unchanged_titles() {
-    assert_eq!(
-        resolve_thread_title_rename("   ", "Old"),
-        TitleRename::RejectEmpty
-    );
-    assert_eq!(
-        resolve_thread_title_rename(" Old ", "Old"),
-        TitleRename::Noop
-    );
 }
 
 #[test]

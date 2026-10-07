@@ -5,8 +5,7 @@ mod menu;
 
 use super::thread_menu::{ThreadMenuChild, ThreadMenuItem};
 pub use menu::{
-    RowMenuContext, TitleRename, resolve_thread_title_rename, snooze_menu_options, thread_row_menu,
-    title_regeneration_menu_item,
+    RowMenuContext, snooze_menu_options, thread_row_menu, title_regeneration_menu_item,
 };
 
 use super::inbox::{
@@ -24,7 +23,7 @@ use super::thread_sort::{
     settled_thread_timestamp, sort_active_threads_by_order_key, sort_pinned_threads_by_order_key,
     sort_settled_threads,
 };
-use super::thread_summary::{RuntimeStatus, SettledOverride, ThreadSummary};
+use super::thread_summary::{SettledOverride, ThreadListStatus, ThreadSummary, thread_list_status};
 use super::time::{TimestampFormat, relative_time};
 use crate::commands::outbox::Request;
 use crate::state::Snapshot;
@@ -39,54 +38,6 @@ pub const SETTLED_INITIAL_COUNT: u32 = 10;
 pub const SETTLED_PAGE_COUNT: u32 = 25;
 
 static NO_IDS: BTreeSet<String> = BTreeSet::new();
-
-/// Colour distinguishes approval, input, active work and failures; ready is
-/// the unlabeled resting state, and waiting is the agent parked on open
-/// background work.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
-pub enum ThreadListStatus {
-    Approval,
-    Input,
-    Working,
-    Waiting,
-    Failed,
-    Limited,
-    Ready,
-}
-impl ThreadListStatus {
-    pub fn label(self) -> Option<&'static str> {
-        match self {
-            Self::Approval => Some("Approval"),
-            Self::Input => Some("Input"),
-            Self::Working => Some("Working"),
-            Self::Failed => Some("Failed"),
-            Self::Limited => Some("Limited"),
-            Self::Waiting | Self::Ready => None,
-        }
-    }
-}
-
-pub fn thread_list_status(thread: &ThreadSummary) -> ThreadListStatus {
-    if thread.has_pending_approvals {
-        return ThreadListStatus::Approval;
-    }
-    if thread.has_pending_user_input {
-        return ThreadListStatus::Input;
-    }
-    let Some(runtime) = &thread.runtime else {
-        return ThreadListStatus::Ready;
-    };
-    match runtime.status {
-        status if status.is_active() => ThreadListStatus::Working,
-        RuntimeStatus::Idle => ThreadListStatus::Waiting,
-        RuntimeStatus::Failed if runtime.last_error_class.as_deref() == Some("usage_limit") => {
-            ThreadListStatus::Limited
-        }
-        RuntimeStatus::Failed => ThreadListStatus::Failed,
-        _ => ThreadListStatus::Ready,
-    }
-}
 
 /// Cards are pinned, active and working rows; slim rows are the receded
 /// snoozed and settled shelves.

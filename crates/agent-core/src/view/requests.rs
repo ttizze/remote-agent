@@ -1,7 +1,9 @@
 //! Pending approvals and questions: the composer drawer on desktop and the
 //! request cards on mobile, with the device's answer drafts.
 use crate::commands::outbox::Outbox;
+use crate::js_text::{is_js_space, js_trim};
 use crate::state::QuestionAnswer;
+use crate::view::quantity;
 use crate::view::queue::outbox_commands;
 use agent_domain::{
     ApprovalDecision, ApprovalOption, Command, Question, Request, RequestBody, RequestStatus,
@@ -319,16 +321,16 @@ impl ResolvedAnswer {
 
 /// The value an option answers with.
 pub fn option_value(label: &str) -> String {
-    label.trim().into()
+    js_trim(label).into()
 }
 
 fn resolve_option_value(question: &Question, value: &str) -> Option<String> {
-    let label = value.trim();
+    let label = js_trim(value);
     (!label.is_empty()
         && question
             .options
             .iter()
-            .any(|option| option.label.trim() == label))
+            .any(|option| js_trim(&option.label) == label))
     .then(|| label.to_owned())
 }
 
@@ -348,7 +350,10 @@ fn selected_values(question: &Question, draft: Option<&QuestionDraft>) -> Vec<St
 }
 
 fn custom_answer(draft: Option<&QuestionDraft>) -> Option<String> {
-    non_empty(draft.map(|draft| draft.custom_answer.as_str()))
+    draft
+        .map(|draft| js_trim(&draft.custom_answer))
+        .filter(|answer| !answer.is_empty())
+        .map(str::to_owned)
 }
 
 /// The answer a draft gives, or `None` while the question is unanswered.
@@ -386,7 +391,7 @@ pub fn set_question_custom_answer(
     draft: Option<&QuestionDraft>,
     custom_answer: &str,
 ) -> QuestionDraft {
-    let selected_option_values = if custom_answer.trim().is_empty() {
+    let selected_option_values = if js_trim(custom_answer).is_empty() {
         selected_values(question, draft)
     } else {
         vec![]
@@ -446,14 +451,14 @@ pub fn is_question_option_selected(
 /// Text typed as an answer moves back to the thread draft when an option
 /// replaces it.
 pub fn carry_displaced_custom_answer_into_prompt(prompt: &str, custom_answer: &str) -> String {
-    let displaced = custom_answer.trim();
+    let displaced = js_trim(custom_answer);
     if displaced.is_empty() {
         return prompt.into();
     }
-    if prompt.trim().is_empty() {
+    if js_trim(prompt).is_empty() {
         return displaced.into();
     }
-    format!("{}\n\n{displaced}", prompt.trim_end())
+    format!("{}\n\n{displaced}", prompt.trim_end_matches(is_js_space))
 }
 
 /// Every question's answer, or `None` while one is unanswered.
@@ -522,7 +527,7 @@ pub fn question_progress(
         selected_option_values: active
             .map(|question| selected_values(question, draft))
             .unwrap_or_default(),
-        using_custom_answer: !custom_answer.trim().is_empty(),
+        using_custom_answer: !js_trim(&custom_answer).is_empty(),
         custom_answer,
         can_advance: resolved.is_some(),
         resolved_answer: resolved,
@@ -619,7 +624,7 @@ pub fn questions_view(
     let can_respond = request.capability != ResponseCapability::NotResumable;
     let answers = build_question_answers(questions, drafts);
     let count = questions.len();
-    let plural = if count == 1 { "" } else { "s" };
+    let questions_label = quantity(count, "question");
     QuestionsView {
         request_id: request.id.to_string(),
         dismissible: question_dismissible(request),
@@ -627,8 +632,8 @@ pub fn questions_view(
         responding,
         question_count: count as u32,
         counter: (count > 1).then(|| format!("{}/{count}", progress.question_index + 1)),
-        count_label: format!("{count} question{plural}"),
-        expand_accessibility_label: format!("Expand user input, {count} question{plural}"),
+        count_label: questions_label.clone(),
+        expand_accessibility_label: format!("Expand user input, {questions_label}"),
         active: questions
             .get(progress.question_index as usize)
             .map(|question| question_view(question, draft_for(drafts, question))),

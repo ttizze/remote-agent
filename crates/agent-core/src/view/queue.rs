@@ -3,6 +3,7 @@
 use crate::commands::outbox::{Outbox, Request};
 use crate::commands::workflows::queue_workflow;
 use crate::state::Snapshot;
+use crate::view::quantity;
 use agent_domain::{
     Attachment, AttachmentKind, Command, DispatchMode, RunId, State, context_references,
 };
@@ -311,10 +312,7 @@ pub fn queue_view(
         title: QUEUE_TITLE.into(),
         count: count as u32,
         queued_count: queued_count as u32,
-        region_accessibility_label: format!(
-            "{count} queued message{}",
-            if count == 1 { "" } else { "s" }
-        ),
+        region_accessibility_label: quantity(count, "queued message"),
         active_run_id: workflow.active_run.as_ref().map(ToString::to_string),
         can_reorder: workflow.can_reorder,
         can_promote_to_steer: workflow.can_promote_to_steer,
@@ -462,31 +460,6 @@ pub fn queue_order_after_move(
     };
     order.insert(at, run_id.into());
     order
-}
-
-/// How far a row shifts so the lifted row's destination opens, keeping hit
-/// testing in the original layout.
-pub fn drag_gap_offset(
-    row_offset: f64,
-    source_offset: f64,
-    source_height: f64,
-    insertion_offset: f64,
-) -> f64 {
-    if row_offset == source_offset {
-        return 0.0;
-    }
-    if insertion_offset <= source_offset {
-        return if row_offset >= insertion_offset && row_offset < source_offset {
-            source_height
-        } else {
-            0.0
-        };
-    }
-    if row_offset > source_offset && row_offset < insertion_offset {
-        -source_height
-    } else {
-        0.0
-    }
 }
 
 #[cfg(test)]

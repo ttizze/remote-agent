@@ -564,7 +564,7 @@ fn does_not_offer_a_parked_section_reorder_or_a_snooze_without_a_wake_time() {
 fn shifts(source: f64, insertion: f64) -> Vec<f64> {
     [0.0, 48.0, 120.0, 168.0, 240.0]
         .iter()
-        .map(|offset| thread_drag_gap_offset(*offset, source, 72.0, insertion))
+        .map(|offset| drag_gap_offset(*offset, source, 72.0, insertion))
         .collect()
 }
 

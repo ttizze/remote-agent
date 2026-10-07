@@ -2,6 +2,7 @@ use super::*;
 use crate::commands::build::{StartTurn, TurnDispatch, TurnMessage, dispatch, send_command};
 use crate::commands::outbox::PendingCommand;
 use crate::sync::fixtures::*;
+use crate::view::thread_order::drag_gap_offset;
 use agent_domain::{
     Attempt, AttemptStatus, CommandId, InputIntent, Message, MessageAuthor, MessageId, Role,
     RunAttemptId, RunStatus,

@@ -252,17 +252,28 @@ fn confirm(enabled: bool, message: String, destructive: bool) -> Option<ThreadMe
     })
 }
 
-fn item(id: ThreadMenuItemId, label: impl Into<String>, icon: &str) -> ThreadMenuItem {
+pub(crate) fn entry(
+    id: ThreadMenuItemId,
+    label: impl Into<String>,
+    action: Option<ThreadMenuAction>,
+) -> ThreadMenuItem {
     ThreadMenuItem {
         id,
         label: label.into(),
-        icon: Some(icon.into()),
+        icon: None,
         enabled: true,
         destructive: false,
         separator_before: false,
-        action: None,
+        action,
         confirmation: None,
         children: vec![],
+    }
+}
+
+fn item(id: ThreadMenuItemId, label: impl Into<String>, icon: &str) -> ThreadMenuItem {
+    ThreadMenuItem {
+        icon: Some(icon.into()),
+        ..entry(id, label, None)
     }
 }
 
@@ -282,7 +293,7 @@ pub(crate) fn child(
     }
 }
 
-fn thread_action(action: ThreadAction) -> Option<ThreadMenuAction> {
+pub(crate) fn thread_action(action: ThreadAction) -> Option<ThreadMenuAction> {
     Some(ThreadMenuAction::Thread { action })
 }
 

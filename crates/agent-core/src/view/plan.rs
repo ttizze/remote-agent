@@ -183,7 +183,7 @@ pub fn is_latest_run_settled(
     let Some((run, status)) = latest else {
         return false;
     };
-    !(status.blocking() || status == RunStatus::Queued) && active_run != Some(run)
+    status.terminal() && active_run != Some(run)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

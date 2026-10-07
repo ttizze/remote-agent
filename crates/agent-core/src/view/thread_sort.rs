@@ -4,14 +4,6 @@ use super::thread_summary::ThreadSummary;
 use crate::ordering;
 use std::{cmp::Ordering, collections::BTreeMap};
 
-/// Approximates `localeCompare` for names: case-insensitive, lowercase first
-/// on ties.
-pub(crate) fn locale_compare(left: &str, right: &str) -> Ordering {
-    left.to_lowercase()
-        .cmp(&right.to_lowercase())
-        .then_with(|| right.cmp(left))
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum ThreadSortOrder {
@@ -45,11 +37,14 @@ pub fn settled_thread_timestamp(thread: &ThreadSummary) -> i64 {
     .unwrap_or(thread.updated_at)
 }
 
-/// Settled rows are history: newest work end first, then id.
-pub fn sort_settled_threads<T: AsRef<ThreadSummary>>(threads: Vec<T>) -> Vec<T> {
+/// Newest `key` first, then id.
+pub(crate) fn sort_newest_first<T: AsRef<ThreadSummary>>(
+    threads: Vec<T>,
+    key: impl Fn(&T) -> i64,
+) -> Vec<T> {
     let mut keyed: Vec<_> = threads
         .into_iter()
-        .map(|thread| (settled_thread_timestamp(thread.as_ref()), thread))
+        .map(|thread| (key(&thread), thread))
         .collect();
     keyed.sort_by(|(left_ms, left), (right_ms, right)| {
         right_ms
@@ -57,6 +52,11 @@ pub fn sort_settled_threads<T: AsRef<ThreadSummary>>(threads: Vec<T>) -> Vec<T> 
             .then_with(|| left.as_ref().id.cmp(&right.as_ref().id))
     });
     keyed.into_iter().map(|(_, thread)| thread).collect()
+}
+
+/// Settled rows are history: newest work end first, then id.
+pub fn sort_settled_threads<T: AsRef<ThreadSummary>>(threads: Vec<T>) -> Vec<T> {
+    sort_newest_first(threads, |thread| settled_thread_timestamp(thread.as_ref()))
 }
 
 pub fn thread_sort_timestamp(thread: &ThreadSummary, order: ThreadSortOrder) -> i64 {

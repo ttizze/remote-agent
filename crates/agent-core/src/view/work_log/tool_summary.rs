@@ -2,6 +2,7 @@
 //! the entities the calls touched.
 use super::tool_catalog::ToolSummaryAction;
 use crate::js_text::js_trim;
+use crate::view::quantity;
 use serde_json::{Map, Value};
 use std::borrow::Cow;
 use std::collections::HashSet;
@@ -136,10 +137,6 @@ pub fn tool_result_indicates_failure(output: Option<&Value>) -> bool {
 fn count_entities(ids: &[Option<&str>]) -> usize {
     ids.iter().flatten().collect::<HashSet<_>>().len()
         + ids.iter().filter(|id| id.is_none()).count()
-}
-
-fn quantity(count: usize, noun: &str) -> String {
-    format!("{count} {noun}{}", if count == 1 { "" } else { "s" })
 }
 
 struct ReadCall<'a> {

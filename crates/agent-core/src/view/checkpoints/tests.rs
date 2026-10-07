@@ -295,7 +295,7 @@ fn summarizes_run_checkpoints_with_their_files_and_last_assistant_message() {
     assert_eq!((summary.additions, summary.deletions), (5, 1));
     assert_eq!(summary.changed_files_label, "2 changed files");
     assert_eq!(summary.completed_at_ms, Some(5_000));
-    assert_eq!(changed_files_label(1), "1 changed file");
+    assert_eq!(quantity(1, "changed file"), "1 changed file");
 }
 
 #[test]

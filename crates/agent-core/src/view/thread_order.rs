@@ -402,7 +402,7 @@ pub fn thread_drag_action(source: DragSection, destination: DragSection) -> Opti
 
 /// How far a row shifts while a lifted row hovers at `insertion_offset`; hit
 /// testing keeps the original layout.
-pub fn thread_drag_gap_offset(
+pub fn drag_gap_offset(
     row_offset: f64,
     source_offset: f64,
     source_height: f64,

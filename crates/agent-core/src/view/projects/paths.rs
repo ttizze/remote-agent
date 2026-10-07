@@ -1,22 +1,9 @@
 //! Project path rules for adding projects and browsing folders. Paths are the
 //! Host's, so Windows forms are recognized even on a Unix client.
 use crate::models::Project;
-
-pub fn is_windows_drive_path(value: &str) -> bool {
-    let bytes = value.as_bytes();
-    bytes.len() >= 2
-        && bytes[0].is_ascii_alphabetic()
-        && bytes[1] == b':'
-        && bytes.get(2).is_none_or(|&b| b == b'/' || b == b'\\')
-}
-
-pub fn is_unc_path(value: &str) -> bool {
-    value.starts_with("\\\\")
-}
-
-pub fn is_windows_absolute_path(value: &str) -> bool {
-    is_unc_path(value) || is_windows_drive_path(value)
-}
+use crate::presentation::markdown::links::{
+    is_unc_path, is_windows_absolute_path, is_windows_drive_path,
+};
 
 pub fn is_explicit_relative_path(value: &str) -> bool {
     value == "."
@@ -298,26 +285,6 @@ pub(crate) mod fixtures {
 mod tests {
     use super::fixtures::project;
     use super::*;
-
-    #[test]
-    fn detects_windows_drive_paths() {
-        assert!(is_windows_drive_path("C:\\repo"));
-        assert!(is_windows_drive_path("D:/repo"));
-        assert!(!is_windows_drive_path("/repo"));
-    }
-
-    #[test]
-    fn detects_unc_paths() {
-        assert!(is_unc_path("\\\\server\\share\\repo"));
-        assert!(!is_unc_path("C:\\repo"));
-    }
-
-    #[test]
-    fn detects_windows_absolute_paths() {
-        assert!(is_windows_absolute_path("C:\\repo"));
-        assert!(is_windows_absolute_path("\\\\server\\share\\repo"));
-        assert!(!is_windows_absolute_path("./repo"));
-    }
 
     #[test]
     fn detects_explicit_relative_paths() {

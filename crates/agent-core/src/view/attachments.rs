@@ -294,6 +294,8 @@ mod tests {
         assert_eq!(format_attachment_size(3 * 1024 * 1024), "3.0 MB");
         assert_eq!(format_attachment_size(1), "1 KB");
         assert_eq!(format_attachment_size(0), "1 KB");
+        assert_eq!(format_attachment_size(1025), "2 KB");
+        assert_eq!(format_attachment_size(1_572_864), "1.5 MB");
         assert_eq!(format_attachment_size(1024 * 1024 + 256 * 1024), "1.3 MB");
     }
 

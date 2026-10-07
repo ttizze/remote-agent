@@ -1,7 +1,7 @@
 //! The proposed plan card: its title, the markdown it shows, the collapsed
 //! preview of a long plan and the file it saves to.
 use super::entries::{PlanStatus, ProposedPlan};
-use crate::commands::build::proposed_plan_title;
+use crate::commands::build::{atx_heading, proposed_plan_title};
 use crate::js_text::utf16_len;
 use agent_domain::{PlanId, RunId};
 
@@ -9,16 +9,6 @@ use agent_domain::{PlanId, RunId};
 const COLLAPSE_CHARACTERS: usize = 900;
 const COLLAPSE_LINES: usize = 20;
 const PREVIEW_LINES: usize = 8;
-
-/// The heading text of an ATX heading line (`#` to `######` after up to three spaces).
-fn heading(line: &str) -> Option<&str> {
-    let indent = line.len() - line.trim_start_matches(' ').len();
-    let rest = &line[indent..];
-    let hashes = rest.len() - rest.trim_start_matches('#').len();
-    let after = &rest[hashes..];
-    (indent <= 3 && (1..=6).contains(&hashes) && after.starts_with(char::is_whitespace))
-        .then(|| after.trim())
-}
 
 fn skip_blank<'a, 'b>(mut lines: &'a [&'b str]) -> &'a [&'b str] {
     while lines.first().is_some_and(|line| line.trim().is_empty()) {
@@ -36,7 +26,10 @@ fn split_lines(text: &str) -> Vec<&str> {
 /// The plan without its title heading or a leading "Summary" heading.
 pub fn strip_displayed_plan_markdown(markdown: &str) -> String {
     let lines = split_lines(markdown.trim_end());
-    let mut lines: &[&str] = if lines.first().is_some_and(|line| heading(line).is_some()) {
+    let mut lines: &[&str] = if lines
+        .first()
+        .is_some_and(|line| atx_heading(line).is_some())
+    {
         &lines[1..]
     } else {
         &lines
@@ -44,7 +37,7 @@ pub fn strip_displayed_plan_markdown(markdown: &str) -> String {
     lines = skip_blank(lines);
     if lines
         .first()
-        .and_then(|line| heading(line))
+        .and_then(|line| atx_heading(line))
         .is_some_and(|title| title.to_lowercase() == "summary")
     {
         lines = skip_blank(&lines[1..]);

@@ -10,7 +10,6 @@ pub mod entries;
 pub mod lifecycle;
 pub mod message;
 pub mod mobile;
-pub mod mobile_answers;
 pub mod mobile_follow;
 pub mod mobile_inspector;
 pub mod mobile_presentation;

@@ -340,14 +340,6 @@ fn marks_unavailable_links_in_the_mobile_feed() {
 }
 
 #[rstest]
-#[case(0, "1 KB")]
-#[case(1025, "2 KB")]
-#[case(1_572_864, "1.5 MB")]
-fn formats_attachment_sizes(#[case] bytes: u64, #[case] expected: &str) {
-    assert_eq!(format_attachment_size(bytes), expected);
-}
-
-#[rstest]
 #[case("a.mp4", "video/mp4", true)]
 #[case("a.mov", "", true)]
 #[case("a.mov", "application/octet-stream", true)]

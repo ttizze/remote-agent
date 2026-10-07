@@ -2,6 +2,7 @@
 //! newest first, across threads and providers.
 use crate::js_text::utf16_units;
 use crate::state::{Draft, DraftAttachment};
+use crate::view::quantity;
 use agent_domain::MessageContext;
 use serde::{Deserialize, Serialize};
 
@@ -336,10 +337,6 @@ pub struct StashEntryView {
     pub created_at_ms: i64,
 }
 
-fn plural(count: usize, noun: &str) -> String {
-    format!("{count} {noun}{}", if count == 1 { "" } else { "s" })
-}
-
 /// The prompt on one line, at most 90 characters, or what the entry attaches.
 pub fn stash_entry_snippet(entry: &PromptStashEntry) -> String {
     let trimmed = entry
@@ -359,9 +356,9 @@ pub fn stash_entry_snippet(entry: &PromptStashEntry) -> String {
     let files = entry.files.len();
     match (images, files) {
         (0, 0) => "(empty)".into(),
-        (0, _) => format!("({})", plural(files, "file")),
-        (_, 0) => format!("({})", plural(images, "image")),
-        _ => format!("({})", plural(images + files, "attachment")),
+        (0, _) => format!("({})", quantity(files, "file")),
+        (_, 0) => format!("({})", quantity(images, "image")),
+        _ => format!("({})", quantity(images + files, "attachment")),
     }
 }
 
@@ -376,12 +373,15 @@ pub fn stash_menu(stash: &PromptStash) -> Vec<StashEntryView> {
                 (
                     Some(format!(
                         "saving {}…",
-                        plural(entry.pending_image_count as usize, "image")
+                        quantity(entry.pending_image_count as usize, "image")
                     )),
                     false,
                 )
             } else if missing > 0 {
-                (Some(format!("{} dropped", plural(missing, "image"))), true)
+                (
+                    Some(format!("{} dropped", quantity(missing, "image"))),
+                    true,
+                )
             } else {
                 (None, false)
             };

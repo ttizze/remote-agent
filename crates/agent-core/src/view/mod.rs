@@ -4,6 +4,7 @@ pub mod agents;
 pub mod archived;
 pub mod attachments;
 pub mod checkpoints;
+pub mod collation;
 pub mod composer;
 pub mod header;
 pub mod inbox;
@@ -29,3 +30,8 @@ pub mod time;
 pub mod timeline;
 pub mod work_log;
 pub mod working_status;
+
+/// A count and its noun: "1 file", "3 files".
+pub(crate) fn quantity(count: usize, noun: &str) -> String {
+    format!("{count} {noun}{}", if count == 1 { "" } else { "s" })
+}

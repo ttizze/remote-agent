@@ -4,6 +4,8 @@
 //!
 //! Offsets are UTF-16 code units, the unit of the native text editors.
 use crate::js_text::{utf16_offset, utf16_units};
+use crate::presentation::markdown::links::is_video_file_name;
+use crate::view::attachments::format_attachment_size;
 use agent_domain::{
     Attachment, AttachmentKind, MessageContext, ThreadShell, context_references,
     sanitize_context_label,
@@ -246,15 +248,6 @@ pub fn preview_annotation_label(comment: &str, page_title: Option<&str>) -> Stri
         .into()
 }
 
-pub fn format_attachment_size(size_bytes: u64) -> String {
-    const MIB: u64 = 1024 * 1024;
-    if size_bytes >= MIB {
-        format!("{:.1} MB", size_bytes as f64 / MIB as f64)
-    } else {
-        format!("{} KB", size_bytes.div_ceil(1024).max(1))
-    }
-}
-
 /// A video by its MIME type, or by its extension when nothing recorded the type.
 pub fn is_video(name: &str, mime_type: &str) -> bool {
     let mime = mime_type
@@ -272,12 +265,7 @@ pub fn is_video(name: &str, mime_type: &str) -> bool {
     ) {
         return false;
     }
-    name.rsplit_once('.').is_some_and(|(_, extension)| {
-        matches!(
-            extension.to_lowercase().as_str(),
-            "avi" | "m4v" | "mkv" | "mov" | "mp4" | "ogv" | "webm"
-        )
-    })
+    is_video_file_name(name)
 }
 
 fn record<'a>(context: Option<&'a MessageContext>, context_id: &str) -> Option<&'a Value> {

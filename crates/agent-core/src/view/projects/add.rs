@@ -7,7 +7,7 @@ use super::paths::{
     resolve_project_path_for_dispatch,
 };
 use crate::models::{FileEntry, Project};
-use crate::view::thread_sort::locale_compare;
+use crate::view::collation::locale_compare;
 
 /// Projects are added only while the Host is connected.
 pub fn can_add_project(connected: bool) -> bool {

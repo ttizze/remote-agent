@@ -1,5 +1,6 @@
 //! The Working section (beta): which threads fold into it, and how the inbox
 //! and the section order their rows.
+use super::thread_sort::sort_newest_first;
 use super::thread_summary::{RuntimeStatus, ThreadSummary};
 use agent_domain::InteractionMode;
 use std::collections::{BTreeMap, BTreeSet};
@@ -32,19 +33,6 @@ impl ThreadSummary {
                 .and_then(|runtime| runtime.active_run.as_ref())
                 != Some(&run.id)
     }
-}
-
-fn sort_newest_first<T: AsRef<ThreadSummary>>(threads: Vec<T>, key: impl Fn(&T) -> i64) -> Vec<T> {
-    let mut keyed: Vec<_> = threads
-        .into_iter()
-        .map(|thread| (key(&thread), thread))
-        .collect();
-    keyed.sort_by(|(left_ms, left), (right_ms, right)| {
-        right_ms
-            .cmp(left_ms)
-            .then_with(|| left.as_ref().id.cmp(&right.as_ref().id))
-    });
-    keyed.into_iter().map(|(_, thread)| thread).collect()
 }
 
 /// Newest first by when each thread last came back to the user; `returns`

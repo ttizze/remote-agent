@@ -2,7 +2,8 @@
 //! Host scan: the picker, its default selection and the result message.
 use super::paths::find_project_by_path;
 use crate::models::Project;
-use crate::view::thread_sort::locale_compare;
+use crate::view::collation::locale_compare;
+use crate::view::time::compact_relative_time_label;
 use agent_domain::Driver;
 use agent_protocol::conversation::{ImportCounts, SessionCandidate, SessionScan};
 use std::collections::{BTreeMap, BTreeSet};
@@ -359,19 +360,7 @@ pub struct SessionImportView {
 
 /// Activity age for the fixed-width column; under a minute reads "now".
 fn import_age_label(last_active_ms: Option<i64>, now_ms: i64) -> String {
-    let Some(at) = last_active_ms else {
-        return String::new();
-    };
-    let minutes = (now_ms - at) / 60_000;
-    if minutes < 1 {
-        "now".into()
-    } else if minutes < 60 {
-        format!("{minutes}m")
-    } else if minutes < 1440 {
-        format!("{}h", minutes / 60)
-    } else {
-        format!("{}d", minutes / 1440)
-    }
+    last_active_ms.map_or_else(String::new, |at| compact_relative_time_label(at, now_ms))
 }
 
 /// The import step. `selection` is `None` until the user changes the default.

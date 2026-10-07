@@ -654,7 +654,7 @@ fn file_icon_by_extension(extension: &str) -> Option<MarkdownFileIcon> {
 }
 
 /// Recognizes videos by extension when nothing recorded the file's MIME type.
-fn is_video_file_name(name: &str) -> bool {
+pub(crate) fn is_video_file_name(name: &str) -> bool {
     name.rsplit_once('.').is_some_and(|(_, extension)| {
         matches!(
             extension.to_lowercase().as_str(),

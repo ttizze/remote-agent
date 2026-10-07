@@ -2,7 +2,7 @@
 //! served driver hands a conversation off to another, so only a thread whose
 //! state is unknown or whose turn has no native session yet is held.
 use crate::view::thread_summary::ThreadSummary;
-use agent_domain::{RunStatus, State};
+use agent_domain::State;
 
 /// What decides whether a loaded thread can hand off its conversation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -21,15 +21,7 @@ impl HandoffFacts {
             native_session: state
                 .native_sessions
                 .contains_key(&thread.selection.instance),
-            active_run: state.runs.iter().any(|run| {
-                matches!(
-                    run.status,
-                    RunStatus::Preparing
-                        | RunStatus::Starting
-                        | RunStatus::Running
-                        | RunStatus::Waiting
-                )
-            }),
+            active_run: state.active_run().is_some(),
             imported: thread.imported,
             has_runs: !state.runs.is_empty(),
         })
