@@ -8,7 +8,7 @@ use crate::view::thread_sort::{
 };
 use crate::view::thread_summary::{
     RuntimeStatus, SettledOverride, ThreadListStatus, ThreadSummary,
-    background_work_holds_completion, thread_list_status,
+    background_work_holds_completion,
 };
 use agent_domain::InteractionMode;
 use std::collections::{BTreeMap, BTreeSet};

@@ -4,6 +4,7 @@ use crate::view::thread_sort::{pin_order_key_between, sort_pinned_threads_by_ord
 use crate::view::thread_summary::{
     RunSummary, RuntimeSummary,
     fixtures::{ms, run, runtime, summary},
+    thread_list_status,
 };
 use agent_domain::BackgroundKind;
 use proptest::prelude::*;

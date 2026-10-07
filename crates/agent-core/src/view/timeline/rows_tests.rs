@@ -1,6 +1,7 @@
 use super::*;
 use crate::sync::ThreadStatus;
 use crate::view::work_log::fixtures::*;
+use agent_domain::RunStatus;
 use agent_domain::{
     Checkpoint, CheckpointFile, CheckpointId, CheckpointStatus, CommandId, Role, TurnItemId,
 };

@@ -11,6 +11,7 @@ use agent_domain::{
     AttemptStatus, CheckpointFile, CheckpointStatus, InputIntent, Message, Run, State, ThreadId,
     WorktreeSetupStage,
 };
+use agent_domain::{WorktreeSetupStageId, WorktreeSetupStageStatus};
 use serde_json::{Value, json};
 
 fn ts(value: &str) -> Timestamp {

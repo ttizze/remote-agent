@@ -68,16 +68,7 @@ pub fn session_phase(runtime: Option<&ThreadRuntime>) -> SessionPhase {
 }
 
 fn runtime_is_active(runtime: &ThreadRuntime) -> bool {
-    matches!(
-        runtime.status,
-        Some(
-            RunStatus::Preparing
-                | RunStatus::Queued
-                | RunStatus::Starting
-                | RunStatus::Running
-                | RunStatus::Waiting
-        )
-    )
+    runtime.status.is_some_and(|status| !status.terminal())
 }
 
 /// Stop is offered while a run is preparing or starting too, since the Host

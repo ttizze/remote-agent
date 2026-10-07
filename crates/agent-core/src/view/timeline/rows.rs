@@ -29,7 +29,7 @@ use crate::view::work_log::ToolIcon;
 use crate::view::work_log::presentation::ToolGroupSummaryKind;
 use agent_domain::{
     Attachment, InputIntent, Item, ItemKind, Message, MessageAuthor, MessageContext, MessageId,
-    RunAttemptId, RunId, RunStatus, State, ThreadId, ThreadShell, Timestamp, WorktreeSetupSnapshot,
+    RunAttemptId, RunId, State, ThreadId, ThreadShell, Timestamp, WorktreeSetupSnapshot,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
@@ -781,16 +781,9 @@ fn mobile_rows(context: &Context<'_>) -> Vec<TimelineRow> {
 /// this device has not had confirmed, or a native subagent's runless turn.
 fn is_working(state: &State, source: &TimelineSource<'_>) -> bool {
     let run_working = source.shell.is_some_and(|shell| {
-        matches!(
-            shell.activity_run_status,
-            Some(
-                RunStatus::Preparing
-                    | RunStatus::Queued
-                    | RunStatus::Starting
-                    | RunStatus::Running
-                    | RunStatus::Waiting
-            )
-        )
+        shell
+            .activity_run_status
+            .is_some_and(|status| !status.terminal())
     });
     let sending = source
         .pending

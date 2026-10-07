@@ -14,6 +14,7 @@ use super::entries::{
     ChatMessage, ProposedPlan, TimelineEntry, TimelineEntryKind, revert_turn_counts,
 };
 use super::lifecycle::HandoffDivider;
+use crate::view::setup_card::agent_started;
 use crate::view::work_log::{
     ItemType, SourceActivity, ToolIcon, ToolLifecycleStatus, ToolSurface, WorkLogEntry, WorkTone,
     presentation::{
@@ -27,7 +28,6 @@ use crate::view::work_log::{
 use agent_domain::{
     Checkpoint, Item, ItemKind, ItemStatus, MessageId, NodeId, Role, RunAttemptId, RunId,
     RunStatus, ThreadShell, Timestamp, WorktreeSetupPhase, WorktreeSetupSnapshot,
-    WorktreeSetupStageId, WorktreeSetupStageStatus,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
@@ -277,12 +277,6 @@ pub fn compute_message_duration_start(messages: &[&ChatMessage]) -> BTreeMap<Mes
         }
     }
     result
-}
-
-fn worktree_setup_agent_started(snapshot: &WorktreeSetupSnapshot) -> bool {
-    snapshot.stages.iter().any(|stage| {
-        stage.id == WorktreeSetupStageId::Agent && stage.status == WorktreeSetupStageStatus::Done
-    })
 }
 
 fn work_group_id(entry_id: &str) -> String {
@@ -1086,7 +1080,7 @@ pub fn derive_desktop_rows(input: &DesktopTimelineInput) -> Vec<DesktopRow> {
     // running is surfaced by the working header. A failed or cancelled setup
     // stays under the send so its outcome and actions remain reachable.
     let setup = input.worktree_setup.as_ref();
-    let setup_handed_off = setup.is_some_and(worktree_setup_agent_started)
+    let setup_handed_off = setup.is_some_and(agent_started)
         && latest_run.is_some_and(|latest| latest.started_at.is_some());
     // A finished setup keeps the slot until the turn is live, so the card does
     // not jump above the working header before the run starts.

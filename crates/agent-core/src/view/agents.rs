@@ -4,7 +4,7 @@ use crate::js_text::{JS_SPACE, collapse_js_spaces, is_js_space};
 use crate::models::{Model, Project};
 use crate::provider::ProviderKind;
 use crate::state::Snapshot;
-use crate::view::models::options::format_codex_model_name;
+use crate::view::models::options::{format_codex_model_name, normalize_model_slug};
 use crate::view::quantity;
 use crate::view::time::format_duration;
 use agent_domain::{
@@ -654,15 +654,6 @@ fn file_basename(path: &str) -> String {
     trimmed.rsplit(['/', '\\']).next().unwrap_or(trimmed).into()
 }
 
-const CODEX_MODEL_ALIASES: [(&str, &str); 6] = [
-    ("gpt-5-codex", "gpt-5.4"),
-    ("5.4", "gpt-5.4"),
-    ("5.3", "gpt-5.3-codex"),
-    ("gpt-5.3", "gpt-5.3-codex"),
-    ("5.3-spark", "gpt-5.3-codex-spark"),
-    ("gpt-5.3-spark", "gpt-5.3-codex-spark"),
-];
-
 fn resolve_selectable_model(
     driver: Driver,
     value: &str,
@@ -679,13 +670,7 @@ fn resolve_selectable_model(
     if let Some(model) = models.iter().find(|m| m.name.to_lowercase() == lower) {
         return Some(model.slug.clone());
     }
-    let normalized = match driver {
-        Driver::Codex => CODEX_MODEL_ALIASES
-            .iter()
-            .find(|(alias, _)| *alias == value)
-            .map_or(value, |(_, slug)| *slug),
-        Driver::Claude => value,
-    };
+    let normalized = normalize_model_slug(value, driver);
     models
         .iter()
         .find(|m| m.slug == normalized)

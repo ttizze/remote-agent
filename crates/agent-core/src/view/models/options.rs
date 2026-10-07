@@ -413,7 +413,8 @@ pub fn model_descriptors(model: &Model) -> Vec<OptionDescriptor> {
     }
 }
 
-fn normalize_model_slug(model: &str, driver: Driver) -> &str {
+/// The catalogue slug a known alias stands for.
+pub(crate) fn normalize_model_slug(model: &str, driver: Driver) -> &str {
     match driver {
         Driver::Codex => match model {
             "gpt-5-codex" | "5.4" => "gpt-5.4",
