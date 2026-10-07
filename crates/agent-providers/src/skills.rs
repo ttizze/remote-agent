@@ -88,10 +88,11 @@ pub fn claude_skill_dispatch(text: &str, skills: &[String]) -> Option<ClaudeSkil
 }
 
 /// What a Claude skill's `SKILL.md` says about invoking it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ClaudeSkillFrontmatter {
     pub user_invocation_only: bool,
     pub user_invocable: bool,
+    pub description: Option<String>,
 }
 /// Claude Code accepts the YAML 1.1 boolean spellings, which the YAML 1.2
 /// core schema leaves as strings and numbers.
@@ -190,6 +191,7 @@ pub fn claude_skill_frontmatter(contents: &str) -> Option<ClaudeSkillFrontmatter
     let mut parsed = ClaudeSkillFrontmatter {
         user_invocation_only: false,
         user_invocable: true,
+        description: None,
     };
     let Some(frontmatter) = frontmatter_block(contents) else {
         return Some(parsed);
@@ -207,6 +209,12 @@ pub fn claude_skill_frontmatter(contents: &str) -> Option<ClaudeSkillFrontmatter
                 frontmatter_boolean(document.get("disable-model-invocation")) == Some(true);
             parsed.user_invocable =
                 frontmatter_boolean(document.get("user-invocable")) != Some(false);
+            parsed.description = document
+                .get("description")
+                .and_then(serde_yaml::Value::as_str)
+                .map(str::trim)
+                .filter(|description| !description.is_empty())
+                .map(str::to_owned);
             Some(parsed)
         }
         serde_yaml::Value::Sequence(_) => Some(parsed),
@@ -377,7 +385,8 @@ mod tests {
             claude_skill_frontmatter("# Just a heading\n"),
             Some(ClaudeSkillFrontmatter {
                 user_invocation_only: false,
-                user_invocable: true
+                user_invocable: true,
+                description: None,
             })
         );
         for (description, comment) in [
@@ -402,7 +411,8 @@ mod tests {
                 ]),
                 Some(ClaudeSkillFrontmatter {
                     user_invocation_only: true,
-                    user_invocable: false
+                    user_invocable: false,
+                    description: Some(description.into()),
                 })
             );
         }
@@ -435,6 +445,7 @@ mod tests {
         let not_invocable = Some(ClaudeSkillFrontmatter {
             user_invocation_only: true,
             user_invocable: false,
+            description: None,
         });
         for (invocation, invocable) in [
             (
@@ -468,14 +479,16 @@ mod tests {
             ]),
             Some(ClaudeSkillFrontmatter {
                 user_invocation_only: false,
-                user_invocable: false
+                user_invocable: false,
+                description: Some("Runs: the deploy.\nuser-invocable: false".into()),
             })
         );
         assert_eq!(
             skill(&["---", "- listed", "---"]),
             Some(ClaudeSkillFrontmatter {
                 user_invocation_only: false,
-                user_invocable: true
+                user_invocable: true,
+                description: None,
             })
         );
         for malformed in [

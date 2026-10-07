@@ -1,7 +1,6 @@
 //! Shared request records and their typed RPC contracts.
 use crate::error::PeerError;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use serde_json::{Map, Value};
 
 /// The method, parameters and result are one contract.
 pub trait RpcMethod: Serialize {
@@ -55,21 +54,6 @@ rpc_method!(ListRemoteHosts, ListRemotes, |self| crate::models::Empty {});
 pub struct RegisterRemoteHost {
     pub ticket: String,
     pub name: String,
-}
-
-#[derive(Debug, Serialize, Clone, Deserialize)]
-pub struct ListModels {
-    pub limit: usize,
-    pub cursor: Option<String>,
-}
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ModelPage {
-    pub data: Vec<crate::models::Model>,
-    pub next_cursor: Option<String>,
-    #[serde(default)]
-    #[serde(with = "crate::protocol::json")]
-    pub provider_errors: Option<Map<String, Value>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -10,3 +10,4 @@ pub mod orchestration;
 pub mod permissions;
 pub mod protocol;
 pub mod provider;
+pub mod workspace;

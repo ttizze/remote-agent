@@ -1,132 +1,9 @@
-//! Claude model options compiled into native launch values, from the model
-//! catalog the reference client ships.
-use agent_domain::ModelSelection;
+//! Claude model options compiled into native launch values, from the bundled
+//! model manifest.
+use crate::model_catalog::claude_entry;
+use agent_domain::{ModelSelection, OptionDescriptor, option_value, prompt_injected_value};
 use serde_json::{Value, json};
 
-struct Profile {
-    models: &'static [&'static str],
-    efforts: &'static [&'static str],
-    default_effort: Option<&'static str>,
-    /// Effort values sent under another native name; `None` sends no effort.
-    effort_map: &'static [(&'static str, Option<&'static str>)],
-    /// Context window options with the `[1m]` model suffix; the first is the default.
-    context_windows: &'static [&'static str],
-    fixed_window: Option<u64>,
-    fast_mode: bool,
-    thinking: bool,
-}
-const FABLE_EFFORTS: &[&str] = &[
-    "low",
-    "medium",
-    "high",
-    "xhigh",
-    "max",
-    "ultracode",
-    "ultrathink",
-];
-const FABLE_MAP: &[(&str, Option<&str>)] = &[("ultracode", Some("xhigh")), ("ultrathink", None)];
-const PROFILES: &[Profile] = &[
-    Profile {
-        models: &["claude-fable-5-1", "claude-fable-5"],
-        efforts: FABLE_EFFORTS,
-        default_effort: Some("medium"),
-        effort_map: FABLE_MAP,
-        context_windows: &["1m", "200k"],
-        fixed_window: None,
-        fast_mode: false,
-        thinking: false,
-    },
-    Profile {
-        models: &["claude-opus-5-5"],
-        efforts: FABLE_EFFORTS,
-        default_effort: Some("medium"),
-        effort_map: FABLE_MAP,
-        context_windows: &["1m"],
-        fixed_window: None,
-        fast_mode: true,
-        thinking: false,
-    },
-    Profile {
-        models: &["claude-opus-5"],
-        efforts: FABLE_EFFORTS,
-        default_effort: Some("high"),
-        effort_map: FABLE_MAP,
-        context_windows: &["1m"],
-        fixed_window: None,
-        fast_mode: true,
-        thinking: false,
-    },
-    Profile {
-        models: &["claude-opus-4-8"],
-        efforts: FABLE_EFFORTS,
-        default_effort: Some("high"),
-        effort_map: FABLE_MAP,
-        context_windows: &[],
-        fixed_window: Some(1_000_000),
-        fast_mode: true,
-        thinking: false,
-    },
-    Profile {
-        models: &["claude-opus-4-7"],
-        efforts: &["low", "medium", "high", "xhigh", "max", "ultrathink"],
-        default_effort: Some("xhigh"),
-        effort_map: &[("xhigh", Some("max")), ("ultrathink", None)],
-        context_windows: &[],
-        fixed_window: Some(1_000_000),
-        fast_mode: true,
-        thinking: false,
-    },
-    Profile {
-        models: &["claude-opus-4-6"],
-        efforts: &["low", "medium", "high", "max", "ultrathink"],
-        default_effort: Some("high"),
-        effort_map: &[("ultrathink", None)],
-        context_windows: &["1m"],
-        fixed_window: None,
-        fast_mode: true,
-        thinking: false,
-    },
-    Profile {
-        models: &["claude-opus-4-5"],
-        efforts: &["low", "medium", "high", "max"],
-        default_effort: Some("high"),
-        effort_map: &[],
-        context_windows: &[],
-        fixed_window: None,
-        fast_mode: true,
-        thinking: false,
-    },
-    Profile {
-        models: &["claude-sonnet-5", "claude-sonnet-5-5"],
-        efforts: &["low", "medium", "high", "xhigh", "max", "ultrathink"],
-        default_effort: Some("high"),
-        effort_map: &[("ultrathink", None)],
-        context_windows: &["200k", "1m"],
-        fixed_window: None,
-        fast_mode: false,
-        thinking: false,
-    },
-    Profile {
-        models: &["claude-sonnet-4-6"],
-        efforts: &["low", "medium", "high", "max", "ultrathink"],
-        default_effort: Some("high"),
-        effort_map: &[("max", Some("high")), ("ultrathink", None)],
-        context_windows: &["200k"],
-        fixed_window: None,
-        fast_mode: false,
-        thinking: false,
-    },
-    Profile {
-        models: &["claude-haiku-4-5"],
-        efforts: &[],
-        default_effort: None,
-        effort_map: &[],
-        context_windows: &[],
-        fixed_window: None,
-        fast_mode: false,
-        thinking: true,
-    },
-];
 #[derive(Debug, Clone, PartialEq)]
 pub struct ClaudeModelOptions {
     /// The model sent to the CLI, with its context-window suffix.
@@ -140,73 +17,71 @@ pub struct ClaudeModelOptions {
     /// The catalog window for handoff budgets, when the catalog knows it.
     pub model_window: Option<u64>,
 }
-fn boolean(selection: &ModelSelection, key: &str) -> Option<bool> {
-    match selection.options.get(key).map(String::as_str) {
+
+pub fn claude_model_options(selection: &ModelSelection) -> ClaudeModelOptions {
+    let entry = claude_entry(&selection.model);
+    let descriptors: &[OptionDescriptor] = entry.map_or(&[], |entry| &entry.model.descriptors);
+    let options = &selection.options;
+    let raw_effort = options.get("effort").map(String::as_str);
+    let resolved = option_value(descriptors, options, "effort");
+    let effort = resolved.clone().and_then(|effort| {
+        match entry.and_then(|entry| entry.profile.effort_map.get(&effort)) {
+            Some(mapped) => mapped.clone(),
+            None => Some(effort),
+        }
+    });
+    let offers = |id: &str| {
+        descriptors
+            .iter()
+            .any(|descriptor| matches!(descriptor, OptionDescriptor::Boolean(boolean) if boolean.id == id))
+    };
+    let boolean = |id: &str| match options.get(id).map(String::as_str) {
         Some("true") => Some(true),
         Some("false") => Some(false),
         _ => None,
-    }
-}
-pub fn claude_model_options(selection: &ModelSelection) -> ClaudeModelOptions {
-    let profile = PROFILES
-        .iter()
-        .find(|profile| profile.models.contains(&selection.model.as_str()));
-    let raw_effort = selection.options.get("effort").map(String::as_str);
-    let resolved = profile.and_then(|profile| {
-        raw_effort
-            .filter(|effort| *effort != "ultrathink" && profile.efforts.contains(effort))
-            .or(profile.default_effort)
-    });
-    let effort = resolved.and_then(|effort| {
-        profile
-            .and_then(|profile| profile.effort_map.iter().find(|(from, _)| *from == effort))
-            .map_or(Some(effort), |(_, to)| *to)
-    });
-    let prompt_effort = (raw_effort == Some("ultrathink")
-        && profile.is_some_and(|profile| profile.efforts.contains(&"ultrathink")))
-    .then(|| "ultrathink".to_owned());
+    };
     let mut settings = json!({});
-    if profile.is_some_and(|profile| profile.thinking)
-        && let Some(thinking) = boolean(selection, "thinking")
+    if offers("thinking")
+        && let Some(thinking) = boolean("thinking")
     {
         settings["alwaysThinkingEnabled"] = json!(thinking);
     }
-    if profile.is_some_and(|profile| profile.fast_mode)
-        && let Some(fast) = boolean(selection, "fastMode")
+    if offers("fastMode")
+        && let Some(fast) = boolean("fastMode")
     {
         settings["fastMode"] = json!(fast);
     }
-    if resolved == Some("ultracode") {
+    if resolved.as_deref() == Some("ultracode") {
         settings["ultracode"] = json!(true);
     }
-    let window = profile.and_then(|profile| {
-        let requested = selection.options.get("contextWindow").map(String::as_str);
-        requested
-            .filter(|value| profile.context_windows.contains(value))
-            .or(profile.context_windows.first().copied())
+    let slug = entry.map_or(selection.model.as_str(), |entry| &entry.model.slug);
+    let suffix = entry.and_then(|entry| {
+        entry
+            .profile
+            .model_suffixes
+            .iter()
+            .find_map(|(option, suffixes)| {
+                suffixes
+                    .get(&option_value(descriptors, options, option)?)
+                    .cloned()
+            })
     });
-    let model = if window == Some("1m") {
-        format!("{}[1m]", selection.model)
-    } else {
-        selection.model.clone()
-    };
+    let window = option_value(descriptors, options, "contextWindow");
     ClaudeModelOptions {
-        model,
-        effort: effort.map(str::to_owned),
-        prompt_effort,
+        model: format!("{slug}{}", suffix.unwrap_or_default()),
+        effort,
+        prompt_effort: prompt_injected_value(descriptors, raw_effort),
         settings,
-        model_window: profile
-            .and_then(|profile| profile.fixed_window)
-            .or(match window {
-                Some("1m") => Some(1_000_000),
-                Some("200k") => Some(200_000),
-                _ => None,
-            }),
+        model_window: entry.and_then(|entry| {
+            entry.profile.fixed_context_window_tokens.or_else(|| {
+                window
+                    .as_ref()
+                    .and_then(|window| entry.profile.context_window_tokens.get(window).copied())
+            })
+        }),
         // The reported turn window keeps the reference's fixed 1M models.
-        context_window: if matches!(
-            selection.model.as_str(),
-            "claude-opus-4-6" | "claude-opus-4-7"
-        ) || window == Some("1m")
+        context_window: if matches!(slug, "claude-opus-4-6" | "claude-opus-4-7")
+            || window.as_deref() == Some("1m")
         {
             1_000_000
         } else {

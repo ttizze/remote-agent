@@ -1,6 +1,6 @@
 //! One contract per native request; provider JSON conversion stays at its boundary.
 use super::*;
-use crate::{conversation as c, models as m, operations as op};
+use crate::{conversation as c, models as m, operations as op, workspace as w};
 macro_rules! contracts {
     ($($variant:ident, $method:literal => ($params:ty, $result:ty) $([$clone:ident])?),* $(,)?) => {
         // Bind metadata to the operation, not the parameter type: ReadFile and
@@ -65,7 +65,12 @@ contracts! {
     UpdateProject, "host/project/update" => (op::UpdateProject, m::Empty) [clone],
     ReadPermissionSettings, "host/permissions/read" => (crate::permissions::ReadPermissionSettings, crate::permissions::PermissionSettings) [clone],
     UpdatePermissionSettings, "host/permissions/update" => (crate::permissions::UpdatePermissionSettings, crate::permissions::PermissionSettings) [clone],
-    ListModels, "host/model/list" => (op::ListModels, op::ModelPage) [clone],
+    ListProviders, "host/provider/list" => (m::Empty, Vec<m::ProviderInstance>),
+    ProviderCommands, "host/provider/commands" => (w::ListProviderCommands, w::ProviderCommands) [clone],
+    SearchEntries, "host/workspace/searchEntries" => (w::SearchEntries, w::EntrySearch) [clone],
+    VcsStatus, "host/vcs/status" => (w::ReadVcsStatus, w::VcsStatus) [clone],
+    ListRefs, "host/vcs/listRefs" => (w::ListRefs, w::RefList) [clone],
+    DiffPreview, "host/review/diffPreview" => (w::DiffPreview, w::DiffPreviewResult) [clone],
     Transcribe, "host/dictation/transcribe" => (op::Transcribe, op::Transcription),
     PrepareDictation, "host/dictation/prepare" => (op::DictationPreparation, m::Empty),
     CancelDictation, "host/dictation/cancel" => (op::DictationPreparation, m::Empty),

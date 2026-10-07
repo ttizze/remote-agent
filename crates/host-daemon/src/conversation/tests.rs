@@ -12,7 +12,6 @@ use agent_protocol::{
     conversation as wire,
     conversation::{ConversationError, ErrorCode},
     error::RpcFailure,
-    models::Model,
     protocol::{self, Call, Response},
 };
 use agent_runtime::{ProcessControl, ProviderProcess};
@@ -119,7 +118,12 @@ impl Spawner for ReplaySpawner {
 
 struct NoModels;
 impl tools::ModelCatalog for NoModels {
-    fn models(&self) -> futures_util::future::BoxFuture<'_, Result<Vec<Model>, String>> {
+    fn providers(
+        &self,
+    ) -> futures_util::future::BoxFuture<
+        '_,
+        Result<Vec<agent_protocol::models::ProviderInstance>, String>,
+    > {
         Box::pin(async { Ok(vec![]) })
     }
 }

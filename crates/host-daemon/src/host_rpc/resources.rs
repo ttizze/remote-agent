@@ -1,10 +1,6 @@
 //! Provider account, catalog and configuration operations, without conversation state.
 use super::{identity::Identity, service::Failure};
-use agent_protocol::{
-    models::{Model, ReasoningEffort},
-    operations as op,
-    provider::ProviderKind,
-};
+use agent_protocol::{models::Model, operations as op, provider::ProviderKind};
 use codex_app_server::CodexAppServer;
 use serde::Serialize;
 use serde_json::Value;
@@ -129,16 +125,56 @@ impl CodexResources {
         *self.accounts.lock().await = Some(accounts);
         Ok(())
     }
-    pub(super) async fn models(&self, params: &op::ListModels) -> Result<op::ModelPage, Failure> {
-        let mut native: Value = self.request("model/list", params).await?;
-        let data = native["data"]
-            .as_array_mut()
-            .ok_or_else(|| Failure::new("invalid_models", "native model catalog is missing"))?;
-        for model in data {
-            let id = model["model"].take();
-            model["model"] = serde_json::json!({"provider":"codex","id":id});
+    /// Every page of the app-server's `model/list`.
+    pub(super) async fn models(&self) -> Result<Vec<Model>, Failure> {
+        let mut native = vec![];
+        let mut cursor: Option<String> = None;
+        loop {
+            let page: Value = self
+                .request(
+                    "model/list",
+                    &serde_json::json!({"limit": 100, "cursor": cursor}),
+                )
+                .await?;
+            native.extend(
+                page["data"]
+                    .as_array()
+                    .ok_or_else(|| {
+                        Failure::new("invalid_models", "native model catalog is missing")
+                    })?
+                    .iter()
+                    .cloned(),
+            );
+            let next = page["nextCursor"].as_str().map(str::to_owned);
+            if next.is_none() {
+                break;
+            }
+            if next == cursor {
+                return Err(Failure::new(
+                    "invalid_models",
+                    "Model catalog repeated its cursor",
+                ));
+            }
+            cursor = next;
         }
-        serde_json::from_value(native).map_err(Into::into)
+        let shares_tokens = crate::conversation::CodexCredentials::shares_tokens(self).await;
+        Ok(agent_providers::codex_catalog(&native, shares_tokens)
+            .map_err(|error| Failure::new("invalid_models", error))?
+            .into_iter()
+            .map(wire_model)
+            .collect())
+    }
+}
+
+pub(super) fn wire_model(model: agent_providers::CatalogModel) -> Model {
+    Model {
+        slug: model.slug,
+        name: model.name,
+        aliases: model.aliases,
+        badge: model.badge,
+        is_default: model.is_default,
+        is_legacy: model.is_legacy,
+        option_descriptors: model.descriptors,
     }
 }
 impl crate::conversation::CodexCredentials for CodexResources {
@@ -215,7 +251,6 @@ impl Identity for CodexResources {
 pub(crate) struct ClaudeResources {
     accounts: tokio::sync::Mutex<crate::claude::accounts::Accounts>,
     pub native_home: PathBuf,
-    directory: PathBuf,
     program: PathBuf,
 }
 impl ClaudeResources {
@@ -238,7 +273,6 @@ impl ClaudeResources {
         Ok(Self {
             accounts: tokio::sync::Mutex::new(accounts),
             native_home,
-            directory,
             program,
         })
     }
@@ -256,82 +290,23 @@ impl ClaudeResources {
             .map_err(|error| Failure::new("account_unavailable", error))?
             .ok_or_else(|| Failure::new("account_unavailable", "select a Claude account"))
     }
-    pub async fn models(&self) -> Result<Vec<Model>, String> {
-        let auth_home = self
-            .credentials_home()
+    /// The installed Claude Code's version from `--version`.
+    pub async fn version(&self) -> Option<String> {
+        let mut command = bex_process::command(&self.program).ok()?;
+        command
+            .arg("--version")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        let output = tokio::time::timeout(std::time::Duration::from_secs(10), command.output())
             .await
-            .map_err(|error| error.to_string())?;
-        let cwd = tempfile::tempdir_in(&self.directory).map_err(|error| error.to_string())?;
-        let initialized = self
-            .program()
-            .query_control(&auth_home, cwd.path(), None)
-            .await?;
-        let entries = initialized["models"]
-            .as_array()
-            .ok_or("Claude Code did not return a model catalog")?;
-        entries
-            .iter()
-            .map(|entry| {
-                let name = entry["value"]
-                    .as_str()
-                    .filter(|name| !name.is_empty())
-                    .ok_or("Claude model has no value")?;
-                let display = entry["displayName"]
-                    .as_str()
-                    .ok_or("Claude model has no display name")?;
-                // The CLI's short display name omits the model generation.
-                // Its description starts with the versioned name and context size.
-                let title = entry["description"]
-                    .as_str()
-                    .and_then(|description| description.split('·').next())
-                    .map(str::trim)
-                    .filter(|title| !title.is_empty())
-                    .unwrap_or(display);
-                let display = if name == "default" && title != display {
-                    format!("{display} · {title}")
-                } else {
-                    title.to_owned()
-                };
-                let values = match entry.get("supportedEffortLevels") {
-                    Some(value) => value
-                        .as_array()
-                        .ok_or("invalid Claude effort levels")?
-                        .as_slice(),
-                    None => &[],
-                };
-                let efforts = values
-                    .iter()
-                    .map(|value| {
-                        Ok(ReasoningEffort {
-                            reasoning_effort: value
-                                .as_str()
-                                .ok_or("invalid Claude effort level")?
-                                .into(),
-                        })
-                    })
-                    .collect::<Result<Vec<_>, String>>()?;
-                let default = efforts
-                    .iter()
-                    .find(|effort| effort.reasoning_effort == "high")
-                    .or(efforts.first())
-                    .map(|effort| effort.reasoning_effort.clone())
-                    .unwrap_or_default();
-                let model = agent_protocol::models::ModelRef {
-                    provider: ProviderKind::Claude,
-                    id: name.into(),
-                };
-                Ok(Model {
-                    id: name.into(),
-                    model,
-                    display_name: format!("Claude · {display}"),
-                    default_reasoning_effort: default,
-                    supported_reasoning_efforts: efforts,
-                    service_tiers: Some(Vec::new()),
-                    default_service_tier: None,
-                    is_default: Some(false),
-                })
-            })
-            .collect::<Result<Vec<Model>, String>>()
+            .ok()?
+            .ok()?;
+        agent_providers::cli_version(&format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ))
     }
 }
 #[async_trait::async_trait]

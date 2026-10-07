@@ -2,6 +2,7 @@
 //! per skill with a `SKILL.md`, from `<config dir>/skills` and then
 //! `<cwd>/.claude/skills`, the first of a name winning, switched off by the
 //! `skillOverrides` of the settings files Claude Code merges.
+use agent_protocol::workspace::ProviderSkill;
 use agent_providers::{claude_skill_frontmatter, claude_skill_overrides};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -45,18 +46,20 @@ fn settings_paths(config_dir: &Path, cwd: Option<&Path>) -> Vec<PathBuf> {
     paths
 }
 
-/// Enabled skills a user may invoke, by name; read again for every prompt.
-pub(crate) fn user_invocable_skills(config_dir: &Path, cwd: Option<&Path>) -> Vec<String> {
+/// Every skill Claude Code loads, by name: the first root that has a name
+/// wins, the directory name is the skill's name, and a skill switched off is
+/// reported disabled.
+pub(crate) fn discover(config_dir: &Path, cwd: Option<&Path>) -> Vec<ProviderSkill> {
     let mut overrides = BTreeMap::new();
     for path in settings_paths(config_dir, cwd) {
         if let Ok(contents) = std::fs::read_to_string(path) {
             overrides.extend(claude_skill_overrides(&contents));
         }
     }
-    let mut roots = vec![config_dir.join("skills")];
-    roots.extend(cwd.map(|cwd| cwd.join(".claude").join("skills")));
+    let mut roots = vec![(config_dir.join("skills"), "user")];
+    roots.extend(cwd.map(|cwd| (cwd.join(".claude").join("skills"), "project")));
     let mut skills = BTreeMap::new();
-    for root in roots {
+    for (root, scope) in roots {
         let Ok(entries) = std::fs::read_dir(&root) else {
             continue;
         };
@@ -66,7 +69,8 @@ pub(crate) fn user_invocable_skills(config_dir: &Path, cwd: Option<&Path>) -> Ve
             .collect();
         names.sort();
         for entry in names {
-            let Ok(contents) = std::fs::read_to_string(root.join(&entry).join("SKILL.md")) else {
+            let path = root.join(&entry).join("SKILL.md");
+            let Ok(contents) = std::fs::read_to_string(&path) else {
                 continue;
             };
             let Some(frontmatter) = claude_skill_frontmatter(&contents) else {
@@ -76,13 +80,32 @@ pub(crate) fn user_invocable_skills(config_dir: &Path, cwd: Option<&Path>) -> Ve
             if name.is_empty() || skills.contains_key(&name) {
                 continue;
             }
-            let enabled = overrides.get(&name).is_none_or(|(enabled, _)| *enabled);
-            skills.insert(name, enabled && frontmatter.user_invocable);
+            let (enabled, only_user) = overrides.get(&name).copied().unwrap_or((true, false));
+            skills.insert(
+                name.clone(),
+                ProviderSkill {
+                    name,
+                    path: path.to_string_lossy().into_owned(),
+                    enabled,
+                    description: frontmatter.description,
+                    scope: Some(scope.into()),
+                    display_name: None,
+                    short_description: None,
+                    user_invocation_only: frontmatter.user_invocation_only || only_user,
+                    user_invocable: frontmatter.user_invocable,
+                },
+            );
         }
     }
-    skills
+    skills.into_values().collect()
+}
+
+/// Enabled skills a user may invoke, by name; read again for every prompt.
+pub(crate) fn user_invocable_skills(config_dir: &Path, cwd: Option<&Path>) -> Vec<String> {
+    discover(config_dir, cwd)
         .into_iter()
-        .filter_map(|(name, invocable)| invocable.then_some(name))
+        .filter(|skill| skill.enabled && skill.user_invocable)
+        .map(|skill| skill.name)
         .collect()
 }
 

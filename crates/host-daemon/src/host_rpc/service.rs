@@ -95,15 +95,19 @@ struct HostResources {
     permission_settings_access: tokio::sync::Mutex<()>,
     dictation: crate::dictation::Dictation,
     auth_task: OnceLock<tokio_util::task::AbortOnDropHandle<()>>,
+    commands: super::commands::CommandCache,
+    search: crate::workspace_search::WorkspaceSearch,
 }
 
 /// The live model catalog for the agent tools, without keeping the service alive.
 struct ServiceModels(Weak<ServiceInner>);
 impl ModelCatalog for ServiceModels {
-    fn models(&self) -> BoxFuture<'_, Result<Vec<agent_protocol::models::Model>, String>> {
+    fn providers(
+        &self,
+    ) -> BoxFuture<'_, Result<Vec<agent_protocol::models::ProviderInstance>, String>> {
         Box::pin(async move {
             let inner = self.0.upgrade().ok_or("the Host is shutting down")?;
-            HostRpcService { inner }.live_models().await
+            Ok(HostRpcService { inner }.providers().await)
         })
     }
 }
@@ -140,6 +144,8 @@ impl HostRpcService {
             permission_settings_access: Default::default(),
             dictation: crate::dictation::Dictation::new(codex),
             auth_task: OnceLock::new(),
+            commands: Default::default(),
+            search: Default::default(),
         });
         Ok(Self {
             inner: Arc::new(ServiceInner {
@@ -480,7 +486,26 @@ impl HostRpcService {
                     .usage(&params.id)
                     .await?
                     .into(),
-                Call::ListModels(params) => self.models(params).await?.into(),
+                Call::ListProviders(_) => self.providers().await.into(),
+                Call::ProviderCommands(params) => self.provider_commands(params).await?.into(),
+                Call::SearchEntries(params) => resources
+                    .search
+                    .search(params.clone())
+                    .await
+                    .map_err(|error| Failure::new("search_entries_failed", error))?
+                    .into(),
+                Call::VcsStatus(params) => crate::vcs::read_status(params.cwd.clone())
+                    .await
+                    .map_err(|error| Failure::new("vcs_status_failed", error))?
+                    .into(),
+                Call::ListRefs(params) => crate::vcs::refs(params.clone())
+                    .await
+                    .map_err(|error| Failure::new("vcs_refs_failed", error))?
+                    .into(),
+                Call::DiffPreview(params) => crate::vcs::diff_preview(params.clone())
+                    .await
+                    .map_err(|error| Failure::new("diff_preview_failed", error))?
+                    .into(),
                 Call::ReadPermissionSettings(params) => {
                     let _guard = resources.permission_settings_access.lock().await;
                     match params.provider {
@@ -738,54 +763,140 @@ impl HostRpcService {
             .map(|project| catalog.wire(project))
             .collect())
     }
-    async fn models(&self, params: &op::ListModels) -> Result<op::ModelPage, Failure> {
-        let mut page = match self.inner.resources.codex.models(params).await {
-            Ok(page) => page,
-            Err(error) => op::ModelPage {
-                data: vec![],
-                next_cursor: None,
-                provider_errors: Some(serde_json::Map::from_iter([(
-                    "codex".into(),
-                    serde_json::to_value(error)?,
-                )])),
-            },
-        };
-        if params.cursor.is_none()
-            && let Some(claude) = self.inner.resources.claude.get()
+    /// The skills and slash commands of one instance in one directory.
+    async fn provider_commands(
+        &self,
+        params: &agent_protocol::workspace::ListProviderCommands,
+    ) -> Result<agent_protocol::workspace::ProviderCommands, Failure> {
+        use super::commands;
+        let resources = &self.inner.resources;
+        if !params.fresh
+            && let Some(cached) = resources.commands.get(&params.instance, &params.cwd)
         {
-            match claude.models().await {
-                Ok(models) => page.data.extend(models),
-                Err(error) => {
-                    page.provider_errors
-                        .get_or_insert_default()
-                        .insert("claude".into(), serde_json::json!({"message":error}));
+            return Ok(cached);
+        }
+        let cwd = tokio::fs::canonicalize(&params.cwd)
+            .await
+            .map_err(|error| Failure::new("invalid_params", error))?;
+        let cwd = dunce::simplified(&cwd).to_owned();
+        let mut scan = agent_protocol::workspace::ProviderCommands {
+            instance: params.instance.clone(),
+            cwd: params.cwd.clone(),
+            slash_commands: vec![],
+            slash_commands_pending: false,
+            skills: vec![],
+        };
+        match params.instance.as_str() {
+            "codex" => {
+                let shares_tokens =
+                    crate::conversation::CodexCredentials::shares_tokens(resources.codex.as_ref())
+                        .await;
+                scan.slash_commands = commands::codex_commands(shares_tokens);
+                if resources.codex.availability().is_ok() {
+                    let listed: Result<serde_json::Value, _> = tokio::time::timeout(
+                        std::time::Duration::from_secs(20),
+                        resources
+                            .codex
+                            .request("skills/list", &serde_json::json!({"cwds": [params.cwd]})),
+                    )
+                    .await
+                    .map_err(|_| Failure::new("provider_failed", "skills/list timed out"))
+                    .and_then(|result| result);
+                    match listed {
+                        Ok(listed) => scan.skills = commands::codex_skills(&listed, &params.cwd),
+                        Err(error) => {
+                            tracing::warn!(operation = "host.provider.skills", message = %error)
+                        }
+                    }
                 }
             }
+            "claude" => {
+                let claude = self.claude()?;
+                scan.skills = crate::claude::skills::discover(&claude.native_home, Some(&cwd));
+                let initialized = match claude.credentials_home().await {
+                    Ok(home) => claude.program().query_control(&home, &cwd, None).await.ok(),
+                    Err(_) => None,
+                };
+                match initialized {
+                    Some(initialized) => {
+                        scan.slash_commands = commands::claude_commands(&initialized)
+                    }
+                    None => {
+                        scan.slash_commands = vec![commands::compact()];
+                        scan.slash_commands_pending = true;
+                    }
+                }
+            }
+            other => {
+                return Err(Failure::new(
+                    "provider_unavailable",
+                    format!("unknown provider instance {other}"),
+                ));
+            }
         }
-        Ok(page)
+        Ok(resources.commands.put(scan))
     }
-    /// Every page of the live model catalog.
-    async fn live_models(&self) -> Result<Vec<agent_protocol::models::Model>, String> {
-        let mut cursor = None;
-        let mut result = vec![];
-        loop {
-            let page = self
-                .models(&op::ListModels {
-                    limit: 100,
-                    cursor: cursor.clone(),
-                })
-                .await
-                .map_err(|e| e.message)?;
-            result.extend(page.data);
-            if page.next_cursor.is_none() {
-                break;
+    /// Codex and Claude as the composer offers them, with their models.
+    async fn providers(&self) -> Vec<agent_protocol::models::ProviderInstance> {
+        use agent_protocol::models::{ProviderInstance, ProviderStatus};
+        let resources = &self.inner.resources;
+        let instance = |driver: Driver, name: &str| ProviderInstance {
+            instance: name.to_lowercase(),
+            driver,
+            display_name: name.into(),
+            accent_color: None,
+            enabled: true,
+            installed: true,
+            version: None,
+            status: ProviderStatus::Ready,
+            message: None,
+            unavailable_reason: None,
+            show_interaction_mode_toggle: true,
+            reports_context_window: true,
+            models: vec![],
+        };
+        let mut codex = instance(Driver::Codex, "Codex");
+        codex.installed = resources.codex.server().is_ok();
+        match resources.codex.availability() {
+            Err(error) => {
+                codex.status = ProviderStatus::Error;
+                codex.message = Some(error.message);
             }
-            if cursor == page.next_cursor {
-                return Err("Model catalog repeated its cursor".into());
-            }
-            cursor = page.next_cursor;
+            Ok(()) => match resources.codex.models().await {
+                Ok(models) => codex.models = models,
+                Err(error) => {
+                    codex.status = ProviderStatus::Error;
+                    codex.message = Some(error.message);
+                }
+            },
         }
-        Ok(result)
+        let mut claude = instance(Driver::Claude, "Claude");
+        match resources.claude.get() {
+            Some(resources) => {
+                claude.version = resources.version().await;
+                claude.message = agent_providers::claude_upgrade_message(claude.version.as_deref());
+            }
+            None => {
+                claude.installed = false;
+                claude.status = ProviderStatus::Error;
+                claude.message = Some(
+                    resources
+                        .startup_errors
+                        .read()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .get(&ProviderKind::Claude)
+                        .map(|error| error.message.clone())
+                        .unwrap_or_else(|| {
+                            "Claude Agent CLI (`claude`) was not found on PATH.".into()
+                        }),
+                );
+            }
+        }
+        claude.models = agent_providers::claude_catalog(claude.version.as_deref())
+            .into_iter()
+            .map(super::resources::wire_model)
+            .collect();
+        vec![codex, claude]
     }
     async fn worktree_list(&self) -> Result<Vec<agent_protocol::models::Worktree>, Failure> {
         let shared = &self.inner.resources.shared;

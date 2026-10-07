@@ -102,34 +102,49 @@ pub enum ProjectScriptIcon {
 pub struct ProjectRoot {
     pub path: String,
 }
-/// Native model identity scoped by provider; neither field is encoded in the other.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ModelRef {
-    pub provider: crate::provider::ProviderKind,
-    pub id: String,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ProviderStatus {
+    Ready,
+    Warning,
+    Error,
+    Disabled,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// One provider instance as the composer and settings show it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderInstance {
+    pub instance: String,
+    pub driver: agent_domain::Driver,
+    pub display_name: String,
+    /// `#rrggbb` when the instance is configured with one.
+    pub accent_color: Option<String>,
+    pub enabled: bool,
+    pub installed: bool,
+    pub version: Option<String>,
+    pub status: ProviderStatus,
+    /// Why the status is not ready, or advice such as an upgrade.
+    pub message: Option<String>,
+    /// Set when this Host cannot run the instance at all.
+    pub unavailable_reason: Option<String>,
+    pub show_interaction_mode_toggle: bool,
+    pub reports_context_window: bool,
+    pub models: Vec<Model>,
+}
+
+/// One model of a provider instance.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Model {
-    pub id: String,
-    pub model: ModelRef,
-    pub display_name: String,
-    pub default_reasoning_effort: String,
-    pub supported_reasoning_efforts: Vec<ReasoningEffort>,
-    pub service_tiers: Option<Vec<ServiceTier>>,
-    pub default_service_tier: Option<String>,
-    pub is_default: Option<bool>,
-}
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ServiceTier {
-    pub id: String,
-    pub name: Option<String>,
-}
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ReasoningEffort {
-    pub reasoning_effort: String,
+    pub slug: String,
+    pub name: String,
+    pub aliases: Vec<String>,
+    /// `new` for a recently added model.
+    pub badge: Option<String>,
+    pub is_default: bool,
+    pub is_legacy: bool,
+    pub option_descriptors: Vec<agent_domain::OptionDescriptor>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

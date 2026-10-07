@@ -2,11 +2,10 @@
 //! the live provider catalog.
 use super::ModelCatalog;
 use crate::conversation::ProjectCatalog;
-use agent_domain::{Command, CommandId, Reply, State, ThreadId, ThreadShell};
-use agent_protocol::{
-    models::{Model, ProjectScript},
-    provider::ProviderKind,
+use agent_domain::{
+    Command, CommandId, Driver, OptionDescriptor, Reply, State, ThreadId, ThreadShell,
 };
+use agent_protocol::models::{ProjectScript, ProviderStatus};
 use agent_runtime::{HostProject, LaunchThread, Runtime, SearchMatch};
 use futures_util::future::BoxFuture;
 use serde_json::{Value, json};
@@ -83,8 +82,6 @@ pub(crate) struct HostOrchestration {
     pub(crate) runtime: Arc<Runtime>,
     pub(crate) projects: Arc<ProjectCatalog>,
     pub(crate) models: Arc<dyn ModelCatalog>,
-    /// Drivers with a configured program.
-    pub(crate) installed: Vec<ProviderKind>,
 }
 
 impl Orchestration for HostOrchestration {
@@ -155,26 +152,40 @@ impl Orchestration for HostOrchestration {
 
     fn providers(&self) -> BoxFuture<'_, Result<Vec<ProviderSnapshot>, String>> {
         Box::pin(async move {
-            let models = self.models.models().await?;
-            Ok([ProviderKind::Codex, ProviderKind::Claude]
+            Ok(self
+                .models
+                .providers()
+                .await?
                 .into_iter()
-                .map(|kind| ProviderSnapshot {
-                    instance: provider_id(kind).into(),
-                    driver: provider_id(kind).into(),
-                    display_name: Some(provider_name(kind).into()),
+                .map(|provider| ProviderSnapshot {
+                    driver: match provider.driver {
+                        Driver::Codex => "codex",
+                        Driver::Claude => "claude",
+                    }
+                    .into(),
+                    instance: provider.instance,
+                    display_name: Some(provider.display_name),
                     adapter: true,
-                    enabled: true,
-                    installed: self.installed.contains(&kind),
-                    unavailable: None,
-                    status_error: None,
+                    enabled: provider.enabled,
+                    installed: provider.installed,
+                    unavailable: provider.unavailable_reason,
+                    status_error: (provider.status == ProviderStatus::Error)
+                        .then_some(provider.message)
+                        .flatten(),
                     unauthenticated: false,
-                    models: models
-                        .iter()
-                        .filter(|model| model.model.provider == kind)
+                    models: provider
+                        .models
+                        .into_iter()
                         .map(|model| ProviderModel {
-                            slug: model.id.clone(),
-                            name: Some(model.display_name.clone()),
-                            options: Some(model_options(model)),
+                            options: Some(
+                                model
+                                    .option_descriptors
+                                    .iter()
+                                    .map(descriptor_json)
+                                    .collect(),
+                            ),
+                            slug: model.slug,
+                            name: Some(model.name),
                         })
                         .collect(),
                 })
@@ -223,50 +234,47 @@ impl Orchestration for HostOrchestration {
     }
 }
 
-pub(crate) fn provider_id(kind: ProviderKind) -> &'static str {
-    match kind {
-        ProviderKind::Codex => "codex",
-        ProviderKind::Claude => "claude",
-    }
-}
-fn provider_name(kind: ProviderKind) -> &'static str {
-    match kind {
-        ProviderKind::Codex => "Codex",
-        ProviderKind::Claude => "Claude",
-    }
-}
-
-/// The option descriptors the composer offers for a model.
-pub(crate) fn model_options(model: &Model) -> Vec<Value> {
-    let mut options = vec![];
-    let effort = if model.model.provider == ProviderKind::Claude {
-        "effort"
-    } else {
-        "reasoningEffort"
+/// An option descriptor in the tools' JSON.
+pub(crate) fn descriptor_json(descriptor: &OptionDescriptor) -> Value {
+    let mut value = match descriptor {
+        OptionDescriptor::Select(select) => {
+            let mut value = json!({
+                "id": select.id,
+                "label": select.label,
+                "type": "select",
+                "options": select.options.iter().map(|choice| {
+                    let mut option = json!({"id": choice.id, "label": choice.label});
+                    if let Some(description) = &choice.description {
+                        option["description"] = json!(description);
+                    }
+                    if choice.is_default {
+                        option["isDefault"] = json!(true);
+                    }
+                    option
+                }).collect::<Vec<_>>(),
+            });
+            if let Some(current) = &select.current_value {
+                value["currentValue"] = json!(current);
+            }
+            if !select.prompt_injected_values.is_empty() {
+                value["promptInjectedValues"] = json!(select.prompt_injected_values);
+            }
+            value
+        }
+        OptionDescriptor::Boolean(boolean) => {
+            let mut value = json!({"id": boolean.id, "label": boolean.label, "type": "boolean"});
+            if let Some(current) = boolean.current_value {
+                value["currentValue"] = json!(current);
+            }
+            value
+        }
     };
-    if !model.supported_reasoning_efforts.is_empty() {
-        options.push(json!({
-            "id": effort,
-            "type": "select",
-            "label": "Reasoning effort",
-            "options": model.supported_reasoning_efforts.iter().map(|e| json!({
-                "id": e.reasoning_effort,
-                "label": e.reasoning_effort,
-                "isDefault": e.reasoning_effort == model.default_reasoning_effort,
-            })).collect::<Vec<_>>(),
-        }));
+    let description = match descriptor {
+        OptionDescriptor::Select(select) => &select.description,
+        OptionDescriptor::Boolean(boolean) => &boolean.description,
+    };
+    if let Some(description) = description {
+        value["description"] = json!(description);
     }
-    if let Some(tiers) = &model.service_tiers {
-        options.push(json!({
-            "id": "serviceTier",
-            "type": "select",
-            "label": "Service tier",
-            "options": tiers.iter().map(|t| json!({
-                "id": t.id,
-                "label": t.name.as_ref().unwrap_or(&t.id),
-                "isDefault": model.default_service_tier.as_ref() == Some(&t.id),
-            })).collect::<Vec<_>>(),
-        }));
-    }
-    options
+    value
 }

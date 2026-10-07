@@ -8,6 +8,7 @@ mod codex;
 mod codex_tools;
 mod elicitation;
 mod instructions;
+mod model_catalog;
 mod skills;
 mod stdio;
 use agent_domain::*;
@@ -20,6 +21,10 @@ pub use codex::*;
 use codex_tools::*;
 pub use elicitation::*;
 pub use instructions::*;
+pub use model_catalog::{
+    CatalogModel, claude_catalog, claude_upgrade_message, cli_version, codex_catalog,
+    codex_model_name,
+};
 use serde_json::Value;
 pub use skills::*;
 pub use stdio::*;

@@ -103,26 +103,10 @@ impl Conversation {
         });
         let runtime = Arc::new(Runtime::open(config.runtime, io, host.clone()).await?);
         let _ = host.runtime.set(Arc::downgrade(&runtime));
-        let installed = [
-            config
-                .programs
-                .codex
-                .is_some()
-                .then_some(agent_protocol::provider::ProviderKind::Codex),
-            config
-                .programs
-                .claude
-                .is_some()
-                .then_some(agent_protocol::provider::ProviderKind::Claude),
-        ]
-        .into_iter()
-        .flatten()
-        .collect();
         let tools = Arc::new(AgentTools::new(Arc::new(HostOrchestration {
             runtime: runtime.clone(),
             projects: resources.projects.clone(),
             models: config.models,
-            installed,
         })));
         Ok(Arc::new(Self {
             runtime,

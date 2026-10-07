@@ -15,7 +15,7 @@ pub(crate) use catalog::read_only_tools;
 pub(crate) use catalog::tools;
 
 use agent_domain::{CommandId, Reply, State, ThreadId};
-use agent_protocol::models::Model;
+use agent_protocol::models::ProviderInstance;
 use agent_transport::peer::{JsonlReader, JsonlWriter};
 use backend::Orchestration;
 use futures_util::future::BoxFuture;
@@ -33,9 +33,9 @@ const MAX_MESSAGE: usize = 6 * 1024 * 1024;
 const TOKEN_ENV: &str = "AGENT_TOOLS_TOKEN";
 pub(crate) const SERVER_NAME: &str = "orchestration";
 
-/// The live model catalog the tools offer for delegation.
+/// The live provider instances and models the tools offer for delegation.
 pub(crate) trait ModelCatalog: Send + Sync {
-    fn models(&self) -> BoxFuture<'_, Result<Vec<Model>, String>>;
+    fn providers(&self) -> BoxFuture<'_, Result<Vec<ProviderInstance>, String>>;
 }
 
 #[derive(Clone, PartialEq, Eq)]

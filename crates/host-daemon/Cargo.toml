@@ -41,6 +41,7 @@ anyhow.workspace = true
 dunce.workspace = true
 alacritty_terminal = "=0.26.0"
 icu_collator = "1.5"
+ignore = "0.4.33"
 
 [dev-dependencies]
 proptest = "1.11"

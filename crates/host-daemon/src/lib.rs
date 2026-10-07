@@ -14,8 +14,10 @@ pub mod platform;
 mod projects;
 mod repository;
 mod terminals;
+mod vcs;
 mod workspace_files;
 mod workspace_review;
+mod workspace_search;
 mod worktrees;
 use workspace_review::inspect_workspace;
 
