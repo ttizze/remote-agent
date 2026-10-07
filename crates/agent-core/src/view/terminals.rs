@@ -22,6 +22,22 @@ pub struct TerminalTab {
     pub running: bool,
     /// The shell runs a command.
     pub running_process: bool,
+    /// The mobile terminal menu's status: "Task running", "Ready",
+    /// "Starting", "Exited", "Error" or "Not started".
+    pub menu_status: String,
+}
+
+/// The mobile terminal menu's status of a terminal.
+pub fn terminal_menu_status(phase: &TerminalPhase, running_process: bool) -> String {
+    match phase {
+        TerminalPhase::Running if running_process => "Task running",
+        TerminalPhase::Running => "Ready",
+        TerminalPhase::Starting => "Starting",
+        TerminalPhase::Exited(_) => "Exited",
+        TerminalPhase::Failed(_) => "Error",
+        TerminalPhase::Suspended | TerminalPhase::Detached => "Not started",
+    }
+    .into()
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -146,6 +162,11 @@ pub fn terminal_tabs(snapshot: &Snapshot, thread: &ThreadId) -> Vec<TerminalTab>
             ),
             running_process: summary(&terminal.terminal_id)
                 .is_some_and(|summary| summary.has_running_subprocess),
+            menu_status: terminal_menu_status(
+                &terminal.phase,
+                summary(&terminal.terminal_id)
+                    .is_some_and(|summary| summary.has_running_subprocess),
+            ),
         })
         .collect();
     let remote: Vec<TerminalTab> = snapshot
@@ -172,6 +193,13 @@ pub fn terminal_tabs(snapshot: &Snapshot, thread: &ThreadId) -> Vec<TerminalTab>
             .into(),
             running: true,
             running_process: summary.has_running_subprocess,
+            menu_status: terminal_menu_status(
+                &match summary.status {
+                    TerminalStatus::Starting => TerminalPhase::Starting,
+                    _ => TerminalPhase::Running,
+                },
+                summary.has_running_subprocess,
+            ),
         })
         .collect();
     tabs.extend(remote);

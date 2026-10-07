@@ -812,6 +812,7 @@ mod tests {
             status: "Running".into(),
             running: true,
             running_process: false,
+            menu_status: "Ready".into(),
         }
     }
 
