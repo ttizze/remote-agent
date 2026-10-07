@@ -2,6 +2,7 @@
 //! native clients render without re-deriving them.
 pub mod agents;
 pub mod api;
+pub mod appearance;
 pub mod archived;
 pub mod attachments;
 pub mod checkpoints;
@@ -9,6 +10,7 @@ pub mod collation;
 pub mod composer;
 pub mod header;
 pub mod inbox;
+pub mod keybindings;
 pub mod models;
 pub mod new_thread;
 pub mod plan;

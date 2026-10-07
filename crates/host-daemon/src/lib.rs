@@ -10,6 +10,7 @@ mod git;
 mod host_identity;
 mod host_rpc;
 mod host_runtime;
+mod keybindings;
 pub mod local_host;
 pub mod platform;
 mod projects;

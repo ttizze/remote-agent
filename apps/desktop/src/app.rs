@@ -14,7 +14,7 @@ mod sidebar;
 mod timeline;
 mod ui;
 
-pub(crate) use ui::{apply_appearance, color, diff_colors};
+pub(crate) use ui::{apply_appearance, color, diff_colors, load_appearance, terminal_font};
 
 /// Whether long lines wrap by default.
 pub(crate) fn ui_word_wrap() -> bool {
@@ -127,8 +127,6 @@ pub(crate) struct Desktop {
     pub(crate) dictation: Option<dictation::Dictation>,
     /// Decoded project icons, by content hash.
     pub(crate) project_icons: std::cell::RefCell<std::collections::HashMap<String, Arc<Image>>>,
-    /// The keyboard shortcuts, the user's over the defaults.
-    pub(crate) keymap: keymap::Keymap,
     tick: Option<tokio_util::task::AbortOnDropHandle<()>>,
     _subscriptions: Vec<Subscription>,
 }
@@ -226,7 +224,6 @@ impl Desktop {
             attachments: attachments::AttachmentCache::new(),
             dictation: None,
             project_icons: Default::default(),
-            keymap: keymap::Keymap::default(),
             tick: None,
             _subscriptions: subscriptions,
         };
@@ -592,20 +589,33 @@ impl Desktop {
         if keymap::is_modifier_only(keystroke) || self.settings.recording_shortcut() {
             return false;
         }
-        let context = keymap::KeyContext {
+        let context = self.key_context(window, cx);
+        let Some(command) = self
+            .snapshot
+            .keymap(keymap::MAC)
+            .resolve(&keymap::key_press(keystroke), &context)
+        else {
+            return false;
+        };
+        self.run_command(&command, window, cx)
+    }
+
+    /// Where focus is, as the keymap's `when` clauses read it.
+    pub(crate) fn key_context(
+        &self,
+        window: &Window,
+        cx: &App,
+    ) -> agent_core::view::keybindings::KeyContext {
+        agent_core::view::keybindings::KeyContext {
             terminal_focus: self.terminal_focused(window, cx),
             terminal_open: self.header_panels().terminal_open,
             composer_focus: self.composer_focused(window, cx),
+            model_picker_open: self.model_picker_open(),
             editable_focus: window
                 .context_stack()
                 .iter()
                 .any(|context| context.contains("Input")),
-        };
-        let key = keymap::keystroke_key(keystroke);
-        let Some(command) = self.keymap.resolve(&key, &context) else {
-            return false;
-        };
-        self.run_command(&command, window, cx)
+        }
     }
 
     /// Runs a keyboard command; false when it does nothing here.
@@ -626,6 +636,13 @@ impl Desktop {
             "thread.steerQueuedMessage" => self.steer_first_queued(),
             "thread.editQueuedMessage" => return self.edit_last_queued(),
             "modelPicker.toggle" => self.toggle_model_picker(window, cx),
+            "modelPicker.previousProvider" | "modelPicker.nextProvider" => {
+                return self.step_model_picker_provider(
+                    command == "modelPicker.nextProvider",
+                    window,
+                    cx,
+                );
+            }
             "chat.new" => {
                 let project = self
                     .snapshot
@@ -649,13 +666,16 @@ impl Desktop {
                 window,
                 cx,
             ),
-            other => match other
-                .strip_prefix("thread.jump.")
-                .and_then(|digit| digit.parse::<usize>().ok())
-            {
-                Some(index @ 1..=9) => self.jump_to_thread(index - 1, cx),
-                _ => return false,
-            },
+            other => {
+                use agent_core::view::keybindings::{model_jump_index, thread_jump_index};
+                if let Some(index) = model_jump_index(other) {
+                    return self.jump_model_picker(index, window, cx);
+                }
+                match thread_jump_index(other) {
+                    Some(index) => self.jump_to_thread(index, cx),
+                    None => return false,
+                }
+            }
         }
         true
     }

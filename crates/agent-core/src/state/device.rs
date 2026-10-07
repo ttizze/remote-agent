@@ -22,6 +22,8 @@ pub struct Preferences {
     pub diff_ignore_whitespace: bool,
     /// The script each project last ran, by project id.
     pub last_run_scripts: BTreeMap<String, String>,
+    /// Provider instances whose resume dialog was told never to ask again.
+    pub resume_compaction_dismissed: BTreeSet<String>,
 }
 impl Default for Preferences {
     fn default() -> Self {
@@ -32,6 +34,7 @@ impl Default for Preferences {
             working_section: false,
             diff_ignore_whitespace: true,
             last_run_scripts: BTreeMap::new(),
+            resume_compaction_dismissed: BTreeSet::new(),
         }
     }
 }

@@ -31,7 +31,14 @@ impl Desktop {
             });
             self.sidebar.undo_expiry = Some((notice.expires_at_ms, timer));
         }
-        let action = match self.keymap.shortcut_label("thread.undo") {
+        let shortcut = self
+            .snapshot
+            .keymap(crate::app::keymap::MAC)
+            .shortcut_label(
+                "thread.undo",
+                &agent_core::view::keybindings::KeyContext::default(),
+            );
+        let action = match shortcut {
             Some(shortcut) => format!("{shortcut} to undo"),
             None => "Undo".into(),
         };

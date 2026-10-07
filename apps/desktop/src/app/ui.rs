@@ -1,4 +1,5 @@
 //! Palette colors, icons and the small controls every screen shares.
+use agent_core::view::appearance::{Appearance, ChatWidth, DiffColors};
 use agent_domain::Driver;
 use gpui_kit::{
     component::{
@@ -7,7 +8,14 @@ use gpui_kit::{
     },
     *,
 };
-use std::cell::RefCell;
+use std::{
+    cell::RefCell,
+    path::PathBuf,
+    sync::{
+        Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
+};
 
 thread_local! {
     static PALETTE: RefCell<agent_core::presentation::theme::Theme> =
@@ -17,69 +25,82 @@ thread_local! {
     static APPEARANCE: RefCell<Appearance> = RefCell::new(Appearance::default());
 }
 
-/// Light, dark, or following the system.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum AppearanceMode {
-    System,
-    Light,
-    Dark,
+/// The newest appearance save; an older save still waiting skips its write.
+static SAVE_GENERATION: AtomicU64 = AtomicU64::new(0);
+static SAVE_LOCK: Mutex<()> = Mutex::new(());
+
+fn appearance_path() -> Option<PathBuf> {
+    crate::platform::state_dir()
+        .ok()
+        .map(|directory| directory.join("appearance.json"))
 }
 
-/// How wide messages and the composer grow.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum ChatWidth {
-    Comfortable,
-    Wide,
-    Full,
-}
-
-/// The colors of additions and deletions.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum DiffColors {
-    RedGreen,
-    BlueOrange,
-}
-
-/// This device's appearance preferences.
-#[derive(Clone, PartialEq, Debug)]
-pub(crate) struct Appearance {
-    pub(crate) mode: AppearanceMode,
-    /// Percent, 40 to 100.
-    pub(crate) glass_opacity: u32,
-    pub(crate) diff_colors: DiffColors,
-    pub(crate) chat_width: ChatWidth,
-    /// Empty for the system font.
-    pub(crate) interface_font: String,
-    pub(crate) interface_size: u32,
-    pub(crate) monospace_font: String,
-    pub(crate) monospace_size: u32,
-    pub(crate) word_wrap: bool,
-}
-impl Default for Appearance {
-    fn default() -> Self {
-        Self {
-            mode: AppearanceMode::System,
-            glass_opacity: 80,
-            diff_colors: DiffColors::RedGreen,
-            chat_width: ChatWidth::Comfortable,
-            interface_font: String::new(),
-            interface_size: 16,
-            monospace_font: String::new(),
-            monospace_size: 13,
-            word_wrap: true,
-        }
-    }
+/// Reads this device's saved appearance; call before the first window paints.
+pub(crate) fn load_appearance() {
+    let saved = appearance_path()
+        .and_then(|path| std::fs::read(path).ok())
+        .map(|bytes| Appearance::decode(&bytes))
+        .unwrap_or_default();
+    APPEARANCE.with(|appearance| *appearance.borrow_mut() = saved);
 }
 
 pub(crate) fn appearance() -> Appearance {
     APPEARANCE.with(|appearance| appearance.borrow().clone())
 }
 
-/// Stores the preferences and redraws with them.
+/// Stores, saves and redraws with the preferences.
 pub(crate) fn set_appearance(appearance: Appearance, cx: &mut App) {
+    let appearance = appearance.normalized();
+    let bytes = appearance.encode();
     APPEARANCE.with(|current| *current.borrow_mut() = appearance);
     let dark = SYSTEM_DARK.with(|dark| *dark.borrow());
     apply_theme(dark, cx);
+    let generation = SAVE_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+    if let Some(path) = appearance_path() {
+        cx.background_spawn(async move {
+            let _guard = SAVE_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+            if SAVE_GENERATION.load(Ordering::SeqCst) != generation {
+                return;
+            }
+            if let Err(error) = host_daemon::platform::save_private_bytes(&path, &bytes) {
+                tracing::warn!(target: "desktop", error = %error, "Could not save the appearance");
+            }
+        })
+        .detach();
+    }
+}
+
+/// An `#rrggbb[aa]` palette value.
+pub(crate) fn hex_color(value: &str) -> Hsla {
+    let value = value.trim_start_matches('#');
+    let hex = u32::from_str_radix(value, 16).unwrap_or(0xffffff);
+    if value.len() == 8 {
+        rgba(hex).into()
+    } else {
+        rgb(hex).into()
+    }
+}
+
+/// The terminal's font family, size and line height.
+pub(crate) fn terminal_font() -> (SharedString, f32, f32) {
+    APPEARANCE.with(|appearance| {
+        let appearance = appearance.borrow();
+        let family = match appearance.terminal_font() {
+            "" => "Menlo".to_owned(),
+            family => family.to_owned(),
+        };
+        let size = appearance.terminal_font_size() as f32;
+        (family.into(), size, (size * 4. / 3.).round())
+    })
+}
+
+/// The prompt's font family, when it is not the interface font.
+pub(crate) fn prompt_font() -> Option<SharedString> {
+    APPEARANCE.with(|appearance| {
+        let appearance = appearance.borrow();
+        let family = appearance.prompt_font();
+        (!family.is_empty()).then(|| SharedString::from(family.to_owned()))
+    })
 }
 
 /// The diff colors of additions and of deletions.
@@ -104,13 +125,8 @@ pub(crate) fn color(role: &str) -> Hsla {
             .colors
             .get(role)
             .or_else(|| palette.colors.get("text"))
-            .map_or("ffffff", |value| value.trim_start_matches('#'));
-        let hex = u32::from_str_radix(value, 16).unwrap_or(0xffffff);
-        if value.len() == 8 {
-            rgba(hex).into()
-        } else {
-            rgb(hex).into()
-        }
+            .map_or("ffffff", String::as_str);
+        hex_color(value)
     })
 }
 
@@ -140,8 +156,8 @@ pub(crate) fn metrics() -> Metrics {
             },
             sidebar_width: palette.sidebar_width,
             panel_width: palette.panel_width,
-            prompt_size: palette.prompt_size,
-            code_size: APPEARANCE.with(|appearance| appearance.borrow().monospace_size) as f32,
+            prompt_size: APPEARANCE.with(|appearance| appearance.borrow().prompt_size) as f32,
+            code_size: APPEARANCE.with(|appearance| appearance.borrow().code_size) as f32,
         }
     })
 }
@@ -158,14 +174,10 @@ pub(crate) fn apply_appearance(appearance: WindowAppearance, cx: &mut App) {
 
 fn apply_theme(system_dark: bool, cx: &mut App) {
     let preferences = appearance();
-    let dark = match preferences.mode {
-        AppearanceMode::System => system_dark,
-        AppearanceMode::Light => false,
-        AppearanceMode::Dark => true,
-    };
+    let dark = preferences.resolved_dark(system_dark);
     DARK.with(|value| *value.borrow_mut() = dark);
     PALETTE.with(|palette| {
-        *palette.borrow_mut() = agent_core::presentation::theme::theme(dark);
+        *palette.borrow_mut() = preferences.palette(system_dark);
     });
     Theme::change(
         if dark {
@@ -179,12 +191,12 @@ fn apply_theme(system_dark: bool, cx: &mut App) {
     let theme = Theme::global_mut(cx);
     // The interface font size is the rem, so every Tailwind size follows it.
     theme.font_size = px(preferences.interface_size as f32);
-    theme.mono_font_size = px(preferences.monospace_size as f32);
+    theme.mono_font_size = px(preferences.code_size as f32);
     if !preferences.interface_font.is_empty() {
         theme.font_family = preferences.interface_font.clone().into();
     }
-    if !preferences.monospace_font.is_empty() {
-        theme.mono_font_family = preferences.monospace_font.clone().into();
+    if !preferences.code_font.is_empty() {
+        theme.mono_font_family = preferences.code_font.clone().into();
     }
     theme.radius = px(8.);
     theme.radius_lg = px(10.);

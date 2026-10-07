@@ -445,6 +445,89 @@ pub fn build_model_picker(
     }
 }
 
+/// How many models the jump shortcuts reach.
+pub const MODEL_PICKER_JUMPS: usize = 9;
+
+impl ModelPickerView {
+    /// What the arrow keys move through, in list order: the selectable
+    /// models, with the "Legacy models" row after the current ones.
+    pub fn navigable_keys(&self) -> Vec<String> {
+        let mut keys: Vec<String> = vec![];
+        for (index, row) in self.rows.iter().enumerate() {
+            if let Some(legacy) = &self.legacy
+                && index == legacy.current_count as usize
+            {
+                keys.push(legacy.key.clone());
+            }
+            if row.disabled_reason.is_none() {
+                keys.push(row.key.clone());
+            }
+        }
+        if let Some(legacy) = &self.legacy
+            && legacy.current_count as usize >= self.rows.len()
+        {
+            keys.push(legacy.key.clone());
+        }
+        keys
+    }
+
+    /// The models the jump shortcuts select, in order.
+    pub fn jump_targets(&self) -> Vec<&ModelPickerRow> {
+        self.rows
+            .iter()
+            .filter(|row| row.disabled_reason.is_none())
+            .take(MODEL_PICKER_JUMPS)
+            .collect()
+    }
+
+    /// The key highlighted when the picker opens or its list changes: the
+    /// selected model when it is listed, else the first item.
+    pub fn initial_highlight(&self) -> Option<String> {
+        let keys = self.navigable_keys();
+        self.rows
+            .iter()
+            .find(|row| row.selected && keys.contains(&row.key))
+            .map(|row| row.key.clone())
+            .or_else(|| keys.first().cloned())
+    }
+
+    /// The highlight after an arrow key, wrapping at either end; a key no
+    /// longer listed restarts from the first or last item.
+    pub fn step_highlight(&self, current: Option<&str>, forward: bool) -> Option<String> {
+        let keys = self.navigable_keys();
+        let count = keys.len();
+        if count == 0 {
+            return None;
+        }
+        let index = match current.and_then(|key| keys.iter().position(|item| item == key)) {
+            None if forward => 0,
+            None => count - 1,
+            Some(index) if forward => (index + 1) % count,
+            Some(index) => (index + count - 1) % count,
+        };
+        Some(keys[index].clone())
+    }
+
+    /// The rail item a provider shortcut moves to from the selected one.
+    /// Built from an unfiltered picker: a search hides the rail.
+    pub fn adjacent_rail(&self, forward: bool) -> PickerRail {
+        let entries: Vec<ProviderInstance> = self
+            .rail
+            .iter()
+            .filter_map(|item| item.instance.clone())
+            .collect();
+        let locked: Vec<String> = entries
+            .iter()
+            .filter(|instance| {
+                self.locked_driver
+                    .is_some_and(|driver| instance.driver != driver)
+            })
+            .map(|instance| instance.instance_id.clone())
+            .collect();
+        adjacent_model_picker_provider(&entries, &self.selected_rail, forward, &locked, &[])
+    }
+}
+
 /// The selected thread's shell row and loaded handoff facts.
 fn selected_thread(snapshot: &Snapshot) -> Option<(ThreadSummary, Option<HandoffFacts>)> {
     let id = snapshot.selected_thread.as_ref()?;
@@ -723,6 +806,85 @@ mod tests {
         let closed = build_model_picker(&catalog, "codex", "gpt-4", None, &|_, _| None, &toggled);
         assert!(!closed.legacy.unwrap().expanded);
         assert_eq!(closed.rows.len(), 1);
+    }
+
+    // ModelPickerContent.tsx keyboard: the arrows move through the listed
+    // items, skipping models a thread cannot take, with the Legacy row in
+    // its place; the jumps reach the first nine selectable models.
+    #[test]
+    fn arrow_keys_walk_selectable_rows_and_the_legacy_row_in_list_order() {
+        let legacy = |slug: &str| CatalogModel {
+            is_legacy: true,
+            ..model("codex", slug, slug)
+        };
+        let catalog = catalog_of(
+            vec![instance("codex", Driver::Codex)],
+            vec![
+                model("codex", "gpt-5.5", "GPT-5.5"),
+                model("codex", "gpt-5.4", "GPT-5.4"),
+                legacy("gpt-4"),
+            ],
+        );
+        let options = ModelPickerOptions {
+            rail: Some(PickerRail::instance("codex")),
+            ..Default::default()
+        };
+        let blocked = |_: &str, slug: &str| (slug == "gpt-5.4").then(|| "Blocked".to_owned());
+        let view = build_model_picker(&catalog, "codex", "gpt-5.5", None, &blocked, &options);
+        let gpt55 = model_picker_model_key("codex", "gpt-5.5");
+        let section = model_picker_legacy_section_key("codex");
+        assert_eq!(view.navigable_keys(), [gpt55.clone(), section.clone()]);
+        assert_eq!(view.initial_highlight(), Some(gpt55.clone()));
+        assert_eq!(
+            view.step_highlight(Some(&gpt55), true),
+            Some(section.clone())
+        );
+        assert_eq!(
+            view.step_highlight(Some(&section), true),
+            Some(gpt55.clone())
+        );
+        assert_eq!(view.step_highlight(None, false), Some(section));
+        let jumps: Vec<&str> = view
+            .jump_targets()
+            .iter()
+            .map(|row| row.slug.as_str())
+            .collect();
+        assert_eq!(jumps, ["gpt-5.5"]);
+        let open = build_model_picker(&catalog, "codex", "gpt-4", None, &|_, _| None, &options);
+        assert_eq!(
+            open.navigable_keys(),
+            [
+                gpt55,
+                model_picker_model_key("codex", "gpt-5.4"),
+                model_picker_legacy_section_key("codex"),
+                model_picker_model_key("codex", "gpt-4"),
+            ]
+        );
+        assert_eq!(
+            open.initial_highlight(),
+            Some(model_picker_model_key("codex", "gpt-4"))
+        );
+    }
+
+    #[test]
+    fn provider_shortcuts_skip_instances_a_locked_thread_cannot_use() {
+        let catalog = two_provider_catalog();
+        let options = ModelPickerOptions {
+            rail: Some(PickerRail::instance("codex")),
+            ..Default::default()
+        };
+        let free = build_model_picker(&catalog, "codex", "gpt-5.5", None, &|_, _| None, &options);
+        assert_eq!(free.adjacent_rail(true), PickerRail::instance("claude"));
+        assert_eq!(free.adjacent_rail(false), PickerRail::Favorites);
+        let locked = build_model_picker(
+            &catalog,
+            "codex",
+            "gpt-5.5",
+            Some(Driver::Codex),
+            &|_, _| None,
+            &options,
+        );
+        assert_eq!(locked.adjacent_rail(true), PickerRail::Favorites);
     }
 
     #[test]

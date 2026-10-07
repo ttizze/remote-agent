@@ -6,7 +6,9 @@ use crate::app::ui::{color, icon, shortcut, text_2xs, tint};
 use agent_core::{
     state::{AnswerEdit, Intent, QueueAction},
     view::{
-        composer::{stash::StashEntryView, view::ComposerView},
+        composer::{
+            context_meter::ResumeCompactionBanner, stash::StashEntryView, view::ComposerView,
+        },
         plan::{PlanStepStatus, PlanView},
         queue::{
             QueueDropTarget, QueueRowView, QueueView, RESUME_QUEUE_LABEL, queue_insert_target,
@@ -77,6 +79,56 @@ impl BannerState {
             thread: None,
         }
     }
+}
+
+/// "Resume with less context": compact an old, large session, or keep its
+/// full history.
+fn composer_resume_compaction(banner: ResumeCompactionBanner, cx: &mut Context<Desktop>) -> Piece {
+    let reason = banner
+        .compact_disabled_reason
+        .clone()
+        .map(SharedString::from);
+    let compact = ghost("resume-compaction-compact")
+        .label(banner.compact_label.clone())
+        .disabled(banner.compact_disabled)
+        .when_some(
+            reason.filter(|_| banner.compact_disabled),
+            |button, reason| button.tooltip(reason),
+        )
+        .on_click(cx.listener(|view, _, _, _| view.perform(Intent::CompactContext)));
+    let key = banner.key.clone();
+    let dismiss = Button::new("resume-compaction-dismiss")
+        .icon(icon("x"))
+        .ghost()
+        .xsmall()
+        .tooltip(banner.dismiss_label.clone())
+        .accessibility_label(banner.dismiss_label.clone())
+        .on_click(cx.listener(move |view, _, _, _| {
+            view.perform(Intent::DismissResumeCompaction { key: key.clone() })
+        }));
+    let mut piece = Piece::new(
+        row()
+            .child(icon_cell(Some("minimize-2")).text_color(color("textMuted")))
+            .child(
+                content()
+                    .child(
+                        div()
+                            .flex_none()
+                            .font_weight(FontWeight::MEDIUM)
+                            .child(banner.title.clone()),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_color(color("textMuted"))
+                            .child(banner.description.clone()),
+                    ),
+            )
+            .child(actions().child(compact).child(dismiss)),
+    );
+    piece.density = Density::Comfortable;
+    piece
 }
 
 /// The vertical padding of a strip.
@@ -281,6 +333,12 @@ impl Desktop {
             }
             if let Some(recovery) = &thread.limit_recovery {
                 pieces.push(self.composer_limit_recovery(&thread.thread_id, recovery, cx));
+            }
+            if let Some(banner) = self.snapshot.selected_thread.clone().and_then(|id| {
+                self.snapshot
+                    .resume_compaction_banner(&id, composer, crate::app::ui::now_ms())
+            }) {
+                pieces.push(composer_resume_compaction(banner, cx));
             }
             let requests = &thread.requests;
             let top = if let Some(approval) = &requests.approval {

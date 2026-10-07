@@ -11,7 +11,7 @@ use agent_protocol::conversation::{SearchMatch, ShellLocation, ShellSnapshot};
 use serde::{Deserialize, Serialize};
 use std::{
     borrow::Cow,
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     ops::{Deref, DerefMut},
     sync::Arc,
 };
@@ -326,6 +326,11 @@ pub struct Snapshot {
     pub thread_order: Option<ThreadOrderHold>,
     /// The Host's conversation settings once read.
     pub conversation_settings: Option<crate::models::ConversationSettings>,
+    /// Resume-compaction offers dismissed with "Keep full history" in this
+    /// session, by thread and context snapshot.
+    pub resume_compaction_dismissals: BTreeSet<String>,
+    /// The Host's keybindings as its stream last reported them.
+    pub keybindings: Option<Arc<agent_protocol::keybindings::KeybindingsConfig>>,
     pub session_import: SessionImport,
     /// Answer drafts by question request id.
     pub question_drafts: BTreeMap<String, QuestionDrafts>,
@@ -1073,6 +1078,11 @@ pub enum Intent {
     SetNewThreadStartFromOrigin {
         on: bool,
     },
+    /// "Create new ref": creates the branch on the new thread's checkout,
+    /// switches to it and works on it.
+    CreateNewThreadBranch {
+        name: String,
+    },
     /// A new thread in the project on a branch, from a thread's menu.
     NewThreadOnBranch {
         project_id: String,
@@ -1138,6 +1148,19 @@ pub enum Intent {
     SetModelOrder {
         instance_id: String,
         models: Vec<String>,
+    },
+    /// "Keep full history": hides one resume-compaction offer for this
+    /// session.
+    DismissResumeCompaction {
+        key: String,
+    },
+    /// Binds a shortcut on the Host, replacing `replace` when given.
+    UpsertKeybinding {
+        rule: crate::view::keybindings::KeybindingTarget,
+        replace: Option<crate::view::keybindings::KeybindingTarget>,
+    },
+    RemoveKeybinding {
+        rule: crate::view::keybindings::KeybindingTarget,
     },
     LoadConversationSettings,
     UpdateConversationSettings {

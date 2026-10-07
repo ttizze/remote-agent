@@ -87,6 +87,39 @@ pub struct NewThreadWorkspaceView {
     pub branch_error: Option<String>,
     /// Why the draft cannot start yet, e.g. a worktree without a base branch.
     pub blocked_reason: Option<String>,
+    /// A searched name no ref has yet, to create and switch to on the
+    /// checkout (`Intent::CreateNewThreadBranch`).
+    pub create_ref: Option<CreateRefChoice>,
+}
+
+/// "Create new ref "<name>"" in the branch picker.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct CreateRefChoice {
+    /// The searched name with the whitespace Git rejects replaced by dashes.
+    pub name: String,
+    pub label: String,
+}
+
+/// A typed ref name Git can take: surrounding whitespace dropped and each
+/// run of the ASCII whitespace Git rejects replaced by one dash. Case,
+/// dashes and whitespace Git accepts stay as typed.
+pub fn sanitize_new_ref_name(raw: &str) -> String {
+    let rejected = |c: char| matches!(c, ' ' | '\t' | '\n' | '\r' | '\u{c}' | '\u{b}');
+    let mut name = String::new();
+    let mut in_run = false;
+    for c in raw.trim().chars() {
+        if rejected(c) {
+            if !in_run {
+                name.push('-');
+            }
+            in_run = true;
+        } else {
+            name.push(c);
+            in_run = false;
+        }
+    }
+    name
 }
 
 /// "Current checkout" or "Current worktree" locally; "New worktree" otherwise.
@@ -214,7 +247,21 @@ fn workspace_view(snapshot: &Snapshot) -> Option<NewThreadWorkspaceView> {
         })
         .unwrap_or_default();
     let loading = refs.is_some_and(|entry| entry.in_flight) && branches.is_empty();
+    let create_ref = (workspace.mode == ThreadWorkspaceMode::Local)
+        .then(|| refs.map(|entry| entry.query.as_str()).unwrap_or_default())
+        .map(sanitize_new_ref_name)
+        .filter(|name| !name.is_empty())
+        .filter(|name| {
+            !refs
+                .and_then(|entry| entry.list.as_ref())
+                .is_some_and(|list| list.refs.iter().any(|candidate| &candidate.name == name))
+        })
+        .map(|name| CreateRefChoice {
+            label: format!("Create new ref \"{name}\""),
+            name,
+        });
     Some(NewThreadWorkspaceView {
+        create_ref,
         mode: workspace.mode,
         workspace_label: new_task_workspace_label(
             workspace.mode,
@@ -482,5 +529,73 @@ mod tests {
             new_task_branch_label(Some("main"), false, ThreadWorkspaceMode::Worktree),
             "From main"
         );
+    }
+
+    // packages/shared git.ts sanitizeNewRefName.
+    #[test]
+    fn sanitizes_a_typed_ref_name_only_where_git_rejects_it() {
+        assert_eq!(sanitize_new_ref_name("new branch"), "new-branch");
+        assert_eq!(sanitize_new_ref_name("new   branch"), "new-branch");
+        assert_eq!(sanitize_new_ref_name("  new branch  "), "new-branch");
+        assert_eq!(sanitize_new_ref_name("new\tbranch"), "new-branch");
+        assert_eq!(sanitize_new_ref_name("new\u{a0}branch"), "new\u{a0}branch");
+        assert_eq!(
+            sanitize_new_ref_name("new\u{2009}branch"),
+            "new\u{2009}branch"
+        );
+        assert_eq!(
+            sanitize_new_ref_name("feature/new thing"),
+            "feature/new-thing"
+        );
+        assert_eq!(
+            sanitize_new_ref_name("Feature/New Thing"),
+            "Feature/New-Thing"
+        );
+        assert_eq!(sanitize_new_ref_name("feature/login"), "feature/login");
+        assert_eq!(sanitize_new_ref_name("   "), "");
+        assert_eq!(sanitize_new_ref_name("new - branch"), "new---branch");
+        assert_eq!(sanitize_new_ref_name("foo--bar"), "foo--bar");
+    }
+
+    // BranchToolbarBranchSelector: a searched name no ref has is offered as
+    // a new ref on a local checkout, not while choosing a worktree's base.
+    #[test]
+    fn a_searched_name_no_ref_has_is_offered_as_a_new_ref() {
+        let mut snapshot = project_snapshot();
+        let search = |snapshot: &mut Snapshot, query: &str| {
+            snapshot
+                .sources
+                .refs
+                .get_mut(&("/repo".to_owned(), RefScope::All))
+                .unwrap()
+                .query = query.into();
+        };
+        search(&mut snapshot, "new thing");
+        let view = workspace_view(&snapshot).unwrap();
+        assert_eq!(
+            view.create_ref,
+            Some(CreateRefChoice {
+                name: "new-thing".into(),
+                label: "Create new ref \"new-thing\"".into(),
+            })
+        );
+        search(&mut snapshot, "main");
+        assert_eq!(workspace_view(&snapshot).unwrap().create_ref, None);
+        search(&mut snapshot, "");
+        assert_eq!(workspace_view(&snapshot).unwrap().create_ref, None);
+        search(&mut snapshot, "other");
+        snapshot.drafts.insert(
+            "new:app".into(),
+            crate::state::Draft {
+                workspace: Some(crate::state::DraftWorkspace {
+                    mode: ThreadWorkspaceMode::Worktree,
+                    branch: None,
+                    worktree_path: None,
+                    start_from_origin: false,
+                }),
+                ..Default::default()
+            },
+        );
+        assert_eq!(workspace_view(&snapshot).unwrap().create_ref, None);
     }
 }

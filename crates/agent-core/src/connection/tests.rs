@@ -2122,3 +2122,49 @@ fn only_applies_the_start_from_origin_default_to_new_worktree_drafts() {
     owner.set_new_thread_start_from_origin(true).unwrap();
     assert!(owner.state.new_thread_workspace().start_from_origin);
 }
+
+// BranchToolbarBranchSelector createRef: the searched name, sanitized, is
+// created on the checkout and switched to, and the draft works on it.
+#[test]
+fn creating_a_new_ref_switches_the_checkout_and_the_draft_takes_it() {
+    use agent_protocol::workspace as w;
+    let mut owner = owner(Snapshot {
+        selected_project: Some("app".into()),
+        ..Snapshot::default()
+    });
+    project_shell(&mut owner);
+    let Next::Call(call, _) = owner
+        .create_new_thread_branch(" new thing ".into())
+        .unwrap()
+    else {
+        panic!("create")
+    };
+    let crate::protocol::Call::CreateRef(request) = *call else {
+        panic!("create")
+    };
+    assert_eq!(
+        request,
+        w::CreateRef {
+            cwd: "/repo".into(),
+            ref_name: "new-thing".into(),
+            switch_ref: true,
+        }
+    );
+    owner.switched_ref(
+        &w::SwitchRef {
+            cwd: request.cwd,
+            ref_name: request.ref_name,
+        },
+        w::SwitchedRef {
+            ref_name: Some("new-thing".into()),
+        },
+    );
+    assert_eq!(
+        owner.state.new_thread_workspace().branch.as_deref(),
+        Some("new-thing")
+    );
+    assert!(matches!(
+        owner.create_new_thread_branch("   ".into()).unwrap(),
+        Next::Done
+    ));
+}

@@ -97,6 +97,7 @@ struct HostResources {
     auth_task: OnceLock<tokio_util::task::AbortOnDropHandle<()>>,
     commands: super::commands::CommandCache,
     search: crate::workspace_search::WorkspaceSearch,
+    keybindings: Arc<crate::keybindings::Keybindings>,
 }
 
 /// The live model catalog for the agent tools, without keeping the service alive.
@@ -125,6 +126,9 @@ impl HostRpcService {
     ) -> anyhow::Result<Self> {
         let connections = Connections::new();
         let terminal_history = projects.path().with_file_name("terminals");
+        let keybindings = Arc::new(crate::keybindings::Keybindings::new(
+            projects.path().with_file_name("keybindings.json"),
+        ));
         let shared = SharedResources {
             files: crate::workspace_files::WorkspaceFiles::new(
                 projects.path().with_file_name("attachments"),
@@ -150,6 +154,7 @@ impl HostRpcService {
             auth_task: OnceLock::new(),
             commands: Default::default(),
             search: Default::default(),
+            keybindings,
         });
         Ok(Self {
             inner: Arc::new(ServiceInner {
@@ -314,6 +319,11 @@ impl HostRpcService {
         if let Some(task) = self.inner.resources.codex.auth_requests() {
             let _ = self.inner.resources.auth_task.set(task);
         }
+        // A broken keybindings file must not keep the Host from starting;
+        // clients read its issues instead.
+        if let Err(error) = self.inner.resources.keybindings.start().await {
+            tracing::warn!(target: "keybindings", error = %format!("{error:#}"), "Could not start keybindings");
+        }
         if let Some(conversation) = self.inner.resources.conversation.get() {
             conversation.start().await?;
         }
@@ -404,7 +414,43 @@ impl HostRpcService {
             let cancel = self.inner.connections.cancellation(session)?;
             return Ok(self.terminal_metadata(cancel));
         }
+        if let Call::Keybindings(_) = call {
+            let cancel = self.inner.connections.cancellation(session)?;
+            return Ok(self.keybindings(cancel).await);
+        }
         Ok(Response::from_result(self.request(session, call).await).into())
+    }
+    /// The keybindings in effect, then each change; a subscriber that fell
+    /// behind gets the latest.
+    async fn keybindings(&self, cancel: tokio_util::sync::CancellationToken) -> HostReply {
+        let keybindings = self.inner.resources.keybindings.clone();
+        let receiver = keybindings.subscribe();
+        let first = match keybindings.config().await {
+            Ok(config) => config,
+            Err(error) => {
+                return Response::error("keybindings_unavailable", &format!("{error:#}")).into();
+            }
+        };
+        let receiver = Arc::new(tokio::sync::Mutex::new(receiver));
+        crate::conversation::stream(
+            std::collections::VecDeque::from([first]),
+            agent_protocol::keybindings::KeybindingsConfig::default(),
+            move || {
+                let (receiver, keybindings) = (receiver.clone(), keybindings.clone());
+                Box::pin(async move {
+                    let mut receiver = receiver.lock().await;
+                    match receiver.recv().await {
+                        Ok(config) => Some(vec![config]),
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                            *receiver = receiver.resubscribe();
+                            keybindings.config().await.ok().map(|config| vec![config])
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => None,
+                    }
+                })
+            },
+            cancel,
+        )
     }
     /// Every terminal first, then upserts and removals; a subscriber that fell
     /// behind gets a fresh snapshot.
@@ -531,6 +577,10 @@ impl HostRpcService {
                     .await
                     .map_err(|error| Failure::new("vcs_refs_failed", error))?
                     .into(),
+                Call::CreateRef(params) => crate::vcs::create_ref(params.clone())
+                    .await
+                    .map_err(|error| Failure::new("vcs_create_ref_failed", error))?
+                    .into(),
                 Call::SwitchRef(params) => crate::vcs::switch_ref(params.clone())
                     .await
                     .map_err(|error| Failure::new("vcs_switch_ref_failed", error))?
@@ -600,6 +650,18 @@ impl HostRpcService {
                     }
                     settings.into()
                 }
+                Call::UpsertKeybinding(params) => (resources
+                    .keybindings
+                    .upsert(params.clone())
+                    .await
+                    .map_err(|error| Failure::new("keybindings_update_failed", error))?)
+                .into(),
+                Call::RemoveKeybinding(params) => (resources
+                    .keybindings
+                    .remove(params.clone())
+                    .await
+                    .map_err(|error| Failure::new("keybindings_update_failed", error))?)
+                .into(),
                 Call::ReadWorktreeSettings(_) | Call::UpdateWorktreeSettings(_) => {
                     let update = if let Call::UpdateWorktreeSettings(settings) = request {
                         Some(settings.clone())

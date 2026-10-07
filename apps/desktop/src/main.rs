@@ -58,6 +58,7 @@ impl DesktopAssets {
         "external-link",
         "eye-off",
         "eye",
+        "file-braces",
         "file-diff",
         "file-text",
         "file",
@@ -95,6 +96,7 @@ impl DesktopAssets {
         "minimize-2",
         "minus",
         "monitor",
+        "moon",
         "panel-bottom",
         "panel-left",
         "panel-right",
@@ -124,6 +126,7 @@ impl DesktopAssets {
         "square-terminal",
         "square",
         "star",
+        "sun",
         "terminal",
         "text-wrap",
         "trash-2",
@@ -280,6 +283,7 @@ fn main() {
                         ..Default::default()
                     },
                     |window, cx| {
+                        app::load_appearance();
                         app::apply_appearance(window.appearance(), cx);
                         let desktop = cx.new(|cx| app::Desktop::new(window, cx));
                         cx.new(|cx| Root::new(desktop, window, cx))

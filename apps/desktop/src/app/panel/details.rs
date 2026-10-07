@@ -3,12 +3,15 @@
 //! else a popover under the header.
 use crate::app::{
     Desktop,
+    settings::SettingsPage,
     ui::{color, driver_icon, icon, text_2xs, tint},
 };
 use agent_core::{
     state::Intent,
     view::{
         agents::StatusTone,
+        header::WorkspaceRow,
+        projects::scripts::ProjectScriptsView,
         relationships::{
             LineageGroup, LineageGroupKind, LineageIcon, LineagePanel, LineageRow,
             lineage_group_title, lineage_window,
@@ -17,10 +20,11 @@ use agent_core::{
 };
 use gpui_kit::{
     component::{
-        Sizable,
+        Sizable, WindowExt,
         button::{Button, ButtonVariants},
         h_flex,
         menu::{DropdownMenu, PopupMenuItem},
+        notification::Notification,
         tooltip::Tooltip,
         v_flex,
     },
@@ -227,13 +231,10 @@ impl Desktop {
 
     fn render_details(&mut self, _: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let thread = self.views.thread.as_ref();
-        let cwd = thread
+        let workspace_row = thread
             .and_then(|thread| thread.header.as_ref())
-            .and_then(|header| header.cwd.clone());
-        let scripts = thread
-            .and_then(|thread| thread.scripts.clone())
-            .map(|scripts| scripts.rows)
-            .unwrap_or_default();
+            .and_then(|header| header.workspace.clone());
+        let scripts = thread.and_then(|thread| thread.scripts.clone());
         let lineage = thread.and_then(|thread| {
             thread
                 .lineage
@@ -245,47 +246,13 @@ impl Desktop {
             .px_2()
             .pt_2()
             .pb_2p5()
-            .when_some(cwd, |section, cwd| {
-                section.child(
-                    h_flex()
-                        .h_8()
-                        .w_full()
-                        .gap_2p5()
-                        .px_2p5()
-                        .rounded(px(10.))
-                        .text_size(px(13.))
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(tint("text", 0.8))
-                        .child(icon("folder").size_4().text_color(color("textMuted")))
-                        .child(div().flex_1().min_w_0().truncate().child(cwd)),
-                )
+            .when_some(workspace_row, |section, row| {
+                section.child(self.render_workspace_row(row, cx))
             })
-            .children(scripts.into_iter().map(|row| {
-                let script_id = row.script.id.clone();
-                let thread_id = thread_id.clone();
-                h_flex()
-                    .id(SharedString::from(format!(
-                        "details-script-{}",
-                        row.script.id
-                    )))
-                    .h_8()
-                    .w_full()
-                    .gap_2p5()
-                    .px_2p5()
-                    .rounded(px(10.))
-                    .text_size(px(13.))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(tint("text", 0.8))
-                    .cursor_pointer()
-                    .hover(|row| row.bg(row_hover()))
-                    .on_click(cx.listener(move |view, _, _, cx| {
-                        if thread_id.is_some() {
-                            view.run_project_script(script_id.clone(), cx);
-                        }
-                    }))
-                    .child(icon("play").size_4().text_color(color("textMuted")))
-                    .child(div().flex_1().min_w_0().truncate().child(row.run_label))
-            }));
+            .when_some(
+                scripts.filter(|_| thread_id.is_some()),
+                |section, scripts| section.child(self.render_details_scripts(scripts, cx)),
+            );
         v_flex()
             .id("thread-details")
             .max_h_full()
@@ -300,6 +267,181 @@ impl Desktop {
             .when_some(lineage, |card, (thread, lineage)| {
                 card.child(self.render_lineage(thread, lineage, cx))
             })
+            .into_any_element()
+    }
+
+    /// The thread's folder: its name, "Worktree" beside a worktree, the full
+    /// path on hover and "Copy full path" on right click.
+    fn render_workspace_row(&self, row: WorkspaceRow, cx: &mut Context<Self>) -> AnyElement {
+        let tooltip: SharedString = row.path.clone().unwrap_or_else(|| row.label.clone()).into();
+        let path = row.path.clone();
+        h_flex()
+            .id("details-workspace")
+            .h_8()
+            .w_full()
+            .gap_2p5()
+            .px_2p5()
+            .rounded(px(10.))
+            .text_size(px(13.))
+            .text_color(tint("textMuted", 0.7))
+            .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+            .when_some(path, |row, path| {
+                row.on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(move |view, event: &MouseDownEvent, window, cx| {
+                        let path = path.clone();
+                        view.open_menu(event.position, window, cx, move |menu, _, _| {
+                            let path = path.clone();
+                            menu.item(
+                                PopupMenuItem::new("Copy full path")
+                                    .icon(icon("copy"))
+                                    .on_click(move |_, window, cx| {
+                                        cx.write_to_clipboard(ClipboardItem::new_string(
+                                            path.clone(),
+                                        ));
+                                        window.push_notification(
+                                            Notification::success(path.clone())
+                                                .title("Path copied"),
+                                            cx,
+                                        );
+                                    }),
+                            )
+                        });
+                    }),
+                )
+            })
+            .child(
+                icon(if row.in_worktree {
+                    "folder-git"
+                } else {
+                    "folder"
+                })
+                .size_4()
+                .text_color(color("textMuted")),
+            )
+            .child(div().min_w_0().truncate().child(row.label))
+            .children(row.kind.map(|kind| {
+                div()
+                    .flex_none()
+                    .text_size(px(10.))
+                    .text_color(tint("textMuted", 0.7))
+                    .child(kind)
+            }))
+            .into_any_element()
+    }
+
+    /// The project's scripts: the primary one runs from the row, the rest
+    /// and "Add project script" from the menu beside it.
+    fn render_details_scripts(
+        &self,
+        scripts: ProjectScriptsView,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let project_id = scripts.project_id.clone();
+        let primary = scripts
+            .primary_script_id
+            .as_ref()
+            .and_then(|id| scripts.rows.iter().find(|row| &row.script.id == id))
+            .or_else(|| scripts.rows.first())
+            .cloned();
+        let Some(primary) = primary else {
+            return h_flex()
+                .id("details-add-script")
+                .h_8()
+                .w_full()
+                .gap_2p5()
+                .px_2p5()
+                .rounded(px(10.))
+                .text_size(px(13.))
+                .text_color(tint("text", 0.8))
+                .cursor_pointer()
+                .hover(|row| row.bg(row_hover()))
+                .on_click(cx.listener(move |view, _, window, cx| {
+                    view.open_settings(
+                        SettingsPage::Projects {
+                            project_id: Some(project_id.clone()),
+                        },
+                        window,
+                        cx,
+                    )
+                }))
+                .child(icon("plus").size_4().text_color(color("textMuted")))
+                .child("Add project script")
+                .into_any_element();
+        };
+        let primary_id = primary.script.id.clone();
+        let tooltip: SharedString = primary.run_label.clone().into();
+        let owner = cx.entity().downgrade();
+        let rows = scripts.rows.clone();
+        h_flex()
+            .w_full()
+            .h_8()
+            .rounded(px(10.))
+            .child(
+                h_flex()
+                    .id("details-script-primary")
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .gap_2p5()
+                    .px_2p5()
+                    .rounded_l(px(10.))
+                    .text_size(px(13.))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(tint("text", 0.8))
+                    .cursor_pointer()
+                    .hover(|row| row.bg(row_hover()))
+                    .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+                    .on_click(cx.listener(move |view, _, _, cx| {
+                        view.run_project_script(primary_id.clone(), cx)
+                    }))
+                    .child(icon("play").size_4().text_color(color("textMuted")))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .child(primary.script.name.clone()),
+                    ),
+            )
+            .child(div().w(px(1.)).h_4().bg(tint("border", 0.65)))
+            .child(
+                Button::new("details-scripts-menu")
+                    .icon(icon("chevron-down"))
+                    .ghost()
+                    .xsmall()
+                    .accessibility_label("Script actions")
+                    .dropdown_menu(move |mut menu, _, _| {
+                        for row in &rows {
+                            let (owner, id) = (owner.clone(), row.script.id.clone());
+                            menu = menu.item(
+                                PopupMenuItem::new(row.label.clone())
+                                    .icon(icon("play"))
+                                    .on_click(move |_, _, cx| {
+                                        let _ = owner.update(cx, |view, cx| {
+                                            view.run_project_script(id.clone(), cx)
+                                        });
+                                    }),
+                            );
+                        }
+                        let (owner, project_id) = (owner.clone(), project_id.clone());
+                        menu.item(
+                            PopupMenuItem::new("Add project script")
+                                .icon(icon("plus"))
+                                .on_click(move |_, window, cx| {
+                                    let project_id = project_id.clone();
+                                    let _ = owner.update(cx, |view, cx| {
+                                        view.open_settings(
+                                            SettingsPage::Projects {
+                                                project_id: Some(project_id),
+                                            },
+                                            window,
+                                            cx,
+                                        )
+                                    });
+                                }),
+                        )
+                    }),
+            )
             .into_any_element()
     }
 
