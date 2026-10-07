@@ -1494,8 +1494,8 @@ A5 で接続した（2026-10-07、後述の「A5: 端末の状態・intent・Uni
 
 未接続:
 
-- 「Changes」（branch との差分）には Host の操作がない。Uncommitted は `host/workspace/review` で近似する。
-- Host に必要な RPC: provider の skill と slash command、workspace の path 検索、thread の context record に入れる environment id。
+- thread の context record に入れる environment id（Host は1つなので持たない）。
+- 「Changes」と Uncommitted、provider の skill と slash command、workspace の path 検索は 2026-10-08 に接続した（後述の「段階 4 の統合」）。
 - 重複していた helper は 1 つにした（2026-10-07）: duration は `view::time::format_duration`、search ranking は `view::search_ranking`、JavaScript の文字列と数値の処理は `js_text`、名前の並びは `view::collation`、質問の回答の下書きは `view::requests`、一覧の行の状態は `thread_summary::thread_list_status`。
 
 ### 一覧・メニュー・検索・model・設定・project の view（2026-10-07）
@@ -1621,13 +1621,11 @@ UniFFI の公開（`bindings/views.rs`）:
 - 状態を持たない関数: `timeline_update`、`answer_draft_key`、`admit_attachments`、`snooze_presets`。
 - 生成は `scripts/build-agent-bindings.sh`（`AgentCore.swift`、`AgentCoreFFI.h`、`AgentCoreFFI.modulemap`、`dev/remoteagent/core/agent_core.kt`）。
 
-未接続（Host・protocol の作業）:
+未接続:
 
-- `StartTerminal` は thread・terminal id・環境変数（`PROJECT_ROOT` など）をまだ運ばない。terminal の metadata stream もない。
-- provider の skill・slash command・workspace の path 検索の RPC がないので、composer の menu は built-in の command と thread だけ。`/compact` は context meter に出ない。
-- provider ごとの runtime mode と plan toggle、model option の記述は Host から届かないので、すべての mode と Plan を出す。
+- provider ごとの runtime mode は Host から届かないので、すべての mode を出す（plan toggle と model option は 2026-10-08 に接続した）。
 - 接続状態は接続しているかどうかだけで、再接続中の環境名や理由は出ない。
-- 「Work locally」（setup を止めて checkout で送り直す）と、新しい task の下書きの project 選択時刻・branch は未実装。
+- 新しい task の下書きの project 選択時刻。
 
 ### Android クライアント（段階 4、2026-10-07）
 
@@ -1654,3 +1652,31 @@ UniFFI の公開（`bindings/views.rs`）:
 - 質問の回答に添付したファイルの一覧は出ない（view が件数だけを返す）。model を変えたときの option は引き継がない。thread 設定の「Legacy models」の切り替えはない。
 - setup card の「Open terminal」は Host が setup を thread の terminal で動かし `terminal_id` を埋めるまで出ない。Host の `StartTerminal` が thread と terminal id を運ぶまで、terminal は handle と cwd だけで開く。
 - 一覧の並べ替え（Arrange）は drag ではなく core の Move up / Move down を並べる。
+
+### 段階 4 の統合: Host の data の接続（2026-10-08）
+
+`stage4-int` で Host・core・iOS・Android・desktop の枝を統合し、core を Host の新しい protocol に載せた。期待値は T3 のまま。
+
+| T3 の原本 | agent-core の実装と検証 |
+| --- | --- |
+| web `providerInstances.ts`（deriveProviderInstanceEntries、isProviderInstancePickerReady）、`ModelPickerSidebar.tsx` describeUnavailableInstance | `view::models::catalog`（`host/provider/list` の instance と model、Host の descriptor）。`the_host_instances_carry_their_display_metadata_and_descriptors`、`unavailable_instances_list_no_models_and_explain_themselves`。 |
+| web `modelSelection.ts` の既定の instance と model | `view::models::default_model`。`a_new_draft_starts_on_the_first_ready_instances_default_model`。 |
+| `shared/model.ts` resolveSelectableModel の alias | `view::models::options::resolve_selectable_model`。`prefers_an_exact_slug_and_returns_no_capabilities_for_an_unknown_one`、`names_a_catalog_model_by_its_slug_name_or_alias`。 |
+| web `ModelPickerContent.tsx` legacySection | `ModelPickerView.legacy`（`ModelPickerOptions.toggled_legacy`）。`legacy_models_fold_under_a_row_that_opens_for_a_legacy_selection`。 |
+| mobile `use-composer-command-menu.ts`（workspace snapshot の取得と 10 秒の再試行）、`queries.ts` useComposerPathSearch、web `queries.ts`、`ComposerCommandMenu.tsx` と mobile `ComposerCommandPopover.tsx` の文言、client-runtime `providerSkills.ts` | `Intent::UpdateComposerMenu`、`connection::workspace`（`ensure_provider_commands`、debounce した `host/workspace/searchEntries`）、`view::composer::menu`。`the_menu_lists_the_providers_skills_commands_and_found_paths`、`an_empty_menu_names_what_its_trigger_searched`。 |
+| web `ChatView.tsx` の Compact context と `ContextWindowMeter.logic.ts` providerSupportsManualCompaction | `view::composer::view::compact_control`、`Intent::CompactContext`（`/compact` を送る）。 |
+| web `DiffPanel.tsx`（diffPreview・vcs status・listRefs）、`lib/baseRefChoices.ts` | `Intent::LoadDiff` が `host/review/diffPreview` と `host/vcs/status` を読む。`view::checkpoints::{git_diff_view, build_base_ref_choices}`、`Intent::SearchDiffBaseRefs`。`base_choices_pair_local_branches_with_their_origin_twin`、`the_git_view_reads_the_preview_source_its_scope_picks`、`uncommitted_reads_the_working_tree_preview`。 |
+| mobile `new-task-flow-provider.tsx`、`new-task-context-presentation.ts`、`projectThreadCreationValidation.ts` | `Draft.workspace`（`DraftWorkspace`）、`NewThreadView.workspace`、`view::new_thread::{new_thread_launch_workspace, branch_worktree_path, new_task_branch_label, new_task_workspace_label}`、`Intent::{SetNewThreadWorkspace, SelectNewThreadBranch, SetNewThreadStartFromOrigin, SearchNewThreadBranches, NewThreadOnBranch}`。`a_local_draft_works_on_the_checked_out_branch_and_a_worktree_starts_from_the_default`、`a_branch_checked_out_in_another_worktree_runs_there_locally`。 |
+| mobile `ThreadRouteScreen.tsx` handleWorkLocally、web の setup card の Retry | `Intent::WorkLocally`（`CancelSetup` の結果で launch）、`Intent::RetryPreparation`（`Command::RetryPrepared`）。 |
+| client-runtime terminal metadata（subscribeTerminalMetadata）、`shared/terminalLabels.ts`、mobile `terminalMenu.ts`、web `Sidebar.tsx` terminalProcessLabel・`ThreadStatusIndicators.tsx` | `StreamKey::TerminalMetadata`、`Snapshot.terminal_metadata`、`view::terminals::{terminal_tabs, next_terminal_id, running_terminal_ids, terminal_process_label, terminal_menu_status}`、`SidebarThreadRow.terminal_processes`、`Intent::{ClearTerminal, RestartTerminal}`、`host/terminal/closed`。`host_terminals_name_their_command_and_new_ids_fill_the_lowest_gap`、`lists_setup_terminals_first_and_takes_the_lowest_free_id`。 |
+| `shared/projectScripts.ts` projectScriptRuntimeEnv、mobile `ThreadTerminalRouteScreen.tsx` の restartIfNotRunning | `Snapshot::terminal_location`、`StartTerminal { thread, terminal_id, cwd, worktree_path, size, env, restart_if_not_running }`。 |
+| mobile `components/ProjectFavicon.tsx`、`state/assets` | `Owner::refresh_project_icons`（`host/project/favicon` と `known_hash`）、`Snapshot::project_icon`、`Intent::SetProjectIcon`。 |
+| mobile `lib/mobileTheme`、既定の palette と状態色 | `presentation::theme` の `mobile*`・`status*`。`both_appearances_name_the_same_tokens_in_hex`。 |
+| web `MessagesTimeline.tsx` formatWorkingTimer、mobile `floating-working-control.tsx` formatWorkingDuration | `view::time::format_working_timer`（`working_timer_label`）、`view::working_status::format_working_duration`（`working_duration_label`）。`working_timer_floors_to_whole_seconds`。 |
+
+未接続（T3 にあって、まだ持たないもの）:
+
+- diff panel の truncated な source の file ごとの遅延読み込み（diffFileContents）、window focus での再読み込み、環境 cwd での再試行。
+- 新しい task の branch の続きのページ（`cursor`）と T3 の `newWorktreesStartFromOrigin` 設定。
+- context meter の resume compaction の帯（`should_offer_resume_compaction` は core にあるが画面に出していない）。
+- provider ごとの runtime mode。
