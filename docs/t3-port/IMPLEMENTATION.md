@@ -11,7 +11,9 @@
 | 5 | 完了 | 旧 `crates/orchestration` と `crates/provider-adapters`、旧 `orchestration/*` RPC、cwd から作る terminal handle、旧ランタイムの文書の削除 |
 | M3 | 未着手 | T3 の Git/worktree 操作、GitHub PR 連携、scheduled tasks、usage の拡張、全設定、Nightly 配布 |
 
-会話の RPC の ALPN は `remote-agent/streams/12`。旧形式の互換性・移行は設けない。iroh、QR ペアリング、provider プロセス管理、terminal・files・browser・dictation・accounts・既存 worktree 機能は維持する。
+会話の RPC の ALPN は `remote-agent/streams/13`。旧形式の互換性・移行は設けない。iroh、QR ペアリング、provider プロセス管理、terminal・files・browser・dictation・accounts・既存 worktree 機能は維持する。
+
+Claude 接続は固定版の Agent SDK を Node 子プロセスから直接呼ぶ。SDK 本体とライセンスは npm lockfile に従って vendoring し、Host に埋め込む。Host 上には Node.js 18 以上が必要（開発環境は Nix の Node を使う）。SDK 内部の制御・fork の履歴変換の Rust 再実装は削除した。
 
 ## 検証方針
 

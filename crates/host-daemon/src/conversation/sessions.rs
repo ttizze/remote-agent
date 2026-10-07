@@ -160,17 +160,10 @@ impl SessionHost for ProviderHost {
         Box::pin(async move {
             let cwd = self.cwd(&request.target).await.map_err(io::Error::other)?;
             let spec = match &request.claude {
-                Some(launch) => {
+                Some(_) => {
                     let (claude, credentials) = self.claude().map_err(io::Error::other)?;
                     let home = credentials.claude_home().await.map_err(io::Error::other)?;
-                    ProcessSpec {
-                        driver: Driver::Claude,
-                        program: claude.program.clone(),
-                        args: launch.args(),
-                        env: claude.environment(&home),
-                        clear_env: true,
-                        cwd,
-                    }
+                    claude.sdk_process(&home, &cwd).await?
                 }
                 None => {
                     let program =
@@ -305,16 +298,33 @@ impl SessionHost for ProviderHost {
         })
     }
 
-    fn read_claude_session(
+    fn prepare_claude_fork(
         &self,
-        target: LaunchTarget,
+        source: LaunchTarget,
         session: String,
+        target: String,
+        through: Option<String>,
     ) -> BoxFuture<'_, io::Result<String>> {
         Box::pin(async move {
-            tokio::fs::read_to_string(self.transcript(&target, &session).await?).await
+            let (claude, credentials) = self.claude().map_err(io::Error::other)?;
+            let home = credentials.claude_home().await.map_err(io::Error::other)?;
+            let cwd = self.cwd(&source).await.map_err(io::Error::other)?;
+            let path = self.transcript(&source, &session).await?;
+            let transcript = tokio::fs::read_to_string(path).await?;
+            let response = claude.sdk_requests(&home, &cwd, vec![json!({
+                "subtype":"fork_session", "transcript":transcript, "session":session, "target":target, "through":through,
+            })]).await?;
+            response["transcript"]
+                .as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "Claude SDK fork transcript missing",
+                    )
+                })
         })
     }
-
     fn write_claude_session(
         &self,
         target: LaunchTarget,

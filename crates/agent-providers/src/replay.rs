@@ -504,32 +504,14 @@ impl Replay {
             settings: None,
             extra_args: BTreeMap::new(),
         };
-        let args = launch.args();
-        let value = |name: &str| {
-            args.iter()
-                .find_map(|arg| arg.strip_prefix(&format!("--{name}=")).map(str::to_owned))
-                .or_else(|| {
-                    args.iter()
-                        .position(|arg| arg == &format!("--{name}"))
-                        .map(|index| args[index + 1].clone())
-                })
-        };
+        let actual = launch.sdk_options();
         let options = &frame["options"];
-        assert_eq!(value("model").as_deref(), options["model"].as_str());
-        assert_eq!(
-            value("settings").map(|settings| serde_json::from_str::<Value>(&settings).unwrap()),
-            Some(options["settings"].clone())
-        );
-        assert_eq!(
-            value("resume").as_deref(),
-            options["resume"].as_str(),
-            "{}",
-            self.scenario
-        );
+        assert_eq!(actual["model"], options["model"]);
+        assert_eq!(actual["settings"], options["settings"]);
+        assert_eq!(actual["resume"], options["resume"], "{}", self.scenario);
         if options["resume"].is_string() {
             assert_eq!(
-                value("resume-session-at").as_deref(),
-                options["resumeSessionAt"].as_str(),
+                actual["resumeSessionAt"], options["resumeSessionAt"],
                 "{}",
                 self.scenario
             );

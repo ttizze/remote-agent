@@ -205,10 +205,7 @@ impl Accounts {
                     .query_control(
                         &home,
                         &directory,
-                        Some((
-                            "usage",
-                            serde_json::json!({"subtype":"get_usage","skip_behaviors":true}),
-                        )),
+                        Some(serde_json::json!({"subtype":"get_usage","skip_behaviors":true})),
                     )
                     .await?;
                     Ok(crate::account_usage::claude(&response))

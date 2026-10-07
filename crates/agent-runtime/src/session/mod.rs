@@ -17,8 +17,7 @@ use agent_domain::{
 };
 use agent_providers::{
     ClaudeLaunch, ClaudeProtocol, Completion, PreparedImage, ProcessDirective, ProtocolError,
-    Translation, WireContext, claude_fork_session, claude_model_options,
-    claude_runtime_query_policy,
+    Translation, WireContext, claude_model_options, claude_runtime_query_policy,
 };
 use claude::ClaudeProcess;
 use futures_util::FutureExt;
@@ -129,10 +128,12 @@ pub trait SessionHost: Send + Sync {
         thread: ThreadId,
         attachments: Vec<Attachment>,
     ) -> BoxFuture<'_, Result<Vec<PreparedImage>, String>>;
-    fn read_claude_session(
+    fn prepare_claude_fork(
         &self,
-        target: LaunchTarget,
+        source: LaunchTarget,
         session: String,
+        target: String,
+        through: Option<String>,
     ) -> BoxFuture<'_, io::Result<String>>;
     fn write_claude_session(
         &self,

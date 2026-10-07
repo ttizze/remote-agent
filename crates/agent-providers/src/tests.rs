@@ -625,7 +625,7 @@ fn codex_stop_before_turn_ready_interrupts_once_and_terminates_native_processes(
 }
 
 #[test]
-fn initialize_recovers_pending_requests_once_and_preserves_reply_correlation() {
+fn sdk_callbacks_open_requests_once_and_preserve_reply_correlation() {
     use serde_json::json;
     let mut control = ClaudeControl::default();
     let init = control.initialize("runtime instructions");
@@ -636,8 +636,13 @@ fn initialize_recovers_pending_requests_once_and_preserves_reply_correlation() {
     let permission = json!({"type":"control_request","request_id":"permission-1","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"ls"},"tool_use_id":"tool-1"}});
     let dialog = json!({"type":"control_request","request_id":"dialog-1","request":{"subtype":"request_user_dialog","dialog_kind":"resume_return","payload":{"sessionAgeMinutes":20,"estimatedTokens":2000}}});
     let output = control.receive(&json!({"type":"control_response","response":{"subtype":"success","request_id":init["request_id"],"response":{"pending_permission_requests":[permission.clone()],"pending_user_dialog_requests":[dialog.clone()]}}})).unwrap().unwrap();
-    assert_eq!(output.events.len(), 2);
+    assert!(output.events.is_empty());
     assert_eq!(output.replies[0].operation, "initialize");
+    assert_eq!(
+        control.receive(&permission).unwrap().unwrap().events.len(),
+        1
+    );
+    assert_eq!(control.receive(&dialog).unwrap().unwrap().events.len(), 1);
     assert!(
         control
             .receive(&permission)

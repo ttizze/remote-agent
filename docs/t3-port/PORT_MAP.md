@@ -21,7 +21,7 @@
 | 境界 | この実装の置換 | 保持する意味／検証 |
 |---|---|---|
 | HTTP / WebSocket | iroh、既存の Postcard framing、QR と端末鍵 | RPC の引数・結果、snapshot/replay/synchronized、afterSequence、順序・fallback 条件。QUIC の handshake/stream decode 保護は通信 owner に置く。 |
-| Claude Agent SDK | pnpm-lock の `@anthropic-ai/claude-agent-sdk@0.3.276` の CLI 制御を Rust へ翻訳 | control_request/control_response、初期化、canUseTool、interrupt、model/permission 変更、resume/fork、stream の順序。その上で ClaudeAdapterV2 を翻訳する。SDK 不在を独自 gate/buffer の理由にしない。 |
+| Claude Agent SDK | `@anthropic-ai/claude-agent-sdk@0.3.276` を Node から直接使用 | 公開 query API、canUseTool、interrupt、permission 変更、resume/fork。SDK 内部の制御と履歴変換は再実装しない。Rust は共通イベントへ翻訳する。 |
 | browser/ReactNative の描画 | GPUI / SwiftUI / Compose | client-runtime の結果を表示する。UI の条件・ラベル・操作は元コンポーネントに合わせ、Web 専用機能を追加しない。 |
 | T3 Connect / 外部サービス | 対象外 | T3 Connect の HTTP 認証/relay は作らない。iroh の既存接続機能を保持する。 |
 | V1 migration | 対象外 | ユーザー指示により互換性・旧形式移行は不要。 |
@@ -1137,7 +1137,7 @@ R3 O6/O8/O9/O13 の再発検証を追加した。control RPC の失敗は run/at
 | `ProviderFailure.ts` の上限 | `large_text_is_split_across_facts_without_truncation`、`failure::tests`。 |
 | `CodexAdapterV2.test.ts:3805, 4004, 2242, 6670, 5719, 2837, 3348–3687, 6455, 1321, 806–936` | `commands_running_at_turn_end_report_later_and_stop_without_a_turn_interrupt`、`a_retained_command_keeps_its_row_and_wakes_the_thread_when_it_finishes`、`asynchronous_codex_questions_become_message_requests_without_prose`、`codex_item_and_subagent_states_use_the_reference_mapping`、`collaboration_calls_do_not_reparent_existing_children`、`codex_failures_and_retries_keep_their_reference_classification_and_lifecycle`、`final_answers_drop_repeats_and_late_empty_completions`、`rerouted_child_models_update_the_child`、`skills::tests`、`codex_tools::tests`、`codex_start_and_steer_send_prepared_images_after_the_text`。 |
 | `ClaudeAdapterV2.test.ts:3326, 3130, 3204, 4328, 2376, 2441, 2691`、`ClaudeSkillDispatch.test.ts`、`claudeModelOptions.test.ts`、`model.test.ts:227` | `claude_rosters_replace_background_work_and_foreground_tasks_stay_foreground`、`claude_server_tools_and_typed_results_are_tool_activity`、`claude_bash_output_joins_stdout_and_stderr`、`claude_api_retries_update_one_item_until_recovery_or_failure`、`claude_success_results_marked_as_errors_add_no_answer_or_failure`、`claude_refusal_fallbacks_and_mcp_names_use_the_reference_fields`、`claude_rate_limits_announce_rejected_windows_unless_overage_is_allowed`、`claude_prompts_run_known_skills_and_request_ultrathink_effort`、`claude_models::tests`、`background_rosters_replace_work_and_usage_limits_render_their_wait`。 |
-| SDK `forkSession` | `claude_fork::tests`。境界までの main chain、progress を飛ばした親子関係、新 session ID への付け替え、fork title、境界が見つからない場合のエラー、project key。 |
+| SDK `forkSession` | `claude/sdk/bridge.test.mjs` が実際の固定版 SDK で境界・UUID/親子関係・予約した会話 ID・不存在の境界を検証。`agent-runtime` の replay と予約前保存防止試験を維持。project key は `claude_fork::tests`。 |
 | wire の encoding | `wire_encodings_round_trip_state_facts_commands_and_effects`、`wire_encodings_round_trip_imports_titles_rollbacks_and_workspaces`（JSON と Postcard）。 |
 
 graph replay（fork / rollback / merge back / delegated_task_status）も、単一 session の transcript と同じく外部 frame の完全一致で比較する（下の「provider session の T3 化」）。

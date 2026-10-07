@@ -63,19 +63,9 @@ type Sessions = Arc<Mutex<BTreeMap<String, String>>>;
 
 /// The recorded launch options a new Claude process must match.
 fn check_open(expected: &Value, launch: &ClaudeLaunch, sessions: &Sessions) -> Result<(), String> {
-    let args = launch.args();
-    let value = |name: &str| {
-        args.iter()
-            .find_map(|arg| arg.strip_prefix(&format!("--{name}=")).map(str::to_owned))
-            .or_else(|| {
-                args.iter()
-                    .position(|arg| arg == &format!("--{name}"))
-                    .map(|index| args[index + 1].clone())
-            })
-    };
+    let actual = launch.sdk_options();
     let options = &expected["options"];
-    let settings =
-        value("settings").map(|settings| serde_json::from_str::<Value>(&settings).unwrap());
+    let settings = actual.get("settings").cloned();
     let resume = options["resume"].as_str().map(|recorded| {
         sessions
             .lock()
@@ -85,22 +75,19 @@ fn check_open(expected: &Value, launch: &ClaudeLaunch, sessions: &Sessions) -> R
             .unwrap_or_else(|| recorded.to_owned())
     });
     let mut mismatches = vec![];
-    if value("model").as_deref() != options["model"].as_str() {
-        mismatches.push(format!("model {:?}", value("model")));
+    if actual["model"].as_str() != options["model"].as_str() {
+        mismatches.push(format!("model {:?}", actual["model"]));
     }
     if settings != Some(options["settings"].clone()) {
         mismatches.push(format!("settings {settings:?}"));
     }
-    if value("resume") != resume {
-        mismatches.push(format!("resume {:?}", value("resume")));
+    if actual["resume"].as_str() != resume.as_deref() {
+        mismatches.push(format!("resume {:?}", actual["resume"]));
     }
     if options["resume"].is_string()
-        && value("resume-session-at").as_deref() != options["resumeSessionAt"].as_str()
+        && actual["resumeSessionAt"].as_str() != options["resumeSessionAt"].as_str()
     {
-        mismatches.push(format!(
-            "resume-session-at {:?}",
-            value("resume-session-at")
-        ));
+        mismatches.push(format!("resume-session-at {:?}", actual["resumeSessionAt"]));
     }
     if mismatches.is_empty() {
         Ok(())

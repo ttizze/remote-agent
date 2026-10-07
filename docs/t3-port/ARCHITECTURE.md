@@ -66,7 +66,7 @@ adapter は通信の翻訳だけをする。ID の採番とエンティティの
 - 入力: `ProviderCommand`（開始、steer、停止、要求への応答、rollback、fork、compact）。モデルと mode は開始の入力にする。
 - 出力: `ProviderEvent`（ターン開始・終了、項目の開始・差分・完了、承認要求、質問、計画、トークン使用量、subagent、エラー）。
 - adapter が持つ状態は、通信の対応付け（JSON-RPC の id、ブロック番号、native の turn id）だけにする。
-- Claude は、T3 が使っている `@anthropic-ai/claude-agent-sdk` の版を取得し、CLI との制御手順を移植した小さなモジュールの上に作る。
+- Claude は、T3 と同じ `@anthropic-ai/claude-agent-sdk@0.3.276` を Node の子プロセスから直接呼ぶ。Rust は会話の状態・共通イベントへの翻訳・保存を担当する。SDK 内部の CLI 制御・履歴変換は再実装しない。
 
 ## 同期
 
@@ -130,7 +130,7 @@ T3 と同じ契約にする。snapshot、`afterSequence` からの再送、synch
 - 2026-10-06: Claude の prompt echo 能力は native session ID ではなくプロセスごとの観測である。Host は新しいプロセスを開いたときに、instance と対象 attempt を明示した `RuntimeOpened` を actor に渡す。再開時は Unknown に戻し、同じ session の以前の echo 能力で `/compact` 前の wake を別 run に割り当てない。古い attempt の起動結果は無視する。
 - 2026-10-06: 委任は子 actor の作成・元発言の開始をひとつの command とし、その発言 ID を親子の固定 anchor にする。子が元 run を確定したときだけ、親への結果と context transfer を送る。後の follow-up は元結果を上書きしない。task_status は元 task と子の確定 runs/items/messages、親の transfers から純粋に導出し、稼働・queue・最新 terminal result を別々に返す。app-owned の boolean は保存せず anchor の有無から導出する。
 - 2026-10-06: interrupt の RPC 失敗だけでは run・子・background roster を終端化しない。停止要求は記録するが、子の terminal は子 actor の確認に従う。root の停止確認だけで子のカードを閉じず、子が生きている間は rollback を拒否する。プロセス終了は明示的な SessionClosed で確定し、古い root の停止後も該当する子の終了報告は受け付ける。再開前に止めた history injection は、unsupported fallback でも prompt を送らない。
-- 2026-10-06: Claude CLI の tools / permission callback / thinking summaries / settings / MCP config / resume 境界は SDK 0.3.276 の制御手順に合わせる。追加 system prompt は initialize に渡す。プロセスの環境は明示的な map とし、SDK と同じ識別値・NODE_OPTIONS と DEBUG の処理を純粋に行う。再接続時は native task/tool/親経路の対応だけを actor の確定値から復元し、翻訳器の旧プロセス状態を引き継がない。
+- 2026-10-08: Claude の tools / permission callback / thinking summaries / settings / MCP config / resume 境界は SDK の公開 API に渡す。Host は選択アカウントの環境を Node に渡し、Node 起動前の NODE_OPTIONS は除く。CLI の環境と初期化・未回答要求の再配送は SDK が行う。再接続時は native task/tool/親経路の対応だけを actor の確定値から復元する。
 - 2026-10-06: provider handoff は model 選択時ではなく dispatch 時に固定する。queued run 自身の selection と、対象 native session が最後に受け取った completed/failed/interrupted run を基準に差分を選ぶ。queued/cancelled/rolled-back run は文脈に含めない。native session を失った場合は full history に戻し、他 instance の配送結果で履歴を消費しない。full と delta の戦略は TransferKind で区別する。
 - 2026-10-06: Codex wire は approval/sandbox override、MCP の instructions/additionalContext/config、managed token session の serviceTier 抑止を明示的な入力で受ける。thread/start・resume・fork・rollback の再開は同じ config 構築を使い、turn/start は各 run の selection/runtime を使う。Host の session 管理は native の能力・認証を解決する。
 - 2026-10-06: 再起動で失われた provider background work は run の事実に記録する。通知は同じ instance の後続ターンに付け、completed attempt で配送を確認する。compaction、別 provider、rolled-back run は配送確認に使わない。ラベル 160 UTF-16 units・通知 10 件は固定版の上限を保持する。旧形式の ID 欠落への fallback は作らない。
@@ -146,7 +146,7 @@ T3 と同じ契約にする。snapshot、`afterSequence` からの再送、synch
 - 2026-10-06: fact の大きさは作成時に抑える。長いテキストは 1 MiB ごとの追記に分け、内容は切り詰めない。tool の JSON は保存では丸ごと残し、配信で T3 WireProjection と同じく縮める（下の WireProjection の項）。failure の文言と code は T3 ProviderFailure.ts と同じく認証情報と制御文字を消してから UTF-16 の上限（4096 / 128）にする。
 - 2026-10-06: Codex の turn 終了時に実行中の command は background work として残し、遅れた完了で行を更新して通知付きの wake を作る。Stop は終わった turn を interrupt せず terminal を止め、一覧で終了を確認する。Claude の background roster は置き換えとして扱い、roster から消えた作業の後着の報告も名前を保って通知する。usage limit の通知は待ち時間を入力の時刻から作るため、domain が文面を作る。
 - 2026-10-06: replay harness は、翻訳層が送る frame がないときだけ記録から利用者の操作を作り、生成した frame を T3 の replay.ts と同じ正規化で次の `expect_outbound` と比較する。期待されない frame が残れば失敗にする。Claude は SDK の記録語彙（prompt.offer / query.interrupt / permission.response）に変換して比較し、query.open では thread が持つ session と境界での resume を確認する。fork / rollback / merge / 委任の graph replay も同じ harness で厳密に比較する（2026-10-06 の Codex 共有 app-server の項）。
-- 2026-10-06: Claude の forkSession は SDK 0.3.276 の transcript 変換を純粋関数として移植した。project directory の解決・読み書きと mode 0600 は Host が行う。fork 後のタイトルの推定は記録の customTitle / aiTitle と最初の prompt を使い、SDK の貼り付け展開は持ち込まない（Claude の session 一覧の表示にだけ使われる）。
+- 2026-10-08: 利用者の「Claude との会話部分だけ Node で SDK と会話する」方針を採用。SDK の forkSession にメモリの SessionStore を渡して履歴を作る。SDK が生成した履歴の sessionId を effect から導出した会話 ID に置き換える。Rust はその ID を予約してから mode 0600 で保存する。SDK の内部履歴変換の Rust 実装は削除した。Node/CLI のプロセスツリーは既存の Host supervisor が所有する。
 - 2026-10-06: 段階 3 の Host は2つの前提を守る。attempt と effect の ID の元になる envelope key を thread をまたいで一意にする（`{thread}#{input_seq}`）。継続の effect は実行時に現在の設定で `enabled` を置き換える。
 - 2026-10-06: Host ランタイムは `crates/agent-runtime` に置く。Host の I/O（プロセス起動、Git、worktree、添付）は trait で注入し、`cargo test -p agent-runtime` を Host の重い依存なしで回せるようにする。
 - 2026-10-06: project は fact log の外にあるので、再開した shell 購読は最初に生きている project の完全な一覧（`ShellUpdate::Projects`）を送る。クライアントはそこにない project を消す。切断中の改名・追加・削除はこれで届く。

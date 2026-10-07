@@ -332,35 +332,83 @@ impl SessionHost for FakeHost {
     }
     /// A recorded transcript, or the one the CLI processes of the thread
     /// would have written.
-    fn read_claude_session(
+    fn prepare_claude_fork(
         &self,
         target: LaunchTarget,
         session: String,
+        fork: String,
+        through: Option<String>,
     ) -> BoxFuture<'_, io::Result<String>> {
         Box::pin(async move {
-            if let Some(transcript) = self.transcripts.lock().unwrap().get(&session) {
-                return Ok(transcript.clone());
-            }
-            let messages: Vec<Value> = self
-                .processes
-                .lock()
+            let source = (|| -> io::Result<String> {
+                if let Some(transcript) = self.transcripts.lock().unwrap().get(&session) {
+                    return Ok(transcript.clone());
+                }
+                let messages: Vec<Value> = self
+                    .processes
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|process| process.request.target.key == target.key)
+                    .flat_map(|process| process.messages.lock().unwrap().clone())
+                    .collect();
+                if messages.is_empty() {
+                    return Err(io::Error::new(io::ErrorKind::NotFound, session.clone()));
+                }
+                let mut parent = Value::Null;
+                let mut transcript = String::new();
+                for message in messages {
+                    let uuid = message["uuid"].clone();
+                    transcript.push_str(&json!({"type":message["type"],"uuid":uuid,"parentUuid":parent,"sessionId":session,"message":message["message"],"timestamp":"2026-10-06T00:00:00Z"}).to_string());
+                    transcript.push('\n');
+                    parent = uuid;
+                }
+                Ok(transcript)
+            })()?;
+            use tokio::io::AsyncWriteExt;
+            let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
                 .unwrap()
-                .iter()
-                .filter(|process| process.request.target.key == target.key)
-                .flat_map(|process| process.messages.lock().unwrap().clone())
-                .collect();
-            if messages.is_empty() {
-                return Err(io::Error::new(io::ErrorKind::NotFound, session));
+                .join("host-daemon/src/claude/sdk/sdk.mjs");
+            let mut child = tokio::process::Command::new("node")
+                .args([
+                    "--input-type=module",
+                    "--eval",
+                    include_str!("../../../../host-daemon/src/claude/sdk/bridge.mjs"),
+                ])
+                .arg(root)
+                .arg("unused-claude")
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .kill_on_drop(true)
+                .spawn()?;
+            let frame = json!({"type":"control_request", "request_id":"fork", "request":{"subtype":"fork_session", "transcript":source, "session":session, "target":fork, "through":through}});
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(format!("{frame}\n").as_bytes())
+                .await?;
+            let output = child.wait_with_output().await?;
+            let frame: Value = serde_json::from_slice(&output.stdout).map_err(|error| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("{error}: {}", String::from_utf8_lossy(&output.stderr)),
+                )
+            })?;
+            if frame["response"]["subtype"] == "error" {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    frame["response"]["error"].as_str().unwrap(),
+                ));
             }
-            let mut parent = Value::Null;
-            let mut transcript = String::new();
-            for message in messages {
-                let uuid = message["uuid"].clone();
-                transcript.push_str(&json!({"type":message["type"],"uuid":uuid,"parentUuid":parent,"sessionId":session,"message":message["message"],"timestamp":"2026-10-06T00:00:00Z"}).to_string());
-                transcript.push('\n');
-                parent = uuid;
-            }
-            Ok(transcript)
+            frame["response"]["response"]["transcript"]
+                .as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidData, "SDK fork response missing")
+                })
         })
     }
     fn write_claude_session(

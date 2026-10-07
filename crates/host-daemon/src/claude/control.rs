@@ -1,7 +1,6 @@
 //! Claude CLI launches: the process environment and short control queries.
 use agent_domain::{InteractionMode, RuntimeMode};
-use agent_providers::{ClaudeLaunch, claude_environment, claude_runtime_query_policy};
-use agent_transport::peer::{JsonlReader, JsonlWriter};
+use agent_providers::{ClaudeLaunch, claude_runtime_query_policy};
 use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
@@ -39,7 +38,8 @@ impl ClaudeProgram {
             credentials_home.to_string_lossy().into_owned(),
         );
         source.insert("CLAUDE_CODE_SDK_READS_SESSION_STATE".into(), "1".into());
-        claude_environment(&source)
+        source.remove("NODE_OPTIONS");
+        source
     }
 
     pub(crate) fn command(
@@ -66,7 +66,7 @@ impl ClaudeProgram {
         &self,
         credentials_home: &Path,
         cwd: &Path,
-        request: Option<(&str, Value)>,
+        request: Option<Value>,
     ) -> Result<Value, String> {
         let launch = ClaudeLaunch {
             model: "default".into(),
@@ -88,54 +88,12 @@ impl ClaudeProgram {
             settings: None,
             extra_args: BTreeMap::new(),
         };
-        let mut child = self
-            .command(&launch.args(), credentials_home, cwd)
-            .map_err(|error| error.to_string())?
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|error| error.to_string())?;
-        let mut writer = JsonlWriter::new(child.stdin.take().ok_or("Claude stdin missing")?);
-        let mut reader = JsonlReader::new(child.stdout.take().ok_or("Claude stdout missing")?);
-        let error = |error: &dyn std::fmt::Display| error.to_string();
-        let result = tokio::time::timeout(std::time::Duration::from_secs(30), async {
-            let initialize = json!({"type":"control_request","request_id":"initialize","request":{"subtype":"initialize"}});
-            writer
-                .write_line(&initialize.to_string())
-                .await
-                .map_err(|e| error(&e))?;
-            let mut expected = "initialize";
-            while let Some(line) = reader.read_line().await.map_err(|e| error(&e))? {
-                let frame: Value = serde_json::from_str(&line).map_err(|e| error(&e))?;
-                if frame["type"] != "control_response"
-                    || frame["response"]["request_id"] != expected
-                {
-                    continue;
-                }
-                if frame["response"]["subtype"] != "success" {
-                    return Err("Claude control query rejected".to_owned());
-                }
-                if expected == "initialize"
-                    && let Some((id, body)) = &request
-                {
-                    let next = json!({"type":"control_request","request_id":id,"request":body});
-                    writer
-                        .write_line(&next.to_string())
-                        .await
-                        .map_err(|e| error(&e))?;
-                    expected = id;
-                    continue;
-                }
-                return Ok(frame["response"]["response"].clone());
-            }
-            Err("Claude closed before returning metadata".to_owned())
-        })
-        .await
-        .map_err(|_| "Claude control query timed out".to_owned());
-        drop(writer);
-        drop(reader);
-        tokio::spawn(async move {
-            let _ = child.wait().await;
-        });
-        result?
+        let mut requests = vec![json!({"subtype":"initialize", "options":launch.sdk_options()})];
+        if let Some(request) = request {
+            requests.push(request);
+        }
+        self.sdk_requests(credentials_home, cwd, requests)
+            .await
+            .map_err(|error| error.to_string())
     }
 }

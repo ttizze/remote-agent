@@ -2802,27 +2802,14 @@ async fn a_claude_launch_pre_approves_the_app_tools_and_appends_the_instructions
     };
     let id = thread("thread-claude-launch-settings");
     let process = rig.claude_turn(&id, RuntimeMode::ApprovalRequired).await;
-    let args = process.request.claude.clone().unwrap().args();
-    let value = |name: &str| {
-        args.iter()
-            .position(|arg| arg == &format!("--{name}"))
-            .map(|index| args[index + 1].clone())
-    };
+    let options = process.request.claude.clone().unwrap().sdk_options();
+    assert_eq!(options["allowedTools"], json!(["mcp__orchestration__*"]));
     assert_eq!(
-        value("allowedTools").as_deref(),
-        Some("mcp__orchestration__*")
+        options["additionalDirectories"],
+        json!(["/workspace", "/attachments"])
     );
     assert_eq!(
-        args.iter()
-            .enumerate()
-            .filter(|(_, arg)| *arg == "--add-dir")
-            .map(|(index, _)| args[index + 1].as_str())
-            .collect::<Vec<_>>(),
-        ["/workspace", "/attachments"]
-    );
-    let config: Value = serde_json::from_str(&value("mcp-config").unwrap()).unwrap();
-    assert_eq!(
-        config["mcpServers"]["orchestration"]["timeout"],
+        options["mcpServers"]["orchestration"]["timeout"],
         65 * 60 * 1000
     );
     let initialize = process
@@ -2855,15 +2842,15 @@ async fn a_read_only_claude_sandbox_pre_approves_only_read_only_app_tools() {
     };
     let id = thread("thread-claude-read-only-tools");
     let process = rig.claude_turn(&id, RuntimeMode::ApprovalRequired).await;
-    let args = process.request.claude.clone().unwrap().args();
-    let allowed = args
-        .iter()
-        .position(|arg| arg == "--allowedTools")
-        .map(|index| args[index + 1].clone());
+    let options = process.request.claude.clone().unwrap().sdk_options();
     assert_eq!(
-        allowed.as_deref(),
-        Some(
-            "Read,Glob,Grep,mcp__orchestration__orchestrator_capabilities,mcp__orchestration__thread_list"
-        )
+        options["allowedTools"],
+        json!([
+            "Read",
+            "Glob",
+            "Grep",
+            "mcp__orchestration__orchestrator_capabilities",
+            "mcp__orchestration__thread_list"
+        ])
     );
 }

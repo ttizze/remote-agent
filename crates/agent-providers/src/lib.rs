@@ -77,8 +77,6 @@ pub enum ProtocolError {
         message: String,
         turn_completed: bool,
     },
-    #[error("native conversation boundary is missing: {0}")]
-    MissingBoundary(String),
 }
 fn string(value: &Value, key: &str) -> String {
     value

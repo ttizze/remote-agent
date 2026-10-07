@@ -14,7 +14,7 @@ mod tests;
 pub(crate) use operations::{HostIo, ProjectCatalog, TextGenerator};
 pub(crate) use rpc::stream;
 pub(crate) use sessions::{
-    BrowserConfig, ProviderHost, ProviderPrograms, Spawner, SupervisedSpawner,
+    BrowserConfig, ProcessSpec, ProviderHost, ProviderPrograms, Spawner, SupervisedSpawner,
 };
 
 use crate::{

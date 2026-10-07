@@ -178,6 +178,14 @@ impl ClaudeProtocol {
         if let Some(control) = self.control.receive(frame)? {
             return Ok(control);
         }
+        if frame["type"] == "sdk_error" {
+            return Err(ProtocolError::Remote {
+                request: None,
+                operation: "stream".into(),
+                message: string(frame, "message"),
+                turn_completed: false,
+            });
+        }
         let native_route = optional(frame, "parent_tool_use_id").unwrap_or_default();
         let mut route = self
             .aliases

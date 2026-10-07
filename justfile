@@ -10,6 +10,7 @@ unit-tests *targets:
     #!/usr/bin/env bash
     set -uo pipefail
     failed=0
+    npm --prefix crates/host-daemon/src/claude/sdk test || failed=1
     cargo build --locked -p bex-process --bin bex-provider-supervisor || failed=1
     cargo nextest run --locked --no-fail-fast --workspace --features agent-core/bindings "$@" &
     rust_pid=$!

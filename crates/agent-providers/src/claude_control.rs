@@ -1,10 +1,9 @@
-//! CLI control protocol from claude-agent-sdk 0.3.276.
+//! Host–SDK worker requests and application permission presentations.
 use crate::*;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
 pub const CLAUDE_SDK_VERSION: &str = "0.3.276";
-pub const CLAUDE_SDK_INTEGRITY: &str = "sha512-Dic43v4uuGLhibPAArWy3RSfq3zHdn+4Oh2AI2/18a5tlbNKkvChEpazyp8c+grUJvzxkzt0jETCa1wrADbkyw==";
 #[derive(Debug, Default)]
 pub struct ClaudeControl {
     next_request: u64,
@@ -21,8 +20,7 @@ impl ClaudeControl {
         json!({"type":"control_request","request_id":id,"request":request})
     }
     pub fn initialize(&mut self, append_system_prompt: &str) -> Value {
-        let mut payload =
-            json!({"hooks":{},"sdkMcpServers":[],"supportedDialogKinds":["resume_return"]});
+        let mut payload = json!({});
         if !append_system_prompt.is_empty() {
             payload["appendSystemPrompt"] = json!(append_system_prompt);
         }
@@ -44,7 +42,7 @@ impl ClaudeControl {
                         turn_completed: false,
                     });
                 }
-                let mut output = Translation {
+                let output = Translation {
                     replies: vec![NativeReply {
                         request: id,
                         operation: operation.clone(),
@@ -52,19 +50,6 @@ impl ClaudeControl {
                     }],
                     ..Translation::default()
                 };
-                if operation == "initialize" {
-                    for key in [
-                        "pending_permission_requests",
-                        "pending_user_dialog_requests",
-                    ] {
-                        for request in response["response"][key].as_array().into_iter().flatten() {
-                            if let Some(recovered) = self.receive(request)? {
-                                output.events.extend(recovered.events);
-                                output.outbound.extend(recovered.outbound);
-                            }
-                        }
-                    }
-                }
                 Ok(Some(output))
             }
             "control_cancel_request" => {
@@ -383,167 +368,79 @@ pub struct ClaudeLaunch {
     pub extra_args: BTreeMap<String, Option<String>>,
 }
 impl ClaudeLaunch {
-    pub fn args(&self) -> Vec<String> {
-        let mut args = [
-            "--output-format",
-            "stream-json",
-            "--verbose",
-            "--input-format",
-            "stream-json",
-            "--include-partial-messages",
-        ]
-        .map(str::to_owned)
-        .to_vec();
-        if self.policy.install_permission_callback {
-            args.extend(["--permission-prompt-tool".into(), "stdio".into()]);
-        }
+    /// Serializable SDK options; callbacks and process I/O belong to the Node worker.
+    pub fn sdk_options(&self) -> Value {
+        let mut extra = self.extra_args.clone();
+        let mode = extra
+            .remove("permission-mode")
+            .flatten()
+            .unwrap_or_else(|| {
+                if extra
+                    .remove("dangerously-skip-permissions")
+                    .is_some_and(|value| value.as_deref().is_none_or(|value| value == "true"))
+                {
+                    "bypassPermissions".into()
+                } else {
+                    self.policy.permission_mode.clone()
+                }
+            });
+        extra.remove("dangerously-skip-permissions");
         let summaries = self
             .settings
             .as_ref()
             .is_none_or(|settings| settings["alwaysThinkingEnabled"] != false)
-            && self
-                .extra_args
-                .get("thinking-display")
-                .and_then(Option::as_deref)
-                != Some("omitted");
-        if summaries {
-            args.extend([
-                "--thinking".into(),
-                "adaptive".into(),
-                "--thinking-display".into(),
-                "summarized".into(),
-            ]);
+            && extra.get("thinking-display").and_then(Option::as_deref) != Some("omitted");
+        let mut options = json!({
+            "model": self.model,
+            "permissionMode": mode,
+            "tools": self.policy.tools.as_ref().map_or_else(|| json!({"type":"preset","preset":"claude_code"}), |tools| json!(tools)),
+            "includePartialMessages": true,
+            "installPermissionCallback": self.policy.install_permission_callback,
+            "additionalDirectories": self.additional_directories,
+        });
+        if self.policy.allow_dangerously_skip_permissions {
+            options["allowDangerouslySkipPermissions"] = json!(true);
         }
-        push_cli_arg(&mut args, "model", &self.model);
-        let permission_mode = self
-            .extra_args
-            .get("permission-mode")
-            .and_then(Option::as_deref)
-            .unwrap_or_else(|| {
-                if self
-                    .extra_args
-                    .get("dangerously-skip-permissions")
-                    .is_some_and(|value| value.as_deref().is_none_or(|value| value == "true"))
-                {
-                    "bypassPermissions"
-                } else {
-                    &self.policy.permission_mode
-                }
-            });
-        push_cli_arg(&mut args, "permission-mode", permission_mode);
-        push_cli_arg(
-            &mut args,
-            "tools",
-            &self
-                .policy
-                .tools
-                .as_ref()
-                .map_or_else(|| "default".into(), |tools| tools.join(",")),
-        );
-        if let Some(tools) = &self.policy.allowed_tools
-            && !tools.is_empty()
-        {
-            push_cli_arg(&mut args, "allowedTools", &tools.join(","));
+        if let Some(tools) = &self.policy.allowed_tools {
+            options["allowedTools"] = json!(tools);
         }
         if !self.disallowed_tools.is_empty() {
-            push_cli_arg(
-                &mut args,
-                "disallowedTools",
-                &self.disallowed_tools.join(","),
-            );
+            options["disallowedTools"] = json!(self.disallowed_tools);
         }
-        if !self.mcp_servers.is_empty() {
-            push_cli_arg(
-                &mut args,
-                "mcp-config",
-                &json!({"mcpServers":self.mcp_servers}).to_string(),
-            );
-        }
-        if self.policy.allow_dangerously_skip_permissions {
-            args.push("--allow-dangerously-skip-permissions".into());
-        }
-        if let Some(session) = &self.native_session {
-            args.push(format!("--resume={session}"));
-        } else if let Some(session) = &self.new_session {
-            args.push(format!("--session-id={session}"));
+        if let Some(native) = &self.native_session {
+            options["resume"] = json!(native);
+        } else if let Some(native) = &self.new_session {
+            options["sessionId"] = json!(native);
         }
         if let Some(head) = &self.resume_at {
-            args.push(format!("--resume-session-at={head}"));
+            options["resumeSessionAt"] = json!(head);
         }
         if self.fork {
-            args.push("--fork-session".into());
-        }
-        for directory in &self.additional_directories {
-            push_cli_arg(&mut args, "add-dir", directory);
+            options["forkSession"] = json!(true);
         }
         if let Some(effort) = &self.effort {
-            push_cli_arg(&mut args, "effort", effort);
+            options["effort"] = json!(effort);
+        }
+        if !self.mcp_servers.is_empty() {
+            options["mcpServers"] = json!(self.mcp_servers);
         }
         let mut settings = self.settings.clone();
-        if summaries && !settings.as_ref().is_some_and(Value::is_string) {
-            let mut value = settings.unwrap_or_else(|| json!({}));
-            value["showThinkingSummaries"] = json!(true);
-            settings = Some(value);
+        if summaries {
+            options["thinking"] = json!({"type":"adaptive","display":"summarized"});
+            if !settings.as_ref().is_some_and(Value::is_string) {
+                let mut value = settings.unwrap_or_else(|| json!({}));
+                value["showThinkingSummaries"] = json!(true);
+                settings = Some(value);
+            }
         }
         if let Some(settings) = settings {
-            push_cli_arg(
-                &mut args,
-                "settings",
-                settings
-                    .as_str()
-                    .map(str::to_owned)
-                    .unwrap_or_else(|| settings.to_string())
-                    .as_str(),
-            );
+            options["settings"] = settings;
         }
-        for (name, value) in &self.extra_args {
-            if matches!(
-                name.as_str(),
-                "permission-mode" | "dangerously-skip-permissions"
-            ) {
-                continue;
-            }
-            if let Some(value) = value {
-                push_cli_arg(&mut args, name, value);
-            } else {
-                args.push(format!("--{name}"));
-            }
+        if !extra.is_empty() {
+            options["extraArgs"] = json!(extra);
         }
-        args
+        options
     }
-}
-fn push_cli_arg(args: &mut Vec<String>, name: &str, value: &str) {
-    if value.len() > 1 && value.starts_with('-') {
-        args.push(format!("--{name}={value}"));
-    } else {
-        args.extend([format!("--{name}"), value.into()]);
-    }
-}
-pub fn claude_environment(source: &BTreeMap<String, String>) -> BTreeMap<String, String> {
-    let mut environment = source.clone();
-    for (key, value) in [
-        ("CLAUDE_CODE_ENTRYPOINT", "sdk-ts"),
-        ("CLAUDE_AGENT_SDK_VERSION", CLAUDE_SDK_VERSION),
-    ] {
-        if environment.get(key).is_none_or(String::is_empty) {
-            environment.insert(key.into(), value.into());
-        }
-    }
-    environment.remove("NODE_OPTIONS");
-    if environment
-        .get("DEBUG_CLAUDE_AGENT_SDK")
-        .is_some_and(|value| {
-            matches!(
-                value.trim().to_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
-    {
-        environment.insert("DEBUG".into(), "1".into());
-    } else {
-        environment.remove("DEBUG");
-    }
-    environment
 }
 
 #[cfg(test)]
@@ -572,43 +469,37 @@ mod tests {
             extra_args: BTreeMap::new(),
         }
     }
-    fn arg<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
-        args.iter()
-            .position(|value| value == name)
-            .and_then(|index| args.get(index + 1))
-            .map(String::as_str)
-    }
     #[test]
     fn sdk_launch_keeps_thinking_settings_and_native_identity() {
         for resume in [false, true] {
-            let options = launch(resume);
-            let args = options.args();
-            assert_eq!(arg(&args, "--thinking"), Some("adaptive"));
-            assert_eq!(arg(&args, "--thinking-display"), Some("summarized"));
-            assert_eq!(arg(&args, "--tools"), Some("default"));
+            let selection = launch(resume);
+            let options = selection.sdk_options();
             assert_eq!(
-                serde_json::from_str::<Value>(arg(&args, "--settings").unwrap()).unwrap(),
-                json!({"showThinkingSummaries":true})
+                options["thinking"],
+                json!({"type":"adaptive","display":"summarized"})
             );
-            assert!(args.contains(&format!(
-                "--{}=thinking-thread",
-                if resume { "resume" } else { "session-id" }
-            )));
-            let mut omitted = options.clone();
+            assert_eq!(
+                options["tools"],
+                json!({"type":"preset","preset":"claude_code"})
+            );
+            assert_eq!(options["settings"], json!({"showThinkingSummaries":true}));
+            assert_eq!(
+                options[if resume { "resume" } else { "sessionId" }],
+                "thinking-thread"
+            );
+            let mut omitted = selection.clone();
             omitted
                 .extra_args
                 .insert("thinking-display".into(), Some("omitted".into()));
-            assert_eq!(arg(&omitted.args(), "--thinking-display"), Some("omitted"));
-            assert_eq!(arg(&omitted.args(), "--thinking"), None);
-            assert_eq!(arg(&omitted.args(), "--settings"), None);
-            let mut disabled = options;
+            let options = omitted.sdk_options();
+            assert_eq!(options["extraArgs"]["thinking-display"], "omitted");
+            assert!(options.get("thinking").is_none());
+            assert!(options.get("settings").is_none());
+            let mut disabled = selection;
             disabled.settings = Some(json!({"alwaysThinkingEnabled":false}));
-            assert_eq!(arg(&disabled.args(), "--thinking"), None);
-            assert_eq!(arg(&disabled.args(), "--thinking-display"), None);
-            assert_eq!(
-                arg(&disabled.args(), "--settings"),
-                Some("{\"alwaysThinkingEnabled\":false}")
-            );
+            let options = disabled.sdk_options();
+            assert!(options.get("thinking").is_none());
+            assert_eq!(options["settings"], json!({"alwaysThinkingEnabled":false}));
         }
     }
     #[test]
@@ -734,13 +625,12 @@ mod tests {
             );
             let mut options = launch(false);
             options.policy = policy;
-            let args = options.args();
+            let query = options.sdk_options();
+            assert_eq!(query["installPermissionCallback"], callback);
             assert_eq!(
-                arg(&args, "--permission-prompt-tool"),
-                callback.then_some("stdio")
-            );
-            assert_eq!(
-                args.contains(&"--allow-dangerously-skip-permissions".into()),
+                query["allowDangerouslySkipPermissions"]
+                    .as_bool()
+                    .unwrap_or(false),
                 skip
             );
         }
@@ -765,53 +655,26 @@ mod tests {
         options
             .extra_args
             .insert("fallback-model".into(), Some("-model".into()));
-        let args = options.args();
-        assert_eq!(arg(&args, "--permission-mode"), Some("plan"));
-        assert!(!args.contains(&"--dangerously-skip-permissions".into()));
-        assert!(args.contains(&"--resume-session-at=assistant-boundary".into()));
-        assert!(args.contains(&"--fork-session".into()));
-        assert!(args.contains(&"--fallback-model=-model".into()));
-        assert_eq!(arg(&args, "--effort"), Some("high"));
-        let settings: Value = serde_json::from_str(arg(&args, "--settings").unwrap()).unwrap();
+        let query = options.sdk_options();
+        assert_eq!(query["permissionMode"], "plan");
+        assert!(
+            query["extraArgs"]
+                .get("dangerously-skip-permissions")
+                .is_none()
+        );
+        assert_eq!(query["resumeSessionAt"], "assistant-boundary");
+        assert_eq!(query["forkSession"], true);
+        assert_eq!(query["extraArgs"]["fallback-model"], "-model");
+        assert_eq!(query["effort"], "high");
         assert_eq!(
-            settings,
+            query["settings"],
             json!({"autoCompactWindow":300000,"showThinkingSummaries":true})
         );
-        let mcp: Value = serde_json::from_str(arg(&args, "--mcp-config").unwrap()).unwrap();
-        assert_eq!(mcp, json!({"mcpServers":options.mcp_servers}));
+        assert_eq!(query["mcpServers"], json!(options.mcp_servers));
         let mut control = ClaudeControl::default();
         assert_eq!(
             control.initialize("runtime\norchestration")["request"]["appendSystemPrompt"],
             "runtime\norchestration"
         );
-    }
-    #[test]
-    fn sdk_environment_is_explicit_and_does_not_mutate_the_source() {
-        let source = BTreeMap::from([
-            ("NODE_OPTIONS".into(), "--trace-warnings".into()),
-            ("DEBUG".into(), "verbose".into()),
-        ]);
-        let result = claude_environment(&source);
-        assert_eq!(
-            result.get("CLAUDE_CODE_ENTRYPOINT").map(String::as_str),
-            Some("sdk-ts")
-        );
-        assert_eq!(
-            result.get("CLAUDE_AGENT_SDK_VERSION").map(String::as_str),
-            Some("0.3.276")
-        );
-        assert!(!result.contains_key("NODE_OPTIONS"));
-        assert!(!result.contains_key("DEBUG"));
-        assert!(source.contains_key("NODE_OPTIONS"));
-        let source = BTreeMap::from([
-            ("CLAUDE_CODE_ENTRYPOINT".into(), "custom".into()),
-            ("DEBUG_CLAUDE_AGENT_SDK".into(), " YES ".into()),
-        ]);
-        let result = claude_environment(&source);
-        assert_eq!(
-            result.get("CLAUDE_CODE_ENTRYPOINT").map(String::as_str),
-            Some("custom")
-        );
-        assert_eq!(result.get("DEBUG").map(String::as_str), Some("1"));
     }
 }

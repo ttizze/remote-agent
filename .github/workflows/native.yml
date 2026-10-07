@@ -79,12 +79,15 @@ jobs:
         with:
           persist-credentials: false
       - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31
-      - name: Check workflows and vendored visualization assets
+      - name: Check workflows and pinned Node assets
         run: |
           nix develop .#native --command actionlint
           nix develop .#native --command npm --prefix crates/host-daemon/src/visualize ci --ignore-scripts --no-audit
           nix develop .#native --command npm --prefix crates/host-daemon/src/visualize run vendor
-          git diff --exit-code -- crates/host-daemon/src/visualize
+          nix develop .#native --command npm --prefix crates/host-daemon/src/claude/sdk ci --ignore-scripts --omit=optional --no-audit
+          nix develop .#native --command npm --prefix crates/host-daemon/src/claude/sdk run vendor
+          nix develop .#native --command npm --prefix crates/host-daemon/src/claude/sdk test
+          git diff --exit-code -- crates/host-daemon/src/visualize crates/host-daemon/src/claude/sdk
   toolchain:
     runs-on: ubuntu-24.04
     timeout-minutes: 10

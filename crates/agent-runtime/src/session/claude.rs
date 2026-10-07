@@ -132,6 +132,7 @@ impl SessionManager {
             self.close_entry(&entry, true).await;
         }
         let resumed = launch.native_session.is_some();
+        let options = launch.sdk_options();
         let entry = self.spawn(target, Some(launch)).await?;
         let skills = settings.skills.clone();
         let prompt = settings.append_system_prompt.clone();
@@ -141,7 +142,9 @@ impl SessionManager {
                 Request::new(&target.key.thread, move |p| {
                     let claude = p.claude()?;
                     claude.set_skills(skills);
-                    Ok(frames(vec![claude.control.initialize(&prompt)]))
+                    let mut initialize = claude.control.initialize(&prompt);
+                    initialize["request"]["options"] = options;
+                    Ok(frames(vec![initialize]))
                 })
                 .owner(attempt)
                 .handshake(),
@@ -293,31 +296,24 @@ impl SessionManager {
                 self.close_fork_source(&source.key, &native_thread),
             )
             .await?;
-        let source = self
+        let session = derived_uuid("fork", effect_id);
+        let transcript = self
             .host
-            .read_claude_session(source.clone(), native_thread.clone())
+            .prepare_claude_fork(source.clone(), native_thread, session.clone(), through_head)
             .await
-            .map_err(|error| ForkError::Retry(error.to_string()))?;
-        let mut serial = 0;
-        let now = self.registry.context().clock.now();
-        let forked = claude_fork_session(
-            &source,
-            &native_thread,
-            through_head.as_deref(),
-            None,
-            || {
-                serial += 1;
-                derived_uuid("fork", &format!("{effect_id}:{serial}"))
-            },
-            now.as_str(),
-        )
-        .map_err(|error| ForkError::Rejected(error.to_string()))?;
+            .map_err(|error| {
+                if error.kind() == io::ErrorKind::InvalidData {
+                    ForkError::Rejected(error.to_string())
+                } else {
+                    ForkError::Retry(error.to_string())
+                }
+            })?;
         let reserved = self
             .input(
                 &target.key.thread,
                 agent_domain::Input::NativeForkReserved {
                     attempt: attempt.clone(),
-                    native_thread: forked.session_id.clone(),
+                    native_thread: session.clone(),
                 },
             )
             .await
@@ -326,10 +322,10 @@ impl SessionManager {
             return Ok(None);
         }
         self.host
-            .write_claude_session(target.clone(), forked.session_id.clone(), forked.transcript)
+            .write_claude_session(target.clone(), session.clone(), transcript)
             .await
             .map_err(|error| ForkError::Retry(error.to_string()))?;
-        Ok(Some(forked.session_id))
+        Ok(Some(session))
     }
 }
 
