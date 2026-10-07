@@ -1,4 +1,6 @@
-//! Stock color tokens, captured from the pinned shared theme palette.
+//! Stock color tokens, captured from the pinned shared theme palette, with the
+//! mobile palette (`mobile*`, `#rrggbbaa` where it is translucent) and the
+//! status hues (`status*`) both mobile apps read.
 use std::collections::HashMap;
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
@@ -30,6 +32,58 @@ pub fn theme(dark: bool) -> Theme {
     }
 }
 const LIGHT: &[(&str, &str)] = &[
+    ("mobileScreen", "#fcfcfc"),
+    ("mobileSheet", "#fcfcfc"),
+    ("mobileCard", "#ffffff"),
+    ("mobileCardAlt", "#fcfcfc"),
+    ("mobileRowHover", "#f4f4f5"),
+    ("mobileComposerPanel", "#fcfcfc"),
+    ("mobileComposerSurface", "#f4f4f5ef"),
+    ("mobileComposerBorder", "#e4e4e7cc"),
+    ("mobileForeground", "#27272a"),
+    ("mobileForegroundSecondary", "#6f6f79"),
+    ("mobileForegroundMuted", "#6f6f79"),
+    ("mobileForegroundTertiary", "#71717b"),
+    ("mobileBorder", "#e4e4e7"),
+    ("mobileBorderSubtle", "#e4e4e7b2"),
+    ("mobileSeparator", "#e4e4e78c"),
+    ("mobileSubtle", "#fafafa"),
+    ("mobileSubtleStrong", "#fafafa"),
+    ("mobilePrimary", "#1b4ed8"),
+    ("mobilePrimaryForeground", "#ffffff"),
+    ("mobileSecondary", "#fafafa"),
+    ("mobileSecondaryForeground", "#27272a"),
+    ("mobileWarning", "#fcf4e8"),
+    ("mobileWarningBorder", "#fe9a0051"),
+    ("mobileWarningForeground", "#bb4d00"),
+    ("mobileDanger", "#fcebec"),
+    ("mobileDangerBorder", "#fb2c3651"),
+    ("mobileDangerForeground", "#c10007"),
+    ("mobileUpdate", "#e0e6f7"),
+    ("mobileUpdateForeground", "#1b4ed8"),
+    ("mobileInput", "#ffffff"),
+    ("mobileInputBorder", "#d4d4d8"),
+    ("mobilePlaceholder", "#6f6f79"),
+    ("mobileIcon", "#27272a"),
+    ("mobileIconMuted", "#71717b"),
+    ("mobileHeader", "#f4f4f5"),
+    ("mobileHeaderForeground", "#27272a"),
+    ("mobileMarkdownCode", "#ffffff"),
+    ("mobileMarkdownBlockquoteBorder", "#e4e4e7"),
+    ("mobileMarkdownRule", "#e4e4e7"),
+    ("mobileUserBubbleForeground", "#27272a"),
+    ("mobileBackdrop", "#00000038"),
+    ("mobileDrawer", "#fafafa"),
+    ("mobileChevron", "#71717b6b"),
+    ("statusSky", "#0284c7"),
+    ("statusIndigo", "#4f46e5"),
+    ("statusEmerald", "#047857"),
+    ("statusEmeraldIcon", "#059669"),
+    ("statusRose", "#e11d48"),
+    ("statusRoseText", "#be123c"),
+    ("statusAmber", "#b45309"),
+    ("statusViolet", "#7c3aed"),
+    ("statusTeal", "#0d9488"),
     ("mobileUserBubble", "#efeff1"),
     ("mobileComposer", "#f4f4f5"),
     ("mobileGroupedCard", "#f4f4f5"),
@@ -97,6 +151,58 @@ const LIGHT: &[(&str, &str)] = &[
     ("terminalScrollbarHover", "#bdbdbd"),
 ];
 const DARK: &[(&str, &str)] = &[
+    ("mobileScreen", "#0a0a0a"),
+    ("mobileSheet", "#0a0a0a"),
+    ("mobileCard", "#111111"),
+    ("mobileCardAlt", "#111111"),
+    ("mobileRowHover", "#141414"),
+    ("mobileComposerPanel", "#0a0a0a"),
+    ("mobileComposerSurface", "#1a1b1be5"),
+    ("mobileComposerBorder", "#191919cc"),
+    ("mobileForeground", "#f5f5f5"),
+    ("mobileForegroundSecondary", "#838383"),
+    ("mobileForegroundMuted", "#838383"),
+    ("mobileForegroundTertiary", "#818181"),
+    ("mobileBorder", "#191919"),
+    ("mobileBorderSubtle", "#191919b2"),
+    ("mobileSeparator", "#1919198c"),
+    ("mobileSubtle", "#111111"),
+    ("mobileSubtleStrong", "#111111"),
+    ("mobilePrimary", "#346bf1"),
+    ("mobilePrimaryForeground", "#ffffff"),
+    ("mobileSecondary", "#111111"),
+    ("mobileSecondaryForeground", "#f5f5f5"),
+    ("mobileWarning", "#312108"),
+    ("mobileWarningBorder", "#fe9a0051"),
+    ("mobileWarningForeground", "#ffb900"),
+    ("mobileDanger", "#301214"),
+    ("mobileDangerBorder", "#fb414a51"),
+    ("mobileDangerForeground", "#ff6467"),
+    ("mobileUpdate", "#121b34"),
+    ("mobileUpdateForeground", "#51a2ff"),
+    ("mobileInput", "#111111"),
+    ("mobileInputBorder", "#1e1e1e"),
+    ("mobilePlaceholder", "#838383"),
+    ("mobileIcon", "#f5f5f5"),
+    ("mobileIconMuted", "#818181"),
+    ("mobileHeader", "#141414"),
+    ("mobileHeaderForeground", "#f1f3f7"),
+    ("mobileMarkdownCode", "#111111"),
+    ("mobileMarkdownBlockquoteBorder", "#191919"),
+    ("mobileMarkdownRule", "#191919"),
+    ("mobileUserBubbleForeground", "#f5f5f5"),
+    ("mobileBackdrop", "#0000007a"),
+    ("mobileDrawer", "#000000"),
+    ("mobileChevron", "#8181816b"),
+    ("statusSky", "#38bdf8"),
+    ("statusIndigo", "#a5b4fc"),
+    ("statusEmerald", "#6ee7b7"),
+    ("statusEmeraldIcon", "#34d399"),
+    ("statusRose", "#fb7185"),
+    ("statusRoseText", "#fda4af"),
+    ("statusAmber", "#fcd34d"),
+    ("statusViolet", "#a78bfa"),
+    ("statusTeal", "#5eead4e5"),
     ("mobileUserBubble", "#161616"),
     ("mobileComposer", "#1a1b1b"),
     ("mobileGroupedCard", "#1a1b1b"),
@@ -163,3 +269,27 @@ const DARK: &[(&str, &str)] = &[
     ("terminalScrollbar", "#222222"),
     ("terminalScrollbarHover", "#363636"),
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn both_appearances_name_the_same_tokens_in_hex() {
+        let names = |tokens: &[(&'static str, &'static str)]| {
+            let mut names: Vec<&'static str> = tokens.iter().map(|(name, _)| *name).collect();
+            names.sort_unstable();
+            names
+        };
+        assert_eq!(names(LIGHT), names(DARK));
+        for (_, value) in LIGHT.iter().chain(DARK) {
+            assert!(
+                matches!(value.len(), 7 | 9)
+                    && value.starts_with('#')
+                    && value[1..].chars().all(|c| c.is_ascii_hexdigit()),
+                "{value}"
+            );
+        }
+        assert_eq!(theme(true).colors["statusSky"], "#38bdf8");
+    }
+}
