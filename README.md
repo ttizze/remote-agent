@@ -189,7 +189,7 @@ fixtures and acceptance runners are removed.
 
 ```sh
 scripts/dev-env.sh just unit-tests
-scripts/dev-env.sh cargo nextest run -p orchestration -p provider-adapters -p agent-protocol -p agent-transport -p agent-core -p host-daemon -p bex-desktop --lib --bins --features agent-core/bindings
+scripts/dev-env.sh cargo nextest run -p agent-domain -p agent-providers -p agent-runtime -p agent-protocol -p agent-transport -p agent-core -p host-daemon -p bex-desktop --lib --bins --features agent-core/bindings
 scripts/dev-env.sh scripts/build-agent-ios.sh simulator
 nix develop .#android --command ./gradlew :apps:mobile:assembleDebug
 ```

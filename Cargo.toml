@@ -9,8 +9,6 @@ members = [
     "crates/bex-process",
     "crates/host-daemon",
     "crates/xtask",
-    "crates/orchestration",
-    "crates/provider-adapters",
     "crates/agent-domain",
     "crates/agent-providers",
     "crates/agent-runtime",

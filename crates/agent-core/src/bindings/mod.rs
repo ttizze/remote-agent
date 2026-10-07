@@ -1,6 +1,6 @@
 //! Native binding boundary. Core owns all conversation state and effects.
 mod domain;
-mod json;
+mod ids;
 mod protocol;
 mod snapshot;
 
@@ -56,15 +56,6 @@ pub fn apply_model_preferences(
 #[uniffi::export]
 pub fn generate_identity() -> Vec<u8> {
     Identity::generate().to_bytes().to_vec()
-}
-
-#[uniffi::export]
-pub fn ticket_identity(ticket: String) -> Result<String, AgentError> {
-    Ok(ticket
-        .parse::<Ticket>()
-        .map_err(error)?
-        .node_id()
-        .to_string())
 }
 
 #[uniffi::export]

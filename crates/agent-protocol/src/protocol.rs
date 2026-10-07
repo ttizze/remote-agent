@@ -83,17 +83,13 @@ macro_rules! results {
     }
 }
 results! {
-    TurnDiff(crate::orchestration::TurnDiff),
-    Dispatched(crate::orchestration::DispatchReceipt),
-    ShellStream(::orchestration::ShellStreamItem), ThreadStream(::orchestration::ThreadStreamItem),
-    Projection(::orchestration::ThreadProjection), TurnItem(Option<::orchestration::TurnItem>),
-    ThreadHistory(::orchestration::ThreadHistoryPage), Search(Vec<::orchestration::SearchMatch>), Projects(Vec<crate::models::Project>),
+    Projects(Vec<crate::models::Project>),
     ProjectFavicon(Option<crate::models::ProjectFavicon>),
     Committed(crate::conversation::Committed), Launched(crate::conversation::Launched),
     ThreadUpdate(crate::conversation::ThreadUpdate), ShellUpdate(crate::conversation::ShellUpdate),
-    ThreadSnapshot(crate::conversation::ThreadSnapshot), TurnItemDetail(Option<crate::conversation::TurnItemDetail>),
-    HistoryPage(crate::conversation::HistoryPage), SearchMatches(Vec<crate::conversation::SearchMatch>),
-    Diff(crate::conversation::TurnDiff), SessionScan(crate::conversation::SessionScan),
+    ThreadSnapshot(crate::conversation::ThreadSnapshot), TurnItem(Option<crate::conversation::TurnItemDetail>),
+    HistoryPage(crate::conversation::HistoryPage), Search(Vec<crate::conversation::SearchMatch>),
+    TurnDiff(crate::conversation::TurnDiff), SessionScan(crate::conversation::SessionScan),
     ImportCounts(crate::conversation::ImportCounts),
     Setup(Option<agent_domain::WorktreeSetupSnapshot>), SetupCancelled(crate::conversation::SetupCancelled),
     Browser(crate::browser::BrowserFrame),

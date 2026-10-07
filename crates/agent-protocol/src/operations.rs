@@ -47,9 +47,6 @@ pub struct Pair {
 pub struct ReadHostStatus {}
 rpc_method!(ReadHostStatus, HostStatus, |self| crate::models::Empty {});
 
-#[derive(Debug, Serialize, Clone)]
-pub struct ListRemoteHosts {}
-rpc_method!(ListRemoteHosts, ListRemotes, |self| crate::models::Empty {});
 #[derive(Debug, Serialize, Clone, Deserialize)]
 pub struct RegisterRemoteHost {
     pub ticket: String,
@@ -510,14 +507,6 @@ pub fn thread_terminal_handle(thread: &str) -> String {
 /// One terminal of a thread, e.g. `term-1` or a setup script's `setup-{id}`.
 pub fn thread_terminal_handle_for(thread: &str, terminal_id: &str) -> String {
     format!("{}:{terminal_id}", thread_terminal_handle(thread))
-}
-
-/// Shared terminal identity for a workspace, used by cleanup and every client.
-pub fn terminal_handle(cwd: &str) -> String {
-    format!(
-        "bex-terminal-{}",
-        uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, cwd.as_bytes())
-    )
 }
 
 #[cfg(test)]
