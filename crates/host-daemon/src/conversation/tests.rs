@@ -575,6 +575,7 @@ async fn a_worktree_launch_runs_the_projects_setup_script() {
     let set_setup = |command: &str| {
         Call::UpdateProject(agent_protocol::operations::UpdateProject {
             project_id: host.project.clone(),
+            favicon_path: None,
             scripts: Some(vec![ProjectScript {
                 id: " setup ".into(),
                 name: "Setup".into(),
@@ -1605,6 +1606,76 @@ async fn settling_a_thread_closes_its_idle_terminals_on_the_metadata_stream() {
     })
     .await
     .expect("settling closes the idle shell");
+    host.conversation.shutdown().await;
+}
+
+// The project keeps only the icon path the user saved; the icon is read by
+// project id, named by its content hash, sent again only when it changed, and
+// missing for an unknown project.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn projects_keep_a_saved_icon_path_and_serve_their_icon() {
+    use agent_protocol::models::{Empty, Project, ProjectFavicon, ReadProjectFavicon};
+    let host = host().await;
+    std::fs::create_dir_all(host.project_root.join("brand")).unwrap();
+    std::fs::write(host.project_root.join("brand/logo.svg"), "<svg>saved</svg>").unwrap();
+    std::fs::write(host.project_root.join("favicon.svg"), "<svg>auto</svg>").unwrap();
+    let update = |favicon_path: Option<Option<&str>>| {
+        Call::UpdateProject(agent_protocol::operations::UpdateProject {
+            project_id: host.project.clone(),
+            scripts: None,
+            favicon_path: favicon_path.map(|path| path.map(str::to_owned)),
+        })
+    };
+    let read = |project: &str, known_hash: Option<&str>| {
+        Call::ProjectFavicon(ReadProjectFavicon {
+            project_id: project.into(),
+            known_hash: known_hash.map(str::to_owned),
+        })
+    };
+    let saved_path = || async {
+        let projects: Vec<Project> = host.call(Call::ListProjects(Empty {})).await.unwrap();
+        projects
+            .into_iter()
+            .find(|project| project.id == host.project)
+            .unwrap()
+            .favicon_path
+    };
+
+    assert_eq!(saved_path().await, None);
+    let automatic: Option<ProjectFavicon> = host.call(read(&host.project, None)).await.unwrap();
+    let automatic = automatic.unwrap();
+    assert!(automatic.file_name.ends_with("-favicon.svg"));
+    assert_eq!(automatic.data.as_deref(), Some(&b"<svg>auto</svg>"[..]));
+    let unchanged: Option<ProjectFavicon> = host
+        .call(read(&host.project, Some(&automatic.hash)))
+        .await
+        .unwrap();
+    assert_eq!(unchanged.unwrap().data, None);
+
+    let _: Empty = host
+        .call(update(Some(Some(" brand/logo.svg "))))
+        .await
+        .unwrap();
+    assert_eq!(saved_path().await.as_deref(), Some("brand/logo.svg"));
+    let saved: Option<ProjectFavicon> = host.call(read(&host.project, None)).await.unwrap();
+    let saved = saved.unwrap();
+    assert!(saved.file_name.ends_with("-logo.svg"));
+    assert_eq!(saved.data.as_deref(), Some(&b"<svg>saved</svg>"[..]));
+
+    let refused = host
+        .call::<Empty>(update(Some(Some("notes.txt"))))
+        .await
+        .unwrap_err();
+    assert_eq!(refused.code, "project_update_failed");
+    let _: Empty = host.call(update(None)).await.unwrap();
+    assert_eq!(saved_path().await.as_deref(), Some("brand/logo.svg"));
+    let _: Empty = host.call(update(Some(None))).await.unwrap();
+    assert_eq!(saved_path().await, None);
+    let cleared: Option<ProjectFavicon> = host.call(read(&host.project, None)).await.unwrap();
+    assert_eq!(cleared.unwrap().hash, automatic.hash);
+
+    let unknown: Option<ProjectFavicon> = host.call(read("missing", None)).await.unwrap();
+    assert_eq!(unknown, None);
     host.conversation.shutdown().await;
 }
 

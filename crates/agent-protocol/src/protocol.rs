@@ -88,6 +88,7 @@ results! {
     ShellStream(::orchestration::ShellStreamItem), ThreadStream(::orchestration::ThreadStreamItem),
     Projection(::orchestration::ThreadProjection), TurnItem(Option<::orchestration::TurnItem>),
     ThreadHistory(::orchestration::ThreadHistoryPage), Search(Vec<::orchestration::SearchMatch>), Projects(Vec<crate::models::Project>),
+    ProjectFavicon(Option<crate::models::ProjectFavicon>),
     Committed(crate::conversation::Committed), Launched(crate::conversation::Launched),
     ThreadUpdate(crate::conversation::ThreadUpdate), ShellUpdate(crate::conversation::ShellUpdate),
     ThreadSnapshot(crate::conversation::ThreadSnapshot), TurnItemDetail(Option<crate::conversation::TurnItemDetail>),
@@ -164,6 +165,26 @@ pub mod json {
             serde_json::from_str(&String::deserialize(deserializer)?)
                 .map_err(serde::de::Error::custom)
         }
+    }
+}
+
+/// `bytes` for an optional value.
+pub mod optional_bytes {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    #[derive(Serialize, Deserialize)]
+    struct Bytes(#[serde(with = "super::bytes")] Vec<u8>);
+    #[derive(Serialize)]
+    struct BytesRef<'a>(#[serde(with = "super::bytes")] &'a [u8]);
+    pub fn serialize<S: Serializer>(
+        value: &Option<Vec<u8>>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        value.as_deref().map(BytesRef).serialize(serializer)
+    }
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<Vec<u8>>, D::Error> {
+        Ok(Option::<Bytes>::deserialize(deserializer)?.map(|bytes| bytes.0))
     }
 }
 

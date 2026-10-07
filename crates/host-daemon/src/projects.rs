@@ -26,6 +26,9 @@ pub(crate) struct StoredProject {
     /// Empty for a project that is not registered and keeps only its settings.
     pub(crate) roots: Vec<ProjectRoot>,
     pub(crate) scripts: Vec<ProjectScript>,
+    /// The icon file the user chose.
+    #[serde(deserialize_with = "serde::Deserialize::deserialize")]
+    pub(crate) favicon_path: Option<String>,
     pub(crate) created_at: Timestamp,
     pub(crate) updated_at: Timestamp,
 }
@@ -113,6 +116,7 @@ impl ProjectStore {
             }),
             roots: vec![ProjectRoot { path: path.into() }],
             scripts,
+            favicon_path: None,
         });
         self.save(&projects).await?;
         Ok(Registration::Created(id))
@@ -123,9 +127,17 @@ impl ProjectStore {
         &self,
         id: &str,
         scripts: Option<Vec<ProjectScript>>,
+        favicon_path: Option<Option<String>>,
         rootless: bool,
     ) -> anyhow::Result<()> {
         let scripts = scripts.map(valid_scripts).transpose()?;
+        let favicon_path = favicon_path
+            .map(|path| {
+                path.map(|path| agent_protocol::models::project_favicon_path(&path))
+                    .transpose()
+            })
+            .transpose()
+            .map_err(anyhow::Error::msg)?;
         let _registration = self.registration.lock().await;
         let mut projects = self.load().await?;
         let index = match projects.iter().position(|project| project.id == id) {
@@ -137,6 +149,7 @@ impl ProjectStore {
                     name: String::new(),
                     roots: vec![],
                     scripts: vec![],
+                    favicon_path: None,
                     created_at: now.clone(),
                     updated_at: now,
                 });
@@ -144,8 +157,14 @@ impl ProjectStore {
             }
             None => anyhow::bail!("project {id} is not registered"),
         };
+        let changed = scripts.is_some() || favicon_path.is_some();
         if let Some(scripts) = scripts {
             projects[index].scripts = scripts;
+        }
+        if let Some(favicon_path) = favicon_path {
+            projects[index].favicon_path = favicon_path;
+        }
+        if changed {
             projects[index].updated_at = now();
         }
         self.save(&projects).await
@@ -175,19 +194,47 @@ fn now() -> Timestamp {
 }
 
 /// `~`, `~/…` and `~\…` name the home directory.
-pub(crate) fn expand_home(path: &str) -> std::path::PathBuf {
-    let home = || directories::BaseDirs::new().map(|dirs| dirs.home_dir().to_owned());
-    if path == "~"
-        && let Some(home) = home()
-    {
-        return home;
+pub(crate) fn expand_home(path: &str) -> PathBuf {
+    match directories::BaseDirs::new() {
+        Some(dirs) => expand_home_in(path, dirs.home_dir()),
+        None => PathBuf::from(path),
     }
-    if let Some(rest) = path.strip_prefix("~/").or_else(|| path.strip_prefix("~\\"))
-        && let Some(home) = home()
-    {
-        return home.join(rest);
+}
+fn expand_home_in(path: &str, home: &Path) -> PathBuf {
+    if path == "~" {
+        return home.to_owned();
     }
-    std::path::PathBuf::from(path)
+    match path.strip_prefix("~/").or_else(|| path.strip_prefix("~\\")) {
+        Some(rest) => normalize_lexically(Path::new(&format!(
+            "{}{}{rest}",
+            home.display(),
+            std::path::MAIN_SEPARATOR
+        ))),
+        None => PathBuf::from(path),
+    }
+}
+
+/// `path` with `.` and `..` folded away without touching the filesystem; `..`
+/// stops at the root.
+pub(crate) fn normalize_lexically(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut normalized = PathBuf::new();
+    for part in path.components() {
+        match part {
+            Component::CurDir => {}
+            Component::ParentDir
+                if matches!(
+                    normalized.components().next_back(),
+                    Some(Component::Normal(_))
+                ) =>
+            {
+                normalized.pop();
+            }
+            Component::ParentDir if normalized.has_root() => {}
+            part => normalized.push(part.as_os_str()),
+        }
+    }
+    normalized
 }
 
 /// Trims the scripts' text fields and rejects empty ones.
@@ -283,15 +330,56 @@ pub(crate) fn claim_thread_folder(
 #[cfg(test)]
 mod tests {
     use super::*;
-    // pathExpansion.ts expandHomePath: `~` alone, `~/` and `~\` only.
+    // pathExpansion.test.ts expandHomePath: `~` alone, `~/` and `~\` only, joined
+    // like a path.
     #[test]
     fn a_leading_tilde_names_the_home_directory() {
         let home = directories::BaseDirs::new().unwrap().home_dir().to_owned();
         assert_eq!(expand_home("~"), home);
-        assert_eq!(expand_home("~/src/app"), home.join("src/app"));
-        assert_eq!(expand_home("~\\src"), home.join("src"));
-        assert_eq!(expand_home("~other/src"), PathBuf::from("~other/src"));
-        assert_eq!(expand_home("/abs/~"), PathBuf::from("/abs/~"));
+        assert_eq!(expand_home("~/.codex-work"), home.join(".codex-work"));
+        assert_eq!(expand_home("~\\.codex"), home.join(".codex"));
+        for unchanged in [
+            "",
+            "/absolute/path",
+            "relative/path",
+            "some~weird~path",
+            "~alice/foo",
+            "/abs/~",
+        ] {
+            assert_eq!(expand_home(unchanged), PathBuf::from(unchanged));
+        }
+        let home = Path::new("/home/me");
+        assert_eq!(expand_home_in("~/", home), home);
+        assert_eq!(expand_home_in("~/a/./b/../c", home), home.join("a/c"));
+        assert_eq!(expand_home_in("~//etc", home), home.join("etc"));
+        assert_eq!(expand_home_in("~/../other", home), Path::new("/home/other"));
+    }
+
+    // WorkspacePaths.ts normalizeWorkspaceRoot: an added project's `~` names the
+    // home directory.
+    #[tokio::test]
+    async fn a_project_added_at_the_tilde_is_the_home_directory() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = ProjectStore::new(directory.path().join("worktrees.json"));
+        let home = dunce::canonicalize(directories::BaseDirs::new().unwrap().home_dir()).unwrap();
+        let id = store.register(&expand_home(" ~ ".trim())).await.unwrap();
+        assert_eq!(store.register(&expand_home("~/")).await.unwrap(), id);
+        assert_eq!(
+            store.load().await.unwrap()[0].roots[0].path,
+            home.to_str().unwrap()
+        );
+    }
+
+    #[test]
+    fn paths_fold_dots_without_the_filesystem() {
+        for (path, normalized) in [
+            ("/a/./b/../c/", "/a/c"),
+            ("/../a", "/a"),
+            ("a/../../b", "../b"),
+            ("./a", "a"),
+        ] {
+            assert_eq!(normalize_lexically(Path::new(path)), Path::new(normalized));
+        }
     }
 
     #[tokio::test]
@@ -342,12 +430,14 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let store = ProjectStore::new(directory.path().join("worktrees.json"));
         let file = directory.path().join("projects.json");
-        let entry = r#"{"id":"p","name":"p","roots":[{"path":"/p"}],"scripts":[]"#;
+        let entry =
+            r#"{"id":"p","name":"p","roots":[{"path":"/p"}],"scripts":[],"faviconPath":null"#;
+        let times =
+            r#""createdAt":"2026-10-07T00:00:00.000Z","updatedAt":"2026-10-07T00:00:00.000Z""#;
         for contents in [
             format!("[{entry}}}]"),
-            format!(
-                r#"[{entry},"createdAt":"2026-10-07T00:00:00.000Z","updatedAt":"2026-10-07T00:00:00.000Z","repositoryIdentity":null}}]"#
-            ),
+            format!(r#"[{entry},{times},"repositoryIdentity":null}}]"#),
+            format!(r#"[{{"id":"p","name":"p","roots":[],"scripts":[],{times}}}]"#),
         ] {
             std::fs::write(&file, contents).unwrap();
             let error = store.load().await.unwrap_err();
@@ -358,11 +448,7 @@ mod tests {
                 "{error:#}"
             );
         }
-        std::fs::write(
-            &file,
-            format!(r#"[{entry},"createdAt":"2026-10-07T00:00:00.000Z","updatedAt":"2026-10-07T00:00:00.000Z"}}]"#),
-        )
-        .unwrap();
+        std::fs::write(&file, format!(r#"[{entry},{times}}}]"#)).unwrap();
         assert_eq!(store.load().await.unwrap()[0].id, "p");
     }
 
@@ -387,11 +473,16 @@ mod tests {
         let id = store.register(&project).await.unwrap();
 
         store
-            .update(&id, Some(vec![script(" vp install ")]), false)
+            .update(&id, Some(vec![script(" vp install ")]), None, false)
             .await
             .unwrap();
-        store.update(&id, None, false).await.unwrap();
-        let scripts = &store.load().await.unwrap()[0].scripts;
+        store
+            .update(&id, None, Some(Some(" brand/logo.svg ".into())), false)
+            .await
+            .unwrap();
+        store.update(&id, None, None, false).await.unwrap();
+        let stored = &store.load().await.unwrap()[0];
+        let scripts = &stored.scripts;
         assert_eq!(
             (
                 scripts[0].id.as_str(),
@@ -400,18 +491,36 @@ mod tests {
             ),
             ("setup", "Setup", "vp install")
         );
+        assert_eq!(stored.favicon_path.as_deref(), Some("brand/logo.svg"));
         assert!(
             store
-                .update(&id, Some(vec![script(" ")]), false)
+                .update(&id, Some(vec![script(" ")]), None, false)
                 .await
                 .is_err()
         );
-        assert!(store.update("missing", Some(vec![]), false).await.is_err());
-        assert_eq!(store.load().await.unwrap()[0].scripts.len(), 1);
+        for invalid in ["", "notes.txt"] {
+            assert!(
+                store
+                    .update(&id, None, Some(Some(invalid.into())), false)
+                    .await
+                    .is_err()
+            );
+        }
+        assert!(
+            store
+                .update("missing", Some(vec![]), None, false)
+                .await
+                .is_err()
+        );
+        let stored = &store.load().await.unwrap()[0];
+        assert_eq!(stored.scripts.len(), 1);
+        assert_eq!(stored.favicon_path.as_deref(), Some("brand/logo.svg"));
+        store.update(&id, None, Some(None), false).await.unwrap();
+        assert_eq!(store.load().await.unwrap()[0].favicon_path, None);
 
         // An unregistered project keeps its settings in an entry without roots.
         store
-            .update("chats", Some(vec![script("vp install")]), true)
+            .update("chats", Some(vec![script("vp install")]), None, true)
             .await
             .unwrap();
         let projects = store.load().await.unwrap();

@@ -470,7 +470,11 @@ impl HostRpcService {
                     resources
                         .shared
                         .projects
-                        .update(&params.project_id, params.scripts.clone())
+                        .update(
+                            &params.project_id,
+                            params.scripts.clone(),
+                            params.favicon_path.clone(),
+                        )
                         .await
                         .map_err(|error| Failure::new("project_update_failed", error))?;
                     if let Ok(conversation) = self.conversation() {
@@ -479,6 +483,26 @@ impl HostRpcService {
                     agent_protocol::models::Empty {}.into()
                 }
                 Call::ListProjects(_) => self.projects().await?.into(),
+                Call::ProjectFavicon(params) => {
+                    match resources
+                        .shared
+                        .projects
+                        .favicon_source(&params.project_id)
+                        .await
+                    {
+                        None => None::<agent_protocol::models::ProjectFavicon>.into(),
+                        Some((root, saved)) => {
+                            let known_hash = params.known_hash.clone();
+                            tokio::task::spawn_blocking(move || {
+                                crate::favicon::read(&root, saved.as_deref(), known_hash.as_deref())
+                            })
+                            .await
+                            .map_err(|error| Failure::new("project_favicon_failed", error))?
+                            .map_err(|error| Failure::new("project_favicon_failed", error))?
+                            .into()
+                        }
+                    }
+                }
                 Call::ListAccounts(_)
                 | Call::SelectAccount(_)
                 | Call::LogoutAccount(_)

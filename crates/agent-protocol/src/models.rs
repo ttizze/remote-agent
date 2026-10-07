@@ -48,11 +48,73 @@ pub struct Project {
     /// stored.
     #[serde(default)]
     pub repository_identity: Option<RepositoryIdentity>,
-    /// The project's icon file, found in its root when the Host lists the
-    /// project; never stored.
+    /// The icon file the user chose, absolute or relative to the root. The icon
+    /// itself comes from `host/project/favicon`.
     pub favicon_path: Option<String>,
     pub created_at: Option<agent_domain::Timestamp>,
     pub updated_at: Option<agent_domain::Timestamp>,
+}
+
+/// The saved icon path a project accepts: trimmed, non-empty, at most 1024
+/// UTF-16 units, ending in an image extension.
+pub fn project_favicon_path(value: &str) -> Result<String, String> {
+    let js_space = |c: char| c == '\u{feff}' || (c != '\u{85}' && c.is_whitespace());
+    let value = value.trim_matches(js_space);
+    if value.is_empty() {
+        return Err("project favicon path must not be empty".into());
+    }
+    if value.encode_utf16().count() > 1024 {
+        return Err("project favicon path must be at most 1024 characters".into());
+    }
+    if image_mime_type(value).is_none() {
+        return Err(
+            "project favicon path must end in .avif, .gif, .ico, .jpg, .jpeg, .png, .svg or .webp"
+                .into(),
+        );
+    }
+    Ok(value.to_owned())
+}
+
+/// The image type of a path by its extension, ignoring ASCII case.
+pub fn image_mime_type(path: &str) -> Option<&'static str> {
+    [
+        (".avif", "image/avif"),
+        (".gif", "image/gif"),
+        (".ico", "image/x-icon"),
+        (".jpeg", "image/jpeg"),
+        (".jpg", "image/jpeg"),
+        (".png", "image/png"),
+        (".svg", "image/svg+xml"),
+        (".webp", "image/webp"),
+    ]
+    .into_iter()
+    .find(|(extension, _)| {
+        path.len() >= extension.len()
+            && path.as_bytes()[path.len() - extension.len()..]
+                .eq_ignore_ascii_case(extension.as_bytes())
+    })
+    .map(|(_, mime_type)| mime_type)
+}
+
+/// Asks for a project's icon; `known_hash` is the hash of the copy the client has.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReadProjectFavicon {
+    pub project_id: String,
+    pub known_hash: Option<String>,
+}
+/// A project's icon file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectFavicon {
+    /// SHA-256 of the file, in lowercase hex.
+    pub hash: String,
+    /// `v<hash>-<file name>`.
+    pub file_name: String,
+    pub mime_type: String,
+    /// Absent when `hash` equals the request's `known_hash`.
+    #[serde(with = "crate::protocol::optional_bytes")]
+    pub data: Option<Vec<u8>>,
 }
 /// The repository a project's checkout belongs to.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -300,6 +362,39 @@ mod tests {
             };
             prop_assert_eq!(status, expected);
         }
+    }
+
+    // contracts/project.ts ProjectFaviconPath.
+    #[test]
+    fn saved_favicon_paths_are_trimmed_image_paths() {
+        assert_eq!(
+            project_favicon_path("  brand/Logo.PNG\u{feff}").as_deref(),
+            Ok("brand/Logo.PNG")
+        );
+        assert_eq!(
+            project_favicon_path("/Users/me/Pictures/icon.jpeg").as_deref(),
+            Ok("/Users/me/Pictures/icon.jpeg")
+        );
+        for extension in ["avif", "gif", "ico", "jpg", "JPEG", "png", "Svg", "webp"] {
+            assert!(project_favicon_path(&format!("icon.{extension}")).is_ok());
+        }
+        for rejected in [
+            "",
+            " \n ",
+            "icon.txt",
+            "icon.svg.bak",
+            "icon",
+            "iconpng",
+            "icon.\u{17f}vg",
+        ] {
+            assert!(project_favicon_path(rejected).is_err(), "{rejected:?}");
+        }
+        let longest = format!("{}.png", "a".repeat(1020));
+        assert!(project_favicon_path(&longest).is_ok());
+        assert!(project_favicon_path(&format!("a{longest}")).is_err());
+        let wide = format!("{}.png", "\u{1f600}".repeat(510));
+        assert!(project_favicon_path(&wide).is_ok());
+        assert!(project_favicon_path(&format!("\u{1f600}{wide}")).is_err());
     }
 }
 
