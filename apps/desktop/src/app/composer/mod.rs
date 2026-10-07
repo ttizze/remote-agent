@@ -38,6 +38,7 @@ pub(crate) struct ComposerState {
     /// The alternate send modifier (⌘ or Ctrl) is held.
     alternate_modifier: bool,
     picker: controls::PickerState,
+    branches: controls::BranchPickerState,
     menu: menu::MenuState,
     banners: banners::BannerState,
     /// The image attachments of the draft just sent to the stash: id, name,
@@ -56,6 +57,7 @@ impl ComposerState {
             sync: editor::EditorSync::default(),
             alternate_modifier: false,
             picker: controls::PickerState::new(window, cx, subscriptions),
+            branches: controls::BranchPickerState::new(window, cx, subscriptions),
             menu: menu::MenuState::default(),
             banners: banners::BannerState::new(cx),
             stash_images: vec![],
@@ -101,7 +103,8 @@ fn glass() -> Hsla {
     } else {
         "surface"
     };
-    color("canvas").blend(color(surface).opacity(0.8))
+    let opacity = super::ui::appearance().glass_opacity as f32 / 100.;
+    color("canvas").blend(color(surface).opacity(opacity))
 }
 
 /// The composer's 1px outline.
@@ -163,6 +166,7 @@ impl Desktop {
         let Some(thread) = shown_thread(&views, self.snapshot.selected_thread.as_ref()) else {
             return div().into_any_element();
         };
+        self.sync_composer_menu(cx);
         dock(self.composer_stack(Some(thread), &thread.composer, window, cx))
     }
 
@@ -176,9 +180,16 @@ impl Desktop {
         let Some(draft) = views.new_thread.as_ref() else {
             return div().flex_1().into_any_element();
         };
+        self.sync_composer_menu(cx);
+        let strip = self.composer_host_strip(
+            draft.workspace.as_ref(),
+            draft.project_id.as_ref(),
+            window,
+            cx,
+        );
         let stack = self
             .composer_stack(None, &draft.composer, window, cx)
-            .child(self.composer_host_strip(cx));
+            .child(strip);
         if draft.show_hero {
             return self.render_draft_hero(&draft.hero, stack, cx);
         }

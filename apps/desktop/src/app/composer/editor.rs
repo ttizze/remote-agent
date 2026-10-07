@@ -213,6 +213,10 @@ impl Desktop {
         (text, cursor)
     }
 
+    pub(crate) fn composer_focused(&self, window: &Window, cx: &App) -> bool {
+        self.editor_focused(window, cx)
+    }
+
     fn editor_focused(&self, window: &Window, cx: &App) -> bool {
         self.composer
             .editor
@@ -274,59 +278,32 @@ impl Desktop {
                     cx.stop_propagation();
                 }
             }))
-            .capture_key_down(cx.listener(|view, event: &KeyDownEvent, window, cx| {
-                if view.composer_shortcut(event, window, cx) {
-                    cx.stop_propagation();
-                }
-            }))
     }
 
-    /// ⌘⇧↵ steers with the first queued message, ⌥↑ edits the last one, ⌘S
-    /// stashes and ⌘⇧M opens the model picker.
-    fn composer_shortcut(
-        &mut self,
-        event: &KeyDownEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        let keystroke = &event.keystroke;
-        let modifiers = keystroke.modifiers;
+    /// Steers with the first queued message.
+    pub(crate) fn steer_first_queued(&mut self) {
         let queue = shown_thread(&self.views, self.snapshot.selected_thread.as_ref())
             .and_then(|thread| thread.queue.as_ref());
-        match (
-            keystroke.key.as_str(),
-            modifiers.secondary(),
-            modifiers.shift,
-            modifiers.alt,
-        ) {
-            ("enter", true, true, false) => {
-                if let Some(run_id) = queue.and_then(|queue| queue.steer_next_run_id.clone()) {
-                    self.perform(Intent::Queue {
-                        action: QueueAction::Steer { run_id },
-                    });
-                }
-                true
-            }
-            ("up", false, false, true) => {
-                let Some(run_id) = queue.and_then(|queue| queue.edit_latest_run_id.clone()) else {
-                    return false;
-                };
-                self.composer.banners.queue_collapsed = false;
-                self.perform(Intent::Queue {
-                    action: QueueAction::Edit { run_id },
-                });
-                true
-            }
-            ("s", true, false, false) => {
-                self.composer_stash_shortcut(cx);
-                true
-            }
-            ("m", true, true, false) => {
-                self.toggle_model_picker(window, cx);
-                true
-            }
-            _ => false,
+        if let Some(run_id) = queue.and_then(|queue| queue.steer_next_run_id.clone()) {
+            self.perform(Intent::Queue {
+                action: QueueAction::Steer { run_id },
+            });
         }
+    }
+
+    /// Edits the last queued message; false when nothing is queued.
+    pub(crate) fn edit_last_queued(&mut self) -> bool {
+        let Some(run_id) = shown_thread(&self.views, self.snapshot.selected_thread.as_ref())
+            .and_then(|thread| thread.queue.as_ref())
+            .and_then(|queue| queue.edit_latest_run_id.clone())
+        else {
+            return false;
+        };
+        self.composer.banners.queue_collapsed = false;
+        self.perform(Intent::Queue {
+            action: QueueAction::Edit { run_id },
+        });
+        true
     }
 
     /// Enter and the primary button: send, answer, refine or implement as
@@ -378,7 +355,7 @@ impl Desktop {
 
     /// ⌘S stashes a composer with content; an empty one restores the only
     /// entry or opens the stash. While a question waits it opens the stash.
-    pub(super) fn composer_stash_shortcut(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn composer_stash_shortcut(&mut self, cx: &mut Context<Self>) {
         let requests = shown_thread(&self.views, self.snapshot.selected_thread.as_ref())
             .map(|thread| &thread.requests);
         if requests.is_some_and(|requests| requests.approval.is_some()) {

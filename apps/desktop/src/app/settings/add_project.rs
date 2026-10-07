@@ -1,6 +1,4 @@
-//! Adding a project: a path field that browses the Host's folders, then the
-//! step that imports existing agent sessions.
-use super::import;
+//! Adding a project: a path field that browses the Host's folders.
 use crate::app::{
     Desktop, Route,
     ui::{color, icon, tint},
@@ -92,7 +90,6 @@ impl Desktop {
                     window.close_dialog(cx);
                     let project = view.snapshot.selected_project.clone();
                     view.new_thread(project, cx);
-                    import::open(view, window, cx);
                 }
                 Err(error) => {
                     let message = agent_core::presentation::error::error_message(error);

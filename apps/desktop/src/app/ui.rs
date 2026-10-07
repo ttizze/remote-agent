@@ -13,6 +13,82 @@ thread_local! {
     static PALETTE: RefCell<agent_core::presentation::theme::Theme> =
         RefCell::new(agent_core::presentation::theme::theme(true));
     static DARK: RefCell<bool> = const { RefCell::new(true) };
+    static SYSTEM_DARK: RefCell<bool> = const { RefCell::new(true) };
+    static APPEARANCE: RefCell<Appearance> = RefCell::new(Appearance::default());
+}
+
+/// Light, dark, or following the system.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum AppearanceMode {
+    System,
+    Light,
+    Dark,
+}
+
+/// How wide messages and the composer grow.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum ChatWidth {
+    Comfortable,
+    Wide,
+    Full,
+}
+
+/// The colors of additions and deletions.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum DiffColors {
+    RedGreen,
+    BlueOrange,
+}
+
+/// This device's appearance preferences.
+#[derive(Clone, PartialEq, Debug)]
+pub(crate) struct Appearance {
+    pub(crate) mode: AppearanceMode,
+    /// Percent, 40 to 100.
+    pub(crate) glass_opacity: u32,
+    pub(crate) diff_colors: DiffColors,
+    pub(crate) chat_width: ChatWidth,
+    /// Empty for the system font.
+    pub(crate) interface_font: String,
+    pub(crate) interface_size: u32,
+    pub(crate) monospace_font: String,
+    pub(crate) monospace_size: u32,
+    pub(crate) word_wrap: bool,
+}
+impl Default for Appearance {
+    fn default() -> Self {
+        Self {
+            mode: AppearanceMode::System,
+            glass_opacity: 80,
+            diff_colors: DiffColors::RedGreen,
+            chat_width: ChatWidth::Comfortable,
+            interface_font: String::new(),
+            interface_size: 16,
+            monospace_font: String::new(),
+            monospace_size: 13,
+            word_wrap: true,
+        }
+    }
+}
+
+pub(crate) fn appearance() -> Appearance {
+    APPEARANCE.with(|appearance| appearance.borrow().clone())
+}
+
+/// Stores the preferences and redraws with them.
+pub(crate) fn set_appearance(appearance: Appearance, cx: &mut App) {
+    APPEARANCE.with(|current| *current.borrow_mut() = appearance);
+    let dark = SYSTEM_DARK.with(|dark| *dark.borrow());
+    apply_theme(dark, cx);
+}
+
+/// The diff colors of additions and of deletions.
+pub(crate) fn diff_colors() -> (Hsla, Hsla) {
+    match APPEARANCE.with(|appearance| appearance.borrow().diff_colors) {
+        DiffColors::RedGreen => (color("successForeground"), color("errorForeground")),
+        DiffColors::BlueOrange if is_dark() => (rgb(0x60a5fa).into(), rgb(0xfb923c).into()),
+        DiffColors::BlueOrange => (rgb(0x2563eb).into(), rgb(0xea580c).into()),
+    }
 }
 
 pub(crate) fn is_dark() -> bool {
@@ -29,7 +105,12 @@ pub(crate) fn color(role: &str) -> Hsla {
             .get(role)
             .or_else(|| palette.colors.get("text"))
             .map_or("ffffff", |value| value.trim_start_matches('#'));
-        rgb(u32::from_str_radix(value, 16).unwrap_or(0xffffff)).into()
+        let hex = u32::from_str_radix(value, 16).unwrap_or(0xffffff);
+        if value.len() == 8 {
+            rgba(hex).into()
+        } else {
+            rgb(hex).into()
+        }
     })
 }
 
@@ -52,21 +133,36 @@ pub(crate) fn metrics() -> Metrics {
         let palette = palette.borrow();
         Metrics {
             header_height: palette.header_height,
-            chat_max_width: palette.chat_max_width,
+            chat_max_width: match APPEARANCE.with(|appearance| appearance.borrow().chat_width) {
+                ChatWidth::Comfortable => palette.chat_max_width,
+                ChatWidth::Wide => 1152.,
+                ChatWidth::Full => f32::MAX,
+            },
             sidebar_width: palette.sidebar_width,
             panel_width: palette.panel_width,
             prompt_size: palette.prompt_size,
-            code_size: palette.code_size,
+            code_size: APPEARANCE.with(|appearance| appearance.borrow().monospace_size) as f32,
         }
     })
 }
 
-/// Follows the system appearance, as the stock theme does.
+/// Follows the system appearance unless the user chose light or dark.
 pub(crate) fn apply_appearance(appearance: WindowAppearance, cx: &mut App) {
     let dark = matches!(
         appearance,
         WindowAppearance::Dark | WindowAppearance::VibrantDark
     );
+    SYSTEM_DARK.with(|value| *value.borrow_mut() = dark);
+    apply_theme(dark, cx);
+}
+
+fn apply_theme(system_dark: bool, cx: &mut App) {
+    let preferences = appearance();
+    let dark = match preferences.mode {
+        AppearanceMode::System => system_dark,
+        AppearanceMode::Light => false,
+        AppearanceMode::Dark => true,
+    };
     DARK.with(|value| *value.borrow_mut() = dark);
     PALETTE.with(|palette| {
         *palette.borrow_mut() = agent_core::presentation::theme::theme(dark);
@@ -80,11 +176,16 @@ pub(crate) fn apply_appearance(appearance: WindowAppearance, cx: &mut App) {
         None,
         cx,
     );
-    let metrics = metrics();
     let theme = Theme::global_mut(cx);
-    // The rem stays 16 px so Tailwind sizes (text-sm = 14 px) read as written.
-    theme.font_size = px(16.);
-    theme.mono_font_size = px(metrics.code_size);
+    // The interface font size is the rem, so every Tailwind size follows it.
+    theme.font_size = px(preferences.interface_size as f32);
+    theme.mono_font_size = px(preferences.monospace_size as f32);
+    if !preferences.interface_font.is_empty() {
+        theme.font_family = preferences.interface_font.clone().into();
+    }
+    if !preferences.monospace_font.is_empty() {
+        theme.mono_font_family = preferences.monospace_font.clone().into();
+    }
     theme.radius = px(8.);
     theme.radius_lg = px(10.);
     for (target, role) in [

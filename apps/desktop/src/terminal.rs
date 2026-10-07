@@ -14,7 +14,11 @@ use alacritty_terminal::{
     vte::ansi::{Color as TerminalColor, Processor},
 };
 use gpui_kit::{
-    component::{h_flex, v_flex},
+    component::{
+        h_flex,
+        menu::{ContextMenuExt, PopupMenuItem},
+        v_flex,
+    },
     prelude::FluentBuilder,
     *,
 };
@@ -271,6 +275,11 @@ impl Terminal {
             });
         }
     }
+    fn copy_selection(&self, cx: &mut Context<Self>) {
+        if let Some(text) = self.term.selection_to_string() {
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
+        }
+    }
     fn paste(&mut self, text: String, cx: &mut Context<Self>) {
         let text = text.replace('\x1b', "");
         let text = if self.term.mode().contains(TermMode::BRACKETED_PASTE) {
@@ -284,9 +293,12 @@ impl Terminal {
         let key = &event.keystroke;
         let mods = key.modifiers;
         if mods.platform && key.key == "c" {
-            if let Some(text) = self.term.selection_to_string() {
-                cx.write_to_clipboard(ClipboardItem::new_string(text));
-            }
+            self.copy_selection(cx);
+            cx.stop_propagation();
+            return;
+        }
+        if mods.platform && key.key == "k" {
+            self.input(b"\x0c".to_vec(), cx);
             cx.stop_propagation();
             return;
         }
@@ -556,6 +568,29 @@ impl Render for Terminal {
                     }))
                     .child(TerminalCanvas {
                         terminal: cx.entity(),
+                    })
+                    .context_menu({
+                        let terminal = cx.entity().downgrade();
+                        let selected = self.term.selection.is_some();
+                        move |menu, _, _| {
+                            let (copy, paste) = (terminal.clone(), terminal.clone());
+                            menu.item(PopupMenuItem::new("Copy").disabled(!selected).on_click(
+                                move |_, _, cx| {
+                                    let _ = copy.update(cx, |view, cx| view.copy_selection(cx));
+                                },
+                            ))
+                            .item(
+                                PopupMenuItem::new("Paste").on_click(move |_, _, cx| {
+                                    let text =
+                                        cx.read_from_clipboard().and_then(|item| item.text());
+                                    let _ = paste.update(cx, |view, cx| {
+                                        if let Some(text) = text {
+                                            view.paste(text, cx);
+                                        }
+                                    });
+                                }),
+                            )
+                        }
                     }),
             )
     }

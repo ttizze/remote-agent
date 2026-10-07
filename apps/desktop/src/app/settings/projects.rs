@@ -1,6 +1,6 @@
 //! The Project page: choosing a project, then its overrides of the Host's
 //! settings and its actions.
-use super::{Row, SettingsPage, notice, page_container, scripts, section};
+use super::{Row, SettingsPage, notice, page_container, reset_button, scripts, section};
 use crate::app::{
     Desktop,
     ui::{color, icon, tint},
@@ -75,10 +75,12 @@ impl Desktop {
         let mut choices = h_flex().flex_wrap().gap_2();
         for (index, project) in projects.into_iter().enumerate() {
             let id = project.id.clone();
+            let mark = self.project_icon(&project.id, &project.name, 14.);
             choices = choices.child(
                 Button::new(("settings-project", index))
                     .outline()
                     .small()
+                    .child(mark)
                     .label(project.name)
                     .on_click(cx.listener(move |view, _, window, cx| {
                         view.open_settings(
@@ -139,6 +141,7 @@ impl Desktop {
             .as_ref()
             .is_some_and(|header| header.has_overrides);
         let reset_id = project_id.to_owned();
+        let icon_row = self.project_icon_row(&project, cx);
         sections.push(
             section(
                 Some("Project".into()),
@@ -167,6 +170,7 @@ impl Desktop {
                         )
                     })
                     .render(),
+                    icon_row,
                 ],
             )
             .into_any_element(),
@@ -182,6 +186,67 @@ impl Desktop {
         }
         sections.push(self.render_project_actions(project_id, cx));
         page_container(896., sections)
+    }
+
+    /// The project's icon: the file it reads, choosing another, and going
+    /// back to finding one automatically.
+    fn project_icon_row(
+        &self,
+        project: &agent_protocol::models::Project,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let (choose, reset) = (project.id.clone(), project.id.clone());
+        let local = self.remote.is_none();
+        let reset = project.favicon_path.is_some().then(|| {
+            reset_button(
+                "reset-project-icon",
+                "project icon",
+                "Reset to default",
+                move |view, _, _| {
+                    view.perform(Intent::SetProjectIcon {
+                        project_id: reset.clone(),
+                        path: None,
+                    })
+                },
+                cx,
+            )
+        });
+        Row::new("Project icon")
+            .description(
+                project
+                    .favicon_path
+                    .clone()
+                    .unwrap_or_else(|| "Automatic".into()),
+            )
+            .reset(reset)
+            .control(
+                h_flex()
+                    .gap_2()
+                    .child(self.project_icon(&project.id, &project.name, 24.))
+                    .child(
+                        Button::new("choose-project-icon")
+                            .outline()
+                            .small()
+                            .label("Choose file")
+                            .accessibility_label("Choose a project icon file")
+                            .disabled(!local)
+                            .on_click(cx.listener(move |view, _, _, _| {
+                                if let Some(path) = rfd::FileDialog::new()
+                                    .add_filter(
+                                        "Image",
+                                        &["png", "jpg", "jpeg", "svg", "ico", "webp", "gif"],
+                                    )
+                                    .pick_file()
+                                {
+                                    view.perform(Intent::SetProjectIcon {
+                                        project_id: choose.clone(),
+                                        path: Some(path.to_string_lossy().into_owned()),
+                                    });
+                                }
+                            })),
+                    ),
+            )
+            .render()
     }
 
     /// Where a project page's value comes from, beside its description.

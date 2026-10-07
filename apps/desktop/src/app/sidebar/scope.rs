@@ -1,12 +1,9 @@
 //! The project scope picker under the search field: a query, "All
 //! projects" and the projects in sidebar order.
-use super::{
-    super::{
-        Desktop,
-        settings::SettingsPage,
-        ui::{color, icon},
-    },
-    project_badge,
+use super::super::{
+    Desktop,
+    settings::SettingsPage,
+    ui::{color, icon},
 };
 use agent_core::view::sidebar::{
     SidebarProjectScopeItem, filter_sidebar_project_scope_items, project_scope_label_matches,
@@ -127,7 +124,7 @@ impl Desktop {
                     cx.listener(move |view, _, _, cx| view.choose_scope(project_id.clone(), cx)),
                 )
                 .child(match &item.project_id {
-                    Some(_) => project_badge(&item.label, 16.).into_any_element(),
+                    Some(id) => self.project_icon(id, &item.label, 16.),
                     None => icon("folder").size_4().into_any_element(),
                 })
                 .child(

@@ -11,20 +11,26 @@ use agent_core::{
         composer::view::ComposerView,
         models::{
             ProviderInstance,
-            picker::{ModelPickerRow, ModelPickerView, PickerRail, PickerRailItem},
+            picker::{
+                LegacyModelsSection, ModelPickerRow, ModelPickerView, PickerRail, PickerRailItem,
+            },
             traits::{SpeedIcon, TraitControl},
         },
+        new_thread::NewThreadWorkspaceView,
+        projects::selection::ThreadWorkspaceMode,
     },
 };
 use agent_domain::{InteractionMode, RuntimeMode};
 use gpui_kit::{
     component::{
-        Disableable, Selectable, Sizable,
+        Disableable, Selectable, Sizable, WindowExt,
         button::{Button, ButtonVariants},
         h_flex,
         input::{Input, InputEvent, InputState},
         menu::{DropdownMenu, PopupMenuItem},
+        notification::Notification,
         popover::Popover,
+        switch::Switch,
         tooltip::Tooltip,
         v_flex,
     },
@@ -37,6 +43,8 @@ pub(super) struct PickerState {
     pub(super) open: bool,
     query: Entity<InputState>,
     rail: Option<PickerRail>,
+    /// Instances whose "Legacy models" row was toggled since the picker opened.
+    toggled_legacy: Vec<String>,
 }
 impl PickerState {
     pub(super) fn new(
@@ -54,8 +62,51 @@ impl PickerState {
             open: false,
             query,
             rail: None,
+            toggled_legacy: vec![],
         }
     }
+}
+
+/// The new-thread branch picker: open, its search field, and the project
+/// whose branches were last asked for.
+pub(super) struct BranchPickerState {
+    open: bool,
+    query: Entity<InputState>,
+    requested: Option<Option<String>>,
+}
+impl BranchPickerState {
+    pub(super) fn new(
+        window: &mut Window,
+        cx: &mut Context<Desktop>,
+        subscriptions: &mut Vec<Subscription>,
+    ) -> Self {
+        let query = cx.new(|cx| InputState::new(window, cx).placeholder("Search refs..."));
+        subscriptions.push(cx.subscribe(&query, |view, input, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                let query = input.read(cx).value().trim().to_owned();
+                view.perform(Intent::SearchNewThreadBranches { query });
+                cx.notify();
+            }
+        }));
+        Self {
+            open: false,
+            query,
+            requested: None,
+        }
+    }
+}
+
+/// A 24 px control of the strip under the new-thread composer.
+fn strip_control(id: impl Into<ElementId>) -> Button {
+    Button::new(id)
+        .ghost()
+        .xsmall()
+        .h(px(24.))
+        .px(px(7.))
+        .gap_1()
+        .text_xs()
+        .font_weight(FontWeight::NORMAL)
+        .text_color(color("textMuted").opacity(0.7))
 }
 
 /// The runtime mode's icon.
@@ -91,33 +142,54 @@ fn separator() -> Div {
         .bg(color("border"))
 }
 
-/// A provider instance's mark, with its account badge when it has one.
+/// An `#rrggbb` accent color.
+fn accent_color(hex: &str) -> Option<Hsla> {
+    let value = u32::from_str_radix(hex.strip_prefix('#')?, 16).ok()?;
+    Some(rgb(value).into())
+}
+
+/// A provider instance's mark, with its account badge when it has one: the
+/// accent color with white initials, else the card color.
 fn instance_icon(instance: &ProviderInstance, size: f32) -> Div {
+    let accent = instance.accent_color.as_deref().and_then(accent_color);
+    let badge = if accent.is_some() { 12. } else { 14. };
     div()
         .relative()
         .flex_none()
-        .size(px(size))
+        .size(px(size + 4.))
+        .flex()
+        .items_center()
+        .justify_center()
         .child(driver_icon(instance.driver).size(px(size)))
-        .when(instance.show_badge, |mark| {
+        .when(instance.show_badge && size >= 16., |mark| {
             mark.child(
                 div()
                     .absolute()
-                    .right(px(-4.))
-                    .bottom(px(-3.))
-                    .rounded(px(3.))
+                    .right_0()
+                    .bottom_0()
+                    .h(px(badge))
+                    .min_w(px(badge))
                     .px(px(2.))
-                    .bg(color("surfaceOverlay"))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded_full()
                     .border_1()
-                    .border_color(color("border"))
-                    .text_size(px(7.))
-                    .font_weight(FontWeight::BOLD)
+                    .border_color(color("muted"))
+                    .shadow_sm()
+                    .text_size(px(if accent.is_some() { 7. } else { 8. }))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .map(|badge| match accent {
+                        Some(accent) => badge.bg(accent).text_color(hsla(0., 0., 1., 1.)),
+                        None => badge.bg(color("surface")).text_color(color("textMuted")),
+                    })
                     .child(instance.initials.clone()),
             )
         })
 }
 
 impl Desktop {
-    pub(super) fn toggle_model_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn toggle_model_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.set_model_picker(!self.composer.picker.open, window, cx);
     }
 
@@ -125,6 +197,7 @@ impl Desktop {
         self.composer.picker.open = open;
         if !open {
             self.composer.picker.rail = None;
+            self.composer.picker.toggled_legacy.clear();
             self.composer
                 .picker
                 .query
@@ -353,10 +426,11 @@ impl Desktop {
         let open = self.composer.picker.open;
         let picker = open.then(|| {
             let query = self.composer.picker.query.read(cx).value().to_string();
-            Rc::new(
-                self.snapshot
-                    .model_picker(query, self.composer.picker.rail.clone(), vec![]),
-            )
+            Rc::new(self.snapshot.model_picker(
+                query,
+                self.composer.picker.rail.clone(),
+                self.composer.picker.toggled_legacy.clone(),
+            ))
         });
         let query = self.composer.picker.query.clone();
         let focus = query.read(cx).focus_handle(cx);
@@ -391,8 +465,24 @@ impl Desktop {
             .into_any_element()
     }
 
-    /// The Host the new thread runs on, under the draft's composer.
-    pub(super) fn composer_host_strip(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    /// The strip under the draft's composer: the Host the new thread runs
+    /// on, its workspace and its branch.
+    pub(super) fn composer_host_strip(
+        &mut self,
+        workspace: Option<&NewThreadWorkspaceView>,
+        project_id: Option<&String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let requested = Some(project_id.cloned());
+        if self.composer.branches.requested != requested {
+            self.composer.branches.requested = requested;
+            if workspace.is_some() {
+                self.perform(Intent::SearchNewThreadBranches {
+                    query: String::new(),
+                });
+            }
+        }
         let name = self.snapshot.host_name.as_deref().unwrap_or("Local");
         h_flex()
             .mx(px(22.))
@@ -400,10 +490,13 @@ impl Desktop {
             .pb_1()
             .pl_1()
             .pr_2()
-            .rounded_b(px(18.))
+            .gap_1()
+            .rounded_b(px(16.))
             .border_1()
             .border_t_0()
             .border_color(outline())
+            .text_xs()
+            .text_color(color("textMuted").opacity(0.7))
             .child(Hosts::menu(
                 &self.hosts,
                 "composer-host",
@@ -412,8 +505,277 @@ impl Desktop {
                 self.connecting,
                 cx,
             ))
+            .when_some(workspace, |strip, workspace| {
+                strip
+                    .child(div().mx(px(2.)).h(px(14.)).w(px(1.)).bg(color("border")))
+                    .child(self.workspace_select(workspace, cx))
+                    .child(div().flex_1())
+                    .child(self.branch_select(workspace, window, cx))
+            })
             .into_any_element()
     }
+
+    /// "Current checkout" or "New worktree".
+    fn workspace_select(
+        &mut self,
+        workspace: &NewThreadWorkspaceView,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let view = cx.entity().downgrade();
+        let mode = workspace.mode;
+        let local_worktree = mode == ThreadWorkspaceMode::Local && workspace.in_worktree;
+        let local_label = if mode == ThreadWorkspaceMode::Local {
+            workspace.workspace_label.clone()
+        } else {
+            "Current checkout".into()
+        };
+        let local_icon = if local_worktree {
+            "folder-git"
+        } else {
+            "folder"
+        };
+        let trigger_icon = match mode {
+            ThreadWorkspaceMode::Worktree => "folder-git-2",
+            ThreadWorkspaceMode::Local => local_icon,
+        };
+        strip_control("new-thread-workspace")
+            .icon(icon(trigger_icon).size(px(12.)))
+            .label(workspace.workspace_label.clone())
+            .dropdown_caret(true)
+            .accessibility_label("Workspace")
+            .tooltip(workspace.workspace_label.clone())
+            .dropdown_menu_with_anchor(Anchor::BottomLeft, move |menu, _, _| {
+                let local = view.clone();
+                let worktree = view.clone();
+                menu.label("Workspace")
+                    .item(
+                        PopupMenuItem::new(local_label.clone())
+                            .icon(icon(local_icon))
+                            .checked(mode == ThreadWorkspaceMode::Local)
+                            .on_click(on_click(&local, |view, _, _| {
+                                view.perform(Intent::SetNewThreadWorkspace {
+                                    mode: ThreadWorkspaceMode::Local,
+                                })
+                            })),
+                    )
+                    .item(
+                        PopupMenuItem::new("New worktree")
+                            .icon(icon("folder-git-2"))
+                            .checked(mode == ThreadWorkspaceMode::Worktree)
+                            .on_click(on_click(&worktree, |view, _, _| {
+                                view.perform(Intent::SetNewThreadWorkspace {
+                                    mode: ThreadWorkspaceMode::Worktree,
+                                })
+                            })),
+                    )
+            })
+            .into_any_element()
+    }
+
+    fn set_branch_picker(&mut self, open: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.composer.branches.open = open;
+        if open {
+            self.perform(Intent::SearchNewThreadBranches {
+                query: String::new(),
+            });
+        } else {
+            self.composer
+                .branches
+                .query
+                .update(cx, |query, cx| query.set_value("", window, cx));
+        }
+        cx.notify();
+    }
+
+    /// The branch the new thread works on, or the base of its worktree.
+    fn branch_select(
+        &mut self,
+        workspace: &NewThreadWorkspaceView,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let view = cx.entity().downgrade();
+        let query = self.composer.branches.query.clone();
+        let focus = query.read(cx).focus_handle(cx);
+        let trigger = strip_control("new-thread-branch")
+            .disabled(workspace.branches_loading && workspace.branches.is_empty())
+            .icon(icon("git-branch").size(px(12.)).opacity(0.7))
+            .child(
+                div()
+                    .max_w(px(240.))
+                    .truncate()
+                    .child(workspace.branch_label.clone()),
+            )
+            .dropdown_caret(true)
+            .accessibility_label(workspace.branch_role.clone());
+        let workspace = workspace.clone();
+        let on_open = view.clone();
+        Popover::new("new-thread-branch-popover")
+            .anchor(Anchor::BottomRight)
+            .open(self.composer.branches.open)
+            .on_open_change(move |open, window, cx| {
+                let open = *open;
+                let _ = on_open.update(cx, |view, cx| view.set_branch_picker(open, window, cx));
+            })
+            .track_focus(&focus)
+            .p_0()
+            .trigger(trigger)
+            .content(move |_, _, _| branch_list(&workspace, &query, &view).into_any_element())
+            .into_any_element()
+    }
+}
+
+/// The branch picker's popup: search, the branches, and "Start from origin"
+/// while choosing a worktree's base.
+fn branch_list(
+    workspace: &NewThreadWorkspaceView,
+    query: &Entity<InputState>,
+    view: &WeakEntity<Desktop>,
+) -> Div {
+    let rows = workspace.branches.iter().map(|branch| {
+        let (name, worktree_path) = (branch.name.clone(), branch.worktree_path.clone());
+        h_flex()
+            .id(SharedString::from(format!("branch-{}", branch.name)))
+            .w_full()
+            .min_h_7()
+            .gap_2()
+            .px_2()
+            .py_1()
+            .rounded_sm()
+            .text_sm()
+            .cursor_pointer()
+            .when(branch.selected, |row| row.bg(color("text").opacity(0.08)))
+            .hover(|row| row.bg(color("accentSurface")))
+            .on_click(on_click(view, move |view, window, cx| {
+                view.perform_then(
+                    Intent::SelectNewThreadBranch {
+                        branch: name.clone(),
+                        worktree_path: worktree_path.clone(),
+                    },
+                    |_, result, window, cx| {
+                        if let Err(error) = result {
+                            window.push_notification(
+                                Notification::error(
+                                    agent_core::presentation::error::error_message(error),
+                                )
+                                .title("Could not switch branch"),
+                                cx,
+                            );
+                        }
+                    },
+                );
+                view.set_branch_picker(false, window, cx);
+                view.focus_composer(window, cx);
+            }))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .child(branch.name.clone()),
+            )
+            .children(branch.badge.clone().map(|badge| {
+                div()
+                    .flex_shrink_0()
+                    .text_size(px(10.))
+                    .text_color(color("textMuted").opacity(0.45))
+                    .child(badge)
+            }))
+    });
+    let status = if workspace.branches_loading {
+        Some("Loading refs...".to_owned())
+    } else {
+        workspace.branch_error.clone()
+    };
+    let list = if workspace.branches.is_empty() {
+        div()
+            .p_2()
+            .text_center()
+            .text_sm()
+            .text_color(color("textMuted"))
+            .child(status.clone().unwrap_or_else(|| "No refs found.".into()))
+            .into_any_element()
+    } else {
+        v_flex()
+            .id("branch-list")
+            .max_h(px(224.))
+            .overflow_y_scroll()
+            .pl_1()
+            .pt_2()
+            .pb_1()
+            .children(rows)
+            .into_any_element()
+    };
+    let origin = (workspace.mode == ThreadWorkspaceMode::Worktree).then(|| {
+        let toggle = view.clone();
+        let on = workspace.start_from_origin;
+        h_flex()
+            .id("start-from-origin")
+            .justify_between()
+            .gap_2()
+            .px_3()
+            .py_2()
+            .border_t_1()
+            .border_color(tint("border", 0.6))
+            .text_xs()
+            .tooltip(|window, cx| {
+                Tooltip::new(
+                    "Creates the worktree from the latest matching branch on origin instead of your local branch.",
+                )
+                .build(window, cx)
+            })
+            .child(
+                h_flex()
+                    .gap_1p5()
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(color("textMuted"))
+                    .child(icon("refresh-cw").size(px(12.)))
+                    .child("Start from origin"),
+            )
+            .child(
+                Switch::new("start-from-origin-switch")
+                    .small()
+                    .checked(on)
+                    .accessibility_label("Start worktree from origin")
+                    .on_click(move |on: &bool, _, cx| {
+                        let on = *on;
+                        let _ = toggle.update(cx, |view, _| {
+                            view.perform(Intent::SetNewThreadStartFromOrigin { on })
+                        });
+                    }),
+            )
+    });
+    v_flex()
+        .w(px(320.))
+        .child(
+            div().px_3().pt(px(10.)).child(
+                div()
+                    .pb(px(6.))
+                    .border_b_1()
+                    .border_color(tint("border", 0.7))
+                    .child(
+                        Input::new(query).appearance(false).small().prefix(
+                            icon("search")
+                                .size(px(16.))
+                                .text_color(color("textMuted").opacity(0.55)),
+                        ),
+                    ),
+            ),
+        )
+        .child(list)
+        .children(
+            status
+                .filter(|_| !workspace.branches.is_empty())
+                .map(|status| {
+                    div()
+                        .px_3()
+                        .py_1()
+                        .text_xs()
+                        .text_color(color("textMuted"))
+                        .child(status)
+                }),
+        )
+        .children(origin)
 }
 
 /// The picker: the provider rail, the search field and the model rows.
@@ -439,11 +801,15 @@ fn model_picker_content(
                     .map(|(index, item)| rail_item(index, item, view)),
             )
     });
-    let rows = picker
+    let mut rows = picker
         .rows
         .iter()
         .map(|row| model_row(row, view))
         .collect::<Vec<_>>();
+    if let Some(legacy) = &picker.legacy {
+        let at = (legacy.current_count as usize).min(rows.len());
+        rows.insert(at, legacy_row(legacy, view));
+    }
     h_flex()
         .w(px(360.))
         .max_h(px(346.))
@@ -495,6 +861,62 @@ fn model_picker_content(
         )
 }
 
+/// The collapsible "Legacy models" row after an instance's current models.
+fn legacy_row(legacy: &LegacyModelsSection, view: &WeakEntity<Desktop>) -> AnyElement {
+    let instance = legacy.instance_id.clone();
+    h_flex()
+        .id(SharedString::from(format!("model-row-{}", legacy.key)))
+        .w_full()
+        .min_w_0()
+        .items_center()
+        .gap_2()
+        .rounded_sm()
+        .px_2()
+        .py_1()
+        .cursor_pointer()
+        .hover(|item| item.bg(color("accentSurface")))
+        .on_click(on_click(view, move |view, _, cx| {
+            let toggled = &mut view.composer.picker.toggled_legacy;
+            match toggled.iter().position(|id| *id == instance) {
+                Some(index) => {
+                    toggled.remove(index);
+                }
+                None => toggled.push(instance.clone()),
+            }
+            cx.notify();
+        }))
+        .child(
+            v_flex()
+                .flex_1()
+                .min_w_0()
+                .child(
+                    div()
+                        .truncate()
+                        .text_xs()
+                        .font_weight(FontWeight::MEDIUM)
+                        .child(legacy.label.clone()),
+                )
+                .child(
+                    div()
+                        .mt_1()
+                        .truncate()
+                        .text_xs()
+                        .text_color(color("textMuted").opacity(0.7))
+                        .child(legacy.detail.clone()),
+                ),
+        )
+        .child(
+            icon(if legacy.expanded {
+                "chevron-down"
+            } else {
+                "chevron-right"
+            })
+            .size(px(16.))
+            .text_color(color("textMuted")),
+        )
+        .into_any_element()
+}
+
 fn rail_item(index: usize, item: &PickerRailItem, view: &WeakEntity<Desktop>) -> AnyElement {
     let rail = item.rail.clone();
     let tooltip = item.tooltip.clone();
@@ -509,16 +931,28 @@ fn rail_item(index: usize, item: &PickerRailItem, view: &WeakEntity<Desktop>) ->
         .child(
             div()
                 .id(("model-rail", index))
+                .relative()
                 .size(px(36.))
                 .flex()
                 .items_center()
                 .justify_center()
                 .rounded_md()
-                .when(item.selected, |cell| cell.bg(color("accentSurface")))
+                .when(item.selected, |cell| {
+                    cell.child(
+                        div()
+                            .absolute()
+                            .right(px(-4.))
+                            .top(px(8.))
+                            .h(px(20.))
+                            .w(px(3.))
+                            .rounded_l_full()
+                            .bg(color("accent")),
+                    )
+                })
                 .when(item.disabled, |cell| cell.opacity(0.5))
                 .when(!item.disabled, |cell| {
                     cell.cursor_pointer()
-                        .hover(|cell| cell.bg(color("accentSurface")))
+                        .hover(|cell| cell.bg(color("text").opacity(0.1)))
                         .on_click(on_click(view, move |view, _, cx| {
                             view.composer.picker.rail = Some(rail.clone());
                             cx.notify();
@@ -551,10 +985,10 @@ fn model_row(row: &ModelPickerRow, view: &WeakEntity<Desktop>) -> AnyElement {
         .min_w_0()
         .items_center()
         .gap_2()
-        .rounded_md()
+        .rounded_sm()
         .px_2()
-        .py(px(6.))
-        .when(row.selected, |item| item.bg(color("accentSurface")))
+        .py_1()
+        .when(row.selected, |item| item.bg(color("text").opacity(0.08)))
         .map(|item| match disabled.clone() {
             Some(reason) => item
                 .opacity(0.64)

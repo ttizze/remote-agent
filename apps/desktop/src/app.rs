@@ -6,6 +6,7 @@ mod dialogs;
 mod dictation;
 mod header;
 mod hosts;
+mod keymap;
 mod menus;
 mod panel;
 mod settings;
@@ -13,7 +14,12 @@ mod sidebar;
 mod timeline;
 mod ui;
 
-pub(crate) use ui::{apply_appearance, color};
+pub(crate) use ui::{apply_appearance, color, diff_colors};
+
+/// Whether long lines wrap by default.
+pub(crate) fn ui_word_wrap() -> bool {
+    ui::appearance().word_wrap
+}
 
 use crate::{Runtime, platform, store_session::StoreSession};
 use agent_core::{
@@ -119,6 +125,10 @@ pub(crate) struct Desktop {
     pub(crate) menus: menus::MenuState,
     pub(crate) attachments: attachments::AttachmentCache,
     pub(crate) dictation: Option<dictation::Dictation>,
+    /// Decoded project icons, by content hash.
+    pub(crate) project_icons: std::cell::RefCell<std::collections::HashMap<String, Arc<Image>>>,
+    /// The keyboard shortcuts, the user's over the defaults.
+    pub(crate) keymap: keymap::Keymap,
     tick: Option<tokio_util::task::AbortOnDropHandle<()>>,
     _subscriptions: Vec<Subscription>,
 }
@@ -215,6 +225,8 @@ impl Desktop {
             menus,
             attachments: attachments::AttachmentCache::new(),
             dictation: None,
+            project_icons: Default::default(),
+            keymap: keymap::Keymap::default(),
             tick: None,
             _subscriptions: subscriptions,
         };
@@ -389,7 +401,7 @@ impl Desktop {
             thread: ThreadViewOptions {
                 layout: TimelineLayout::Desktop,
                 disclosure: self.timeline.disclosure(),
-                panels: self.panels.header_panels(),
+                panels: self.header_panels(),
                 composer: self.composer.options(),
                 show_scroll_to_end: false,
             },
@@ -515,7 +527,6 @@ impl Desktop {
 
     fn outcome(&mut self, outcome: &Outcome, window: &mut Window, cx: &mut Context<Self>) {
         self.composer_outcome(outcome, window, cx);
-        self.panel_outcome(outcome, window, cx);
     }
 
     fn snapshot_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -528,6 +539,7 @@ impl Desktop {
         self.sync_composer(window, cx);
         self.sync_panels(window, cx);
         self.sync_settings(window, cx);
+        self.offer_onboarding_import(window, cx);
         self.schedule_views(cx);
     }
 
@@ -566,6 +578,7 @@ impl Desktop {
         cx.notify();
     }
 
+    /// Runs the command the keymap binds to this keystroke where focus is.
     fn global_key(
         &mut self,
         event: &KeyDownEvent,
@@ -573,22 +586,40 @@ impl Desktop {
         cx: &mut Context<Self>,
     ) -> bool {
         let keystroke = &event.keystroke;
-        let modifiers = keystroke.modifiers;
-        if !modifiers.secondary() {
+        if keymap::is_modifier_only(keystroke) || self.settings.recording_shortcut() {
             return false;
         }
-        if self.panel_key(event, window, cx) {
-            return true;
-        }
-        let key = keystroke.key.as_str();
-        match (key, modifiers.shift, modifiers.alt) {
-            ("b", false, false) => {
+        let context = keymap::KeyContext {
+            terminal_focus: self.terminal_focused(window, cx),
+            terminal_open: self.header_panels().terminal_open,
+            composer_focus: self.composer_focused(window, cx),
+        };
+        let key = keymap::keystroke_key(keystroke);
+        let Some(command) = self.keymap.resolve(&key, &context) else {
+            return false;
+        };
+        self.run_command(&command, window, cx)
+    }
+
+    /// Runs a keyboard command; false when it does nothing here.
+    fn run_command(&mut self, command: &str, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        match command {
+            "sidebar.toggle" => {
                 self.sidebar_hidden = !self.sidebar_hidden;
                 cx.notify();
             }
-            ("b", false, true) => self.toggle_right_panel(window, cx),
-            ("j", false, false) => self.toggle_terminal_drawer(window, cx),
-            ("n", false, false) | ("o", true, false) => {
+            "rightPanel.toggle" => self.toggle_right_panel(window, cx),
+            "terminal.toggle" => self.toggle_terminal_drawer(window, cx),
+            "terminal.split" | "terminal.splitVertical" | "terminal.new" | "terminal.close" => {
+                return self.terminal_command(command, window, cx);
+            }
+            "rightPanel.close" => return self.close_active_surface(window, cx),
+            "diff.toggle" => self.toggle_diff(window, cx),
+            "composer.stash" => self.composer_stash_shortcut(cx),
+            "thread.steerQueuedMessage" => self.steer_first_queued(),
+            "thread.editQueuedMessage" => return self.edit_last_queued(),
+            "modelPicker.toggle" => self.toggle_model_picker(window, cx),
+            "chat.new" => {
                 let project = self
                     .snapshot
                     .selected_thread
@@ -598,22 +629,25 @@ impl Desktop {
                     .or_else(|| self.snapshot.selected_project.clone());
                 self.new_thread(project, cx);
             }
-            ("[", true, false) => self.select_adjacent_thread(false, cx),
-            ("]", true, false) => self.select_adjacent_thread(true, cx),
-            ("s", true, false) => self.toggle_open_thread(
+            "thread.previous" => self.select_adjacent_thread(false, cx),
+            "thread.next" => self.select_adjacent_thread(true, cx),
+            "thread.settle" => self.toggle_open_thread(
                 (ThreadMenuItemId::Settle, ThreadMenuItemId::Unsettle),
                 window,
                 cx,
             ),
-            ("p", true, false) => self.toggle_open_thread(
+            "thread.pin" => self.toggle_open_thread(
                 (ThreadMenuItemId::Pin, ThreadMenuItemId::Unpin),
                 window,
                 cx,
             ),
-            (digit @ ("1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9"), false, false) => {
-                self.jump_to_thread(digit.parse::<usize>().unwrap_or(1) - 1, cx)
-            }
-            _ => return false,
+            other => match other
+                .strip_prefix("thread.jump.")
+                .and_then(|digit| digit.parse::<usize>().ok())
+            {
+                Some(index @ 1..=9) => self.jump_to_thread(index - 1, cx),
+                _ => return false,
+            },
         }
         true
     }
@@ -637,24 +671,19 @@ impl Render for Desktop {
                     self.render_new_thread(window, cx)
                 };
                 let body = self.chat_drop_target(body, cx);
+                let body = self.details_area(body, window, cx);
                 let column = v_flex()
                     .flex_1()
                     .min_w_0()
                     .h_full()
                     .child(self.render_header(window, cx))
                     .child(
-                        h_flex()
+                        v_flex()
                             .flex_1()
                             .min_h_0()
-                            .child(
-                                v_flex()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .h_full()
-                                    .child(body)
-                                    .children(self.render_terminal_drawer(window, cx)),
-                            )
-                            .children(self.render_thread_details(window, cx)),
+                            .min_w_0()
+                            .child(body)
+                            .children(self.render_terminal_drawer(window, cx)),
                     );
                 h_flex()
                     .flex_1()

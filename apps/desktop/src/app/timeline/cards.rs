@@ -388,6 +388,17 @@ pub(super) fn render_setup_card(
                 });
             })
     });
+    let work_locally = (card.can_work_locally && !embedded).then(|| {
+        let owner = owner.clone();
+        Button::new("setup-work-locally")
+            .icon(icon("laptop"))
+            .label("Work locally")
+            .ghost()
+            .xsmall()
+            .on_click(move |_, _, cx| {
+                let _ = owner.update(cx, |view, _| view.perform(Intent::WorkLocally));
+            })
+    });
     let cancel = (card.can_cancel && !embedded).then(|| {
         Button::new("setup-cancel")
             .icon(icon("x"))
@@ -433,6 +444,7 @@ pub(super) fn render_setup_card(
                         .on_click(toggle_details),
                 )
                 .children(terminal)
+                .children(work_locally)
                 .children(cancel),
         )
         .into_any_element()

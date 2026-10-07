@@ -608,9 +608,18 @@ impl Desktop {
                 );
             }
             ThreadMenuAction::FilterProject { project_id } => self.filter_project(project_id, cx),
-            // No intent carries the branch yet: the draft opens in the project.
-            ThreadMenuAction::NewThreadOnBranch { project_id, .. } => {
-                self.new_thread(Some(project_id), cx)
+            ThreadMenuAction::NewThreadOnBranch {
+                project_id,
+                branch,
+                worktree_path,
+            } => {
+                self.route = super::Route::Chat;
+                self.perform(Intent::NewThreadOnBranch {
+                    project_id,
+                    branch,
+                    worktree_path,
+                });
+                cx.notify();
             }
             ThreadMenuAction::CustomSnooze => {
                 self.open_custom_snooze(vec![thread_id], surface, window, cx)

@@ -121,6 +121,17 @@ impl GeneralState {
     }
 }
 
+/// The icon of a permissions choice, as the composer's runtime mode shows it.
+fn runtime_mode_icon(id: &str) -> Option<&'static str> {
+    match id {
+        "approval-required" => Some("lock"),
+        "auto-accept-edits" => Some("pen-line"),
+        "auto" => Some("sparkles"),
+        "full-access" => Some("lock-open"),
+        _ => None,
+    }
+}
+
 impl Desktop {
     /// The scope the open settings page edits.
     pub(super) fn settings_scope(&self) -> Option<SettingsScope> {
@@ -289,6 +300,9 @@ impl Desktop {
                             id: choice.id.clone(),
                             label: choice.label.clone(),
                             description: choice.description.clone(),
+                            icon: (id == SettingId::DefaultPermissions)
+                                .then(|| runtime_mode_icon(&choice.id))
+                                .flatten(),
                             selected: Some(&choice.id) == selected.as_ref(),
                         })
                         .collect(),

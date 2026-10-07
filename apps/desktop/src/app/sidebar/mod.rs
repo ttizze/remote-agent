@@ -33,7 +33,7 @@ use gpui_kit::{
     *,
 };
 use scope::ScopeMenu;
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 /// How long the secondary modifier is held before the jump hints show.
 const JUMP_HINT_DELAY: Duration = Duration::from_millis(200);
@@ -109,6 +109,41 @@ pub(crate) fn project_badge(name: &str, size: f32) -> Div {
         .font_weight(FontWeight::BOLD)
         .font_family("Menlo")
         .child(identity.monogram)
+}
+
+/// A project's icon at `size`: the Host's image, else its generated badge.
+pub(crate) fn project_mark(image: Option<Arc<Image>>, name: &str, size: f32) -> AnyElement {
+    match image {
+        Some(image) => img(image)
+            .size(px(size))
+            .flex_shrink_0()
+            .rounded(px(size / 4.))
+            .object_fit(ObjectFit::Contain)
+            .into_any_element(),
+        None => project_badge(name, size).into_any_element(),
+    }
+}
+
+impl Desktop {
+    /// The project's icon image, decoded once per icon.
+    pub(crate) fn project_icon_image(&self, project_id: &str) -> Option<Arc<Image>> {
+        let hash = self.snapshot.project_icon_hash(project_id.to_owned())?;
+        if let Some(image) = self.project_icons.borrow().get(&hash) {
+            return Some(image.clone());
+        }
+        let icon = self.snapshot.project_icon(project_id.to_owned())?;
+        let format = ImageFormat::from_mime_type(&icon.mime_type)?;
+        let image = Arc::new(Image::from_bytes(format, icon.data));
+        self.project_icons
+            .borrow_mut()
+            .insert(icon.hash, image.clone());
+        Some(image)
+    }
+
+    /// The project's icon at `size`.
+    pub(crate) fn project_icon(&self, project_id: &str, name: &str, size: f32) -> AnyElement {
+        project_mark(self.project_icon_image(project_id), name, size)
+    }
 }
 
 /// A 28 px sidebar header button with a tooltip.
@@ -210,7 +245,12 @@ impl Desktop {
             .project_scope
             .iter()
             .find(|item| item.selected && item.project_id.is_some())
-            .map(|item| item.label.clone());
+            .map(|item| {
+                (
+                    item.project_id.clone().unwrap_or_default(),
+                    item.label.clone(),
+                )
+            });
         let search = h_flex()
             .id("sidebar-search")
             .h_8()
@@ -268,11 +308,11 @@ impl Desktop {
                             header_button(
                                 "project-scope",
                                 match &scoped {
-                                    Some(name) => project_badge(name, 16.).into_any_element(),
+                                    Some((id, name)) => self.project_icon(id, name, 16.),
                                     None => icon("folder").size_4().into_any_element(),
                                 },
                                 match &scoped {
-                                    Some(name) => {
+                                    Some((_, name)) => {
                                         format!("Filter threads by project: {name}").into()
                                     }
                                     None => "Filter threads by project".into(),

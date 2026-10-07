@@ -1,7 +1,10 @@
 //! The new-thread hero: "What should we build in {project}?" over a composer
 //! centred in the chat column.
 use super::{Desktop, on_click};
-use crate::app::ui::{color, icon};
+use crate::app::{
+    sidebar::project_mark,
+    ui::{color, icon},
+};
 use agent_core::view::composer::hero::{DraftHeroHeadline, DraftHeroHeadlineKind};
 use gpui_kit::{
     component::{
@@ -119,6 +122,16 @@ impl Desktop {
                 .into_any_element();
         }
         let view = cx.entity().downgrade();
+        let images: std::collections::HashMap<String, Option<std::sync::Arc<Image>>> = hero
+            .project_choices
+            .iter()
+            .map(|choice| {
+                (
+                    choice.project_id.clone(),
+                    self.project_icon_image(&choice.project_id),
+                )
+            })
+            .collect();
         let hero = hero.clone();
         base.dropdown_menu_with_anchor(Anchor::TopCenter, move |mut menu, _, _| {
             if hero.no_project_choice {
@@ -131,13 +144,21 @@ impl Desktop {
             }
             for choice in &hero.project_choices {
                 let project = choice.project_id.clone();
+                let (name, image) = (
+                    choice.name.clone(),
+                    images.get(&choice.project_id).cloned().flatten(),
+                );
                 menu = menu.item(
-                    PopupMenuItem::new(choice.name.clone())
-                        .icon(icon("folder"))
-                        .checked(choice.selected)
-                        .on_click(on_click(&view, move |view, _, cx| {
-                            view.new_thread(Some(project.clone()), cx)
-                        })),
+                    PopupMenuItem::element(move |_, _| {
+                        h_flex()
+                            .gap_2()
+                            .child(project_mark(image.clone(), &name, 16.))
+                            .child(name.clone())
+                    })
+                    .checked(choice.selected)
+                    .on_click(on_click(&view, move |view, _, cx| {
+                        view.new_thread(Some(project.clone()), cx)
+                    })),
                 );
             }
             menu.separator().item(

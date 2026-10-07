@@ -4,6 +4,7 @@ use super::{
     Desktop, cards::render_setup_card, chevron, color, icon, local_time, markdown::chat_markdown,
     mono, shimmer_label, tint,
 };
+use agent_core::state::Intent;
 use agent_core::view::thread::ThreadView;
 use agent_core::view::{
     time::upcoming_timestamp,
@@ -199,7 +200,23 @@ fn render_failure(
     failure: &ProviderFailureRow,
     format: agent_core::view::time::TimestampFormat,
     timestamp: Option<AnyElement>,
+    cx: &mut Context<Desktop>,
 ) -> AnyElement {
+    let retry = failure.retry_preparation.as_ref().map(|run| {
+        let run_id = run.to_string();
+        div().ml(px(28.)).pb_1().child(
+            Button::new(SharedString::from(format!("retry-preparation-{id}")))
+                .outline()
+                .xsmall()
+                .icon(icon("rotate-ccw"))
+                .label("Retry")
+                .on_click(cx.listener(move |view, _, _, _| {
+                    view.perform(Intent::RetryPreparation {
+                        run_id: run_id.clone(),
+                    })
+                })),
+        )
+    });
     let tone = if failure.warning {
         color("warning")
     } else {
@@ -241,6 +258,7 @@ fn render_failure(
                     .child(failure.message.clone()),
             )
         })
+        .children(retry)
         .into_any_element()
 }
 
@@ -389,7 +407,7 @@ impl Desktop {
                     Some(&failure.created_at),
                     None,
                 );
-                render_failure(&row.id, failure, self.timestamp_format(), timestamp)
+                render_failure(&row.id, failure, self.timestamp_format(), timestamp, cx)
             }
         }
     }

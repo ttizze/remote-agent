@@ -339,12 +339,10 @@ fn line<const N: usize>(
     text: SharedString,
     wrap: bool,
 ) -> impl IntoElement {
+    let (addition, deletion) = crate::app::diff_colors();
     let (background, gutter) = match kind {
-        '+' => (
-            tint("successForeground", 0.10),
-            tint("successForeground", 0.18),
-        ),
-        '-' => (tint("error", 0.10), tint("error", 0.18)),
+        '+' => (addition.opacity(0.10), addition.opacity(0.18)),
+        '-' => (deletion.opacity(0.10), deletion.opacity(0.18)),
         _ => (color("codeBackground"), color("codeBackground")),
     };
     let content: SharedString = text.get(1..).unwrap_or_default().to_owned().into();
@@ -367,8 +365,8 @@ fn line<const N: usize>(
                 .justify_end()
                 .bg(gutter)
                 .text_color(match kind {
-                    '+' => color("successForeground"),
-                    '-' => color("errorForeground"),
+                    '+' => addition,
+                    '-' => deletion,
                     _ => tint("textMuted", 0.7),
                 })
                 .child(number.map(|n| n.to_string()).unwrap_or_default())
@@ -386,24 +384,17 @@ fn line<const N: usize>(
 
 /// `+12 −3` in the diff colors.
 pub(crate) fn diff_stat(additions: Option<u64>, deletions: Option<u64>) -> impl IntoElement {
+    let (addition, deletion) = crate::app::diff_colors();
     h_flex()
         .gap_1()
         .flex_shrink_0()
         .text_size(px(11.))
         .line_height(px(16.))
         .when_some(additions, |stat, n| {
-            stat.child(
-                div()
-                    .text_color(color("successForeground"))
-                    .child(format!("+{n}")),
-            )
+            stat.child(div().text_color(addition).child(format!("+{n}")))
         })
         .when_some(deletions, |stat, n| {
-            stat.child(
-                div()
-                    .text_color(color("errorForeground"))
-                    .child(format!("−{n}")),
-            )
+            stat.child(div().text_color(deletion).child(format!("−{n}")))
         })
 }
 

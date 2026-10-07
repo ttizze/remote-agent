@@ -132,7 +132,7 @@ impl Desktop {
                 composer
                     .context_meter
                     .as_ref()
-                    .map(|meter| self.composer_context_meter(meter)),
+                    .map(|meter| self.composer_context_meter(meter, cx)),
             )
             .child(self.composer_primary_action(composer, cx))
             .into_any_element()
@@ -209,8 +209,13 @@ impl Desktop {
     }
 
     /// The ring and, on click, the context window's numbers.
-    fn composer_context_meter(&self, meter: &ContextWindowMeter) -> AnyElement {
+    fn composer_context_meter(
+        &self,
+        meter: &ContextWindowMeter,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let details = meter.clone();
+        let owner = cx.entity().downgrade();
         let trigger = Button::new("context-meter")
             .ghost()
             .small()
@@ -220,7 +225,7 @@ impl Desktop {
         Popover::new("context-meter-popover")
             .anchor(Anchor::BottomRight)
             .trigger(trigger)
-            .content(move |_, _, _| context_meter_details(&details))
+            .content(move |_, _, _| context_meter_details(&details, owner.clone()))
             .into_any_element()
     }
 
@@ -393,7 +398,7 @@ fn stop_button(tooltip: String, cx: &mut Context<Desktop>) -> Stateful<Div> {
         .child(div().size(px(8.)).rounded(px(1.5)).bg(hsla(0., 0., 1., 1.)))
 }
 
-fn context_meter_details(meter: &ContextWindowMeter) -> Div {
+fn context_meter_details(meter: &ContextWindowMeter, owner: WeakEntity<Desktop>) -> Div {
     let usage = if meter.overloaded {
         color("error")
     } else {
@@ -459,8 +464,6 @@ fn context_meter_details(meter: &ContextWindowMeter) -> Div {
             )
         })
         .when_some(meter.compact.clone(), |column, compact| {
-            // The Host takes no compaction request yet, so the button stays
-            // disabled; agent-core does not offer it either.
             column
                 .child(
                     Button::new("compact-context")
@@ -470,10 +473,17 @@ fn context_meter_details(meter: &ContextWindowMeter) -> Div {
                         .mt_1()
                         .icon(icon("minimize-2"))
                         .label(compact.label)
-                        .disabled(true),
+                        .disabled(compact.disabled)
+                        .on_click(move |_, _, cx| {
+                            let _ =
+                                owner.update(cx, |view, _| view.perform(Intent::CompactContext));
+                        }),
                 )
-                .when_some(compact.disabled_reason, |column, reason| {
-                    column.child(text_2xs(div()).text_color(color("textMuted")).child(reason))
-                })
+                .when_some(
+                    compact.disabled_reason.filter(|_| compact.disabled),
+                    |column, reason| {
+                        column.child(text_2xs(div()).text_color(color("textMuted")).child(reason))
+                    },
+                )
         })
 }

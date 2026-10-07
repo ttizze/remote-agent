@@ -1,6 +1,7 @@
-//! The thread's terminals: the drawer under the chat column, which the right
-//! panel's Terminal tab shows instead while it is open.
-use super::{PanelTab, tab_close_button, with_shortcut};
+//! The thread's terminals: the drawer under the chat column and the right
+//! panel's terminal surfaces. Each terminal is held by one of them; the
+//! drawer shows the thread's terminals no surface holds.
+use super::{Surface, tab_close_button, with_shortcut};
 use crate::{
     app::{
         Desktop,
@@ -8,8 +9,12 @@ use crate::{
     },
     terminal::Terminal,
 };
-use agent_core::{state::Intent, view::terminals::TerminalTab};
-use agent_protocol::operations::TerminalSize;
+use agent_core::{
+    connection::Outcome,
+    state::{Intent, TerminalPhase},
+    view::terminals::TerminalTab,
+};
+use agent_protocol::operations::{TerminalSize, terminal_label, thread_terminal_handle_for};
 use gpui_kit::{
     component::{Sizable, button::Button, h_flex, tooltip::Tooltip, v_flex},
     prelude::FluentBuilder,
@@ -52,31 +57,57 @@ fn groups(tabs: &[TerminalTab]) -> Vec<(&str, Vec<&TerminalTab>)> {
     groups
 }
 
+/// "Close terminal "a"?" or "Close 2 terminals?", and what closing does.
+fn close_confirmation(labels: &[String]) -> (String, String) {
+    match labels {
+        [label] => (
+            format!("Close terminal \"{label}\"?"),
+            "This stops the running process and clears its history.".into(),
+        ),
+        labels => (
+            format!("Close {} terminals?", labels.len()),
+            format!(
+                "This stops their running processes and clears their histories: {}.",
+                labels
+                    .iter()
+                    .map(|label| format!("\"{label}\""))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        ),
+    }
+}
+
+/// One thread's drawer.
+#[derive(Default)]
+struct Drawer {
+    open: bool,
+    active: Option<String>,
+    /// Groups split top to bottom.
+    stacked: HashSet<String>,
+}
+
 pub(super) struct TerminalState {
     views: HashMap<(String, String), Entity<Terminal>>,
-    /// The selected terminal of each thread.
-    active: HashMap<String, String>,
-    /// Threads whose drawer is open.
-    open: HashSet<String>,
-    /// Groups split top to bottom, by thread.
-    stacked: HashSet<(String, String)>,
+    drawers: HashMap<String, Drawer>,
     /// The thread whose terminals are shown.
     thread: Option<String>,
     height: f32,
     focus_request: Option<(String, String)>,
     creating: bool,
+    /// Exited terminals already being closed.
+    exited: HashSet<(String, String)>,
 }
 impl Default for TerminalState {
     fn default() -> Self {
         Self {
             views: HashMap::new(),
-            active: HashMap::new(),
-            open: HashSet::new(),
-            stacked: HashSet::new(),
+            drawers: HashMap::new(),
             thread: None,
             height: DRAWER_DEFAULT_HEIGHT,
             focus_request: None,
             creating: false,
+            exited: HashSet::new(),
         }
     }
 }
@@ -84,51 +115,123 @@ impl TerminalState {
     pub(super) fn drawer_open(&self) -> bool {
         self.thread
             .as_ref()
-            .is_some_and(|thread| self.open.contains(thread))
+            .and_then(|thread| self.drawers.get(thread))
+            .is_some_and(|drawer| drawer.open)
     }
-    pub(super) fn set_drawer_open(&mut self, thread: &str, open: bool) {
-        if open {
-            self.open.insert(thread.to_owned());
-        } else {
-            self.open.remove(thread);
-        }
+    fn drawer(&mut self, thread: &str) -> &mut Drawer {
+        self.drawers.entry(thread.to_owned()).or_default()
     }
-    fn active_id<'a>(&self, thread: &str, tabs: &'a [TerminalTab]) -> Option<&'a str> {
-        let selected = self.active.get(thread);
-        tabs.iter()
-            .find(|tab| Some(&tab.terminal_id) == selected)
-            .or(tabs.first())
-            .map(|tab| tab.terminal_id.as_str())
+    pub(super) fn request_focus(&mut self, thread: String, terminal_id: String) {
+        self.focus_request = Some((thread, terminal_id));
     }
 }
 
+/// Where a terminal action applies: the drawer or one panel surface.
+#[derive(Clone, PartialEq)]
+enum Place {
+    Drawer,
+    Surface(String),
+}
+
 impl Desktop {
-    /// Keeps a view for each terminal of the shown thread and feeds them the
-    /// snapshot; views of hidden terminals drop and detach.
+    /// The thread's terminals the drawer shows: those no panel surface holds.
+    fn drawer_tabs(&self, thread: &str) -> Vec<TerminalTab> {
+        let held: HashSet<&String> = self.right().terminal_ids().collect();
+        self.snapshot
+            .terminals(thread.to_owned())
+            .into_iter()
+            .filter(|tab| !held.contains(&tab.terminal_id))
+            .collect()
+    }
+
+    /// A panel surface's terminals, in its order; one not opened yet shows
+    /// under its default name.
+    fn surface_tabs(&self, thread: &str, terminal_ids: &[String]) -> Vec<TerminalTab> {
+        let tabs = self.snapshot.terminals(thread.to_owned());
+        let group = terminal_ids.first().cloned().unwrap_or_default();
+        terminal_ids
+            .iter()
+            .map(|id| {
+                let tab = tabs.iter().find(|tab| &tab.terminal_id == id);
+                TerminalTab {
+                    terminal_id: id.clone(),
+                    group: group.clone(),
+                    label: tab.map_or_else(|| terminal_label(id), |tab| tab.label.clone()),
+                    status: tab.map(|tab| tab.status.clone()).unwrap_or_default(),
+                    running: tab.is_some_and(|tab| tab.running),
+                    running_process: tab.is_some_and(|tab| tab.running_process),
+                    menu_status: tab.map(|tab| tab.menu_status.clone()).unwrap_or_default(),
+                    exited: tab.is_some_and(|tab| tab.exited),
+                }
+            })
+            .collect()
+    }
+
+    /// The panel surface holding `terminal_id`.
+    fn surface_of(&self, terminal_id: &str) -> Option<String> {
+        self.right()
+            .surfaces
+            .iter()
+            .find(|surface| {
+                matches!(surface, Surface::Terminal { terminal_ids, .. }
+                    if terminal_ids.iter().any(|id| id == terminal_id))
+            })
+            .map(Surface::id)
+    }
+
+    /// Keeps a view for each terminal on screen and feeds them the snapshot;
+    /// views of hidden terminals drop and detach. A shown terminal whose
+    /// process exited closes.
     pub(super) fn sync_terminals(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let thread = self.thread_id();
         if thread != self.panels.terminals.thread {
             self.panels.terminals.thread = thread.clone();
             self.refresh_views(cx);
         }
-        let shown = self.panels.terminals.drawer_open() || self.panels.shows(PanelTab::Terminal);
-        let (Some(thread), Some(store), true) = (thread, self.store(), shown) else {
+        let (Some(thread), Some(store)) = (thread, self.store()) else {
             self.panels.terminals.views.clear();
             return;
         };
-        let tabs = self.snapshot.terminals(thread.clone());
+        let mut shown: Vec<String> = vec![];
+        if self.panels.terminals.drawer_open() {
+            shown.extend(
+                self.drawer_tabs(&thread)
+                    .into_iter()
+                    .map(|tab| tab.terminal_id),
+            );
+        }
+        if self.right().open
+            && let Some(Surface::Terminal { terminal_ids, .. }) = self.right().active_surface()
+        {
+            shown.extend(terminal_ids.iter().cloned());
+        }
+        let exited: Vec<String> = shown
+            .iter()
+            .filter(|id| {
+                self.snapshot
+                    .terminals
+                    .get(&thread_terminal_handle_for(&thread, id))
+                    .is_some_and(|terminal| matches!(terminal.phase, TerminalPhase::Exited(_)))
+                    && !self
+                        .panels
+                        .terminals
+                        .exited
+                        .contains(&(thread.clone(), (*id).clone()))
+            })
+            .cloned()
+            .collect();
         let state = &mut self.panels.terminals;
-        state.views.retain(|(owner, id), _| {
-            *owner == thread && tabs.iter().any(|tab| &tab.terminal_id == id)
-        });
-        for tab in &tabs {
-            let key = (thread.clone(), tab.terminal_id.clone());
+        state
+            .views
+            .retain(|(owner, id), _| *owner == thread && shown.contains(id));
+        for id in &shown {
+            let key = (thread.clone(), id.clone());
             if let std::collections::hash_map::Entry::Vacant(entry) = state.views.entry(key) {
                 entry.insert(Terminal::new(
                     store.clone(),
                     self.snapshot.clone(),
                     thread.clone(),
-                    tab.terminal_id.clone(),
+                    id.clone(),
                     window,
                     cx,
                 ));
@@ -148,10 +251,16 @@ impl Desktop {
                 None => {}
             }
         }
+        for id in exited {
+            self.panels
+                .terminals
+                .exited
+                .insert((thread.clone(), id.clone()));
+            self.close_terminals(thread.clone(), vec![id], window, cx);
+        }
     }
 
-    /// Selects a terminal of the thread and shows it, in the drawer unless
-    /// the right panel's Terminal tab is showing.
+    /// Selects a terminal of the thread and shows it where it is held.
     pub(super) fn show_terminal(
         &mut self,
         thread: String,
@@ -159,28 +268,93 @@ impl Desktop {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let state = &mut self.panels.terminals;
-        state.active.insert(thread.clone(), terminal_id.clone());
-        state.focus_request = Some((thread.clone(), terminal_id));
-        if !self.panels.shows(PanelTab::Terminal) {
-            self.panels.terminals.set_drawer_open(&thread, true);
+        self.panels
+            .terminals
+            .request_focus(thread.clone(), terminal_id.clone());
+        match self.surface_of(&terminal_id) {
+            Some(surface) => {
+                let right = self.right_mut();
+                right.open = true;
+                right.active = Some(surface);
+                if let Some(Surface::Terminal { active, .. }) = right
+                    .surfaces
+                    .iter_mut()
+                    .find(|open| Some(open.id()) == right.active)
+                {
+                    *active = terminal_id;
+                }
+            }
+            None => {
+                let drawer = self.panels.terminals.drawer(&thread);
+                drawer.open = true;
+                drawer.active = Some(terminal_id);
+            }
         }
         self.panels_changed(window, cx);
     }
 
-    /// Focuses the thread's selected terminal, starting its first terminal
-    /// when it has none.
-    pub(super) fn ensure_terminal(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+    /// Shows a terminal the thread just opened in the drawer.
+    fn show_opened(
+        &mut self,
+        result: &Result<Outcome, String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match result {
+            Ok(Outcome::TerminalOpened { terminal_id }) => {
+                if let Some(thread) = self.thread_id() {
+                    self.show_terminal(thread, terminal_id.clone(), window, cx);
+                }
+            }
+            Ok(_) => {}
+            Err(error) => self.show_error(error, window, cx),
+        }
+    }
+
+    /// Runs a project script in a new drawer terminal.
+    pub(super) fn run_project_script(&mut self, script_id: String, cx: &mut Context<Self>) {
+        let Some(thread_id) = self.thread_id() else {
+            return;
+        };
+        let size = self.terminal_size(cx);
+        self.perform_then(
+            Intent::RunProjectScript {
+                thread_id,
+                script_id,
+                cols: size.cols,
+                rows: size.rows,
+            },
+            |view, result, window, cx| view.show_opened(result, window, cx),
+        );
+    }
+
+    pub(crate) fn toggle_terminal_drawer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(thread) = self.thread_id() else {
             return;
         };
-        let tabs = self.snapshot.terminals(thread.clone());
-        let state = &mut self.panels.terminals;
-        if let Some(active) = state.active_id(&thread, &tabs) {
-            state.focus_request = Some((thread, active.to_owned()));
+        if !self.snapshot.terminal_available() {
             return;
         }
-        if state.creating {
+        let drawer = self.panels.terminals.drawer(&thread);
+        drawer.open = !drawer.open;
+        if drawer.open {
+            self.ensure_drawer_terminal(cx);
+        }
+        self.panels_changed(window, cx);
+    }
+
+    /// Focuses the drawer's selected terminal, starting one when the drawer
+    /// has none.
+    fn ensure_drawer_terminal(&mut self, cx: &mut Context<Self>) {
+        let Some(thread) = self.thread_id() else {
+            return;
+        };
+        let tabs = self.drawer_tabs(&thread);
+        if let Some(active) = self.drawer_active(&thread, &tabs) {
+            self.panels.terminals.request_focus(thread, active);
+            return;
+        }
+        if self.panels.terminals.creating {
             return;
         }
         self.panels.terminals.creating = true;
@@ -193,149 +367,298 @@ impl Desktop {
             },
             |view, result, window, cx| {
                 view.panels.terminals.creating = false;
-                if let Err(error) = result {
-                    view.show_error(error, window, cx);
-                }
+                view.show_opened(result, window, cx);
             },
         );
+    }
+
+    fn drawer_active(&self, thread: &str, tabs: &[TerminalTab]) -> Option<String> {
+        let selected = self
+            .panels
+            .terminals
+            .drawers
+            .get(thread)
+            .and_then(|drawer| drawer.active.as_ref());
+        tabs.iter()
+            .find(|tab| Some(&tab.terminal_id) == selected)
+            .or(tabs.first())
+            .map(|tab| tab.terminal_id.clone())
+    }
+
+    /// Opens a new terminal in its own panel surface.
+    pub(super) fn add_terminal_surface(&mut self) -> bool {
+        let Some(thread) = self.thread_id() else {
+            return false;
+        };
+        let size = TerminalSize { cols: 80, rows: 24 };
+        self.perform_then(
+            Intent::NewTerminal {
+                thread_id: thread.clone(),
+                cols: size.cols,
+                rows: size.rows,
+            },
+            move |view, result, window, cx| match result {
+                Ok(Outcome::TerminalOpened { terminal_id }) => {
+                    if view.thread_id().as_deref() == Some(thread.as_str()) {
+                        view.right_mut()
+                            .upsert(Surface::terminal(terminal_id.clone()));
+                        view.panels
+                            .terminals
+                            .request_focus(thread.clone(), terminal_id.clone());
+                        view.panels_changed(window, cx);
+                    }
+                }
+                Ok(_) => {}
+                Err(error) => view.show_error(error, window, cx),
+            },
+        );
+        true
     }
 
     /// The size new terminals start at: the selected terminal's.
     pub(super) fn terminal_size(&self, cx: &App) -> TerminalSize {
         let state = &self.panels.terminals;
-        state
-            .thread
-            .as_ref()
-            .and_then(|thread| {
-                let id = state.active.get(thread)?;
-                state.views.get(&(thread.clone(), id.clone()))
-            })
+        let focused = state.thread.as_ref().and_then(|thread| {
+            let id = state.drawers.get(thread)?.active.clone()?;
+            state.views.get(&(thread.clone(), id))
+        });
+        focused
             .or_else(|| state.views.values().next())
             .map_or(TerminalSize { cols: 80, rows: 24 }, |view| {
                 view.read(cx).size()
             })
     }
 
-    pub(super) fn terminal_focused(&self, window: &Window, cx: &App) -> bool {
+    /// The focused terminal's id.
+    fn focused_terminal(&self, window: &Window, cx: &App) -> Option<String> {
         self.panels
             .terminals
             .views
-            .values()
-            .any(|view| view.read(cx).is_focused(window))
+            .iter()
+            .find(|(_, view)| view.read(cx).is_focused(window))
+            .map(|((_, id), _)| id.clone())
     }
 
-    /// The drawer's keys while a terminal is focused.
-    pub(super) fn terminal_key(
+    pub(crate) fn terminal_focused(&self, window: &Window, cx: &App) -> bool {
+        self.focused_terminal(window, cx).is_some()
+    }
+
+    /// A terminal command for the focused terminal, where it is held.
+    pub(crate) fn terminal_command(
         &mut self,
-        key: &str,
-        shift: bool,
+        command: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        match (key, shift) {
-            ("d", vertical) => self.split_terminal(vertical, cx),
-            ("n", false) => self.new_terminal(cx),
-            ("w", false) => {
-                if let Some(thread) = self.thread_id() {
-                    let tabs = self.snapshot.terminals(thread.clone());
-                    if let Some(tab) = self
-                        .panels
-                        .terminals
-                        .active_id(&thread, &tabs)
-                        .and_then(|id| tabs.iter().find(|tab| tab.terminal_id == id))
-                    {
-                        self.close_terminal(tab.clone(), window, cx);
-                    }
-                }
-            }
+        let Some(focused) = self.focused_terminal(window, cx) else {
+            return false;
+        };
+        let place = match self.surface_of(&focused) {
+            Some(surface) => Place::Surface(surface),
+            None => Place::Drawer,
+        };
+        match command {
+            "terminal.split" => self.split_terminal(place, false, cx),
+            "terminal.splitVertical" => self.split_terminal(place, true, cx),
+            "terminal.new" => self.new_terminal(place, window, cx),
+            "terminal.close" => self.confirm_close_terminals(vec![focused], window, cx),
             _ => return false,
         }
         true
     }
 
-    fn split_terminal(&mut self, vertical: bool, cx: &mut Context<Self>) {
+    fn split_terminal(&mut self, place: Place, vertical: bool, cx: &mut Context<Self>) {
+        let Some(thread) = self.thread_id() else {
+            return;
+        };
+        let size = self.terminal_size(cx);
+        match place {
+            Place::Drawer => {
+                let tabs = self.drawer_tabs(&thread);
+                let Some(active) = self.drawer_active(&thread, &tabs) else {
+                    return;
+                };
+                let Some((group, members)) = groups(&tabs)
+                    .into_iter()
+                    .find(|(_, members)| members.iter().any(|tab| tab.terminal_id == active))
+                else {
+                    return;
+                };
+                if members.len() >= MAX_TERMINALS_PER_GROUP {
+                    return;
+                }
+                let group = group.to_owned();
+                let drawer = self.panels.terminals.drawer(&thread);
+                drawer.open = true;
+                if vertical {
+                    drawer.stacked.insert(group);
+                } else {
+                    drawer.stacked.remove(&group);
+                }
+                self.perform_then(
+                    Intent::SplitTerminal {
+                        thread_id: thread,
+                        terminal_id: active,
+                        cols: size.cols,
+                        rows: size.rows,
+                    },
+                    |view, result, window, cx| view.show_opened(result, window, cx),
+                );
+            }
+            Place::Surface(surface) => {
+                let Some(Surface::Terminal {
+                    terminal_ids,
+                    active,
+                    ..
+                }) = self
+                    .right()
+                    .surfaces
+                    .iter()
+                    .find(|open| open.id() == surface)
+                    .cloned()
+                else {
+                    return;
+                };
+                if terminal_ids.len() >= MAX_TERMINALS_PER_GROUP {
+                    return;
+                }
+                let thread_id = thread.clone();
+                self.perform_then(
+                    Intent::SplitTerminal {
+                        thread_id,
+                        terminal_id: active.clone(),
+                        cols: size.cols,
+                        rows: size.rows,
+                    },
+                    move |view, result, window, cx| match result {
+                        Ok(Outcome::TerminalOpened { terminal_id }) => {
+                            if view.thread_id().as_deref() != Some(thread.as_str()) {
+                                return;
+                            }
+                            let right = view.right_mut();
+                            if let Some(Surface::Terminal {
+                                terminal_ids,
+                                active: selected,
+                                stacked,
+                                ..
+                            }) = right.surfaces.iter_mut().find(|open| open.id() == surface)
+                            {
+                                let at = terminal_ids
+                                    .iter()
+                                    .position(|id| *id == active)
+                                    .map_or(terminal_ids.len(), |index| index + 1);
+                                terminal_ids.insert(at, terminal_id.clone());
+                                *selected = terminal_id.clone();
+                                *stacked = vertical;
+                            }
+                            view.panels
+                                .terminals
+                                .request_focus(thread.clone(), terminal_id.clone());
+                            view.panels_changed(window, cx);
+                        }
+                        Ok(_) => {}
+                        Err(error) => view.show_error(error, window, cx),
+                    },
+                );
+            }
+        }
+    }
+
+    /// A new terminal: a new drawer group, or a new panel surface.
+    fn new_terminal(&mut self, place: Place, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(thread) = self.thread_id() else {
+            return;
+        };
+        if let Place::Surface(_) = place {
+            self.add_terminal_surface();
+            return;
+        }
+        self.panels.terminals.drawer(&thread).open = true;
+        let size = self.terminal_size(cx);
+        self.perform_then(
+            Intent::NewTerminal {
+                thread_id: thread,
+                cols: size.cols,
+                rows: size.rows,
+            },
+            |view, result, window, cx| view.show_opened(result, window, cx),
+        );
+        self.panels_changed(window, cx);
+    }
+
+    /// Asks, then stops the terminals' processes and clears their history.
+    pub(super) fn confirm_close_terminals(
+        &mut self,
+        terminal_ids: Vec<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(thread) = self.thread_id() else {
             return;
         };
         let tabs = self.snapshot.terminals(thread.clone());
-        let Some(active) = self.panels.terminals.active_id(&thread, &tabs) else {
-            return;
-        };
-        let Some((group, members)) = groups(&tabs)
-            .into_iter()
-            .find(|(_, members)| members.iter().any(|tab| tab.terminal_id == active))
-        else {
-            return;
-        };
-        if members.len() >= MAX_TERMINALS_PER_GROUP {
-            return;
-        }
-        let key = (thread.clone(), group.to_owned());
-        if vertical {
-            self.panels.terminals.stacked.insert(key);
-        } else {
-            self.panels.terminals.stacked.remove(&key);
-        }
-        let size = self.terminal_size(cx);
-        self.perform(Intent::SplitTerminal {
-            thread_id: thread,
-            terminal_id: active.to_owned(),
-            cols: size.cols,
-            rows: size.rows,
-        });
-    }
-
-    fn new_terminal(&mut self, cx: &mut Context<Self>) {
-        let Some(thread) = self.thread_id() else {
-            return;
-        };
-        let size = self.terminal_size(cx);
-        self.perform(Intent::NewTerminal {
-            thread_id: thread,
-            cols: size.cols,
-            rows: size.rows,
-        });
-    }
-
-    /// Asks, then stops the terminal's process; the last one closes the drawer.
-    fn close_terminal(&mut self, tab: TerminalTab, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(thread) = self.thread_id() else {
-            return;
-        };
+        let labels: Vec<String> = terminal_ids
+            .iter()
+            .map(|id| {
+                tabs.iter()
+                    .find(|tab| &tab.terminal_id == id)
+                    .map_or_else(|| terminal_label(id), |tab| tab.label.clone())
+            })
+            .collect();
+        let (title, message) = close_confirmation(&labels);
         self.confirm(
             crate::app::dialogs::Confirm {
-                title: Some(format!("Close terminal \"{}\"?", tab.label)),
-                message: "This stops the running process and clears its history.".into(),
+                title: Some(title),
+                message,
                 action: "Close".into(),
                 destructive: true,
             },
             window,
             cx,
-            move |view, _, _| {
-                let thread = thread.clone();
-                view.perform_then(
-                    Intent::CloseTerminal {
-                        thread_id: thread.clone(),
-                        terminal_id: tab.terminal_id.clone(),
-                    },
-                    move |view, result, window, cx| {
-                        if let Err(error) = result {
-                            view.show_error(error, window, cx);
-                        } else if view.snapshot.terminals(thread.clone()).is_empty() {
-                            view.panels.terminals.set_drawer_open(&thread, false);
-                            if view.panels.shows(PanelTab::Terminal) {
-                                view.close_surface(PanelTab::Terminal, window, cx);
-                            }
-                            view.panels_changed(window, cx);
-                        }
-                    },
-                );
+            move |view, window, cx| {
+                view.close_terminals(thread.clone(), terminal_ids.clone(), window, cx)
             },
         );
     }
 
+    /// Stops the terminals and takes them out of their surface or the
+    /// drawer; the drawer closes with its last terminal.
+    pub(super) fn close_terminals(
+        &mut self,
+        thread: String,
+        terminal_ids: Vec<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.thread_id().as_deref() == Some(thread.as_str()) {
+            let right = self.right_mut();
+            for id in &terminal_ids {
+                right.remove_terminal(id);
+            }
+        }
+        for terminal_id in terminal_ids {
+            let thread = thread.clone();
+            self.perform_then(
+                Intent::CloseTerminal {
+                    thread_id: thread.clone(),
+                    terminal_id,
+                },
+                move |view, result, window, cx| {
+                    if let Err(error) = result {
+                        view.show_error(error, window, cx);
+                    } else if view.drawer_tabs(&thread).is_empty() {
+                        view.panels.terminals.drawer(&thread).open = false;
+                        view.panels_changed(window, cx);
+                    }
+                },
+            );
+        }
+        self.panels_changed(window, cx);
+    }
+
     fn select_terminal(
         &mut self,
+        place: &Place,
         terminal_id: String,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -352,25 +675,61 @@ impl Desktop {
             let focus = view.read(cx).focus_handle();
             focus.focus(window, cx);
         }
-        self.panels.terminals.active.insert(thread, terminal_id);
+        match place {
+            Place::Drawer => self.panels.terminals.drawer(&thread).active = Some(terminal_id),
+            Place::Surface(surface) => {
+                if let Some(Surface::Terminal { active, .. }) = self
+                    .right_mut()
+                    .surfaces
+                    .iter_mut()
+                    .find(|open| &open.id() == surface)
+                {
+                    *active = terminal_id;
+                }
+            }
+        }
         cx.notify();
     }
 
-    /// The thread's terminals: in the drawer, or filling the right panel.
+    /// The thread's terminals: the drawer's (`surface` is `None`), or one
+    /// panel surface's filling the panel.
     pub(super) fn render_terminals(
         &mut self,
-        in_panel: bool,
+        surface: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let thread = self.thread_id().unwrap_or_default();
-        let tabs = self
-            .views
-            .thread
-            .as_ref()
-            .filter(|view| view.thread_id == thread)
-            .map(|view| view.terminals.clone())
-            .unwrap_or_else(|| self.snapshot.terminals(thread.clone()));
+        let in_panel = surface.is_some();
+        let place = match &surface {
+            Some(surface) => Place::Surface(surface.clone()),
+            None => Place::Drawer,
+        };
+        let (tabs, active, panel_stacked) = match &surface {
+            Some(surface) => match self
+                .right()
+                .surfaces
+                .iter()
+                .find(|open| &open.id() == surface)
+            {
+                Some(Surface::Terminal {
+                    terminal_ids,
+                    active,
+                    stacked,
+                    ..
+                }) => (
+                    self.surface_tabs(&thread, terminal_ids),
+                    active.clone(),
+                    *stacked,
+                ),
+                _ => (vec![], String::new(), false),
+            },
+            None => {
+                let tabs = self.drawer_tabs(&thread);
+                let active = self.drawer_active(&thread, &tabs).unwrap_or_default();
+                (tabs, active, false)
+            }
+        };
         let viewport = window.viewport_size().height.as_f32();
         let height = clamp_drawer_height(self.panels.terminals.height, viewport);
         let container = v_flex()
@@ -422,6 +781,7 @@ impl Desktop {
         });
         let new_label = with_shortcut("New Terminal", "N");
         if tabs.is_empty() {
+            let place = place.clone();
             return container
                 .child(
                     v_flex()
@@ -440,24 +800,29 @@ impl Desktop {
                                 .label(new_label)
                                 .outline()
                                 .xsmall()
-                                .on_click(cx.listener(|view, _, _, cx| view.new_terminal(cx))),
+                                .on_click(cx.listener(move |view, _, window, cx| {
+                                    view.new_terminal(place.clone(), window, cx)
+                                })),
                         ),
                 )
                 .children(resize_handle)
                 .into_any_element();
         }
-        let state = &self.panels.terminals;
-        let active = state
-            .active_id(&thread, &tabs)
-            .unwrap_or_default()
-            .to_owned();
         let groups = groups(&tabs);
         let (active_group, visible) = groups
             .iter()
             .find(|(_, members)| members.iter().any(|tab| tab.terminal_id == active))
             .map(|(group, members)| (group.to_string(), members.clone()))
             .unwrap_or_default();
-        let stacked = state.stacked.contains(&(thread.clone(), active_group));
+        let stacked = if in_panel {
+            panel_stacked
+        } else {
+            self.panels
+                .terminals
+                .drawers
+                .get(&thread)
+                .is_some_and(|drawer| drawer.stacked.contains(&active_group))
+        };
         let limit = visible.len() >= MAX_TERMINALS_PER_GROUP;
         let labels = ActionLabels {
             split: if limit {
@@ -474,7 +839,7 @@ impl Desktop {
             close: with_shortcut("Close Terminal", "W"),
             limit,
         };
-        let active_tab = tabs.iter().find(|tab| tab.terminal_id == active).cloned();
+        let state = &self.panels.terminals;
         let views: Vec<(String, Entity<Terminal>)> = visible
             .iter()
             .filter_map(|tab| {
@@ -487,6 +852,7 @@ impl Desktop {
         let split = views.len() > 1;
         let screens = views.into_iter().enumerate().map(|(index, (id, view))| {
             let selected = id == active;
+            let place = place.clone();
             div()
                 .id(SharedString::from(format!("terminal-pane-{id}")))
                 .flex_1()
@@ -506,11 +872,8 @@ impl Desktop {
                 })
                 .on_mouse_down(
                     MouseButton::Left,
-                    cx.listener(move |view, _, _, cx| {
-                        if let Some(thread) = view.thread_id() {
-                            view.panels.terminals.active.insert(thread, id.clone());
-                            cx.notify();
-                        }
+                    cx.listener(move |view, _, window, cx| {
+                        view.select_terminal(&place, id.clone(), window, cx)
                     }),
                 )
                 .child(view)
@@ -524,6 +887,7 @@ impl Desktop {
             }
             .children(screens),
         );
+        let active_id = active.clone();
         container
             .child(
                 h_flex()
@@ -535,12 +899,7 @@ impl Desktop {
                     .child(body)
                     .when(has_sidebar, |row| {
                         row.child(self.render_terminal_sidebar(
-                            &thread,
-                            &groups,
-                            &active,
-                            &labels,
-                            active_tab.clone(),
-                            cx,
+                            &place, &thread, &groups, &active, &labels, stacked, cx,
                         ))
                     }),
             )
@@ -558,7 +917,7 @@ impl Desktop {
                             .bg(color("canvas"))
                             .shadow_xs()
                             .children(
-                                self.terminal_actions(&labels, active_tab.clone(), false, cx)
+                                self.terminal_actions(&place, &labels, active_id, false, cx)
                                     .into_iter()
                                     .enumerate()
                                     .flat_map(|(index, button)| {
@@ -582,8 +941,9 @@ impl Desktop {
     /// Split, split vertically, new and close, as compact icon buttons.
     fn terminal_actions(
         &self,
+        place: &Place,
         labels: &ActionLabels,
-        active: Option<TerminalTab>,
+        active: String,
         bordered: bool,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
@@ -615,6 +975,7 @@ impl Desktop {
                 .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
                 .child(icon(icon_name).size(px(13.)))
         };
+        let (split, split_vertical, new) = (place.clone(), place.clone(), place.clone());
         vec![
             button(
                 "terminal-split",
@@ -623,7 +984,9 @@ impl Desktop {
                 labels.limit,
             )
             .when(bordered, |button| button.border_l_0())
-            .on_click(cx.listener(|view, _, _, cx| view.split_terminal(false, cx)))
+            .on_click(
+                cx.listener(move |view, _, _, cx| view.split_terminal(split.clone(), false, cx)),
+            )
             .into_any_element(),
             button(
                 "terminal-split-vertical",
@@ -631,32 +994,38 @@ impl Desktop {
                 &labels.split_vertical,
                 labels.limit,
             )
-            .on_click(cx.listener(|view, _, _, cx| view.split_terminal(true, cx)))
+            .on_click(cx.listener(move |view, _, _, cx| {
+                view.split_terminal(split_vertical.clone(), true, cx)
+            }))
             .into_any_element(),
             button("terminal-new", "plus", &labels.new, false)
-                .on_click(cx.listener(|view, _, _, cx| view.new_terminal(cx)))
+                .on_click(cx.listener(move |view, _, window, cx| {
+                    view.new_terminal(new.clone(), window, cx)
+                }))
                 .into_any_element(),
             button("terminal-close", "trash-2", &labels.close, false)
                 .on_click(cx.listener(move |view, _, window, cx| {
-                    if let Some(tab) = active.clone() {
-                        view.close_terminal(tab, window, cx);
+                    if !active.is_empty() {
+                        view.confirm_close_terminals(vec![active.clone()], window, cx);
                     }
                 }))
                 .into_any_element(),
         ]
     }
 
-    /// The list of the thread's terminals beside them, once there are two.
+    /// The list of the terminals beside them, once there are two.
+    #[allow(clippy::too_many_arguments)]
     fn render_terminal_sidebar(
         &self,
+        place: &Place,
         thread: &str,
         groups: &[(&str, Vec<&TerminalTab>)],
         active: &str,
         labels: &ActionLabels,
-        active_tab: Option<TerminalTab>,
+        panel_stacked: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let actions = self.terminal_actions(labels, active_tab, true, cx);
+        let actions = self.terminal_actions(place, labels, active.to_owned(), true, cx);
         let show_headers = groups.len() > 1 || groups.iter().any(|(_, members)| members.len() > 1);
         let entries = groups.iter().map(|(group, members)| {
             let group_active = members.iter().any(|tab| tab.terminal_id == active);
@@ -664,17 +1033,22 @@ impl Desktop {
                 .first()
                 .map(|tab| tab.terminal_id.clone())
                 .unwrap_or_default();
-            let stacked = self
-                .panels
-                .terminals
-                .stacked
-                .contains(&(thread.to_owned(), group.to_string()));
+            let stacked = match place {
+                Place::Surface(_) => panel_stacked,
+                Place::Drawer => self
+                    .panels
+                    .terminals
+                    .drawers
+                    .get(thread)
+                    .is_some_and(|drawer| drawer.stacked.contains(*group)),
+            };
             let (group_icon, group_label) = match (members.len() > 1, stacked) {
                 (false, _) => ("square", "Single"),
                 (true, true) => ("square-split-vertical", "Stacked"),
                 (true, false) => ("square-split-horizontal", "Side by side"),
             };
             let count = members.len();
+            let group_place = place.clone();
             v_flex()
                 .pb_0p5()
                 .when(show_headers, |entry| {
@@ -703,7 +1077,7 @@ impl Desktop {
                             })
                             .on_click(cx.listener(move |view, _, window, cx| {
                                 if !group_active {
-                                    view.select_terminal(first.clone(), window, cx);
+                                    view.select_terminal(&group_place, first.clone(), window, cx);
                                 }
                             }))
                             .child(icon(group_icon).size_3())
@@ -719,12 +1093,13 @@ impl Desktop {
                 .child(v_flex().gap_0p5().children(members.iter().map(|tab| {
                     let selected = tab.terminal_id == active;
                     let id = tab.terminal_id.clone();
-                    let close_tab = (*tab).clone();
+                    let close_id = tab.terminal_id.clone();
                     let close_label = if selected {
                         format!("Close {} ({})", tab.label, super::shortcut("W"))
                     } else {
                         format!("Close {}", tab.label)
                     };
+                    let place = place.clone();
                     h_flex()
                         .id(SharedString::from(format!("terminal-tab-{id}")))
                         .group("terminal-tab")
@@ -746,7 +1121,7 @@ impl Desktop {
                             }
                         })
                         .on_click(cx.listener(move |view, _, window, cx| {
-                            view.select_terminal(id.clone(), window, cx)
+                            view.select_terminal(&place, id.clone(), window, cx)
                         }))
                         .child(tab_close_button(
                             SharedString::from(format!("terminal-tab-close-{}", tab.terminal_id)),
@@ -755,7 +1130,7 @@ impl Desktop {
                             close_label,
                             cx.listener(move |view, _, window, cx| {
                                 cx.stop_propagation();
-                                view.close_terminal(close_tab.clone(), window, cx);
+                                view.confirm_close_terminals(vec![close_id.clone()], window, cx);
                             }),
                         ))
                         .child(div().flex_1().min_w_0().truncate().child(tab.label.clone()))
@@ -800,7 +1175,7 @@ struct ActionLabels {
 
 #[cfg(test)]
 mod tests {
-    use super::{DRAWER_MIN_HEIGHT, clamp_drawer_height, groups};
+    use super::{DRAWER_MIN_HEIGHT, clamp_drawer_height, close_confirmation, groups};
     use agent_core::view::terminals::TerminalTab;
     use core::prelude::v1::test;
 
@@ -812,6 +1187,7 @@ mod tests {
             status: "Running".into(),
             running: true,
             running_process: false,
+            exited: false,
             menu_status: "Ready".into(),
         }
     }
@@ -848,6 +1224,25 @@ mod tests {
                 ("term-1", vec!["term-1", "term-2"]),
                 ("term-3", vec!["term-3"]),
             ]
+        );
+    }
+
+    #[test]
+    fn closing_asks_with_every_label() {
+        assert_eq!(
+            close_confirmation(&["vite".into()]),
+            (
+                "Close terminal \"vite\"?".into(),
+                "This stops the running process and clears its history.".into()
+            )
+        );
+        assert_eq!(
+            close_confirmation(&["a".into(), "b".into()]),
+            (
+                "Close 2 terminals?".into(),
+                "This stops their running processes and clears their histories: \"a\", \"b\"."
+                    .into()
+            )
         );
     }
 }

@@ -160,6 +160,8 @@ impl DesktopAssets {
         "trash",
         "arrow-right-left",
         "message-circle",
+        "palette",
+        "folder-git",
     ];
     /// Provider marks as `brand/<name>.svg`.
     const BRANDS: &[(&str, &[u8])] = &[

@@ -89,7 +89,7 @@ impl Desktop {
     /// open file's text, or its unsaved draft, into the editor.
     pub(super) fn sync_files(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let cwd = self.snapshot.cwd();
-        if self.panels.shows(PanelTab::Files)
+        if self.panel_shows(PanelTab::Files)
             && !cwd.is_empty()
             && self.panels.files.listed_for.as_ref() != Some(&cwd)
         {

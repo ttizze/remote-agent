@@ -3,7 +3,10 @@ use super::{Desktop, banners::Piece};
 use crate::app::ui::{color, icon};
 use agent_core::{
     state::Intent,
-    view::composer::{commands::ComposerCommandTarget, menu::ComposerMenuView},
+    view::{
+        composer::{commands::ComposerCommandTarget, menu::ComposerMenuView},
+        timeline::rows::TimelineLayout,
+    },
 };
 use gpui_kit::{component::h_flex, prelude::FluentBuilder, *};
 
@@ -12,6 +15,8 @@ pub(super) struct MenuState {
     highlight: usize,
     /// Escape closed the menu until the text changes.
     dismissed: bool,
+    /// The text and caret the menu's sources were last asked for.
+    requested: Option<(String, u32)>,
 }
 impl MenuState {
     pub(super) fn text_changed(&mut self) {
@@ -21,6 +26,25 @@ impl MenuState {
 }
 
 impl Desktop {
+    /// Asks for what the menu lists whenever the composer's text or caret
+    /// moved, and when the composer appears.
+    pub(super) fn sync_composer_menu(&mut self, cx: &App) {
+        if self.shown_composer().is_none() {
+            self.composer.menu.requested = None;
+            return;
+        }
+        let (text, cursor) = self.editor_text_and_cursor(cx);
+        if self.composer.menu.requested.as_ref() == Some(&(text.clone(), cursor)) {
+            return;
+        }
+        self.composer.menu.requested = Some((text.clone(), cursor));
+        self.perform(Intent::UpdateComposerMenu {
+            text,
+            cursor,
+            layout: TimelineLayout::Desktop,
+        });
+    }
+
     /// The menu for the editor's text and caret, while a trigger is open.
     fn composer_menu_state(&self, cx: &App) -> Option<(String, u32, ComposerMenuView)> {
         if self.composer.menu.dismissed

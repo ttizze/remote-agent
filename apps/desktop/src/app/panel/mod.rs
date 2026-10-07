@@ -1,5 +1,5 @@
-//! The right panel (Browser, Terminal, Files, Diff), the thread terminal
-//! drawer and the thread details panel.
+//! The right panel's surfaces (browsers, terminals, Files, Diff), the thread
+//! terminal drawer and the thread details card.
 mod details;
 mod diff;
 mod files;
@@ -9,25 +9,26 @@ use super::{
     Desktop, Route,
     ui::{color, icon, shortcut, tint},
 };
-use agent_core::{connection::Outcome, view::header::HeaderPanelState};
+use agent_core::view::header::HeaderPanelState;
 use gpui_kit::{
     component::{
         Sizable,
         button::{Button, ButtonVariants},
         h_flex,
-        menu::{DropdownMenu, PopupMenuItem},
+        menu::{ContextMenuExt, DropdownMenu, PopupMenuItem},
         v_flex,
     },
     prelude::FluentBuilder,
     *,
 };
+use std::collections::HashMap;
 
 const PANEL_MIN_WIDTH: f32 = 360.;
 const PANEL_MAX_FRACTION: f32 = 0.7;
 /// The chat column keeps this much beside the panel.
 const SIBLING_MIN_WIDTH: f32 = 360.;
 
-/// The right panel's tabs.
+/// The kinds of surface the right panel opens.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum PanelTab {
     Diff,
@@ -76,6 +77,134 @@ impl PanelTab {
     }
 }
 
+/// One open surface. Browsers and terminals may be open several times; a
+/// terminal surface holds up to four split terminals.
+#[derive(Clone, PartialEq, Debug)]
+pub(crate) enum Surface {
+    Diff,
+    Files,
+    Browser {
+        id: u64,
+    },
+    Terminal {
+        /// The first terminal's id, which names the surface for good.
+        key: String,
+        terminal_ids: Vec<String>,
+        active: String,
+        stacked: bool,
+    },
+}
+impl Surface {
+    fn id(&self) -> String {
+        match self {
+            Surface::Diff => "diff".into(),
+            Surface::Files => "files".into(),
+            Surface::Browser { id } => format!("browser:{id}"),
+            Surface::Terminal { key, .. } => format!("terminal:{key}"),
+        }
+    }
+    fn kind(&self) -> PanelTab {
+        match self {
+            Surface::Diff => PanelTab::Diff,
+            Surface::Files => PanelTab::Files,
+            Surface::Browser { .. } => PanelTab::Browser,
+            Surface::Terminal { .. } => PanelTab::Terminal,
+        }
+    }
+    fn terminal(terminal_id: String) -> Self {
+        Surface::Terminal {
+            key: terminal_id.clone(),
+            terminal_ids: vec![terminal_id.clone()],
+            active: terminal_id,
+            stacked: false,
+        }
+    }
+}
+
+static NO_PANEL: ThreadPanel = ThreadPanel::EMPTY;
+
+/// One thread's right panel: whether it is open, its surfaces in tab order
+/// and the active one.
+#[derive(Clone, Default, PartialEq, Debug)]
+pub(crate) struct ThreadPanel {
+    open: bool,
+    surfaces: Vec<Surface>,
+    active: Option<String>,
+}
+impl ThreadPanel {
+    const EMPTY: ThreadPanel = ThreadPanel {
+        open: false,
+        surfaces: Vec::new(),
+        active: None,
+    };
+    fn active_surface(&self) -> Option<&Surface> {
+        let active = self.active.as_ref()?;
+        self.surfaces.iter().find(|surface| &surface.id() == active)
+    }
+    fn active_kind(&self) -> Option<PanelTab> {
+        self.active_surface().map(Surface::kind)
+    }
+    /// Adds the surface, or keeps the one already open with its id, and
+    /// makes it active.
+    fn upsert(&mut self, surface: Surface) {
+        let id = surface.id();
+        if !self.surfaces.iter().any(|open| open.id() == id) {
+            self.surfaces.push(surface);
+        }
+        self.active = Some(id);
+        self.open = true;
+    }
+    /// Removes a surface; its neighbour becomes active, and the panel closes
+    /// once nothing is left.
+    fn close(&mut self, id: &str) {
+        let Some(index) = self.surfaces.iter().position(|open| open.id() == id) else {
+            return;
+        };
+        self.surfaces.remove(index);
+        if self.active.as_deref() == Some(id) {
+            self.active = self
+                .surfaces
+                .get(index.min(self.surfaces.len().saturating_sub(1)))
+                .map(Surface::id);
+        }
+        if self.surfaces.is_empty() {
+            self.open = false;
+        }
+    }
+    /// The terminal ids every terminal surface holds.
+    fn terminal_ids(&self) -> impl Iterator<Item = &String> {
+        self.surfaces.iter().flat_map(|surface| match surface {
+            Surface::Terminal { terminal_ids, .. } => terminal_ids.as_slice(),
+            _ => &[],
+        })
+    }
+    /// Takes a terminal out of the surface holding it; a surface left empty
+    /// closes.
+    fn remove_terminal(&mut self, terminal_id: &str) {
+        let Some(surface) = self.surfaces.iter_mut().find(|surface| {
+            matches!(surface, Surface::Terminal { terminal_ids, .. } if terminal_ids.iter().any(|id| id == terminal_id))
+        }) else {
+            return;
+        };
+        let id = surface.id();
+        let Surface::Terminal {
+            terminal_ids,
+            active,
+            ..
+        } = surface
+        else {
+            return;
+        };
+        terminal_ids.retain(|id| id != terminal_id);
+        if active == terminal_id {
+            *active = terminal_ids.last().cloned().unwrap_or_default();
+        }
+        if terminal_ids.is_empty() {
+            self.close(&id);
+        }
+    }
+}
+
 /// The right panel's width, kept between its minimum and what leaves the chat
 /// column usable.
 fn clamp_panel_width(width: f32, viewport: f32) -> f32 {
@@ -95,14 +224,12 @@ impl Render for PanelResize {
 }
 
 pub(crate) struct PanelState {
-    right_open: bool,
-    /// The open surfaces, in tab order.
-    surfaces: Vec<PanelTab>,
-    active: Option<PanelTab>,
+    /// Each thread's right panel, by thread id (`""` for the new-thread draft).
+    threads: HashMap<String, ThreadPanel>,
     width: f32,
     launcher_focus: FocusHandle,
-    details_open: bool,
-    browser: Option<Entity<crate::browser::Browser>>,
+    browsers: HashMap<u64, Entity<crate::browser::Browser>>,
+    next_browser: u64,
     diff: diff::DiffState,
     files: files::FilesState,
     terminals: terminal_drawer::TerminalState,
@@ -113,27 +240,16 @@ impl PanelState {
     pub(crate) fn new(window: &mut Window, cx: &mut Context<Desktop>) -> Self {
         let mut subscriptions = vec![];
         Self {
-            right_open: false,
-            surfaces: vec![],
-            active: None,
+            threads: HashMap::new(),
             width: super::ui::metrics().panel_width,
             launcher_focus: cx.focus_handle(),
-            details_open: false,
-            browser: None,
-            diff: diff::DiffState::new(cx),
+            browsers: HashMap::new(),
+            next_browser: 0,
+            diff: diff::DiffState::new(window, cx, &mut subscriptions),
             files: files::FilesState::new(window, cx, &mut subscriptions),
             terminals: terminal_drawer::TerminalState::default(),
             details: details::DetailsState::default(),
             _subscriptions: subscriptions,
-        }
-    }
-    /// The panels the header shows as open.
-    pub(crate) fn header_panels(&self) -> HeaderPanelState {
-        HeaderPanelState {
-            thread_panel_open: self.details_open,
-            terminal_open: self.terminals.drawer_open(),
-            right_panel_open: self.right_open,
-            files_open: self.right_open && self.active == Some(PanelTab::Files),
         }
     }
     /// Closes what belonged to the previous connection.
@@ -142,33 +258,58 @@ impl PanelState {
         self.diff.reset();
         self.files.reset();
         self.details = details::DetailsState::default();
-        if let Some(browser) = self.browser.take() {
+        for browser in self.browsers.values() {
             browser.update(cx, |browser, cx| browser.set_visible(false, cx));
         }
-        self.surfaces.retain(|tab| *tab != PanelTab::Browser);
-        if self.active == Some(PanelTab::Browser) {
-            self.active = self.surfaces.first().copied();
-        }
-    }
-    fn shows(&self, tab: PanelTab) -> bool {
-        self.right_open && self.active == Some(tab)
+        self.browsers.clear();
+        self.threads.clear();
     }
 }
 
 impl Desktop {
+    /// The key of the shown thread's panels.
+    fn panel_thread(&self) -> String {
+        self.thread_id().unwrap_or_default()
+    }
+    fn right(&self) -> &ThreadPanel {
+        self.panels
+            .threads
+            .get(&self.panel_thread())
+            .unwrap_or(&NO_PANEL)
+    }
+    fn right_mut(&mut self) -> &mut ThreadPanel {
+        let key = self.panel_thread();
+        self.panels.threads.entry(key).or_default()
+    }
+    /// The right panel is open on a surface of this kind.
+    pub(crate) fn panel_shows(&self, tab: PanelTab) -> bool {
+        let right = self.right();
+        right.open && right.active_kind() == Some(tab)
+    }
+
+    /// The panels the header shows as open.
+    pub(crate) fn header_panels(&self) -> HeaderPanelState {
+        HeaderPanelState {
+            thread_panel_open: self.details_open(),
+            terminal_open: self.panels.terminals.drawer_open(),
+            right_panel_open: self.right().open,
+            files_open: self.panel_shows(PanelTab::Files),
+        }
+    }
+
     pub(crate) fn render_right_panel(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        if !self.panels.right_open {
+        if !self.right().open {
             return None;
         }
         let viewport = window.viewport_size().width.as_f32();
         let width = clamp_panel_width(self.panels.width, viewport);
-        let body = match self.panels.active {
+        let body = match self.right().active_surface().cloned() {
             None => self.render_launcher(cx),
-            Some(PanelTab::Browser) => match &self.panels.browser {
+            Some(Surface::Browser { id }) => match self.panels.browsers.get(&id) {
                 Some(browser) => div()
                     .flex_1()
                     .min_h_0()
@@ -176,9 +317,11 @@ impl Desktop {
                     .into_any_element(),
                 None => div().flex_1().into_any_element(),
             },
-            Some(PanelTab::Terminal) => self.render_terminals(true, window, cx),
-            Some(PanelTab::Files) => self.render_files(window, cx),
-            Some(PanelTab::Diff) => self.render_diff(window, cx),
+            Some(surface @ Surface::Terminal { .. }) => {
+                self.render_terminals(Some(surface.id()), window, cx)
+            }
+            Some(Surface::Files) => self.render_files(window, cx),
+            Some(Surface::Diff) => self.render_diff(window, cx),
         };
         Some(
             v_flex()
@@ -225,47 +368,111 @@ impl Desktop {
         )
     }
 
+    /// A surface's tab title.
+    fn surface_title(&self, surface: &Surface, cx: &App) -> String {
+        match surface {
+            Surface::Browser { id } => self
+                .panels
+                .browsers
+                .get(id)
+                .map_or_else(|| "Browser".into(), |browser| browser.read(cx).title(cx)),
+            Surface::Terminal { active, .. } => {
+                let thread = self.panel_thread();
+                self.snapshot
+                    .terminals(thread)
+                    .into_iter()
+                    .find(|tab| &tab.terminal_id == active)
+                    .map_or_else(
+                        || agent_protocol::operations::terminal_label(active),
+                        |tab| tab.label,
+                    )
+            }
+            other => other.kind().label().into(),
+        }
+    }
+
     fn render_tab_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let metrics = super::ui::metrics();
-        let tabs = self.panels.surfaces.iter().map(|tab| {
-            let tab = *tab;
-            let active = self.panels.active == Some(tab);
-            h_flex()
-                .id(SharedString::from(format!("panel-tab-{}", tab.label())))
-                .group("panel-tab")
-                .h_6()
-                .max_w(px(144.))
-                .flex_shrink_0()
-                .gap_0p5()
-                .pl_1p5()
-                .pr_2()
-                .rounded_md()
-                .text_xs()
-                .cursor_pointer()
-                .map(|row| {
-                    if active {
-                        row.bg(color("accentSurface")).text_color(color("text"))
-                    } else {
-                        row.text_color(color("textMuted")).hover(|row| {
-                            row.bg(tint("accentSurface", 0.6)).text_color(color("text"))
-                        })
-                    }
-                })
-                .on_click(
-                    cx.listener(move |view, _, window, cx| view.open_right_panel(tab, window, cx)),
-                )
-                .child(tab_close_button(
-                    SharedString::from(format!("panel-tab-close-{}", tab.label())),
-                    "panel-tab",
-                    tab.icon(),
-                    format!("Close {}", tab.label()),
-                    cx.listener(move |view, _, window, cx| {
-                        cx.stop_propagation();
-                        view.close_surface(tab, window, cx);
-                    }),
-                ))
-                .child(div().min_w_0().truncate().child(tab.label()))
-        });
+        let right = self.right();
+        let ids: Vec<String> = right.surfaces.iter().map(Surface::id).collect();
+        let owner = cx.entity().downgrade();
+        let tabs: Vec<_> = right
+            .surfaces
+            .iter()
+            .enumerate()
+            .map(|(index, surface)| {
+                let id = surface.id();
+                let active = right.active.as_ref() == Some(&id);
+                let title = self.surface_title(surface, cx);
+                let (select, close) = (id.clone(), id.clone());
+                let (owner, ids) = (owner.clone(), ids.clone());
+                h_flex()
+                    .id(SharedString::from(format!("panel-tab-{id}")))
+                    .group("panel-tab")
+                    .h_6()
+                    .max_w(px(144.))
+                    .flex_shrink_0()
+                    .gap_0p5()
+                    .pl_1p5()
+                    .pr_2()
+                    .rounded_md()
+                    .text_xs()
+                    .cursor_pointer()
+                    .map(|row| {
+                        if active {
+                            row.bg(color("accentSurface")).text_color(color("text"))
+                        } else {
+                            row.text_color(color("textMuted")).hover(|row| {
+                                row.bg(tint("accentSurface", 0.6)).text_color(color("text"))
+                            })
+                        }
+                    })
+                    .on_click(cx.listener(move |view, _, window, cx| {
+                        view.select_surface(select.clone(), window, cx)
+                    }))
+                    .on_mouse_down(
+                        MouseButton::Middle,
+                        cx.listener({
+                            let id = id.clone();
+                            move |view, _, window, cx| view.request_close_surface(&id, window, cx)
+                        }),
+                    )
+                    .child(tab_close_button(
+                        SharedString::from(format!("panel-tab-close-{id}")),
+                        "panel-tab",
+                        surface.kind().icon(),
+                        format!("Close {title}"),
+                        cx.listener(move |view, _, window, cx| {
+                            cx.stop_propagation();
+                            view.request_close_surface(&close, window, cx);
+                        }),
+                    ))
+                    .child(div().min_w_0().truncate().child(title))
+                    .context_menu(move |menu, _, _| {
+                        let others: Vec<String> = ids
+                            .iter()
+                            .filter(|other| **other != ids[index])
+                            .cloned()
+                            .collect();
+                        let right: Vec<String> = ids[index + 1..].to_vec();
+                        let item = |label: &'static str, close: Vec<String>, confirm: bool| {
+                            let owner = owner.clone();
+                            let disabled = close.is_empty();
+                            PopupMenuItem::new(label).disabled(disabled).on_click(
+                                move |_, window, cx| {
+                                    let _ = owner.update(cx, |view, cx| {
+                                        view.close_surfaces(close.clone(), confirm, window, cx)
+                                    });
+                                },
+                            )
+                        };
+                        menu.item(item("Close", vec![ids[index].clone()], true))
+                            .item(item("Close others", others, false))
+                            .item(item("Close to the right", right, false))
+                            .item(item("Close all", ids.clone(), false))
+                    })
+            })
+            .collect();
         let owner = cx.entity().downgrade();
         let available = self.surface_availability();
         h_flex()
@@ -275,8 +482,15 @@ impl Desktop {
             .gap_1()
             .pl_2()
             .pr_3()
-            .children(tabs)
-            .when(!self.panels.surfaces.is_empty(), |bar| {
+            .child(
+                h_flex()
+                    .id("panel-tabs")
+                    .min_w_0()
+                    .gap_1()
+                    .overflow_x_scroll()
+                    .children(tabs),
+            )
+            .when(!right.surfaces.is_empty(), |bar| {
                 bar.child(
                     Button::new("add-panel-surface")
                         .icon(icon("plus"))
@@ -287,15 +501,24 @@ impl Desktop {
                             for tab in PanelTab::ALL {
                                 let owner = owner.clone();
                                 let enabled = available(tab);
+                                let tab_key = tab.key().to_uppercase();
                                 menu = menu.item(
-                                    PopupMenuItem::new(tab.label())
-                                        .icon(icon(tab.icon()))
-                                        .disabled(!enabled)
-                                        .on_click(move |_, window, cx| {
+                                    PopupMenuItem::element(move |_, _| {
+                                        h_flex()
+                                            .w_full()
+                                            .gap_2()
+                                            .child(tab.label())
+                                            .child(div().ml_auto().child(kbd(tab_key.clone())))
+                                    })
+                                    .icon(icon(tab.icon()))
+                                    .disabled(!enabled)
+                                    .on_click(
+                                        move |_, window, cx| {
                                             let _ = owner.update(cx, |view, cx| {
-                                                view.open_right_panel(tab, window, cx)
+                                                view.add_surface(tab, window, cx)
                                             });
-                                        }),
+                                        },
+                                    ),
                                 );
                             }
                             menu
@@ -335,7 +558,7 @@ impl Desktop {
                         row.cursor_pointer()
                             .hover(|row| row.bg(tint("accentSurface", 0.6)))
                             .on_click(cx.listener(move |view, _, window, cx| {
-                                view.open_right_panel(tab, window, cx)
+                                view.add_surface(tab, window, cx)
                             }))
                     } else {
                         row.text_color(color("textMuted")).opacity(0.64)
@@ -378,7 +601,7 @@ impl Desktop {
                     .find(|tab| tab.key() == keystroke.key && available(*tab))
                 {
                     cx.stop_propagation();
-                    view.open_right_panel(tab, window, cx);
+                    view.add_surface(tab, window, cx);
                 }
             }))
             .child(
@@ -404,21 +627,10 @@ impl Desktop {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        if !self.panels.terminals.drawer_open() || self.panels.shows(PanelTab::Terminal) {
+        if !self.panels.terminals.drawer_open() {
             return None;
         }
-        Some(self.render_terminals(false, window, cx))
-    }
-
-    pub(crate) fn render_thread_details(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
-        if !self.panels.details_open || self.snapshot.selected_thread.is_none() {
-            return None;
-        }
-        Some(self.render_details(window, cx))
+        Some(self.render_terminals(None, window, cx))
     }
 
     /// Follows the snapshot: the diff source, file editor and terminals.
@@ -429,28 +641,24 @@ impl Desktop {
         self.sync_browser(cx);
     }
 
-    /// Shows the browser's native view only while its tab is on screen.
+    /// Shows a browser's native view only while its tab is on screen.
     pub(crate) fn sync_browser(&mut self, cx: &mut Context<Self>) {
-        let visible = self.route == Route::Chat && self.panels.shows(PanelTab::Browser);
-        if let Some(browser) = &self.panels.browser {
+        let shown = match (self.route, self.right()) {
+            (Route::Chat, right) if right.open => match right.active_surface() {
+                Some(Surface::Browser { id }) => Some(*id),
+                _ => None,
+            },
+            _ => None,
+        };
+        for (id, browser) in &self.panels.browsers {
+            let visible = shown == Some(*id);
             browser.update(cx, |browser, cx| browser.set_visible(visible, cx));
         }
     }
 
-    pub(crate) fn panel_outcome(
-        &mut self,
-        outcome: &Outcome,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if let Outcome::TerminalOpened { terminal_id } = outcome
-            && let Some(thread) = self.thread_id()
-        {
-            self.show_terminal(thread, terminal_id.clone(), window, cx);
-        }
-    }
-
-    pub(crate) fn open_right_panel(
+    /// Opens a surface of `tab`: Diff and Files once, a browser or terminal
+    /// as a new tab each time.
+    pub(crate) fn add_surface(
         &mut self,
         tab: PanelTab,
         window: &mut Window,
@@ -459,82 +667,162 @@ impl Desktop {
         if !self.surface_availability()(tab) {
             return;
         }
-        if tab == PanelTab::Browser && self.panels.browser.is_none() {
-            match crate::browser::Browser::new(
-                wry::WebViewBuilder::new(),
-                #[cfg(target_os = "macos")]
-                crate::browser::ChromeProfileSource::default(),
-                window,
-                cx,
-            ) {
-                Ok(browser) => self.panels.browser = Some(browser),
-                Err(error) => {
-                    self.show_error(&error, window, cx);
+        match tab {
+            PanelTab::Diff => self.right_mut().upsert(Surface::Diff),
+            PanelTab::Files => self.right_mut().upsert(Surface::Files),
+            PanelTab::Browser => {
+                match crate::browser::Browser::new(
+                    wry::WebViewBuilder::new(),
+                    #[cfg(target_os = "macos")]
+                    crate::browser::ChromeProfileSource::default(),
+                    window,
+                    cx,
+                ) {
+                    Ok(browser) => {
+                        self.panels.next_browser += 1;
+                        let id = self.panels.next_browser;
+                        self.panels.browsers.insert(id, browser);
+                        self.right_mut().upsert(Surface::Browser { id });
+                    }
+                    Err(error) => {
+                        self.show_error(&error, window, cx);
+                        return;
+                    }
+                }
+            }
+            PanelTab::Terminal => {
+                if !self.add_terminal_surface() {
                     return;
                 }
             }
         }
-        if !self.panels.surfaces.contains(&tab) {
-            self.panels.surfaces.push(tab);
-        }
-        self.panels.right_open = true;
-        self.panels.active = Some(tab);
-        if tab == PanelTab::Terminal {
-            // The thread's terminals move from the drawer into the panel.
-            if let Some(thread) = self.thread_id() {
-                self.panels.terminals.set_drawer_open(&thread, false);
+        self.panels_changed(window, cx);
+    }
+
+    /// Opens the right panel on the surface of `tab` already open, else a new one.
+    pub(crate) fn open_right_panel(
+        &mut self,
+        tab: PanelTab,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let existing = self
+            .right()
+            .surfaces
+            .iter()
+            .find(|surface| surface.kind() == tab)
+            .map(Surface::id);
+        match existing {
+            Some(id) => {
+                let right = self.right_mut();
+                right.open = true;
+                right.active = Some(id);
+                self.panels_changed(window, cx);
             }
-            self.ensure_terminal(window, cx);
+            None => self.add_surface(tab, window, cx),
+        }
+    }
+
+    fn select_surface(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+        let focus_terminal = match self
+            .right()
+            .surfaces
+            .iter()
+            .find(|surface| surface.id() == id)
+        {
+            Some(Surface::Terminal { active, .. }) => Some(active.clone()),
+            _ => None,
+        };
+        self.right_mut().active = Some(id);
+        if let (Some(terminal), Some(thread)) = (focus_terminal, self.thread_id()) {
+            self.panels.terminals.request_focus(thread, terminal);
         }
         self.panels_changed(window, cx);
     }
 
     pub(crate) fn toggle_right_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.panels.right_open = !self.panels.right_open;
-        if self.panels.right_open && self.panels.active.is_none() {
+        let right = self.right_mut();
+        right.open = !right.open;
+        if right.open && right.surfaces.is_empty() {
             self.panels.launcher_focus.focus(window, cx);
         }
         self.panels_changed(window, cx);
     }
 
-    fn close_surface(&mut self, tab: PanelTab, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(index) = self.panels.surfaces.iter().position(|open| *open == tab) else {
+    /// Closes a surface; a terminal surface asks first, as it stops its
+    /// processes.
+    fn request_close_surface(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let surface = self
+            .right()
+            .surfaces
+            .iter()
+            .find(|surface| surface.id() == id)
+            .cloned();
+        match surface {
+            Some(Surface::Terminal { terminal_ids, .. }) => {
+                self.confirm_close_terminals(terminal_ids, window, cx)
+            }
+            Some(_) => self.close_surface(id, window, cx),
+            None => {}
+        }
+    }
+
+    /// Closes several surfaces; only a single close asks before stopping
+    /// terminals.
+    fn close_surfaces(
+        &mut self,
+        ids: Vec<String>,
+        confirm: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if confirm && let [id] = ids.as_slice() {
+            self.request_close_surface(id, window, cx);
             return;
-        };
-        self.panels.surfaces.remove(index);
-        if self.panels.active == Some(tab) {
-            self.panels.active = self
-                .panels
+        }
+        for id in ids {
+            let surface = self
+                .right()
                 .surfaces
-                .get(index.min(self.panels.surfaces.len().saturating_sub(1)))
-                .copied();
+                .iter()
+                .find(|surface| surface.id() == id)
+                .cloned();
+            match (surface, self.thread_id()) {
+                (Some(Surface::Terminal { terminal_ids, .. }), Some(thread)) => {
+                    self.close_terminals(thread, terminal_ids, window, cx)
+                }
+                (Some(_), _) => self.close_surface(&id, window, cx),
+                (None, _) => {}
+            }
         }
-        if self.panels.active.is_none() {
-            self.panels.launcher_focus.focus(window, cx);
-        }
-        self.panels_changed(window, cx);
     }
 
-    pub(crate) fn toggle_terminal_drawer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(thread) = self.thread_id() else {
-            return;
-        };
-        if !self.snapshot.terminal_available() {
-            return;
+    fn close_surface(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(Surface::Browser { id: browser }) = self
+            .right()
+            .surfaces
+            .iter()
+            .find(|surface| surface.id() == id)
+            .cloned()
+            && let Some(browser) = self.panels.browsers.remove(&browser)
+        {
+            browser.update(cx, |browser, cx| browser.set_visible(false, cx));
         }
-        let open = !self.panels.terminals.drawer_open();
-        if open && self.panels.shows(PanelTab::Terminal) {
-            self.close_surface(PanelTab::Terminal, window, cx);
-        }
-        self.panels.terminals.set_drawer_open(&thread, open);
-        if open {
-            self.ensure_terminal(window, cx);
+        let right = self.right_mut();
+        right.close(id);
+        let empty = right.surfaces.is_empty();
+        if empty {
+            self.panels.launcher_focus.focus(window, cx);
         }
         self.panels_changed(window, cx);
     }
 
     pub(crate) fn toggle_thread_details(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.panels.details_open = !self.panels.details_open;
+        if self.details_just_dismissed() {
+            return;
+        }
+        let open = !self.details_open();
+        self.set_details_open(open);
         self.panels_changed(window, cx);
     }
 
@@ -554,7 +842,8 @@ impl Desktop {
         self.open_right_panel(PanelTab::Diff, window, cx);
     }
 
-    /// Opens one of the thread's terminals in the drawer.
+    /// Opens one of the thread's terminals where it is held: its panel
+    /// surface, else the drawer.
     pub(crate) fn open_thread_terminal(
         &mut self,
         thread_id: String,
@@ -568,39 +857,33 @@ impl Desktop {
         self.show_terminal(thread_id, terminal_id, window, cx);
     }
 
-    /// Panel keys: the terminal's own while one is focused, else the Diff
-    /// toggle and closing the right panel.
-    pub(crate) fn panel_key(
+    /// Opens the Diff surface, or closes the panel while it shows.
+    pub(crate) fn toggle_diff(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.panel_shows(PanelTab::Diff) {
+            self.right_mut().open = false;
+            self.panels_changed(window, cx);
+        } else {
+            self.open_right_panel(PanelTab::Diff, window, cx);
+        }
+    }
+
+    /// Closes the active surface of an open panel.
+    pub(crate) fn close_active_surface(
         &mut self,
-        event: &KeyDownEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let keystroke = &event.keystroke;
-        let modifiers = keystroke.modifiers;
-        if !modifiers.secondary() || modifiers.alt {
+        if !self.right().open {
             return false;
         }
-        if self.terminal_focused(window, cx) {
-            return self.terminal_key(keystroke.key.as_str(), modifiers.shift, window, cx);
-        }
-        match (keystroke.key.as_str(), modifiers.shift) {
-            ("d", false) => {
-                if self.panels.shows(PanelTab::Diff) {
-                    self.panels.right_open = false;
-                    self.panels_changed(window, cx);
-                } else {
-                    self.open_right_panel(PanelTab::Diff, window, cx);
-                }
-                true
-            }
-            ("w", false) if self.panels.right_open => {
-                self.panels.right_open = false;
+        match self.right().active.clone() {
+            Some(id) => self.request_close_surface(&id, window, cx),
+            None => {
+                self.right_mut().open = false;
                 self.panels_changed(window, cx);
-                true
             }
-            _ => false,
         }
+        true
     }
 
     /// Derives the views again after a panel opened or closed.
@@ -671,7 +954,7 @@ fn with_shortcut(label: &str, key: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{PANEL_MIN_WIDTH, clamp_panel_width};
+    use super::{PANEL_MIN_WIDTH, Surface, ThreadPanel, clamp_panel_width};
     use core::prelude::v1::test;
 
     #[test]
@@ -682,5 +965,77 @@ mod tests {
         assert_eq!(clamp_panel_width(600., 1000.), 640.0f32.min(600.));
         assert_eq!(clamp_panel_width(900., 800.), 440.);
         assert_eq!(clamp_panel_width(900., 500.), PANEL_MIN_WIDTH);
+    }
+
+    #[test]
+    fn browsers_and_terminals_open_as_many_tabs_as_asked_while_diff_stays_single() {
+        let mut panel = ThreadPanel::default();
+        panel.upsert(Surface::Diff);
+        panel.upsert(Surface::Browser { id: 1 });
+        panel.upsert(Surface::Browser { id: 2 });
+        panel.upsert(Surface::terminal("term-1".into()));
+        panel.upsert(Surface::terminal("term-2".into()));
+        panel.upsert(Surface::Diff);
+        let ids: Vec<String> = panel.surfaces.iter().map(Surface::id).collect();
+        assert_eq!(
+            ids,
+            [
+                "diff",
+                "browser:1",
+                "browser:2",
+                "terminal:term-1",
+                "terminal:term-2"
+            ]
+        );
+        assert_eq!(panel.active.as_deref(), Some("diff"));
+        assert!(panel.open);
+    }
+
+    #[test]
+    fn closing_moves_to_the_neighbour_and_the_last_close_shuts_the_panel() {
+        let mut panel = ThreadPanel::default();
+        panel.upsert(Surface::Diff);
+        panel.upsert(Surface::Files);
+        panel.upsert(Surface::Browser { id: 1 });
+        panel.active = Some("files".into());
+        panel.close("files");
+        assert_eq!(panel.active.as_deref(), Some("browser:1"));
+        panel.close("browser:1");
+        assert_eq!(panel.active.as_deref(), Some("diff"));
+        panel.close("diff");
+        assert!(!panel.open);
+        assert_eq!(panel.active, None);
+    }
+
+    #[test]
+    fn a_terminal_surface_closes_with_its_last_terminal() {
+        let mut panel = ThreadPanel::default();
+        panel.upsert(Surface::terminal("term-1".into()));
+        if let Some(Surface::Terminal {
+            terminal_ids,
+            active,
+            ..
+        }) = panel.surfaces.first_mut()
+        {
+            terminal_ids.push("term-3".into());
+            *active = "term-3".into();
+        }
+        panel.remove_terminal("term-3");
+        assert_eq!(
+            panel.surfaces,
+            [Surface::Terminal {
+                key: "term-1".into(),
+                terminal_ids: vec!["term-1".into()],
+                active: "term-1".into(),
+                stacked: false,
+            }]
+        );
+        assert_eq!(
+            panel.terminal_ids().cloned().collect::<Vec<_>>(),
+            ["term-1"]
+        );
+        panel.remove_terminal("term-1");
+        assert!(panel.surfaces.is_empty());
+        assert!(!panel.open);
     }
 }

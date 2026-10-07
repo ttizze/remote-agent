@@ -1,4 +1,6 @@
-//! The thread details panel: the thread's workspace and its Lineage.
+//! The thread details card: the thread's workspace and its Lineage, pinned
+//! at the chat area's top right while a readable chat lane fits beside it,
+//! else a popover under the header.
 use crate::app::{
     Desktop,
     ui::{color, driver_icon, icon, text_2xs, tint},
@@ -25,9 +27,43 @@ use gpui_kit::{
     prelude::FluentBuilder,
     *,
 };
-use std::collections::HashMap;
+use std::{
+    cell::Cell,
+    collections::{HashMap, HashSet},
+    rc::Rc,
+};
 
 const PANEL_WIDTH: f32 = 280.;
+const CARD_GAP: f32 = 12.;
+/// The room kept between the chat lane and the card.
+const CARD_CLEARANCE: f32 = 32.;
+const LANE_PADDING: f32 = 20.;
+const LANE_MIN_WIDTH: f32 = 640.;
+
+/// Where the card sits in a chat area of `width` x `height`: its left, top,
+/// width and height; `None` when the chat lane would get too narrow, and the
+/// card opens as a popover instead.
+fn details_card_layout(width: f32, height: f32) -> Option<(f32, f32, f32, f32)> {
+    let x = width - PANEL_WIDTH - CARD_GAP;
+    if x - CARD_CLEARANCE - LANE_PADDING < LANE_MIN_WIDTH {
+        return None;
+    }
+    let card_height = height - CARD_GAP * 2.;
+    (card_height >= 160.).then_some((x, CARD_GAP, PANEL_WIDTH, card_height))
+}
+
+/// How far the chat lane's right edge moves in from the area's so the lane
+/// clears an open card: the lane stays centred while it fits, then moves left.
+fn chat_lane_inset(width: f32, max_width: f32, card_left: Option<f32>) -> f32 {
+    let Some(card_left) = card_left else {
+        return 0.;
+    };
+    let centered = max_width.min(width - LANE_PADDING * 2.).max(0.);
+    let lane_right = card_left - CARD_CLEARANCE;
+    let lane_width = centered.min(lane_right - LANE_PADDING).max(0.);
+    let left = LANE_PADDING.max(((width - lane_width) / 2.).min(lane_right - lane_width));
+    (width - left * 2. - lane_width).max(0.)
+}
 
 fn group_key(kind: LineageGroupKind) -> u8 {
     match kind {
@@ -46,14 +82,150 @@ fn row_hover() -> Hsla {
     }
 }
 
-/// What the user expanded and paged in each Lineage group, by thread.
+/// What the user expanded and paged in each Lineage group, and whether the
+/// card is open inline and as a popover, by thread.
 #[derive(Default)]
 pub(super) struct DetailsState {
     groups: HashMap<(String, u8), (bool, Option<u32>)>,
+    /// Threads whose inline card the user closed; it starts open.
+    inline_closed: HashSet<String>,
+    popover_open: HashSet<String>,
+    /// When a click outside last closed the popover; the toggle under that
+    /// click must not open it again.
+    dismissed_at: Option<std::time::Instant>,
+    /// The chat area, measured as it was last laid out.
+    area: Rc<Cell<Bounds<Pixels>>>,
 }
 
 impl Desktop {
-    pub(super) fn render_details(&mut self, _: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    /// Where the card sits now; `None` shows it as a popover.
+    fn details_layout(&self) -> Option<(f32, f32, f32, f32)> {
+        let area = self.panels.details.area.get();
+        details_card_layout(area.size.width.as_f32(), area.size.height.as_f32())
+    }
+
+    /// The card is open in the mode it has now.
+    pub(crate) fn details_open(&self) -> bool {
+        let Some(thread) = self.thread_id() else {
+            return false;
+        };
+        let details = &self.panels.details;
+        match self.details_layout() {
+            Some(_) => !details.inline_closed.contains(&thread),
+            None => details.popover_open.contains(&thread),
+        }
+    }
+
+    /// A click outside closed the popover just now.
+    pub(super) fn details_just_dismissed(&self) -> bool {
+        self.panels
+            .details
+            .dismissed_at
+            .is_some_and(|at| at.elapsed() < std::time::Duration::from_millis(300))
+    }
+
+    pub(super) fn set_details_open(&mut self, open: bool) {
+        let Some(thread) = self.thread_id() else {
+            return;
+        };
+        let inline = self.details_layout().is_some();
+        let details = &mut self.panels.details;
+        if inline {
+            details.popover_open.remove(&thread);
+            if open {
+                details.inline_closed.remove(&thread);
+            } else {
+                details.inline_closed.insert(thread);
+            }
+        } else if open {
+            details.popover_open.insert(thread);
+        } else {
+            details.popover_open.remove(&thread);
+        }
+    }
+
+    /// The chat area with the thread details card over its top right, the
+    /// chat lane moved left to clear the card.
+    pub(crate) fn details_area(
+        &mut self,
+        body: AnyElement,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let area = self.panels.details.area.clone();
+        let bounds = area.get();
+        let shown = self.snapshot.selected_thread.is_some() && self.details_open();
+        let layout = self.details_layout();
+        let inset = chat_lane_inset(
+            bounds.size.width.as_f32(),
+            super::super::ui::metrics().chat_max_width,
+            layout.filter(|_| shown).map(|(x, ..)| x),
+        );
+        let card = shown.then(|| self.render_details(window, cx));
+        let card = card.map(|card| match layout {
+            Some((x, y, width, height)) => div()
+                .absolute()
+                .left(px(x))
+                .top(px(y))
+                .w(px(width))
+                .max_h(px(height))
+                .flex()
+                .flex_col()
+                .child(card)
+                .into_any_element(),
+            None => {
+                let width = PANEL_WIDTH.min(bounds.size.width.as_f32() - 16.);
+                deferred(
+                    anchored()
+                        .position(point(
+                            bounds.right() - px(width) - px(8.),
+                            bounds.top() + px(8.),
+                        ))
+                        .child(
+                            div()
+                                .id("thread-details-popover")
+                                .occlude()
+                                .w(px(width))
+                                .max_h(bounds.size.height - px(16.))
+                                .flex()
+                                .flex_col()
+                                .on_mouse_down_out(cx.listener(|view, _, window, cx| {
+                                    view.set_details_open(false);
+                                    view.panels.details.dismissed_at =
+                                        Some(std::time::Instant::now());
+                                    view.panels_changed(window, cx);
+                                }))
+                                .child(card),
+                        ),
+                )
+                .into_any_element()
+            }
+        });
+        div()
+            .relative()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .min_w_0()
+            .child(
+                canvas(move |bounds, _, _| area.set(bounds), |_, _, _, _| {})
+                    .absolute()
+                    .size_full(),
+            )
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_h_0()
+                    .min_w_0()
+                    .pr(px(inset))
+                    .child(body),
+            )
+            .children(card)
+            .into_any_element()
+    }
+
+    fn render_details(&mut self, _: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let thread = self.views.thread.as_ref();
         let cwd = thread
             .and_then(|thread| thread.header.as_ref())
@@ -107,41 +279,27 @@ impl Desktop {
                     .cursor_pointer()
                     .hover(|row| row.bg(row_hover()))
                     .on_click(cx.listener(move |view, _, _, cx| {
-                        let Some(thread_id) = thread_id.clone() else {
-                            return;
-                        };
-                        let size = view.terminal_size(cx);
-                        view.perform(Intent::RunProjectScript {
-                            thread_id,
-                            script_id: script_id.clone(),
-                            cols: size.cols,
-                            rows: size.rows,
-                        });
+                        if thread_id.is_some() {
+                            view.run_project_script(script_id.clone(), cx);
+                        }
                     }))
                     .child(icon("play").size_4().text_color(color("textMuted")))
                     .child(div().flex_1().min_w_0().truncate().child(row.run_label))
             }));
-        div()
-            .w(px(PANEL_WIDTH + 24.))
-            .flex_shrink_0()
-            .h_full()
-            .p_3()
-            .child(
-                v_flex()
-                    .id("thread-details")
-                    .max_h_full()
-                    .w(px(PANEL_WIDTH))
-                    .overflow_y_scroll()
-                    .rounded(px(22.))
-                    .border_1()
-                    .border_color(color("border"))
-                    .bg(color("surfaceOverlay"))
-                    .shadow_lg()
-                    .child(workspace)
-                    .when_some(lineage, |card, (thread, lineage)| {
-                        card.child(self.render_lineage(thread, lineage, cx))
-                    }),
-            )
+        v_flex()
+            .id("thread-details")
+            .max_h_full()
+            .w_full()
+            .overflow_y_scroll()
+            .rounded(px(24.))
+            .border_1()
+            .border_color(color("border"))
+            .bg(color("surfaceOverlay"))
+            .shadow_lg()
+            .child(workspace)
+            .when_some(lineage, |card, (thread, lineage)| {
+                card.child(self.render_lineage(thread, lineage, cx))
+            })
             .into_any_element()
     }
 
@@ -496,5 +654,34 @@ impl Desktop {
                     .child(row.status_label),
             )
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{chat_lane_inset, details_card_layout};
+    use core::prelude::v1::test;
+
+    #[test]
+    fn the_card_pins_top_right_only_beside_a_readable_chat_lane() {
+        assert_eq!(
+            details_card_layout(1200., 800.),
+            Some((908., 12., 280., 776.))
+        );
+        assert_eq!(details_card_layout(983., 800.), None);
+        assert_eq!(
+            details_card_layout(984., 800.),
+            Some((692., 12., 280., 776.))
+        );
+        assert_eq!(details_card_layout(1200., 183.), None);
+    }
+
+    #[test]
+    fn the_chat_lane_stays_centred_until_the_card_needs_its_room() {
+        assert_eq!(chat_lane_inset(1600., 736., None), 0.);
+        assert_eq!(chat_lane_inset(1600., 736., Some(1308.)), 0.);
+        let inset = chat_lane_inset(1100., 736., Some(808.));
+        let left = (1100. - inset - 736.) / 2.;
+        assert_eq!(left + 736., 776.);
     }
 }

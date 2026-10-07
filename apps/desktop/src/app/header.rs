@@ -4,7 +4,7 @@ use super::{
     Desktop,
     menus::MenuSurface,
     settings::SettingsPage,
-    sidebar::{project_badge, window_drag},
+    sidebar::window_drag,
     ui::{self, color, icon},
 };
 use agent_core::view::header::{
@@ -46,7 +46,7 @@ fn stop_mouse_down<E: InteractiveElement>(element: E) -> E {
 impl Desktop {
     /// The open thread's header, or the draft's while none is open.
     fn header_view(&self) -> ThreadHeaderView {
-        let panels = self.panels.header_panels();
+        let panels = self.header_panels();
         if let Some(thread) = &self.snapshot.selected_thread
             && let Some(header) = snapshot_thread_header(&self.snapshot, thread, &panels)
         {
@@ -236,7 +236,7 @@ impl Desktop {
                     .cursor_pointer()
                     .text_color(color("textMuted"))
                     .hover(|crumb| crumb.text_color(color("text")))
-                    .child(project_badge(&project.name, 14.))
+                    .child(self.project_icon(&project.id, &project.name, 14.))
                     .child(div().max_w(px(160.)).truncate().child(project.name.clone()))
                     .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
                     .on_click(

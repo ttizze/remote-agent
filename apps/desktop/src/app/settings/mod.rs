@@ -1,9 +1,12 @@
 //! Settings: the navigation that replaces the sidebar, and its pages
-//! (General, Projects, Providers, Connections, Archived).
+//! (Project, General, Appearance, Keybindings, Providers, Connections,
+//! Archive).
 mod add_project;
+mod appearance;
 mod archived;
 mod general;
 mod import;
+mod keybindings;
 mod projects;
 mod providers;
 mod scripts;
@@ -30,6 +33,8 @@ use std::rc::Rc;
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) enum SettingsPage {
     General,
+    Appearance,
+    Keybindings,
     Projects { project_id: Option<String> },
     Providers,
     Connections,
@@ -38,10 +43,12 @@ pub(crate) enum SettingsPage {
 
 impl SettingsPage {
     /// The navigation entries in their order.
-    fn sections() -> [SettingsPage; 5] {
+    fn sections() -> [SettingsPage; 7] {
         [
             SettingsPage::Projects { project_id: None },
             SettingsPage::General,
+            SettingsPage::Appearance,
+            SettingsPage::Keybindings,
             SettingsPage::Providers,
             SettingsPage::Connections,
             SettingsPage::Archived,
@@ -50,6 +57,8 @@ impl SettingsPage {
     fn label(&self) -> &'static str {
         match self {
             SettingsPage::General => "General",
+            SettingsPage::Appearance => "Appearance",
+            SettingsPage::Keybindings => "Keybindings",
             SettingsPage::Projects { .. } => "Project",
             SettingsPage::Providers => "Providers",
             SettingsPage::Connections => "Connections",
@@ -59,6 +68,8 @@ impl SettingsPage {
     fn icon(&self) -> &'static str {
         match self {
             SettingsPage::General => "settings-2",
+            SettingsPage::Appearance => "palette",
+            SettingsPage::Keybindings => "keyboard",
             SettingsPage::Projects { .. } => "panels-top-left",
             SettingsPage::Providers => "bot",
             SettingsPage::Connections => "link-2",
@@ -78,9 +89,18 @@ pub(crate) struct SettingsState {
     /// The page and store whose data was last requested.
     loaded: Option<(SettingsPage, String)>,
     general: general::GeneralState,
+    appearance: appearance::AppearanceState,
+    keybindings: keybindings::KeybindingsState,
     providers: providers::ProvidersState,
+    /// The stores whose onboarding already ran in this app session.
+    onboarded: std::collections::HashSet<String>,
 }
 impl SettingsState {
+    /// A shortcut is being recorded, so keys go to it and run nothing.
+    pub(crate) fn recording_shortcut(&self) -> bool {
+        self.keybindings.recording()
+    }
+
     pub(crate) fn new(window: &mut Window, cx: &mut Context<Desktop>) -> Self {
         Self {
             page: SettingsPage::General,
@@ -88,7 +108,10 @@ impl SettingsState {
             archive_store: None,
             loaded: None,
             general: general::GeneralState::new(window, cx),
+            appearance: appearance::AppearanceState::new(window, cx),
+            keybindings: keybindings::KeybindingsState::new(window, cx),
             providers: providers::ProvidersState::new(window, cx),
+            onboarded: Default::default(),
         }
     }
 }
@@ -210,6 +233,8 @@ impl Desktop {
         let page = self.settings.page.clone();
         let body = match &page {
             SettingsPage::General => self.render_general(window, cx),
+            SettingsPage::Appearance => self.render_appearance(window, cx),
+            SettingsPage::Keybindings => self.render_keybindings(window, cx),
             SettingsPage::Projects { project_id: None } => self.render_projects(cx),
             SettingsPage::Projects {
                 project_id: Some(project_id),
@@ -294,9 +319,31 @@ impl Desktop {
         cx.notify();
     }
 
-    /// Starts adding a project, then offers to import its agent sessions.
     pub(crate) fn open_add_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         add_project::open(self, window, cx);
+    }
+
+    /// Onboarding: a Host with no projects and no threads yet offers, once,
+    /// to import the projects and conversations of its agent sessions.
+    pub(crate) fn offer_onboarding_import(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let store = self.snapshot.store_id.clone();
+        if self.session.is_none()
+            || !self.snapshot.connected
+            || self.settings.onboarded.contains(&store)
+        {
+            return;
+        }
+        if self.snapshot.shell_status() != agent_core::sync::shell::ShellStatus::Live {
+            return;
+        }
+        let Some(shell) = self.snapshot.shell_view() else {
+            return;
+        };
+        let fresh = shell.projects.is_empty() && shell.threads.is_empty();
+        self.settings.onboarded.insert(store);
+        if fresh {
+            import::open(self, window, cx);
+        }
     }
 
     /// Follows the snapshot: the archive subscription and loaded settings.
@@ -338,7 +385,7 @@ impl Desktop {
             SettingsPage::Projects { .. } => self.perform(Intent::LoadConversationSettings),
             SettingsPage::Providers => self.perform(Intent::LoadAccounts),
             SettingsPage::Connections => self.hosts.update(cx, |hosts, _| hosts.refresh()),
-            SettingsPage::Archived => {}
+            SettingsPage::Archived | SettingsPage::Appearance | SettingsPage::Keybindings => {}
         }
     }
 }
@@ -550,6 +597,7 @@ struct Choice {
     id: String,
     label: String,
     description: Option<String>,
+    icon: Option<&'static str>,
     selected: bool,
 }
 
@@ -561,13 +609,30 @@ fn select(
     pick: impl Fn(&mut Desktop, String, &mut Window, &mut Context<Desktop>) + 'static,
     cx: &mut Context<Desktop>,
 ) -> impl IntoElement {
+    select_sized(id, label, choices, 176., pick, cx)
+}
+
+/// A select trigger `width` wide.
+fn select_sized(
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+    choices: Vec<Choice>,
+    width: f32,
+    pick: impl Fn(&mut Desktop, String, &mut Window, &mut Context<Desktop>) + 'static,
+    cx: &mut Context<Desktop>,
+) -> impl IntoElement {
     let owner = cx.entity().downgrade();
     let pick = Rc::new(pick);
+    let glyph = choices
+        .iter()
+        .find(|choice| choice.selected)
+        .and_then(|choice| choice.icon);
     let choices = Rc::new(choices);
     Button::new(id)
         .outline()
         .small()
-        .w(px(176.))
+        .w(px(width))
+        .when_some(glyph, |button, glyph| button.icon(icon(glyph)))
         .label(label)
         .dropdown_caret(true)
         .dropdown_menu_with_anchor(Anchor::TopRight, move |mut menu, _, _| {
@@ -580,11 +645,24 @@ fn select(
                     Some(description) => {
                         let label = choice.label.clone();
                         let description = description.clone();
+                        let glyph = choice.icon;
                         PopupMenuItem::element(move |_, _| {
                             v_flex()
-                                .min_w(px(240.))
+                                .min_w(px(256.))
                                 .gap(px(2.))
-                                .child(div().font_medium().child(label.clone()))
+                                .child(
+                                    h_flex()
+                                        .gap(px(6.))
+                                        .font_medium()
+                                        .when_some(glyph, |row, glyph| {
+                                            row.child(
+                                                icon(glyph)
+                                                    .size(px(14.))
+                                                    .text_color(color("textMuted")),
+                                            )
+                                        })
+                                        .child(label.clone()),
+                                )
                                 .child(
                                     div()
                                         .text_xs()

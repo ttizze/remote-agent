@@ -135,13 +135,8 @@ impl Desktop {
                 .collect();
             sections.push(
                 section(
-                    Some(group.title.into()),
-                    Some(
-                        icon("folder")
-                            .size(px(14.))
-                            .text_color(color("textMuted"))
-                            .into_any_element(),
-                    ),
+                    Some(group.title.clone().into()),
+                    Some(self.project_icon(&group.project_id, &group.title, 14.)),
                     None,
                     rows,
                 )

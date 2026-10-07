@@ -7,7 +7,7 @@ use super::{
         ui::{self, color, driver_icon, icon, tint},
     },
     drag::{DragPreview, ThreadDrag},
-    project_badge,
+    project_mark,
 };
 use agent_core::{
     state::{Intent, ThreadAction},
@@ -27,7 +27,7 @@ use gpui_kit::{
     prelude::FluentBuilder,
     *,
 };
-use std::f32::consts::PI;
+use std::{f32::consts::PI, sync::Arc, time::Duration};
 
 /// The status icon and its color.
 fn status_style(status: SidebarTopStatus) -> (Option<&'static str>, Hsla) {
@@ -79,8 +79,10 @@ fn element_id(kind: &str, key: &str) -> ElementId {
 fn hover_card(
     row: &SidebarThreadRow,
     catalog: &ModelCatalog,
+    project_image: Option<Arc<Image>>,
 ) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {
     let title = row.title.clone();
+    let terminals = row.terminal_processes.clone();
     let project = row.project_name.clone();
     let branch = row.branch.clone();
     let current_id = row.provider_stack.last().cloned();
@@ -99,12 +101,14 @@ fn hover_card(
         })
         .collect();
     move |window, cx| {
-        let (title, project, branch, current, earlier) = (
+        let (title, project, branch, current, earlier, terminals, project_image) = (
             title.clone(),
             project.clone(),
             branch.clone(),
             current.clone(),
             earlier.clone(),
+            terminals.clone(),
+            project_image.clone(),
         );
         Tooltip::element(move |_, _| {
             let line = || h_flex().min_w_0().gap_2();
@@ -129,9 +133,11 @@ fn hover_card(
                         .text_color(color("textMuted"))
                         .when_some(project.clone(), |card, name| {
                             card.child(
-                                line().child(project_badge(&name, 12.)).child(
-                                    div().truncate().text_color(tint("text", 0.75)).child(name),
-                                ),
+                                line()
+                                    .child(project_mark(project_image.clone(), &name, 12.))
+                                    .child(
+                                        div().truncate().text_color(tint("text", 0.75)).child(name),
+                                    ),
                             )
                         })
                         .when_some(branch.clone(), |card, branch| {
@@ -150,6 +156,20 @@ fn hover_card(
                                     ),
                             )
                         })
+                        .when_some(terminals.clone(), |card, terminals| {
+                            card.child(
+                                line()
+                                    .child(
+                                        icon("terminal").size_3().text_color(color("statusTeal")),
+                                    )
+                                    .child(
+                                        div()
+                                            .truncate()
+                                            .text_color(tint("text", 0.75))
+                                            .child(terminals),
+                                    ),
+                            )
+                        })
                         .when(!earlier.is_empty(), |card| {
                             card.child(
                                 line().child(icon("arrow-right-left").size_3()).child(
@@ -164,6 +184,42 @@ fn hover_card(
         })
         .build(window, cx)
     }
+}
+
+/// The pulse of the running-terminal icon: full for 40% of its 2 s, half
+/// for the next 40%, stepping between them in six steps.
+fn terminal_pulse_opacity(progress: f32) -> f32 {
+    let step = |from: f32, to: f32, start: f32| {
+        let steps = (((progress - start) / 0.1).clamp(0., 1.) * 6.).floor() / 6.;
+        from + (to - from) * steps
+    };
+    match progress {
+        p if p < 0.4 => 1.,
+        p if p < 0.5 => step(1., 0.5, 0.4),
+        p if p < 0.9 => 0.5,
+        _ => step(0.5, 1., 0.9),
+    }
+}
+
+/// The teal terminal icon of a thread whose terminals run a process.
+fn terminal_indicator(id: &str, label: Option<String>) -> Option<AnyElement> {
+    let label: SharedString = label?.into();
+    Some(
+        div()
+            .id(element_id("terminal-running", id))
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .text_color(color("statusTeal"))
+            .tooltip(move |window, cx| Tooltip::new(label.clone()).build(window, cx))
+            .child(icon("terminal").size(px(14.)).with_animation(
+                "terminal-pulse",
+                Animation::new(Duration::from_secs(2)).repeat(),
+                |icon, progress| icon.opacity(terminal_pulse_opacity(progress)),
+            ))
+            .into_any_element(),
+    )
 }
 
 /// The ⌘1…⌘9 hint, centred on the row's right edge.
@@ -520,7 +576,11 @@ impl Desktop {
                 .tooltip(|window, cx| Tooltip::new("Unsent draft").build(window, cx))
         });
         let project = row.project_name.clone().unwrap_or_default();
-        let badge = project_badge(&project, 16.);
+        let project_image = self.project_icon_image(&row.project_id);
+        let badge = div()
+            .flex_shrink_0()
+            .child(project_mark(project_image.clone(), &project, 16.));
+        let terminal = || terminal_indicator(&id, row.terminal_processes.clone());
         let body = if slim {
             h_flex()
                 .h_9()
@@ -533,6 +593,7 @@ impl Desktop {
                 .children(pen)
                 .child(title)
                 .children(self.render_pin(row, cx))
+                .children(terminal())
                 .child(self.render_trailing(row, hovered, cx))
         } else {
             let branch = row.branch.clone().map(|branch| {
@@ -604,6 +665,7 @@ impl Desktop {
                             Some(branch) => branch,
                             None => h_flex().flex_1(),
                         })
+                        .children(terminal())
                         .children(self.render_provider_stack(row, catalog)),
                 )
         };
@@ -630,7 +692,7 @@ impl Desktop {
             })
             .when(lifted, |surface| surface.opacity(0.5))
             .when(self.sidebar.drag.is_none() && !renaming, |surface| {
-                surface.tooltip(hover_card(row, catalog))
+                surface.tooltip(hover_card(row, catalog, project_image.clone()))
             })
             .when(row.faded && !hovered, |surface| surface.opacity(0.7))
             .on_hover(cx.listener(move |view, hovered: &bool, _, cx| {
@@ -728,7 +790,7 @@ impl Desktop {
                                             .size_3()
                                             .text_color(color("warningForeground")),
                                     )
-                                    .child(project_badge(&project, 16.))
+                                    .child(self.project_icon(&draft.project_id, &project, 16.))
                                     .child(
                                         div()
                                             .flex_1()
@@ -837,7 +899,8 @@ impl Desktop {
                 view.clear_search(window, cx);
                 view.open_sidebar_thread(id.clone(), cx);
             }))
-            .child(project_badge(
+            .child(self.project_icon(
+                &result.project_id,
                 result.project_name.as_deref().unwrap_or_default(),
                 16.,
             ))
@@ -1047,5 +1110,20 @@ impl Desktop {
             .child(icon("plus").size_4())
             .child(format!("Show {count} more"))
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::terminal_pulse_opacity;
+    use core::prelude::v1::test;
+
+    #[test]
+    fn the_terminal_icon_holds_full_then_half_and_steps_between() {
+        assert_eq!(terminal_pulse_opacity(0.), 1.);
+        assert_eq!(terminal_pulse_opacity(0.39), 1.);
+        assert!((terminal_pulse_opacity(0.425) - 11. / 12.).abs() < 1e-4);
+        assert_eq!(terminal_pulse_opacity(0.6), 0.5);
+        assert!((terminal_pulse_opacity(0.925) - 7. / 12.).abs() < 1e-4);
     }
 }

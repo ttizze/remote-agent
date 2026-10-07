@@ -145,6 +145,14 @@ impl Browser {
             }
         }))
     }
+    /// The tab title: the page's host, else "Browser".
+    #[cfg_attr(test, allow(dead_code))]
+    pub(crate) fn title(&self, cx: &App) -> String {
+        url::Url::parse(&self.address.read(cx).value())
+            .ok()
+            .and_then(|url| url.host_str().map(str::to_owned))
+            .unwrap_or_else(|| "Browser".into())
+    }
     pub(crate) fn set_visible(&mut self, visible: bool, cx: &mut App) {
         #[cfg(target_os = "macos")]
         {
