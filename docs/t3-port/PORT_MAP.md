@@ -1330,6 +1330,16 @@ Codex の app-server を instance ごとに共有し、起動設定・アカウ�
 | `ProjectFaviconResolver.ts` | `favicon::tests`。 |
 | `pathExpansion.ts` expandHomePath | `projects::tests::a_leading_tilde_names_the_home_directory`。 |
 | `Orchestrator.ts` の thread.settle / unsettle と自動の unsettle、lineage | `agent_domain::shell::tests::unsettling_records_when_the_thread_left_settled`、`rows_name_how_a_thread_came_from_its_parent`。 |
+| `Manager.test.ts`「caps persisted history to configured line limit」「strips replay-unsafe terminal query and reply sequences from persisted history」 | `terminals::tests::a_kept_screen_is_bounded_and_asks_nothing_when_restored`。履歴は生の出力ではなく画面の checkpoint なので、query の除去は「復元が shell に何も問わない」ことで確かめる。 |
+| `Manager.test.ts`「bounds persisted and attached history without truncating live output」の再オープン、「deletes history file when close(deleteHistory=true)」「closes all terminals for a thread when close omits terminalId」の履歴の削除 | `a_terminal_shows_its_kept_screen_after_the_host_restarts`、`closing_keeps_history_unless_asked_and_thread_cleanup_deletes_it`。 |
+| `Manager.test.ts`「clears transcript and emits cleared event」「restarts terminal with empty transcript and respawns pty」 | `clearing_a_terminal_empties_its_screens_and_history`、`restarting_a_running_terminal_starts_a_new_shell_with_an_empty_history`、protocol の `operations::terminal_tests::clear_restart_and_kill_requests_keep_their_wire_shape`。 |
+| `Manager.test.ts`「reports a missing cwd without an artificial cause」「reports a cwd that is not a directory」「preserves non-notFound cwd stat failures」 | `a_terminal_needs_a_directory_it_can_reach`。 |
+| `Manager.ts` windowsProcessTableSnapshot | `windows_listings_name_each_shells_command`（解析のみ。実行は Windows の Host で行う）。 |
+| 一覧の行と `projects.json` の形式 | `store::tests::rows_of_an_older_shell_format_are_rebuilt_from_facts_on_open`、`projects::tests::a_projects_file_in_another_format_is_refused`。 |
+| `Orchestrator.ts:8393-8569` dispatchCheckpointRollback（active run を確かめない）、`CheckpointRollbackService.ts` の runsToRollback | `agent_domain::tests::a_rollback_while_a_run_is_active_is_accepted_and_keeps_that_run`、`executor::tests::rollback::a_rollback_requested_while_a_turn_runs_executes_without_waiting_for_it`。 |
+| `AttachmentClaims.ts` claimPendingAttachments・validateAttachmentLimits、`ThreadMessageIntake.ts` の回答の claim と release、launchThread の release | `workspace_files::attachments::tests::claim_failures_say_why_in_the_reference_wording`、`a_question_response_is_bounded_and_released_as_a_whole`、`conversation::tests::conversation_calls_answer_with_typed_errors`（回答の上限で receipt が残らない）、`tools::tests::a_launch_that_was_not_accepted_releases_its_claimed_uploads`。 |
+| `composerContext.ts` の TrimmedNonEmptyString（decode 時の trim） | `composer::tests::records_are_trimmed_before_they_are_checked`。 |
+| `ThreadForkService.ts` の subagent 項目の複製 | `query::tests::a_forks_inherited_subagent_item_reads_its_task_from_the_source`。 |
 
 ### 段階 1・2 の検証記録（2026-10-06）
 
