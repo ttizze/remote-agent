@@ -303,7 +303,8 @@ transfer server just to delete that check would reverse A14.
   Simulator or emulator and reuses build caches. Android currently has no JVM
   unit tests; instrumentation acceptance remains in CI. The environment wrapper
   shares a fixed, garbage-collection-rooted Nix environment across worktrees,
-  keyed by the flake, lockfile and platform; cached runs do not enter Nix.
+  keyed by the flake, lockfile, Kache package definition and platform; cached
+  runs do not enter Nix.
   Cargo indexes, locks and build outputs remain worktree-local. Locked dependency
   sources and archives are seeded from existing caches with copy-on-write on
   APFS or reflinks where supported, preserving timestamps. Tests recompile
