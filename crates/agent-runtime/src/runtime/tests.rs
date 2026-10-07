@@ -918,9 +918,11 @@ async fn import_waits_for_startup_and_is_refused_after_shutdown() {
     ));
 }
 
-// An answer whose attachment is gone is refused before the request resolves.
+// An answer whose attachment is gone fails before dispatch and leaves no
+// receipt, so the same command succeeds once the file is back. A retry of a
+// recorded answer checks its files again.
 #[tokio::test(flavor = "multi_thread")]
-async fn an_answer_with_an_unavailable_attachment_is_rejected_and_replays_on_retry() {
+async fn an_answer_with_an_unavailable_attachment_fails_without_a_receipt() {
     let host = host();
     host.ops.real_files.store(true, Ordering::SeqCst);
     let runtime = host.open().await;
@@ -936,62 +938,73 @@ async fn an_answer_with_an_unavailable_attachment_is_rejected_and_replays_on_ret
     .await;
     let request_id = state(&runtime, &thread).await.requests[0].id.clone();
     let dir = tempfile::tempdir().unwrap();
-    let missing = dir.path().join("missing.txt");
+    let path = dir.path().join("notes.txt");
+    let path = path.to_string_lossy();
+    let unavailable = |result: Result<Committed, RuntimeError>| match result {
+        Err(RuntimeError::AttachmentUnavailable(message)) => message,
+        other => panic!("expected an unavailable attachment, got {other:?}"),
+    };
 
-    let refused_id = host.id();
+    let answer_id = host.id();
     let refused = runtime
         .dispatch(
             thread.clone(),
-            refused_id.clone(),
-            answer_with(request_id.clone(), &missing.to_string_lossy()),
+            answer_id.clone(),
+            answer_with(request_id.clone(), &path),
         )
-        .await
-        .unwrap();
+        .await;
     assert_eq!(
-        refused.reply,
-        Reply::Rejected {
-            reason: "attachment-unavailable".into()
-        }
+        unavailable(refused),
+        "Attachment 'notes.txt' is no longer available. Attach it again."
     );
     assert_eq!(
         state(&runtime, &thread).await.requests[0].status,
         RequestStatus::Pending
     );
+    let lookup = answer_id.clone();
+    assert!(
+        runtime
+            .store()
+            .blocking(move |store| store.receipt(&lookup))
+            .await
+            .unwrap()
+            .is_none()
+    );
 
-    let present = dir.path().join("notes.txt");
-    std::fs::write(&present, "note").unwrap();
-    // A retry replays the first result although the Host now fills the path.
-    let retried = runtime
-        .dispatch(
-            thread.clone(),
-            refused_id,
-            answer_with(request_id.clone(), &present.to_string_lossy()),
-        )
-        .await
-        .unwrap();
-    assert_eq!(retried.reply, refused.reply);
-    assert!(retried.replayed);
-    let accepted_id = host.id();
+    std::fs::write(&*path, "note").unwrap();
     let accepted = runtime
         .dispatch(
             thread.clone(),
-            accepted_id.clone(),
-            answer_with(request_id.clone(), &present.to_string_lossy()),
+            answer_id.clone(),
+            answer_with(request_id.clone(), &path),
         )
         .await
         .unwrap();
     assert_eq!(accepted.reply, Reply::Request(request_id.clone()));
-    std::fs::remove_file(&present).unwrap();
+    assert!(!accepted.replayed);
+    assert_eq!(
+        state(&runtime, &thread).await.requests[0].status,
+        RequestStatus::Resolved
+    );
+
     let retried = runtime
         .dispatch(
             thread.clone(),
-            accepted_id,
-            answer_with(request_id.clone(), &present.to_string_lossy()),
+            answer_id.clone(),
+            answer_with(request_id.clone(), &path),
         )
         .await
         .unwrap();
-    assert_eq!(retried.reply, Reply::Request(request_id));
+    assert_eq!(retried.reply, Reply::Request(request_id.clone()));
     assert!(retried.replayed);
+    std::fs::remove_file(&*path).unwrap();
+    let retried = runtime
+        .dispatch(thread.clone(), answer_id, answer_with(request_id, &path))
+        .await;
+    assert_eq!(
+        unavailable(retried),
+        "Attachment 'notes.txt' is no longer available. Attach it again."
+    );
     runtime.shutdown().await;
 }
 

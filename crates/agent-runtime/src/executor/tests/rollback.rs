@@ -886,3 +886,42 @@ async fn a_provider_switch_while_a_rollback_waits_fails_the_rollback() {
     assert!(rollback_calls(&rig.ops).is_empty());
     assert!(rolled_back(&state).is_empty());
 }
+
+// Effects of a thread execute in the order they were requested: a rollback
+// requested while a message waits for an earlier rollback executes after the
+// message's turn has started.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rollback_requested_while_a_message_waits_executes_after_its_turn_starts() {
+    let rig = rig();
+    rig.host.respond(revert_replies(rig.ops.clone(), false));
+    let id = tid("rollback-behind-a-start");
+    let scope = rig.scoped(&id, worktree("/wt")).await;
+    rig.completed_run(&id, "first", "turn-1").await;
+    rig.completed_run(&id, "second", "turn-2").await;
+    rig.ops.log.lock().unwrap().clear();
+
+    assert_eq!(rollback(&rig, &id, &scope, 1, false).await, Reply::Accepted);
+    let waiting = rig.send(&id, "waiting", "waiting").await;
+    assert_eq!(rollback(&rig, &id, &scope, 0, false).await, Reply::Accepted);
+    rig.drain().await;
+
+    let order: Vec<_> = rig
+        .ops
+        .logged()
+        .into_iter()
+        .filter(|entry| entry.starts_with("provider"))
+        .collect();
+    assert_eq!(
+        order,
+        [
+            "provider",
+            "provider-start rollback-behind-a-start",
+            "provider"
+        ]
+    );
+    let state = rig.state(&id).await;
+    assert!(state.rollbacks.is_empty());
+    assert_eq!(state.rollback_failure, None);
+    assert_eq!(rolled_back(&state), [1, 2]);
+    assert!(rig.run(&id, &waiting).await.attempt.is_some());
+}
