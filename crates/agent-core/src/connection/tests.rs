@@ -1798,3 +1798,162 @@ fn picking_another_local_branch_switches_the_checkout_first() {
         Some("topic")
     );
 }
+
+// web useReviewFilePatches with client-runtime diffFilePatch: a truncated
+// source that lists its files is read file by file, four reads at a time; a
+// newer preview reads the asked files again and a new diff starts over.
+#[test]
+fn a_truncated_diff_with_its_file_list_is_read_file_by_file() {
+    use agent_protocol::workspace as w;
+    let mut owner = opened(thread_state("Thread"));
+    let request = w::DiffPreview {
+        cwd: owner.state.cwd(),
+        base_ref: None,
+        ignore_whitespace: false,
+        file: None,
+    };
+    let source = |hash: &str, truncated: bool, paths: &[&str]| {
+        w::DiffSource {
+        id: "branch-range".into(),
+        kind: w::DiffSourceKind::BranchRange,
+        title: "Changes vs main".into(),
+        base_ref: Some("main".into()),
+        head_ref: Some("topic".into()),
+        diff: paths
+            .iter()
+            .map(|path| {
+                format!("diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n@@ -1 +1 @@\n-a\n+b\n")
+            })
+            .collect(),
+        diff_hash: hash.into(),
+        truncated,
+        files: Some(
+            paths
+                .iter()
+                .map(|path| w::DiffFile {
+                    path: (*path).into(),
+                    previous_path: None,
+                    additions: 1,
+                    deletions: 1,
+                })
+                .collect(),
+        ),
+    }
+    };
+    let preview = |owner: &mut Owner, millis: i64, source: w::DiffSource| {
+        owner.state.sources.diff_preview = Some(DiffPreviewEntry {
+            request: request.clone(),
+            result: None,
+            error: None,
+        });
+        owner.finished(job(
+            Call::DiffPreview(request.clone()),
+            Ok(CallReply::DiffPreview(w::DiffPreviewResult {
+                cwd: request.cwd.clone(),
+                generated_at: agent_domain::Timestamp::from_millis(millis).unwrap(),
+                sources: vec![source],
+            })),
+            None,
+        ));
+    };
+    let files = ["f.ts", "e.ts", "d.ts", "c.ts", "b.ts", "a.ts"];
+    let file_request = |owner: &Owner, path: &str| {
+        let entry = owner.state.sources.diff_files.as_ref().unwrap();
+        let file = entry.files.iter().find(|file| file.path == path).unwrap();
+        Call::DiffPreview(entry.file_request(file))
+    };
+    let reading = |owner: &Owner| -> Vec<String> {
+        let entry = owner.state.sources.diff_files.as_ref().unwrap();
+        entry
+            .patches
+            .iter()
+            .filter(|(_, patch)| patch.in_flight)
+            .map(|(path, _)| path.clone())
+            .collect()
+    };
+    preview(&mut owner, 1, source("one", true, &files));
+    assert_eq!(reading(&owner), ["a.ts", "b.ts", "c.ts", "d.ts"]);
+    let call = file_request(&owner, "a.ts");
+    let Call::DiffPreview(single) = &call else {
+        unreachable!()
+    };
+    assert_eq!(
+        single.file,
+        Some(w::DiffPreviewFile {
+            path: "a.ts".into(),
+            previous_path: None,
+            source: w::DiffSourceKind::BranchRange,
+        })
+    );
+    assert_eq!(single.base_ref.as_deref(), Some("main"));
+    owner.finished(job(
+        call,
+        Ok(CallReply::DiffPreview(w::DiffPreviewResult {
+            cwd: request.cwd.clone(),
+            generated_at: agent_domain::Timestamp::from_millis(2).unwrap(),
+            sources: vec![source("a", false, &["a.ts"])],
+        })),
+        None,
+    ));
+    owner.prepare(Intent::LoadMoreDiffFiles).unwrap();
+    assert_eq!(reading(&owner), ["b.ts", "c.ts", "d.ts", "e.ts"]);
+    owner
+        .prepare(Intent::RevealDiffFile {
+            path: "f.ts".into(),
+            retry: false,
+        })
+        .unwrap();
+    let entry = owner.state.sources.diff_files.as_ref().unwrap();
+    assert_eq!(entry.queue, ["f.ts"]);
+    let selection = crate::view::checkpoints::DiffPanelSelection::default();
+    let cwd = owner.state.cwd();
+    let view = crate::view::review_files::review_files_view(
+        crate::view::review_files::lazy_entry(&owner.state, &cwd, &selection).unwrap(),
+    );
+    assert_eq!((view.settled_count, view.additions), (1, 6));
+    assert!(view.pending);
+    let git = crate::view::checkpoints::git_diff_view(&owner.state, &cwd, &selection);
+    assert!(!git.truncated && git.files_revision.is_some());
+
+    let failed = file_request(&owner, "b.ts");
+    owner.finished(job(failed, Err(invalid("offline")), None));
+    assert_eq!(reading(&owner), ["c.ts", "d.ts", "e.ts", "f.ts"]);
+    let patches = &owner.state.sources.diff_files.as_ref().unwrap().patches;
+    assert!(matches!(patches["b.ts"].result, Some(Err(_))));
+    owner
+        .prepare(Intent::RevealDiffFile {
+            path: "b.ts".into(),
+            retry: true,
+        })
+        .unwrap();
+    assert_eq!(
+        owner.state.sources.diff_files.as_ref().unwrap().queue,
+        ["b.ts"]
+    );
+
+    // The same diff again: every asked file is read again.
+    for path in ["c.ts", "d.ts", "e.ts", "f.ts"] {
+        let call = file_request(&owner, path);
+        owner.finished(job(call, Err(invalid("offline")), None));
+    }
+    preview(&mut owner, 3, source("one", true, &files));
+    let entry = owner.state.sources.diff_files.as_ref().unwrap();
+    assert_eq!(entry.patches.len(), 6);
+    assert_eq!(reading(&owner).len() + entry.queue.len(), 6);
+    assert_eq!(
+        entry.patches["a.ts"].result.as_ref().map(Result::is_ok),
+        Some(true)
+    );
+
+    // A new diff starts over, and a late read of the old one is dropped.
+    let late = file_request(&owner, "a.ts");
+    preview(&mut owner, 4, source("two", true, &files));
+    owner.finished(job(late, Err(invalid("offline")), None));
+    let entry = owner.state.sources.diff_files.as_ref().unwrap();
+    assert_eq!(entry.patches.len(), 4);
+    assert!(entry.patches.values().all(|patch| patch.result.is_none()));
+    assert_eq!(reading(&owner), ["a.ts"]);
+
+    preview(&mut owner, 5, source("three", false, &files));
+    assert!(owner.state.sources.diff_files.is_none());
+}

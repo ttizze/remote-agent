@@ -910,6 +910,16 @@ pub enum Intent {
         ignore: bool,
     },
     LoadDiff,
+    /// The loading boundary of a diff shown file by file came near: reads
+    /// the next files.
+    LoadMoreDiffFiles,
+    /// A file of a diff shown file by file was revealed or scrolled to: reads
+    /// it (mobile: with the two after it), and with `retry` reads it again
+    /// when its patch could not be shown.
+    RevealDiffFile {
+        path: String,
+        retry: bool,
+    },
     ReviewWorkspace {
         cwd: String,
     },

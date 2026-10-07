@@ -13,13 +13,14 @@ use crate::{
     peer::PeerError,
     protocol::Call,
     state::{
-        DiffPreviewEntry, DraftWorkspace, EntryQuery, PROVIDER_COMMANDS_RETRY_MS, RefScope,
-        RefsEntry,
+        DiffFilePatch, DiffFilesEntry, DiffPreviewEntry, DraftWorkspace, EntryQuery,
+        PROVIDER_COMMANDS_RETRY_MS, RefScope, RefsEntry,
     },
     view::{
         checkpoints::DiffSelection,
         composer::commands::{ComposerTriggerKind, detect_composer_trigger},
         projects::selection::ThreadWorkspaceMode,
+        review_files::{CONCURRENT_FILE_READS, FileRequest, MISSING_SOURCE, retries, wanted_files},
         timeline::rows::TimelineLayout,
     },
 };
@@ -357,6 +358,198 @@ impl Owner {
             }
         }
     }
+
+    /// Keeps the per-file patches on the shown source: a truncated source
+    /// that lists its files is read file by file, from its first files; a
+    /// newer preview of the same source reads the asked files again.
+    fn sync_diff_files(
+        &mut self,
+        preview: &w::DiffPreviewResult,
+        request: &w::DiffPreview,
+        source: &w::DiffSource,
+    ) {
+        let Some(files) = source.files.clone().filter(|_| source.truncated) else {
+            self.state.sources.diff_files = None;
+            return;
+        };
+        let same = self.state.sources.diff_files.as_ref().is_some_and(|entry| {
+            &entry.preview == request
+                && entry.kind == source.kind
+                && entry.base_ref == source.base_ref
+                && entry.diff_hash == source.diff_hash
+        });
+        if !same {
+            let layout = if self.options.creation_source == "mobile" {
+                TimelineLayout::Mobile
+            } else {
+                TimelineLayout::Desktop
+            };
+            let mut entry = DiffFilesEntry {
+                preview: request.clone(),
+                kind: source.kind,
+                base_ref: source.base_ref.clone(),
+                diff_hash: source.diff_hash.clone(),
+                generated_at: preview.generated_at.clone(),
+                layout,
+                files,
+                patches: Default::default(),
+                queue: vec![],
+                superseded: Default::default(),
+                revision: 0,
+            };
+            // Reads of the older diff that would answer as this one's.
+            if let Some(old) = self.state.sources.diff_files.take() {
+                entry.superseded = old
+                    .files
+                    .iter()
+                    .filter(|file| {
+                        old.superseded.contains(&file.path)
+                            || old
+                                .patches
+                                .get(&file.path)
+                                .is_some_and(|patch| patch.in_flight)
+                    })
+                    .filter(|file| {
+                        entry
+                            .files
+                            .iter()
+                            .any(|listed| entry.file_request(listed) == old.file_request(file))
+                    })
+                    .map(|file| file.path.clone())
+                    .collect();
+            }
+            self.state.sources.diff_files = Some(entry);
+            self.want_diff_files(FileRequest::Initial);
+            return;
+        }
+        let Some(entry) = self.state.sources.diff_files.as_mut() else {
+            return;
+        };
+        if entry.generated_at == preview.generated_at {
+            return;
+        }
+        entry.generated_at = preview.generated_at.clone();
+        let paths: Vec<String> = entry.patches.keys().cloned().collect();
+        for path in paths {
+            Self::queue_diff_file(entry, path);
+        }
+        self.read_diff_files();
+    }
+
+    /// Asks for the files `request` wants of the shown source.
+    pub(super) fn want_diff_files(&mut self, request: FileRequest) {
+        let Some(entry) = self.state.sources.diff_files.as_mut() else {
+            return;
+        };
+        let wanted = wanted_files(entry, request);
+        for index in wanted {
+            let path = entry.files[index].path.clone();
+            entry.patches.insert(path.clone(), DiffFilePatch::default());
+            Self::queue_diff_file(entry, path);
+        }
+        self.read_diff_files();
+    }
+
+    /// Reads `path` again when its last read could not be shown.
+    pub(super) fn retry_diff_file(&mut self, path: &str) {
+        let Some(entry) = self
+            .state
+            .sources
+            .diff_files
+            .as_mut()
+            .filter(|entry| retries(entry, path))
+        else {
+            return;
+        };
+        Self::queue_diff_file(entry, path.to_owned());
+        self.read_diff_files();
+    }
+
+    /// Queues a read of `path`; a read already in flight is superseded.
+    fn queue_diff_file(entry: &mut DiffFilesEntry, path: String) {
+        if let Some(patch) = entry.patches.get_mut(&path).filter(|patch| patch.in_flight) {
+            patch.in_flight = false;
+            entry.superseded.insert(path.clone());
+        }
+        if !entry.queue.contains(&path) {
+            entry.queue.push(path);
+        }
+        entry.revision += 1;
+    }
+
+    /// Sends queued file reads while fewer than four are in flight; a file
+    /// waits for its superseded read to answer first.
+    fn read_diff_files(&mut self) {
+        let mut calls = vec![];
+        if let Some(entry) = self.state.sources.diff_files.as_mut() {
+            let mut reading = entry.reading();
+            let mut position = 0;
+            while reading < CONCURRENT_FILE_READS && position < entry.queue.len() {
+                if entry.superseded.contains(&entry.queue[position]) {
+                    position += 1;
+                    continue;
+                }
+                let path = entry.queue.remove(position);
+                let Some(file) = entry.files.iter().find(|file| file.path == path) else {
+                    continue;
+                };
+                calls.push(entry.file_request(file));
+                entry.patches.entry(path).or_default().in_flight = true;
+                reading += 1;
+                entry.revision += 1;
+            }
+        }
+        for call in calls {
+            self.job(Call::DiffPreview(call), None, None);
+        }
+    }
+
+    /// Settles one file's read when it still belongs to the shown source.
+    pub(super) fn diff_file_finished(
+        &mut self,
+        request: &w::DiffPreview,
+        result: Result<w::DiffPreviewResult, &PeerError>,
+    ) {
+        let Some(file) = &request.file else {
+            return;
+        };
+        let Some(entry) = self.state.sources.diff_files.as_mut() else {
+            return;
+        };
+        let matches = entry
+            .files
+            .iter()
+            .any(|listed| listed.path == file.path && &entry.file_request(listed) == request);
+        if !matches {
+            return;
+        }
+        if entry.superseded.remove(&file.path) {
+            entry.revision += 1;
+            self.read_diff_files();
+            return;
+        }
+        let Some(patch) = entry
+            .patches
+            .get_mut(&file.path)
+            .filter(|patch| patch.in_flight)
+        else {
+            return;
+        };
+        patch.in_flight = false;
+        patch.result = Some(match result {
+            Ok(preview) => preview
+                .sources
+                .into_iter()
+                .find(|source| source.kind == file.source)
+                .map(Arc::new)
+                .ok_or_else(|| MISSING_SOURCE.to_owned()),
+            Err(error) => Err(crate::presentation::error::error_message(
+                &error.to_string(),
+            )),
+        });
+        entry.revision += 1;
+        self.read_diff_files();
+    }
 }
 
 impl Owner {
@@ -375,17 +568,20 @@ impl Owner {
             Some(DiffSelection::Turn { .. }) => return,
             _ => w::DiffSourceKind::BranchRange,
         };
-        let Some(source) = self
+        let Some((request, preview)) = self
             .state
             .sources
             .diff_preview
             .as_ref()
             .filter(|entry| entry.request.cwd == self.state.cwd())
-            .and_then(|entry| entry.result.as_ref())
-            .and_then(|preview| preview.sources.iter().find(|source| source.kind == kind))
+            .and_then(|entry| Some((entry.request.clone(), entry.result.clone()?)))
         else {
             return;
         };
+        let Some(source) = preview.sources.iter().find(|source| source.kind == kind) else {
+            return;
+        };
+        self.sync_diff_files(&preview, &request, source);
         let mut review = crate::presentation::diff::review_from_patch(source.diff.clone());
         review.branch = source.title.clone();
         let workspace = &mut self.state.workspace;

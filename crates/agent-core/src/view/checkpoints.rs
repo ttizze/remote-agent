@@ -540,8 +540,12 @@ pub struct GitDiffView {
     pub error: Option<String>,
     pub base_ref: Option<String>,
     pub head_ref: Option<String>,
-    /// The diff is too large to show whole.
+    /// The diff is too large to show whole and lists no files to read one by
+    /// one: the panel shows the partial preview notice.
     pub truncated: bool,
+    /// Present while the diff is shown file by file; changes whenever a
+    /// file's patch does (see `Snapshot::review_files`).
+    pub files_revision: Option<String>,
     /// `<head> → <base>` beside the base picker.
     pub comparison_label: Option<String>,
     /// The mobile review section's subtitle: "Staged, unstaged, and untracked
@@ -706,7 +710,9 @@ pub fn git_diff_view(
             .map(|base| format!("{} \u{2192} {base}", head.as_deref().unwrap_or("HEAD"))),
         base_ref,
         head_ref: head,
-        truncated: source.is_some_and(|source| source.truncated),
+        truncated: source.is_some_and(|source| source.truncated && source.files.is_none()),
+        files_revision: crate::view::review_files::lazy_entry(snapshot, cwd, selection)
+            .map(|entry| format!("{}:{}", entry.diff_hash, entry.revision)),
         base_ref_choices: choices,
         base_refs_loading: [local, remote]
             .into_iter()

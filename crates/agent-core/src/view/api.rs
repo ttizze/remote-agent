@@ -270,6 +270,17 @@ impl Snapshot {
             )
         }
     }
+    /// The files of the thread's diff while it is shown file by file.
+    pub fn review_files(
+        &self,
+        thread_id: String,
+    ) -> Option<crate::view::review_files::ReviewFilesView> {
+        let thread = thread(thread_id)?;
+        let unselected = DiffPanelSelection::default();
+        let selection = self.diff_panels.get(&thread).unwrap_or(&unselected);
+        crate::view::review_files::lazy_entry(self, &self.thread_cwd(&thread), selection)
+            .map(crate::view::review_files::review_files_view)
+    }
     pub fn project_scripts(&self, project_id: String) -> Option<ProjectScriptsView> {
         project_scripts(
             self,

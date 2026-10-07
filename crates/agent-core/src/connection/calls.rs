@@ -343,6 +343,9 @@ impl Owner {
                         self.provider_commands_finished(request, Err(&error))
                     }
                     Call::ListRefs(request) => self.refs_finished(request, Err(&error)),
+                    Call::DiffPreview(request) if request.file.is_some() => {
+                        self.diff_file_finished(request, Err(&error))
+                    }
                     Call::DiffPreview(request) => self.diff_preview_finished(request, Err(&error)),
                     Call::CancelSetup(_) => self.work_locally = None,
                     Call::ProjectFavicon(request) => self.project_icon_read(request, Err(())),
@@ -519,8 +522,12 @@ impl Owner {
             }
             Reply::DiffPreview(preview) => {
                 if let Call::DiffPreview(request) = call {
-                    self.diff_preview_finished(request, Ok(preview));
-                    self.show_diff_preview();
+                    if request.file.is_some() {
+                        self.diff_file_finished(request, Ok(preview));
+                    } else {
+                        self.diff_preview_finished(request, Ok(preview));
+                        self.show_diff_preview();
+                    }
                 }
             }
             Reply::SwitchedRef(switched) => {

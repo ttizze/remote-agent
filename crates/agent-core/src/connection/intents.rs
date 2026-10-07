@@ -279,6 +279,17 @@ impl Owner {
                 }
             }
             Intent::LoadDiff => self.load_diff()?,
+            Intent::LoadMoreDiffFiles => {
+                self.want_diff_files(crate::view::review_files::FileRequest::Next);
+                Next::Done
+            }
+            Intent::RevealDiffFile { path, retry } => {
+                self.want_diff_files(crate::view::review_files::FileRequest::Reveal(&path));
+                if retry {
+                    self.retry_diff_file(&path);
+                }
+                Next::Done
+            }
             Intent::OpenTerminal {
                 thread_id: id,
                 terminal_id,

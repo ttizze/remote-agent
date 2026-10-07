@@ -2,7 +2,10 @@
 //! panel and the new-task branch picker: provider commands, path search, Git
 //! status, refs and diff previews.
 use agent_protocol::workspace as w;
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
 /// A failed or still pending provider command scan is asked again after this.
 pub const PROVIDER_COMMANDS_RETRY_MS: u64 = 10_000;
@@ -73,6 +76,70 @@ pub struct DiffPreviewEntry {
     pub error: Option<String>,
 }
 
+/// One file's patch of a diff source too large to send whole.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct DiffFilePatch {
+    /// The source of the requested kind, or why it could not be read.
+    pub result: Option<Result<Arc<w::DiffSource>, String>>,
+    pub in_flight: bool,
+}
+
+/// The per-file patches of the shown diff while its source is truncated but
+/// lists every file: each file's patch is asked for on its own.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DiffFilesEntry {
+    /// The preview request whose source lists the files.
+    pub preview: w::DiffPreview,
+    pub kind: w::DiffSourceKind,
+    pub base_ref: Option<String>,
+    pub diff_hash: String,
+    /// The preview the loaded patches follow; a newer one reloads them.
+    pub generated_at: agent_domain::Timestamp,
+    /// Desktop orders the files by path, mobile keeps the Host's order.
+    pub layout: crate::view::timeline::rows::TimelineLayout,
+    /// The source's files in the Host's order, with complete counts.
+    pub files: Vec<w::DiffFile>,
+    /// By path, the requested files.
+    pub patches: BTreeMap<String, DiffFilePatch>,
+    /// Requested files waiting for a free read, first asked first.
+    pub queue: Vec<String>,
+    /// Files whose read in flight belongs to an older diff: its reply is
+    /// dropped before the file is read again.
+    pub superseded: BTreeSet<String>,
+    /// Changes whenever a file's request or patch changes.
+    pub revision: u64,
+}
+impl DiffFilesEntry {
+    /// The single-file preview request of `file`.
+    pub fn file_request(&self, file: &w::DiffFile) -> w::DiffPreview {
+        w::DiffPreview {
+            cwd: self.preview.cwd.clone(),
+            base_ref: self
+                .base_ref
+                .clone()
+                .or_else(|| self.preview.base_ref.clone()),
+            ignore_whitespace: self.preview.ignore_whitespace,
+            file: Some(w::DiffPreviewFile {
+                path: file.path.clone(),
+                previous_path: file.previous_path.clone(),
+                source: self.kind,
+            }),
+        }
+    }
+    /// Reads in flight, current or outdated.
+    pub fn reading(&self) -> usize {
+        self.patches
+            .values()
+            .filter(|patch| patch.in_flight)
+            .count()
+            + self.superseded.len()
+    }
+    /// A patch is being read or waits for a read.
+    pub fn pending(&self) -> bool {
+        !self.queue.is_empty() || self.reading() > 0
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct WorkspaceSources {
     /// By provider instance and directory.
@@ -82,6 +149,7 @@ pub struct WorkspaceSources {
     pub vcs_status: BTreeMap<String, w::VcsStatus>,
     pub refs: BTreeMap<(String, RefScope), RefsEntry>,
     pub diff_preview: Option<DiffPreviewEntry>,
+    pub diff_files: Option<DiffFilesEntry>,
     /// The layout the composer last reported, whose wording its menu uses.
     pub composer_layout: crate::view::timeline::rows::TimelineLayout,
 }
