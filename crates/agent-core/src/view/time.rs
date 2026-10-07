@@ -42,6 +42,109 @@ pub fn short_month_day<Tz: TimeZone>(date: &DateTime<Tz>) -> String {
     format!("{} {}", MONTHS[date.month0() as usize], date.day())
 }
 
+const MONTH_NAMES: [&str; 12] = [
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
+];
+
+/// "8/13", with the year once it differs from `now`'s: "8/13/2025".
+fn numeric_date<Tz: TimeZone>(date: &DateTime<Tz>, now: &DateTime<Tz>) -> String {
+    if date.year() == now.year() {
+        format!("{}/{}", date.month(), date.day())
+    } else {
+        format!("{}/{}/{}", date.month(), date.day(), date.year())
+    }
+}
+
+/// Calendar days from `from` to `to` in their zone.
+fn calendar_days<Tz: TimeZone>(from: &DateTime<Tz>, to: &DateTime<Tz>) -> i64 {
+    (to.date_naive() - from.date_naive()).num_days()
+}
+
+/// A chat time that adds the date once it is not from today: "12:34 PM",
+/// "yesterday at 12:34 PM", "8/13 12:34 PM", "8/13/2025 12:34 PM".
+pub fn day_aware_timestamp<Tz: TimeZone>(
+    date: &DateTime<Tz>,
+    now: &DateTime<Tz>,
+    format: TimestampFormat,
+) -> String {
+    let time = time_of_day(date, format);
+    match calendar_days(date, now) {
+        ..=0 => time,
+        1 => format!("yesterday at {time}"),
+        _ => format!("{} {time}", numeric_date(date, now)),
+    }
+}
+
+/// The forward-looking form for an instant still to come, such as a usage
+/// limit reset: "12:34 PM", "tomorrow at 12:34 PM", "8/13 12:34 PM".
+pub fn upcoming_timestamp<Tz: TimeZone>(
+    date: &DateTime<Tz>,
+    now: &DateTime<Tz>,
+    format: TimestampFormat,
+) -> String {
+    let time = time_of_day(date, format);
+    match calendar_days(now, date) {
+        ..0 => day_aware_timestamp(date, now, format),
+        0 => time,
+        1 => format!("tomorrow at {time}"),
+        _ => format!("{} {time}", numeric_date(date, now)),
+    }
+}
+
+fn ordinal_suffix(day: u32) -> &'static str {
+    match (day % 100, day % 10) {
+        (11..=13, _) => "th",
+        (_, 1) => "st",
+        (_, 2) => "nd",
+        (_, 3) => "rd",
+        _ => "th",
+    }
+}
+
+/// The tooltip of a chat time: "12:04 PM, 4th June 2026".
+pub fn chat_timestamp_tooltip<Tz: TimeZone>(
+    date: &DateTime<Tz>,
+    format: TimestampFormat,
+) -> String {
+    let day = date.day();
+    format!(
+        "{}, {day}{} {} {}",
+        time_of_day(date, format),
+        ordinal_suffix(day),
+        MONTH_NAMES[date.month0() as usize],
+        date.year()
+    )
+}
+
+/// A date and time as the default English locale writes it in full:
+/// "10/7/2026, 3:04:05 PM".
+pub fn locale_date_time<Tz: TimeZone>(date: &DateTime<Tz>) -> String {
+    let hour = match date.hour() % 12 {
+        0 => 12,
+        hour => hour,
+    };
+    format!(
+        "{}/{}/{}, {hour}:{:02}:{:02} {}",
+        date.month(),
+        date.day(),
+        date.year(),
+        date.minute(),
+        date.second(),
+        if date.hour() < 12 { "AM" } else { "PM" }
+    )
+}
+
 /// A local wall-clock time, moved past a daylight-saving gap the way a
 /// calendar does.
 pub fn resolve_local<Tz: TimeZone>(zone: &Tz, local: NaiveDateTime) -> Option<DateTime<Tz>> {
@@ -210,5 +313,82 @@ mod tests {
         assert_eq!(time_of_day(&midnight, TimestampFormat::Locale), "12:00 AM");
         assert_eq!(short_weekday(&date), "Wed");
         assert_eq!(short_month_day(&date), "Apr 8");
+    }
+
+    #[test]
+    fn chat_times_add_the_date_once_the_day_has_passed() {
+        let now = chrono::Utc.with_ymd_and_hms(2026, 8, 14, 9, 0, 0).unwrap();
+        let at = |m, d, h| chrono::Utc.with_ymd_and_hms(2026, m, d, h, 34, 0).unwrap();
+        let format = TimestampFormat::TwelveHour;
+        assert_eq!(
+            day_aware_timestamp(&at(8, 14, 12), &now, format),
+            "12:34 PM"
+        );
+        assert_eq!(
+            day_aware_timestamp(&at(8, 13, 23), &now, format),
+            "yesterday at 11:34 PM"
+        );
+        assert_eq!(
+            day_aware_timestamp(&at(8, 12, 0), &now, format),
+            "8/12 12:34 AM"
+        );
+        let last_year = chrono::Utc
+            .with_ymd_and_hms(2025, 12, 31, 18, 5, 0)
+            .unwrap();
+        assert_eq!(
+            day_aware_timestamp(&last_year, &now, TimestampFormat::TwentyFourHour),
+            "12/31/2025 18:05"
+        );
+    }
+
+    #[test]
+    fn upcoming_times_name_tomorrow_and_fall_back_for_the_past() {
+        let now = chrono::Utc.with_ymd_and_hms(2026, 8, 14, 9, 0, 0).unwrap();
+        let at = |d, h| chrono::Utc.with_ymd_and_hms(2026, 8, d, h, 0, 0).unwrap();
+        let format = TimestampFormat::TwelveHour;
+        assert_eq!(upcoming_timestamp(&at(14, 17), &now, format), "5:00 PM");
+        assert_eq!(
+            upcoming_timestamp(&at(15, 1), &now, format),
+            "tomorrow at 1:00 AM"
+        );
+        assert_eq!(upcoming_timestamp(&at(20, 1), &now, format), "8/20 1:00 AM");
+        assert_eq!(
+            upcoming_timestamp(&at(13, 1), &now, format),
+            "yesterday at 1:00 AM"
+        );
+    }
+
+    #[test]
+    fn tooltips_spell_the_day_with_its_ordinal_and_month() {
+        let at = |d| chrono::Utc.with_ymd_and_hms(2026, 6, d, 12, 4, 0).unwrap();
+        let format = TimestampFormat::TwentyFourHour;
+        assert_eq!(
+            chat_timestamp_tooltip(&at(4), format),
+            "12:04, 4th June 2026"
+        );
+        assert_eq!(
+            chat_timestamp_tooltip(&at(1), format),
+            "12:04, 1st June 2026"
+        );
+        assert_eq!(
+            chat_timestamp_tooltip(&at(22), format),
+            "12:04, 22nd June 2026"
+        );
+        assert_eq!(
+            chat_timestamp_tooltip(&at(13), format),
+            "12:04, 13th June 2026"
+        );
+        assert_eq!(
+            chat_timestamp_tooltip(&at(23), format),
+            "12:04, 23rd June 2026"
+        );
+    }
+
+    #[test]
+    fn locale_date_times_carry_seconds_and_the_meridiem() {
+        let date = chrono::Utc.with_ymd_and_hms(2026, 10, 7, 15, 4, 5).unwrap();
+        assert_eq!(locale_date_time(&date), "10/7/2026, 3:04:05 PM");
+        let midnight = chrono::Utc.with_ymd_and_hms(2026, 1, 2, 0, 0, 9).unwrap();
+        assert_eq!(locale_date_time(&midnight), "1/2/2026, 12:00:09 AM");
     }
 }

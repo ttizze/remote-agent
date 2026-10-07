@@ -23,6 +23,7 @@ use agent_core::{
         new_thread::NewThreadView,
         sidebar::{SidebarOptions, SidebarView},
         thread::{ThreadView, ThreadViewOptions},
+        thread_menu::ThreadMenuItemId,
         timeline::rows::TimelineLayout,
     },
 };
@@ -576,6 +577,9 @@ impl Desktop {
         if !modifiers.secondary() {
             return false;
         }
+        if self.panel_key(event, window, cx) {
+            return true;
+        }
         let key = keystroke.key.as_str();
         match (key, modifiers.shift, modifiers.alt) {
             ("b", false, false) => {
@@ -596,6 +600,19 @@ impl Desktop {
             }
             ("[", true, false) => self.select_adjacent_thread(false, cx),
             ("]", true, false) => self.select_adjacent_thread(true, cx),
+            ("s", true, false) => self.toggle_open_thread(
+                (ThreadMenuItemId::Settle, ThreadMenuItemId::Unsettle),
+                window,
+                cx,
+            ),
+            ("p", true, false) => self.toggle_open_thread(
+                (ThreadMenuItemId::Pin, ThreadMenuItemId::Unpin),
+                window,
+                cx,
+            ),
+            (digit @ ("1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9"), false, false) => {
+                self.jump_to_thread(digit.parse::<usize>().unwrap_or(1) - 1, cx)
+            }
             _ => return false,
         }
         true
@@ -604,6 +621,7 @@ impl Desktop {
 
 impl Render for Desktop {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_browser(cx);
         let metrics = ui::metrics();
         let main = match self.route {
             Route::Settings => self.render_settings(window, cx),
@@ -618,6 +636,7 @@ impl Render for Desktop {
                 } else {
                     self.render_new_thread(window, cx)
                 };
+                let body = self.chat_drop_target(body, cx);
                 let column = v_flex()
                     .flex_1()
                     .min_w_0()
@@ -654,6 +673,7 @@ impl Render for Desktop {
                     cx.stop_propagation();
                 }
             }))
+            .on_modifiers_changed(cx.listener(Self::sidebar_modifiers_changed))
             .relative()
             .size_full()
             .bg(color("canvas"))

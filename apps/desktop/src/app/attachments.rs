@@ -546,7 +546,12 @@ mod tests {
         let missing = directory.path().join("missing.png");
         let encoded = encode_stash_images(vec![
             ("a".into(), "small.png".into(), "image/png".into(), source),
-            ("b".into(), "missing.png".into(), "image/png".into(), missing),
+            (
+                "b".into(),
+                "missing.png".into(),
+                "image/png".into(),
+                missing,
+            ),
         ]);
         assert_eq!(encoded.images.len(), 1);
         assert_eq!(encoded.unreadable_image_names, ["missing.png"]);

@@ -39,8 +39,7 @@ impl Default for ChromeProfileSource {
             password: || {
                 security_framework::passwords::get_generic_password("Chrome Safe Storage", "Chrome")
                     .map_err(|_| {
-                        "ChromeのKeychainにアクセスできません。アクセスを許可して再試行してください"
-                            .into()
+                        "Can't access Chrome's Keychain item. Allow access and try again.".into()
                     })
             },
         }
@@ -90,7 +89,7 @@ impl Browser {
             .build_as_child(window)
             .map_err(|e| e.to_string())?;
         let webview = cx.new(|cx| WebView::new(raw, window, cx));
-        let address = cx.new(|cx| InputState::new(window, cx).placeholder("URL を入力"));
+        let address = cx.new(|cx| InputState::new(window, cx).placeholder("Search or enter URL"));
         Ok(cx.new(|cx: &mut Context<Self>| {
             let subscription = cx.subscribe_in(&address, window, |s, _, event, _, cx| {
                 if matches!(event, InputEvent::PressEnter { .. }) {
@@ -190,8 +189,7 @@ impl Browser {
         }
         self.importing = true;
         self.error.clear();
-        self.import_notice =
-            "ChromeのCookieを読み込み中… Keychainの確認が出たら許可してください".into();
+        self.import_notice = "Reading Chrome cookies… Allow Keychain access if asked.".into();
         let read = cx.background_executor().spawn(async move {
             read_chrome_cookies(&profile, chrono::Utc::now().timestamp(), password)
         });
@@ -200,20 +198,20 @@ impl Browser {
                 let (cookies, skipped) = read.await?;
                 let count = cookies.len();
                 if count == 0 {
-                    return Ok(format!("取り込めるCookieがありません（期限切れなど{skipped}件を除外）"));
+                    return Ok(format!("No cookies to import ({skipped} expired or unsupported skipped)."));
                 }
                 let store = owner.update(cx, |s, cx| unsafe {
                     s.webview.read(cx).raw().webview().configuration().websiteDataStore().httpCookieStore()
-                }).map_err(|_| "ブラウザが閉じられました".to_string())?;
+                }).map_err(|_| "The browser was closed.".to_string())?;
                 let timer = cx.background_executor().timer(std::time::Duration::from_secs(30));
                 match futures_util::future::select(install_chrome_cookies(&store, cookies).boxed_local(), timer.boxed_local()).await {
                     Either::Left((result, _)) => result?,
-                    Either::Right(_) => return Err("Cookieの保存が時間内に完了しませんでした。一部保存された可能性があります。再試行してください".into()),
+                    Either::Right(_) => return Err("Saving cookies timed out. Some may have been saved. Try again.".into()),
                 }
                 owner.update(cx, |s, cx| s.webview.read(cx).raw().reload())
-                    .map_err(|_| "ブラウザが閉じられました".to_string())?
-                    .map_err(|_| "Cookieは保存しましたが再読み込みに失敗しました。再読み込みしてください".to_string())?;
-                Ok(format!("Cookieを{count}件取り込みました（期限切れなど{skipped}件を除外）。ログイン状態はサイトで確認してください"))
+                    .map_err(|_| "The browser was closed.".to_string())?
+                    .map_err(|_| "Cookies were saved, but the page didn't reload. Reload it.".to_string())?;
+                Ok(format!("Imported {count} cookies ({skipped} expired or unsupported skipped). Check the site to confirm you're signed in."))
             }.await;
             let _ = owner.update(cx, |s, cx| {
                 s.importing = false;
@@ -235,11 +233,11 @@ impl Browser {
         let password = self.chrome.password;
         Button::new("import-chrome-cookies")
             .label(if self.importing {
-                "取り込み中…"
+                "Importing…"
             } else {
-                "Chromeから取り込む"
+                "Import from Chrome"
             })
-            .accessibility_label("ChromeからCookieを取り込む")
+            .accessibility_label("Import cookies from Chrome")
             .small()
             .ghost()
             .disabled(self.importing)
@@ -247,7 +245,7 @@ impl Browser {
             .dropdown_menu(move |mut menu, _, _| {
                 let profiles = root
                     .as_deref()
-                    .ok_or_else(|| "ホームフォルダを取得できません".to_string())
+                    .ok_or_else(|| "Can't find the home folder.".to_string())
                     .and_then(chrome_profiles);
                 match profiles {
                     Ok(profiles) => {
@@ -300,8 +298,8 @@ impl Render for Browser {
                             .icon(IconName::ArrowLeft)
                             .small()
                             .ghost()
-                            .tooltip("戻る")
-                            .accessibility_label("戻る")
+                            .tooltip("Back")
+                            .accessibility_label("Back")
                             .on_click(cx.listener(|s, _, _, cx| {
                                 let _ = s.webview.read(cx).raw().evaluate_script("history.back()");
                             })),
@@ -311,8 +309,8 @@ impl Render for Browser {
                             .icon(IconName::ArrowRight)
                             .small()
                             .ghost()
-                            .tooltip("進む")
-                            .accessibility_label("進む")
+                            .tooltip("Forward")
+                            .accessibility_label("Forward")
                             .on_click(cx.listener(|s, _, _, cx| {
                                 let _ = s
                                     .webview
@@ -326,8 +324,8 @@ impl Render for Browser {
                             .icon(IconName::RotateCw)
                             .small()
                             .ghost()
-                            .tooltip("再読み込み")
-                            .accessibility_label("再読み込み")
+                            .tooltip("Refresh")
+                            .accessibility_label("Refresh")
                             .on_click(cx.listener(|s, _, _, cx| {
                                 if let Err(e) = s.webview.read(cx).raw().reload() {
                                     s.error = e.to_string();
@@ -338,15 +336,15 @@ impl Render for Browser {
                     .child(
                         Input::new(&self.address)
                             .small()
-                            .aria_label("ブラウザの URL"),
+                            .aria_label("Search or enter URL"),
                     )
                     .child(
                         Button::new("browser-go")
                             .icon(IconName::ArrowRight)
                             .small()
                             .ghost()
-                            .tooltip("URL を開く")
-                            .accessibility_label("URL を開く")
+                            .tooltip("Go")
+                            .accessibility_label("Go")
                             .on_click(cx.listener(|s, _, _, cx| s.navigate(cx))),
                     ),
             )
@@ -381,15 +379,14 @@ impl Render for Browser {
 
 #[cfg(target_os = "macos")]
 fn chrome_profiles(root: &std::path::Path) -> Result<Vec<(String, std::path::PathBuf)>, String> {
-    let bytes = std::fs::read(root.join("Local State")).map_err(|_| {
-        "Chromeのプロファイルが見つかりません。Chromeを一度起動してください".to_string()
-    })?;
+    let bytes = std::fs::read(root.join("Local State"))
+        .map_err(|_| "No Chrome profile found. Open Chrome once, then try again.".to_string())?;
     let state: serde_json::Value = serde_json::from_slice(&bytes)
-        .map_err(|_| "Chromeのプロファイル情報を読み取れません".to_string())?;
+        .map_err(|_| "Can't read Chrome's profile list.".to_string())?;
     let profiles = state
         .pointer("/profile/info_cache")
         .and_then(|v| v.as_object())
-        .ok_or("Chromeのプロファイル情報がありません")?;
+        .ok_or("Chrome has no profile list.")?;
     let mut result = Vec::new();
     for (directory, info) in profiles {
         // Local State must not redirect the importer outside Chrome's profile root.
@@ -409,7 +406,7 @@ fn chrome_profiles(root: &std::path::Path) -> Result<Vec<(String, std::path::Pat
         }
     }
     if result.is_empty() {
-        return Err("CookieのあるChromeプロファイルが見つかりません".into());
+        return Err("No Chrome profile has cookies.".into());
     }
     Ok(result)
 }
@@ -443,30 +440,30 @@ fn read_chrome_cookies(
     use aes::cipher::{BlockDecryptMut, KeyIvInit, block_padding::Pkcs7};
     use sha2::{Digest, Sha256};
     use zeroize::Zeroizing;
-    let path = chrome_cookie_path(profile).ok_or("ChromeのCookieファイルが見つかりません")?;
+    let path = chrome_cookie_path(profile).ok_or("Chrome's cookie file is missing.")?;
     let mut db =
         rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
             .map_err(|_| {
-                "ChromeのCookieを開けません。ファイルのアクセス権を確認してください".to_string()
+                "Can't open Chrome's cookies. Check the file's permissions.".to_string()
             })?;
     db.busy_timeout(std::time::Duration::from_secs(3))
-        .map_err(|_| "Cookieの読み込み設定に失敗しました")?;
+        .map_err(|_| "Couldn't prepare to read cookies.")?;
     // One read transaction includes committed WAL rows without copying or modifying Chrome's DB.
     let transaction = db
         .transaction()
-        .map_err(|_| "ChromeのCookieを読み取れません。再試行してください")?;
+        .map_err(|_| "Can't read Chrome's cookies. Try again.")?;
     let schema: i64 = transaction
         .query_row("SELECT value FROM meta WHERE key = 'version'", [], |row| {
             row.get::<_, String>(0)?
                 .parse::<i64>()
                 .map_err(|_| rusqlite::Error::InvalidQuery)
         })
-        .map_err(|_| "ChromeのCookie形式を確認できません")?;
+        .map_err(|_| "Can't identify Chrome's cookie format.")?;
     if !matches!(schema, 23 | 24) {
-        return Err("このChromeのCookie形式にはまだ対応していません".into());
+        return Err("This version of Chrome's cookie format isn't supported yet.".into());
     }
     let mut statement = transaction.prepare("SELECT host_key, name, value, encrypted_value, path, is_secure, is_httponly, samesite, expires_utc, has_expires, top_frame_site_key FROM cookies")
-        .map_err(|_| "ChromeのCookie形式を読み取れません")?;
+        .map_err(|_| "Can't read Chrome's cookie format.")?;
     let rows = statement
         .query_map([], |row| {
             let expires: i64 = row.get(8)?;
@@ -489,9 +486,9 @@ fn read_chrome_cookies(
                 row.get::<_, String>(10)?,
             ))
         })
-        .map_err(|_| "ChromeのCookieを読み取れません")?
+        .map_err(|_| "Can't read Chrome's cookies.")?
         .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| "ChromeのCookieに読み取れないデータがあります")?;
+        .map_err(|_| "Some of Chrome's cookies can't be read.")?;
     drop(statement);
     drop(transaction);
     drop(db);
@@ -507,11 +504,11 @@ fn read_chrome_cookies(
         }
         if !encrypted.is_empty() {
             if !cookie.value.is_empty() {
-                return Err("ChromeのCookieに矛盾する値があります".into());
+                return Err("Chrome's cookies contain conflicting values.".into());
             }
             let encrypted = encrypted
                 .strip_prefix(b"v10")
-                .ok_or("未対応のCookie暗号化方式です。取り込みは行いませんでした")?;
+                .ok_or("Unsupported cookie encryption. Nothing was imported.")?;
             if key.is_none() {
                 let secret = Zeroizing::new(password.take().expect("key requested once")()?);
                 let mut derived = Zeroizing::new([0u8; 16]);
@@ -522,13 +519,12 @@ fn read_chrome_cookies(
             let clear = Zeroizing::new(
                 cbc::Decryptor::<aes::Aes128>::new((&**key).into(), (&[b' '; 16]).into())
                     .decrypt_padded_vec_mut::<Pkcs7>(encrypted)
-                    .map_err(|_| "ChromeのCookieを復号できません。取り込みは行いませんでした")?,
+                    .map_err(|_| "Can't decrypt Chrome's cookies. Nothing was imported.")?,
             );
             let value = if schema >= 24 {
                 if clear.len() < 32 || clear[..32] != Sha256::digest(cookie.domain.as_bytes())[..] {
                     return Err(
-                        "ChromeのCookieのドメイン検証に失敗しました。取り込みは行いませんでした"
-                            .into(),
+                        "A Chrome cookie failed its domain check. Nothing was imported.".into(),
                     );
                 }
                 &clear[32..]
@@ -537,7 +533,7 @@ fn read_chrome_cookies(
             };
             cookie.value = Zeroizing::new(
                 std::str::from_utf8(value)
-                    .map_err(|_| "ChromeのCookieの文字コードに対応していません")?
+                    .map_err(|_| "A Chrome cookie uses an unsupported encoding.")?
                     .to_owned(),
             );
         }
@@ -555,7 +551,7 @@ fn read_chrome_cookies(
             || url::Host::parse(cookie.domain.trim_start_matches('.')).is_err()
         {
             return Err(
-                "ChromeのCookieに未対応の属性があります。取り込みは行いませんでした".into(),
+                "A Chrome cookie has an unsupported attribute. Nothing was imported.".into(),
             );
         }
         if !identities.insert((
@@ -564,7 +560,8 @@ fn read_chrome_cookies(
             cookie.path.clone(),
         )) {
             return Err(
-                "WebViewで区別できないCookieが重複しています。取り込みは行いませんでした".into(),
+                "Some cookies are duplicates the browser can't tell apart. Nothing was imported."
+                    .into(),
             );
         }
         cookies.push(cookie);
@@ -623,8 +620,9 @@ fn native_chrome_cookie(
             }
             _ => {}
         }
-        NSHTTPCookie::cookieWithProperties(&properties)
-            .ok_or_else(|| "WebViewに渡せないCookieがあります。取り込みは行いませんでした".into())
+        NSHTTPCookie::cookieWithProperties(&properties).ok_or_else(|| {
+            "Some cookies can't be passed to the browser. Nothing was imported.".into()
+        })
     }
 }
 
@@ -651,7 +649,7 @@ async fn install_chrome_cookies(
         }
         rx.recv()
             .await
-            .map_err(|_| "Cookieの保存完了を確認できません")?;
+            .map_err(|_| "Can't confirm the cookies were saved.")?;
     }
     let (tx, rx) = async_channel::bounded(1);
     unsafe {
@@ -688,9 +686,9 @@ async fn install_chrome_cookies(
     if !rx
         .recv()
         .await
-        .map_err(|_| "Cookieの保存結果を確認できません")?
+        .map_err(|_| "Can't confirm which cookies were saved.")?
     {
-        return Err("一部のCookieを元の属性で保存できませんでした。保存済みのCookieもあります。再試行してください".into());
+        return Err("Some cookies couldn't be saved with their original attributes. Others were saved. Try again.".into());
     }
     Ok(())
 }
@@ -835,7 +833,7 @@ mod chrome_tests {
             read_chrome_cookies(directory.path(), 0, password)
                 .err()
                 .unwrap()
-                .contains("ドメイン検証")
+                .contains("domain check")
         );
         db.execute_batch("UPDATE cookies SET encrypted_value=X'763230001122';")
             .unwrap();
@@ -872,17 +870,20 @@ mod chrome_tests {
         std::fs::create_dir_all(directory.path().join("Profile 2")).unwrap();
         std::fs::write(directory.path().join("Default/Network/Cookies"), []).unwrap();
         std::fs::write(directory.path().join("Profile 2/Cookies"), []).unwrap();
-        std::fs::write(directory.path().join("Local State"), r#"{"profile":{"info_cache":{"Default":{"name":"個人用"},"Profile 2":{"name":"仕事用"},"Missing":{"name":"removed"},"../escape":{"name":"invalid"}}}}"#).unwrap();
+        std::fs::write(directory.path().join("Local State"), r#"{"profile":{"info_cache":{"Default":{"name":"Personal"},"Profile 2":{"name":"Work"},"Missing":{"name":"removed"},"../escape":{"name":"invalid"}}}}"#).unwrap();
         let profiles = chrome_profiles(directory.path()).unwrap();
         assert_eq!(profiles.len(), 2);
         assert_eq!(
             profiles[0],
-            ("個人用 (Default)".into(), directory.path().join("Default"))
+            (
+                "Personal (Default)".into(),
+                directory.path().join("Default")
+            )
         );
         assert_eq!(
             profiles[1],
             (
-                "仕事用 (Profile 2)".into(),
+                "Work (Profile 2)".into(),
                 directory.path().join("Profile 2")
             )
         );

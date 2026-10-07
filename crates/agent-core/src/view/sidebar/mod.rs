@@ -1,8 +1,10 @@
 //! The desktop sidebar: unsent new-thread drafts, then one list of pinned,
 //! active, Working, Snoozed and Settled threads with shelf headers, or search
 //! results while a query is typed.
+mod identity;
 mod logic;
 
+pub use identity::*;
 pub use logic::*;
 
 use crate::state::Snapshot;

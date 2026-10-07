@@ -1,4 +1,6 @@
-use crate::Runtime;
+//! One thread-owned terminal: a Host process per (thread, terminal id) that
+//! this view attaches to while it is shown and detaches from when dropped.
+use crate::{Runtime, app::color};
 use agent_core::connection::Store;
 use agent_core::state::{Intent, Snapshot, TerminalPhase};
 use agent_protocol::operations::TerminalSize;
@@ -18,8 +20,9 @@ use gpui_kit::{
 };
 use std::{ops::Range, sync::Arc};
 
-const FONT_SIZE: f32 = 13.;
-const LINE_HEIGHT: f32 = 18.;
+const FONT_SIZE: f32 = 12.;
+const LINE_HEIGHT: f32 = 16.;
+const FONT_FAMILY: &str = "Menlo";
 #[derive(Clone, Copy)]
 struct GridSize(TerminalSize);
 impl Dimensions for GridSize {
@@ -43,9 +46,17 @@ impl EventListener for TerminalEvents {
     }
 }
 enum Event {
-    Snapshot(Arc<Snapshot>),
     Clipboard(String),
     Error(String),
+}
+
+/// Whether this view should attach to the terminal: it is not running for
+/// this connection yet and has not ended.
+fn needs_attach(phase: Option<&TerminalPhase>) -> bool {
+    matches!(
+        phase,
+        None | Some(TerminalPhase::Suspended | TerminalPhase::Detached)
+    )
 }
 
 pub(crate) struct Terminal {
@@ -56,7 +67,8 @@ pub(crate) struct Terminal {
     thread_id: String,
     terminal_id: String,
     handle: String,
-    started: bool,
+    /// An attach was sent and the terminal has not started since.
+    attaching: bool,
     sequence: u64,
     size: TerminalSize,
     term: Term<TerminalEvents>,
@@ -72,6 +84,10 @@ pub(crate) struct Terminal {
 }
 impl Drop for Terminal {
     fn drop(&mut self) {
+        // A closed terminal is gone from the snapshot; only a live one detaches.
+        if !self.snapshot.terminals.contains_key(&self.handle) {
+            return;
+        }
         let store = self.store.clone();
         let thread_id = self.thread_id.clone();
         let terminal_id = self.terminal_id.clone();
@@ -88,6 +104,7 @@ impl Drop for Terminal {
 impl Terminal {
     pub(crate) fn new(
         store: Arc<Store>,
+        snapshot: Arc<Snapshot>,
         thread_id: String,
         terminal_id: String,
         window: &mut Window,
@@ -95,21 +112,8 @@ impl Terminal {
     ) -> Entity<Self> {
         let (events, incoming) = async_channel::unbounded();
         let runtime = cx.global::<Runtime>().clone();
-        let updates = events.clone();
-        let mut snapshots = store.subscribe();
-        runtime.handle.spawn(async move {
-            loop {
-                let snapshot = snapshots.borrow_and_update().clone();
-                if updates.send(Event::Snapshot(snapshot)).await.is_err()
-                    || snapshots.changed().await.is_err()
-                {
-                    break;
-                }
-            }
-        });
         let size = TerminalSize { cols: 80, rows: 24 };
         let focus = cx.focus_handle();
-        focus.focus(window, cx);
         cx.new(|cx: &mut Context<Self>| {
             cx.spawn_in(window, async move |view, cx| {
                 while let Ok(event) = incoming.recv().await {
@@ -122,7 +126,7 @@ impl Terminal {
                 }
             })
             .detach();
-            Self {
+            let mut view = Self {
                 store,
                 snapshot: Arc::default(),
                 runtime,
@@ -132,7 +136,7 @@ impl Terminal {
                 ),
                 thread_id,
                 terminal_id,
-                started: false,
+                attaching: false,
                 sequence: 0,
                 size,
                 term: Term::new(
@@ -144,29 +148,39 @@ impl Terminal {
                 events,
                 focus,
                 bounds: Bounds::default(),
-                cell_width: px(8.),
+                cell_width: px(7.),
                 composition: String::new(),
                 composition_selection: 0..0,
                 selecting: false,
                 mouse_pressed: false,
                 error: None,
-            }
+            };
+            view.set_snapshot(snapshot, cx);
+            view
         })
     }
+    pub(crate) fn focus_handle(&self) -> FocusHandle {
+        self.focus.clone()
+    }
+    pub(crate) fn is_focused(&self, window: &Window) -> bool {
+        self.focus.is_focused(window)
+    }
+    /// The grid size the view last measured, for terminals opened beside it.
+    pub(crate) fn size(&self) -> TerminalSize {
+        self.size
+    }
     fn dispatch(&self, intent: Intent) {
-        {
-            let receipt = self.store.dispatch(intent);
-            let events = self.events.clone();
-            self.runtime.handle.spawn(async move {
-                if let Err(error) = receipt
-                    .await
-                    .map_err(|e| e.to_string())
-                    .and_then(|r| r.map_err(|e| e.to_string()))
-                {
-                    let _ = events.send(Event::Error(error.to_string())).await;
-                }
-            });
-        }
+        let receipt = self.store.dispatch(intent);
+        let events = self.events.clone();
+        self.runtime.handle.spawn(async move {
+            if let Err(error) = receipt
+                .await
+                .map_err(|e| e.to_string())
+                .and_then(|r| r.map_err(|e| e.to_string()))
+            {
+                let _ = events.send(Event::Error(error)).await;
+            }
+        });
     }
     fn input(&mut self, data: Vec<u8>, cx: &mut Context<Self>) {
         if data.is_empty() {
@@ -184,11 +198,27 @@ impl Terminal {
     fn event(&mut self, event: Event, cx: &mut Context<Self>) {
         match event {
             Event::Error(error) => self.error = Some(error),
-            Event::Snapshot(snapshot) => self.snapshot = snapshot,
             Event::Clipboard(text) => cx.write_to_clipboard(ClipboardItem::new_string(text)),
         }
-        if self.snapshot.connected && !self.started {
-            self.started = true;
+        cx.notify();
+    }
+    /// Follows the store: attaches once connected and feeds new output.
+    pub(crate) fn set_snapshot(&mut self, snapshot: Arc<Snapshot>, cx: &mut Context<Self>) {
+        if Arc::ptr_eq(&snapshot, &self.snapshot) {
+            return;
+        }
+        self.snapshot = snapshot;
+        let detached = needs_attach(
+            self.snapshot
+                .terminals
+                .get(&self.handle)
+                .map(|terminal| &terminal.phase),
+        );
+        if !self.snapshot.connected || !detached {
+            self.attaching = false;
+        } else if !self.attaching {
+            self.attaching = true;
+            self.error = None;
             self.dispatch(Intent::OpenTerminal {
                 thread_id: self.thread_id.clone(),
                 terminal_id: self.terminal_id.clone(),
@@ -196,30 +226,31 @@ impl Terminal {
                 rows: self.size.rows,
             });
         }
-        if let Some(terminal) = self.snapshot.terminals.get(&self.handle) {
-            let chunks: Vec<_> = terminal
-                .output
-                .iter()
-                .filter(|chunk| chunk.sequence > self.sequence)
-                .cloned()
-                .collect();
-            for chunk in chunks {
-                if let Some(size) = chunk.reset_size {
-                    self.parser = Processor::new();
-                    self.term = Term::new(
-                        Config::default(),
-                        &GridSize(size),
-                        TerminalEvents(self.events.clone()),
-                    );
-                }
-                self.parser.advance(&mut self.term, &chunk.data);
-                self.sequence = chunk.sequence;
+        let view = self.snapshot.terminal(
+            self.thread_id.clone(),
+            self.terminal_id.clone(),
+            self.sequence,
+        );
+        if view.output.is_empty() {
+            cx.notify();
+            return;
+        }
+        for chunk in view.output {
+            if let Some(size) = chunk.reset_size {
+                self.parser = Processor::new();
+                self.term = Term::new(
+                    Config::default(),
+                    &GridSize(size),
+                    TerminalEvents(self.events.clone()),
+                );
             }
-            if self.term.columns() != self.size.cols as usize
-                || self.term.screen_lines() != self.size.rows as usize
-            {
-                self.resize(self.size);
-            }
+            self.parser.advance(&mut self.term, &chunk.data);
+            self.sequence = chunk.sequence;
+        }
+        if self.term.columns() != self.size.cols as usize
+            || self.term.screen_lines() != self.size.rows as usize
+        {
+            self.resize(self.size);
         }
         cx.notify();
     }
@@ -403,36 +434,32 @@ impl Terminal {
 }
 impl Render for Terminal {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let status = self.error.clone().or_else(|| {
-            agent_domain::ThreadId::new(self.thread_id.clone())
-                .ok()
-                .and_then(|thread| {
-                    agent_core::view::terminals::terminal_view(
-                        &self.snapshot,
-                        &thread,
-                        &self.terminal_id,
-                        self.sequence,
-                    )
-                    .status
-                })
-        });
+        let view =
+            self.snapshot
+                .terminal(self.thread_id.clone(), self.terminal_id.clone(), u64::MAX);
+        let status = self
+            .error
+            .clone()
+            .or_else(|| view.status.filter(|_| !view.accepts_input));
         v_flex()
             .size_full()
             .min_h_0()
-            .bg(crate::app::color("terminalBackground"))
+            .bg(color("terminalBackground"))
             .when_some(status, |view, status| {
                 view.child(
                     h_flex()
                         .px_3()
                         .py_1()
                         .text_xs()
-                        .text_color(crate::app::color("textMuted"))
+                        .text_color(color("textMuted"))
+                        .bg(color("terminalBackground"))
                         .child(status),
                 )
             })
             .child(
                 div()
-                    .id("native-terminal")
+                    .id("thread-terminal")
+                    .pl_1()
                     .flex_1()
                     .min_h_0()
                     .overflow_hidden()
@@ -574,8 +601,8 @@ impl Element for TerminalCanvas {
     ) {
         let run = TextRun {
             len: 1,
-            font: font("Menlo"),
-            color: crate::app::color("terminalForeground").into(),
+            font: font(FONT_FAMILY),
+            color: color("terminalForeground"),
             background_color: None,
             underline: None,
             strikethrough: None,
@@ -639,7 +666,7 @@ impl Element for TerminalCanvas {
                     .selection
                     .is_some_and(|selection| selection.contains(indexed.point))
                 {
-                    bg = crate::app::color("terminalSelection").into();
+                    bg = color("terminalSelection");
                 }
                 window.paint_quad(fill(
                     Bounds::new(position, size(cell_width, px(LINE_HEIGHT))),
@@ -658,7 +685,7 @@ impl Element for TerminalCanvas {
                 if let Some(chars) = cell.zerowidth() {
                     text.extend(chars);
                 }
-                let mut face = font("Menlo");
+                let mut face = font(FONT_FAMILY);
                 if cell.flags.contains(Flags::BOLD) {
                     face.weight = FontWeight::BOLD;
                 }
@@ -704,14 +731,14 @@ impl Element for TerminalCanvas {
                 );
                 window.paint_quad(fill(
                     Bounds::new(position, size(px(2.), px(LINE_HEIGHT))),
-                    crate::app::color("terminalForeground"),
+                    color("terminalCursor"),
                 ));
                 if !view.composition.is_empty() {
                     let run = TextRun {
                         len: view.composition.len(),
-                        font: font("Menlo"),
-                        color: crate::app::color("terminalForeground").into(),
-                        background_color: Some(crate::app::color("terminalSelection").into()),
+                        font: font(FONT_FAMILY),
+                        color: color("terminalForeground"),
+                        background_color: Some(color("terminalSelection")),
                         underline: Some(UnderlineStyle {
                             color: None,
                             thickness: px(1.),

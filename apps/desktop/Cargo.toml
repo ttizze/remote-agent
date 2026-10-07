@@ -31,7 +31,6 @@ tempfile = "3"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "tiff", "bmp", "ico", "pnm"] }
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 async-channel = "2"
-similar = { version = "2", features = ["inline"] }
 alacritty_terminal = "=0.26.0"
 cpal = "0.18.2"
 rubato = { version = "5", default-features = false }

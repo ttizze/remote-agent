@@ -212,6 +212,10 @@ impl Owner {
                 self.remove_draft_context(&context_id);
                 Next::Done
             }
+            Intent::DiscardDraft { draft_key } => {
+                self.state.drafts.remove(&draft_key);
+                Next::Done
+            }
             Intent::SelectTrait {
                 descriptor_id,
                 choice,
@@ -359,6 +363,27 @@ impl Owner {
             }
             Intent::SetWorkingSection { enabled } => {
                 self.state.preferences.working_section = enabled;
+                Next::Done
+            }
+            Intent::SetDefaultModel {
+                instance_id,
+                driver,
+                model,
+                options,
+            } => {
+                let draft = Draft {
+                    instance_id,
+                    driver,
+                    model,
+                    options,
+                    ..self.state.default_draft.clone()
+                };
+                draft.selection().map_err(invalid)?;
+                self.state.default_draft = draft;
+                Next::Done
+            }
+            Intent::SetDefaultRuntimeMode { mode } => {
+                self.state.default_draft.runtime_mode = mode;
                 Next::Done
             }
             Intent::ToggleFavoriteModel { instance_id, model } => {
@@ -526,6 +551,9 @@ impl Owner {
                     ThreadAction::ActiveReorder { order_key } => {
                         LifecycleAction::ReorderActive { order: order_key }
                     }
+                    ThreadAction::Visit { at } => LifecycleAction::Visit {
+                        at: Timestamp::from_millis(at).map_err(invalid)?,
+                    },
                 };
                 Next::Commands(vec![self.lifecycle(thread_id(id)?, action)])
             }

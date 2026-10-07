@@ -1790,3 +1790,69 @@ fn a_new_thread_in_the_current_project_needs_shift_unless_there_is_one_project()
     assert!(should_create_new_thread_in_current_project(false, 1));
     assert!(!should_create_new_thread_in_current_project(false, 2));
 }
+
+#[test]
+fn bulk_delete_asks_with_the_count() {
+    assert_eq!(
+        bulk_delete_confirmation(1),
+        "Delete 1 thread?\nThis permanently clears conversation history for these threads."
+    );
+    assert!(bulk_delete_confirmation(3).starts_with("Delete 3 threads?\n"));
+}
+
+fn rows(values: &[&str]) -> Vec<String> {
+    values.iter().map(|value| (*value).into()).collect()
+}
+
+#[test]
+fn mod_click_toggles_and_anchors_only_added_rows() {
+    let mut selection = SidebarSelection::default();
+    selection.toggle("a");
+    selection.toggle("b");
+    assert_eq!(selection.selected, rows(&["a", "b"]));
+    assert_eq!(selection.anchor.as_deref(), Some("b"));
+    selection.toggle("b");
+    assert_eq!(selection.selected, rows(&["a"]));
+    assert_eq!(selection.anchor.as_deref(), Some("b"));
+}
+
+#[test]
+fn shift_click_adds_the_range_from_a_stable_anchor() {
+    let ordered = rows(&["a", "b", "c", "d", "e"]);
+    let mut selection = SidebarSelection::default();
+    selection.open("b");
+    selection.extend_to("d", &ordered);
+    assert_eq!(selection.selected, rows(&["b", "c", "d"]));
+    selection.extend_to("a", &ordered);
+    assert_eq!(selection.selected, rows(&["b", "c", "d", "a"]));
+    assert_eq!(selection.anchor.as_deref(), Some("b"));
+}
+
+#[test]
+fn shift_click_without_a_listed_anchor_selects_and_anchors_the_row() {
+    let ordered = rows(&["a", "b"]);
+    let mut selection = SidebarSelection::default();
+    selection.extend_to("b", &ordered);
+    assert_eq!(selection.selected, rows(&["b"]));
+    assert_eq!(selection.anchor.as_deref(), Some("b"));
+    selection.anchor = Some("gone".into());
+    selection.extend_to("a", &ordered);
+    assert_eq!(selection.selected, rows(&["b", "a"]));
+    assert_eq!(selection.anchor.as_deref(), Some("a"));
+}
+
+#[test]
+fn opening_a_row_clears_the_selection_and_anchors_it() {
+    let mut selection = SidebarSelection {
+        selected: rows(&["a", "b"]),
+        anchor: Some("a".into()),
+    };
+    selection.open("c");
+    assert_eq!(
+        selection,
+        SidebarSelection {
+            selected: vec![],
+            anchor: Some("c".into()),
+        }
+    );
+}

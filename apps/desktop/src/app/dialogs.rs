@@ -11,21 +11,34 @@ use gpui_kit::{
 };
 use std::rc::Rc;
 
+/// What a confirmation dialog asks.
+pub(crate) struct Confirm {
+    pub(crate) title: Option<String>,
+    pub(crate) message: String,
+    /// The confirming button's label.
+    pub(crate) action: String,
+    /// Draws the confirming button red.
+    pub(crate) destructive: bool,
+}
+
 impl Desktop {
-    /// Asks before running `confirmed`; destructive actions draw a red button.
+    /// Asks before running `confirmed`.
     pub(crate) fn confirm(
         &self,
-        title: Option<String>,
-        message: String,
-        confirm_label: &str,
-        destructive: bool,
+        dialog: Confirm,
         window: &mut Window,
         cx: &mut Context<Self>,
         confirmed: impl Fn(&mut Desktop, &mut Window, &mut Context<Desktop>) + 'static,
     ) {
         let owner = cx.entity().downgrade();
         let confirmed = Rc::new(confirmed);
-        let confirm_label: SharedString = confirm_label.to_owned().into();
+        let Confirm {
+            title,
+            message,
+            action,
+            destructive,
+        } = dialog;
+        let confirm_label: SharedString = action.into();
         window.open_alert_dialog(cx, move |alert: AlertDialog, _, _| {
             let owner = owner.clone();
             let confirmed = confirmed.clone();
@@ -65,10 +78,12 @@ impl Desktop {
         match confirmation {
             None => self.perform(intent),
             Some(confirmation) => self.confirm(
-                confirmation.title.clone(),
-                confirmation.message.clone(),
-                confirm_label,
-                confirmation.destructive,
+                Confirm {
+                    title: confirmation.title.clone(),
+                    message: confirmation.message.clone(),
+                    action: confirm_label.into(),
+                    destructive: confirmation.destructive,
+                },
                 window,
                 cx,
                 move |view, _, _| view.perform(intent.clone()),

@@ -22,7 +22,7 @@ use crate::view::{
         scripts::{ProjectScriptsView, project_scripts},
     },
     search::{SearchOptions, SearchView, search_view},
-    settings::{SettingsScope, SettingsView, settings_view},
+    settings::{SettingsScope, SettingsView, default_model_picker, settings_view},
     sidebar::{SidebarOptions, SidebarThreadDropPlan, SidebarView, plan_sidebar_drop, sidebar},
     snooze::{SnoozePreset, resolve_snooze_presets},
     terminals::{TerminalTab, TerminalView, terminal_tabs, terminal_view},
@@ -56,6 +56,19 @@ pub struct PreferencesView {
 }
 
 impl Snapshot {
+    fn picker_options(&self, query: String, rail: Option<PickerRail>) -> ModelPickerOptions {
+        ModelPickerOptions {
+            query,
+            rail,
+            favorites: self.preferences.favorite_models.clone(),
+            model_order: self
+                .preferences
+                .model_order
+                .iter()
+                .map(|(instance, models)| (instance.clone(), models.clone()))
+                .collect(),
+        }
+    }
     fn sidebar_options(&self, options: SidebarOptions) -> SidebarOptions {
         SidebarOptions {
             working_section: self.preferences.working_section,
@@ -154,18 +167,12 @@ impl Snapshot {
         model_picker(
             self,
             &self.current_draft(),
-            &ModelPickerOptions {
-                query,
-                rail,
-                favorites: self.preferences.favorite_models.clone(),
-                model_order: self
-                    .preferences
-                    .model_order
-                    .iter()
-                    .map(|(instance, models)| (instance.clone(), models.clone()))
-                    .collect(),
-            },
+            &self.picker_options(query, rail),
         )
+    }
+    /// The settings Model row's picker over the new-thread default.
+    pub fn default_model_picker(&self, query: String, rail: Option<PickerRail>) -> ModelPickerView {
+        default_model_picker(self, &self.picker_options(query, rail))
     }
     pub fn traits(&self) -> TraitsView {
         traits(self, &self.current_draft(), true)

@@ -1421,6 +1421,48 @@ fn a_closed_setup_stream_keeps_its_last_snapshot_for_the_card() {
 }
 
 #[test]
+fn new_thread_defaults_change_without_touching_the_open_thread() {
+    let mut owner = opened(thread_state("Thread"));
+    let before = owner.state.current_draft();
+    let next = owner
+        .prepare(Intent::SetDefaultModel {
+            instance_id: "claude".into(),
+            driver: agent_domain::Driver::Claude,
+            model: "sonnet".into(),
+            options: vec![],
+        })
+        .unwrap();
+    assert!(matches!(next, Next::Done));
+    let next = owner
+        .prepare(Intent::SetDefaultRuntimeMode {
+            mode: agent_domain::RuntimeMode::ApprovalRequired,
+        })
+        .unwrap();
+    assert!(matches!(next, Next::Done));
+    let default = &owner.state.default_draft;
+    assert_eq!(
+        (default.instance_id.as_str(), default.model.as_str()),
+        ("claude", "sonnet")
+    );
+    assert_eq!(
+        default.runtime_mode,
+        agent_domain::RuntimeMode::ApprovalRequired
+    );
+    assert_eq!(owner.state.current_draft(), before);
+    assert!(
+        owner
+            .prepare(Intent::SetDefaultModel {
+                instance_id: "codex".into(),
+                driver: agent_domain::Driver::Codex,
+                model: String::new(),
+                options: vec![],
+            })
+            .is_err()
+    );
+    assert_eq!(owner.state.default_draft.model, "sonnet");
+}
+
+#[test]
 fn preferences_change_on_the_device_and_survive_a_restart() {
     let mut owner = owner(Snapshot::default());
     for intent in [
@@ -1442,4 +1484,47 @@ fn preferences_change_on_the_device_and_survive_a_restart() {
     assert!(restored.preferences.working_section);
     assert!(!restored.preferences.diff_ignore_whitespace);
     assert_eq!(restored.preferences.favorite_models.len(), 1);
+}
+
+#[test]
+fn dismissing_a_wake_records_the_visit_at_the_wake() {
+    let mut owner = opened(thread_state("Thread"));
+    let entries = commands(
+        owner
+            .prepare(Intent::Thread {
+                thread_id: thread_id().to_string(),
+                action: ThreadAction::Visit { at: at().millis() },
+            })
+            .unwrap(),
+    );
+    let Request::Dispatch(dispatch) = &entries[0].request else {
+        panic!("dispatch")
+    };
+    assert_eq!(dispatch.command, Command::Visit { at: at() });
+}
+
+#[test]
+fn discarding_a_draft_removes_only_that_draft() {
+    let mut owner = owner(Snapshot::default());
+    for key in ["new:app", "thread"] {
+        owner.state.drafts.insert(
+            key.into(),
+            Draft {
+                text: "unsent".into(),
+                ..Draft::default()
+            },
+        );
+    }
+    assert!(matches!(
+        owner
+            .prepare(Intent::DiscardDraft {
+                draft_key: "new:app".into()
+            })
+            .unwrap(),
+        Next::Done
+    ));
+    assert_eq!(
+        owner.state.drafts.keys().cloned().collect::<Vec<_>>(),
+        ["thread"]
+    );
 }

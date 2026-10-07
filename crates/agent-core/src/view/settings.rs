@@ -8,9 +8,13 @@
 use crate::{
     commands::build::FollowUpBehavior,
     models::{AutoSettle, ConversationSettings, ProjectConversationSettings},
-    state::Snapshot,
+    state::{Draft, Intent, Preferences, Snapshot},
     view::{
-        models::{catalog, picker::trigger, traits::build_traits},
+        models::{
+            catalog,
+            picker::{ModelPickerOptions, ModelPickerView, build_model_picker, trigger},
+            traits::build_traits,
+        },
         time::TimestampFormat,
     },
 };
@@ -42,6 +46,7 @@ pub enum SettingId {
     FollowUpBehavior,
     TimeFormat,
     ContinueAfterRestart,
+    WorkingSection,
     DefaultModel,
     DefaultPermissions,
     DefaultWorkspace,
@@ -396,7 +401,7 @@ pub fn runtime_mode_id(mode: RuntimeMode) -> &'static str {
     }
 }
 
-fn timestamp_format_id(format: TimestampFormat) -> &'static str {
+pub fn timestamp_format_id(format: TimestampFormat) -> &'static str {
     match format {
         TimestampFormat::Locale => "locale",
         TimestampFormat::TwelveHour => "12-hour",
@@ -488,6 +493,22 @@ fn host_sections(
         behavior.push(continue_row(host.continue_after_restart, None));
     }
     sections.push(section("behavior", "Behavior", behavior, None));
+    sections.push(section(
+        "beta",
+        "Beta",
+        vec![SettingsRow {
+            resettable: snapshot.preferences.working_section,
+            ..row(
+                SettingId::WorkingSection,
+                "Working section",
+                Some("Fold working and monitoring threads into a Working section. They return to the top of the inbox when they need you."),
+                SettingControl::Switch {
+                    on: snapshot.preferences.working_section,
+                },
+            )
+        }],
+        None,
+    ));
 
     let draft = &snapshot.default_draft;
     let models = catalog(snapshot);
@@ -538,6 +559,179 @@ fn host_sections(
     }
     sections.push(section("new-threads", "New threads", new_threads, None));
     sections
+}
+
+/// A control's new value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
+pub enum SettingValue {
+    Switch { on: bool },
+    Choice { id: String },
+    Number { value: u32 },
+}
+
+fn auto_settle_days(value: AutoSettle) -> Option<u32> {
+    match value {
+        AutoSettle::AfterDays(days) => Some(days),
+        AutoSettle::Never => None,
+    }
+}
+
+/// What giving setting `id` the new `value` on the page of `scope` does;
+/// `None` when the value does not fit the setting.
+pub fn setting_intent(
+    snapshot: &Snapshot,
+    scope: &SettingsScope,
+    id: SettingId,
+    value: &SettingValue,
+) -> Option<Intent> {
+    let update = |change| {
+        Some(Intent::UpdateConversationSettings {
+            scope: scope.clone(),
+            change,
+        })
+    };
+    match (id, value) {
+        (SettingId::AutoResumeLimitedThreads, SettingValue::Switch { on }) => {
+            update(ConversationSettingChange::AutoResumeLimitedThreads { on: *on })
+        }
+        (SettingId::SnoozeLimitedThreads, SettingValue::Switch { on }) => {
+            update(ConversationSettingChange::SnoozeLimitedThreads { on: *on })
+        }
+        (SettingId::AutoSettleInactiveThreads, SettingValue::Switch { on }) => {
+            update(ConversationSettingChange::AutoSettle {
+                days: on.then_some(AUTO_SETTLE_DEFAULT_DAYS),
+            })
+        }
+        (SettingId::AutoSettleDays, SettingValue::Number { value })
+            if (MIN_AUTO_SETTLE_DAYS..=MAX_AUTO_SETTLE_DAYS).contains(value) =>
+        {
+            update(ConversationSettingChange::AutoSettle { days: Some(*value) })
+        }
+        (SettingId::ContinueAfterRestart, SettingValue::Switch { on }) => {
+            update(ConversationSettingChange::ContinueAfterRestart { on: *on })
+        }
+        (SettingId::WorkingSection, SettingValue::Switch { on }) => {
+            Some(Intent::SetWorkingSection { enabled: *on })
+        }
+        (SettingId::FollowUpBehavior, SettingValue::Choice { id }) => {
+            let behavior = match id.as_str() {
+                "queue" => FollowUpBehavior::Queue,
+                "steer" => FollowUpBehavior::Steer,
+                _ => return None,
+            };
+            Some(Intent::SetFollowUpBehavior { behavior })
+        }
+        (SettingId::TimeFormat, SettingValue::Choice { id }) => [
+            TimestampFormat::Locale,
+            TimestampFormat::TwelveHour,
+            TimestampFormat::TwentyFourHour,
+        ]
+        .into_iter()
+        .find(|format| timestamp_format_id(*format) == id)
+        .map(|format| Intent::SetTimestampFormat { format }),
+        (SettingId::DefaultPermissions, SettingValue::Choice { id }) => [
+            RuntimeMode::ApprovalRequired,
+            RuntimeMode::AutoAcceptEdits,
+            RuntimeMode::Auto,
+            RuntimeMode::FullAccess,
+        ]
+        .into_iter()
+        .find(|mode| runtime_mode_id(*mode) == id)
+        .map(|mode| Intent::SetDefaultRuntimeMode { mode }),
+        (SettingId::DefaultWorkspace, SettingValue::Choice { id }) => {
+            let create_on_new_session = match id.as_str() {
+                "local" => false,
+                "worktree" => true,
+                _ => return None,
+            };
+            let settings = snapshot.workspace.worktree_settings.clone()?;
+            Some(Intent::SaveWorktreeSettings {
+                settings: crate::models::WorktreeSettings {
+                    create_on_new_session,
+                    ..settings
+                },
+            })
+        }
+        _ => None,
+    }
+}
+
+/// What a row's reset arrow does: a project row follows the Host again, a
+/// Host row returns to its default. `None` when the row offers no reset.
+pub fn setting_reset_intent(scope: &SettingsScope, row: &SettingsRow) -> Option<Intent> {
+    let update = |change| {
+        Some(Intent::UpdateConversationSettings {
+            scope: scope.clone(),
+            change,
+        })
+    };
+    if let SettingsScope::Project { .. } = scope {
+        if row.source != Some(SettingSource::Project) {
+            return None;
+        }
+        let key = match row.id {
+            SettingId::AutoSettleInactiveThreads | SettingId::AutoSettleDays => {
+                ProjectSettingKey::AutoSettle
+            }
+            SettingId::ContinueAfterRestart => ProjectSettingKey::ContinueAfterRestart,
+            _ => return None,
+        };
+        return update(ConversationSettingChange::Inherit { key });
+    }
+    if !row.resettable {
+        return None;
+    }
+    let defaults = ConversationSettings::default();
+    match row.id {
+        SettingId::AutoResumeLimitedThreads => {
+            update(ConversationSettingChange::AutoResumeLimitedThreads {
+                on: defaults.auto_resume_limited_threads,
+            })
+        }
+        SettingId::SnoozeLimitedThreads => {
+            update(ConversationSettingChange::SnoozeLimitedThreads {
+                on: defaults.snooze_limited_threads,
+            })
+        }
+        SettingId::AutoSettleInactiveThreads | SettingId::AutoSettleDays => {
+            update(ConversationSettingChange::AutoSettle {
+                days: auto_settle_days(defaults.auto_settle),
+            })
+        }
+        SettingId::ContinueAfterRestart => {
+            update(ConversationSettingChange::ContinueAfterRestart {
+                on: defaults.continue_after_restart,
+            })
+        }
+        SettingId::WorkingSection => Some(Intent::SetWorkingSection {
+            enabled: Preferences::default().working_section,
+        }),
+        SettingId::FollowUpBehavior => Some(Intent::SetFollowUpBehavior {
+            behavior: FollowUpBehavior::default(),
+        }),
+        SettingId::TimeFormat => Some(Intent::SetTimestampFormat {
+            format: TimestampFormat::default(),
+        }),
+        SettingId::DefaultPermissions => Some(Intent::SetDefaultRuntimeMode {
+            mode: Draft::default().runtime_mode,
+        }),
+        SettingId::DefaultModel | SettingId::DefaultWorkspace => None,
+    }
+}
+
+/// The picker the Model row opens: the new-thread default, which no open
+/// thread locks or limits.
+pub fn default_model_picker(snapshot: &Snapshot, options: &ModelPickerOptions) -> ModelPickerView {
+    let draft = &snapshot.default_draft;
+    build_model_picker(
+        &catalog(snapshot),
+        &draft.instance_id,
+        &draft.model,
+        None,
+        &|_, _| None,
+        options,
+    )
 }
 
 /// The settings page. `host` is the Host's conversation settings once read;
@@ -780,6 +974,7 @@ mod tests {
             [
                 ("follow-ups".into(), vec![SettingId::FollowUpBehavior]),
                 ("behavior".into(), vec![SettingId::TimeFormat]),
+                ("beta".into(), vec![SettingId::WorkingSection]),
                 (
                     "new-threads".into(),
                     vec![SettingId::DefaultModel, SettingId::DefaultPermissions]
@@ -830,6 +1025,7 @@ mod tests {
                     "behavior".into(),
                     vec![SettingId::TimeFormat, SettingId::ContinueAfterRestart]
                 ),
+                ("beta".into(), vec![SettingId::WorkingSection]),
                 (
                     "new-threads".into(),
                     vec![
@@ -869,6 +1065,239 @@ mod tests {
                 traits_label: None
             }
         );
+    }
+
+    fn same(left: Option<Intent>, right: Option<Intent>) {
+        assert_eq!(format!("{left:?}"), format!("{right:?}"));
+    }
+
+    #[test]
+    fn each_control_value_becomes_its_intent() {
+        let mut snapshot = Snapshot::default();
+        let host = SettingsScope::Host;
+        let on = SettingValue::Switch { on: true };
+        same(
+            setting_intent(&snapshot, &host, SettingId::AutoSettleInactiveThreads, &on),
+            Some(Intent::UpdateConversationSettings {
+                scope: SettingsScope::Host,
+                change: ConversationSettingChange::AutoSettle { days: Some(3) },
+            }),
+        );
+        same(
+            setting_intent(
+                &snapshot,
+                &project("p"),
+                SettingId::AutoSettleDays,
+                &SettingValue::Number { value: 7 },
+            ),
+            Some(Intent::UpdateConversationSettings {
+                scope: project("p"),
+                change: ConversationSettingChange::AutoSettle { days: Some(7) },
+            }),
+        );
+        same(
+            setting_intent(
+                &snapshot,
+                &host,
+                SettingId::AutoSettleDays,
+                &SettingValue::Number { value: 91 },
+            ),
+            None,
+        );
+        same(
+            setting_intent(&snapshot, &host, SettingId::WorkingSection, &on),
+            Some(Intent::SetWorkingSection { enabled: true }),
+        );
+        let choice = |id: &str| SettingValue::Choice { id: id.into() };
+        same(
+            setting_intent(
+                &snapshot,
+                &host,
+                SettingId::FollowUpBehavior,
+                &choice("steer"),
+            ),
+            Some(Intent::SetFollowUpBehavior {
+                behavior: FollowUpBehavior::Steer,
+            }),
+        );
+        same(
+            setting_intent(&snapshot, &host, SettingId::TimeFormat, &choice("24-hour")),
+            Some(Intent::SetTimestampFormat {
+                format: TimestampFormat::TwentyFourHour,
+            }),
+        );
+        same(
+            setting_intent(
+                &snapshot,
+                &host,
+                SettingId::DefaultPermissions,
+                &choice("auto"),
+            ),
+            Some(Intent::SetDefaultRuntimeMode {
+                mode: RuntimeMode::Auto,
+            }),
+        );
+        same(
+            setting_intent(
+                &snapshot,
+                &host,
+                SettingId::DefaultWorkspace,
+                &choice("worktree"),
+            ),
+            None,
+        );
+        snapshot.workspace.worktree_settings = Some(crate::models::WorktreeSettings {
+            worktree_directory: "/tmp/trees".into(),
+            ..Default::default()
+        });
+        same(
+            setting_intent(
+                &snapshot,
+                &host,
+                SettingId::DefaultWorkspace,
+                &choice("worktree"),
+            ),
+            Some(Intent::SaveWorktreeSettings {
+                settings: crate::models::WorktreeSettings {
+                    create_on_new_session: true,
+                    worktree_directory: "/tmp/trees".into(),
+                    ..Default::default()
+                },
+            }),
+        );
+        same(
+            setting_intent(&snapshot, &host, SettingId::TimeFormat, &on),
+            None,
+        );
+    }
+
+    #[test]
+    fn a_reset_returns_a_host_row_to_its_default_and_a_project_row_to_the_host() {
+        let snapshot = Snapshot {
+            follow_up: FollowUpBehavior::Steer,
+            ..Snapshot::default()
+        };
+        let host = ConversationSettings {
+            auto_settle: AutoSettle::Never,
+            ..Default::default()
+        };
+        let view = settings_view(
+            &snapshot,
+            Some(&host),
+            &SettingsScope::Host,
+            TimestampFormat::Locale,
+        );
+        let find = |view: &SettingsView, id| {
+            view.sections
+                .iter()
+                .flat_map(|section| &section.rows)
+                .find(|row| row.id == id)
+                .cloned()
+                .unwrap()
+        };
+        same(
+            setting_reset_intent(
+                &SettingsScope::Host,
+                &find(&view, SettingId::AutoSettleInactiveThreads),
+            ),
+            Some(Intent::UpdateConversationSettings {
+                scope: SettingsScope::Host,
+                change: ConversationSettingChange::AutoSettle { days: Some(3) },
+            }),
+        );
+        same(
+            setting_reset_intent(
+                &SettingsScope::Host,
+                &find(&view, SettingId::FollowUpBehavior),
+            ),
+            Some(Intent::SetFollowUpBehavior {
+                behavior: FollowUpBehavior::Queue,
+            }),
+        );
+        same(
+            setting_reset_intent(&SettingsScope::Host, &find(&view, SettingId::TimeFormat)),
+            None,
+        );
+        let overridden = host_with(
+            "p",
+            ProjectConversationSettings {
+                continue_after_restart: Some(true),
+                ..Default::default()
+            },
+        );
+        let page = settings_view(
+            &snapshot,
+            Some(&overridden),
+            &project("p"),
+            TimestampFormat::Locale,
+        );
+        same(
+            setting_reset_intent(&project("p"), &find(&page, SettingId::ContinueAfterRestart)),
+            Some(Intent::UpdateConversationSettings {
+                scope: project("p"),
+                change: ConversationSettingChange::Inherit {
+                    key: ProjectSettingKey::ContinueAfterRestart,
+                },
+            }),
+        );
+        same(
+            setting_reset_intent(
+                &project("p"),
+                &find(&page, SettingId::AutoSettleInactiveThreads),
+            ),
+            None,
+        );
+    }
+
+    #[test]
+    fn the_working_section_row_follows_the_device_preference() {
+        let mut snapshot = Snapshot::default();
+        snapshot.preferences.working_section = true;
+        let view = settings_view(
+            &snapshot,
+            None,
+            &SettingsScope::Host,
+            TimestampFormat::Locale,
+        );
+        let row = view
+            .sections
+            .iter()
+            .flat_map(|section| &section.rows)
+            .find(|row| row.id == SettingId::WorkingSection)
+            .unwrap();
+        assert_eq!(row.control, SettingControl::Switch { on: true });
+        assert!(row.resettable);
+    }
+
+    #[test]
+    fn the_default_model_picker_reads_the_new_thread_default_not_the_open_thread() {
+        use crate::provider::ProviderKind;
+        use crate::view::models::fixtures::host_model;
+        let mut snapshot = Snapshot {
+            models: vec![
+                host_model(ProviderKind::Codex, "gpt-5.4", "gpt-5.4"),
+                host_model(ProviderKind::Claude, "sonnet", "Sonnet"),
+            ],
+            ..Snapshot::default()
+        };
+        snapshot.default_draft.instance_id = "claude".into();
+        snapshot.default_draft.driver = agent_domain::Driver::Claude;
+        snapshot.default_draft.model = "sonnet".into();
+        snapshot.drafts.insert(
+            "new:chats".into(),
+            crate::state::Draft {
+                instance_id: "codex".into(),
+                model: "gpt-5.4".into(),
+                ..Default::default()
+            },
+        );
+        let picker = default_model_picker(&snapshot, &ModelPickerOptions::default());
+        assert_eq!(picker.trigger.instance_id, "claude");
+        assert_eq!(picker.locked_driver, None);
+        let selected: Vec<_> = picker.rows.iter().filter(|row| row.selected).collect();
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].slug, "sonnet");
+        assert!(picker.rows.iter().all(|row| row.disabled_reason.is_none()));
     }
 
     #[test]
