@@ -22,9 +22,11 @@ use crate::view::{
         scripts::{ProjectScriptsView, project_scripts},
     },
     search::{SearchOptions, SearchView, search_view},
-    settings::{SettingsScope, SettingsView, settings_view},
+    settings::{
+        SettingEdit, SettingId, SettingsScope, SettingsView, setting_edit_intent, settings_view,
+    },
     sidebar::{SidebarOptions, SidebarThreadDropPlan, SidebarView, plan_sidebar_drop, sidebar},
-    snooze::{SnoozePreset, resolve_snooze_presets},
+    snooze::{CustomSnoozeInput, SnoozePreset, resolve_custom_snooze, resolve_snooze_presets},
     terminals::{TerminalTab, TerminalView, terminal_tabs, terminal_view},
     thread::{ThreadView, ThreadViewOptions, selected_thread_view, thread_view},
     thread_list::{ThreadListHolds, ThreadListOptions, ThreadListView, thread_list},
@@ -147,6 +149,15 @@ impl Snapshot {
             &scope,
             self.preferences.timestamp_format,
         )
+    }
+    /// The intent one edit of a settings row sends; `None` for display-only rows.
+    pub fn setting_edit(
+        &self,
+        scope: SettingsScope,
+        id: SettingId,
+        edit: SettingEdit,
+    ) -> Option<crate::state::Intent> {
+        setting_edit_intent(self, &scope, id, &edit)
     }
     pub fn model_picker(&self, query: String, rail: Option<PickerRail>) -> ModelPickerView {
         model_picker(
@@ -281,4 +292,58 @@ pub fn snooze_presets(now_ms: i64, format: TimestampFormat) -> Vec<SnoozePreset>
         .single()
         .map(|now| resolve_snooze_presets(&now, format))
         .unwrap_or_default()
+}
+
+/// A custom snooze's wake time from `now_ms` in the device's time zone;
+/// `None` for invalid, nonexistent or past times.
+#[uniffi::export]
+pub fn custom_snooze_until(input: CustomSnoozeInput, now_ms: i64) -> Option<String> {
+    let now = Local.timestamp_millis_opt(now_ms).single()?;
+    resolve_custom_snooze(&input, &now)
+}
+
+/// Durations as `250ms`, `1.5s`, `22s`, `1m 5s` or `1h 1m 1s`, as the
+/// "Working for …" row counts them.
+#[uniffi::export]
+pub fn format_duration(duration_ms: i64) -> String {
+    crate::view::time::format_duration(duration_ms)
+}
+
+/// Why the client could not prepare an image for upload.
+#[uniffi::export]
+pub fn image_preparation_error(name: String, unreadable: bool) -> String {
+    crate::view::attachments::image_preparation_error(&name, unreadable)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::view::snooze::SnoozeDurationUnit;
+
+    #[test]
+    fn a_custom_snooze_wakes_after_a_positive_duration_only() {
+        let now = 1_800_000_000_000;
+        let until = custom_snooze_until(
+            CustomSnoozeInput::Duration {
+                amount: "2".into(),
+                unit: SnoozeDurationUnit::Hours,
+            },
+            now,
+        )
+        .unwrap();
+        assert_eq!(
+            agent_domain::Timestamp::parse(&until).unwrap().millis(),
+            now + 2 * 3_600_000
+        );
+        assert_eq!(
+            custom_snooze_until(
+                CustomSnoozeInput::Duration {
+                    amount: "0".into(),
+                    unit: SnoozeDurationUnit::Minutes,
+                },
+                now,
+            ),
+            None
+        );
+    }
 }

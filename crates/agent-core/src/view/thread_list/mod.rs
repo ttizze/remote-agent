@@ -761,6 +761,77 @@ pub struct ThreadListView {
     pub next_snooze_wake_at_ms: Option<i64>,
     /// Anything to list before filters; otherwise the empty state shows.
     pub has_threads: bool,
+    /// What an empty list says instead of rows.
+    pub empty: Option<ThreadListEmpty>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct ThreadListEmpty {
+    pub title: String,
+    pub detail: String,
+    /// The list is still loading; a spinner joins the text.
+    pub loading: bool,
+}
+
+fn empty(title: impl Into<String>, detail: impl Into<String>, loading: bool) -> ThreadListEmpty {
+    ThreadListEmpty {
+        title: title.into(),
+        detail: detail.into(),
+        loading,
+    }
+}
+
+/// The Home empty state: the connection before a shell arrives, then the
+/// search, the project filter, and finally the first-run copy.
+pub fn thread_list_empty(snapshot: &Snapshot, has_threads: bool) -> ThreadListEmpty {
+    if snapshot.shell.snapshot.is_none() {
+        return if snapshot.connected || snapshot.error.is_none() {
+            empty(
+                "Connecting to environment",
+                "Loading projects and threads from the saved environment.",
+                true,
+            )
+        } else {
+            empty(
+                "Environment unavailable",
+                snapshot.error.clone().unwrap_or_default(),
+                false,
+            )
+        };
+    }
+    let query = snapshot.search.trim();
+    if !query.is_empty() {
+        return empty(
+            "No results",
+            format!("No threads matching \"{query}\"."),
+            false,
+        );
+    }
+    if let Some(project) = snapshot.selected_project.as_deref() {
+        let name = snapshot
+            .shell_projects()
+            .iter()
+            .find(|candidate| candidate.id == project)
+            .map_or(project, |candidate| candidate.name.as_str());
+        return empty(
+            format!("No threads in {name}"),
+            "Choose another project or create a new task.",
+            false,
+        );
+    }
+    if !has_threads && snapshot.shell_projects().is_empty() {
+        return empty(
+            "No projects found",
+            "The connected environment did not report any projects.",
+            false,
+        );
+    }
+    empty(
+        "No threads yet",
+        "Create a task to start a new coding session.",
+        false,
+    )
 }
 
 /// Threads with a message the device sent and the Host has not folded.
@@ -929,11 +1000,15 @@ pub fn thread_list_at<Tz: TimeZone>(
             row.search_snippet = snippets.get(&row.id).map(|snippet| snippet.to_string());
         }
     }
+    let empty = items
+        .is_empty()
+        .then(|| thread_list_empty(snapshot, has_threads));
     ThreadListView {
         items,
         hidden_settled_count: count(layout.hidden_settled_count),
         next_snooze_wake_at_ms: layout.next_snooze_wake_at,
         has_threads,
+        empty,
     }
 }
 

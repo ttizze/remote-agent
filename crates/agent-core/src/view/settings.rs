@@ -8,7 +8,7 @@
 use crate::{
     commands::build::FollowUpBehavior,
     models::{AutoSettle, ConversationSettings, ProjectConversationSettings},
-    state::Snapshot,
+    state::{Intent, Snapshot},
     view::{
         models::{catalog, picker::trigger, traits::build_traits},
         time::TimestampFormat,
@@ -540,6 +540,109 @@ fn host_sections(
     sections
 }
 
+/// What the user did to one settings row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
+pub enum SettingEdit {
+    Switch {
+        on: bool,
+    },
+    Choice {
+        id: String,
+    },
+    Number {
+        value: u32,
+    },
+    /// Back to the default, or to the Host value on a project page.
+    Reset,
+}
+
+fn host_change(scope: &SettingsScope, change: ConversationSettingChange) -> Intent {
+    Intent::UpdateConversationSettings {
+        scope: scope.clone(),
+        change,
+    }
+}
+
+/// The intent one edit of a settings row sends; `None` for rows this page
+/// only displays.
+pub fn setting_edit_intent(
+    snapshot: &Snapshot,
+    scope: &SettingsScope,
+    id: SettingId,
+    edit: &SettingEdit,
+) -> Option<Intent> {
+    use ConversationSettingChange as Change;
+    let project = matches!(scope, SettingsScope::Project { .. });
+    let switch = |on: &dyn Fn(bool) -> Change, default: bool| match edit {
+        SettingEdit::Switch { on: value } => Some(on(*value)),
+        SettingEdit::Reset => Some(on(default)),
+        _ => None,
+    };
+    let change = match id {
+        SettingId::AutoResumeLimitedThreads => {
+            switch(&|on| Change::AutoResumeLimitedThreads { on }, false)?
+        }
+        SettingId::SnoozeLimitedThreads => {
+            switch(&|on| Change::SnoozeLimitedThreads { on }, false)?
+        }
+        SettingId::AutoSettleInactiveThreads | SettingId::AutoSettleDays => match edit {
+            SettingEdit::Reset if project => Change::Inherit {
+                key: ProjectSettingKey::AutoSettle,
+            },
+            SettingEdit::Reset => Change::AutoSettle {
+                days: Some(AUTO_SETTLE_DEFAULT_DAYS),
+            },
+            SettingEdit::Switch { on } => Change::AutoSettle {
+                days: on.then_some(AUTO_SETTLE_DEFAULT_DAYS),
+            },
+            SettingEdit::Number { value } => Change::AutoSettle {
+                days: Some((*value).clamp(MIN_AUTO_SETTLE_DAYS, MAX_AUTO_SETTLE_DAYS)),
+            },
+            SettingEdit::Choice { .. } => return None,
+        },
+        SettingId::ContinueAfterRestart => match edit {
+            SettingEdit::Reset if project => Change::Inherit {
+                key: ProjectSettingKey::ContinueAfterRestart,
+            },
+            _ => switch(&|on| Change::ContinueAfterRestart { on }, false)?,
+        },
+        SettingId::FollowUpBehavior => {
+            let behavior = match edit {
+                SettingEdit::Choice { id } if id == "steer" => FollowUpBehavior::Steer,
+                SettingEdit::Choice { id } if id == "queue" => FollowUpBehavior::Queue,
+                SettingEdit::Reset => FollowUpBehavior::default(),
+                _ => return None,
+            };
+            return Some(Intent::SetFollowUpBehavior { behavior });
+        }
+        SettingId::TimeFormat => {
+            let format = match edit {
+                SettingEdit::Choice { id } if id == "12-hour" => TimestampFormat::TwelveHour,
+                SettingEdit::Choice { id } if id == "24-hour" => TimestampFormat::TwentyFourHour,
+                SettingEdit::Choice { id } if id == "locale" => TimestampFormat::Locale,
+                SettingEdit::Reset => TimestampFormat::default(),
+                _ => return None,
+            };
+            return Some(Intent::SetTimestampFormat { format });
+        }
+        SettingId::DefaultWorkspace => {
+            let SettingEdit::Choice { id } = edit else {
+                return None;
+            };
+            let settings = snapshot.workspace.worktree_settings.clone()?;
+            return Some(Intent::SaveWorktreeSettings {
+                settings: crate::models::WorktreeSettings {
+                    create_on_new_session: id == "worktree",
+                    ..settings
+                },
+            });
+        }
+        SettingId::DefaultModel | SettingId::DefaultPermissions => return None,
+    };
+    Some(host_change(scope, change))
+}
+
 /// The settings page. `host` is the Host's conversation settings once read;
 /// rows backed by them are left out until then. A project page shows that
 /// project's effective auto-settle and restart continuation.
@@ -615,6 +718,101 @@ mod tests {
         SettingsScope::Project {
             project_id: id.into(),
         }
+    }
+
+    #[test]
+    fn a_row_edit_becomes_the_intent_its_setting_takes() {
+        let snapshot = Snapshot::default();
+        let host = SettingsScope::Host;
+        assert!(matches!(
+            setting_edit_intent(
+                &snapshot,
+                &host,
+                SettingId::AutoSettleInactiveThreads,
+                &SettingEdit::Switch { on: true }
+            ),
+            Some(Intent::UpdateConversationSettings {
+                change: ConversationSettingChange::AutoSettle {
+                    days: Some(AUTO_SETTLE_DEFAULT_DAYS)
+                },
+                ..
+            })
+        ));
+        assert!(matches!(
+            setting_edit_intent(
+                &snapshot,
+                &host,
+                SettingId::AutoSettleDays,
+                &SettingEdit::Number { value: 500 }
+            ),
+            Some(Intent::UpdateConversationSettings {
+                change: ConversationSettingChange::AutoSettle {
+                    days: Some(MAX_AUTO_SETTLE_DAYS)
+                },
+                ..
+            })
+        ));
+        assert!(matches!(
+            setting_edit_intent(
+                &snapshot,
+                &project("app"),
+                SettingId::ContinueAfterRestart,
+                &SettingEdit::Reset
+            ),
+            Some(Intent::UpdateConversationSettings {
+                change: ConversationSettingChange::Inherit {
+                    key: ProjectSettingKey::ContinueAfterRestart
+                },
+                ..
+            })
+        ));
+        assert!(matches!(
+            setting_edit_intent(
+                &snapshot,
+                &host,
+                SettingId::FollowUpBehavior,
+                &SettingEdit::Choice { id: "steer".into() }
+            ),
+            Some(Intent::SetFollowUpBehavior {
+                behavior: FollowUpBehavior::Steer
+            })
+        ));
+        assert!(matches!(
+            setting_edit_intent(
+                &snapshot,
+                &host,
+                SettingId::TimeFormat,
+                &SettingEdit::Choice {
+                    id: "24-hour".into()
+                }
+            ),
+            Some(Intent::SetTimestampFormat {
+                format: TimestampFormat::TwentyFourHour
+            })
+        ));
+        assert!(
+            setting_edit_intent(
+                &snapshot,
+                &host,
+                SettingId::DefaultWorkspace,
+                &SettingEdit::Choice {
+                    id: "worktree".into()
+                }
+            )
+            .is_none()
+        );
+        let mut snapshot = Snapshot::default();
+        snapshot.workspace.worktree_settings = Some(WorktreeSettings {
+            create_on_new_session: false,
+            copy_on_create: false,
+            copy_paths: vec![],
+            worktree_directory: String::new(),
+            delete_merged: false,
+        });
+        assert!(matches!(
+            setting_edit_intent(&snapshot, &host, SettingId::DefaultWorkspace, &SettingEdit::Choice { id: "worktree".into() }),
+            Some(Intent::SaveWorktreeSettings { settings }) if settings.create_on_new_session
+        ));
     }
 
     #[test]
