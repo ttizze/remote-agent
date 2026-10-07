@@ -1039,7 +1039,7 @@ impl Owner {
         })
     }
 
-    /// Admits the picked files as T3 does, then uploads the accepted ones.
+    /// Admits the picked files by the reference rules, then uploads the accepted ones.
     /// Images over the size limit must be downscaled by the client first.
     fn attach_files(&mut self, key: String, files: Vec<LocalFile>) -> Result<(), PeerError> {
         if key != self.state.draft_key()
