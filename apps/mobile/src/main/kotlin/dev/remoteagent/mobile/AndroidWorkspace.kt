@@ -11,6 +11,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -18,6 +19,7 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
@@ -26,6 +28,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.ChevronRight
+import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.MoreHoriz
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material3.Button
@@ -68,6 +71,7 @@ import dev.remoteagent.core.DiffPanelView
 import dev.remoteagent.core.DiffScopeChoice
 import dev.remoteagent.core.FileEntry
 import dev.remoteagent.core.Intent
+import dev.remoteagent.core.ReviewFilesView
 import dev.remoteagent.core.WorkspaceDiffFile
 import java.io.File
 import java.util.UUID
@@ -273,13 +277,28 @@ private fun ReviewScreen(model: AndroidAppModel) {
     val git = panel?.git
     val choice = panel?.scopes?.firstOrNull { it.selected }?.choice
     val gitScope = choice == DiffScopeChoice.Branch || choice == DiffScopeChoice.Unstaged
+    // A diff too large to send whole lists every file and reads each one on its own.
+    val filesRevision = git?.filesRevision?.takeIf { gitScope }
+    var lazyFiles by remember { mutableStateOf<ReviewFilesView?>(null) }
+    LaunchedEffect(thread, filesRevision) {
+        lazyFiles =
+            if (thread == null || filesRevision == null) null
+            else withContext(Dispatchers.Default) { model.snapshot.reviewFiles(thread) }
+    }
+    val lazy = lazyFiles?.takeIf { filesRevision != null }
+    val shownFiles =
+        remember(lazy, files) {
+            lazy?.files?.map { WorkspaceDiffFile(it.path, it.additions, it.deletions, it.rows) } ?: files
+        }
+    val notices =
+        remember(lazy) { lazy?.files?.mapNotNull { file -> file.notice?.let { file.path to it } }?.toMap() }
     val loading = (gitScope && git?.loading == true) || (panel?.request != null && review == null)
     val subtitle =
         panel?.let {
             listOf(
                     it.scopeLabel,
-                    "+${files.sumOf { file -> file.additions ?: 0uL }}",
-                    "-${files.sumOf { file -> file.deletions ?: 0uL }}",
+                    "+${shownFiles.sumOf { file -> file.additions ?: 0uL }}",
+                    "-${shownFiles.sumOf { file -> file.deletions ?: 0uL }}",
                 )
                 .joinToString(" · ")
         } ?: "Select a diff"
@@ -320,7 +339,7 @@ private fun ReviewScreen(model: AndroidAppModel) {
                             Text("Loading diff…", style = AppTheme.label, color = colors.foregroundMuted)
                         }
                     }
-                files.isEmpty() ->
+                shownFiles.isEmpty() ->
                     item { ReviewMessage("No changes", git?.subtitle?.takeIf { gitScope } ?: "This diff is empty.") }
             }
             if (gitScope && git?.truncated == true && !loading)
@@ -334,9 +353,20 @@ private fun ReviewScreen(model: AndroidAppModel) {
                     )
                 }
             if (!loading)
-                items(files, key = { it.path }) { file ->
+                items(shownFiles, key = { it.path }) { file ->
+                    if (notices != null)
+                        LaunchedEffect(file.path) {
+                            model.perform(Intent.RevealDiffFile(file.path, false))
+                        }
                     Column(Modifier.padding(horizontal = 16.dp)) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
+                        Row(
+                            Modifier.then(
+                                if (notices != null)
+                                    Modifier.clickable { model.perform(Intent.RevealDiffFile(file.path, true)) }
+                                else Modifier
+                            ),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
                             Text(
                                 file.path,
                                 Modifier.weight(1f),
@@ -371,6 +401,7 @@ private fun ReviewScreen(model: AndroidAppModel) {
                                 }
                             }
                         }
+                        notices?.get(file.path)?.let { ReviewFileNotice(it) }
                     }
                 }
         }
@@ -438,6 +469,19 @@ private fun MenuChoice(label: String, selected: Boolean, enabled: Boolean = true
         enabled = enabled,
         onClick = onClick,
     )
+}
+
+/** Why a file of a diff read file by file shows no or partial rows. */
+@Composable
+private fun ReviewFileNotice(notice: String) {
+    Row(
+        Modifier.fillMaxWidth().heightIn(min = 44.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        Icon(Icons.Outlined.Info, null, Modifier.size(16.dp), tint = AppTheme.colors.foregroundMuted)
+        Text(notice, style = AppTheme.caption, color = AppTheme.colors.foregroundMuted, maxLines = 1)
+    }
 }
 
 @Composable
