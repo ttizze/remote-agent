@@ -162,6 +162,47 @@ impl Worktrees {
         .await
     }
 
+    /// Renames the branch checked out at `cwd` from `old` to `new`, or, unless
+    /// `exact`, to the first of `new`, `new-1` … `new-100` that is free, as the
+    /// reference's renameBranch does. Git validates the name. A thread whose
+    /// checkout had `old` keeps it under the new name.
+    pub(crate) async fn rename_branch(
+        &self,
+        cwd: String,
+        old: String,
+        new: String,
+        exact: bool,
+    ) -> Result<String> {
+        self.locked(move |path| {
+            if old == new {
+                return Ok(new);
+            }
+            let cwd = Path::new(&cwd);
+            let target = if exact {
+                new
+            } else {
+                available_branch_name(cwd, &new)?
+            };
+            crate::git::text(cwd, &["branch", "-m", "--", &old, &target])?;
+            let mut state = read(path)?;
+            let root = dunce::canonicalize(
+                crate::git::text(cwd, &["rev-parse", "--show-toplevel"])?.trim_end(),
+            )?;
+            let mut changed = false;
+            for checkout in state.threads.values_mut() {
+                if checkout.branch == old && Path::new(&checkout.path) == root {
+                    checkout.branch = target.clone();
+                    changed = true;
+                }
+            }
+            if changed {
+                save(path, &state)?;
+            }
+            Ok(target)
+        })
+        .await
+    }
+
     /// Recreate a deleted checkout at its persisted path so provider sessions
     /// and every client keep using the same working directory.
     pub(crate) async fn ensure_available(&self, cwd: &str) -> Result<Option<PathBuf>> {
@@ -473,6 +514,14 @@ fn branch_exists(root: &Path, branch: &str) -> bool {
         ],
     )
     .is_ok()
+}
+
+/// `desired`, or the first of `desired-1` … `desired-100` no branch has.
+fn available_branch_name(cwd: &Path, desired: &str) -> Result<String> {
+    std::iter::once(desired.to_owned())
+        .chain((1..=100).map(|suffix| format!("{desired}-{suffix}")))
+        .find(|candidate| !branch_exists(cwd, candidate))
+        .ok_or_else(|| anyhow!("Could not find an available branch name for '{desired}'."))
 }
 
 fn registered(root: &Path, destination: &Path) -> Result<bool> {
@@ -1310,6 +1359,58 @@ mod tests {
         assert!(!checkout.parent().unwrap().exists());
         assert_eq!(registered_paths(&root), [root.to_str().unwrap()]);
         assert!(branch_exists(&root, &branch));
+    }
+
+    // GitVcsDriverCore renameBranch: a taken name gets the first free numeric
+    // suffix unless the exact name is required; the thread's retry finds its
+    // checkout under the new name.
+    #[tokio::test]
+    async fn renaming_a_launch_branch_picks_a_free_name_and_keeps_the_checkout() {
+        let repository = repository();
+        let root = dunce::canonicalize(repository.path()).unwrap();
+        crate::git::text(&root, &["branch", "feature/search"]).unwrap();
+        crate::git::text(&root, &["branch", "feature/search-1"]).unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let store = Worktrees::new(&directory.path().join("projects.json"));
+        let thread = new_thread();
+        let create = || {
+            store.create(
+                &thread,
+                root.to_str().unwrap(),
+                "HEAD",
+                None,
+                false,
+                Default::default(),
+                Default::default(),
+            )
+        };
+        let (checkout, temporary) = create().await.unwrap();
+        let cwd = checkout.to_str().unwrap().to_owned();
+        let rename = |old: &str, new: &str, exact: bool| {
+            store.rename_branch(cwd.clone(), old.into(), new.into(), exact)
+        };
+
+        let exact = rename(&temporary, "feature/search", true)
+            .await
+            .unwrap_err();
+        assert!(format!("{exact:#}").contains("already exists"), "{exact:#}");
+        let option = rename(&temporary, "-D", true).await.unwrap_err();
+        assert!(
+            format!("{option:#}").contains("not a valid branch name"),
+            "{option:#}"
+        );
+        let renamed = rename(&temporary, "feature/search", false).await.unwrap();
+        assert_eq!(renamed, "feature/search-2");
+        assert_eq!(
+            crate::git::text(&checkout, &["branch", "--show-current"])
+                .unwrap()
+                .trim(),
+            renamed
+        );
+        assert!(branch_exists(&root, "feature/search"));
+        assert!(!branch_exists(&root, &temporary));
+        assert_eq!(rename(&renamed, &renamed, false).await.unwrap(), renamed);
+        assert_eq!(create().await.unwrap(), (checkout, renamed));
     }
 
     /// Makes `git worktree add` in `root` wait in its post-checkout hook, which

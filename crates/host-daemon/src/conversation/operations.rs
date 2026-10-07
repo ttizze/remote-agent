@@ -5,7 +5,7 @@ use crate::claude::control::ClaudeProgram;
 use crate::{
     ProjectStore, terminals::Terminals, workspace_files::WorkspaceFiles, worktrees::Worktrees,
 };
-use agent_domain::{AttachmentKind, CheckpointFile, ThreadId};
+use agent_domain::{AttachmentKind, BranchNaming, CheckpointFile, ThreadId};
 use agent_protocol::models::{AutoSettle, Project, ProjectRoot, ProjectScript};
 use agent_runtime::{
     ConversationSettings, CreatedWorktree, HostOperations, HostProject, PreparedRestore,
@@ -334,9 +334,35 @@ fn resolve_settings(
     }
 }
 
+/// The branch naming of `project`: its overrides, then the Host's settings.
+/// Text values are trimmed, as the reference decodes them.
+fn resolve_branch_naming(
+    saved: &agent_protocol::models::ConversationSettings,
+    project: &str,
+) -> BranchNaming {
+    let overrides = saved.project_overrides.get(project);
+    let text = |value: Option<&String>, inherited: &str| {
+        value.map_or(inherited, String::as_str).trim().to_owned()
+    };
+    BranchNaming {
+        mode: overrides
+            .and_then(|project| project.branch_naming_mode)
+            .unwrap_or(saved.branch_naming_mode),
+        prefix: text(
+            overrides.and_then(|project| project.branch_name_prefix.as_ref()),
+            &saved.branch_name_prefix,
+        ),
+        instructions: text(
+            overrides.and_then(|project| project.branch_name_instructions.as_ref()),
+            &saved.branch_name_instructions,
+        ),
+    }
+}
+
 #[cfg(test)]
 mod settings_tests {
     use super::*;
+    use agent_domain::BranchNamingMode;
     use agent_protocol::models::ProjectConversationSettings;
 
     #[test]
@@ -353,14 +379,38 @@ mod settings_tests {
             ProjectConversationSettings {
                 auto_settle: Some(AutoSettle::AfterDays(2)),
                 continue_after_restart: Some(true),
+                branch_naming_mode: Some(BranchNamingMode::Custom),
+                branch_name_prefix: None,
+                branch_name_instructions: Some(" Use ABC-123. ".into()),
             },
         );
+        saved.branch_name_prefix = " team/ ".into();
         let inherited = resolve_settings(&saved, "other");
         assert_eq!(inherited.auto_settle_after_days, None);
         assert!(!inherited.continue_after_restart && inherited.auto_resume_limited_threads);
         let opted_in = resolve_settings(&saved, "opted-in");
         assert_eq!(opted_in.auto_settle_after_days, Some(2));
         assert!(opted_in.continue_after_restart);
+        assert_eq!(
+            resolve_branch_naming(&saved, "other"),
+            BranchNaming {
+                mode: BranchNamingMode::Static,
+                prefix: "team/".into(),
+                instructions: String::new(),
+            }
+        );
+        assert_eq!(
+            resolve_branch_naming(&saved, "opted-in"),
+            BranchNaming {
+                mode: BranchNamingMode::Custom,
+                prefix: "team/".into(),
+                instructions: "Use ABC-123.".into(),
+            }
+        );
+        assert_eq!(
+            resolve_branch_naming(&Default::default(), "any"),
+            BranchNaming::default()
+        );
     }
 }
 
@@ -384,6 +434,23 @@ impl HostOperations for HostIo {
     }
     fn settings(&self, project: &str) -> ConversationSettings {
         resolve_settings(&self.worktrees.conversation(), project)
+    }
+    fn branch_naming(&self, project: &str) -> BranchNaming {
+        resolve_branch_naming(&self.worktrees.conversation(), project)
+    }
+    fn rename_branch(
+        &self,
+        cwd: String,
+        old: String,
+        new: String,
+        exact: bool,
+    ) -> BoxFuture<'_, Result<String, String>> {
+        Box::pin(async move {
+            self.worktrees
+                .rename_branch(cwd, old, new, exact)
+                .await
+                .map_err(error)
+        })
     }
     fn real_path(&self, path: String) -> BoxFuture<'_, io::Result<Option<String>>> {
         Box::pin(async move {

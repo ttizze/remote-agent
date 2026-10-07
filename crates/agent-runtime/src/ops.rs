@@ -160,6 +160,22 @@ pub trait HostOperations: Send + Sync {
     fn settings(&self, _project: &str) -> ConversationSettings {
         ConversationSettings::default()
     }
+    /// How launches into `project` name the worktree branches they generate.
+    fn branch_naming(&self, _project: &str) -> agent_domain::BranchNaming {
+        agent_domain::BranchNaming::default()
+    }
+    /// Renames the branch checked out at `cwd` from `old` to `new`, or, unless
+    /// `exact`, to the first of `new`, `new-1` … `new-100` no branch has.
+    /// Returns the name it got.
+    fn rename_branch(
+        &self,
+        _cwd: String,
+        _old: String,
+        _new: String,
+        _exact: bool,
+    ) -> BoxFuture<'_, Result<String, String>> {
+        Box::pin(async { Err("branch renames are unavailable".into()) })
+    }
     /// Whether a run cut by a Host restart continues afterwards.
     fn continue_after_restart(&self, project: &str) -> bool {
         self.settings(project).continue_after_restart
