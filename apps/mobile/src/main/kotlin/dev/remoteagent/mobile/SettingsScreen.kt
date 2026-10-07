@@ -39,13 +39,14 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import dev.remoteagent.core.ArchivedLayout
 import dev.remoteagent.core.ArchivedOptions
 import dev.remoteagent.core.ArchivedSortOrder
 import dev.remoteagent.core.Intent
 import dev.remoteagent.core.ProviderKind
 import dev.remoteagent.core.SettingControl
-import dev.remoteagent.core.SettingEdit
+import dev.remoteagent.core.SettingValue
 import dev.remoteagent.core.SettingsRow
 import dev.remoteagent.core.SettingsScope
 import dev.remoteagent.core.ThreadMenuConfirmation
@@ -79,6 +80,23 @@ internal fun SettingsScreen(model: AndroidAppModel, projectId: String?) {
                         NavigationRow(Icons.Outlined.Archive, "Archived Threads") { model.navigate(Route.Archived) }
                     }
                 }
+            view.project?.let { header ->
+                item {
+                    Row(
+                        Modifier.padding(horizontal = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(16.dp),
+                    ) {
+                        ProjectFavicon(header.projectId, 48.dp)
+                        Text(
+                            header.label,
+                            style = AppTheme.title,
+                            fontWeight = FontWeight.Bold,
+                            color = AppTheme.colors.foreground,
+                        )
+                    }
+                }
+            }
             view.project
                 ?.takeIf { it.hasOverrides }
                 ?.let { header ->
@@ -93,8 +111,11 @@ internal fun SettingsScreen(model: AndroidAppModel, projectId: String?) {
                     SectionCard(section.title) {
                         section.rows.forEachIndexed { index, row ->
                             if (index > 0) HorizontalDivider(color = AppTheme.colors.border)
-                            SettingRow(row) { edit ->
-                                model.snapshot.settingEdit(scope, row.id, edit)?.let(model::perform)
+                            SettingRow(
+                                row,
+                                onReset = { model.snapshot.settingReset(scope, row)?.let(model::perform) },
+                            ) { value ->
+                                model.snapshot.settingIntent(scope, row.id, value)?.let(model::perform)
                             }
                         }
                     }
@@ -129,7 +150,7 @@ private fun NavigationRow(icon: ImageVector, label: String, onClick: () -> Unit)
 }
 
 @Composable
-private fun SettingRow(row: SettingsRow, onEdit: (SettingEdit) -> Unit) {
+private fun SettingRow(row: SettingsRow, onReset: () -> Unit, onEdit: (SettingValue) -> Unit) {
     val colors = AppTheme.colors
     var open by remember { mutableStateOf(false) }
     Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -145,7 +166,7 @@ private fun SettingRow(row: SettingsRow, onEdit: (SettingEdit) -> Unit) {
                 is SettingControl.Switch ->
                     Switch(
                         control.on,
-                        { onEdit(SettingEdit.Switch(it)) },
+                        { onEdit(SettingValue.Switch(it)) },
                         colors =
                             SwitchDefaults.colors(
                                 checkedTrackColor = colors.primary,
@@ -164,14 +185,14 @@ private fun SettingRow(row: SettingsRow, onEdit: (SettingEdit) -> Unit) {
                 is SettingControl.Number ->
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         TextButton(
-                            onClick = { onEdit(SettingEdit.Number(control.value - 1u)) },
+                            onClick = { onEdit(SettingValue.Number(control.value - 1u)) },
                             enabled = control.value > control.min,
                         ) {
                             Text("−", color = colors.foreground)
                         }
                         Text(control.value.toString(), style = AppTheme.body, color = colors.foreground)
                         TextButton(
-                            onClick = { onEdit(SettingEdit.Number(control.value + 1u)) },
+                            onClick = { onEdit(SettingValue.Number(control.value + 1u)) },
                             enabled = control.value < control.max,
                         ) {
                             Text("+", color = colors.foreground)
@@ -190,16 +211,11 @@ private fun SettingRow(row: SettingsRow, onEdit: (SettingEdit) -> Unit) {
             choice.choices.forEach { option ->
                 ChoiceRow(option.label, option.description, option.id == choice.selected) {
                     open = false
-                    onEdit(SettingEdit.Choice(option.id))
+                    onEdit(SettingValue.Choice(option.id))
                 }
             }
         if (row.resettable)
-            Text(
-                "Reset",
-                Modifier.clickable { onEdit(SettingEdit.Reset) },
-                style = AppTheme.caption,
-                color = colors.primaryText,
-            )
+            Text("Reset", Modifier.clickable(onClick = onReset), style = AppTheme.caption, color = colors.primaryText)
     }
 }
 
@@ -306,7 +322,22 @@ internal fun ArchivedScreen(model: AndroidAppModel) {
             current?.error?.let { Text(it, Modifier.padding(16.dp), color = colors.dangerForeground) }
             LazyColumn(contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(20.dp)) {
                 items(current?.groups.orEmpty(), key = { it.projectId }) { group ->
-                    SectionCard(group.title) {
+                    Row(
+                        Modifier.padding(start = 4.dp, end = 4.dp, bottom = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        ProjectFavicon(group.projectId, 18.dp)
+                        Text(
+                            group.title.uppercase(),
+                            style = AppTheme.label,
+                            fontWeight = FontWeight.Medium,
+                            letterSpacing = 0.5.sp,
+                            color = colors.foregroundMuted,
+                            maxLines = 1,
+                        )
+                    }
+                    SectionCard(null) {
                         group.rows.forEachIndexed { index, row ->
                             if (index > 0) HorizontalDivider(color = colors.border)
                             Column(Modifier.fillMaxWidth().heightIn(min = 56.dp).padding(16.dp)) {

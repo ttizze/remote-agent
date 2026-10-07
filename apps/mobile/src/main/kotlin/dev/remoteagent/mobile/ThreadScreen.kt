@@ -74,7 +74,7 @@ import kotlinx.coroutines.launch
 private const val END_SLACK_PX = 80
 private const val MINUTE_MILLIS = 60_000L
 
-private fun List<String>.toggled(id: String) = if (id in this) this - id else this + id
+internal fun List<String>.toggled(id: String) = if (id in this) this - id else this + id
 
 /** What the feed has open; core folds it into the rows. */
 private class Disclosure {
@@ -107,7 +107,7 @@ internal fun ThreadScreen(model: AndroidAppModel, threadId: String) {
     val tick = if (live) now else now / MINUTE_MILLIS
     val view by
         rememberView(model.snapshot, threadId, tick, options) {
-            it.thread(threadId, System.currentTimeMillis(), options)
+            it.threadScreen(threadId, System.currentTimeMillis(), options)
         }
     SideEffect { live = view?.let { it.working?.status != null || it.setup.card != null } ?: true }
     var sheet by remember { mutableStateOf<ThreadSheet?>(null) }
@@ -171,6 +171,7 @@ internal fun ThreadScreen(model: AndroidAppModel, threadId: String) {
                     }
                 },
                 copy = copy,
+                retryPreparation = { run -> model.perform(Intent.RetryPreparation(run)) },
             )
         Column(Modifier.fillMaxSize().imePadding()) {
             Box(Modifier.weight(1f).fillMaxWidth()) {
@@ -219,7 +220,15 @@ internal fun ThreadScreen(model: AndroidAppModel, threadId: String) {
             ThreadSheet.Settings -> ThreadSettingsSheet(model, current.composer) { sheet = null }
             ThreadSheet.Setup ->
                 current.setup.card?.let { card ->
-                    SetupDetailsSheet(model, card, { terminal -> model.navigate(Route.Terminal(threadId, terminal)) }) {
+                    SetupDetailsSheet(
+                        model,
+                        card,
+                        { terminal ->
+                            model.navigate(
+                                Route.Terminal(threadId, terminal, current.header?.project?.name, current.header?.cwd)
+                            )
+                        },
+                    ) {
                         sheet = null
                     }
                 }
@@ -245,7 +254,14 @@ private fun HeaderActions(model: AndroidAppModel, view: ThreadView) {
                 }
             HeaderActionKind.TERMINAL ->
                 HeaderIconButton(Icons.Outlined.Terminal, action.accessibilityLabel) {
-                    model.navigate(Route.Terminal(view.threadId, view.terminals.firstOrNull()?.terminalId ?: ""))
+                    model.navigate(
+                        Route.Terminal(
+                            view.threadId,
+                            view.terminals.firstOrNull()?.terminalId ?: "",
+                            view.header?.project?.name,
+                            view.header?.cwd,
+                        )
+                    )
                 }
             HeaderActionKind.MERGE_BACK ->
                 IconButton(onClick = { model.perform(Intent.MergeBack) }, modifier = Modifier.size(48.dp)) {

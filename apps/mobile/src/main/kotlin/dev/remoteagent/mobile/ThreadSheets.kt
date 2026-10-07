@@ -23,6 +23,8 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.ArrowBack
+import androidx.compose.material.icons.outlined.ChevronRight
 import androidx.compose.material.icons.outlined.MoreVert
 import androidx.compose.material.icons.outlined.Star
 import androidx.compose.material.icons.outlined.StarBorder
@@ -51,6 +53,7 @@ import androidx.compose.ui.unit.dp
 import dev.remoteagent.core.AgentRoster
 import dev.remoteagent.core.ComposerView
 import dev.remoteagent.core.Intent
+import dev.remoteagent.core.LegacyModelsSection
 import dev.remoteagent.core.ModelPickerRow
 import dev.remoteagent.core.PickerRail
 import dev.remoteagent.core.QueueAction
@@ -68,6 +71,7 @@ internal fun BottomSheet(
     onDismiss: () -> Unit,
     title: String,
     skipPartiallyExpanded: Boolean = false,
+    leading: (@Composable () -> Unit)? = null,
     trailing: @Composable () -> Unit = {},
     content: @Composable ColumnScope.() -> Unit,
 ) {
@@ -78,9 +82,10 @@ internal fun BottomSheet(
         contentColor = AppTheme.colors.foreground,
     ) {
         Row(
-            Modifier.fillMaxWidth().padding(start = 20.dp, end = 8.dp, bottom = 8.dp),
+            Modifier.fillMaxWidth().padding(start = if (leading != null) 4.dp else 20.dp, end = 8.dp, bottom = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
+            leading?.invoke()
             Text(title, Modifier.weight(1f), style = AppTheme.headline, fontWeight = FontWeight.ExtraBold)
             trailing()
         }
@@ -257,26 +262,39 @@ internal fun AgentsSheet(model: AndroidAppModel, roster: AgentRoster, onDismiss:
     }
 }
 
-/** Model list with a provider filter, then Options and Runtime. A new model applies on Save. */
+/** Model list with a provider filter, then Options. A new model applies on Save. */
 @Composable
 internal fun ThreadSettingsSheet(model: AndroidAppModel, composer: ComposerView, onDismiss: () -> Unit) {
     val colors = AppTheme.colors
     var query by remember { mutableStateOf("") }
     var rail by remember { mutableStateOf<PickerRail?>(null) }
     var pending by remember { mutableStateOf<ModelPickerRow?>(null) }
-    val picker by rememberView(model.snapshot, query, rail) { it.modelPicker(query, rail) }
+    var toggledLegacy by remember { mutableStateOf(emptyList<String>()) }
+    var choosing by remember { mutableStateOf<OptionScreen?>(null) }
+    val picker by
+        rememberView(model.snapshot, query, rail, toggledLegacy) { it.modelPicker(query, rail, toggledLegacy) }
     fun save() {
         pending?.let { row -> model.perform(Intent.SetModel(row.instanceId, row.driver, row.slug, emptyList())) }
         onDismiss()
     }
+    val screen = choosing
     BottomSheet(
         onDismiss,
-        "Thread settings",
+        screen?.title ?: "Thread settings",
         skipPartiallyExpanded = true,
+        leading =
+            screen?.let { { HeaderIconButton(Icons.AutoMirrored.Outlined.ArrowBack, "Back") { choosing = null } } },
         trailing = {
-            TextButton(onClick = ::save) { Text(if (pending != null) "Save" else "Done", color = colors.foreground) }
+            if (screen == null)
+                TextButton(onClick = ::save) {
+                    Text(if (pending != null) "Save" else "Done", color = colors.foreground)
+                }
         },
     ) {
+        if (screen != null) {
+            OptionChoices(screen) { choosing = null }
+            return@BottomSheet
+        }
         SettingsField(query, { query = it }, "Find a model", Modifier.padding(horizontal = 16.dp))
         picker?.let { view ->
             Row(
@@ -292,7 +310,10 @@ internal fun ThreadSettingsSheet(model: AndroidAppModel, composer: ComposerView,
                 Text(it, Modifier.padding(20.dp), style = AppTheme.footnote, color = colors.foregroundMuted)
             }
             var provider: String? = null
-            view.rows.forEach { row ->
+            view.rows.forEachIndexed { index, row ->
+                view.legacy
+                    ?.takeIf { it.currentCount.toInt() == index }
+                    ?.let { legacy -> LegacyModelsRow(legacy) { toggledLegacy = toggledLegacy.toggled(it) } }
                 if (row.providerName != provider) {
                     provider = row.providerName
                     Text(
@@ -313,8 +334,9 @@ internal fun ThreadSettingsSheet(model: AndroidAppModel, composer: ComposerView,
                         IconButton(onClick = { model.perform(Intent.ToggleFavoriteModel(row.instanceId, row.slug)) }) {
                             Icon(
                                 if (row.favorite) Icons.Outlined.Star else Icons.Outlined.StarBorder,
-                                "Favorite",
-                                tint = colors.iconMuted,
+                                if (row.favorite) "Remove from favorites: ${row.name}"
+                                else "Add to favorites: ${row.name}",
+                                tint = if (row.favorite) colors.icon else colors.iconMuted,
                             )
                         }
                     },
@@ -322,19 +344,127 @@ internal fun ThreadSettingsSheet(model: AndroidAppModel, composer: ComposerView,
                     pending = if (row.selected) null else row
                 }
             }
+            view.legacy
+                ?.takeIf { it.currentCount.toInt() >= view.rows.size }
+                ?.let { legacy -> LegacyModelsRow(legacy) { toggledLegacy = toggledLegacy.toggled(it) } }
         }
-        if (composer.traits.visible) {
-            SheetSection("Options")
-            composer.traits.controls.forEach { control -> TraitRow(model, control) }
-        }
-        SheetSection("Runtime")
-        composer.controls.runtimeModeChoices.forEach { choice ->
-            ChoiceRow(choice.label, choice.description, choice.mode == composer.controls.runtimeMode.mode) {
-                model.perform(Intent.SetRuntimeMode(choice.mode))
+        SheetSection("Options")
+        if (composer.traits.visible)
+            composer.traits.controls.forEach { control ->
+                when (control) {
+                    is TraitControl.Select ->
+                        DisclosureRow(
+                            control.label,
+                            control.note ?: control.choices.firstOrNull { it.id == control.selected }?.label.orEmpty(),
+                            enabled = !control.disabled,
+                        ) {
+                            choosing =
+                                OptionScreen(
+                                    control.label,
+                                    control.choices.map {
+                                        OptionScreenChoice(it.label, null, it.id == control.selected)
+                                    },
+                                ) { index ->
+                                    model.perform(Intent.SelectTrait(control.id, control.choices[index].id))
+                                }
+                        }
+                    is TraitControl.Toggle ->
+                        SwitchRow(control.label, control.on) { model.perform(Intent.ToggleTrait(control.id, it)) }
+                }
             }
+        val runtime = composer.controls
+        DisclosureRow("Runtime", runtime.runtimeMode.label) {
+            choosing =
+                OptionScreen(
+                    "Runtime",
+                    runtime.runtimeModeChoices.map {
+                        OptionScreenChoice(it.label, it.description, it.mode == runtime.runtimeMode.mode)
+                    },
+                ) { index ->
+                    model.perform(Intent.SetRuntimeMode(runtime.runtimeModeChoices[index].mode))
+                }
         }
         Spacer(Modifier.heightIn(min = 24.dp))
     }
+}
+
+private class OptionScreenChoice(val label: String, val description: String?, val selected: Boolean)
+
+/** A descriptor's choices, pushed over the settings like a screen. */
+private class OptionScreen(val title: String, val choices: List<OptionScreenChoice>, val select: (Int) -> Unit)
+
+@Composable
+private fun OptionChoices(screen: OptionScreen, onDone: () -> Unit) {
+    screen.choices.forEachIndexed { index, choice ->
+        ChoiceRow(choice.label, choice.description, choice.selected) {
+            screen.select(index)
+            onDone()
+        }
+    }
+    Spacer(Modifier.heightIn(min = 24.dp))
+}
+
+/** An instance's legacy models, folded until the switch shows them. */
+@Composable
+private fun LegacyModelsRow(legacy: LegacyModelsSection, onToggle: (String) -> Unit) {
+    Row(
+        Modifier.fillMaxWidth()
+            .heightIn(min = 56.dp)
+            .clickable { onToggle(legacy.instanceId) }
+            .padding(horizontal = 20.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f).padding(vertical = 8.dp)) {
+            Text(legacy.label, style = AppTheme.footnote, fontWeight = FontWeight.Medium)
+            Text(legacy.detail, style = AppTheme.caption, color = AppTheme.colors.foregroundMuted)
+        }
+        AppSwitch(legacy.expanded) { onToggle(legacy.instanceId) }
+    }
+}
+
+@Composable
+private fun DisclosureRow(label: String, value: String, enabled: Boolean = true, onClick: () -> Unit) {
+    val colors = AppTheme.colors
+    Row(
+        Modifier.fillMaxWidth()
+            .heightIn(min = 56.dp)
+            .clickable(enabled = enabled, onClick = onClick)
+            .padding(horizontal = 20.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Text(label, style = AppTheme.footnote, fontWeight = FontWeight.Medium, color = colors.foreground)
+        Spacer(Modifier.weight(1f))
+        Text(value, style = AppTheme.footnote, color = colors.foregroundMuted, maxLines = 1)
+        Icon(Icons.Outlined.ChevronRight, null, Modifier.size(12.dp), tint = colors.iconMuted)
+    }
+}
+
+@Composable
+private fun SwitchRow(label: String, on: Boolean, onChange: (Boolean) -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().heightIn(min = 44.dp).padding(horizontal = 20.dp, vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(label, Modifier.weight(1f), style = AppTheme.footnote, fontWeight = FontWeight.Medium)
+        AppSwitch(on, onChange = onChange)
+    }
+}
+
+@Composable
+internal fun AppSwitch(on: Boolean, enabled: Boolean = true, onChange: (Boolean) -> Unit) {
+    Switch(
+        on,
+        onChange,
+        enabled = enabled,
+        colors =
+            SwitchDefaults.colors(
+                checkedTrackColor = AppTheme.colors.primary,
+                checkedThumbColor = AppTheme.colors.primaryForeground,
+                uncheckedTrackColor = AppTheme.colors.secondary,
+                uncheckedThumbColor = AppTheme.colors.iconMuted,
+            ),
+    )
 }
 
 @Composable
@@ -361,41 +491,6 @@ private fun FilterChip(label: String, selected: Boolean, onClick: () -> Unit) {
         fontWeight = FontWeight.Medium,
         color = colors.foreground,
     )
-}
-
-@Composable
-private fun TraitRow(model: AndroidAppModel, control: TraitControl) {
-    when (control) {
-        is TraitControl.Select -> {
-            var open by remember { mutableStateOf(false) }
-            val current = control.choices.firstOrNull { it.id == control.selected }?.label ?: control.selected
-            ChoiceRow(control.label, control.note ?: current, false, enabled = !control.disabled, radio = false) {
-                open = !open
-            }
-            if (open)
-                control.choices.forEach { choice ->
-                    ChoiceRow(choice.label, choice.description, choice.id == control.selected, indent = true) {
-                        model.perform(Intent.SelectTrait(control.id, choice.id))
-                    }
-                }
-        }
-        is TraitControl.Toggle ->
-            Row(
-                Modifier.fillMaxWidth().heightIn(min = 56.dp).padding(horizontal = 20.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text(control.label, Modifier.weight(1f), style = AppTheme.body)
-                Switch(
-                    control.on,
-                    { model.perform(Intent.ToggleTrait(control.id, it)) },
-                    colors =
-                        SwitchDefaults.colors(
-                            checkedTrackColor = AppTheme.colors.primary,
-                            checkedThumbColor = AppTheme.colors.primaryForeground,
-                        ),
-                )
-            }
-    }
 }
 
 /** Android settings rows: 56 tall, a leading radio and the secondary fill when selected. */
@@ -509,7 +604,7 @@ internal fun SetupDetailsSheet(
                 }
             }
             val terminal = card.openTerminalId
-            if (card.canCancel || terminal != null) {
+            if (card.canCancel || card.canWorkLocally || terminal != null) {
                 HorizontalDivider(Modifier.padding(top = 12.dp), color = colors.border)
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(16.dp, Alignment.End)) {
                     if (terminal != null)
@@ -529,6 +624,15 @@ internal fun SetupDetailsSheet(
                             }
                         ) {
                             Text("Cancel setup", style = AppTheme.footnote, color = colors.dangerForeground)
+                        }
+                    if (card.canWorkLocally)
+                        TextButton(
+                            onClick = {
+                                onDismiss()
+                                model.workLocally()
+                            }
+                        ) {
+                            Text("Work locally", style = AppTheme.footnote, color = colors.foreground)
                         }
                 }
             }

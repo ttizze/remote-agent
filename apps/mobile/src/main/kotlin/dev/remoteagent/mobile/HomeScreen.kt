@@ -65,7 +65,11 @@ private const val SETTLED_PAGE_COUNT = 25u
 
 /** Provider instance to driver, from the model catalog core holds. */
 internal fun instanceDrivers(snapshot: Snapshot): Map<String, Driver> =
-    snapshot.modelPicker("", null).rail.mapNotNull { item -> item.instance?.let { it.instanceId to it.driver } }.toMap()
+    snapshot
+        .modelPicker("", null, emptyList())
+        .rail
+        .mapNotNull { item -> item.instance?.let { it.instanceId to it.driver } }
+        .toMap()
 
 @Composable
 internal fun HomeScreen(model: AndroidAppModel) {

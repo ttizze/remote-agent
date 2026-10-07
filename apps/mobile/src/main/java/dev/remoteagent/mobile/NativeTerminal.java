@@ -16,6 +16,9 @@ public final class NativeTerminal implements TerminalSessionClient, TerminalView
     public final TerminalView view;
     public final TerminalSession session;
     private long sequence;
+    public boolean controlArmed;
+    public boolean altArmed;
+    public Runnable onModifiersReleased;
     public NativeTerminal(Context context, TerminalSession.Transport transport, int background, int foreground, int cursor, int fontSize) {
         view = new TerminalView(context, null);
         view.setTerminalViewClient(this);
@@ -70,11 +73,21 @@ public final class NativeTerminal implements TerminalSessionClient, TerminalView
     public boolean onKeyDown(int keyCode, KeyEvent event, TerminalSession session) { return false; }
     public boolean onKeyUp(int keyCode, KeyEvent event) { return false; }
     public boolean onLongPress(MotionEvent event) { return false; }
-    public boolean readControlKey() { return false; }
-    public boolean readAltKey() { return false; }
+    public boolean readControlKey() { return controlArmed; }
+    public boolean readAltKey() { return altArmed; }
     public boolean readShiftKey() { return false; }
     public boolean readFnKey() { return false; }
-    public boolean onCodePoint(int codePoint, boolean control, TerminalSession session) { return false; }
+    public boolean onCodePoint(int codePoint, boolean control, TerminalSession session) {
+        releaseModifiers();
+        return false;
+    }
+    // One-shot modifiers from the extra keys row apply to the next key.
+    public void releaseModifiers() {
+        if (!controlArmed && !altArmed) return;
+        controlArmed = false;
+        altArmed = false;
+        if (onModifiersReleased != null) onModifiersReleased.run();
+    }
     public void onEmulatorSet() {}
     // Terminal input/output may contain credentials; do not forward emulator logs.
     public void logError(String tag, String message) {}

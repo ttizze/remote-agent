@@ -10,6 +10,7 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -48,6 +49,7 @@ import androidx.compose.material.icons.outlined.Language
 import androidx.compose.material.icons.outlined.Lock
 import androidx.compose.material.icons.outlined.Psychology
 import androidx.compose.material.icons.outlined.Public
+import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.SmartToy
 import androidx.compose.material.icons.outlined.Terminal
@@ -63,6 +65,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -111,6 +114,7 @@ internal class FeedActions(
     val openDiff: (ChangedFilesCard) -> Unit,
     val fork: (String) -> Unit,
     val copy: (String) -> Unit,
+    val retryPreparation: (String) -> Unit,
 )
 
 internal fun clockLabel(millis: Long): String =
@@ -419,6 +423,26 @@ private fun WorkRow(row: WorkLogRow, actions: FeedActions) {
                     style = AppTheme.caption,
                     color = colors.foregroundMuted,
                 )
+                failure.retryPreparation?.let { run ->
+                    Row(
+                        Modifier.padding(start = 28.dp, top = 8.dp)
+                            .heightIn(min = 44.dp)
+                            .border(1.dp, colors.border, CircleShape)
+                            .clip(CircleShape)
+                            .clickable { actions.retryPreparation(run) }
+                            .padding(horizontal = 16.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        Icon(Icons.Outlined.Refresh, null, Modifier.size(13.dp), tint = colors.icon)
+                        Text(
+                            "Retry",
+                            style = AppTheme.footnote,
+                            fontWeight = FontWeight.Medium,
+                            color = colors.foreground,
+                        )
+                    }
+                }
             }
         }
         is WorkLogRow.Activity -> {

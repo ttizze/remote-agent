@@ -26,6 +26,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
@@ -50,30 +51,36 @@ internal fun RemoteAgentApp(
     }
     BackHandler(model.stack.size > 1) { model.back() }
     AppMaterialTheme {
-        Surface(Modifier.fillMaxSize(), color = AppTheme.colors.header) {
-            Box(Modifier.fillMaxSize().safeDrawingPadding()) {
-                key(model.profileId) {
-                    when (val route = model.route) {
-                        Route.Hosts -> HostsScreen(model)
-                        Route.Pairing -> PairingScreen(model, requestQrScan)
-                        Route.Home -> HomeScreen(model)
-                        is Route.Thread -> ThreadScreen(model, route.id)
-                        Route.NewTask -> NewTaskScreen(model)
-                        is Route.Terminal -> TerminalScreen(model, route.threadId, route.terminalId)
-                        is Route.Workspace -> WorkspaceScreen(model, route.tab)
-                        is Route.Settings -> SettingsScreen(model, route.projectId)
-                        Route.Archived -> ArchivedScreen(model)
-                    }
+        CompositionLocalProvider(LocalSnapshot provides model.snapshot) { AppSurface(model, requestQrScan) }
+    }
+}
+
+@Composable
+private fun AppSurface(model: AndroidAppModel, requestQrScan: (onContents: (String) -> Unit) -> Unit) {
+    Surface(Modifier.fillMaxSize(), color = AppTheme.colors.header) {
+        Box(Modifier.fillMaxSize().safeDrawingPadding()) {
+            key(model.profileId) {
+                when (val route = model.route) {
+                    Route.Hosts -> HostsScreen(model)
+                    Route.Pairing -> PairingScreen(model, requestQrScan)
+                    Route.Home -> HomeScreen(model)
+                    is Route.Thread -> ThreadScreen(model, route.id)
+                    Route.NewTask -> NewTaskScreen(model)
+                    is Route.Terminal ->
+                        TerminalScreen(model, route.threadId, route.terminalId, route.project, route.cwd)
+                    is Route.Workspace -> WorkspaceScreen(model, route.tab)
+                    is Route.Settings -> SettingsScreen(model, route.projectId)
+                    Route.Archived -> ArchivedScreen(model)
                 }
-                model.notice?.let { notice ->
-                    Snackbar(
-                        Modifier.align(Alignment.BottomCenter).padding(16.dp),
-                        action = { TextButton(onClick = { model.notice = null }) { Text("Dismiss") } },
-                        containerColor = AppTheme.colors.foreground,
-                        contentColor = AppTheme.colors.screen,
-                    ) {
-                        Text(notice, style = AppTheme.footnote)
-                    }
+            }
+            model.notice?.let { notice ->
+                Snackbar(
+                    Modifier.align(Alignment.BottomCenter).padding(16.dp),
+                    action = { TextButton(onClick = { model.notice = null }) { Text("Dismiss") } },
+                    containerColor = AppTheme.colors.foreground,
+                    contentColor = AppTheme.colors.screen,
+                ) {
+                    Text(notice, style = AppTheme.footnote)
                 }
             }
         }

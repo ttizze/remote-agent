@@ -10,6 +10,7 @@ import android.widget.ImageView
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -21,9 +22,16 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Check
+import androidx.compose.material.icons.outlined.ChevronRight
+import androidx.compose.material.icons.outlined.MoreHoriz
+import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.Icon
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -38,10 +46,14 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
@@ -52,8 +64,12 @@ import dev.remoteagent.core.BrowserAction
 import dev.remoteagent.core.BrowserFrame
 import dev.remoteagent.core.BrowserKey
 import dev.remoteagent.core.BrowserRequest
+import dev.remoteagent.core.DiffPanelView
+import dev.remoteagent.core.DiffScopeChoice
 import dev.remoteagent.core.FileEntry
+import dev.remoteagent.core.GitDiffView
 import dev.remoteagent.core.Intent
+import dev.remoteagent.core.WorkspaceDiffFile
 import java.io.File
 import java.util.UUID
 import kotlinx.coroutines.Dispatchers
@@ -68,11 +84,15 @@ private const val BROWSER_REFRESH_MILLIS = 500L
 /** The open thread's files, diff and browser, each as its own screen. */
 @Composable
 internal fun WorkspaceScreen(model: AndroidAppModel, tab: WorkspaceTab) {
+    if (tab == WorkspaceTab.Diff) {
+        ReviewScreen(model)
+        return
+    }
     ScreenScaffold(tab.name, onBack = model::back) {
         Column(Modifier.fillMaxSize()) {
             when (tab) {
                 WorkspaceTab.Files -> WorkspaceFiles(model, Modifier.weight(1f))
-                WorkspaceTab.Diff -> WorkspaceDiff(model, Modifier.weight(1f))
+                WorkspaceTab.Diff -> Unit
                 WorkspaceTab.Browser -> WorkspaceBrowser(model, Modifier.weight(1f))
             }
         }
@@ -238,83 +258,229 @@ private fun WorkspaceFiles(model: AndroidAppModel, modifier: Modifier) {
     }
 }
 
-/** The diff panel core describes: scope, turn, whitespace, then the files of the loaded diff. */
+/** What an empty diff compares, as the review sheet words it. */
+internal fun reviewEmptyDetail(choice: DiffScopeChoice?, git: GitDiffView?): String =
+    when (choice) {
+        DiffScopeChoice.Branch ->
+            git?.baseRef?.let { base -> "$base ... ${git.headRef ?: "HEAD"}" } ?: "Base branch unavailable"
+        DiffScopeChoice.Unstaged -> "Staged, unstaged, and untracked files"
+        else -> "This diff is empty."
+    }
+
+/** "Review changes": the selected diff, chosen from the header menu, then its files. */
 @Composable
-@Suppress("LongMethod")
-private fun WorkspaceDiff(model: AndroidAppModel, modifier: Modifier) {
-    val thread = model.snapshot.selectedThreadId() ?: return
-    val panel = model.snapshot.diff(thread)
-    var menu by remember { mutableStateOf(false) }
-    LaunchedEffect(thread, panel.request) { if (panel.request != null) model.perform(Intent.LoadDiff) }
+@Suppress("LongMethod", "CyclomaticComplexMethod")
+private fun ReviewScreen(model: AndroidAppModel) {
+    val thread = model.snapshot.selectedThreadId()
+    val panel = thread?.let { model.snapshot.diff(it) }
+    LaunchedEffect(thread, panel?.request) { if (panel?.request != null) model.perform(Intent.LoadDiff) }
     val review = model.snapshot.review()
-    var files by remember { mutableStateOf<List<dev.remoteagent.core.WorkspaceDiffFile>>(emptyList()) }
+    var files by remember { mutableStateOf<List<WorkspaceDiffFile>>(emptyList()) }
     LaunchedEffect(model.snapshot.reviewRevision()) {
         files = withContext(Dispatchers.Default) { review?.diffFiles().orEmpty() }
     }
     val colors = AppTheme.colors
-    Column(modifier) {
-        Row(Modifier.padding(horizontal = 12.dp)) {
-            Box(Modifier.weight(1f)) {
-                TextButton(onClick = { menu = true }) { Text(panel.scopeLabel, color = colors.foreground) }
-                AnchoredMenu(menu, { menu = false }) {
-                    panel.scopes.forEach { scope ->
-                        DropdownMenuItem(
-                            text = { Text(if (scope.selected) "✓  ${scope.label}" else scope.label) },
-                            onClick = {
-                                menu = false
-                                model.perform(Intent.SelectDiffScope(scope.choice))
-                            },
-                        )
-                    }
-                    panel.turns.forEach { turn ->
-                        DropdownMenuItem(
-                            text = { Text(if (turn.selected) "✓  ${turn.label}" else turn.label) },
-                            onClick = {
-                                menu = false
-                                model.perform(Intent.SelectDiffTurn(turn.runId, null))
-                            },
-                        )
-                    }
-                }
-            }
-            TextButton(onClick = { model.perform(Intent.SetDiffIgnoreWhitespace(!panel.ignoreWhitespace)) }) {
-                Text(panel.whitespaceToggleLabel, color = colors.foreground)
-            }
-        }
+    val git = panel?.git
+    val choice = panel?.scopes?.firstOrNull { it.selected }?.choice
+    val gitScope = choice == DiffScopeChoice.Branch || choice == DiffScopeChoice.Unstaged
+    val loading = (gitScope && git?.loading == true) || (panel?.request != null && review == null)
+    val subtitle =
+        panel?.let {
+            listOf(
+                    it.scopeLabel,
+                    "+${files.sumOf { file -> file.additions ?: 0uL }}",
+                    "-${files.sumOf { file -> file.deletions ?: 0uL }}",
+                )
+                .joinToString(" · ")
+        } ?: "Select a diff"
+    ScreenScaffold(
+        "Review changes",
+        onBack = model::back,
+        subtitle = subtitle,
+        actions = { if (panel != null) ReviewMenu(model, panel, loading) },
+    ) {
         LazyColumn(
-            Modifier.weight(1f),
-            contentPadding = PaddingValues(20.dp),
+            Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(vertical = 8.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            val empty = panel.emptyMessage
+            val error = git?.error?.takeIf { gitScope }
+            val empty = panel?.emptyMessage
             when {
-                empty != null -> item { Text(empty, color = colors.foregroundMuted) }
-                review == null -> item { CircularProgressIndicator() }
-                files.isEmpty() -> item { Text("No changes", color = colors.foregroundMuted) }
+                panel == null || empty != null ->
+                    item {
+                        ReviewMessage(
+                            "No review diffs",
+                            empty ?: "This thread has no ready turn diffs and the worktree diff is empty.",
+                        )
+                    }
+                error != null -> item { ReviewCard("Review unavailable", error, colors.card, colors.foreground) }
+                loading ->
+                    item {
+                        Column(
+                            Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 24.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(12.dp),
+                        ) {
+                            CircularProgressIndicator(
+                                Modifier.size(18.dp),
+                                color = colors.iconMuted,
+                                strokeWidth = 2.dp,
+                            )
+                            Text("Loading diff…", style = AppTheme.label, color = colors.foregroundMuted)
+                        }
+                    }
+                files.isEmpty() -> item { ReviewMessage("No changes", reviewEmptyDetail(choice, git)) }
             }
-            items(files, key = { it.path }) { file ->
-                Column {
-                    Text(file.path, style = AppTheme.label, color = colors.foreground)
-                    androidx.compose.foundation.text.selection.SelectionContainer {
-                        Column {
-                            file.rows.forEach { row ->
+            if (gitScope && git?.truncated == true && !loading)
+                item {
+                    ReviewCard(
+                        "Partial diff",
+                        "Diff output hit the server size cap. Showing the available excerpt.",
+                        colors.warning,
+                        colors.warningForeground,
+                        notice = true,
+                    )
+                }
+            if (!loading)
+                items(files, key = { it.path }) { file ->
+                    Column(Modifier.padding(horizontal = 16.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                file.path,
+                                Modifier.weight(1f),
+                                style = AppTheme.label,
+                                fontWeight = FontWeight.Medium,
+                                color = colors.foreground,
+                            )
+                            file.deletions?.let { Text("-$it", style = AppTheme.micro, color = colors.rose) }
+                            file.additions?.let {
                                 Text(
-                                    row.text,
-                                    fontFamily = FontFamily.Monospace,
-                                    style = AppTheme.caption,
-                                    color =
-                                        when (row.kind) {
-                                            "+" -> colors.emerald
-                                            "-" -> colors.rose
-                                            else -> colors.foreground
-                                        },
+                                    "+$it",
+                                    Modifier.padding(start = 4.dp),
+                                    style = AppTheme.micro,
+                                    color = colors.emerald,
                                 )
+                            }
+                        }
+                        androidx.compose.foundation.text.selection.SelectionContainer {
+                            Column {
+                                file.rows.forEach { row ->
+                                    Text(
+                                        row.text,
+                                        fontFamily = FontFamily.Monospace,
+                                        style = AppTheme.caption,
+                                        color =
+                                            when (row.kind) {
+                                                "+" -> colors.emerald
+                                                "-" -> colors.rose
+                                                else -> colors.foreground
+                                            },
+                                    )
+                                }
                             }
                         }
                     }
                 }
+        }
+    }
+}
+
+/** "Select diff": Changes, Uncommitted, the latest turn, every turn, and refresh. */
+@Composable
+private fun ReviewMenu(model: AndroidAppModel, panel: DiffPanelView, loading: Boolean) {
+    var open by remember { mutableStateOf(false) }
+    var turns by remember { mutableStateOf(false) }
+    val repository = panel.git?.isRepo != false
+    Box {
+        HeaderIconButton(Icons.Outlined.MoreHoriz, "Select diff") { open = true }
+        AnchoredMenu(
+            open || turns,
+            {
+                open = false
+                turns = false
+            },
+        ) {
+            if (turns)
+                panel.turns.forEach { turn ->
+                    MenuChoice(turn.label, turn.selected) {
+                        turns = false
+                        model.perform(Intent.SelectDiffTurn(turn.runId, null))
+                    }
+                }
+            else {
+                panel.scopes.forEach { scope ->
+                    val git = scope.choice == DiffScopeChoice.Branch || scope.choice == DiffScopeChoice.Unstaged
+                    MenuChoice(scope.label, scope.selected, enabled = repository || !git) {
+                        open = false
+                        model.perform(Intent.SelectDiffScope(scope.choice))
+                    }
+                }
+                if (panel.turns.isNotEmpty())
+                    DropdownMenuItem(
+                        text = { Text("Turn", style = AppTheme.footnote) },
+                        trailingIcon = { Icon(Icons.Outlined.ChevronRight, null) },
+                        onClick = {
+                            open = false
+                            turns = true
+                        },
+                    )
+                DropdownMenuItem(
+                    text = { Text("Refresh current diff", style = AppTheme.footnote) },
+                    leadingIcon = { Icon(Icons.Outlined.Refresh, null) },
+                    enabled = panel.request != null && !loading,
+                    onClick = {
+                        open = false
+                        model.perform(Intent.LoadDiff)
+                    },
+                )
             }
         }
+    }
+}
+
+@Composable
+private fun MenuChoice(label: String, selected: Boolean, enabled: Boolean = true, onClick: () -> Unit) {
+    DropdownMenuItem(
+        text = { Text(label, style = AppTheme.footnote) },
+        trailingIcon = if (selected) ({ Icon(Icons.Outlined.Check, null) }) else null,
+        enabled = enabled,
+        onClick = onClick,
+    )
+}
+
+@Composable
+private fun ReviewMessage(title: String, detail: String) {
+    Column(
+        Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 20.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Text(title, style = AppTheme.footnote, fontWeight = FontWeight.Bold, color = AppTheme.colors.foreground)
+        Text(
+            detail,
+            Modifier.padding(top = 8.dp),
+            style = AppTheme.label,
+            color = AppTheme.colors.foregroundMuted,
+            textAlign = TextAlign.Center,
+        )
+    }
+}
+
+@Composable
+private fun ReviewCard(title: String, detail: String, container: Color, titleColor: Color, notice: Boolean = false) {
+    Column(
+        Modifier.fillMaxWidth()
+            .padding(8.dp)
+            .background(container, RoundedCornerShape(20.dp))
+            .padding(horizontal = 16.dp, vertical = 12.dp)
+    ) {
+        Text(
+            if (notice) title.uppercase() else title,
+            style = if (notice) AppTheme.label else AppTheme.footnote,
+            fontWeight = FontWeight.Bold,
+            color = titleColor,
+        )
+        Text(detail, style = AppTheme.label, color = AppTheme.colors.foregroundMuted)
     }
 }
 

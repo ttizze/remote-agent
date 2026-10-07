@@ -1,31 +1,37 @@
+// Declarative native layout with the fixed mobile metrics; the terminal state is supplied by core.
+@file:Suppress("LongMethod", "LongParameterList", "MagicNumber", "CyclomaticComplexMethod")
+
 package dev.remoteagent.mobile
 
 import android.view.KeyEvent
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Add
-import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material.icons.outlined.Check
+import androidx.compose.material.icons.outlined.Terminal
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
@@ -39,6 +45,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.termux.terminal.TerminalSession
+import com.termux.view.TerminalView
 import dev.remoteagent.core.Intent
 import dev.remoteagent.core.Outcome
 import dev.remoteagent.core.Snapshot
@@ -46,22 +53,44 @@ import dev.remoteagent.core.TerminalTab
 
 private const val TERMINAL_FONT_SIZE = 12
 
-/** A thread's terminals: tabs over one native terminal, keyed by (thread, terminal id). */
+/** The terminal a thread falls back to when `closing` goes away: the nearest lower id, else the nearest higher. */
+internal fun fallbackTerminal(tabs: List<TerminalTab>, closing: String): String? {
+    val others = tabs.map { it.terminalId }.filter { it != closing }
+    val order = { id: String -> id.substringAfterLast('-').toIntOrNull() ?: Int.MAX_VALUE }
+    val rank = order(closing)
+    return others.filter { order(it) < rank }.maxByOrNull(order) ?: others.minByOrNull(order)
+}
+
+/** A thread's terminal: one shell at a time, the others in the header menu. */
 @Composable
-internal fun TerminalScreen(model: AndroidAppModel, threadId: String, initialTerminalId: String) {
+internal fun TerminalScreen(
+    model: AndroidAppModel,
+    threadId: String,
+    initialTerminalId: String,
+    project: String?,
+    cwd: String?,
+) {
     var terminalId by remember { mutableStateOf(initialTerminalId) }
     val opened = remember { mutableSetOf<String>() }
     val current by rememberUpdatedState(model)
     DisposableEffect(threadId) { onDispose { opened.forEach { current.perform(Intent.DetachTerminal(threadId, it)) } } }
     val tabs = model.snapshot.terminals(threadId)
     val selected = tabs.firstOrNull { it.terminalId == terminalId }
-    ScreenScaffold(selected?.label ?: "Terminal", onBack = model::back, subtitle = selected?.status) {
+    // An exited or closed shell closes, and the screen moves to the thread's other terminal.
+    LaunchedEffect(terminalId, selected?.exited, selected == null) {
+        if (terminalId !in opened || (selected != null && !selected.exited)) return@LaunchedEffect
+        if (selected != null) model.perform(Intent.CloseTerminal(threadId, terminalId))
+        opened.remove(terminalId)
+        val next = fallbackTerminal(tabs, terminalId)
+        if (next != null) terminalId = next else model.back()
+    }
+    ScreenScaffold(
+        "Terminal",
+        onBack = model::back,
+        subtitle = project,
+        actions = { TerminalMenu(tabs, selected, cwd, onSelect = { terminalId = it }, onNew = { terminalId = "" }) },
+    ) {
         Column(Modifier.fillMaxSize().imePadding()) {
-            TerminalTabs(tabs, terminalId, onSelect = { terminalId = it }, onNew = { terminalId = "" }) { id ->
-                opened.remove(id)
-                model.perform(Intent.CloseTerminal(threadId, id))
-                if (id == terminalId) terminalId = tabs.firstOrNull { it.terminalId != id }?.terminalId ?: ""
-            }
             key(terminalId) {
                 TerminalBody(
                     model,
@@ -78,46 +107,66 @@ internal fun TerminalScreen(model: AndroidAppModel, threadId: String, initialTer
     }
 }
 
+/** The header menu: the status, every live shell, and a new one. */
 @Composable
-private fun TerminalTabs(
+private fun TerminalMenu(
     tabs: List<TerminalTab>,
-    selected: String,
+    selected: TerminalTab?,
+    cwd: String?,
     onSelect: (String) -> Unit,
     onNew: () -> Unit,
-    onClose: (String) -> Unit,
 ) {
     val colors = AppTheme.colors
-    Row(
-        Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 8.dp, vertical = 6.dp),
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        tabs.forEach { tab ->
-            Row(
-                Modifier.heightIn(min = 32.dp)
-                    .background(
-                        if (tab.terminalId == selected) colors.secondary else colors.screen,
-                        RoundedCornerShape(10.dp),
-                    )
-                    .clickable { onSelect(tab.terminalId) }
-                    .padding(start = 10.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text(
+    var open by remember { mutableStateOf(false) }
+    val folder = cwd?.trimEnd('/')?.substringAfterLast('/')?.takeIf { it.isNotEmpty() }
+    Box {
+        HeaderIconButton(Icons.Outlined.Terminal, "Terminals") { open = true }
+        AnchoredMenu(open, { open = false }) {
+            Text(
+                selected?.menuStatus ?: "Starting",
+                Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                style = AppTheme.caption,
+                color = colors.foregroundSecondary,
+            )
+            HorizontalDivider(color = colors.border)
+            tabs.forEach { tab ->
+                MenuRow(
+                    Icons.Outlined.Terminal,
                     tab.label,
-                    style = AppTheme.caption,
-                    fontWeight = FontWeight.Medium,
-                    color = if (tab.running) colors.foreground else colors.foregroundMuted,
-                )
-                Box(Modifier.size(28.dp).clickable { onClose(tab.terminalId) }, contentAlignment = Alignment.Center) {
-                    Icon(Icons.Outlined.Close, "Close ${tab.label}", Modifier.size(12.dp), tint = colors.iconMuted)
+                    listOfNotNull(tab.menuStatus, folder).joinToString(" · "),
+                    checked = tab.terminalId == selected?.terminalId,
+                ) {
+                    open = false
+                    onSelect(tab.terminalId)
                 }
             }
-        }
-        Box(Modifier.size(32.dp).clickable(onClick = onNew), contentAlignment = Alignment.Center) {
-            Icon(Icons.Outlined.Add, "New terminal", Modifier.size(16.dp), tint = colors.icon)
+            MenuRow(Icons.Outlined.Add, "Open new terminal", "Start another shell in ${folder ?: "this workspace"}") {
+                open = false
+                onNew()
+            }
         }
     }
+}
+
+@Composable
+private fun MenuRow(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    title: String,
+    subtitle: String,
+    checked: Boolean = false,
+    onClick: () -> Unit,
+) {
+    DropdownMenuItem(
+        text = {
+            Column {
+                Text(title, style = AppTheme.footnote, color = AppTheme.colors.foreground)
+                Text(subtitle, style = AppTheme.caption, color = AppTheme.colors.foregroundMuted)
+            }
+        },
+        leadingIcon = { Icon(icon, null, tint = AppTheme.colors.icon) },
+        trailingIcon = if (checked) ({ Icon(Icons.Outlined.Check, null, tint = AppTheme.colors.icon) }) else null,
+        onClick = onClick,
+    )
 }
 
 @Composable
@@ -199,32 +248,111 @@ private fun TerminalBody(
                 }
             },
         )
-        TerminalKeys(native)
+        TerminalKeys(native) { if (terminalId.isNotEmpty()) model.perform(Intent.ClearTerminal(threadId, terminalId)) }
     }
 }
 
+private sealed interface ExtraKey {
+    val label: String
+
+    data class Code(override val label: String, val code: Int) : ExtraKey
+
+    data class Symbol(override val label: String) : ExtraKey
+
+    data class Toggle(override val label: String, val control: Boolean) : ExtraKey
+
+    data object Paste : ExtraKey {
+        override val label = "paste"
+    }
+
+    data object Clear : ExtraKey {
+        override val label = "CLEAR"
+    }
+}
+
+private val EXTRA_KEYS =
+    listOf(
+        ExtraKey.Code("esc", KeyEvent.KEYCODE_ESCAPE),
+        ExtraKey.Toggle("CTRL", control = true),
+        ExtraKey.Toggle("ALT", control = false),
+        ExtraKey.Code("tab", KeyEvent.KEYCODE_TAB),
+        ExtraKey.Paste,
+        ExtraKey.Clear,
+        ExtraKey.Code("↑", KeyEvent.KEYCODE_DPAD_UP),
+        ExtraKey.Code("↓", KeyEvent.KEYCODE_DPAD_DOWN),
+        ExtraKey.Code("←", KeyEvent.KEYCODE_DPAD_LEFT),
+        ExtraKey.Code("→", KeyEvent.KEYCODE_DPAD_RIGHT),
+        ExtraKey.Symbol("~"),
+        ExtraKey.Symbol("|"),
+        ExtraKey.Symbol("/"),
+        ExtraKey.Symbol("-"),
+    )
+
+/** The extra keys row: escape, one-shot modifiers, paste, clear, arrows and symbols. */
 @Composable
-private fun TerminalKeys(terminal: NativeTerminal?) {
-    val keys =
-        listOf(
-            "Esc" to KeyEvent.KEYCODE_ESCAPE,
-            "Tab" to KeyEvent.KEYCODE_TAB,
-            "Ctrl+C" to KeyEvent.KEYCODE_C,
-            "←" to KeyEvent.KEYCODE_DPAD_LEFT,
-            "↓" to KeyEvent.KEYCODE_DPAD_DOWN,
-            "↑" to KeyEvent.KEYCODE_DPAD_UP,
-            "→" to KeyEvent.KEYCODE_DPAD_RIGHT,
-        )
-    Row(Modifier.fillMaxWidth().background(AppTheme.colors.screen), horizontalArrangement = Arrangement.SpaceEvenly) {
-        keys.forEach { (label, code) ->
-            TextButton(
-                onClick = {
-                    val modifiers = if (label == "Ctrl+C") KeyEvent.META_CTRL_ON else 0
-                    terminal?.view?.onKeyDown(code, KeyEvent(0, 0, KeyEvent.ACTION_DOWN, code, 0, modifiers))
-                },
-                contentPadding = PaddingValues(),
+private fun TerminalKeys(terminal: NativeTerminal?, onClear: () -> Unit) {
+    val colors = AppTheme.colors
+    var control by remember { mutableStateOf(false) }
+    var alt by remember { mutableStateOf(false) }
+    DisposableEffect(terminal) {
+        terminal?.onModifiersReleased = Runnable {
+            control = false
+            alt = false
+        }
+        onDispose { terminal?.onModifiersReleased = null }
+    }
+    fun press(key: ExtraKey) {
+        val native = terminal ?: return
+        when (key) {
+            is ExtraKey.Code -> {
+                native.view.onKeyDown(key.code, KeyEvent(0, 0, KeyEvent.ACTION_DOWN, key.code, 0))
+                native.releaseModifiers()
+            }
+            is ExtraKey.Symbol ->
+                native.view.inputCodePoint(
+                    TerminalView.KEY_EVENT_SOURCE_SOFT_KEYBOARD,
+                    key.label.codePointAt(0),
+                    false,
+                    false,
+                )
+            is ExtraKey.Toggle ->
+                if (key.control) {
+                    native.controlArmed = !native.controlArmed
+                    control = native.controlArmed
+                } else {
+                    native.altArmed = !native.altArmed
+                    alt = native.altArmed
+                }
+            ExtraKey.Paste -> native.onPasteTextFromClipboard(native.session)
+            ExtraKey.Clear -> onClear()
+        }
+    }
+    Row(
+        Modifier.fillMaxWidth()
+            .height(52.dp)
+            .background(colors.terminalBackground)
+            .horizontalScroll(rememberScrollState())
+            .padding(horizontal = 8.dp, vertical = 4.dp),
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        EXTRA_KEYS.forEach { key ->
+            val armed = key is ExtraKey.Toggle && (if (key.control) control else alt)
+            Surface(
+                onClick = { press(key) },
+                shape = RoundedCornerShape(10.dp),
+                color = if (armed) colors.secondary else colors.terminalBackground,
+                modifier =
+                    Modifier.height(44.dp).widthIn(min = if (key.label.length > 1) 56.dp else 44.dp, max = 120.dp),
             ) {
-                Text(label, style = AppTheme.caption, color = AppTheme.colors.foreground)
+                Box(contentAlignment = Alignment.Center) {
+                    Text(
+                        key.label,
+                        style = AppTheme.footnote,
+                        fontWeight = if (armed) FontWeight.Bold else FontWeight.Medium,
+                        color = colors.terminalForeground,
+                    )
+                }
             }
         }
     }

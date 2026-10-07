@@ -48,7 +48,12 @@ internal sealed interface Route {
 
     data object NewTask : Route
 
-    data class Terminal(val threadId: String, val terminalId: String) : Route
+    data class Terminal(
+        val threadId: String,
+        val terminalId: String,
+        val project: String? = null,
+        val cwd: String? = null,
+    ) : Route
 
     data class Workspace(val tab: WorkspaceTab) : Route
 
@@ -96,6 +101,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
     var composerText by mutableStateOf("")
         private set
 
+    private var followingFrom: String? = null
     private var owner: AgentStore? = null
     private var initialization: Job? = null
     private var connection: Job? = null
@@ -159,6 +165,20 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
             stack = stack.dropLast(1) + Route.Thread(outcome.id)
             perform(Intent.OpenThread(outcome.id))
         }
+    }
+
+    /** Cancels the setup and restarts the first message locally; the screen follows the new thread. */
+    fun workLocally() {
+        val leaving = (route as? Route.Thread)?.id ?: return
+        followingFrom = leaving
+        perform(Intent.WorkLocally) { if (it.isFailure) followingFrom = null }
+    }
+
+    /** "New thread on <branch>": core opens the draft on that branch, then the new-task screen shows it. */
+    fun newThreadOnBranch(projectId: String, branch: String, worktreePath: String?) {
+        draftEdits.reset()
+        perform(Intent.NewThreadOnBranch(projectId, branch, worktreePath))
+        stack = stack + Route.NewTask
     }
 
     fun editDraft(text: String) {
@@ -437,6 +457,12 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
             repository.saveProfiles(profiles)
         }
         snapshot = next
+        val selected = next.selectedThreadId()
+        val from = followingFrom
+        if (from != null && selected != null && selected != from) {
+            if (route == Route.Thread(from)) stack = stack.dropLast(1) + Route.Thread(selected)
+            followingFrom = null
+        }
         val key = next.currentDraftKey()
         if (key != composerKey) {
             draftEdits.reset()

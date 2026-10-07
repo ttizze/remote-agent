@@ -238,6 +238,9 @@ private fun QuestionBlock(model: AndroidAppModel, requestId: String, question: Q
                 }
             }
         }
+        val draftKey = answerDraftKey(requestId, question.id)
+        AttachmentButton(model, draftKey, enabled = !disabled, compact = true)
+        DraftAttachmentStrip(model, model.snapshot.draftAttachments(draftKey), draftKey, thumbnail = 72.dp)
         var answer by remember(requestId, question.id) { mutableStateOf(question.customAnswer) }
         SettingsField(
             answer,
@@ -247,6 +250,5 @@ private fun QuestionBlock(model: AndroidAppModel, requestId: String, question: Q
             },
             question.hint ?: "Type your answer",
         )
-        AttachmentButton(model, answerDraftKey(requestId, question.id), enabled = !disabled, compact = true)
     }
 }

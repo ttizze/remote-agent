@@ -1,4 +1,4 @@
-@file:Suppress("MagicNumber") // Palette values and the type scale are fixed tokens.
+@file:Suppress("MagicNumber") // The type scale is a fixed token set.
 
 package dev.remoteagent.mobile
 
@@ -16,193 +16,86 @@ import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
+import dev.remoteagent.core.theme
 
-/** The stock mobile palette, with the Android frame tone on the header. */
-internal data class Palette(
-    val dark: Boolean,
-    val screen: Color,
-    val sheet: Color,
-    val card: Color,
-    val groupedCard: Color,
-    val cardAlt: Color,
-    val threadSelected: Color,
-    val rowHover: Color,
-    val composerPanel: Color,
-    val composerSurface: Color,
-    val composerBorder: Color,
-    val foreground: Color,
-    val foregroundSecondary: Color,
-    val foregroundMuted: Color,
-    val foregroundTertiary: Color,
-    val border: Color,
-    val borderSubtle: Color,
-    val separator: Color,
-    val subtle: Color,
-    val subtleStrong: Color,
-    val primary: Color,
-    val primaryForeground: Color,
-    val primaryText: Color,
-    val secondary: Color,
-    val secondaryForeground: Color,
-    val warning: Color,
-    val warningBorder: Color,
-    val warningForeground: Color,
-    val danger: Color,
-    val dangerBorder: Color,
-    val dangerForeground: Color,
-    val update: Color,
-    val updateForeground: Color,
-    val input: Color,
-    val inputBorder: Color,
-    val placeholder: Color,
-    val icon: Color,
-    val iconMuted: Color,
-    val header: Color,
-    val headerForeground: Color,
-    val mdLink: Color,
-    val mdCodeBackground: Color,
-    val mdBlockquoteBorder: Color,
-    val mdHr: Color,
-    val userBubble: Color,
-    val userBubbleForeground: Color,
-    val backdrop: Color,
-    val drawer: Color,
-    val chevron: Color,
-    val indigo: Color,
-    val sky: Color,
-    val emerald: Color,
-    val rose: Color,
-    val violet: Color,
-    val terminalBackground: Color,
-    val terminalForeground: Color,
-    val terminalCursor: Color,
-)
+/** `#rrggbb` or `#rrggbbaa`, as the core theme writes colors. */
+internal fun parseThemeColor(value: String): Color {
+    val hex = value.removePrefix("#")
+    require(value.startsWith("#") && (hex.length == 6 || hex.length == 8)) { "Unexpected color $value" }
+    fun channel(index: Int) = hex.substring(index * 2, index * 2 + 2).toInt(16)
+    return Color(channel(0), channel(1), channel(2), if (hex.length == 8) channel(3) else 255)
+}
 
-private fun rgba(red: Int, green: Int, blue: Int, alpha: Float) = Color(red, green, blue, (alpha * 255).toInt())
+/** The core's mobile palette, status hues and terminal colors. */
+internal class Palette(val dark: Boolean, tokens: Map<String, String>) {
+    private val colors = tokens.mapValues { parseThemeColor(it.value) }
 
-private fun hex(value: Long) = Color(0xFF000000 or value)
+    private fun token(name: String) = requireNotNull(colors[name]) { "The theme has no $name" }
 
-private val LightPalette =
-    Palette(
-        dark = false,
-        screen = hex(0xfcfcfc),
-        sheet = hex(0xfcfcfc),
-        card = hex(0xffffff),
-        groupedCard = hex(0xf4f4f5),
-        cardAlt = hex(0xfcfcfc),
-        threadSelected = hex(0xffffff),
-        rowHover = hex(0xf4f4f5),
-        composerPanel = hex(0xfcfcfc),
-        composerSurface = rgba(244, 244, 245, 0.94f),
-        composerBorder = rgba(228, 228, 231, 0.8f),
-        foreground = hex(0x27272a),
-        foregroundSecondary = hex(0x6f6f79),
-        foregroundMuted = hex(0x6f6f79),
-        foregroundTertiary = hex(0x71717b),
-        border = hex(0xe4e4e7),
-        borderSubtle = rgba(228, 228, 231, 0.7f),
-        separator = rgba(228, 228, 231, 0.55f),
-        subtle = hex(0xfafafa),
-        subtleStrong = hex(0xfafafa),
-        primary = hex(0x1b4ed8),
-        primaryForeground = hex(0xffffff),
-        primaryText = hex(0x1b4ed8),
-        secondary = hex(0xfafafa),
-        secondaryForeground = hex(0x27272a),
-        warning = hex(0xfcf4e8),
-        warningBorder = rgba(254, 154, 0, 0.32f),
-        warningForeground = hex(0xbb4d00),
-        danger = hex(0xfcebec),
-        dangerBorder = rgba(251, 44, 54, 0.32f),
-        dangerForeground = hex(0xc10007),
-        update = hex(0xe0e6f7),
-        updateForeground = hex(0x1b4ed8),
-        input = hex(0xffffff),
-        inputBorder = hex(0xd4d4d8),
-        placeholder = hex(0x6f6f79),
-        icon = hex(0x27272a),
-        iconMuted = hex(0x71717b),
-        header = hex(0xf4f4f5),
-        headerForeground = hex(0x27272a),
-        mdLink = hex(0x1b4ed8),
-        mdCodeBackground = hex(0xffffff),
-        mdBlockquoteBorder = hex(0xe4e4e7),
-        mdHr = hex(0xe4e4e7),
-        userBubble = hex(0xefeff1),
-        userBubbleForeground = hex(0x27272a),
-        backdrop = rgba(0, 0, 0, 0.22f),
-        drawer = hex(0xfafafa),
-        chevron = rgba(113, 113, 123, 0.42f),
-        indigo = hex(0x4f46e5),
-        sky = hex(0x0284c7),
-        emerald = hex(0x047857),
-        rose = hex(0xe11d48),
-        violet = hex(0x7c3aed),
-        terminalBackground = hex(0xfcfcfc),
-        terminalForeground = hex(0x27272a),
-        terminalCursor = hex(0x26384e),
-    )
+    val screen = token("mobileScreen")
+    val sheet = token("mobileSheet")
+    val card = token("mobileCard")
+    val groupedCard = token("mobileGroupedCard")
+    val cardAlt = token("mobileCardAlt")
+    val threadSelected = token("mobileSelected")
+    val rowHover = token("mobileRowHover")
+    val composerPanel = token("mobileComposerPanel")
+    val composerSurface = token("mobileComposerSurface")
+    val composerBorder = token("mobileComposerBorder")
+    val foreground = token("mobileForeground")
+    val foregroundSecondary = token("mobileForegroundSecondary")
+    val foregroundMuted = token("mobileForegroundMuted")
+    val foregroundTertiary = token("mobileForegroundTertiary")
+    val border = token("mobileBorder")
+    val borderSubtle = token("mobileBorderSubtle")
+    val separator = token("mobileSeparator")
+    val subtle = token("mobileSubtle")
+    val subtleStrong = token("mobileSubtleStrong")
+    val primary = token("mobilePrimary")
+    val primaryForeground = token("mobilePrimaryForeground")
+    val primaryText = token("mobilePrimaryText")
+    val secondary = token("mobileSecondary")
+    val secondaryForeground = token("mobileSecondaryForeground")
+    val warning = token("mobileWarning")
+    val warningBorder = token("mobileWarningBorder")
+    val warningForeground = token("mobileWarningForeground")
+    val danger = token("mobileDanger")
+    val dangerBorder = token("mobileDangerBorder")
+    val dangerForeground = token("mobileDangerForeground")
+    val update = token("mobileUpdate")
+    val updateForeground = token("mobileUpdateForeground")
+    val input = token("mobileInput")
+    val inputBorder = token("mobileInputBorder")
+    val placeholder = token("mobilePlaceholder")
+    val icon = token("mobileIcon")
+    val iconMuted = token("mobileIconMuted")
+    val header = token("mobileHeader")
+    val headerForeground = token("mobileHeaderForeground")
+    val mdLink = token("mobileMarkdownLink")
+    val mdCodeBackground = token("mobileMarkdownCode")
+    val mdBlockquoteBorder = token("mobileMarkdownBlockquoteBorder")
+    val mdHr = token("mobileMarkdownRule")
+    val userBubble = token("mobileUserBubble")
+    val userBubbleForeground = token("mobileUserBubbleForeground")
+    val backdrop = token("mobileBackdrop")
+    val drawer = token("mobileDrawer")
+    val chevron = token("mobileChevron")
+    val sky = token("statusSky")
+    val indigo = token("statusIndigo")
+    val emerald = token("statusEmerald")
+    val emeraldIcon = token("statusEmeraldIcon")
+    val rose = token("statusRose")
+    val roseText = token("statusRoseText")
+    val amber = token("statusAmber")
+    val violet = token("statusViolet")
+    val teal = token("statusTeal")
+    val terminalBackground = token("terminalBackground")
+    val terminalForeground = token("terminalForeground")
+    val terminalCursor = token("terminalCursor")
+}
 
-private val DarkPalette =
-    Palette(
-        dark = true,
-        screen = hex(0x0a0a0a),
-        sheet = hex(0x0a0a0a),
-        card = hex(0x111111),
-        groupedCard = hex(0x1a1b1b),
-        cardAlt = hex(0x111111),
-        threadSelected = hex(0x1a1b1b),
-        rowHover = hex(0x141414),
-        composerPanel = hex(0x0a0a0a),
-        composerSurface = rgba(26, 27, 27, 0.9f),
-        composerBorder = rgba(25, 25, 25, 0.8f),
-        foreground = hex(0xf5f5f5),
-        foregroundSecondary = hex(0x838383),
-        foregroundMuted = hex(0x838383),
-        foregroundTertiary = hex(0x818181),
-        border = hex(0x191919),
-        borderSubtle = rgba(25, 25, 25, 0.7f),
-        separator = rgba(25, 25, 25, 0.55f),
-        subtle = hex(0x111111),
-        subtleStrong = hex(0x111111),
-        primary = hex(0x346bf1),
-        primaryForeground = hex(0xffffff),
-        primaryText = hex(0x4b7cf3),
-        secondary = hex(0x111111),
-        secondaryForeground = hex(0xf5f5f5),
-        warning = hex(0x312108),
-        warningBorder = rgba(254, 154, 0, 0.32f),
-        warningForeground = hex(0xffb900),
-        danger = hex(0x301214),
-        dangerBorder = rgba(251, 65, 74, 0.32f),
-        dangerForeground = hex(0xff6467),
-        update = hex(0x121b34),
-        updateForeground = hex(0x51a2ff),
-        input = hex(0x111111),
-        inputBorder = hex(0x1e1e1e),
-        placeholder = hex(0x838383),
-        icon = hex(0xf5f5f5),
-        iconMuted = hex(0x818181),
-        header = hex(0x141414),
-        headerForeground = hex(0xf1f3f7),
-        mdLink = hex(0x3b70f1),
-        mdCodeBackground = hex(0x111111),
-        mdBlockquoteBorder = hex(0x191919),
-        mdHr = hex(0x191919),
-        userBubble = hex(0x161616),
-        userBubbleForeground = hex(0xf5f5f5),
-        backdrop = rgba(0, 0, 0, 0.48f),
-        drawer = hex(0x000000),
-        chevron = rgba(129, 129, 129, 0.42f),
-        indigo = hex(0xa5b4fc),
-        sky = hex(0x38bdf8),
-        emerald = hex(0x6ee7b7),
-        rose = hex(0xfb7185),
-        violet = hex(0xa78bfa),
-        terminalBackground = hex(0x0a0a0a),
-        terminalForeground = hex(0xf5f5f5),
-        terminalCursor = hex(0xb4cbff),
-    )
+private val LightPalette by lazy { Palette(false, theme(false).colors) }
+private val DarkPalette by lazy { Palette(true, theme(true).colors) }
 
 internal val LocalPalette = staticCompositionLocalOf { LightPalette }
 

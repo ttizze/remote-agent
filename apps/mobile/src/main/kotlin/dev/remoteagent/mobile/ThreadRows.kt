@@ -29,9 +29,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.Undo
 import androidx.compose.material.icons.outlined.AlarmOff
 import androidx.compose.material.icons.outlined.Check
-import androidx.compose.material.icons.outlined.EditNote
 import androidx.compose.material.icons.outlined.ExpandMore
-import androidx.compose.material.icons.outlined.Folder
 import androidx.compose.material.icons.outlined.HourglassTop
 import androidx.compose.material.icons.outlined.PushPin
 import androidx.compose.material.icons.outlined.Schedule
@@ -343,7 +341,7 @@ private fun CardRow(row: ThreadRow, environmentLabel: String?, drivers: List<Dri
     val muted = colors.foregroundMuted
     Column(Modifier.fillMaxWidth().padding(horizontal = 10.5.dp, vertical = 8.75.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.25.dp)) {
-            Icon(Icons.Outlined.Folder, null, Modifier.size(15.dp), tint = colors.iconMuted)
+            ProjectFavicon(row.projectId, 15.dp)
             Text(
                 row.projectTitle.orEmpty(),
                 Modifier.weight(1f),
@@ -427,7 +425,7 @@ private fun SlimRow(row: ThreadRow) {
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.75.dp),
     ) {
-        Icon(Icons.Outlined.Folder, null, Modifier.size(15.dp).alphaLayer(0.4f), tint = colors.iconMuted)
+        ProjectFavicon(row.projectId, 15.dp, Modifier.alphaLayer(0.4f))
         Column(Modifier.weight(1f)) {
             Text(
                 row.title,
@@ -461,9 +459,9 @@ internal fun PendingTaskListRow(task: PendingTaskRow, onOpen: () -> Unit, onDele
     ) {
         Column(Modifier.fillMaxWidth().padding(horizontal = 10.5.dp, vertical = 8.75.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.25.dp)) {
-                Icon(Icons.Outlined.EditNote, null, Modifier.size(15.dp), tint = colors.iconMuted)
+                ProjectFavicon(task.projectId, 15.dp)
                 Text(
-                    task.projectId,
+                    task.projectTitle,
                     Modifier.weight(1f),
                     style = AppTheme.footnote,
                     fontWeight = FontWeight.Medium,

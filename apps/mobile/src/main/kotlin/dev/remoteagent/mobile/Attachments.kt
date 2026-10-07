@@ -78,9 +78,8 @@ internal fun AttachmentButton(model: AndroidAppModel, draftKey: String, enabled:
         val destination = target
         if (uris.isEmpty()) return
         scope.launch {
-            val existing =
-                model.snapshot.draft().attachments.takeIf { destination.second == model.snapshot.currentDraftKey() }
-            val prepared = withContext(Dispatchers.IO) { prepareAttachments(context, uris, existing.orEmpty()) }
+            val existing = model.snapshot.draftAttachments(destination.second)
+            val prepared = withContext(Dispatchers.IO) { prepareAttachments(context, uris, existing) }
             if (model.profileId != destination.first) {
                 prepared.files.forEach { File(it.path).delete() }
                 return@launch

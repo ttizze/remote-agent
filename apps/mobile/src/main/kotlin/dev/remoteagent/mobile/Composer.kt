@@ -18,17 +18,25 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.FormatListBulleted
+import androidx.compose.material.icons.automirrored.outlined.InsertDriveFile
 import androidx.compose.material.icons.automirrored.outlined.Undo
 import androidx.compose.material.icons.outlined.ArrowUpward
+import androidx.compose.material.icons.outlined.ChatBubbleOutline
 import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.ExpandMore
+import androidx.compose.material.icons.outlined.Folder
 import androidx.compose.material.icons.outlined.Stop
+import androidx.compose.material.icons.outlined.Terminal
+import androidx.compose.material.icons.outlined.ViewInAr
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -44,18 +52,28 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import dev.remoteagent.core.ComposerCommandItem
+import dev.remoteagent.core.ComposerCommandTarget
+import dev.remoteagent.core.ComposerMenuView
 import dev.remoteagent.core.ComposerPrimaryAction
+import dev.remoteagent.core.ComposerTriggerKind
 import dev.remoteagent.core.ComposerView
 import dev.remoteagent.core.FollowUpBehavior
 import dev.remoteagent.core.Intent
 import dev.remoteagent.core.MobileSendIcon
 import dev.remoteagent.core.Outcome
 import dev.remoteagent.core.QueueAction
+import dev.remoteagent.core.TimelineLayout
 
 private fun followUpLabel(behavior: FollowUpBehavior) =
     when (behavior) {
@@ -86,9 +104,12 @@ internal fun Composer(model: AndroidAppModel, composer: ComposerView, onOpenSett
             value = TextFieldValue(model.composerText, TextRange(model.composerText.length))
     }
     val expanded = focused || value.text.isNotEmpty() || composer.attachments.isNotEmpty()
+    LaunchedEffect(composer.draftKey, value.text, value.selection) {
+        model.perform(Intent.UpdateComposerMenu(value.text, value.selection.end.toUInt(), TimelineLayout.MOBILE))
+    }
     val menu by
-        rememberView(model.snapshot, value.text, value.selection.end) {
-            it.composerMenu(value.text, value.selection.end.toUInt())
+        rememberView(model.snapshot, value.text, value.selection) {
+            if (value.selection.collapsed) it.composerMenu(value.text, value.selection.end.toUInt()) else null
         }
     Column(
         Modifier.fillMaxWidth()
@@ -97,7 +118,9 @@ internal fun Composer(model: AndroidAppModel, composer: ComposerView, onOpenSett
     ) {
         if (composer.editingQueuedRun != null) EditingBanner(model)
         menu
-            ?.takeIf { it.trigger != null && it.items.isNotEmpty() }
+            ?.takeIf {
+                it.trigger != null && (it.items.isNotEmpty() || it.trigger?.kind == ComposerTriggerKind.PULL_REQUEST)
+            }
             ?.let { current ->
                 CommandPopover(current) { item ->
                     model.perform(Intent.SelectComposerItem(value.text, value.selection.end.toUInt(), item.id)) { result
@@ -210,38 +233,105 @@ private fun EditingBanner(model: AndroidAppModel) {
     }
 }
 
+private fun menuGroupLabel(kind: ComposerTriggerKind?) =
+    when (kind) {
+        ComposerTriggerKind.PULL_REQUEST -> "Pull requests"
+        ComposerTriggerKind.SLASH_COMMAND -> "Commands"
+        ComposerTriggerKind.SKILL -> "Skills"
+        ComposerTriggerKind.PATH -> "Files"
+        ComposerTriggerKind.SLASH_MODEL,
+        null -> null
+    }
+
+private fun menuItemIcon(target: ComposerCommandTarget): ImageVector =
+    when (target) {
+        is ComposerCommandTarget.BuiltIn,
+        is ComposerCommandTarget.ProviderCommand -> Icons.Outlined.Terminal
+        is ComposerCommandTarget.Skill -> Icons.Outlined.ViewInAr
+        is ComposerCommandTarget.Path ->
+            if (target.directory) Icons.Outlined.Folder else Icons.AutoMirrored.Outlined.InsertDriveFile
+        is ComposerCommandTarget.Thread -> Icons.Outlined.ChatBubbleOutline
+    }
+
+private const val SLASH_SKILL_PREFIX = "skill:"
+
+/** The `/`, `$` and `@` menu above the composer card. */
 @Composable
-private fun CommandPopover(
-    menu: dev.remoteagent.core.ComposerMenuView,
-    onSelect: (dev.remoteagent.core.ComposerCommandItem) -> Unit,
-) {
+private fun CommandPopover(menu: ComposerMenuView, onSelect: (ComposerCommandItem) -> Unit) {
+    val colors = AppTheme.colors
+    val kind = menu.trigger?.kind
     Surface(
         Modifier.fillMaxWidth().padding(bottom = 8.dp),
         shape = RoundedCornerShape(16.dp),
-        color = AppTheme.colors.cardAlt,
-        border = BorderStroke(1.dp, AppTheme.colors.border),
+        color = colors.cardAlt,
+        border = BorderStroke(1.dp, colors.border),
     ) {
-        Column(Modifier.padding(vertical = 6.dp)) {
-            menu.items.forEach { item ->
-                Column(
-                    Modifier.fillMaxWidth().clickable { onSelect(item) }.padding(horizontal = 14.dp, vertical = 8.dp)
-                ) {
-                    Text(
-                        item.label,
-                        style = AppTheme.footnote,
-                        fontWeight = FontWeight.Medium,
-                        color = AppTheme.colors.foreground,
-                    )
-                    if (item.description.isNotEmpty())
-                        Text(
-                            item.description,
-                            style = AppTheme.caption,
-                            color = AppTheme.colors.foregroundMuted,
-                            maxLines = 1,
-                        )
-                }
+        Column {
+            menuGroupLabel(kind)?.let { label ->
+                Text(
+                    label.uppercase(),
+                    Modifier.padding(start = 14.dp, end = 14.dp, top = 10.dp, bottom = 4.dp),
+                    style = AppTheme.micro,
+                    fontWeight = FontWeight.Bold,
+                    letterSpacing = 0.8.sp,
+                    color = colors.foregroundMuted,
+                )
             }
+            if (menu.items.isEmpty())
+                menu.emptyLabel?.let {
+                    Text(
+                        it,
+                        Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                        style = AppTheme.label,
+                        color = colors.foregroundTertiary,
+                    )
+                }
+            else
+                Column(Modifier.heightIn(max = 180.dp).verticalScroll(rememberScrollState())) {
+                    menu.items.forEachIndexed { index, item ->
+                        CommandRow(item, kind, onSelect)
+                        if (index < menu.items.lastIndex) HorizontalDivider(thickness = 0.5.dp, color = colors.border)
+                    }
+                }
         }
+    }
+}
+
+@Composable
+private fun CommandRow(item: ComposerCommandItem, kind: ComposerTriggerKind?, onSelect: (ComposerCommandItem) -> Unit) {
+    val colors = AppTheme.colors
+    val path = item.target is ComposerCommandTarget.Path
+    Row(
+        Modifier.fillMaxWidth().clickable { onSelect(item) }.padding(horizontal = 14.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        Icon(menuItemIcon(item.target), null, Modifier.size(if (path) 16.dp else 14.dp), tint = colors.iconMuted)
+        val slashSkill =
+            kind == ComposerTriggerKind.SLASH_COMMAND &&
+                item.target is ComposerCommandTarget.Skill &&
+                item.label.startsWith(SLASH_SKILL_PREFIX)
+        Text(
+            if (slashSkill)
+                buildAnnotatedString {
+                    withStyle(SpanStyle(color = colors.foregroundMuted)) { append(SLASH_SKILL_PREFIX) }
+                    append(item.label.removePrefix(SLASH_SKILL_PREFIX))
+                }
+            else AnnotatedString(item.label),
+            style = AppTheme.body,
+            fontWeight = FontWeight.Medium,
+            color = colors.foreground,
+            maxLines = 1,
+        )
+        if (item.description.isNotEmpty())
+            Text(
+                item.description,
+                Modifier.weight(1f),
+                style = AppTheme.label,
+                color = colors.foregroundMuted,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
     }
 }
 

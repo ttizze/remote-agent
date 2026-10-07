@@ -62,10 +62,8 @@ internal fun runThreadMenuAction(
             if (action.action is ThreadAction.Delete || action.action is ThreadAction.Archive) onLeave()
         }
         is ThreadMenuAction.FilterProject -> model.perform(Intent.FilterProject(action.projectId))
-        is ThreadMenuAction.NewThreadOnBranch -> {
-            model.perform(Intent.FilterProject(action.projectId))
-            model.navigate(Route.NewTask)
-        }
+        is ThreadMenuAction.NewThreadOnBranch ->
+            model.newThreadOnBranch(action.projectId, action.branch, action.worktreePath)
         ThreadMenuAction.CustomSnooze -> state.snoozing = threadId
         ThreadMenuAction.StartRename -> state.renaming = threadId to title
         is ThreadMenuAction.OpenProjectSettings -> model.navigate(Route.Settings(action.projectId))
