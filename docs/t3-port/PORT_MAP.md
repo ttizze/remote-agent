@@ -1613,7 +1613,7 @@ UniFFI の公開（`bindings/views.rs`）:
 |---|---|
 | `HomeScreen`、`HomeHeader.android`、`MaterialThreadListToolbar`、`AndroidHomeFab.android` | `HomeScreen.kt`（`Snapshot::thread_list`、空の状態は `ThreadListView.empty`） |
 | `thread-list-v2-items`（card・slim・unsent 行、shelf、Show more）、`thread-list-v2-row-appearance.android`、`thread-swipe-actions` | `ThreadRows.kt` |
-| long-press menu、`ThreadArrangementSheet` | `ThreadActions.kt`（`ThreadMenuItem`・`ThreadMenuAction`）、`HomeScreen.kt` の Arrange sheet（並べ替えは上下の移動） |
+| long-press menu、`ThreadArrangementSheet` | `ThreadActions.kt`（`ThreadMenuItem`・`ThreadMenuAction`）、`ThreadArrangement.kt`（core の `thread_arrangement_drop` と `drag_gap_offset` を使う drag） |
 | `CustomSnoozeSheet.android` | `CustomSnoozeDialog.kt`（`custom_snooze_until`） |
 | `ThreadRouteScreen`（Android header）、`ThreadDetailScreen`、`ThreadFeed`、`thread-work-log`、`thread-subagent-group`、`worktree-setup-card`、`floating-working-control` | `ThreadScreen.kt`、`FeedRows.kt`（`TimelineLayout::Mobile` の行） |
 | `PendingApprovalCard`、`PendingUserInputCard`、`RequestActionButton` | `RequestCards.kt` |
@@ -1624,13 +1624,17 @@ UniFFI の公開（`bindings/views.rs`）:
 | `SettingsRouteScreen`、`ArchivedThreadsScreen` | `SettingsScreen.kt`（`Snapshot::settings`・`setting_edit`、`Snapshot::archived`） |
 | `composerImages.ts` の写真の再符号化、`ComposerAttachmentStrip` | `AttachmentFiles.kt`・`Attachments.kt`（`admit_attachments`） |
 | `lib/mobileTheme`・既定の theme 変数 | `AppTheme.kt` |
+| voice input の録音・取消・background | `Dictation.kt` と `AndroidAppModel.background`。保存の flush と録音の終了を一つの lifecycle handler にまとめる。 |
+| `Choose project`、Add project の folder 閲覧 | `ProjectScreens.kt`（`ChooseProjectScreen`、`FolderBrowserCard`） |
+| project の SVG icon | `ProjectFavicon.kt`（固定版 AndroidSVG による描画） |
+| terminal の Text size・Attach output・Show keyboard | `TerminalScreen.kt`・`TerminalContextSheet.kt`。添付の record と draft の変更は core の `terminal_output_context` と `Intent::AttachTerminalOutput`。 |
+| model を staged で選び、option を保存 | `ThreadSheets.kt`。`Snapshot::stage_model` が記憶した option を適用し、`Intent::SaveStagedModel` が選択時の明示的な値を保存する。 |
 
 未対応（2026-10-08 の統合の後、Android でまだ作っていないもの）:
 
-- 音声入力（mic）、git 操作（段階 6）、端末 preview、Material You の配色、project の folder の閲覧（Add project は絶対 path の入力だけ）と「Choose project」の全画面（dropdown のまま）、既存 session の取り込み画面。
-- terminal の「Text size」submenu と keyboard を閉じたときの bar（Attach output・Show keyboard）。
-- SVG の project icon は Android で描けないので folder の glyph にする。
-- model を変えたときの option は引き継がない。一覧の並べ替え（Arrange）は drag ではなく core の Move up / Move down を並べる。
+- git 操作（段階 6）、端末 preview、Material You の配色。
+
+固定 T3 mobile に既存 session の手動取り込み画面はない。Host の初回自動取り込みと desktop の onboarding を使う。
 
 ### 段階 4 の統合: Host の data の接続（2026-10-08）
 
@@ -1656,10 +1660,10 @@ UniFFI の公開（`bindings/views.rs`）:
 
 未接続（T3 にあって、まだ持たないもの）:
 
-- diff panel の truncated な source の file ごとの遅延読み込み（diffFileContents）、window focus での再読み込み、環境 cwd での再試行。
-- T3 の `newWorktreesStartFromOrigin` 設定。
-- context meter の resume compaction の帯（`should_offer_resume_compaction` は core にあるが画面に出していない）。
+- diff の window focus での再読み込み、環境 cwd での再試行。
 - provider ごとの runtime mode。
+
+truncated diff の file ごとの遅延読み込みは core の `review_files` と3クライアントの review へ接続した。`newWorktreesStartFromOrigin` は Host と project の疎な設定更新・新規 draft の workspace 選択へ接続した。resume compaction の帯は固定 T3 web と同じく desktop の composer に出す（固定 T3 mobile にはない）。
 
 ### 段階 4 の統合: 3 クライアント（2026-10-08）
 
@@ -1672,13 +1676,14 @@ UniFFI の公開（`bindings/views.rs`）:
 
 未接続（2026-10-08 の時点）:
 
-- desktop: Appearance と Keybindings の値の保存（いまは起動中だけ）、Themes の grid と組み込みの palette、Contrast・Composer context・Motion・Advanced typography、keybindings.json、terminal の「Add to chat」、thread details の Workspace の節、branch picker の「Create new ref」。
-- iOS: composer の path の行の file 種別ごとの icon、icon の無い project の folder の symbol（いまは頭文字）。
+- desktop: branch picker の「Create new ref」。
+
+Appearance の保存と Themes・Contrast・Composer context・Motion・Advanced typography は `settings/appearance.rs` と `app/ui.rs`、Keybindings の Host への保存と keybindings.json は `settings/keybindings.rs` へ接続した。terminal の「Add to chat」と thread details の Workspace も接続した。iOS の file 種別 icon は `ComposerMenu.swift`、icon の無い project の folder は `ThreadListRows.swift` で描画する。
 
 ## 段階 5: 旧ランタイムの削除（2026-10-08）
 
 - `crates/orchestration` と `crates/provider-adapters` を workspace から削除した。上の生成表の翻訳先の列（すべて旧 crate への予定パスで、翻訳済みの行はなかった）と `PORT_MAP.json` の `rust` の欄、`inventory.py` の翻訳先の生成も消した。
-- `agent-protocol` の `orchestration` module、旧 `orchestration/*` の Call と Body、cwd から作る `terminal_handle` を削除した。会話の Call は `SubscribeThread`・`SubscribeShell`・`GetTurnItem`・`GetTurnDiff` と呼ぶ。ALPN は `remote-agent/streams/12`。
+- `agent-protocol` の `orchestration` module、旧 `orchestration/*` の Call と Body、cwd から作る `terminal_handle` を削除した。会話の Call は `SubscribeThread`・`SubscribeShell`・`GetTurnItem`・`GetTurnDiff` と呼ぶ。ALPN は `remote-agent/streams/13`。
 - `crate_boundaries` は `agent-domain` の依存が純粋な crate だけであること、`agent-core`（bindings の有無とも）と `agent-ffi` が `agent-runtime`・`agent-providers`・`rusqlite` を含まないことを確かめる。
 - 旧ランタイムを記述した文書（`SESSION_RUNTIME.md`、`BEX_PROTOCOL_DESIGN.md`、`BEX_PROTOCOL_NATIVE_CONTRACTS.md`、`CRATE_BOUNDARIES.md`、`IMPLEMENTATION.md`、`PLAN.md` の設計の節）を現在の設計に書き直し、旧コードの地図 `BEX_ARCHITECTURE_MAP.md` と、削除したテストを根拠にした `PR55_REVIEW.md`、この文書の「中断時の12ファイルの採否」を削除した。
 - どこからも参照されない core と runtime の定数・関数を削除した。T3 から移植してテストだけが使う関数（minimap、drag、citation など）は、未接続の T3 の挙動として残す。
