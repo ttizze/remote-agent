@@ -1,0 +1,2 @@
+# Preserve the SDK archive's bytes, verified by the pinned npm vendoring step.
+crates/host-daemon/src/claude/sdk/sdk.mjs -text -whitespace
