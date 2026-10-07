@@ -50,7 +50,7 @@ struct ThreadArrangementSheet: View {
     @ViewBuilder
     private func rowView(_ row: ArrangementRow, locked: Bool) -> some View {
         switch row.kind {
-        case let .header(label, foldable, _):
+        case let .header(label, foldable):
             Button {
                 if row.section == .snoozed {
                     snoozedExpanded.toggle()

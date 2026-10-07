@@ -33,8 +33,8 @@ struct TerminalScreen: View {
             NativeTerminalView(model: model, threadId: threadId, terminal: terminalId,
                                opened: { terminalId = $0 }, keys: keys, fontSize: fontSize)
                 .id(session)
-            if let terminalId {
-                Button { capture(terminalId) } label: {
+            if terminalId != nil {
+                Button(action: capture) {
                     Text("Attach visible output").font(AppTheme.font(16))
                         .foregroundStyle(AppTheme.color("terminalForeground"))
                         .padding(.horizontal, 16).padding(.vertical, 8)
@@ -123,7 +123,7 @@ struct TerminalScreen: View {
     }
 
     /// Freezes the visible output for the attach sheet.
-    private func capture(_: String) {
+    private func capture() {
         UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
         let text = keys.capture?() ?? ""
         if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {

@@ -34,11 +34,7 @@ pub struct ArrangementSectionMove {
 #[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum ArrangementRowKind {
     /// "Pinned (2)"; the Snoozed and Settled headers fold their threads.
-    Header {
-        label: String,
-        foldable: bool,
-        expanded: bool,
-    },
+    Header { label: String, foldable: bool },
     Thread {
         thread_id: String,
         title: String,
@@ -226,7 +222,6 @@ fn arrangement_rows(
             kind: ArrangementRowKind::Header {
                 label: format!("{} ({})", section_name(section), threads.len()),
                 foldable: matches!(section, DragSection::Snoozed | DragSection::Settled),
-                expanded,
             },
         });
         if !expanded {
