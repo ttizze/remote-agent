@@ -971,6 +971,8 @@ pub enum Intent {
     SearchNewThreadBranches {
         query: String,
     },
+    /// The next page of the new-thread branch picker.
+    LoadMoreNewThreadBranches,
     SetNewThreadWorkspace {
         mode: crate::view::projects::selection::ThreadWorkspaceMode,
     },

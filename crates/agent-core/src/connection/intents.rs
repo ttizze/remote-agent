@@ -371,6 +371,10 @@ impl Owner {
                 self.load_new_thread_branches(query);
                 Next::Done
             }
+            Intent::LoadMoreNewThreadBranches => {
+                self.load_more_new_thread_branches();
+                Next::Done
+            }
             Intent::SetNewThreadWorkspace { mode } => self.set_new_thread_workspace(mode)?,
             Intent::SelectNewThreadBranch {
                 branch,

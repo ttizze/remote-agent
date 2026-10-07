@@ -51,6 +51,9 @@ pub struct NewThreadWorkspaceView {
     pub branches_loading: bool,
     /// The project's local branches matching the picker's query.
     pub branches: Vec<BranchChoice>,
+    /// More branches follow (`Intent::LoadMoreNewThreadBranches`).
+    pub has_more_branches: bool,
+    pub branches_loading_more: bool,
     pub start_from_origin: bool,
     pub branch_error: Option<String>,
     /// Why the draft cannot start yet, e.g. a worktree without a base branch.
@@ -205,6 +208,10 @@ fn workspace_view(snapshot: &Snapshot) -> Option<NewThreadWorkspaceView> {
         }
         .into(),
         branches_loading: loading,
+        has_more_branches: refs
+            .and_then(|entry| entry.list.as_ref())
+            .is_some_and(|list| list.next_cursor.is_some()),
+        branches_loading_more: refs.is_some_and(|entry| entry.in_flight) && !branches.is_empty(),
         branches,
         start_from_origin: workspace.start_from_origin,
         branch_error: refs.and_then(|entry| entry.error.clone()),

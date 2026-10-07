@@ -1666,3 +1666,78 @@ fn a_new_thread_on_a_branch_opens_a_local_draft_in_its_worktree() {
     );
     assert_eq!(owner.state.composer_cwd(), "/trees/fix");
 }
+
+// mobile queries.ts usePaginatedBranches: later pages join the first.
+#[test]
+fn a_later_branch_page_joins_the_first() {
+    use agent_protocol::workspace as w;
+    let mut owner = owner(Snapshot {
+        selected_project: Some("app".into()),
+        ..Snapshot::default()
+    });
+    project_shell(&mut owner);
+    let branch = |name: &str| w::VcsRef {
+        name: name.into(),
+        is_remote: false,
+        remote_name: None,
+        current: false,
+        is_default: false,
+        worktree_path: None,
+    };
+    let request = |cursor| w::ListRefs {
+        cwd: "/repo".into(),
+        query: None,
+        cursor,
+        include_matching_remote_refs: false,
+        ref_kind: w::RefKind::All,
+        limit: Some(100),
+    };
+    owner.state.sources.refs.insert(
+        ("/repo".into(), RefScope::All),
+        RefsEntry {
+            in_flight: true,
+            ..Default::default()
+        },
+    );
+    owner.refs_finished(
+        &request(None),
+        Ok(w::RefList {
+            refs: vec![branch("main"), branch("dev")],
+            is_repo: true,
+            has_primary_remote: false,
+            next_cursor: Some(2),
+            total_count: 3,
+        }),
+    );
+    let view = owner
+        .state
+        .new_thread(Default::default())
+        .workspace
+        .unwrap();
+    assert!(view.has_more_branches);
+    owner
+        .state
+        .sources
+        .refs
+        .get_mut(&("/repo".into(), RefScope::All))
+        .unwrap()
+        .in_flight = true;
+    owner.refs_finished(
+        &request(Some(2)),
+        Ok(w::RefList {
+            refs: vec![branch("dev"), branch("topic")],
+            is_repo: true,
+            has_primary_remote: false,
+            next_cursor: None,
+            total_count: 3,
+        }),
+    );
+    let view = owner
+        .state
+        .new_thread(Default::default())
+        .workspace
+        .unwrap();
+    let names: Vec<&str> = view.branches.iter().map(|b| b.name.as_str()).collect();
+    assert_eq!(names, ["main", "dev", "topic"]);
+    assert!(!view.has_more_branches);
+}

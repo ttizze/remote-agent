@@ -200,7 +200,7 @@ impl Owner {
             .refs
             .entry((cwd.clone(), scope))
             .or_default();
-        if entry.query == query && (entry.in_flight || entry.list.is_some()) {
+        if entry.query == query && entry.in_flight {
             return;
         }
         let keep = entry.query == query;
@@ -215,6 +215,38 @@ impl Owner {
                 cwd,
                 query: (!query.is_empty()).then_some(query),
                 cursor: None,
+                include_matching_remote_refs: scope != RefScope::All,
+                ref_kind: scope.kind(),
+                limit: Some(REF_LIST_LIMIT),
+            }),
+            None,
+            None,
+        );
+    }
+
+    /// Asks for the next page of a listing.
+    pub(super) fn load_more_refs(&mut self, cwd: String, scope: RefScope) {
+        if !self.connected() {
+            return;
+        }
+        let Some(entry) = self.state.sources.refs.get_mut(&(cwd.clone(), scope)) else {
+            return;
+        };
+        let Some(cursor) = entry
+            .list
+            .as_ref()
+            .and_then(|list| list.next_cursor)
+            .filter(|_| !entry.in_flight)
+        else {
+            return;
+        };
+        entry.in_flight = true;
+        let query = entry.query.clone();
+        self.job(
+            Call::ListRefs(w::ListRefs {
+                cwd,
+                query: (!query.is_empty()).then_some(query),
+                cursor: Some(cursor),
                 include_matching_remote_refs: scope != RefScope::All,
                 ref_kind: scope.kind(),
                 limit: Some(REF_LIST_LIMIT),
@@ -247,7 +279,18 @@ impl Owner {
         }
         entry.in_flight = false;
         match result {
-            Ok(list) => entry.list = Some(list),
+            Ok(page) => match entry.list.as_mut().filter(|_| request.cursor.is_some()) {
+                Some(list) => {
+                    for branch in page.refs {
+                        if !list.refs.iter().any(|known| known.name == branch.name) {
+                            list.refs.push(branch);
+                        }
+                    }
+                    list.next_cursor = page.next_cursor;
+                    list.total_count = list.total_count.max(page.total_count);
+                }
+                None => entry.list = Some(page),
+            },
             Err(error) => {
                 entry.error = Some(crate::presentation::error::error_message(
                     &error.to_string(),
@@ -520,6 +563,12 @@ impl Owner {
             .unwrap_or_else(|| self.state.default_draft.clone());
         change(&mut draft);
         self.state.drafts.insert(key, draft);
+    }
+
+    pub(super) fn load_more_new_thread_branches(&mut self) {
+        if let Some(root) = self.state.new_thread_project_root() {
+            self.load_more_refs(root, RefScope::All);
+        }
     }
 
     /// Loads the refs and status the new-thread workspace controls show.
