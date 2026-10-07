@@ -83,6 +83,7 @@ impl ItemType {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum ToolLifecycleStatus {
     Idle,
     InProgress,
@@ -121,18 +122,21 @@ pub enum SourceActivity {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum ToolSurface {
     Browser,
     Computer,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum NativeApp {
     AppId(String),
     DisplayName(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum ToolIcon {
     Website {
         page_url: String,
@@ -147,6 +151,7 @@ pub enum ToolIcon {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum ToolSourceKind {
     Browser,
     Computer,
@@ -154,6 +159,7 @@ pub enum ToolSourceKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct ToolSource {
     pub key: String,
     pub name: String,

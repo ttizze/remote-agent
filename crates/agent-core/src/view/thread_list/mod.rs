@@ -69,6 +69,7 @@ impl SwipeAction {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct SwipeActions {
     /// A full swipe commits this lifecycle action.
     pub primary: SwipeAction,

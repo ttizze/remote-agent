@@ -36,6 +36,7 @@ pub struct StashFile {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct PromptStashEntry {
     pub id: String,
     pub created_at_ms: i64,

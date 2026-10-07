@@ -9,6 +9,7 @@ use regex::Regex;
 use std::sync::LazyLock;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum MarkdownImageSource {
     Direct { uri: String },
     WorkspaceFile { path: String },

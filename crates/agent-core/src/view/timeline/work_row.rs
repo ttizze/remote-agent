@@ -6,6 +6,7 @@ use crate::view::work_log::tool_catalog::ToolLogo;
 use agent_domain::{RunId, ThreadId, Timestamp};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum WorkIcon {
     Agent,
     Alert,
@@ -27,6 +28,7 @@ pub enum WorkIcon {
 
 /// A provider failure that ended a turn, drawn with its message.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct ProviderFailureRow {
     pub summary: String,
     /// A usage limit, drawn as a warning without the message.
@@ -61,6 +63,7 @@ impl ProviderFailureRow {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum WorkRowIcon {
     Brain,
     Logo(ToolLogo),
@@ -68,6 +71,7 @@ pub enum WorkRowIcon {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum WorkLabelTone {
     Default,
     Warning,
@@ -75,6 +79,7 @@ pub enum WorkLabelTone {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum WorkIconTone {
     Default,
     Warning,
@@ -84,6 +89,7 @@ pub enum WorkIconTone {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum WorkRowRole {
     None,
     Button,
@@ -93,6 +99,7 @@ pub enum WorkRowRole {
 
 /// One work-log call row and, when expanded, its detail.
 #[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct WorkActivityRow {
     pub id: String,
     pub role: WorkRowRole,
@@ -121,6 +128,7 @@ pub struct WorkActivityRow {
 
 /// The expanded panel of a call row.
 #[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct WorkActivityDetail {
     pub reasoning: Option<String>,
     pub call: Option<ToolCallLines>,
@@ -132,6 +140,7 @@ pub struct WorkActivityDetail {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum WorkLogRow {
     ProviderFailure(ProviderFailureRow),
     Activity(Box<WorkActivityRow>),

@@ -6,11 +6,13 @@ use std::sync::LazyLock;
 
 /// The logo a recognized orchestration tool is branded with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum ToolLogo {
     App,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct ToolCatalogPresentation {
     pub display_name: String,
     pub logo: ToolLogo,
@@ -18,6 +20,7 @@ pub struct ToolCatalogPresentation {
 
 /// How a group summary counts the calls of one tool.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum ToolSummaryAction {
     Capabilities,
     Delegate,

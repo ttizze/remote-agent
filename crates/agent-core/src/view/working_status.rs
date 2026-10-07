@@ -10,7 +10,7 @@ use agent_domain::{ItemKind, ItemStatus, RequestStatus, Run, RunStatus, State};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
-pub enum ConnectionPhase {
+pub enum ConnectionStatus {
     Connecting,
     Reconnecting,
     Offline,
@@ -57,7 +57,7 @@ pub enum FloatingWorkingStatus {
 
 /// The pill's connection variant, or `None` once connected.
 pub fn connection_floating_status(
-    phase: ConnectionPhase,
+    phase: ConnectionStatus,
     connection_error: Option<&str>,
     environment_label: Option<&str>,
 ) -> Option<FloatingWorkingStatus> {
@@ -67,7 +67,7 @@ pub fn connection_floating_status(
         label,
     };
     Some(match phase {
-        ConnectionPhase::Connecting | ConnectionPhase::Reconnecting => {
+        ConnectionStatus::Connecting | ConnectionStatus::Reconnecting => {
             FloatingWorkingStatus::Connection {
                 tone: ConnectionTone::Reconnecting,
                 label: match connection_error {
@@ -76,14 +76,14 @@ pub fn connection_floating_status(
                 },
             }
         }
-        ConnectionPhase::Offline => unavailable("You are offline".into()),
-        ConnectionPhase::Unsupported => unavailable("Client not supported".into()),
-        ConnectionPhase::Error => unavailable(match connection_error.filter(|e| !e.is_empty()) {
+        ConnectionStatus::Offline => unavailable("You are offline".into()),
+        ConnectionStatus::Unsupported => unavailable("Client not supported".into()),
+        ConnectionStatus::Error => unavailable(match connection_error.filter(|e| !e.is_empty()) {
             Some(error) => format!("Failed to connect to {environment}: {error}"),
             None => format!("Failed to connect to {environment}"),
         }),
-        ConnectionPhase::Available => unavailable(format!("{environment} is not connected")),
-        ConnectionPhase::Connected => return None,
+        ConnectionStatus::Available => unavailable(format!("{environment} is not connected")),
+        ConnectionStatus::Connected => return None,
     })
 }
 
@@ -121,7 +121,7 @@ pub enum ThreadCreation {
 /// Inputs the folded thread does not hold.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FloatingStatusInput {
-    pub connection_phase: ConnectionPhase,
+    pub connection_phase: ConnectionStatus,
     pub connection_error: Option<String>,
     pub environment_label: Option<String>,
     /// From [`thread_sync_label`], after the client's show delay.

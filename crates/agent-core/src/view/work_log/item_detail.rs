@@ -108,6 +108,7 @@ fn format_tool_value(value: Option<&Value>) -> Option<String> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct ToolCallArg {
     pub key: String,
     pub value: String,
@@ -115,6 +116,7 @@ pub struct ToolCallArg {
 
 /// The call a tool row's body shows above its result.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct ToolCallLines {
     pub command: Option<String>,
     pub args: Option<Vec<ToolCallArg>>,
@@ -187,6 +189,7 @@ pub fn turn_item_needs_detail_fetch(item: &Item) -> bool {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct WebSearchResult {
     pub title: Option<String>,
     pub url: Option<String>,

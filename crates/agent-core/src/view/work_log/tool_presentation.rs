@@ -6,6 +6,7 @@ use agent_domain::{Item, ItemKind, ToolPresentation};
 use serde_json::Value;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct ExtractedToolPresentation {
     pub viewed_image_path: Option<String>,
     pub tool_surface: Option<ToolSurface>,

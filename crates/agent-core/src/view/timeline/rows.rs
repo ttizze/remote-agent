@@ -35,6 +35,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum TimelineLayout {
     #[default]
     Desktop,
@@ -64,6 +65,7 @@ pub struct TimelineOptions {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct UserMessageRow {
     pub message: MessageId,
     pub text: String,
@@ -75,6 +77,7 @@ pub struct UserMessageRow {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct AssistantMessageRow {
     pub message: MessageId,
     pub text: String,
@@ -89,6 +92,7 @@ pub struct AssistantMessageRow {
 
 /// A message this device sent that the thread has not folded yet.
 #[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct PendingMessageRow {
     pub message: MessageId,
     pub text: String,
@@ -99,10 +103,11 @@ pub struct PendingMessageRow {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct WorkToggleRow {
     pub run: Option<RunId>,
     pub group_id: String,
-    pub hidden_count: usize,
+    pub hidden_count: u32,
     pub expanded: bool,
     pub summary: String,
     pub icon: WorkRowIcon,
@@ -113,6 +118,7 @@ pub struct WorkToggleRow {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum FoldKind {
     /// A settled turn's work behind "Worked for …".
     Turn,
@@ -121,6 +127,7 @@ pub enum FoldKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct FoldRow {
     pub kind: FoldKind,
     pub run: RunId,
@@ -130,6 +137,7 @@ pub struct FoldRow {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum TimelineRowKind {
     UserMessage(Box<UserMessageRow>),
     AssistantMessage(Box<AssistantMessageRow>),
@@ -149,7 +157,7 @@ pub enum TimelineRowKind {
         label: String,
         row: WorkLogRow,
         group_id: String,
-        call_count: usize,
+        call_count: u32,
         expanded: bool,
         active: bool,
     },
@@ -176,6 +184,7 @@ pub enum TimelineRowKind {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct TimelineRow {
     pub id: String,
     pub created_at: Option<Timestamp>,
@@ -425,7 +434,7 @@ fn desktop_rows(
                             ),
                             row: work_row(&entry, None),
                             group_id,
-                            call_count: grouped_entries.len(),
+                            call_count: crate::view::count(grouped_entries.len()),
                             expanded,
                             active,
                         },
@@ -473,7 +482,7 @@ fn desktop_rows(
                         TimelineRowKind::WorkToggle(WorkToggleRow {
                             run,
                             group_id,
-                            hidden_count,
+                            hidden_count: crate::view::count(hidden_count),
                             expanded,
                             summary,
                             icon,
@@ -738,7 +747,7 @@ fn mobile_rows(context: &Context<'_>) -> Vec<TimelineRow> {
                     TimelineRowKind::WorkToggle(WorkToggleRow {
                         run: toggle.run,
                         group_id: toggle.group_id,
-                        hidden_count: toggle.hidden_count,
+                        hidden_count: crate::view::count(toggle.hidden_count),
                         expanded: toggle.expanded,
                         summary: toggle.summary,
                         icon,
@@ -835,16 +844,20 @@ pub struct ThreadTimeline {
 
 /// How to bring a list showing `previous` rows to the current ones.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct TimelineUpdate {
     pub splice: Splice,
     /// Indexes of kept rows whose content changed, to measure again.
-    pub changed: Vec<usize>,
+    pub changed: Vec<u32>,
 }
 
 pub fn timeline_update(previous: &[TimelineRow], next: &[TimelineRow]) -> TimelineUpdate {
     TimelineUpdate {
         splice: splice(previous, next, |row| &row.id),
-        changed: changed(previous, next, |row| &row.id),
+        changed: changed(previous, next, |row| &row.id)
+            .into_iter()
+            .map(crate::view::count)
+            .collect(),
     }
 }
 

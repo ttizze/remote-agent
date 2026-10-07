@@ -9,7 +9,7 @@ use rstest::rstest;
 use std::collections::BTreeMap;
 
 fn status(
-    phase: ConnectionPhase,
+    phase: ConnectionStatus,
     connection_error: Option<&str>,
     environment_label: Option<&str>,
 ) -> Option<FloatingWorkingStatus> {
@@ -26,7 +26,7 @@ fn connection(tone: ConnectionTone, label: &str) -> Option<FloatingWorkingStatus
 #[test]
 fn yields_the_pill_to_sync_and_working_state_once_connected() {
     assert_eq!(
-        status(ConnectionPhase::Connected, None, Some("Mac mini")),
+        status(ConnectionStatus::Connected, None, Some("Mac mini")),
         None
     );
 }
@@ -34,12 +34,12 @@ fn yields_the_pill_to_sync_and_working_state_once_connected() {
 #[test]
 fn names_the_environment_it_is_retrying_and_says_so_only_after_a_failure() {
     assert_eq!(
-        status(ConnectionPhase::Connecting, None, Some("Mac mini")),
+        status(ConnectionStatus::Connecting, None, Some("Mac mini")),
         connection(ConnectionTone::Reconnecting, "Reconnecting to Mac mini...")
     );
     assert_eq!(
         status(
-            ConnectionPhase::Reconnecting,
+            ConnectionStatus::Reconnecting,
             Some("ECONNREFUSED"),
             Some("Mac mini")
         ),
@@ -53,16 +53,16 @@ fn names_the_environment_it_is_retrying_and_says_so_only_after_a_failure() {
 #[test]
 fn reports_why_the_environment_is_unreachable() {
     assert_eq!(
-        status(ConnectionPhase::Offline, None, Some("Mac mini")),
+        status(ConnectionStatus::Offline, None, Some("Mac mini")),
         connection(ConnectionTone::Unavailable, "You are offline")
     );
     assert_eq!(
-        status(ConnectionPhase::Available, None, Some("Mac mini")),
+        status(ConnectionStatus::Available, None, Some("Mac mini")),
         connection(ConnectionTone::Unavailable, "Mac mini is not connected")
     );
     assert_eq!(
         status(
-            ConnectionPhase::Error,
+            ConnectionStatus::Error,
             Some("handshake timed out"),
             Some("Mac mini")
         ),
@@ -72,7 +72,7 @@ fn reports_why_the_environment_is_unreachable() {
         )
     );
     assert_eq!(
-        status(ConnectionPhase::Error, None, Some("Mac mini")),
+        status(ConnectionStatus::Error, None, Some("Mac mini")),
         connection(ConnectionTone::Unavailable, "Failed to connect to Mac mini")
     );
 }
@@ -80,7 +80,7 @@ fn reports_why_the_environment_is_unreachable() {
 #[test]
 fn falls_back_to_a_generic_name_when_the_environment_has_no_label() {
     assert_eq!(
-        status(ConnectionPhase::Error, None, None),
+        status(ConnectionStatus::Error, None, None),
         connection(
             ConnectionTone::Unavailable,
             "Failed to connect to Environment"
@@ -91,7 +91,7 @@ fn falls_back_to_a_generic_name_when_the_environment_has_no_label() {
 /// The pill's reconnect handler becomes the interactive connection variant.
 #[test]
 fn carries_the_reconnect_handler_so_the_pill_can_trigger_it() {
-    let pill = status(ConnectionPhase::Offline, None, Some("Mac mini"));
+    let pill = status(ConnectionStatus::Offline, None, Some("Mac mini"));
     assert!(matches!(
         pill,
         Some(FloatingWorkingStatus::Connection { .. })
@@ -384,7 +384,7 @@ fn user_item(id: &str, run_id: &str, message_id: &str, ordinal: u64) -> Item {
 
 fn input() -> FloatingStatusInput {
     FloatingStatusInput {
-        connection_phase: ConnectionPhase::Connected,
+        connection_phase: ConnectionStatus::Connected,
         connection_error: None,
         environment_label: Some("Mac mini".into()),
         sync_label: None,
@@ -529,7 +529,7 @@ fn a_pending_request_hides_the_status() {
         floating_working_status(
             Some(&state),
             &FloatingStatusInput {
-                connection_phase: ConnectionPhase::Offline,
+                connection_phase: ConnectionStatus::Offline,
                 ..input()
             }
         )

@@ -9,12 +9,14 @@ use agent_domain::{
 use std::collections::BTreeSet;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum DividerTone {
     Neutral,
     Danger,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum DividerIcon {
     Stop,
     Compaction,
@@ -23,6 +25,7 @@ pub enum DividerIcon {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct DividerAction {
     pub label: String,
     pub thread: ThreadId,
@@ -30,6 +33,7 @@ pub struct DividerAction {
 
 /// A centered line across the timeline with a label and optional detail.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct SystemDivider {
     pub label: String,
     /// Follows the label after a "·" separator.
@@ -41,6 +45,7 @@ pub struct SystemDivider {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct InterruptRequestRow {
     pub label: String,
     pub message: String,
@@ -48,6 +53,7 @@ pub struct InterruptRequestRow {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum CreatedThreadLayout {
     /// A bordered card for a resource summary.
     ResourceCard,
@@ -55,6 +61,7 @@ pub enum CreatedThreadLayout {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct CreatedThreadRow {
     pub layout: CreatedThreadLayout,
     pub label: String,
@@ -64,6 +71,7 @@ pub struct CreatedThreadRow {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum SubagentDot {
     Info,
     Success,
@@ -72,6 +80,7 @@ pub enum SubagentDot {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct SubagentStatusVisual {
     pub dot: SubagentDot,
     pub label: String,
@@ -95,6 +104,7 @@ pub fn subagent_status_visual(status: ItemStatus) -> SubagentStatusVisual {
 
 /// One subagent drawn as a link row to its thread.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct SubagentLink {
     pub task: Option<NodeId>,
     pub title: String,
@@ -118,6 +128,7 @@ pub struct SubagentLink {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum LifecycleRow {
     InterruptRequest(InterruptRequestRow),
     Divider(SystemDivider),
@@ -335,12 +346,14 @@ fn present_subagent(
 
 /// A provider instance and the model it ran, when known.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct HandoffEndpoint {
     pub instance: String,
     pub model: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct HandoffEndpoints {
     pub from: Vec<HandoffEndpoint>,
     pub to: HandoffEndpoint,
@@ -348,6 +361,7 @@ pub struct HandoffEndpoints {
 
 /// A context handoff divider; the row derivations place it before `run`.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct HandoffDivider {
     pub run: RunId,
     pub transfers: Vec<ContextTransferId>,
@@ -476,6 +490,7 @@ pub fn handoff_dividers(state: &State) -> Vec<HandoffDivider> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct HandoffEndpointPresentation {
     pub label: String,
     pub provider_name: String,

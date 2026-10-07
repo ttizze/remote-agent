@@ -36,12 +36,14 @@ impl ThreadErrorDismissals {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum BannerVariant {
     Warning,
     Error,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct ThreadErrorBanner {
     pub text: String,
     pub variant: BannerVariant,
@@ -108,6 +110,7 @@ pub const LIMIT_RESET_PASSED: &str = "The reset time has passed. Retry the threa
 /// What the recovery banner offers for a run stopped by a usage limit.
 /// Clients evaluate it again at `reset_at`, when snoozing stops being possible.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct UsageLimitRecovery {
     pub id: String,
     pub run: RunId,
@@ -167,12 +170,14 @@ pub fn usage_limit_recovery(shell: &ThreadShell, now_ms: i64) -> Option<UsageLim
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum RecoveryAction {
     Resume,
     Snooze,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum RecoveryToggle {
     Ignored,
     /// Shown under the actions.

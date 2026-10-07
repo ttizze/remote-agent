@@ -8,12 +8,14 @@ use agent_domain::{
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct DiffStat {
     pub additions: u64,
     pub deletions: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum DiffTreeNode {
     Directory {
         name: String,
@@ -189,6 +191,7 @@ pub fn format_compact_diff_count(value: u64) -> String {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct DiffStatLabel {
     pub additions: String,
     pub deletions: String,
@@ -204,6 +207,7 @@ pub fn diff_stat_label(stat: DiffStat) -> DiffStatLabel {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum ChangedFileRowKind {
     Directory { expanded: bool },
     File,
@@ -211,6 +215,7 @@ pub enum ChangedFileRowKind {
 
 /// One visible row of the folder tree, depth-first.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct ChangedFileRow {
     pub kind: ChangedFileRowKind,
     pub name: String,
@@ -223,6 +228,7 @@ pub struct ChangedFileRow {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct ChangedFilesCard {
     pub run: RunId,
     pub title: String,
@@ -355,6 +361,7 @@ pub fn toggle_directory(overrides: &mut BTreeMap<String, bool>, path: &str, all_
 
 /// A checkpoint as the response that ended its run presents it.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct TurnDiffSummary {
     pub checkpoint: CheckpointId,
     pub run: RunId,
@@ -392,6 +399,7 @@ pub fn turn_diff_summaries(state: &State) -> Vec<TurnDiffSummary> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct AssistantTurnDiff {
     pub message: MessageId,
     pub summary: TurnDiffSummary,

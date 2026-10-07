@@ -38,6 +38,7 @@ pub struct ChatMessage {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum PlanStatus {
     Active,
     Completed,
@@ -160,6 +161,7 @@ pub fn file_change_paths(changes: &Json) -> Vec<String> {
     }
 }
 
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct ProviderErrorPresentation {
     pub label: String,
     pub detail: String,

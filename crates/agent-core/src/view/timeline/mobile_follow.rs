@@ -12,8 +12,9 @@ pub struct WorkGroupScrollPosition {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct WorkGroupInitialScroll {
-    pub index: usize,
+    pub index: u32,
     pub view_offset: f64,
 }
 
@@ -25,7 +26,7 @@ pub fn work_group_initial_scroll(
     let position = position?;
     let index = row_ids.iter().position(|id| id == &position.row_id)?;
     Some(WorkGroupInitialScroll {
-        index,
+        index: crate::view::count(index),
         view_offset: -position.offset_within_row,
     })
 }
