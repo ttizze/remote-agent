@@ -127,8 +127,8 @@ formatting, and the unchanged 69-mutation inventory were also checked.
 ## Current commands
 
 The T3 port's explicit user instruction limits local tests to changed crates:
-`scripts/dev-env.sh cargo nextest run -p orchestration -p provider-adapters
--p agent-protocol -p agent-transport -p agent-core -p host-daemon -p bex-desktop
+`scripts/dev-env.sh cargo nextest run -p agent-domain -p agent-providers
+-p agent-runtime -p agent-protocol -p agent-transport -p agent-core -p host-daemon -p bex-desktop
 --lib --bins --features agent-core/bindings`.
 No CI wait, cargo-mutants, E2E or Simulator UI tests run for this port.
 The general mutation/Kani guidance above remains for future focused audits.

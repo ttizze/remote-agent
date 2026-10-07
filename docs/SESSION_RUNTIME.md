@@ -1,41 +1,46 @@
-# Orchestration runtime
+# Conversation runtime
 
-The frozen T3 specification is recorded in [the port plan](t3-port/PLAN.md).
-`orchestration` owns app threads, runs, attempts, execution nodes, provider
-sessions/threads/turns, messages, items, runtime requests and plans. Native
-provider IDs belong to provider-thread records; clients use app-thread IDs.
+Behaviour follows T3 Code commit `4ee6bfd50ef4a089440d5c3662db2298da9cc50e`.
+The design and its dated decisions are in
+[the runtime architecture](t3-port/ARCHITECTURE.md); test mappings are in
+[the port map](t3-port/PORT_MAP.md).
 
-A pure decider returns events and effects. The SQLite owner atomically commits
-events, command receipts, projections and an effect outbox, then publishes.
-Command IDs deduplicate retries. Host and clients share one projector. Provider
-adapters return complete entities; Host rejects superseded run attempts.
+`agent-domain` owns IDs, entities, commands, facts and the thread state machine.
+`ThreadMachine::step` is pure: it takes the current state and one input (client
+command, provider event, effect result, timer or recovery) and returns facts,
+effects and a reply. Time and ID seeds come from the input, so replays are
+deterministic. Host and clients fold facts with the same function.
 
-Effects execute serially per thread, with four workers across threads. Leases
-and bounded retry backoff recover delivery. Process loss ends active entities
-and holds queued runs. A held queue requires explicit resume. Normal send queues
-behind an active run; an idle thread starts immediately. Steer, restart, stop
-and queue edit/reorder/cancel are distinct commands.
+`agent-runtime` runs one writer actor per thread over a SQLite (WAL) fact log.
+Each step commits its facts, command receipts, outbox effects and the shell row
+in one transaction, then publishes. Thread snapshots are a rebuildable cache,
+written every 256 facts. A repeated command ID returns the stored result; a
+different command under the same ID is rejected. Effects run at least once from
+the outbox and return as effect results; the state machine discards results and
+provider events from superseded attempts. On start every actor receives
+`Recover`, which applies T3's recovery and queue-hold rules.
 
-Root checkpoints use a private Git index and fsynced dedicated refs. HEAD and
-the user's index remain unchanged. A baseline is recorded before provider start;
-successful completion waits for a durable capture effect before advancing the
-queue. Capture records, the run/node and a checkpoint timeline item commit
-together. Stopped runs retain their status; recovery retains capture effects
-and holds the queue. Redelivery does not rewrite a saved checkpoint. Non-Git
-workspaces record missing checkpoints; Git failures record errors without
-blocking conversation. Cone sparse checkout is supported; non-cone rebuilding
-records an error. Rollback is not yet implemented.
+`agent-providers` translates Codex app-server and Claude CLI traffic into
+normalized provider commands and events. It keeps only native correlation
+state; app IDs and entities are created by the state machine.
 
-Subscriptions register under the commit lock and deliver snapshot or bounded
-replay, synchronized, then live events. Replay retains 128 events and 1 MiB;
-projections retain 200 messages; shells retain 1,000 threads and 8 MiB. Missing
-replay falls back to snapshot. Clients track sequence cursors, retain 16 idle
-thread caches and bound owner ingress to 64 events.
+Checkpoints are stored under `refs/orchestration/checkpoints/…` with a private
+index; HEAD and the user's index are unchanged. Rollback restores the absolute
+head recorded in a checkpoint.
 
-Native transcript import is asynchronous and read-only: latest 100 files per
-provider within 30 days, 200 messages per thread including the first user
-message. Native session ID and cwd support resumption. Imported threads are
-never overwritten; tool/approval details are not imported.
+`subscribeThread` returns a snapshot or, after a cursor, a replay of at most 128
+facts and 1 MiB, then an optional synchronized marker and live facts. Snapshot
+timelines are bounded (10 user turns, 75 items, 1 MiB); older rows are paged with
+`readHistory`. `subscribeShell` replays at most 1,000 rows and 8 MiB, otherwise a
+snapshot. A subscriber more than 1,000 updates or 8 MiB behind is closed and
+resumes from its last applied sequence. `agent-core` keeps folded thread state
+for five minutes after the last view and retries refused subscriptions with a
+backoff from 250 ms to 30 s.
 
-Terminal, files, browser, worktrees, accounts, dictation, pairing and revocation
-have independent Host owners. A build does not replace a running Host.
+Native transcript import scans at most 100 recent transcripts from the last 30
+days and imports up to 200 messages per thread. Imported threads keep their
+native session for resumption.
+
+Terminals, files, browser, worktrees, accounts, dictation, pairing and
+revocation have independent Host owners. Thread terminals are keyed by thread
+and terminal ID. A build does not replace a running Host.

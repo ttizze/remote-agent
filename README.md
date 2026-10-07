@@ -42,7 +42,7 @@ When a new major becomes generally available, verify the vendor release, update 
 Clients render immutable `Snapshot` values and never re-derive presentation: `agent-core::presentation` produces `RenderedConversation` rows for GPUI directly and for mobile through the bindings. Add logic to core, not to a client. See [ADR 0005](docs/adr/0005-rust-store-and-one-iroh-client-path.md).
 Device storage uses the explicit [client state storage contract](docs/CLIENT_STATE_STORAGE.md).
 
-The session architecture, limits, local data and verification matrix are documented in [Session runtime](docs/SESSION_RUNTIME.md).
+The session architecture, limits, local data and verification matrix are documented in [Conversation runtime](docs/SESSION_RUNTIME.md).
 
 ## Run the Host
 
