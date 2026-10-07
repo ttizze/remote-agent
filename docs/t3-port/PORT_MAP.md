@@ -1442,18 +1442,16 @@ T3 と変えた点・近似:
   - checkpoint の時刻: run の `completed_at`。
 - 文字数の数え方: agent の 80 / 280 文字の上限は Unicode の文字で数える（T3 は UTF-16）。prompt の 120,000 文字と composer の offset は UTF-16 で数える。
 
-未接続（A5 と各クライアントで行う）:
+A5 で接続した（2026-10-07、後述の「A5: 端末の状態・intent・UniFFI の公開」）:
 
-- 拒否の文面:
-  - `commands/outbox.rs` で `Reply::Rejected` が `Resolution::Failed` になり、`connection/delivery.rs` の `fail` から `state.error` に入る。この経路の Committed の拒否にだけ文面を使う。
-  - 同じ経路の `NotSent`（transport の文）には使わない。
-- setup card: `connection/subscriptions.rs` は stream の `None` で snapshot を消し、古い sequence でも上書きする。T3 は遷移するまで新しい方を残すので、`resolve_setup_snapshot` を使う。
+- 拒否の文面は `Committed` の拒否にだけ使い、thread の provider の名前で書く。`NotSent`（transport の文）には使わない。
+- setup card: stream の `None` で最後の snapshot を `held_setups` に残し、`resolve_setup_progress` に渡す。
+- キューの移動は `QueueAction::Move` の 1 回の `ReorderQueued`。添付だけの複数選択の回答は空の text。Implement / Refine は `view::plan` の規則で判断する。
+- 質問の回答の下書きと表示中の index、diff panel の選択と ignore whitespace、prompt stash、Draft の `MessageContext` は `Snapshot` に置いた。
+
+未接続:
+
 - 「Changes」（branch との差分）には Host の操作がない。Uncommitted は `host/workspace/review` で近似する。
-- 既存の intent の不一致:
-  - `QueueAction::Reorder` は行ごとに `ReorderQueued` を送るが、T3 は移動 1 回（run と移動先）を送る。
-  - attachment だけで答えた複数選択の質問は、`RespondQuestions` で choices の `[""]` になる。
-  - `connection/intents.rs` の `actionable_plan` を `view::plan` の規則に揃える。規則は、下書きの mode、latest run が確定していること、未回答の質問がないこと、添付がないこと。
-- Snapshot に置き場がないもの: 質問の回答の下書きと表示中の index、diff panel の選択と ignore whitespace、prompt stash、Draft の `MessageContext`。
 - Host に必要な RPC: provider の skill と slash command、workspace の path 検索、thread の context record に入れる environment id。
 - 重複していた helper は 1 つにした（2026-10-07）: duration は `view::time::format_duration`、search ranking は `view::search_ranking`、JavaScript の文字列と数値の処理は `js_text`、名前の並びは `view::collation`、質問の回答の下書きは `view::requests`、一覧の行の状態は `thread_summary::thread_list_status`。
 
@@ -1499,7 +1497,7 @@ T3 に合わせた判断と残る差:
 
 - 時刻表示の `locale` は英語の既定（12 時間制）として扱う。snooze の preset と custom の日時は端末の時間帯（`chrono::Local`）で計算する。
 - mobile の長押しの項目と web の thread menu は同じ `ThreadMenuItem` の型で返す（UniFFI の型名を 1 つにするため）。検索、名前の照合順、行の経過時間、drop の section も各 view で 1 つを共有する。
-- `ThreadShell` に無い値は既定値で読む: `unsettled_at`（再開した thread の並び）、subagent の lineage、PR の一覧（linked PR のみ）、diff の統計、terminal の表示、project の favicon と作成・更新時刻。Working の beta の `InboxReturns`、移動中の並び（`PendingThreadOrder`）、model の favorites、設定、session scan の結果は A5 で `Snapshot` に置く。model option の記述と instance の表示情報は Host から届く必要がある。
+- `ThreadShell` に無い値は既定値で読む: `unsettled_at`（再開した thread の並び）、subagent の lineage、PR の一覧（linked PR のみ）、diff の統計、terminal の表示、project の favicon と作成・更新時刻。Working の beta の `InboxReturns`、移動中の並び（`PendingThreadOrder`）、model の favorites、設定、session scan の結果は A5 で `Snapshot` に置いた。model option の記述と instance の表示情報は Host から届く必要がある。
 
 ### agent-core の timeline・work log・markdown（A4、2026-10-07）
 
@@ -1546,3 +1544,44 @@ T3 に合わせた判断と差:
 - mobile は T3 と同じく outbox の全発言を feed に足す。desktop は queue に入る送信を timeline に出さない（T3 web の optimistic と同じ）。
 - handoff divider は provider の instance が変わったものだけ。T3 が出す fork / merge back の portable handoff の divider はない（domain の transfer の種類が違う）。
 - 同じ判定の重複を一つにした: JavaScript の文字列の規則は `js_text`、media source は markdown link の関数を使う。`tool_output` は Host（`agent-runtime/src/sync/wire.rs`）と、citation の parser は `agent-runtime/src/title/citations.rs` と重複している（agent-core は agent-runtime に依存しない）。
+
+### A5: 端末の状態・intent・UniFFI の公開（2026-10-07）
+
+A4 の view が明示的な入力として受けていた端末側の状態を `Snapshot` に置き（`state/device.rs`）、intent で変える。ネイティブの3クライアントはこの節の getter と `Intent` だけを使い、表示用の規則を持たない。期待値は T3 のまま。
+
+| T3 の原本 | agent-core の実装と検証 |
+| --- | --- |
+| client-runtime `state/threadInbox.ts`（戻った時刻の記録） | `Snapshot.inbox_returns`。shell か outbox が変わった publish のたびに `Owner::observe_list` が `InboxReturns::observe` を呼ぶ（Working の beta が off なら reset）。 |
+| mobile `thread-order.ts`（保留中の並び） | `Intent::MoveThread` が `ThreadMovePlanner` で書き込みを作り、`Snapshot.thread_order`（`ThreadOrderHold`）に `PendingThreadOrder` と command id を持つ。publish のたびに `refresh`、書き込みが outbox から消えたら `complete`、どれかが拒否されたら解く。 |
+| web `Sidebar.logic.ts` の drop | `Snapshot::sidebar_drop` が `plan_sidebar_drop` を返し、`Intent::DropThread` が pin・unpin・unsettle・unsnooze・settle と key の書き込みに変える。 |
+| web `modelOrdering.ts`、settings の favorites | `Preferences.favorite_models`・`model_order`、`Intent::ToggleFavoriteModel`・`SetModelOrder`。instance の rail は `sort_models_for_provider_instance`（favorites、利用者の順、catalog の順）。`an_instance_lists_favorites_then_the_users_order_then_the_catalogue`。 |
+| `ConversationSettings` の読み書き、web settings | `Intent::LoadConversationSettings`・`UpdateConversationSettings{scope, change}`（`plan_conversation_settings_update`）・`ResetProjectSettings`（`clear_project_overrides`）。`Snapshot::settings(scope)`。 |
+| 時刻の表記・Working の beta・follow-up の設定 | `Preferences.timestamp_format`・`working_section`、`Snapshot.follow_up`。getter は一覧・menu・設定にこの値を渡す。`preferences_change_on_the_device_and_survive_a_restart`。 |
+| `projectScripts.ts` の最後に実行した script、`runProjectScript` | `Preferences.last_run_scripts`、`Intent::RunProjectScript` は新しい terminal を開き、Host が開始を返してから command を書き込む。`Intent::UpdateProjectScripts` は `host/project/update`。 |
+| 既存 session の取り込み（scan・選択・import・landing・toast） | `Snapshot.session_import`（`SessionImport`、`SessionImportProgress`）、`Intent::ScanSessions`・`SelectImportSessions`・`ImportSessions`（未登録の folder は `AddProject` してから `conversation/agentSessions/import`）・`CloseImport`。`Snapshot::session_import`・`import_toast`。 |
+| web `pendingUserInput.ts`、mobile の回答の下書き | `Snapshot.question_drafts`、`Intent::EditAnswer`（選択肢で置き換えた入力は thread の下書きへ移す）・`ShowQuestion`・`SubmitAnswers`。送る値は `view::requests::question_answers`（入力と添付だけの回答は text、複数選択は choices）。回答の添付は `answer_draft_key` の下書き。`a_reply_sends_attachment_only_answers_as_text_and_chosen_options_as_choices`、`an_attachment_only_answer_is_empty_text_and_chosen_options_are_choices`、`a_typed_answer_moves_to_the_thread_draft_when_an_option_replaces_it`。 |
+| web `diffPanelStore.ts` | `Snapshot.diff_panels`、`Preferences.diff_ignore_whitespace`、`Intent::SelectDiffScope`・`SelectDiffTurn`・`SelectDiffBaseRef`・`SetDiffIgnoreWhitespace`・`LoadDiff`（`DiffRequest::intent` で読み込む）。 |
+| web `promptStashStore.ts` | `Snapshot.stash`（端末に保存）、`Intent::StashDraft`（`Outcome::Stashed`）・`FinalizeStashImages`・`RestoreStash`（`Outcome::StashRestored`）・`DeleteStash`。`a_stashed_draft_restores_its_text_and_uploaded_files`。 |
+| composer の context record、`use-composer-command-menu.ts` | `Draft.context`、`Snapshot::composer_menu(text, cursor)`、`Intent::SelectComposerItem`（`Outcome::ComposerEdited{cursor}`）・`RemoveDraftContext`。送信・キューの編集・stash は context を運ぶ。 |
+| `TraitsPicker` の選択 | `Intent::SelectTrait`・`ToggleTrait`（`select_trait`・`toggle_trait` の変更を下書きと thread の選択に適用）。 |
+| client-runtime `worktreeSetup.ts` の保持 | stream の `None` で最後の snapshot を `Snapshot.held_setups` に残す。`a_closed_setup_stream_keeps_its_last_snapshot_for_the_card`。 |
+| `ThreadErrorBanner` の非表示 | `Snapshot.error_dismissals`、`Intent::DismissThreadError{dismiss_key}`。 |
+| `UsageLimitRecoveryBanner` | `Intent::LimitRecovery{thread_id, action}`（`toggle_limit_recovery` の `LimitRecoveryUpdate` を `UpdateMetadata` で送る）。 |
+| server `UserFacingErrors.ts` の適用 | `Resolution::Failed{rejected}` の Committed の拒否だけを `provider_rejection_message` で文にする。`a_committed_refusal_reads_as_a_sentence_and_a_transport_failure_keeps_its_text`。 |
+| web `QueuedRunsControl` の移動 | `QueueAction::Move{run_id, before_run_id}` が 1 回の `ReorderQueued`。`moving_a_queued_message_sends_one_reorder`。 |
+| `state/attachments.ts` の受け入れ | `Intent::AttachFiles{draft_key, files}` が `admit_attachments` で選ぶ。縮小が必要な画像は拒否（縮小はネイティブ側）。 |
+| `ThreadTerminalDrawer`、contracts `terminal.ts` の id | `view::terminals`（`terminal_tabs`、`next_terminal_id`、`terminal_view`）。handle は `thread_terminal_handle_for`（`terminal:{thread}:{id}`）。`Intent::OpenTerminal`・`NewTerminal`・`SplitTerminal`・`WriteTerminal`・`ResizeTerminal`・`DetachTerminal`・`CloseTerminal`。`lists_setup_terminals_first_and_numbers_the_next_terminal`、`a_thread_terminal_handle_extends_the_thread_prefix_with_its_id`。 |
+
+UniFFI の公開（`bindings/views.rs`）:
+
+- `Snapshot` の getter: `sidebar`、`sidebar_drop`、`thread_list`、`archived`、`thread_menu`、`thread`（`ThreadView`: header、rows と `rows_revision`、history、composer、queue、requests、plan、agents、lineage、setup、working、error banner、limit recovery、diff、terminals、scripts）、`selected_thread`、`new_thread`、`composer_menu`、`search`、`settings`、`model_picker`、`traits`、`terminals`、`terminal`、`diff`、`project_scripts`、`session_import`、`import_toast`、`stash`、`preferences`、`conversation_settings_loaded`。行は snapshot が共有する `TimelineCache` から作り、入力が変わらなければ作り直さない。
+- 状態を持たない関数: `timeline_update`、`answer_draft_key`、`admit_attachments`、`snooze_presets`。
+- 生成は `scripts/build-agent-bindings.sh`（`AgentCore.swift`、`AgentCoreFFI.h`、`AgentCoreFFI.modulemap`、`dev/remoteagent/core/agent_core.kt`）。
+
+未接続（Host・protocol の作業）:
+
+- `StartTerminal` は thread・terminal id・環境変数（`PROJECT_ROOT` など）をまだ運ばない。terminal の metadata stream もない。
+- provider の skill・slash command・workspace の path 検索の RPC がないので、composer の menu は built-in の command と thread だけ。`/compact` は context meter に出ない。
+- provider ごとの runtime mode と plan toggle、model option の記述は Host から届かないので、すべての mode と Plan を出す。
+- 接続状態は接続しているかどうかだけで、再接続中の環境名や理由は出ない。
+- 「Work locally」（setup を止めて checkout で送り直す）と、新しい task の下書きの project 選択時刻・branch は未実装。
