@@ -70,6 +70,7 @@ pub(super) enum StreamKey {
     Thread(ThreadId),
     Setup(ThreadId),
     TerminalMetadata,
+    Keybindings,
 }
 impl StreamKey {
     pub fn location(&self) -> Option<ShellLocation> {
@@ -589,6 +590,7 @@ impl Owner {
             self.subscribe_thread(&thread);
         }
         self.subscribe_terminal_metadata();
+        self.subscribe_keybindings();
         self.refresh();
         self.state_outbox().reconnected();
         self.drain();

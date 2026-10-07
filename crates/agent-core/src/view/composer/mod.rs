@@ -4,6 +4,7 @@ pub mod chips;
 pub mod commands;
 pub mod context_meter;
 pub mod controls;
+pub mod footer_layout;
 pub mod hero;
 pub mod menu;
 pub mod prompt;

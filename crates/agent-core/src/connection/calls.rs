@@ -44,6 +44,7 @@ pub(super) enum Reply {
     SetupCancelled(c::SetupCancelled),
     ProjectIcon(Option<m::ProjectFavicon>),
     SwitchedRef(w::SwitchedRef),
+    Keybindings(agent_protocol::keybindings::KeybindingsConfig),
     Done,
 }
 
@@ -70,7 +71,10 @@ async fn execute(peer: &Peer, call: &Call) -> Result<Reply, PeerError> {
         Call::ListRefs(_) => Reply::Refs(peer.request(call).await?),
         Call::DiffPreview(_) => Reply::DiffPreview(peer.request(call).await?),
         Call::ProjectFavicon(_) => Reply::ProjectIcon(peer.request(call).await?),
-        Call::SwitchRef(_) => Reply::SwitchedRef(peer.request(call).await?),
+        Call::SwitchRef(_) | Call::CreateRef(_) => Reply::SwitchedRef(peer.request(call).await?),
+        Call::UpsertKeybinding(_) | Call::RemoveKeybinding(_) => {
+            Reply::Keybindings(peer.request(call).await?)
+        }
         Call::ListAccounts(_) => Reply::Accounts(peer.request(call).await?),
         Call::StartAccountLogin(_) => Reply::Login(peer.request(call).await?),
         Call::HostStatus(_) => Reply::HostStatus(peer.request(call).await?),
@@ -478,6 +482,7 @@ impl Owner {
             Reply::ConversationSettings(settings) => {
                 self.state.conversation_settings = Some(settings)
             }
+            Reply::Keybindings(config) => self.state.keybindings = Some(Arc::new(config)),
             Reply::SessionScan(scan) => {
                 let import = &mut self.state.session_import;
                 import.scan_pending = false;
@@ -523,11 +528,17 @@ impl Owner {
                     self.show_diff_preview();
                 }
             }
-            Reply::SwitchedRef(switched) => {
-                if let Call::SwitchRef(request) = call {
-                    self.switched_ref(request, switched);
-                }
-            }
+            Reply::SwitchedRef(switched) => match call {
+                Call::SwitchRef(request) => self.switched_ref(request, switched),
+                Call::CreateRef(request) => self.switched_ref(
+                    &w::SwitchRef {
+                        cwd: request.cwd.clone(),
+                        ref_name: request.ref_name.clone(),
+                    },
+                    switched,
+                ),
+                _ => {}
+            },
             Reply::ProjectIcon(favicon) => {
                 if let Call::ProjectFavicon(request) = call {
                     self.project_icon_read(request, Ok(favicon));

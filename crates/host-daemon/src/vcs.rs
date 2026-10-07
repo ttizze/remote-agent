@@ -3,7 +3,7 @@
 //! compares the working tree, untracked files included, with the merge base of
 //! HEAD and the base branch.
 use agent_protocol::workspace::{
-    BranchChanges, DiffFile, DiffPreview, DiffPreviewResult, DiffSource, DiffSourceKind,
+    BranchChanges, CreateRef, DiffFile, DiffPreview, DiffPreviewResult, DiffSource, DiffSourceKind,
     FileChangeTotals, ListRefs, RefKind, RefList, SwitchRef, SwitchedRef, VcsRef, VcsStatus,
     WorkingTreeChanges,
 };
@@ -1056,6 +1056,38 @@ pub(crate) async fn switch_ref(request: SwitchRef) -> Result<SwitchedRef> {
         return Err(anyhow!("invalid ref name"));
     }
     tokio::task::spawn_blocking(move || checkout(&request)).await?
+}
+
+/// Creates a branch at HEAD, then checks it out when asked.
+fn create(request: &CreateRef) -> Result<SwitchedRef> {
+    let cwd = Path::new(&request.cwd);
+    let run = git(
+        cwd,
+        &["branch", "--", &request.ref_name],
+        Options::default(),
+    )?;
+    if !run.ok() {
+        return Err(anyhow!(
+            "Git command failed in GitVcsDriver.createRef ({}): git branch create failed",
+            request.cwd
+        ));
+    }
+    if request.switch_ref {
+        checkout(&SwitchRef {
+            cwd: request.cwd.clone(),
+            ref_name: request.ref_name.clone(),
+        })?;
+    }
+    Ok(SwitchedRef {
+        ref_name: Some(request.ref_name.clone()),
+    })
+}
+
+pub(crate) async fn create_ref(request: CreateRef) -> Result<SwitchedRef> {
+    if request.ref_name.trim().is_empty() || request.ref_name.starts_with('-') {
+        return Err(anyhow!("invalid ref name"));
+    }
+    tokio::task::spawn_blocking(move || create(&request)).await?
 }
 
 #[cfg(test)]

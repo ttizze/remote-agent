@@ -380,6 +380,7 @@ impl Owner {
                 branch,
                 worktree_path,
             } => self.select_new_thread_branch(branch, worktree_path)?,
+            Intent::CreateNewThreadBranch { name } => self.create_new_thread_branch(name)?,
             Intent::SetNewThreadStartFromOrigin { on } => {
                 self.set_new_thread_start_from_origin(on)?
             }
@@ -461,6 +462,20 @@ impl Owner {
                     .model_order
                     .insert(instance_id, models);
                 Next::Done
+            }
+            Intent::DismissResumeCompaction { key } => {
+                self.state.resume_compaction_dismissals.insert(key);
+                Next::Done
+            }
+            Intent::UpsertKeybinding { rule, replace } => Next::call(
+                Call::UpsertKeybinding(agent_protocol::keybindings::UpsertKeybinding {
+                    rule: rule.into(),
+                    replace: replace.map(Into::into),
+                }),
+                None,
+            ),
+            Intent::RemoveKeybinding { rule } => {
+                Next::call(Call::RemoveKeybinding(rule.into()), None)
             }
             Intent::LoadConversationSettings => {
                 Next::call(Call::ReadConversationSettings(m::Empty {}), None)

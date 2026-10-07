@@ -425,3 +425,97 @@ fn the_meter_shows_percentage_with_a_known_window_and_tokens_otherwise() {
     assert_eq!(unknown.progress, None);
     assert!(!unknown.overloaded);
 }
+
+fn offer<'a>(
+    context: Option<&'a ContextWindowSnapshot>,
+    dismissed: &'a std::collections::BTreeSet<String>,
+) -> ResumeCompactionInput<'a> {
+    ResumeCompactionInput {
+        thread_id: "thread",
+        driver: Some(Driver::Claude),
+        context,
+        dismissed_keys: dismissed,
+        instance_dismissed: false,
+        native_dismissed: false,
+        pending_user_input: false,
+        running: false,
+        compact: None,
+        now_ms: millis(NOW).unwrap(),
+    }
+}
+
+fn old_session(at: &str) -> ContextWindowSnapshot {
+    snapshot(180_000, Some(200_000), None, None, millis(at).unwrap())
+}
+
+#[test]
+fn an_old_large_claude_session_offers_to_resume_with_less_context() {
+    let old = old_session("2026-08-24T10:00:00.000Z");
+    let none = std::collections::BTreeSet::new();
+    let button = CompactContextButton {
+        label: "Compact context".into(),
+        disabled: false,
+        disabled_reason: None,
+    };
+    let banner = resume_compaction_banner(&ResumeCompactionInput {
+        compact: Some(&button),
+        ..offer(Some(&old), &none)
+    })
+    .unwrap();
+    assert_eq!(banner.title, "Resume with less context");
+    assert_eq!(banner.description, "180k tokens from earlier");
+    assert_eq!(banner.dismiss_label, "Keep full history");
+    assert_eq!(
+        (banner.compact_label.as_str(), banner.compact_disabled),
+        ("Compact", false)
+    );
+    // Without a /compact command the button stays, disabled with the reason.
+    let unavailable = resume_compaction_banner(&offer(Some(&old), &none)).unwrap();
+    assert!(unavailable.compact_disabled);
+    assert_eq!(
+        unavailable.compact_disabled_reason.as_deref(),
+        Some("Compaction is unavailable for this provider")
+    );
+}
+
+#[test]
+fn keeping_full_history_or_a_busy_thread_hides_the_offer() {
+    let old = old_session("2026-08-24T10:00:00.000Z");
+    let none = std::collections::BTreeSet::new();
+    let key = resume_compaction_banner(&offer(Some(&old), &none))
+        .unwrap()
+        .key;
+    let dismissed = std::collections::BTreeSet::from([key]);
+    assert_eq!(
+        resume_compaction_banner(&offer(Some(&old), &dismissed)),
+        None
+    );
+    for hidden in [
+        ResumeCompactionInput {
+            running: true,
+            ..offer(Some(&old), &none)
+        },
+        ResumeCompactionInput {
+            pending_user_input: true,
+            ..offer(Some(&old), &none)
+        },
+        ResumeCompactionInput {
+            native_dismissed: true,
+            ..offer(Some(&old), &none)
+        },
+        ResumeCompactionInput {
+            instance_dismissed: true,
+            ..offer(Some(&old), &none)
+        },
+        ResumeCompactionInput {
+            driver: Some(Driver::Codex),
+            ..offer(Some(&old), &none)
+        },
+        offer(None, &none),
+    ] {
+        assert_eq!(resume_compaction_banner(&hidden), None);
+    }
+    // A newer context snapshot offers again.
+    let newer = old_session("2026-08-24T10:30:00.000Z");
+    assert!(resume_compaction_banner(&offer(Some(&newer), &dismissed)).is_some());
+}

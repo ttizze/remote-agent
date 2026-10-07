@@ -188,6 +188,16 @@ pub struct SwitchRef {
     pub ref_name: String,
 }
 
+/// `host/vcs/createRef`: creates a branch in a checkout at its HEAD, and
+/// checks it out when `switch_ref` is set.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateRef {
+    pub cwd: String,
+    pub ref_name: String,
+    pub switch_ref: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SwitchedRef {

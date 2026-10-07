@@ -390,3 +390,33 @@ fn switching_refs_checks_out_local_and_remote_branches() {
     let missing = switch("no-such-branch").unwrap_err().to_string();
     assert!(missing.ends_with("git checkout failed"), "{missing}");
 }
+
+// GitVcsDriverCore createRef: `git branch <name>`, then switchRef when asked.
+#[test]
+fn creating_a_ref_branches_at_head_and_switches_when_asked() {
+    let directory = tempfile::tempdir().unwrap();
+    let cwd = directory.path();
+    let initial = repository_with_commit(cwd);
+    let create_ref = |name: &str, switch_ref: bool| {
+        create(&CreateRef {
+            cwd: cwd.to_string_lossy().into_owned(),
+            ref_name: name.into(),
+            switch_ref,
+        })
+    };
+    assert_eq!(
+        create_ref("feature/kept", false)
+            .unwrap()
+            .ref_name
+            .as_deref(),
+        Some("feature/kept")
+    );
+    assert_eq!(run(cwd, &["branch", "--show-current"]), initial);
+    assert_eq!(
+        create_ref("feature/new", true).unwrap().ref_name.as_deref(),
+        Some("feature/new")
+    );
+    assert_eq!(run(cwd, &["branch", "--show-current"]), "feature/new");
+    let taken = create_ref("feature/new", true).unwrap_err().to_string();
+    assert!(taken.ends_with("git branch create failed"), "{taken}");
+}

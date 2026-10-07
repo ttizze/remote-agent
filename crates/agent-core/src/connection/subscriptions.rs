@@ -50,6 +50,7 @@ impl Owner {
             StreamKey::TerminalMetadata => {
                 tokio::spawn(follow(target, call, Payload::TerminalMetadata))
             }
+            StreamKey::Keybindings => tokio::spawn(follow(target, call, Payload::Keybindings)),
         };
         let failures = network
             .streams
@@ -130,6 +131,17 @@ impl Owner {
         self.open_stream(
             StreamKey::TerminalMetadata,
             Call::TerminalMetadata(agent_protocol::models::Empty {}),
+        );
+    }
+
+    /// The Host's keybindings and every change to them.
+    pub(super) fn subscribe_keybindings(&mut self) {
+        if !self.connected() {
+            return;
+        }
+        self.open_stream(
+            StreamKey::Keybindings,
+            Call::Keybindings(agent_protocol::models::Empty {}),
         );
     }
 
@@ -310,6 +322,7 @@ impl Owner {
                 }
             }
             StreamKey::TerminalMetadata => self.subscribe_terminal_metadata(),
+            StreamKey::Keybindings => self.subscribe_keybindings(),
         }
     }
 
@@ -348,6 +361,10 @@ impl Owner {
                 self.healthy(&StreamKey::TerminalMetadata);
                 self.terminal_metadata(event);
             }
+            (StreamKey::Keybindings, Payload::Keybindings(config)) => {
+                self.healthy(&StreamKey::Keybindings);
+                self.state.keybindings = Some(Arc::new(config));
+            }
             _ => {}
         }
     }
@@ -373,7 +390,7 @@ impl Owner {
                         shell.stream_error();
                     }
                 }
-                StreamKey::Setup(_) | StreamKey::TerminalMetadata => {}
+                StreamKey::Setup(_) | StreamKey::TerminalMetadata | StreamKey::Keybindings => {}
             }
             self.schedule_resubscribe(key);
             return;
@@ -425,6 +442,27 @@ impl Owner {
         }
     }
 
+    /// A resume dialog answered "Don't ask again" stops the offer for every
+    /// thread of that provider instance, and the device keeps it.
+    fn remember_resume_compaction_dismissal(&mut self, thread: &ThreadId) {
+        let Some(state) = self.state.thread_state(thread) else {
+            return;
+        };
+        if !crate::view::composer::context_meter::has_dismissed_resume_compaction(state) {
+            return;
+        }
+        if let Some(instance) = state
+            .thread
+            .as_ref()
+            .map(|thread| thread.selection.instance.clone())
+        {
+            self.state
+                .preferences
+                .resume_compaction_dismissed
+                .insert(instance);
+        }
+    }
+
     fn thread_applied(&mut self, thread: &ThreadId, applied: Applied) {
         match applied.resync {
             Resync::Snapshot => self.subscribe_thread(thread),
@@ -447,6 +485,7 @@ impl Owner {
         for result in applied.rollbacks {
             self.rollback_finished(thread, result);
         }
+        self.remember_resume_compaction_dismissal(thread);
         self.end_finished_queue_edit(thread);
         self.complete_outbox();
         self.visit_selected();

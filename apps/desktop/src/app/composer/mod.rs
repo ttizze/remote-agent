@@ -9,7 +9,7 @@ mod menu;
 
 use super::{
     Desktop, Views,
-    ui::{color, is_dark, metrics},
+    ui::{color, is_dark, metrics, prompt_font},
 };
 use agent_core::{
     connection::Outcome,
@@ -41,6 +41,8 @@ pub(crate) struct ComposerState {
     branches: controls::BranchPickerState,
     menu: menu::MenuState,
     banners: banners::BannerState,
+    /// How many footer blocks sit in the overflow menu.
+    footer_layout: agent_core::view::composer::footer_layout::FooterLayout,
     /// The image attachments of the draft just sent to the stash: id, name,
     /// MIME type and local file.
     stash_images: Vec<(String, String, String, PathBuf)>,
@@ -60,6 +62,10 @@ impl ComposerState {
             branches: controls::BranchPickerState::new(window, cx, subscriptions),
             menu: menu::MenuState::default(),
             banners: banners::BannerState::new(cx),
+            footer_layout: agent_core::view::composer::footer_layout::FooterLayout {
+                hidden_count: 0,
+                visible: true,
+            },
             stash_images: vec![],
         }
     }
@@ -167,7 +173,19 @@ impl Desktop {
             return div().into_any_element();
         };
         self.sync_composer_menu(cx);
-        dock(self.composer_stack(Some(thread), &thread.composer, window, cx))
+        let mut stack = self.composer_stack(Some(thread), &thread.composer, window, cx);
+        // "Composer context" keeps the workspace and branch under the
+        // composer once the thread has started.
+        if super::ui::appearance().composer_context
+            && let Some(header) = &thread.header
+            && let Some(workspace) = &header.workspace
+        {
+            stack = stack.child(controls::thread_context_strip(
+                workspace,
+                header.branch.as_deref(),
+            ));
+        }
+        dock(stack)
     }
 
     /// The new-thread draft: the hero headline over a centred composer.
@@ -250,6 +268,7 @@ impl Desktop {
                     .disabled(composer.editor.disabled)
                     .aria_label("Message")
                     .text_size(px(metrics().prompt_size))
+                    .when_some(prompt_font(), |field, family| field.font_family(family))
                     .line_height(relative(1.625))
                     // The field's own padding replaces the body's here.
                     .mx(px(-10.))

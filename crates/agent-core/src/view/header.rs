@@ -88,11 +88,62 @@ pub struct ThreadHeaderView {
     pub title_menu_label: Option<String>,
     /// The worktree, or else the project root, that files and terminals open in.
     pub cwd: Option<String>,
+    /// The thread's workspace as the details card and the composer context
+    /// strip name it.
+    pub workspace: Option<WorkspaceRow>,
+    /// The branch the thread works on.
+    pub branch: Option<String>,
     pub thread_panel: PanelToggle,
     pub terminal: PanelToggle,
     pub right_panel: PanelToggle,
     /// Compact header buttons in order: files, terminal, merge back.
     pub actions: Vec<HeaderAction>,
+}
+
+/// A started thread's workspace: its folder's name, "Worktree" beside a
+/// worktree, and the full path to show and copy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct WorkspaceRow {
+    pub label: String,
+    /// "Worktree" when the thread runs in a worktree.
+    pub kind: Option<String>,
+    pub in_worktree: bool,
+    /// The folder, for the tooltip and "Copy full path".
+    pub path: Option<String>,
+}
+
+/// The last folder of a path, POSIX or Windows; a root stays itself.
+pub fn workspace_display_name(path: Option<&str>) -> Option<String> {
+    let path = path?;
+    let trimmed = path.trim_end_matches(['/', '\\']);
+    if trimmed.is_empty() {
+        return Some(path.to_owned());
+    }
+    trimmed.rsplit(['/', '\\']).next().map(str::to_owned)
+}
+
+/// A started thread's workspace with no folder name: its worktree, a
+/// worktree still being created, or the project's checkout.
+pub fn locked_workspace_label(worktree_path: Option<&str>, worktree_mode: bool) -> &'static str {
+    match (worktree_path, worktree_mode) {
+        (Some(_), _) => "Worktree",
+        (None, true) => "New worktree",
+        (None, false) => "Local checkout",
+    }
+}
+
+/// The workspace row of a thread in `worktree_path`, else in the project
+/// at `project_root`.
+pub fn workspace_row(worktree_path: Option<&str>, project_root: Option<&str>) -> WorkspaceRow {
+    let path = worktree_path.or(project_root);
+    WorkspaceRow {
+        label: workspace_display_name(path)
+            .unwrap_or_else(|| locked_workspace_label(worktree_path, false).to_owned()),
+        kind: worktree_path.map(|_| "Worktree".to_owned()),
+        in_worktree: worktree_path.is_some(),
+        path: path.map(str::to_owned),
+    }
 }
 
 /// Panels the client has open.
@@ -181,6 +232,19 @@ pub fn thread_header(input: &HeaderInput<'_>, panels: &HeaderPanelState) -> Thre
         title_menu_label: input
             .is_server_thread
             .then(|| format!("Thread actions for {}", input.title)),
+        workspace: (input.is_server_thread && (cwd.is_some() || has_project)).then(|| {
+            workspace_row(
+                input
+                    .workspace
+                    .and_then(|workspace| workspace.worktree_path.as_deref())
+                    .filter(|path| !path.is_empty()),
+                project_root.as_deref(),
+            )
+        }),
+        branch: input
+            .workspace
+            .and_then(|workspace| workspace.branch.clone())
+            .filter(|branch| !branch.is_empty()),
         cwd,
         thread_panel: PanelToggle {
             available: true,
@@ -282,6 +346,71 @@ mod tests {
     #[test]
     fn no_ops_when_the_trimmed_title_is_unchanged() {
         assert_eq!(resolve_rename_commit(" Old ", "Old"), RenameCommit::Noop);
+    }
+
+    // BranchToolbar.logic.test.ts resolveLockedWorkspaceLabel and
+    // resolveWorkspaceDisplayName.
+    #[test]
+    fn uses_a_shorter_label_for_the_main_repo_checkout() {
+        assert_eq!(locked_workspace_label(None, false), "Local checkout");
+    }
+
+    #[test]
+    fn uses_a_shorter_label_for_an_attached_worktree() {
+        assert_eq!(
+            locked_workspace_label(Some("/repo/worktrees/feature-a"), true),
+            "Worktree"
+        );
+    }
+
+    #[test]
+    fn describes_a_worktree_that_is_still_being_created_as_a_new_worktree() {
+        assert_eq!(locked_workspace_label(None, true), "New worktree");
+    }
+
+    #[test]
+    fn returns_the_final_folder_for_posix_and_windows_paths() {
+        assert_eq!(
+            workspace_display_name(Some("/repo/worktrees/feature-a")).as_deref(),
+            Some("feature-a")
+        );
+        assert_eq!(
+            workspace_display_name(Some("C:\\code\\project\\feature-b\\")).as_deref(),
+            Some("feature-b")
+        );
+    }
+
+    #[test]
+    fn handles_missing_and_root_paths() {
+        assert_eq!(workspace_display_name(None), None);
+        assert_eq!(workspace_display_name(Some("/")).as_deref(), Some("/"));
+    }
+
+    #[test]
+    fn the_workspace_row_names_a_worktree_folder_and_marks_its_kind() {
+        let project = project("/repo");
+        let workspace = Workspace {
+            cwd: "/repo".into(),
+            worktree_path: Some("/worktrees/fix".into()),
+            branch: Some("fix".into()),
+        };
+        let header = thread_header(
+            &input(Some(&project), Some(&workspace)),
+            &HeaderPanelState::default(),
+        );
+        assert_eq!(
+            header.workspace,
+            Some(WorkspaceRow {
+                label: "fix".into(),
+                kind: Some("Worktree".into()),
+                in_worktree: true,
+                path: Some("/worktrees/fix".into()),
+            })
+        );
+        assert_eq!(header.branch.as_deref(), Some("fix"));
+        let local = thread_header(&input(Some(&project), None), &HeaderPanelState::default());
+        let row = local.workspace.unwrap();
+        assert_eq!((row.label.as_str(), row.kind), ("repo", None));
     }
 
     fn project(root: &str) -> Project {

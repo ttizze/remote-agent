@@ -1,6 +1,9 @@
 //! One thread-owned terminal: a Host process per (thread, terminal id) that
 //! this view attaches to while it is shown and detaches from when dropped.
-use crate::{Runtime, app::color};
+use crate::{
+    Runtime,
+    app::{color, terminal_font},
+};
 use agent_core::connection::Store;
 use agent_core::state::{Intent, Snapshot, TerminalPhase};
 use agent_protocol::operations::TerminalSize;
@@ -24,9 +27,16 @@ use gpui_kit::{
 };
 use std::{ops::Range, sync::Arc};
 
-const FONT_SIZE: f32 = 12.;
-const LINE_HEIGHT: f32 = 16.;
-const FONT_FAMILY: &str = "Menlo";
+/// The terminal font from the appearance preferences.
+fn font_family() -> SharedString {
+    terminal_font().0
+}
+fn font_size() -> f32 {
+    terminal_font().1
+}
+fn line_height() -> f32 {
+    terminal_font().2
+}
 #[derive(Clone, Copy)]
 struct GridSize(TerminalSize);
 impl Dimensions for GridSize {
@@ -389,7 +399,7 @@ impl Terminal {
             .floor()
             .max(0.) as usize
             + 1;
-        let row = ((position.y - self.bounds.top()) / px(LINE_HEIGHT))
+        let row = ((position.y - self.bounds.top()) / px(line_height()))
             .floor()
             .max(0.) as usize
             + 1;
@@ -429,7 +439,7 @@ impl Terminal {
         });
     }
     fn position(&self, position: Point<Pixels>) -> CellPoint {
-        let row = ((position.y - self.bounds.top()) / px(LINE_HEIGHT))
+        let row = ((position.y - self.bounds.top()) / px(line_height()))
             .floor()
             .max(0.) as i32;
         let column = ((position.x - self.bounds.left()) / self.cell_width)
@@ -532,8 +542,8 @@ impl Render for Terminal {
                         }),
                     )
                     .on_scroll_wheel(cx.listener(|s, event: &ScrollWheelEvent, _, cx| {
-                        let delta = event.delta.pixel_delta(px(LINE_HEIGHT));
-                        let lines = (delta.y / px(LINE_HEIGHT)).round() as i32;
+                        let delta = event.delta.pixel_delta(px(line_height()));
+                        let lines = (delta.y / px(line_height())).round() as i32;
                         if s.term.mode().intersects(TermMode::MOUSE_MODE) && !event.modifiers.shift
                         {
                             for _ in 0..lines.unsigned_abs().min(50) {
@@ -636,7 +646,7 @@ impl Element for TerminalCanvas {
     ) {
         let run = TextRun {
             len: 1,
-            font: font(FONT_FAMILY),
+            font: font(font_family()),
             color: color("terminalForeground"),
             background_color: None,
             underline: None,
@@ -644,14 +654,14 @@ impl Element for TerminalCanvas {
         };
         let width = window
             .text_system()
-            .shape_line("M".into(), px(FONT_SIZE), &[run], None)
+            .shape_line("M".into(), px(font_size()), &[run], None)
             .width;
         self.terminal.update(cx, |view, _| {
             view.bounds = bounds;
             view.cell_width = width;
             let size = TerminalSize {
                 cols: ((bounds.size.width / width).floor() as u16).clamp(2, 500),
-                rows: ((bounds.size.height / px(LINE_HEIGHT)).floor() as u16).clamp(1, 250),
+                rows: ((bounds.size.height / px(line_height())).floor() as u16).clamp(1, 250),
             };
             if size != view.size {
                 view.resize(size);
@@ -690,7 +700,7 @@ impl Element for TerminalCanvas {
                     };
                 let position = point(
                     bounds.left() + view.cell_width * indexed.point.column.0 as f32,
-                    bounds.top() + px(LINE_HEIGHT) * (indexed.point.line.0 + offset) as f32,
+                    bounds.top() + px(line_height()) * (indexed.point.line.0 + offset) as f32,
                 );
                 let mut fg = resolve_color(cell.fg, &view.term);
                 let mut bg = resolve_color(cell.bg, &view.term);
@@ -704,7 +714,7 @@ impl Element for TerminalCanvas {
                     bg = color("terminalSelection");
                 }
                 window.paint_quad(fill(
-                    Bounds::new(position, size(cell_width, px(LINE_HEIGHT))),
+                    Bounds::new(position, size(cell_width, px(line_height()))),
                     bg,
                 ));
                 if cell.flags.contains(Flags::HIDDEN)
@@ -720,7 +730,7 @@ impl Element for TerminalCanvas {
                 if let Some(chars) = cell.zerowidth() {
                     text.extend(chars);
                 }
-                let mut face = font(FONT_FAMILY);
+                let mut face = font(font_family());
                 if cell.flags.contains(Flags::BOLD) {
                     face.weight = FontWeight::BOLD;
                 }
@@ -752,8 +762,15 @@ impl Element for TerminalCanvas {
                 let line =
                     window
                         .text_system()
-                        .shape_line(text.into(), px(FONT_SIZE), &[run], None);
-                let _ = line.paint(position, px(LINE_HEIGHT), TextAlign::Left, None, window, cx);
+                        .shape_line(text.into(), px(font_size()), &[run], None);
+                let _ = line.paint(
+                    position,
+                    px(line_height()),
+                    TextAlign::Left,
+                    None,
+                    window,
+                    cx,
+                );
             }
             if view.focus.is_focused(window)
                 && view.term.mode().contains(TermMode::SHOW_CURSOR)
@@ -762,16 +779,16 @@ impl Element for TerminalCanvas {
                 let cursor = content.cursor.point;
                 let position = point(
                     bounds.left() + view.cell_width * cursor.column.0 as f32,
-                    bounds.top() + px(LINE_HEIGHT) * cursor.line.0 as f32,
+                    bounds.top() + px(line_height()) * cursor.line.0 as f32,
                 );
                 window.paint_quad(fill(
-                    Bounds::new(position, size(px(2.), px(LINE_HEIGHT))),
+                    Bounds::new(position, size(px(2.), px(line_height()))),
                     color("terminalCursor"),
                 ));
                 if !view.composition.is_empty() {
                     let run = TextRun {
                         len: view.composition.len(),
-                        font: font(FONT_FAMILY),
+                        font: font(font_family()),
                         color: color("terminalForeground"),
                         background_color: Some(color("terminalSelection")),
                         underline: Some(UnderlineStyle {
@@ -783,12 +800,18 @@ impl Element for TerminalCanvas {
                     };
                     let line = window.text_system().shape_line(
                         view.composition.clone().into(),
-                        px(FONT_SIZE),
+                        px(font_size()),
                         &[run],
                         None,
                     );
-                    let _ =
-                        line.paint(position, px(LINE_HEIGHT), TextAlign::Left, None, window, cx);
+                    let _ = line.paint(
+                        position,
+                        px(line_height()),
+                        TextAlign::Left,
+                        None,
+                        window,
+                        cx,
+                    );
                 }
             }
         });
@@ -878,9 +901,9 @@ impl EntityInputHandler for Terminal {
         Some(Bounds::new(
             point(
                 self.bounds.left() + self.cell_width * p.column.0 as f32,
-                self.bounds.top() + px(LINE_HEIGHT) * p.line.0 as f32,
+                self.bounds.top() + px(line_height()) * p.line.0 as f32,
             ),
-            size(self.cell_width, px(LINE_HEIGHT)),
+            size(self.cell_width, px(line_height())),
         ))
     }
     fn character_index_for_point(

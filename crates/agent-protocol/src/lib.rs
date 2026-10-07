@@ -3,6 +3,7 @@ pub mod browser;
 pub mod conversation;
 pub mod diagnostics;
 pub mod error;
+pub mod keybindings;
 pub mod message;
 pub mod models;
 pub mod operations;

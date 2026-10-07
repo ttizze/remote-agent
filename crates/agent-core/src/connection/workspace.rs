@@ -546,12 +546,50 @@ impl Owner {
         Ok(Next::Done)
     }
 
+    /// "Create new ref": creates the searched branch on the draft's checkout
+    /// and switches to it, then the draft works on it.
+    pub(super) fn create_new_thread_branch(&mut self, name: String) -> Result<Next, PeerError> {
+        let root = self
+            .state
+            .new_thread_project_root()
+            .ok_or_else(|| invalid("Choose a project first"))?;
+        let current = self.new_thread_workspace();
+        if current.mode != ThreadWorkspaceMode::Local {
+            return Err(invalid("Choose a base branch for a new worktree"));
+        }
+        let name = crate::view::new_thread::sanitize_new_ref_name(&name);
+        if name.is_empty() {
+            return Ok(Next::Done);
+        }
+        Ok(Next::call(
+            Call::CreateRef(w::CreateRef {
+                cwd: current.worktree_path.unwrap_or(root),
+                ref_name: name,
+                switch_ref: true,
+            }),
+            None,
+        ))
+    }
+
     /// The new-thread draft's checkout moved to `switched`.
     pub(super) fn switched_ref(&mut self, request: &w::SwitchRef, switched: w::SwitchedRef) {
+        let current = self.new_thread_workspace();
+        // A ref created in the worktree the draft runs in keeps it there.
+        if current.worktree_path.as_deref() == Some(request.cwd.as_str()) {
+            let branch = switched
+                .ref_name
+                .unwrap_or_else(|| request.ref_name.clone());
+            self.update_new_thread_draft(|draft| {
+                draft.workspace = Some(DraftWorkspace {
+                    branch: Some(branch),
+                    ..current
+                })
+            });
+            return;
+        }
         if self.state.new_thread_project_root().as_deref() != Some(request.cwd.as_str()) {
             return;
         }
-        let current = self.new_thread_workspace();
         let branch = switched
             .ref_name
             .unwrap_or_else(|| request.ref_name.clone());

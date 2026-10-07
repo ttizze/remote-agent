@@ -322,6 +322,115 @@ pub fn should_offer_resume_compaction(
             .is_some_and(|updated| now_ms - updated >= RESUME_COMPACTION_MINUTES * 60_000)
 }
 
+/// "Resume with less context": the banner above the composer offering to
+/// compact an old, large Claude session before continuing it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResumeCompactionBanner {
+    /// One per thread and context snapshot; "Keep full history" hides it.
+    pub key: String,
+    pub title: String,
+    pub description: String,
+    pub compact_label: String,
+    pub compact_disabled: bool,
+    /// Shown on the disabled button.
+    pub compact_disabled_reason: Option<String>,
+    pub dismiss_label: String,
+}
+
+/// What the banner decides from.
+#[derive(Debug, Clone, Copy)]
+pub struct ResumeCompactionInput<'a> {
+    pub thread_id: &'a str,
+    pub driver: Option<Driver>,
+    pub context: Option<&'a ContextWindowSnapshot>,
+    pub dismissed_keys: &'a std::collections::BTreeSet<String>,
+    /// The resume dialog was told never to ask again for this instance.
+    pub instance_dismissed: bool,
+    pub native_dismissed: bool,
+    pub pending_user_input: bool,
+    pub running: bool,
+    /// The context meter's compact button; `None` when the provider cannot
+    /// compact.
+    pub compact: Option<&'a CompactContextButton>,
+    pub now_ms: i64,
+}
+
+pub fn resume_compaction_banner(
+    input: &ResumeCompactionInput<'_>,
+) -> Option<ResumeCompactionBanner> {
+    let context = input.context?;
+    let key = format!("{}:{}", input.thread_id, context.updated_at_ms);
+    if input.dismissed_keys.contains(&key)
+        || input.instance_dismissed
+        || input.native_dismissed
+        || input.pending_user_input
+        || input.running
+        || !should_offer_resume_compaction(
+            input.driver,
+            Some(context.used_tokens),
+            Some(context.updated_at_ms),
+            input.now_ms,
+        )
+    {
+        return None;
+    }
+    let (compact_disabled, compact_disabled_reason) = match input.compact {
+        Some(compact) => (compact.disabled, compact.disabled_reason.clone()),
+        None => (
+            true,
+            Some("Compaction is unavailable for this provider".to_owned()),
+        ),
+    };
+    Some(ResumeCompactionBanner {
+        key,
+        title: "Resume with less context".into(),
+        description: format!(
+            "{} tokens from earlier",
+            format_context_window_tokens(Some(context.used_tokens))
+        ),
+        compact_label: "Compact".into(),
+        compact_disabled,
+        compact_disabled_reason,
+        dismiss_label: "Keep full history".into(),
+    })
+}
+
+impl crate::state::Snapshot {
+    /// The open thread's resume-compaction offer, given its composer.
+    pub fn resume_compaction_banner(
+        &self,
+        thread: &agent_domain::ThreadId,
+        composer: &super::view::ComposerView,
+        now_ms: i64,
+    ) -> Option<ResumeCompactionBanner> {
+        let state = self.thread_state(thread)?;
+        let (_, draft) = super::view::composer_draft(self, Some(thread));
+        let context = latest_context_window(state);
+        let pending_user_input = state.requests.iter().any(|request| {
+            request.status == RequestStatus::Pending
+                && matches!(request.body, RequestBody::Questions { .. })
+        });
+        resume_compaction_banner(&ResumeCompactionInput {
+            thread_id: thread.as_str(),
+            driver: Some(draft.driver),
+            context: context.as_ref(),
+            dismissed_keys: &self.resume_compaction_dismissals,
+            instance_dismissed: self
+                .preferences
+                .resume_compaction_dismissed
+                .contains(&draft.instance_id),
+            native_dismissed: has_dismissed_resume_compaction(state),
+            pending_user_input,
+            running: state.active_run().is_some(),
+            compact: composer
+                .context_meter
+                .as_ref()
+                .and_then(|meter| meter.compact.as_ref()),
+            now_ms,
+        })
+    }
+}
+
 /// Holds the meter's slot while a started thread's detail loads, unless its
 /// provider is known not to report context usage.
 pub fn should_reserve_context_window_meter(
