@@ -623,3 +623,25 @@ proptest! {
         }
     }
 }
+
+#[test]
+fn a_queued_send_is_marked_for_the_queue_instead_of_the_timeline() {
+    let mut outbox = Outbox::default();
+    outbox
+        .enqueue(send("now", "now", "2026-09-06T10:00:00Z"))
+        .unwrap();
+    let mut queued = send("later", "later", "2026-09-06T10:00:01Z");
+    if let Request::Dispatch(dispatch) = &mut queued.request
+        && let Command::Send(send) = &mut dispatch.command
+    {
+        send.mode = agent_domain::DispatchMode::QueueAfterActive;
+        send.intent = None;
+    }
+    outbox.enqueue(queued).unwrap();
+    let marks: Vec<_> = outbox
+        .undelivered_messages(&thread_id(), None)
+        .iter()
+        .map(|message| (message.id.to_string(), message.queued))
+        .collect();
+    assert_eq!(marks, [("now".into(), false), ("later".into(), true)]);
+}

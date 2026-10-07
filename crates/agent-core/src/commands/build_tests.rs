@@ -458,6 +458,28 @@ fn title_seeds_fall_back_to_new_thread() {
 }
 
 #[test]
+fn title_seeds_read_assistant_quotes_as_their_text_and_comment() {
+    use crate::presentation::markdown::assistant_citations::{
+        AssistantCitation, serialize_assistant_citation,
+    };
+    let quote = serialize_assistant_citation(&AssistantCitation {
+        environment_id: "environment".into(),
+        thread_id: "thread".into(),
+        message_id: "message".into(),
+        text: "Retry  the\nlogin".into(),
+        comment: Some("Why?".into()),
+        start: 0,
+        end: 16,
+        prefix: String::new(),
+        suffix: String::new(),
+    });
+    assert_eq!(
+        thread_title_seed(&format!("Explain {quote}"), &[], &[]),
+        "Explain Retry the login Comment: Why?"
+    );
+}
+
+#[test]
 fn title_seeds_apply_the_shared_truncation() {
     assert_eq!(
         thread_title_seed(&"x".repeat(60), &[], &[]),

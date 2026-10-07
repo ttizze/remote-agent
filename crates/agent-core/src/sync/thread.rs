@@ -42,6 +42,11 @@ pub struct ThreadSync {
     pub details: Arc<BTreeMap<TurnItemId, Detail>>,
     /// Advances on every change a view could show.
     pub revision: u64,
+    /// Advances when the folded state changes without the cursor moving: an
+    /// installed snapshot, a merged history page, a deletion.
+    pub history_revision: u64,
+    /// Advances on every change of `details`.
+    pub detail_revision: u64,
     awaiting_completion: bool,
     resuming_live: bool,
     needs_snapshot: bool,
@@ -294,6 +299,8 @@ impl ThreadSync {
         self.error = None;
         self.history = HistoryMeta::default();
         self.details = Arc::default();
+        self.history_revision += 1;
+        self.detail_revision += 1;
         self.touch();
     }
 
@@ -358,8 +365,10 @@ impl ThreadSync {
                 .map(|(id, detail)| (id.clone(), detail.clone()))
                 .collect();
             self.details = Arc::new(kept);
+            self.detail_revision += 1;
         }
         self.state = Some(snapshot.state);
+        self.history_revision += 1;
         self.status = if self.error.is_some() {
             ThreadStatus::Cached
         } else if self.awaiting_completion {
@@ -422,6 +431,7 @@ impl ThreadSync {
                 }
                 if self.details.contains_key(id) {
                     Arc::make_mut(&mut self.details).remove(id);
+                    self.detail_revision += 1;
                 }
             }
             let state = Arc::make_mut(self.state.as_mut().expect("thread data"));
@@ -503,6 +513,7 @@ impl ThreadSync {
         };
         if let Some(merged) = merge_history_page(state, &page.rows) {
             self.state = Some(Arc::new(merged));
+            self.history_revision += 1;
         }
         self.history = self.history.after_page(&page);
         if self.awaiting_completion {
@@ -543,6 +554,7 @@ impl ThreadSync {
             return false;
         }
         Arc::make_mut(&mut self.details).insert(item.clone(), Detail::Loading);
+        self.detail_revision += 1;
         self.touch();
         true
     }
@@ -562,12 +574,14 @@ impl ThreadSync {
                 details.remove(item);
             }
         }
+        self.detail_revision += 1;
         self.touch();
     }
 
     pub fn detail_failed(&mut self, item: &TurnItemId, message: String) {
         if self.details.get(item) == Some(&Detail::Loading) {
             Arc::make_mut(&mut self.details).insert(item.clone(), Detail::Failed(message));
+            self.detail_revision += 1;
             self.touch();
         }
     }

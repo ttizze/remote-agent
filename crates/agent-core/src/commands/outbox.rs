@@ -4,7 +4,8 @@
 use super::lifecycle::LifecycleOverlay;
 use crate::sync::ShellStatus;
 use agent_domain::{
-    Attachment, Command, CommandId, MessageContext, MessageId, Reply, State, ThreadId, Timestamp,
+    Attachment, Command, CommandId, DispatchMode, MessageContext, MessageId, Reply, State,
+    ThreadId, Timestamp,
 };
 use agent_protocol::conversation::{Committed, Dispatch, Launch, ShellSnapshot};
 use agent_protocol::error::{Delivery, RpcFailure};
@@ -92,13 +93,14 @@ impl PendingCommand {
     }
     /// The message this entry carries, shown until the thread folds it.
     pub fn message(&self) -> Option<PendingMessage> {
-        let (id, text, attachments, context) = match &self.request {
+        let (id, text, attachments, context, queued) = match &self.request {
             Request::Dispatch(dispatch) => match &dispatch.command {
                 Command::Send(send) => (
                     send.id.clone(),
                     send.text.clone(),
                     send.attachments.clone(),
                     send.context.clone(),
+                    send.mode == DispatchMode::QueueAfterActive,
                 ),
                 _ => return None,
             },
@@ -109,6 +111,7 @@ impl PendingCommand {
                     message.text.clone(),
                     message.attachments.clone(),
                     message.context.clone(),
+                    false,
                 )
             }
         };
@@ -119,6 +122,7 @@ impl PendingCommand {
             text,
             attachments,
             context,
+            queued,
             created_at: self.created_at.clone(),
             phase: self.phase.clone(),
         })
@@ -133,6 +137,8 @@ pub struct PendingMessage {
     pub text: String,
     pub attachments: Vec<Attachment>,
     pub context: Option<MessageContext>,
+    /// Sent to wait behind the active run; the queue shows it, not the timeline.
+    pub queued: bool,
     pub created_at: Timestamp,
     pub phase: Phase,
 }

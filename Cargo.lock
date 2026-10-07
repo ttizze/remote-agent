@@ -144,6 +144,7 @@ dependencies = [
  "insta",
  "markdown",
  "proptest",
+ "regex",
  "rstest",
  "scopeguard",
  "serde",
@@ -153,6 +154,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "uniffi",
+ "url",
  "uuid",
  "zeroize",
 ]

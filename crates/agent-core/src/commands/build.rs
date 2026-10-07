@@ -1,6 +1,7 @@
 //! Domain commands and launches built from what the user chose. The Host
 //! resolves delivery against the live run, so sends carry the user's intent.
 use super::workflows::interrupt_target;
+use crate::presentation::markdown::assistant_citations::assistant_citations_to_plain_text;
 use agent_domain::{
     Answers, ApprovalDecision, Attachment, Checkpoint, CheckpointStatus, Command, CommandId,
     Continuation, DeliveryIntent, DispatchMode, InteractionMode, LimitRecoveryUpdate,
@@ -406,8 +407,12 @@ fn truncate_title(text: &str) -> String {
     format!("{head}...")
 }
 
-fn collapse_spaces(text: &str) -> String {
-    text.split_whitespace().collect::<Vec<_>>().join(" ")
+/// Quotes read as their text and comment; whitespace runs collapse to one space.
+fn normalize_title_seed(text: &str) -> String {
+    assistant_citations_to_plain_text(text)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// The title shown while the first message's title is generated.
@@ -416,17 +421,17 @@ pub fn thread_title_seed(
     attachment_names: &[&str],
     fallbacks: &[Option<&str>],
 ) -> String {
-    let text = collapse_spaces(text);
+    let text = normalize_title_seed(text);
     if !text.is_empty() {
         return truncate_title(&text);
     }
-    let attachment = collapse_spaces(attachment_names.first().copied().unwrap_or(""));
+    let attachment = normalize_title_seed(attachment_names.first().copied().unwrap_or(""));
     if !attachment.is_empty() {
         return truncate_title(&format!("Image: {attachment}"));
     }
     fallbacks
         .iter()
-        .map(|label| collapse_spaces(label.unwrap_or("")))
+        .map(|label| normalize_title_seed(label.unwrap_or("")))
         .find(|label| !label.is_empty())
         .map_or_else(|| "New thread".into(), |label| truncate_title(&label))
 }
