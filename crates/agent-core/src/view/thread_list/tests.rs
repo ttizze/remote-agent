@@ -1957,3 +1957,45 @@ mod snapshot {
         assert!(!first.can_move_up && first.can_move_down);
     }
 }
+
+#[test]
+fn an_empty_list_names_the_connection_search_or_project_that_left_it_empty() {
+    let mut snapshot = Snapshot::default();
+    assert_eq!(
+        thread_list_empty(&snapshot, false).title,
+        "Connecting to environment"
+    );
+    assert!(thread_list_empty(&snapshot, false).loading);
+    snapshot.error = Some("The Host is offline.".into());
+    assert_eq!(
+        thread_list_empty(&snapshot, false),
+        ThreadListEmpty {
+            title: "Environment unavailable".into(),
+            detail: "The Host is offline.".into(),
+            loading: false,
+        }
+    );
+    snapshot.error = None;
+    snapshot.shell = std::sync::Arc::new(crate::sync::ShellCache::from_cache(
+        agent_protocol::conversation::ShellSnapshot {
+            snapshot_sequence: 1,
+            projects: vec![],
+            threads: vec![],
+        },
+    ));
+    assert_eq!(
+        thread_list_empty(&snapshot, false).title,
+        "No projects found"
+    );
+    assert_eq!(thread_list_empty(&snapshot, true).title, "No threads yet");
+    snapshot.selected_project = Some("app".into());
+    assert_eq!(
+        thread_list_empty(&snapshot, true).title,
+        "No threads in app"
+    );
+    snapshot.search = " fix ".into();
+    assert_eq!(
+        thread_list_empty(&snapshot, true).detail,
+        "No threads matching \"fix\"."
+    );
+}

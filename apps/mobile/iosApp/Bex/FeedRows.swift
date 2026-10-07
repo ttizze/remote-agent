@@ -233,17 +233,6 @@ enum FeedTime {
     static func clock(_ millis: Int64) -> String {
         Date(timeIntervalSince1970: Double(millis) / 1000).formatted(date: .omitted, time: .shortened)
     }
-
-    /// "42s", "3m 07s", "1h 02m".
-    static func elapsed(_ seconds: Int) -> String {
-        if seconds < 60 {
-            return "\(seconds)s"
-        }
-        if seconds < 3600 {
-            return String(format: "%dm %02ds", seconds / 60, seconds % 60)
-        }
-        return String(format: "%dh %02dm", seconds / 3600, (seconds % 3600) / 60)
-    }
 }
 
 struct FoldRowView: View {

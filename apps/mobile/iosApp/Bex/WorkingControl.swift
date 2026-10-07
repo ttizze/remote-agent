@@ -94,8 +94,8 @@ private struct StatusSegment: View {
             switch status {
             case let .working(startedAtMs):
                 TimelineView(.periodic(from: .now, by: 1)) { clock in
-                    let seconds = max(0, Int(clock.date.timeIntervalSince1970 - Double(startedAtMs) / 1000))
-                    Text("Working \(FeedTime.elapsed(seconds))")
+                    let now = Int64(clock.date.timeIntervalSince1970 * 1000)
+                    Text("Working \(workingDurationLabel(startedAtMs: startedAtMs, nowMs: now))")
                 }
             case let .syncing(text):
                 ProgressView().controlSize(.mini)

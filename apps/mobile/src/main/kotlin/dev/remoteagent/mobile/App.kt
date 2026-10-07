@@ -1,37 +1,9 @@
 package dev.remoteagent.mobile
 
 import android.content.Context
-import androidx.activity.ComponentActivity
-import androidx.activity.compose.BackHandler
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
-import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
-import androidx.compose.material3.Card
-import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.LinearProgressIndicator
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModel
 import dev.remoteagent.core.AgentStore
 import dev.remoteagent.core.BrowserFrame
@@ -41,11 +13,11 @@ import dev.remoteagent.core.Intent
 import dev.remoteagent.core.Invitation
 import dev.remoteagent.core.Outcome
 import dev.remoteagent.core.Snapshot
-import dev.remoteagent.core.ThreadAction
 import dev.remoteagent.core.applyModelPreferences
 import dev.remoteagent.core.generateIdentity
 import dev.remoteagent.core.parseInvitation
 import dev.remoteagent.core.validateInvitation
+import java.io.File
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
@@ -62,28 +34,43 @@ import kotlinx.coroutines.withContext
 
 private const val PERSISTENCE_QUEUE_CAPACITY = 8
 private const val MILLIS_PER_SECOND = 1000L
-private const val PRESENTATION_COALESCE_MILLIS = 16L
 private const val PERSISTENCE_DEBOUNCE_MILLIS = 250L
 
-internal enum class Screen {
-    Hosts,
-    Pairing,
-    Threads,
-    Conversation,
+/** Screens of the native stack. Terminals exist only under a thread. */
+internal sealed interface Route {
+    data object Hosts : Route
+
+    data object Pairing : Route
+
+    data object Home : Route
+
+    data class Thread(val id: String) : Route
+
+    data object NewTask : Route
+
+    data class Terminal(val threadId: String, val terminalId: String) : Route
+
+    data class Workspace(val tab: WorkspaceTab) : Route
+
+    data class Settings(val projectId: String? = null) : Route
+
+    data object Archived : Route
 }
 
-// One owner coordinates native lifecycle, receipts and persistence.
-@Suppress("TooManyFunctions", "TooGenericExceptionCaught", "ReturnCount")
+internal enum class WorkspaceTab {
+    Files,
+    Diff,
+    Browser,
+}
+
+// One owner coordinates native lifecycle, receipts, navigation and persistence.
+@Suppress("TooManyFunctions", "TooGenericExceptionCaught", "ReturnCount", "LongMethod")
 internal class AndroidAppModel(private val context: Context) : ViewModel() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val repository = AndroidMobileRepository(context)
     var snapshot by mutableStateOf(Snapshot.empty())
         private set
 
-    var conversation by mutableStateOf(snapshot.conversation())
-        private set
-
-    private var presentation: Job? = null
     private val draftEdits = DraftRevision()
     private var composerKey = ""
 
@@ -93,11 +80,15 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
     var profileId by mutableStateOf<String?>(null)
         private set
 
-    var screen by mutableStateOf(Screen.Hosts)
+    var stack by mutableStateOf(listOf<Route>(Route.Hosts))
+        private set
+
+    val route: Route
+        get() = stack.last()
+
     var busy by mutableStateOf(false)
         private set
 
-    var deleteThreadId by mutableStateOf<String?>(null)
     var notice by mutableStateOf<String?>(null)
     var invitation by mutableStateOf<Invitation?>(null)
         private set
@@ -126,6 +117,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
 
     init {
         runCatching { profiles = repository.profiles() }.onFailure { notice = it.message }
+        if (profiles.isEmpty()) stack = listOf(Route.Pairing)
         repository.selected?.takeIf { id -> profiles.any { it.id == id } }?.let(::selectProfile)
     }
 
@@ -150,7 +142,8 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
                     val result = runCatching { receipt.wait() }
                     if (host == profileId && owner === store) {
                         publish(store.snapshot())
-                        result.exceptionOrNull()?.let { notice = snapshot.error() ?: it.message }
+                        result.exceptionOrNull()?.let { notice = it.message }
+                        result.getOrNull()?.let(::follow)
                         complete(result)
                     } else complete(Result.failure(CancellationException("Host changed")))
                 } finally {
@@ -161,8 +154,11 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
         operation.start()
     }
 
-    private fun resetEditor() {
-        draftEdits.reset()
+    private fun follow(outcome: Outcome) {
+        if (outcome is Outcome.StartedThread && route == Route.NewTask) {
+            stack = stack.dropLast(1) + Route.Thread(outcome.id)
+            perform(Intent.OpenThread(outcome.id))
+        }
     }
 
     fun editDraft(text: String) {
@@ -176,32 +172,55 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
         }
     }
 
+    fun navigate(next: Route) {
+        when (next) {
+            is Route.Thread -> {
+                draftEdits.reset()
+                perform(Intent.OpenThread(next.id))
+            }
+            Route.NewTask -> {
+                draftEdits.reset()
+                perform(Intent.NewThread(snapshot.selectedProjectId()))
+            }
+            Route.Archived -> perform(Intent.ShowArchived(true))
+            else -> Unit
+        }
+        stack = stack + next
+    }
+
+    /** Replaces the open thread, as a thread link inside a thread does. */
     fun openThread(id: String) {
-        resetEditor()
-        screen = Screen.Conversation
-        perform(Intent.OpenThread(id))
+        if (route is Route.Thread) stack = stack.dropLast(1)
+        navigate(Route.Thread(id))
     }
 
-    fun newThread(project: String? = snapshot.selectedProjectId()) {
-        resetEditor()
-        screen = Screen.Conversation
-        perform(Intent.NewThread(project))
-    }
-
-    fun showThreads() {
-        resetEditor()
-        screen = Screen.Threads
-        perform(Intent.LeaveThread)
+    fun back() {
+        val leaving = stack.lastOrNull() ?: return
+        if (stack.size <= 1) return
+        stack = stack.dropLast(1)
+        when (leaving) {
+            is Route.Thread,
+            Route.NewTask -> {
+                draftEdits.reset()
+                when (val current = route) {
+                    is Route.Thread -> perform(Intent.OpenThread(current.id))
+                    else -> perform(Intent.LeaveThread)
+                }
+            }
+            Route.Archived -> perform(Intent.ShowArchived(false))
+            Route.Hosts -> Unit
+            else -> Unit
+        }
     }
 
     fun showHosts() {
         persist()
-        screen = Screen.Hosts
+        stack = listOf(Route.Hosts)
     }
 
     fun selectProfile(id: String) {
         if (profiles.none { it.id == id }) return
-        screen = Screen.Threads
+        stack = listOf(Route.Home)
         if (profileId == id && owner != null) {
             connect()
             return
@@ -217,7 +236,8 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
                     withContext(Dispatchers.IO) {
                         applyModelPreferences(repository.load(id), repository.modelPreferences())
                     }
-                val store = AgentStore.offline(bytes, repository.diagnosticsDirectory(id))
+                val store =
+                    AgentStore.offline(bytes, repository.cacheDirectory(id), repository.diagnosticsDirectory(id))
                 if (profileId != id || !isActive) {
                     store.shutdown()
                     return@launch
@@ -245,7 +265,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
 
     private fun detach(): AgentStore? {
         persist()
-        resetEditor()
+        draftEdits.reset()
         initialization?.cancel()
         observation?.cancel()
         connection?.cancel()
@@ -269,6 +289,8 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
                 }
                 profiles = profiles.filterNot { it.id == id }
                 repository.saveProfiles(profiles)
+                File(repository.cacheDirectory(id)).deleteRecursively()
+                if (profiles.isEmpty()) stack = listOf(Route.Pairing)
             }
             .onFailure { notice = it.message }
     }
@@ -282,7 +304,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
     }
 
     fun openPairing() {
-        screen = Screen.Pairing
+        if (route != Route.Pairing) stack = stack + Route.Pairing
         invitation = null
         notice = null
     }
@@ -307,6 +329,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
                         AgentStore.connect(
                             Connection(target.endpoint, identity, target.invitation, true),
                             bytes,
+                            repository.cacheDirectory(id),
                             repository.diagnosticsDirectory(id),
                         )
                     } finally {
@@ -318,7 +341,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
                     return@launch
                 }
                 persist()
-                resetEditor()
+                draftEdits.reset()
                 initialization?.cancel()
                 observation?.cancel()
                 val old = owner
@@ -333,7 +356,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
                 publish(store.snapshot())
                 observe(store, id)
                 invitation = null
-                screen = Screen.Threads
+                stack = listOf(Route.Home)
                 busy = false
                 scope.launch { old?.shutdown() }
             } catch (error: CancellationException) {
@@ -347,10 +370,16 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
         }
     }
 
+    /** Foreground: subscriptions resume from their cursors and the connection is checked. */
+    fun foreground() {
+        owner?.appBecameActive()
+        connect()
+    }
+
     fun connect() {
         val store = owner ?: return
         val profile = profiles.firstOrNull { it.id == profileId } ?: return
-        if (busy || screen == Screen.Pairing) return
+        if (busy || route == Route.Pairing) return
         busy = true
         notice = null
         connection = scope.launch {
@@ -402,7 +431,6 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
     private fun publish(next: Snapshot) {
         if (!next.supersedes(snapshot)) return
         if (next === snapshot) return
-
         val name = next.hostName()
         if (name != null && profiles.any { it.id == profileId && it.name != name }) {
             profiles = profiles.map { if (it.id == profileId) it.copy(name = name) else it }
@@ -418,32 +446,10 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
             composerText = next.draft().text
             draftEdits.base = composerText
         }
-        schedulePresentation()
         persistence?.cancel()
         persistence = scope.launch {
             delay(PERSISTENCE_DEBOUNCE_MILLIS)
             persist()
-        }
-    }
-
-    private fun schedulePresentation() {
-        if (owner == null) {
-            presentation?.cancel()
-            presentation = null
-            conversation = snapshot.conversation()
-        } else if (presentation?.isActive != true) {
-            val expectedOwner = owner
-            val expectedHost = profileId
-            presentation = scope.launch {
-                while (isActive) {
-                    delay(PRESENTATION_COALESCE_MILLIS)
-                    val latest = snapshot
-                    val view = withContext(Dispatchers.Default) { latest.conversation() }
-                    if (owner !== expectedOwner || profileId != expectedHost) return@launch
-                    if (snapshot.selectedThreadId() == latest.selectedThreadId()) conversation = view
-                    if (snapshot === latest) return@launch
-                }
-            }
         }
     }
 
@@ -453,35 +459,25 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
         scope.launch { writes.send(id to current) }
     }
 
-    suspend fun download(path: String, destination: String) {
+    private suspend fun <T> withStore(block: suspend (AgentStore) -> T): T {
         val store = owner ?: error("Host not connected")
         val host = profileId
-        store.downloadFile(path, destination)
-        if (host != profileId) throw CancellationException("Host changed")
-    }
-
-    suspend fun downloadAttachment(id: String, destination: String) {
-        val store = owner ?: error("Host not connected")
-        val host = profileId
-        store.downloadAttachment(id, destination)
-        if (host != profileId) throw CancellationException("Host changed")
-    }
-
-    suspend fun upload(source: String, directory: String, name: String): String {
-        val store = owner ?: error("Host not connected")
-        val host = profileId
-        val result = store.uploadFile(source, directory, name)
+        val result = block(store)
         if (host != profileId) throw CancellationException("Host changed")
         return result
     }
 
-    suspend fun browser(request: BrowserRequest): BrowserFrame {
-        val store = owner ?: error("Host not connected")
-        val host = profileId
-        val result = store.browser(request)
-        if (host != profileId) throw CancellationException("Host changed")
-        return result
+    suspend fun download(path: String, destination: String) = withStore { it.downloadFile(path, destination) }
+
+    suspend fun downloadAttachment(id: String, destination: String) = withStore {
+        it.downloadAttachment(id, destination)
     }
+
+    suspend fun upload(source: String, directory: String, name: String): String = withStore {
+        it.uploadFile(source, directory, name)
+    }
+
+    suspend fun browser(request: BrowserRequest): BrowserFrame = withStore { it.browser(request) }
 
     override fun onCleared() {
         observation?.cancel()
@@ -497,145 +493,6 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
             writes.close()
             writer.join()
             scope.cancel()
-        }
-    }
-}
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-// Declarative native layout; the conversation decisions are supplied by core.
-@Suppress("LongMethod", "CyclomaticComplexMethod")
-internal fun RemoteAgentApp(
-    activity: ComponentActivity,
-    model: AndroidAppModel,
-    requestQrScan: (onContents: (String) -> Unit) -> Unit,
-) {
-    DisposableEffect(model, activity) {
-        val observer = AndroidConnectionLifecycle(model::connect, model::persist)
-        activity.lifecycle.addObserver(observer)
-        onDispose { activity.lifecycle.removeObserver(observer) }
-    }
-    BackHandler(model.screen != Screen.Hosts) {
-        if (model.screen == Screen.Conversation) model.showThreads() else model.showHosts()
-    }
-    AppMaterialTheme {
-        model.deleteThreadId?.let { id ->
-            AlertDialog(
-                onDismissRequest = { model.deleteThreadId = null },
-                title = { Text("Delete thread?") },
-                text = { Text("This permanently deletes the conversation.") },
-                confirmButton = {
-                    TextButton(
-                        onClick = {
-                            val wasOpen = model.snapshot.selectedThreadId() == id
-                            model.perform(Intent.Thread(id, ThreadAction.Delete)) { result ->
-                                val selected = model.snapshot.selectedThreadId()
-                                val stillOnDeletedThread = selected == id || selected == null
-                                if (result.isSuccess && wasOpen) {
-                                    if (model.screen == Screen.Conversation && stillOnDeletedThread) model.showThreads()
-                                }
-                            }
-                            model.deleteThreadId = null
-                        }
-                    ) {
-                        Text("Delete")
-                    }
-                },
-                dismissButton = { TextButton(onClick = { model.deleteThreadId = null }) { Text("Cancel") } },
-            )
-        }
-        Scaffold(
-            topBar = {
-                TopAppBar(
-                    expandedHeight = 48.dp,
-                    title = {
-                        Text(
-                            if (model.screen == Screen.Conversation) model.conversation.title
-                            else model.profiles.firstOrNull { it.id == model.profileId }?.name ?: "Bex"
-                        )
-                    },
-                    navigationIcon = {
-                        if (model.screen != Screen.Hosts)
-                            TextButton(
-                                onClick = {
-                                    if (model.screen == Screen.Conversation) model.showThreads() else model.showHosts()
-                                }
-                            ) {
-                                Text("‹")
-                            }
-                    },
-                )
-            }
-        ) { padding ->
-            Column(Modifier.padding(padding).fillMaxSize()) {
-                (model.notice ?: model.snapshot.error())?.let {
-                    Text(it, color = AppTheme.color("errorForeground"), modifier = Modifier.padding(12.dp))
-                }
-                if (model.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
-                if (!model.snapshot.connected() && model.profileId != null && model.screen != Screen.Pairing)
-                    TextButton(onClick = model::connect, enabled = !model.busy) { Text("Reconnect") }
-                when {
-                    model.screen == Screen.Pairing || model.profiles.isEmpty() -> PairingScreen(model, requestQrScan)
-                    model.screen == Screen.Hosts -> ProfilesScreen(model)
-                    model.screen == Screen.Threads -> ThreadListScreen(model, Modifier.weight(1f))
-                    else -> ThreadDetailScreen(model, Modifier.weight(1f))
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun PairingScreen(model: AndroidAppModel, scan: (onContents: (String) -> Unit) -> Unit) {
-    var contents by remember { mutableStateOf("") }
-    Column(Modifier.fillMaxSize().padding(24.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        Text("PCとペアリング", style = MaterialTheme.typography.headlineMedium)
-        val invitation = model.invitation
-        if (invitation == null) {
-            Text("PC Host Manager の QR コードを読み取ります。")
-            Button(onClick = { scan { model.preparePairing(it) } }) { Text("QRコードを読み取る") }
-            OutlinedTextField(
-                contents,
-                { contents = it },
-                Modifier.fillMaxWidth(),
-                label = { Text("接続情報") },
-                minLines = 3,
-            )
-            Button(
-                onClick = {
-                    model.preparePairing(contents)
-                    contents = ""
-                },
-                enabled = contents.isNotBlank() && !model.busy,
-            ) {
-                Text("接続先を確認")
-            }
-        } else {
-            Text(invitation.hostName, style = MaterialTheme.typography.titleLarge)
-            Text("メッセージと作業に必要な内容をこの PC と AI サービスに送信します。")
-            Text("AI処理: ${invitation.aiRecipients.joinToString("、")}")
-            invitation.transcriptionRecipient?.let { Text("音声入力: $it") }
-            Button(onClick = model::pair, enabled = !model.busy) { Text("同意して接続") }
-            TextButton(onClick = model::openPairing) { Text("変更") }
-        }
-        TextButton(onClick = model::showHosts) { Text("戻る") }
-    }
-}
-
-@Composable
-private fun ProfilesScreen(model: AndroidAppModel) {
-    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(20.dp)) {
-        item { Button(onClick = model::openPairing) { Text("PCを追加") } }
-        items(model.profiles, key = { it.id }) { profile ->
-            Card(
-                onClick = { model.selectProfile(profile.id) },
-                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-            ) {
-                Row(Modifier.padding(16.dp), horizontalArrangement = Arrangement.SpaceBetween) {
-                    Text(profile.name, Modifier.weight(1f))
-                    TextButton(onClick = { model.removeProfile(profile.id) }) { Text("Remove") }
-                }
-            }
         }
     }
 }

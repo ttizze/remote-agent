@@ -125,6 +125,15 @@ pub fn format_duration(duration_ms: i64) -> String {
         .join(" ")
 }
 
+/// "Working for …" time: whole seconds below a minute, then `format_duration`.
+pub fn format_working_timer(started_at_ms: i64, now_ms: i64) -> String {
+    let seconds = (now_ms - started_at_ms).max(0) / 1_000;
+    if seconds < 60 {
+        return format!("{seconds}s");
+    }
+    format_duration(seconds * 1_000)
+}
+
 #[cfg(test)]
 pub(crate) mod fixtures {
     use chrono::{DateTime, Local, NaiveDate};
@@ -177,6 +186,16 @@ mod tests {
     #[case(90_061_000, "25h 1m 1s")]
     fn formats_durations(#[case] duration_ms: i64, #[case] expected: &str) {
         assert_eq!(format_duration(duration_ms), expected);
+    }
+
+    #[rstest]
+    #[case(-1_000, "0s")]
+    #[case(1_500, "1s")]
+    #[case(59_999, "59s")]
+    #[case(65_400, "1m 5s")]
+    #[case(3_661_900, "1h 1m 1s")]
+    fn working_timer_floors_to_whole_seconds(#[case] elapsed_ms: i64, #[case] expected: &str) {
+        assert_eq!(format_working_timer(1_000_000, 1_000_000 + elapsed_ms), expected);
     }
 
     #[test]

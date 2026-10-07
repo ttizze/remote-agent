@@ -62,7 +62,7 @@ struct CustomSnoozeSheet: View {
         } else {
             .duration(amount: String(amount), unit: unit)
         }
-        guard let until = customSnooze(nowMs: now, input: input) else {
+        guard let until = customSnoozeUntil(input: input, nowMs: now) else {
             error = byDate ? "Choose a date and time in the future." : "Enter a positive duration."
             return
         }

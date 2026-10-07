@@ -30,6 +30,9 @@ internal class AndroidMobileRepository(context: Context) {
     fun diagnosticsDirectory(id: String): String =
         File(directory, "connection-diagnostics/${encodedId(id)}").absolutePath
 
+    /** The shell and thread snapshots core keeps for a warm start. */
+    fun cacheDirectory(id: String): String = File(directory, "conversation-cache/${encodedId(id)}").absolutePath
+
     fun modelPreferences(): ByteArray =
         preferences.getString("orchestration-model-defaults", null)?.let { Base64.getDecoder().decode(it) }
             ?: byteArrayOf()

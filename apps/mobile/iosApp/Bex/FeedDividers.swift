@@ -106,9 +106,8 @@ struct WorkingSinceRow: View {
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 1)) { clock in
-            let start = Double(createdAt ?? 0) / 1000
-            let seconds = max(0, Int(clock.date.timeIntervalSince1970 - start))
-            Text("Working for \(FeedTime.elapsed(seconds))")
+            let now = Int64(clock.date.timeIntervalSince1970 * 1000)
+            Text("Working for \(workingTimerLabel(startedAtMs: createdAt ?? now, nowMs: now))")
                 .font(AppTheme.font(14)).foregroundStyle(AppTheme.muted).shimmering(true)
                 .frame(minHeight: 28, alignment: .leading)
         }
