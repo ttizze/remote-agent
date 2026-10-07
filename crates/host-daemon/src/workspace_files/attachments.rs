@@ -325,9 +325,6 @@ impl WorkspaceFiles {
             {
                 return Err(cannot("attachment type does not match the upload"));
             }
-            if uploaded.name != attachment.name {
-                return Err(cannot("attachment does not match the upload"));
-            }
             let mut attachment = attachment.clone();
             let target = match pending {
                 Some(token) => {
@@ -349,7 +346,6 @@ impl WorkspaceFiles {
                     if target.exists() {
                         let (_, saved) = self.manifest(&attachment.id).map_err(|_| failed())?;
                         if saved.attachment.id != attachment.id
-                            || saved.attachment.name != uploaded.name
                             || saved.attachment.size != uploaded.size
                             || saved.sha256 != digest
                         {
@@ -532,9 +528,18 @@ mod tests {
             claimed
         );
         assert!(files.attachment_path("pending-../../checkout").is_err());
-        let mut changed = pending.clone();
-        changed.name = "renamed.txt".into();
-        assert!(files.claim("thread", &[changed]).is_err());
+        // The name is the message's own label of the upload.
+        let renamed = files
+            .claim(
+                "thread",
+                &[Attachment {
+                    name: "renamed.txt".into(),
+                    ..pending.clone()
+                }],
+            )
+            .unwrap();
+        assert_eq!(renamed.attachments[0].name, "renamed.txt");
+        assert_eq!(renamed.attachments[0].path, claimed[0].path);
 
         let outside = directory.path().join("outside.txt");
         fs::write(&outside, b"keep").unwrap();
