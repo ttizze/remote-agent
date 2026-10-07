@@ -420,3 +420,50 @@ async fn refuses_an_unknown_schema_version() {
     drop(store);
     assert!(matches!(Store::open(&path), Err(StoreError::Schema(v)) if v == "0"));
 }
+
+// List rows are derived: a store whose rows predate the current shell format
+// rebuilds them from facts on open, each under a new global sequence.
+#[tokio::test]
+async fn rows_of_an_older_shell_format_are_rebuilt_from_facts_on_open() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("runtime.sqlite");
+    let store = Store::open(&path).unwrap();
+    let id = thread("thread:shell-format");
+    store
+        .commit(batch(&id, 0, 1, history(&id, 3, "Shell")))
+        .await
+        .unwrap();
+    store
+        .write(move |tx| {
+            tx.execute(
+                "INSERT INTO thread_shells
+                     (thread_id, global_seq, project, archived, deleted, needs_recovery, payload)
+                 VALUES ('thread:shell-format', 1, 'old', 0, 0, 1, '{\"title\":\"old\"}')",
+                [],
+            )?;
+            tx.execute("DELETE FROM runtime_meta WHERE key = 'shell_format'", [])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let before = store.latest_global_seq().unwrap();
+    assert!(store.shell(&id).is_err(), "an older row does not decode");
+    drop(store);
+
+    let store = Store::open(&path).unwrap();
+    let (sequence, row) = store.shell(&id).unwrap().unwrap();
+    let state = fold(&State::default(), &history(&id, 3, "Shell")).unwrap();
+    assert_eq!(*row.summary, agent_domain::shell(&state).unwrap());
+    assert_eq!(row.summary.title, "Shell 2");
+    assert_eq!(
+        (row.project.as_str(), row.needs_recovery),
+        ("project", false)
+    );
+    assert!(sequence > before);
+    assert_eq!(store.latest_global_seq().unwrap(), sequence);
+    drop(store);
+
+    // The current format keeps its rows.
+    let store = Store::open(&path).unwrap();
+    assert_eq!(store.shell(&id).unwrap().unwrap().0, sequence);
+}

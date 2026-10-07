@@ -19,7 +19,7 @@ impl Store {
     }
 }
 
-fn load(c: &Connection, thread: &ThreadId) -> Result<LoadedThread, StoreError> {
+pub(super) fn load(c: &Connection, thread: &ThreadId) -> Result<LoadedThread, StoreError> {
     let head = head(c, thread)?;
     let snapshot: Option<(i64, String, Vec<u8>)> = c
         .query_row(

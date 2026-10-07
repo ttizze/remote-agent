@@ -32,7 +32,7 @@ pub(crate) struct ProjectCatalog {
     projects: RwLock<Vec<HostProject>>,
     scripts: RwLock<HashMap<String, Vec<ProjectScript>>>,
     identities: crate::repository::ProjectIdentities,
-    stored: RwLock<HashMap<String, Project>>,
+    stored: RwLock<HashMap<String, crate::projects::StoredProject>>,
     chats: tokio::sync::OnceCell<bool>,
 }
 
@@ -94,18 +94,17 @@ impl ProjectCatalog {
     /// The project as clients see it, with the repository identity at hand; a
     /// missing or expired one resolves in the background.
     pub(crate) fn wire(&self, project: HostProject) -> Project {
-        let stored = self
+        let times = self
             .stored
             .read()
             .unwrap_or_else(|error| error.into_inner())
             .get(&project.id)
-            .cloned()
-            .unwrap_or_default();
+            .map(|stored| (stored.created_at.clone(), stored.updated_at.clone()));
         Project {
             favicon_path: crate::favicon::resolve(Path::new(&project.root))
                 .map(|path| path.to_string_lossy().into_owned()),
-            created_at: stored.created_at,
-            updated_at: stored.updated_at,
+            created_at: times.as_ref().map(|(created, _)| created.clone()),
+            updated_at: times.map(|(_, updated)| updated),
             repository_identity: (project.id != CHATS_PROJECT)
                 .then(|| self.identities.available(&project.root))
                 .flatten(),

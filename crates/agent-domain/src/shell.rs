@@ -34,6 +34,9 @@ pub struct PullRequestLink {
     pub source: String,
     pub linked_at: Timestamp,
 }
+/// Version of the `ThreadShell` encoding and of how `shell` derives it.
+/// Stored rows with another value are rebuilt from facts.
+pub const SHELL_FORMAT: u32 = 1;
 /// Message bodies stay in the thread detail; unread state is derived by
 /// clients from `last_visited_at` and the latest completion.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -46,7 +49,6 @@ pub struct ThreadShell {
     pub interaction_mode: InteractionMode,
     pub workspace: Option<Workspace>,
     pub parent: Option<ThreadId>,
-    #[serde(default)]
     pub relationship_to_parent: Option<ThreadRelationship>,
     pub fork_boundary: Option<u64>,
     pub imported: bool,
@@ -58,7 +60,6 @@ pub struct ThreadShell {
     pub deleted_at: Option<Timestamp>,
     pub settled: Option<bool>,
     pub settled_at: Option<Timestamp>,
-    #[serde(default)]
     pub unsettled_at: Option<Timestamp>,
     pub snoozed_until: Option<Timestamp>,
     pub snoozed_at: Option<Timestamp>,
@@ -82,7 +83,6 @@ pub struct ThreadShell {
     pub usage_limit_reset_at: Option<Timestamp>,
     pub limit_recovery: Option<LimitRecovery>,
     pub linked_pull_request: Option<LinkedPullRequest>,
-    #[serde(default)]
     pub pull_requests: Vec<PullRequestLink>,
     pub pending_request: Option<PendingRequestSummary>,
     pub latest_user_message_at: Option<Timestamp>,

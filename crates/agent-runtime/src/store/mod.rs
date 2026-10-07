@@ -17,11 +17,38 @@ const _: () = assert!(
     "bump SNAPSHOT_FORMAT with STATE_FORMAT"
 );
 pub const SNAPSHOT_INTERVAL: u64 = 256;
+/// Stored list rows older than this marker are rebuilt from facts on open.
+const SHELL_FORMAT: &str = "shell-json-1";
+const _: () = assert!(
+    agent_domain::SHELL_FORMAT == 1,
+    "bump SHELL_FORMAT with agent_domain::SHELL_FORMAT"
+);
 
 pub(crate) fn latest_sequence(c: &Connection) -> Result<u64, StoreError> {
     Ok(c.query_row(
         "SELECT MAX(COALESCE((SELECT MAX(global_seq) FROM facts), 0),
                     COALESCE((SELECT seq FROM sqlite_sequence WHERE name = 'facts'), 0))",
+        [],
+        |row| row.get::<_, i64>(0),
+    )? as u64)
+}
+/// Takes the next global sequence for a change outside the fact log.
+pub(crate) fn take_sequence(c: &Connection) -> Result<u64, StoreError> {
+    let sequence = c.query_row(
+        "INSERT INTO sqlite_sequence (name, seq)
+         SELECT 'facts', COALESCE(MAX(global_seq), 0) FROM facts
+         WHERE NOT EXISTS (SELECT 1 FROM sqlite_sequence WHERE name = 'facts')
+         RETURNING seq",
+        [],
+        |row| row.get::<_, i64>(0),
+    );
+    if let Err(error) = sequence
+        && error != rusqlite::Error::QueryReturnedNoRows
+    {
+        return Err(error.into());
+    }
+    Ok(c.query_row(
+        "UPDATE sqlite_sequence SET seq = seq + 1 WHERE name = 'facts' RETURNING seq",
         [],
         |row| row.get::<_, i64>(0),
     )? as u64)
@@ -333,6 +360,16 @@ fn migrate(connection: &mut Connection) -> Result<(), StoreError> {
         if version.as_deref() != Some(SCHEMA_VERSION) {
             return Err(StoreError::Schema(version.unwrap_or_default()));
         }
+        let shells: Option<String> = transaction
+            .query_row(
+                "SELECT value FROM runtime_meta WHERE key = 'shell_format'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if shells.as_deref() != Some(SHELL_FORMAT) {
+            rebuild_shells(&transaction)?;
+        }
     } else {
         transaction.execute_batch(include_str!("schema.sql"))?;
         transaction.execute(
@@ -340,7 +377,56 @@ fn migrate(connection: &mut Connection) -> Result<(), StoreError> {
             [SCHEMA_VERSION],
         )?;
     }
+    transaction.execute(
+        "INSERT INTO runtime_meta (key, value) VALUES ('shell_format', ?1)
+         ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+        [SHELL_FORMAT],
+    )?;
     transaction.commit()?;
+    Ok(())
+}
+
+/// Rebuilds every thread's list row from its facts. Each row takes a new
+/// global sequence, so a resuming subscriber receives it.
+fn rebuild_shells(c: &Connection) -> Result<(), StoreError> {
+    use crate::ShellProjector;
+    let threads: Vec<ThreadId> = {
+        let mut statement = c.prepare("SELECT thread_id FROM threads ORDER BY thread_id")?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+        rows.map(|row| thread_id(row?)).collect::<Result<_, _>>()?
+    };
+    for thread in threads {
+        let loaded = load::load(c, &thread)?;
+        match crate::ThreadShellProjector.project(&loaded.state) {
+            Some(shell) => {
+                let sequence = take_sequence(c)?;
+                c.execute(
+                    "INSERT INTO thread_shells
+                         (thread_id, global_seq, project, archived, deleted, needs_recovery, payload)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                     ON CONFLICT (thread_id) DO UPDATE SET global_seq = excluded.global_seq,
+                         project = excluded.project, archived = excluded.archived,
+                         deleted = excluded.deleted, needs_recovery = excluded.needs_recovery,
+                         payload = excluded.payload",
+                    params![
+                        thread.as_str(),
+                        sequence as i64,
+                        shell.project,
+                        shell.archived,
+                        shell.deleted,
+                        shell.needs_recovery,
+                        serde_json::to_string(&shell.summary)?,
+                    ],
+                )?;
+            }
+            None => {
+                c.execute(
+                    "DELETE FROM thread_shells WHERE thread_id = ?1",
+                    [thread.as_str()],
+                )?;
+            }
+        }
+    }
     Ok(())
 }
 

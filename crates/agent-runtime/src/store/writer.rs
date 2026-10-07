@@ -154,24 +154,7 @@ impl Store {
         then: impl FnOnce(u64) + Send + 'static,
     ) -> Result<u64, StoreError> {
         self.submit(move |connection, _| {
-            let sequence = connection.query_row(
-                "INSERT INTO sqlite_sequence (name, seq)
-                 SELECT 'facts', COALESCE(MAX(global_seq), 0) FROM facts
-                 WHERE NOT EXISTS (SELECT 1 FROM sqlite_sequence WHERE name = 'facts')
-                 RETURNING seq",
-                [],
-                |row| row.get::<_, i64>(0),
-            );
-            if let Err(error) = sequence
-                && error != rusqlite::Error::QueryReturnedNoRows
-            {
-                return Err(error.into());
-            }
-            let sequence = connection.query_row(
-                "UPDATE sqlite_sequence SET seq = seq + 1 WHERE name = 'facts' RETURNING seq",
-                [],
-                |row| row.get::<_, i64>(0),
-            )? as u64;
+            let sequence = super::take_sequence(connection)?;
             then(sequence);
             Ok(sequence)
         })

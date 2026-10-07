@@ -50,11 +50,8 @@ pub struct Project {
     pub repository_identity: Option<RepositoryIdentity>,
     /// The project's icon file, found in its root when the Host lists the
     /// project; never stored.
-    #[serde(default)]
     pub favicon_path: Option<String>,
-    #[serde(default)]
     pub created_at: Option<agent_domain::Timestamp>,
-    #[serde(default)]
     pub updated_at: Option<agent_domain::Timestamp>,
 }
 /// The repository a project's checkout belongs to.

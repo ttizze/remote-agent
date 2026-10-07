@@ -1,4 +1,5 @@
-use agent_protocol::models::{Project, ProjectScript};
+use agent_domain::Timestamp;
+use agent_protocol::models::{ProjectRoot, ProjectScript};
 use anyhow::Context;
 use std::{
     io,
@@ -14,6 +15,19 @@ pub(crate) use named::{Git, NamedProjectError, create_named_project};
 pub(crate) enum Registration {
     Created(String),
     Existing(String),
+}
+
+/// One entry of `projects.json`. A file in any other shape is refused.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct StoredProject {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    /// Empty for a project that is not registered and keeps only its settings.
+    pub(crate) roots: Vec<ProjectRoot>,
+    pub(crate) scripts: Vec<ProjectScript>,
+    pub(crate) created_at: Timestamp,
+    pub(crate) updated_at: Timestamp,
 }
 
 /// The Host owns project registration independently of native provider catalogs.
@@ -41,9 +55,12 @@ impl ProjectStore {
         self.path.with_file_name("projects")
     }
 
-    pub(crate) async fn load(&self) -> anyhow::Result<Vec<Project>> {
-        match tokio::fs::read(self.path.with_file_name("projects.json")).await {
-            Ok(bytes) => Ok(serde_json::from_slice(&bytes)?),
+    pub(crate) async fn load(&self) -> anyhow::Result<Vec<StoredProject>> {
+        let file = self.path.with_file_name("projects.json");
+        match tokio::fs::read(&file).await {
+            Ok(bytes) => serde_json::from_slice(&bytes).with_context(|| {
+                format!("{} is not in the current project format", file.display())
+            }),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
             Err(error) => Err(error.into()),
         }
@@ -85,18 +102,16 @@ impl ProjectStore {
         }
         let id = uuid::Uuid::new_v4().to_string();
         let now = now();
-        projects.push(Project {
-            repository_identity: None,
-            favicon_path: None,
-            created_at: Some(now.clone()),
-            updated_at: Some(now),
+        projects.push(StoredProject {
+            created_at: now.clone(),
+            updated_at: now,
             id: id.clone(),
             name: name.map(str::to_owned).unwrap_or_else(|| {
                 root.file_name()
                     .map(|name| name.to_string_lossy().into_owned())
                     .unwrap_or_else(|| path.into())
             }),
-            roots: vec![agent_protocol::models::ProjectRoot { path: path.into() }],
+            roots: vec![ProjectRoot { path: path.into() }],
             scripts,
         });
         self.save(&projects).await?;
@@ -116,10 +131,14 @@ impl ProjectStore {
         let index = match projects.iter().position(|project| project.id == id) {
             Some(index) => index,
             None if rootless => {
-                projects.push(Project {
+                let now = now();
+                projects.push(StoredProject {
                     id: id.into(),
-                    created_at: Some(now()),
-                    ..Project::default()
+                    name: String::new(),
+                    roots: vec![],
+                    scripts: vec![],
+                    created_at: now.clone(),
+                    updated_at: now,
                 });
                 projects.len() - 1
             }
@@ -127,11 +146,11 @@ impl ProjectStore {
         };
         if let Some(scripts) = scripts {
             projects[index].scripts = scripts;
-            projects[index].updated_at = Some(now());
+            projects[index].updated_at = now();
         }
         self.save(&projects).await
     }
-    async fn save(&self, projects: &[Project]) -> anyhow::Result<()> {
+    async fn save(&self, projects: &[StoredProject]) -> anyhow::Result<()> {
         let file = self.path.with_file_name("projects.json");
         let bytes = serde_json::to_vec(projects)?;
         tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
@@ -148,11 +167,11 @@ impl ProjectStore {
     }
 }
 
-fn now() -> agent_domain::Timestamp {
+fn now() -> Timestamp {
     let millis = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_millis() as i64);
-    agent_domain::Timestamp::from_millis(millis).expect("the clock is within range")
+    Timestamp::from_millis(millis).expect("the clock is within range")
 }
 
 /// `~`, `~/…` and `~\…` name the home directory.
@@ -290,7 +309,6 @@ mod tests {
         assert_eq!(projects[0].id, registered);
         assert_eq!(projects[0].name, "project");
         assert_eq!(projects[0].roots[0].path, project.to_str().unwrap());
-        assert!(projects[0].created_at.is_some());
         assert_eq!(projects[0].created_at, projects[0].updated_at);
         assert!(store.register(Path::new("relative")).await.is_err());
         assert_eq!(
@@ -315,6 +333,37 @@ mod tests {
                 .name,
             "Pinball Stats"
         );
+    }
+
+    // Only the current format loads; an entry without times or with fields the
+    // Host never stores is refused rather than read as another format.
+    #[tokio::test]
+    async fn a_projects_file_in_another_format_is_refused() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = ProjectStore::new(directory.path().join("worktrees.json"));
+        let file = directory.path().join("projects.json");
+        let entry = r#"{"id":"p","name":"p","roots":[{"path":"/p"}],"scripts":[]"#;
+        for contents in [
+            format!("[{entry}}}]"),
+            format!(
+                r#"[{entry},"createdAt":"2026-10-07T00:00:00.000Z","updatedAt":"2026-10-07T00:00:00.000Z","repositoryIdentity":null}}]"#
+            ),
+        ] {
+            std::fs::write(&file, contents).unwrap();
+            let error = store.load().await.unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .ends_with("is not in the current project format"),
+                "{error:#}"
+            );
+        }
+        std::fs::write(
+            &file,
+            format!(r#"[{entry},"createdAt":"2026-10-07T00:00:00.000Z","updatedAt":"2026-10-07T00:00:00.000Z"}}]"#),
+        )
+        .unwrap();
+        assert_eq!(store.load().await.unwrap()[0].id, "p");
     }
 
     #[tokio::test]
