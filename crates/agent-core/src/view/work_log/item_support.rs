@@ -70,11 +70,7 @@ pub fn resolve_item_support(state: &State, item_id: &TurnItemId) -> ItemSupport 
             .cloned()
     });
     let task = match &item.kind {
-        ItemKind::Subagent { task } => state
-            .tasks
-            .iter()
-            .find(|candidate| &candidate.id == task)
-            .cloned(),
+        ItemKind::Subagent { task } => state.task(task).cloned(),
         _ => None,
     };
     let transfer = match &item.kind {

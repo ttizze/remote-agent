@@ -219,6 +219,7 @@ fn a_fork_keeps_its_subagent_tasks_as_they_were_at_the_fork() {
             .any(|item| matches!(&item.kind, ItemKind::Subagent { task } if task == &at_fork.id))
     );
     assert_eq!(child.inherited_tasks, std::slice::from_ref(&at_fork));
+    assert_eq!(child.task(&at_fork.id), Some(&at_fork));
     let child_run = completed(&mut child, "child request", "child answer");
     let grandchild = accept_child(&fork(&mut child, "fork-again", SourcePoint::Run(child_run)));
     assert_eq!(grandchild.inherited_tasks, [at_fork]);

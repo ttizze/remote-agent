@@ -284,7 +284,7 @@ fn present_subagent(
     item_status: ItemStatus,
     event: Option<SubagentEvent>,
 ) -> SubagentLink {
-    let task = task_id.and_then(|id| state.tasks.iter().find(|task| &task.id == id));
+    let task = task_id.and_then(|id| state.task(id));
     let live_status = task.map_or(item_status, |task| task.status);
     let status = match &event {
         Some(event) => event.status,

@@ -312,7 +312,7 @@ pub fn turn_item_has_detail(item: &Item, state: &State) -> bool {
             plan(id).is_some_and(|plan| !js_trim(&plan.markdown).is_empty())
         }
         ItemKind::TodoList { plan: id } => plan(id).is_some_and(|plan| !plan.steps.is_empty()),
-        ItemKind::Subagent { task } => state.tasks.iter().any(|candidate| &candidate.id == task),
+        ItemKind::Subagent { task } => state.task(task).is_some(),
         _ => false,
     }
 }

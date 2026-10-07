@@ -384,7 +384,7 @@ pub(crate) fn subagent_task<'a>(state: &'a State, item: &Item) -> Option<&'a Tas
     let ItemKind::Subagent { task } = &item.kind else {
         return None;
     };
-    state.tasks.iter().find(|candidate| &candidate.id == task)
+    state.task(task)
 }
 
 fn usage_limit(item: &Item) -> bool {

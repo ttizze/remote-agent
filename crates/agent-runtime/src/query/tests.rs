@@ -601,9 +601,12 @@ async fn a_forks_inherited_subagent_item_reads_its_task_as_it_was_at_the_fork() 
             .unwrap();
         assert!(detail.row.inherited);
         assert_eq!(detail.task.unwrap(), at_fork, "{thread}");
-        // Clients read the inherited tasks through this call only.
+        // Clients fold the same frozen tasks for the inherited cards.
         let state = registry.state(&thread).await.unwrap();
         assert_eq!(state.inherited_tasks, std::slice::from_ref(&at_fork));
-        assert!(crate::sync::client_state(&state).inherited_tasks.is_empty());
+        assert_eq!(
+            crate::sync::client_state(&state).inherited_tasks,
+            std::slice::from_ref(&at_fork)
+        );
     }
 }

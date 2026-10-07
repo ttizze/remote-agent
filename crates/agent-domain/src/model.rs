@@ -728,6 +728,13 @@ impl State {
             .chain(&self.inherited_messages)
             .find(|message| &message.id == id)
     }
+    /// A task of the thread, or of a subagent item the thread inherited.
+    pub fn task(&self, id: &NodeId) -> Option<&Task> {
+        self.tasks
+            .iter()
+            .chain(&self.inherited_tasks)
+            .find(|task| &task.id == id)
+    }
     pub fn active_run(&self) -> Option<&Run> {
         self.runs
             .iter()

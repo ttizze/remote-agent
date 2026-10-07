@@ -1,6 +1,6 @@
-//! What clients receive. Storage keeps everything; delivery withholds tool output, file bodies,
-//! transfer transcripts and a fork's inherited tasks, and bounds long detail text. `getTurnItem`
-//! reads the withheld parts with a larger bound.
+//! What clients receive. Storage keeps everything; delivery withholds tool output, file bodies
+//! and transfer transcripts, and bounds long detail text, a fork's inherited tasks included.
+//! `getTurnItem` reads the withheld parts with a larger bound.
 use crate::StoredFact;
 use agent_domain::{FactBody, HistoricalContext, Item, ItemKind, ItemStatus, Json, State, Task};
 use regex::Regex;
@@ -530,7 +530,10 @@ fn projects_item(item: &Item) -> bool {
 }
 
 fn needs_projection(state: &State) -> bool {
-    !state.inherited_tasks.is_empty()
+    state
+        .inherited_tasks
+        .iter()
+        .any(|task| wire_task(task).is_some())
         || state.transfers.iter().any(|t| carries_history(&t.history))
         || state
             .items
@@ -546,7 +549,6 @@ pub fn client_state(state: &Arc<State>) -> Arc<State> {
         return state.clone();
     }
     let mut projected = State::clone(state);
-    projected.inherited_tasks.clear();
     for transfer in &mut projected.transfers {
         transfer.history = empty_history();
     }
@@ -559,7 +561,11 @@ pub fn client_state(state: &Arc<State>) -> Arc<State> {
             *item = wire;
         }
     }
-    for task in &mut projected.tasks {
+    for task in projected
+        .tasks
+        .iter_mut()
+        .chain(&mut projected.inherited_tasks)
+    {
         if let Some(wire) = wire_task(task) {
             *task = wire;
         }
@@ -581,14 +587,15 @@ fn client_fact(state: &State, body: &FactBody) -> Option<FactBody> {
             }
             Some(body)
         }
-        // `conversation/getTurnItem` reads the inherited tasks.
         FactBody::ForkAccepted {
             parent,
             boundary,
             history,
             messages,
             tasks,
-        } if !tasks.is_empty() || history.iter().any(projects_item) => {
+        } if tasks.iter().any(|task| wire_task(task).is_some())
+            || history.iter().any(projects_item) =>
+        {
             Some(FactBody::ForkAccepted {
                 parent: parent.clone(),
                 boundary: *boundary,
@@ -597,7 +604,10 @@ fn client_fact(state: &State, body: &FactBody) -> Option<FactBody> {
                     .map(|item| wire_item(item).into_owned())
                     .collect(),
                 messages: messages.clone(),
-                tasks: vec![],
+                tasks: tasks
+                    .iter()
+                    .map(|task| wire_task(task).unwrap_or_else(|| task.clone()))
+                    .collect(),
             })
         }
         FactBody::ItemStarted { id, kind, .. } if withholds_detail(kind) => {
