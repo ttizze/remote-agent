@@ -16,8 +16,11 @@ export async function forkTranscript(sdk, source, session, target, through) {
   return copied.map((entry) => JSON.stringify(entry.sessionId === forked.sessionId ? { ...entry, sessionId: target } : entry)).join("\n") + "\n";
 }
 
+const supportedDialogKinds = ["resume_return"];
+
 // Only SDK I/O lives here. The Host owns conversation state and permission decisions.
 export async function runBridge(sdk, program, input, output) {
+  const lines = createInterface({ input, crlfDelay: Infinity });
   let query;
   const pending = new Map();
   const prompts = [];
@@ -74,8 +77,10 @@ export async function runBridge(sdk, program, input, output) {
               permission_suggestions: metadata.suggestions }, metadata.signal, metadata.requestId);
             return answer ?? { behavior: "deny", message: "Permission request cancelled", interrupt: true };
           } } : {}),
-          supportedDialogKinds: ["resume_return"],
-          onUserDialog: (dialog, metadata) => ask({ subtype: "request_user_dialog", dialog_kind: dialog.dialogKind, payload: dialog.payload, tool_use_id: dialog.toolUseID }, metadata.signal, metadata.requestId),
+          supportedDialogKinds,
+          onUserDialog: (dialog, metadata) => supportedDialogKinds.includes(dialog.dialogKind)
+            ? ask({ subtype: "request_user_dialog", dialog_kind: dialog.dialogKind, payload: dialog.payload, tool_use_id: dialog.toolUseID }, metadata.signal, metadata.requestId)
+            : Promise.resolve({ behavior: "cancelled" }),
         } });
         // Initialization and callbacks are SDK-owned; replaying the pending arrays
         // here would open the same approval twice under different correlation keys.
@@ -84,6 +89,7 @@ export async function runBridge(sdk, program, input, output) {
         void (async () => {
           try { for await (const message of query) await send(message); }
           catch (error) { if (!closed) await send({ type: "sdk_error", message: error.message }); }
+          finally { if (!closed) lines.close(); }
         })();
         break;
       }
@@ -97,7 +103,7 @@ export async function runBridge(sdk, program, input, output) {
   }
   const tasks = new Set();
   try {
-    for await (const line of createInterface({ input, crlfDelay: Infinity })) {
+    for await (const line of lines) {
       if (!line.trim()) continue;
       const frame = JSON.parse(line);
       if (frame.type === "user") {

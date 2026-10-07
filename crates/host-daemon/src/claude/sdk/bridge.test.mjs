@@ -94,3 +94,24 @@ test("SDK resume dialogs retain their payload and structured answer", { timeout:
     assert.equal((await h.take((frame) => frame.type === "assistant")).message.content[0].text, "compact");
   } finally { h.input.end(); await h.completion; }
 });
+
+test("SDK process failure closes the worker instead of leaving an unusable session alive", { timeout: 10000 }, async () => {
+  const h = harness();
+  try {
+    h.request("initialize", "initialize");
+    await h.take((frame) => frame.response?.request_id === "initialize");
+    h.send({ type: "user", uuid: "one", session_id: "", parent_tool_use_id: null, message: { role: "user", content: "crash" } });
+    assert.match((await h.take((frame) => frame.type === "sdk_error")).message, /7/);
+    await h.completion;
+  } finally { h.input.end(); await h.completion; }
+});
+
+test("unknown SDK dialogs cancel immediately without blocking the conversation", { timeout: 10000 }, async () => {
+  const h = harness();
+  try {
+    h.request("initialize", "initialize");
+    await h.take((frame) => frame.response?.request_id === "initialize");
+    h.send({ type: "user", uuid: "one", session_id: "", parent_tool_use_id: null, message: { role: "user", content: "future-dialog" } });
+    assert.equal((await h.take((frame) => frame.type === "assistant")).message.content[0].text, "cancelled");
+  } finally { h.input.end(); await h.completion; }
+});

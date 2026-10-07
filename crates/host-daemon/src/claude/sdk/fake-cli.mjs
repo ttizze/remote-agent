@@ -9,8 +9,9 @@ for await (const line of createInterface({ input: process.stdin })) {
     send({ type: "control_response", response: { subtype: "success", request_id: frame.request_id, response: { commands: [], models: [], account: {} } } });
   } else if (frame.type === "user") {
     prompt = frame;
-    const request = prompt.message.content === "dialog"
-      ? { subtype: "request_user_dialog", dialog_kind: "resume_return", payload: { sessionAgeMinutes: 90, estimatedTokens: 120000 } }
+    if (prompt.message.content === "crash") process.exit(7);
+    const request = ["dialog", "future-dialog"].includes(prompt.message.content)
+      ? { subtype: "request_user_dialog", dialog_kind: prompt.message.content === "dialog" ? "resume_return" : "future_dialog", payload: { sessionAgeMinutes: 90, estimatedTokens: 120000 } }
       : { subtype: "can_use_tool", tool_name: "Bash", input: { command: "echo test" }, tool_use_id: "tool", description: "Run the test fixture" };
     send({ type: "control_request", request_id: "permission", request });
   } else if (frame.type === "control_response") {
