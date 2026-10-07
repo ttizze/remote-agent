@@ -20,6 +20,7 @@ fn options() -> StoreOptions {
     StoreOptions {
         creation_source: "desktop".into(),
         cache_directory: None,
+        state_file: None,
         start_on_list: false,
     }
 }
@@ -1130,36 +1131,50 @@ fn a_failed_terminal_start_is_terminal_and_terminal_output_stays_bounded() {
     ));
 }
 
-#[tokio::test]
-async fn a_healthy_resume_reuses_the_connection_and_timed_out_sends_keep_their_id_and_order() {
-    tokio::time::timeout(std::time::Duration::from_secs(10), async {
-        use crate::transport::{Endpoint, Identity, IncomingRequest, Relays, Trust};
-        let host = Endpoint::bind(Identity::generate(), Relays::Loopback)
+/// An owner connected over loopback to a Host side the test answers by hand.
+struct Loopback {
+    owner: Owner,
+    events: mpsc::Receiver<Event>,
+    host: crate::transport::Session,
+    _host_peer: agent_transport::client::HostPeer,
+    session: crate::transport::Session,
+    ticket: crate::transport::Ticket,
+    endpoint: crate::transport::Endpoint,
+    host_endpoint: crate::transport::Endpoint,
+    client: Peer,
+}
+impl Loopback {
+    /// `prepare` runs before the owner counts as connected, so it opens no streams.
+    async fn connect(
+        timeout: std::time::Duration,
+        options: StoreOptions,
+        prepare: impl FnOnce(&mut Owner),
+    ) -> Self {
+        use crate::transport::{Endpoint, Identity, Relays, Trust};
+        let host_endpoint = Endpoint::bind(Identity::generate(), Relays::Loopback)
             .await
             .unwrap();
         let endpoint = Endpoint::bind(Identity::generate(), Relays::Loopback)
             .await
             .unwrap();
-        let ticket = host.local_ticket();
+        let ticket = host_endpoint.local_ticket();
         let (outgoing, incoming) = tokio::join!(endpoint.connect(&ticket), async {
-            host.accept().await.unwrap().establish().await
+            host_endpoint.accept().await.unwrap().establish().await
         });
         let session = outgoing.unwrap();
-        let incoming = incoming
+        let host = incoming
             .unwrap()
             .authorize(&Trust {
                 allowed: BTreeSet::from([endpoint.node_id()]),
                 ..Default::default()
             })
             .unwrap();
-        let (client, _events) = session
-            .open_peer(std::time::Duration::from_millis(150), 8)
-            .await
-            .unwrap();
-        let _host_events = incoming.accept_peer().await.unwrap();
+        let (client, _events) = session.open_peer(timeout, 8).await.unwrap();
+        let host_peer = host.accept_peer().await.unwrap();
         let client = Arc::new(client);
-        let (sender, mut receiver) = mpsc::channel(8);
-        let mut owner = Owner::new(Snapshot::default(), options(), sender).0;
+        let (sender, events) = mpsc::channel(8);
+        let mut owner = Owner::new(Snapshot::default(), options, sender).0;
+        prepare(&mut owner);
         owner.state.connected = true;
         owner.network = Some(Network {
             peer: client.clone(),
@@ -1170,15 +1185,22 @@ async fn a_healthy_resume_reuses_the_connection_and_timed_out_sends_keep_their_i
             streams: BTreeMap::new(),
             deliveries: BTreeMap::new(),
         });
-        let (complete, timed_out) = oneshot::channel();
-        owner
-            .handle(Event::Resume {
-                endpoint: endpoint.clone(),
-                ticket: ticket.clone(),
-                complete,
-            })
-            .await;
-        let IncomingRequest::Call(unanswered) = incoming
+        Self {
+            owner,
+            events,
+            host,
+            _host_peer: host_peer,
+            session,
+            ticket,
+            endpoint,
+            host_endpoint,
+            client,
+        }
+    }
+
+    async fn next_call(&self) -> Box<agent_transport::client::HostRequest> {
+        let crate::transport::IncomingRequest::Call(request) = self
+            .host
             .accept_stream()
             .await
             .unwrap()
@@ -1186,111 +1208,121 @@ async fn a_healthy_resume_reuses_the_connection_and_timed_out_sends_keep_their_i
             .await
             .unwrap()
         else {
-            panic!("health probe")
+            panic!("a request")
         };
+        request
+    }
+
+    async fn close(self) {
+        drop(self.owner);
+        self.session.close();
+        self.endpoint.close().await;
+        self.host_endpoint.close().await;
+    }
+}
+
+/// Answers with the result type the Host's contract for the call declares.
+async fn answer<C: crate::protocol::contracts::Contract>(
+    request: &mut agent_transport::client::HostRequest,
+    result: C::Output,
+) where
+    C::Output: serde::Serialize,
+{
+    agent_transport::framing::write(
+        &mut request.send,
+        crate::protocol::Response::Success { result },
+    )
+    .await
+    .unwrap();
+    request.send.finish().unwrap();
+}
+
+#[tokio::test]
+async fn a_healthy_resume_reuses_the_connection_and_timed_out_sends_keep_their_id_and_order() {
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        let mut host = Loopback::connect(std::time::Duration::from_millis(150), options(), |_| {}).await;
+        let (complete, timed_out) = oneshot::channel();
+        host.owner
+            .handle(Event::Resume {
+                endpoint: host.endpoint.clone(),
+                ticket: host.ticket.clone(),
+                complete,
+            })
+            .await;
+        let unanswered = host.next_call().await;
         assert!(matches!(unanswered.call, Call::HostStatus(_)));
         assert!(
             timed_out.await.unwrap().is_none(),
             "open transport flags do not prove liveness"
         );
         drop(unanswered);
-        let (complete, answer) = oneshot::channel();
-        owner
+        let (complete, reply) = oneshot::channel();
+        host.owner
             .handle(Event::Resume {
-                endpoint: endpoint.clone(),
-                ticket,
+                endpoint: host.endpoint.clone(),
+                ticket: host.ticket.clone(),
                 complete,
             })
             .await;
-        let IncomingRequest::Call(mut probe) = incoming
-            .accept_stream()
-            .await
-            .unwrap()
-            .decode()
-            .await
-            .unwrap()
-        else {
-            panic!("health probe")
-        };
+        let mut probe = host.next_call().await;
         assert!(matches!(probe.call, Call::HostStatus(_)));
-        agent_transport::framing::write(
-            &mut probe.send,
-            crate::protocol::Response::Success {
-                result: m::HostStatus {
-                    name: "fixture".into(),
-                    node_id: "node".into(),
-                    devices: vec![],
-                    provider_errors: None,
-                },
+        answer::<crate::protocol::contracts::HostStatus>(
+            &mut probe,
+            m::HostStatus {
+                name: "fixture".into(),
+                node_id: "node".into(),
+                devices: vec![],
+                provider_errors: None,
             },
         )
-        .await
-        .unwrap();
-        probe.send.finish().unwrap();
-        let reused = answer.await.unwrap().unwrap();
+        .await;
+        let reused = reply.await.unwrap().unwrap();
         assert!(reused.reused);
-        assert_eq!(reused.connection_id, client.diagnostic_id);
+        assert_eq!(reused.connection_id, host.client.diagnostic_id);
 
-        live_shell(&mut owner, 1, vec![row(&thread_id())]);
-        let first = owner.pending(
+        live_shell(&mut host.owner, 1, vec![row(&thread_id())]);
+        let first = host.owner.pending(
             thread_id(),
             Command::Pin {
                 pinned: true,
                 order: None,
             },
         );
-        let second = owner.pending(
+        let second = host.owner.pending(
             thread_id(),
             Command::Pin {
                 pinned: false,
                 order: None,
             },
         );
-        let expected = vec![first.id.clone(), first.id.clone(), second.id.clone()];
-        let server = tokio::spawn(async move {
-            let mut held = vec![];
-            for (index, expected) in expected.into_iter().enumerate() {
-                let IncomingRequest::Call(mut request) = incoming
-                    .accept_stream()
-                    .await
-                    .unwrap()
-                    .decode()
-                    .await
-                    .unwrap()
-                else {
-                    panic!("command request");
-                };
-                let Call::Dispatch(dispatch) = &request.call else {
-                    panic!("dispatch")
-                };
-                assert_eq!(dispatch.command_id, expected);
-                if index == 0 {
-                    // Keep the response stream open until the client times out.
-                    held.push(request.send);
-                } else {
-                    agent_transport::framing::write(
-                        &mut request.send,
-                        crate::protocol::Response::Success {
-                            result: Committed {
-                                reply: Reply::Accepted,
-                                thread_sequence: index as u64,
-                                sequence: index as u64,
-                                replayed: index == 1,
-                            },
-                        },
-                    )
-                    .await
-                    .unwrap();
-                    request.send.finish().unwrap();
-                }
-            }
-        });
-        owner.enqueue(first.clone(), None).unwrap();
-        owner.enqueue(second.clone(), None).unwrap();
+        host.owner.enqueue(first.clone(), None).unwrap();
+        host.owner.enqueue(second.clone(), None).unwrap();
         // The second request waits behind the first.
-        assert_eq!(owner.state.outbox.entries[1].phase, Phase::Queued);
-        for _ in 0..2 {
-            let event = receiver.recv().await.unwrap();
+        assert_eq!(host.owner.state.outbox.entries[1].phase, Phase::Queued);
+        let mut held = vec![];
+        let expected = [first.id.clone(), first.id.clone(), second.id.clone()];
+        for (index, expected) in expected.into_iter().enumerate() {
+            let mut request = host.next_call().await;
+            let Call::Dispatch(dispatch) = &request.call else {
+                panic!("dispatch")
+            };
+            assert_eq!(dispatch.command_id, expected);
+            if index == 0 {
+                // Keep the response stream open until the client times out.
+                held.push(request);
+                continue;
+            }
+            answer::<crate::protocol::contracts::Dispatch>(
+                &mut request,
+                Committed {
+                    reply: Reply::Accepted,
+                    thread_sequence: index as u64,
+                    sequence: index as u64,
+                    replayed: index == 1,
+                },
+            )
+            .await;
+            let event = host.events.recv().await.unwrap();
             assert!(matches!(
                 &event,
                 Event::Delivered {
@@ -1298,32 +1330,90 @@ async fn a_healthy_resume_reuses_the_connection_and_timed_out_sends_keep_their_i
                     ..
                 }
             ));
-            owner.handle(event).await;
+            host.owner.handle(event).await;
         }
-        server.await.unwrap();
         assert!(
-            owner
+            host.owner
                 .state
                 .outbox
                 .entries
                 .iter()
                 .all(|entry| matches!(entry.phase, Phase::Committed { .. }))
         );
-        owner.shell_update(
+        host.owner.shell_update(
             ShellLocation::Active,
             ShellUpdate::ThreadUpdated {
                 sequence: 2,
                 thread: Box::new(row(&thread_id())),
             },
         );
-        assert!(owner.state.outbox.is_empty());
-        drop(owner);
-        session.close();
-        endpoint.close().await;
+        assert!(host.owner.state.outbox.is_empty());
         host.close().await;
     })
     .await
     .unwrap();
+}
+
+#[tokio::test]
+async fn an_expanded_item_shows_the_withheld_output_the_host_reads() {
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        let mut state = thread_state("Thread");
+        let mut item = command_item("command", 1);
+        item.output_omitted = true;
+        state.items.push(item.clone());
+        let mut host = Loopback::connect(std::time::Duration::from_secs(5), options(), |owner| {
+            owner.select_thread(Some(thread_id()));
+            owner.thread_update(&thread_id(), snapshot(state, 1, None));
+        })
+        .await;
+        host.owner.load_detail(item.id.clone()).unwrap();
+        let mut request = host.next_call().await;
+        let Call::TurnItem(read) = &request.call else {
+            panic!("item read")
+        };
+        assert_eq!(read.item_id, item.id);
+        let mut full = item.clone();
+        full.output_omitted = false;
+        full.text = "the complete output".into();
+        answer::<crate::protocol::contracts::TurnItem>(
+            &mut request,
+            Some(agent_protocol::conversation::TurnItemDetail {
+                row: agent_protocol::conversation::HistoryRow {
+                    position: 0,
+                    source: thread_id(),
+                    inherited: false,
+                    item: full.clone(),
+                    message: None,
+                    plan: None,
+                },
+                task: None,
+            }),
+        )
+        .await;
+        let event = host.events.recv().await.unwrap();
+        host.owner.handle(event).await;
+        assert_eq!(
+            host.owner.state.threads[&thread_id()].details.get(&item.id),
+            Some(&crate::sync::Detail::Loaded(Box::new(full)))
+        );
+        host.close().await;
+    })
+    .await
+    .unwrap();
+}
+
+#[test]
+fn an_item_expanded_offline_is_not_left_loading() {
+    let mut state = thread_state("Thread");
+    let mut item = command_item("command", 1);
+    item.output_omitted = true;
+    state.items.push(item.clone());
+    let mut owner = opened(state);
+    assert!(owner.load_detail(item.id.clone()).is_err());
+    assert_eq!(
+        owner.state.threads[&thread_id()].details.get(&item.id),
+        None
+    );
 }
 
 #[test]
@@ -2264,4 +2354,144 @@ fn creating_a_new_ref_switches_the_checkout_and_the_draft_takes_it() {
         owner.create_new_thread_branch("   ".into()).unwrap(),
         Next::Done
     ));
+}
+
+#[test]
+fn a_due_provider_command_retry_waits_for_a_connection() {
+    let mut owner = owner(Snapshot::default());
+    owner.state.sources.provider_commands.insert(
+        ("codex".into(), "/repo".into()),
+        ProviderCommandsEntry {
+            retry_at_ms: Some(0),
+            ..ProviderCommandsEntry::default()
+        },
+    );
+    assert_eq!(owner.sources_deadline(), None);
+}
+
+#[test]
+fn a_replaced_connection_releases_the_requests_it_carried() {
+    let mut state = thread_state("Thread");
+    let mut item = command_item("command", 1);
+    item.output_omitted = true;
+    state.items.push(item.clone());
+    let mut owner = owner(Snapshot::default());
+    owner.select_thread(Some(thread_id()));
+    owner.thread_update(
+        &thread_id(),
+        snapshot(state, 1, Some(window(Some("cursor"), true, Some(1)))),
+    );
+    let sync = Arc::make_mut(owner.state.threads.get_mut(&thread_id()).unwrap());
+    assert!(sync.begin_detail(&item.id));
+    assert_eq!(
+        sync.begin_load_earlier(),
+        crate::sync::thread::LoadEarlier::Request("cursor".into())
+    );
+    let key = ("codex".to_owned(), "/repo".to_owned());
+    owner.state.sources.provider_commands.insert(
+        key.clone(),
+        ProviderCommandsEntry {
+            in_flight: true,
+            ..ProviderCommandsEntry::default()
+        },
+    );
+    owner.abandon_requests();
+    let sync = &owner.state.threads[&thread_id()];
+    assert!(!sync.history.loading);
+    assert_eq!(sync.details.get(&item.id), None);
+    let entry = &owner.state.sources.provider_commands[&key];
+    assert!(!entry.in_flight);
+    assert!(entry.retry_at_ms.is_some());
+}
+
+#[tokio::test]
+async fn a_command_reaches_the_host_only_once_the_device_state_holds_it() {
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        let directory = tempfile::tempdir().unwrap();
+        let state_file = directory.path().join("device.json");
+        let mut host = Loopback::connect(
+            std::time::Duration::from_secs(5),
+            StoreOptions {
+                state_file: Some(state_file.clone()),
+                ..options()
+            },
+            |_| {},
+        )
+        .await;
+        live_shell(&mut host.owner, 1, vec![row(&thread_id())]);
+        let entry = host.owner.pending(
+            thread_id(),
+            Command::Pin {
+                pinned: true,
+                order: None,
+            },
+        );
+        host.owner.enqueue(entry.clone(), None).unwrap();
+        host.owner.publish();
+        assert_eq!(host.owner.state.outbox.entries[0].phase, Phase::Queued);
+        host.owner.tick();
+        let written = host.events.recv().await.unwrap();
+        assert!(matches!(written, Event::Written(owner::Written::Device, true)));
+        let saved = crate::persistence::load(&state_file, &[]);
+        assert_eq!(saved.outbox.entries[0].id, entry.id);
+        host.owner.handle(written).await;
+        assert_eq!(host.owner.state.outbox.entries[0].phase, Phase::InFlight);
+        let request = host.next_call().await;
+        assert!(matches!(&request.call, Call::Dispatch(dispatch) if dispatch.command_id == entry.id));
+        host.close().await;
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn closing_writes_the_latest_device_state() {
+    let directory = tempfile::tempdir().unwrap();
+    let state_file = directory.path().join("device.json");
+    let store = Store::offline(
+        Snapshot::default(),
+        StoreOptions {
+            state_file: Some(state_file.clone()),
+            ..options()
+        },
+    );
+    store
+        .dispatch(Intent::EditDraft {
+            base_text: None,
+            text: "typed just before closing".into(),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    store.close().await.unwrap();
+    assert_eq!(
+        crate::persistence::load(&state_file, &[]).current_draft().text,
+        "typed just before closing"
+    );
+}
+
+#[tokio::test]
+async fn a_deleted_thread_cache_stays_deleted_after_an_earlier_save_lands() {
+    let directory = tempfile::tempdir().unwrap();
+    let (sender, _events) = mpsc::channel(8);
+    let mut owner = Owner::new(
+        Snapshot::default(),
+        StoreOptions {
+            cache_directory: Some(directory.path().into()),
+            ..options()
+        },
+        sender,
+    )
+    .0;
+    owner.select_thread(Some(thread_id()));
+    owner.thread_update(&thread_id(), snapshot(thread_state("Thread"), 1, None));
+    owner.thread_update(&thread_id(), ThreadUpdate::Synchronized);
+    owner.store_thread_now(&thread_id());
+    owner.thread_deleted(&thread_id());
+    owner.teardown().await;
+    assert!(
+        crate::sync::DiskCache::new(directory.path())
+            .load_thread(&thread_id())
+            .is_none()
+    );
 }

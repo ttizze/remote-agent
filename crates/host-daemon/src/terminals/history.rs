@@ -21,6 +21,10 @@ impl Default for Limits {
 /// Stored in small pieces, so dropping the oldest text copies little.
 const CHUNK_BYTES: usize = 16 * 1024;
 
+/// An unfinished control sequence longer than this is kept as output, so an
+/// introducer that is never terminated cannot hold text back without bound.
+const MAX_UNFINISHED_CONTROL_BYTES: usize = 64 * 1024;
+
 struct Chunk {
     data: String,
     line_breaks: usize,
@@ -168,8 +172,13 @@ impl History {
     /// Adds one output chunk; whether the kept text changed.
     pub(crate) fn record(&mut self, data: &[u8]) -> bool {
         let text = decode(&mut self.utf8, data);
-        let (visible, control) = sanitize(&self.control, &text);
-        self.control = control;
+        let (mut visible, control) = sanitize(&self.control, &text);
+        if control.len() > MAX_UNFINISHED_CONTROL_BYTES {
+            visible.push_str(&control);
+            self.control.clear();
+        } else {
+            self.control = control;
+        }
         self.text.append(&visible);
         !visible.is_empty()
     }

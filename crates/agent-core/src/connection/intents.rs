@@ -130,17 +130,6 @@ impl Owner {
         }
     }
 
-    fn restore_draft(&mut self, restore: &Restore) {
-        let mut draft = self
-            .state
-            .drafts
-            .get(&restore.draft_key)
-            .cloned()
-            .unwrap_or_else(|| self.state.current_draft());
-        draft.text = merge_restored_text(&draft.text, &restore.text);
-        self.state.drafts.insert(restore.draft_key.clone(), draft);
-    }
-
     pub(super) fn command(&self, thread: ThreadId, command: Command) -> PendingCommand {
         self.pending(thread, command)
     }

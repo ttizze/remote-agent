@@ -249,20 +249,18 @@ fn running_with_queue() -> State {
 }
 
 fn outbox(commands: Vec<Command>) -> Outbox {
-    Outbox {
-        entries: commands
-            .into_iter()
-            .enumerate()
-            .map(|(index, command)| {
-                let id = CommandId::new(format!("command-{index}")).unwrap();
-                PendingCommand::new(
-                    thread_id(),
-                    Request::Dispatch(Box::new(dispatch(thread_id(), id, command))),
-                    at(),
-                )
-            })
-            .collect(),
+    let mut outbox = Outbox::default();
+    for (index, command) in commands.into_iter().enumerate() {
+        let id = CommandId::new(format!("command-{index}")).unwrap();
+        outbox
+            .enqueue(PendingCommand::new(
+                thread_id(),
+                Request::Dispatch(Box::new(dispatch(thread_id(), id, command))),
+                at(),
+            ))
+            .unwrap();
     }
+    outbox
 }
 
 fn queued_send(id: &str, text: &str, dispatch: TurnDispatch) -> Command {

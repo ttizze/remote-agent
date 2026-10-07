@@ -192,3 +192,17 @@ async fn image_searches_filter_before_the_limit() {
         }]
     );
 }
+
+#[tokio::test]
+async fn finds_a_path_after_the_first_twenty_five_thousand_entries() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    std::fs::create_dir(root.join("a")).unwrap();
+    for index in 0..25_000 {
+        std::fs::write(root.join("a").join(index.to_string()), "").unwrap();
+    }
+    write(root, "z/needle.rs");
+    let result = run(root, "needle.rs", 5, None).await;
+    assert_eq!(paths(&result), ["z/needle.rs"]);
+    assert!(!result.truncated);
+}

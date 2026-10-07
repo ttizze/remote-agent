@@ -152,13 +152,13 @@ fn keeps_the_preview_after_acknowledgement_until_the_matching_shell_update() {
     let shown = visible(&outbox, &changed);
     assert_eq!(shown.title, "Renamed remotely");
     assert_eq!(shown.settled, Some(true));
-    assert!(outbox.complete(Some(2), |_| Some(3)).is_empty());
+    assert!(outbox.complete(Some(2), |_| Some(3), |_| false).is_empty());
     let mut confirmed_row = renamed;
     confirmed_row.settled = Some(true);
     confirmed_row.settled_at = Some(Timestamp::parse("2026-09-12T12:00:00Z").unwrap());
     let confirmed = shell(3, confirmed_row);
     assert!(matches!(outbox.overlay_shell(&confirmed), Cow::Borrowed(_)));
-    assert_eq!(outbox.complete(Some(3), |_| None).len(), 1);
+    assert_eq!(outbox.complete(Some(3), |_| None, |_| false).len(), 1);
     assert_eq!(visible(&outbox, &shell(4, row())).settled, None);
 }
 
@@ -247,7 +247,7 @@ fn restores_a_confirmed_settle_or_snooze_when_a_queued_undo_fails() {
             _ => parked.snoozed_until = Some(future()),
         }
         let confirmed = shell(2, parked);
-        outbox.complete(Some(2), |_| None);
+        outbox.complete(Some(2), |_| None, |_| false);
         assert!(awake(&visible(&outbox, &confirmed)));
         outbox.sending(&id("undo"));
         outbox.resolve(&id("undo"), rejected());
@@ -390,6 +390,31 @@ fn pending_messages_follow_send_order_until_the_thread_folds_them() {
     delivered.id = MessageId::new("first").unwrap();
     state.messages.push(delivered);
     assert_eq!(ids(&outbox, Some(&state)), ["second"]);
+}
+
+#[test]
+fn an_acknowledged_message_stays_visible_until_its_thread_shows_it() {
+    let mut outbox = Outbox::default();
+    outbox
+        .enqueue(send("first", "first", "2026-09-06T10:00:00Z"))
+        .unwrap();
+    outbox.resolve(&id("first"), committed(5));
+    let shown_ids = |outbox: &Outbox| -> Vec<String> {
+        outbox
+            .undelivered_messages(&thread_id(), None)
+            .iter()
+            .map(|message| message.id.to_string())
+            .collect()
+    };
+    assert!(!outbox.completes(Some(4), |_| None, |_| false));
+    // The shell reached the send before the thread stream did.
+    assert_eq!(outbox.complete(Some(5), |_| None, |_| false).len(), 1);
+    assert!(outbox.is_empty());
+    assert_eq!(shown_ids(&outbox), ["first"]);
+    assert!(!outbox.completes(Some(5), |_| None, |_| false));
+    assert!(outbox.completes(Some(5), |_| None, |_| true));
+    outbox.complete(Some(5), |_| None, |message| message.id.as_str() == "first");
+    assert!(shown_ids(&outbox).is_empty());
 }
 
 #[test]
@@ -613,7 +638,7 @@ proptest! {
                         let result = if commit { committed(sequence) } else { Delivered::Unknown("lost".into()) };
                         outbox.resolve(id, result);
                     }
-                    outbox.complete(None, |_| Some(sequence));
+                    outbox.complete(None, |_| Some(sequence), |_| false);
                 }
                 Op::Reconnect => outbox.reconnected(),
             }

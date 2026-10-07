@@ -2,7 +2,7 @@
 use super::history::{HistoryMeta, merge_history_page};
 use agent_domain::{CommandId, Fact, FactBody, Item, State, ThreadId, TurnItemId, apply};
 use agent_protocol::conversation::{
-    ErrorCode, HistoryPage, HistoryRow, SequencedFact, SubscribeThread, ThreadSnapshot,
+    ErrorCode, HistoryPage, SequencedFact, SubscribeThread, ThreadSnapshot,
     ThreadUpdate,
 };
 use agent_protocol::error::RpcFailure;
@@ -318,6 +318,20 @@ impl ThreadSync {
                 return out;
             }
             match update {
+                // A resume past the replay limit reports a deletion this way.
+                ThreadUpdate::Snapshot(snapshot)
+                    if snapshot
+                        .state
+                        .thread
+                        .as_ref()
+                        .is_some_and(|thread| thread.deleted_at.is_some()) =>
+                {
+                    self.cursor = snapshot.snapshot_sequence;
+                    self.set_deleted();
+                    out.deleted = true;
+                    out.changed = true;
+                    return out;
+                }
                 ThreadUpdate::Snapshot(snapshot) => {
                     self.install(snapshot);
                     out.changed = true;
@@ -546,6 +560,27 @@ impl ThreadSync {
         }
     }
 
+    /// Whether a history page or an item detail is being read.
+    pub fn has_pending_requests(&self) -> bool {
+        self.history.loading
+            || self
+                .details
+                .values()
+                .any(|detail| detail == &Detail::Loading)
+    }
+
+    /// The connection carrying this thread's history and detail reads ended.
+    pub fn requests_abandoned(&mut self) {
+        if let Some(cursor) = self.history.cursor.clone() {
+            self.history_abandoned(&cursor);
+        }
+        if self.details.values().any(|detail| detail == &Detail::Loading) {
+            Arc::make_mut(&mut self.details).retain(|_, detail| detail != &Detail::Loading);
+            self.detail_revision += 1;
+            self.touch();
+        }
+    }
+
     /// Starts reading an item's withheld output unless it is loading or loaded.
     pub fn begin_detail(&mut self, item: &TurnItemId) -> bool {
         if matches!(
@@ -562,14 +597,14 @@ impl ThreadSync {
 
     /// Stores a detail only while its request is current; a fact that touched
     /// the item meanwhile invalidated it.
-    pub fn detail_loaded(&mut self, item: &TurnItemId, row: Option<HistoryRow>) {
+    pub fn detail_loaded(&mut self, item: &TurnItemId, loaded: Option<Item>) {
         if self.details.get(item) != Some(&Detail::Loading) {
             return;
         }
         let details = Arc::make_mut(&mut self.details);
-        match row {
-            Some(row) => {
-                details.insert(item.clone(), Detail::Loaded(Box::new(row.item)));
+        match loaded {
+            Some(loaded) => {
+                details.insert(item.clone(), Detail::Loaded(Box::new(loaded)));
             }
             None => {
                 details.remove(item);

@@ -8,16 +8,15 @@ use crate::{
     commands::build::{LifecycleAction, lifecycle_command},
     peer::PeerError,
     protocol::Call,
-    state::{DraftAttachment, merge_restored_text},
     sync::{
         ShellCache, ThreadCacheEntry, ThreadStatus, ThreadSync, resubscribe_delay_ms,
         thread::{Applied, FailureAction, LoadEarlier, NOT_CONNECTED, Resync, RollbackResult},
     },
 };
 use agent_domain::WorktreeSetupSnapshot;
-use agent_domain::{RunStatus, ThreadId, TurnItemId};
+use agent_domain::{Item, RunStatus, ThreadId, TurnItemId};
 use agent_protocol::conversation::{
-    GetTurnItem, HistoryPage, HistoryRow, ReadHistory, ShellLocation, ShellUpdate, SubscribeSetup,
+    GetTurnItem, HistoryPage, ReadHistory, ShellLocation, ShellUpdate, SubscribeSetup,
     ThreadUpdate,
 };
 use std::{sync::Arc, time::Duration};
@@ -499,8 +498,9 @@ impl Owner {
         }
         if let Some(cache) = self.cache.clone() {
             let thread = thread.clone();
-            tokio::task::spawn_blocking(move || {
+            self.write_file(move || {
                 let _ = cache.remove_thread(&thread);
+                None
             });
         }
         if let Some(sync) = self.state.threads.get_mut(thread)
@@ -508,6 +508,7 @@ impl Owner {
         {
             Arc::make_mut(sync).set_deleted();
         }
+        self.state_outbox().thread_deleted(thread);
         self.state.drafts.remove(thread.as_str());
         self.state.setups.remove(thread);
         self.state.held_setups.remove(thread);
@@ -571,18 +572,7 @@ impl Owner {
             return;
         };
         let mut draft = self.state.draft_for_thread(thread);
-        draft.text = merge_restored_text(&draft.text, &text);
-        for attachment in &attachments {
-            if !draft
-                .attachments
-                .iter()
-                .any(|existing| existing.remote_id.as_deref() == Some(attachment.id.as_str()))
-            {
-                draft
-                    .attachments
-                    .push(DraftAttachment::from_remote(attachment));
-            }
-        }
+        draft.restore(&text, &attachments, None);
         self.state.drafts.insert(thread.to_string(), draft);
     }
 
@@ -677,6 +667,9 @@ impl Owner {
 
     pub(super) fn load_detail(&mut self, item: TurnItemId) -> Result<(), PeerError> {
         let thread = self.selected()?;
+        let sender = self.sender.clone();
+        let network = self.network()?;
+        let (peer, epoch) = (network.peer.clone(), network.epoch);
         let begun = self
             .state
             .threads
@@ -685,16 +678,14 @@ impl Owner {
         if !begun {
             return Ok(());
         }
-        let sender = self.sender.clone();
-        let network = self.network()?;
-        let (peer, epoch) = (network.peer.clone(), network.epoch);
-        network.spawn(async move {
+        self.network()?.spawn(async move {
             let result = peer
-                .request::<Option<HistoryRow>>(&Call::TurnItem(GetTurnItem {
+                .call(&GetTurnItem {
                     thread_id: thread.clone(),
                     item_id: item.clone(),
-                }))
-                .await;
+                })
+                .await
+                .map(|detail| detail.map(|detail| detail.row.item));
             let _ = sender
                 .send(Event::Detail {
                     epoch,
@@ -711,14 +702,14 @@ impl Owner {
         &mut self,
         thread: &ThreadId,
         item: &TurnItemId,
-        result: Result<Option<HistoryRow>, PeerError>,
+        result: Result<Option<Item>, PeerError>,
     ) {
         let Some(sync) = self.state.threads.get_mut(thread) else {
             return;
         };
         let sync = Arc::make_mut(sync);
         match result {
-            Ok(row) => sync.detail_loaded(item, row),
+            Ok(loaded) => sync.detail_loaded(item, loaded),
             Err(error) => sync.detail_failed(item, error.to_string()),
         }
     }

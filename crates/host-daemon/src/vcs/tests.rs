@@ -296,6 +296,22 @@ fn status_reports_the_branch_and_its_changes() {
     assert!(!status(plain.path()).unwrap().is_repo);
 }
 
+#[test]
+fn status_counts_a_rename_under_its_new_path() {
+    let directory = tempfile::tempdir().unwrap();
+    let cwd = directory.path();
+    repository_with_commit(cwd);
+    run(cwd, &["mv", "README.md", "RENAMED.md"]);
+    let read = status(cwd).unwrap();
+    let paths: Vec<&str> = read
+        .working_tree
+        .files
+        .iter()
+        .map(|file| file.path.as_str())
+        .collect();
+    assert_eq!(paths, ["RENAMED.md"]);
+}
+
 // "reports non-repository directories without failing", "optionally includes
 // remote refs that match local branches" and "marks the origin default ref as
 // default when no local copy exists".

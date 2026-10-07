@@ -7,12 +7,11 @@ use super::{
 };
 use crate::{
     commands::outbox::{
-        Delivered, DeliveryAction, PendingCommand, Request, Resolution, delivery_action,
-        retry_delay_ms, should_retry,
+        Delivered, DeliveryAction, PendingCommand, PendingMessage, Request, Resolution, Restore,
+        delivery_action, retry_delay_ms, should_retry,
     },
     peer::PeerError,
     protocol::Call,
-    state::{DraftAttachment, merge_restored_text},
 };
 use agent_domain::{Command, CommandId, ThreadId};
 use agent_protocol::conversation::{Committed, ErrorCode, Launched};
@@ -86,9 +85,17 @@ impl Owner {
                         let _ = waiter.send(Err(super::invalid("The thread no longer exists.")));
                     }
                 }
-                DeliveryAction::Send => self.send(entry),
+                // A request is sent once the device state holds it.
+                DeliveryAction::Send if self.stored(&entry.id) => self.send(entry),
+                DeliveryAction::Send => {}
             }
         }
+    }
+
+    fn stored(&self, id: &CommandId) -> bool {
+        self.device
+            .as_ref()
+            .is_none_or(|device| device.writer.stored(id))
     }
 
     fn send(&mut self, entry: PendingCommand) {
@@ -208,12 +215,22 @@ impl Owner {
     pub(super) fn complete_outbox(&mut self) {
         let shell = self.state.shell.sequence();
         let threads = &self.state.threads;
-        let done = std::sync::Arc::make_mut(&mut self.state.outbox).complete(shell, |thread| {
+        let cursor = |thread: &ThreadId| {
             threads
                 .get(thread)
                 .filter(|sync| sync.has_data())
                 .map(|sync| sync.cursor)
-        });
+        };
+        let shown = |message: &PendingMessage| {
+            threads
+                .get(&message.thread)
+                .and_then(|sync| sync.state.as_deref())
+                .is_some_and(|state| state.message(&message.id).is_some())
+        };
+        if !self.state.outbox.completes(shell, cursor, shown) {
+            return;
+        }
+        let done = std::sync::Arc::make_mut(&mut self.state.outbox).complete(shell, cursor, shown);
         for entry in done {
             self.finish(entry);
         }
@@ -303,28 +320,7 @@ impl Owner {
             self.state.thread_order = None;
         }
         if let Some(restore) = &entry.restore {
-            let mut draft = self
-                .state
-                .drafts
-                .get(&restore.draft_key)
-                .cloned()
-                .unwrap_or_else(|| match ThreadId::new(restore.draft_key.clone()) {
-                    Ok(thread) => self.state.draft_for_thread(&thread),
-                    Err(_) => self.state.default_draft.clone(),
-                });
-            draft.text = merge_restored_text(&draft.text, &restore.text);
-            for attachment in &restore.attachments {
-                if !draft
-                    .attachments
-                    .iter()
-                    .any(|existing| existing.remote_id.as_deref() == Some(attachment.id.as_str()))
-                {
-                    draft
-                        .attachments
-                        .push(DraftAttachment::from_remote(attachment));
-                }
-            }
-            self.state.drafts.insert(restore.draft_key.clone(), draft);
+            self.restore_draft(restore);
         }
         let background = matches!(&entry.request, Request::Dispatch(dispatch)
             if matches!(dispatch.command, Command::Visit { .. }));
@@ -334,6 +330,25 @@ impl Owner {
         if let Some(waiter) = self.waiters.remove(&entry.id) {
             let _ = waiter.send(Err(super::invalid(reason)));
         }
+    }
+
+    /// The composer content a send cleared returns to its draft.
+    pub(super) fn restore_draft(&mut self, restore: &Restore) {
+        let mut draft = self
+            .state
+            .drafts
+            .get(&restore.draft_key)
+            .cloned()
+            .unwrap_or_else(|| match ThreadId::new(restore.draft_key.clone()) {
+                Ok(thread) => self.state.draft_for_thread(&thread),
+                Err(_) => self.state.default_draft.clone(),
+            });
+        draft.restore(
+            &restore.text,
+            &restore.attachments,
+            restore.context.as_ref(),
+        );
+        self.state.drafts.insert(restore.draft_key.clone(), draft);
     }
 
     /// The user stopped a request that has not committed.

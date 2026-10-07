@@ -5,7 +5,8 @@ import Security
 import SwiftUI
 import UIKit
 
-/// Device preferences and atomic per-Host user work share one persistence owner.
+/// Where each Host's state lives; core keeps the state file written. The model
+/// preferences every Host shares stay in the app's defaults.
 enum SnapshotFiles {
     private static func location(_ host: String) throws -> URL {
         let directory = try FileManager.default.url(
@@ -18,6 +19,10 @@ enum SnapshotFiles {
         return directory.appendingPathComponent(name).appendingPathExtension("json")
     }
 
+    static func stateFile(_ host: String) throws -> String {
+        try location(host).path
+    }
+
     static func cacheDirectory(_ host: String) throws -> String {
         let directory = try location(host).deletingPathExtension().appendingPathExtension("cache")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -28,27 +33,16 @@ enum SnapshotFiles {
         try location(host).deletingPathExtension().appendingPathExtension("diagnostics").path
     }
 
-    static func load(_ host: String) async throws -> Data {
-        let bytes = try await Task.detached(priority: .utility) {
-            let url = try location(host)
-            return FileManager.default.fileExists(atPath: url.path) ? try Data(contentsOf: url) : Data()
-        }.value
-        return try withModelPreferences(bytes)
+    static func modelDefaults() -> Data {
+        UserDefaults.standard.data(forKey: "bex.orchestration-model-defaults") ?? Data()
     }
 
-    static func withModelPreferences(_ persisted: Data) throws -> Data {
-        try applyModelPreferences(persisted: persisted,
-                                  defaults: UserDefaults.standard
-                                      .data(forKey: "bex.orchestration-model-defaults") ?? Data())
-    }
-
-    static func save(_ host: String, snapshot: AgentCore.Snapshot) async throws {
+    static func saveModelPreferences(_ snapshot: AgentCore.Snapshot) async throws {
         try await Task.detached(priority: .utility) {
             try UserDefaults.standard.set(
                 snapshot.serializeModelPreferences(),
                 forKey: "bex.orchestration-model-defaults"
             )
-            try snapshot.serializeLocalState().write(to: location(host), options: .atomic)
         }.value
     }
 }

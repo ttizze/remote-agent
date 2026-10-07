@@ -7,7 +7,9 @@
 //! behavior and new-thread draft are device settings.
 use crate::{
     commands::build::FollowUpBehavior,
-    models::{AutoSettle, ConversationSettings, ProjectConversationSettings},
+    models::{
+        AutoSettle, ConversationSettings, ConversationSettingsPatch, ProjectConversationSettings,
+    },
     state::{Draft, Intent, Preferences, Snapshot},
     view::{
         models::{
@@ -229,38 +231,37 @@ fn clear(overrides: &mut ProjectConversationSettings, key: ProjectSettingKey) {
     }
 }
 
-fn store(
-    host: &mut ConversationSettings,
-    project_id: &str,
-    overrides: ProjectConversationSettings,
-) {
-    if overrides == ProjectConversationSettings::default() {
-        host.project_overrides.remove(project_id);
-    } else {
-        host.project_overrides.insert(project_id.into(), overrides);
+/// The patch replacing one project's overrides; an empty set removes them.
+fn store(project_id: &str, overrides: ProjectConversationSettings) -> ConversationSettingsPatch {
+    let overrides = (overrides != ProjectConversationSettings::default()).then_some(overrides);
+    ConversationSettingsPatch {
+        project_overrides: [(project_id.into(), overrides)].into(),
+        ..Default::default()
     }
 }
 
-/// The settings to save after one change. A project page writes only that
-/// project's override; usage-limit handling stays Host-wide, so a project
-/// page cannot change it (`None`).
+/// The patch saving one change. A project page writes only that project's
+/// overrides; usage-limit handling stays Host-wide, so a project page cannot
+/// change it (`None`).
 pub fn plan_conversation_settings_update(
     host: &ConversationSettings,
     scope: &SettingsScope,
     change: &ConversationSettingChange,
-) -> Option<ConversationSettings> {
-    let mut next = host.clone();
+) -> Option<ConversationSettingsPatch> {
+    let mut patch = ConversationSettingsPatch::default();
     match scope {
         SettingsScope::Host => match change {
             ConversationSettingChange::AutoResumeLimitedThreads { on } => {
-                next.auto_resume_limited_threads = *on
+                patch.auto_resume_limited_threads = Some(*on)
             }
             ConversationSettingChange::SnoozeLimitedThreads { on } => {
-                next.snooze_limited_threads = *on
+                patch.snooze_limited_threads = Some(*on)
             }
-            ConversationSettingChange::AutoSettle { days } => next.auto_settle = auto_settle(*days),
+            ConversationSettingChange::AutoSettle { days } => {
+                patch.auto_settle = Some(auto_settle(*days))
+            }
             ConversationSettingChange::ContinueAfterRestart { on } => {
-                next.continue_after_restart = *on
+                patch.continue_after_restart = Some(*on)
             }
             ConversationSettingChange::NewWorktreesStartFromOrigin { on } => {
                 next.new_worktrees_start_from_origin = *on
@@ -268,7 +269,7 @@ pub fn plan_conversation_settings_update(
             ConversationSettingChange::Inherit { .. } => return None,
         },
         SettingsScope::Project { project_id } => {
-            let mut overrides = next
+            let mut overrides = host
                 .project_overrides
                 .get(project_id)
                 .cloned()
@@ -287,10 +288,10 @@ pub fn plan_conversation_settings_update(
                 ConversationSettingChange::AutoResumeLimitedThreads { .. }
                 | ConversationSettingChange::SnoozeLimitedThreads { .. } => return None,
             }
-            store(&mut next, project_id, overrides);
+            patch = store(project_id, overrides);
         }
     }
-    Some(next)
+    Some(patch)
 }
 
 /// Clears the project's overrides of `keys`, keeping its others.
@@ -298,15 +299,16 @@ pub fn clear_project_overrides(
     host: &ConversationSettings,
     project_id: &str,
     keys: &[ProjectSettingKey],
-) -> ConversationSettings {
-    let mut next = host.clone();
-    if let Some(mut overrides) = next.project_overrides.get(project_id).cloned() {
-        for key in keys {
-            clear(&mut overrides, *key);
-        }
-        store(&mut next, project_id, overrides);
+) -> ConversationSettingsPatch {
+    let mut overrides = host
+        .project_overrides
+        .get(project_id)
+        .cloned()
+        .unwrap_or_default();
+    for key in keys {
+        clear(&mut overrides, *key);
     }
-    next
+    store(project_id, overrides)
 }
 
 /// The days the auto-settle field commits: an integer from 1 to 90.
@@ -894,12 +896,14 @@ mod tests {
                 ..Default::default()
             },
         );
-        let next = plan_conversation_settings_update(
-            &host,
-            &project("first-project"),
-            &ConversationSettingChange::AutoSettle { days: None },
-        )
-        .unwrap();
+        let next = host.patched(
+            &plan_conversation_settings_update(
+                &host,
+                &project("first-project"),
+                &ConversationSettingChange::AutoSettle { days: None },
+            )
+            .unwrap(),
+        );
         assert_eq!(
             next.project_overrides["first-project"],
             ProjectConversationSettings {
@@ -909,12 +913,14 @@ mod tests {
             }
         );
         assert_eq!(next.auto_settle, host.auto_settle);
-        let second = plan_conversation_settings_update(
-            &host,
-            &project("second-project"),
-            &ConversationSettingChange::ContinueAfterRestart { on: false },
-        )
-        .unwrap();
+        let second = host.patched(
+            &plan_conversation_settings_update(
+                &host,
+                &project("second-project"),
+                &ConversationSettingChange::ContinueAfterRestart { on: false },
+            )
+            .unwrap(),
+        );
         assert_eq!(
             second.project_overrides["second-project"].continue_after_restart,
             Some(false)
@@ -932,14 +938,16 @@ mod tests {
                 ..Default::default()
             },
         );
-        let next = plan_conversation_settings_update(
-            &host,
-            &project("first-project"),
-            &ConversationSettingChange::Inherit {
-                key: ProjectSettingKey::ContinueAfterRestart,
-            },
-        )
-        .unwrap();
+        let next = host.patched(
+            &plan_conversation_settings_update(
+                &host,
+                &project("first-project"),
+                &ConversationSettingChange::Inherit {
+                    key: ProjectSettingKey::ContinueAfterRestart,
+                },
+            )
+            .unwrap(),
+        );
         assert_eq!(
             next.project_overrides["first-project"],
             ProjectConversationSettings {
@@ -970,8 +978,11 @@ mod tests {
                 ..Default::default()
             },
         );
-        let cleared =
-            clear_project_overrides(&host, "first-project", &[ProjectSettingKey::AutoSettle]);
+        let cleared = host.patched(&clear_project_overrides(
+            &host,
+            "first-project",
+            &[ProjectSettingKey::AutoSettle],
+        ));
         assert_eq!(
             cleared.project_overrides["first-project"],
             ProjectConversationSettings {
@@ -980,14 +991,14 @@ mod tests {
                 ..Default::default()
             }
         );
-        let all = clear_project_overrides(
+        let all = host.patched(&clear_project_overrides(
             &host,
             "first-project",
             &[
                 ProjectSettingKey::AutoSettle,
                 ProjectSettingKey::ContinueAfterRestart,
             ],
-        );
+        ));
         assert!(all.project_overrides.is_empty());
         assert_eq!(
             plan_conversation_settings_update(
@@ -1000,20 +1011,30 @@ mod tests {
     }
 
     #[test]
-    fn host_wide_changes_write_the_host_value() {
-        let next = plan_conversation_settings_update(
-            &ConversationSettings::default(),
+    fn host_wide_changes_patch_only_the_host_value() {
+        let host = ConversationSettings::default();
+        let resume = plan_conversation_settings_update(
+            &host,
             &SettingsScope::Host,
             &ConversationSettingChange::AutoResumeLimitedThreads { on: true },
         )
         .unwrap();
-        assert!(next.auto_resume_limited_threads);
-        let next = plan_conversation_settings_update(
-            &next,
+        assert_eq!(
+            resume,
+            ConversationSettingsPatch {
+                auto_resume_limited_threads: Some(true),
+                ..Default::default()
+            }
+        );
+        // A second change planned from the same settings keeps the first.
+        let settle = plan_conversation_settings_update(
+            &host,
             &SettingsScope::Host,
             &ConversationSettingChange::AutoSettle { days: Some(7) },
         )
         .unwrap();
+        let next = host.patched(&resume).patched(&settle);
+        assert!(next.auto_resume_limited_threads);
         assert_eq!(next.auto_settle, AutoSettle::AfterDays(7));
     }
 

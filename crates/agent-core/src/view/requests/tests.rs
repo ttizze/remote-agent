@@ -684,21 +684,21 @@ fn a_sent_reply_marks_its_request_responding() {
     state
         .requests
         .push(approval("approval", "command", "ls", provider_options(), 1));
-    let sent = Outbox {
-        entries: vec![PendingCommand::new(
+    let mut sent = Outbox::default();
+    sent.enqueue(PendingCommand::new(
+        thread_id(),
+        OutboxRequest::Dispatch(Box::new(dispatch(
             thread_id(),
-            OutboxRequest::Dispatch(Box::new(dispatch(
-                thread_id(),
-                CommandId::new("reply").unwrap(),
-                answers_command(
-                    RuntimeRequestId::new("async-question").unwrap(),
-                    Answers::new(),
-                    BTreeMap::new(),
-                ),
-            ))),
-            at(),
-        )],
-    };
+            CommandId::new("reply").unwrap(),
+            answers_command(
+                RuntimeRequestId::new("async-question").unwrap(),
+                Answers::new(),
+                BTreeMap::new(),
+            ),
+        ))),
+        at(),
+    ))
+    .unwrap();
     let drafts = [draft("next", &["Continue"], "")];
     let view = requests_view(&state, &sent, &drafts, 0);
     let questions = view.questions.unwrap();

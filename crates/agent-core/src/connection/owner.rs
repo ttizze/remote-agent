@@ -1,9 +1,10 @@
 //! The single owner of device state. Every change arrives as an event and
 //! leaves a new published snapshot.
-use super::{Outcome, Peer, calls::JobResult, invalid, streams::Payload};
+use super::{Outcome, Peer, calls::JobResult, disk::Disk, invalid, streams::Payload};
 use crate::{
     commands::outbox::Delivered,
     peer::PeerError,
+    persistence::StateWriter,
     protocol::{self, Call},
     state::*,
     sync::{
@@ -13,7 +14,7 @@ use crate::{
     transport,
 };
 use agent_domain::{Attachment, CommandId, ThreadId, Timestamp, TurnItemId};
-use agent_protocol::conversation::{HistoryPage, HistoryRow, ShellLocation};
+use agent_protocol::conversation::{HistoryPage, ShellLocation};
 use agent_protocol::models as m;
 use agent_transport::client::Updates;
 use std::{
@@ -33,6 +34,8 @@ pub struct StoreOptions {
     pub creation_source: String,
     /// The disk cache of one Host's shell and threads.
     pub cache_directory: Option<PathBuf>,
+    /// The device state file of one Host, which the store keeps written.
+    pub state_file: Option<PathBuf>,
     /// Mobile starts on the thread list, so a restored selection is not reopened.
     pub start_on_list: bool,
 }
@@ -42,6 +45,7 @@ impl Default for StoreOptions {
         Self {
             creation_source: if mobile { "mobile" } else { "desktop" }.into(),
             cache_directory: None,
+            state_file: None,
             start_on_list: mobile,
         }
     }
@@ -82,9 +86,12 @@ impl StreamKey {
     }
 }
 
-pub(super) enum CacheWrite {
+/// A file write the owner asked for.
+pub(super) enum Written {
     Shell(u64),
     Thread(ThreadId, CachedThread),
+    /// The device state.
+    Device,
 }
 
 pub(super) enum Event {
@@ -128,9 +135,11 @@ pub(super) enum Event {
         epoch: u64,
         thread: ThreadId,
         item: TurnItemId,
-        result: Box<Result<Option<HistoryRow>, PeerError>>,
+        result: Box<Result<Option<agent_domain::Item>, PeerError>>,
     },
-    CacheWritten(CacheWrite, bool),
+    Written(Written, bool),
+    /// Resolves once the latest device state is written.
+    Flush(oneshot::Sender<()>),
     Notification(u64, protocol::Notification),
     Disconnected(u64, String),
     Finished(u64, Box<JobResult>),
@@ -179,6 +188,13 @@ impl Network {
     }
 }
 
+/// The device state file and its pending writes.
+pub(super) struct DeviceFile {
+    path: PathBuf,
+    pub writer: StateWriter,
+    flushes: Vec<oneshot::Sender<()>>,
+}
+
 pub(super) struct Owner {
     pub state: Snapshot,
     snapshots: watch::Sender<Arc<Snapshot>>,
@@ -188,6 +204,9 @@ pub(super) struct Owner {
     pub generation: u64,
     pub options: StoreOptions,
     pub cache: Option<DiskCache>,
+    pub device: Option<DeviceFile>,
+    /// Started with the first file write.
+    disk: Option<Disk>,
     pub shell_cache: ShellCacheEntry,
     pub thread_caches: BTreeMap<ThreadId, ThreadCacheEntry>,
     /// When each retained thread was last shown.
@@ -231,6 +250,11 @@ impl Owner {
         if let Some(shell) = cache.as_ref().and_then(DiskCache::load_shell) {
             snapshot.shell = Arc::new(ShellCache::from_cache(shell));
         }
+        let device = options.state_file.clone().map(|path| DeviceFile {
+            path,
+            writer: StateWriter::restored(&snapshot),
+            flushes: vec![],
+        });
         let (snapshots, updates) = watch::channel(Arc::new(snapshot.clone()));
         let mut owner = Self {
             state: snapshot,
@@ -241,6 +265,8 @@ impl Owner {
             generation: 0,
             options,
             cache,
+            device,
+            disk: None,
             shell_cache: ShellCacheEntry::default(),
             thread_caches: BTreeMap::new(),
             last_used: BTreeMap::new(),
@@ -263,7 +289,7 @@ impl Owner {
         mut receiver: mpsc::Receiver<Event>,
         stop: CancellationToken,
     ) {
-        loop {
+        let closing = loop {
             let deadline = self.next_deadline();
             let wake = async move {
                 match deadline {
@@ -275,27 +301,39 @@ impl Owner {
             };
             let event = tokio::select! {
                 biased;
-                _ = stop.cancelled() => break,
-                event = input.recv() => match event { Some(event) => event, None => break },
-                event = receiver.recv() => match event { Some(event) => event, None => break },
+                _ = stop.cancelled() => break None,
+                event = input.recv() => match event { Some(event) => event, None => break None },
+                event = receiver.recv() => match event { Some(event) => event, None => break None },
                 _ = wake => {
                     self.tick();
                     self.publish();
                     continue;
                 }
             };
-            if self.handle(event).await {
-                break;
+            if let Event::Close(complete) = event {
+                break Some(complete);
             }
-        }
-        self.teardown();
+            self.handle(event).await;
+        };
+        // File writes no longer report back.
+        drop((input, receiver));
+        self.interrupt_uploads();
+        self.state.connected = false;
+        self.publish();
+        self.teardown().await;
         if let Some(network) = self.network.take() {
             network.peer.close().await;
+        }
+        if let Some(complete) = closing {
+            let _ = complete.send(());
         }
     }
 
     pub fn publish(&mut self) {
         self.observe_list();
+        if let Some(device) = &mut self.device {
+            device.writer.observe(&self.state, now_ms());
+        }
         self.state.revision += 1;
         self.snapshots.send_replace(Arc::new(self.state.clone()));
     }
@@ -327,6 +365,7 @@ impl Owner {
             )
             .chain(retention)
             .chain(self.sources_deadline())
+            .chain(self.device.as_ref().and_then(|device| device.writer.next_due()))
             .min()
     }
 
@@ -334,8 +373,9 @@ impl Owner {
     pub fn tick(&mut self) {
         let now = now_ms();
         self.sources_tick(now);
+        self.write_device_state(now);
         if let Some((revision, shell)) = self.shell_cache.due(now) {
-            self.write_cache(CacheWrite::Shell(revision), move |cache| {
+            self.write_cache(Written::Shell(revision), move |cache| {
                 cache.save_shell(&shell)
             });
         }
@@ -346,7 +386,7 @@ impl Owner {
             .collect();
         for (id, cached) in due {
             let (thread, value) = (id.clone(), cached.clone());
-            self.write_cache(CacheWrite::Thread(id, cached), move |cache| {
+            self.write_cache(Written::Thread(id, cached), move |cache| {
                 cache.save_thread(&thread, &value)
             });
         }
@@ -367,33 +407,79 @@ impl Owner {
         }
     }
 
+    /// Runs a file job after every one asked before it.
+    pub fn write_file(&mut self, job: impl FnOnce() -> Option<Event> + Send + 'static) {
+        let sender = self.sender.clone();
+        self.disk
+            .get_or_insert_with(|| Disk::new(sender))
+            .run(job);
+    }
+
     fn write_cache(
         &mut self,
-        write: CacheWrite,
+        write: Written,
         save: impl FnOnce(&DiskCache) -> std::io::Result<()> + Send + 'static,
     ) {
         let Some(cache) = self.cache.clone() else {
             return;
         };
-        let sender = self.sender.clone();
-        tokio::spawn(async move {
-            let stored = tokio::task::spawn_blocking(move || save(&cache).is_ok())
-                .await
-                .unwrap_or(false);
-            let _ = sender.send(Event::CacheWritten(write, stored)).await;
+        self.write_file(move || Some(Event::Written(write, save(&cache).is_ok())));
+    }
+
+    /// Starts the due write of the device state.
+    fn write_device_state(&mut self, now: u64) {
+        let Some(device) = &mut self.device else {
+            return;
+        };
+        if !device.writer.due(&self.state, now) {
+            return;
+        }
+        let (path, snapshot) = (device.path.clone(), self.state.clone());
+        self.write_file(move || {
+            let stored = crate::persistence::save(&path, &snapshot).is_ok();
+            Some(Event::Written(Written::Device, stored))
         });
     }
 
-    pub fn cache_written(&mut self, write: CacheWrite, stored: bool) {
+    pub fn written(&mut self, write: Written, stored: bool) {
         let now = now_ms();
         match write {
-            CacheWrite::Shell(revision) => self.shell_cache.written(revision, stored, now),
-            CacheWrite::Thread(id, cached) => {
+            Written::Shell(revision) => self.shell_cache.written(revision, stored, now),
+            Written::Thread(id, cached) => {
                 if let Some(entry) = self.thread_caches.get_mut(&id) {
                     entry.written(cached, stored, now);
                 }
             }
+            Written::Device => {
+                let Some(device) = &mut self.device else {
+                    return;
+                };
+                device.writer.written(stored, now);
+                if !stored || !device.writer.changed() {
+                    for flush in device.flushes.drain(..) {
+                        let _ = flush.send(());
+                    }
+                }
+                if !stored {
+                    self.state.error = Some("Could not save this device's state.".into());
+                }
+                self.drain();
+            }
         }
+    }
+
+    /// Writes the device state now; `complete` resolves once it is written.
+    fn flush(&mut self, complete: oneshot::Sender<()>) {
+        let Some(device) = &mut self.device else {
+            let _ = complete.send(());
+            return;
+        };
+        if !device.writer.changed() && !device.writer.writing() {
+            let _ = complete.send(());
+            return;
+        }
+        device.writer.hurry(now_ms());
+        device.flushes.push(complete);
     }
 
     /// Stores a thread leaving memory: the latest settled state not yet saved.
@@ -406,7 +492,7 @@ impl Owner {
         if let Some(cached) = entry.teardown(sync) {
             let thread = id.clone();
             self.write_cache(
-                CacheWrite::Thread(id.clone(), cached.clone()),
+                Written::Thread(id.clone(), cached.clone()),
                 move |cache| cache.save_thread(&thread, &cached),
             );
         }
@@ -414,29 +500,35 @@ impl Owner {
 
     pub fn flush_shell(&mut self) {
         if let Some((revision, shell)) = self.shell_cache.flush() {
-            self.write_cache(CacheWrite::Shell(revision), move |cache| {
+            self.write_cache(Written::Shell(revision), move |cache| {
                 cache.save_shell(&shell)
             });
         }
     }
 
-    fn teardown(&mut self) {
-        let Some(cache) = self.cache.clone() else {
-            return;
-        };
-        if let Some((_, shell)) = self.shell_cache.flush() {
-            let _ = cache.save_shell(&shell);
+    /// Writes what is not saved yet after the writes already asked, and waits
+    /// for all of them.
+    pub(super) async fn teardown(&mut self) {
+        self.flush_shell();
+        let threads: Vec<_> = self.thread_caches.keys().cloned().collect();
+        for thread in threads {
+            self.store_thread_now(&thread);
         }
-        for (id, entry) in &mut self.thread_caches {
-            if let Some(sync) = self.state.threads.get(id)
-                && let Some(cached) = entry.teardown(sync)
-            {
-                let _ = cache.save_thread(id, &cached);
-            }
+        if let Some(device) = &self.device
+            && device.writer.changed()
+        {
+            let (path, snapshot) = (device.path.clone(), self.state.clone());
+            self.write_file(move || {
+                let _ = crate::persistence::save(&path, &snapshot);
+                None
+            });
+        }
+        if let Some(disk) = self.disk.take() {
+            disk.finish().await;
         }
     }
 
-    pub async fn handle(&mut self, event: Event) -> bool {
+    pub async fn handle(&mut self, event: Event) {
         match event {
             Event::Intent(intent, complete) => self.intent(intent, complete),
             Event::AppActive => self.app_became_active(),
@@ -483,7 +575,8 @@ impl Owner {
                 item,
                 result,
             } if epoch == self.epoch => self.detail_result(&thread, &item, *result),
-            Event::CacheWritten(write, stored) => self.cache_written(write, stored),
+            Event::Written(write, stored) => self.written(write, stored),
+            Event::Flush(complete) => self.flush(complete),
             Event::Notification(epoch, notification) if epoch == self.epoch => {
                 self.notification(notification)
             }
@@ -506,23 +599,6 @@ impl Owner {
                 ticket,
                 complete,
             } => self.resume(endpoint, ticket, complete),
-            Event::Close(complete) => {
-                self.interrupt_uploads();
-                self.flush_shell();
-                if let Some(network) = self.network.take() {
-                    tokio::spawn(async move {
-                        let peer = network.peer.clone();
-                        drop(network);
-                        peer.close().await;
-                        let _ = complete.send(());
-                    });
-                } else {
-                    let _ = complete.send(());
-                }
-                self.state.connected = false;
-                self.publish();
-                return true;
-            }
             Event::Browser(request, complete) => self.browser(request, complete),
             Event::Dictation(id, cancel) => self.dictation(id, cancel),
             Event::Transfer(transfer, complete) => self.transfer(transfer, complete),
@@ -537,7 +613,6 @@ impl Owner {
             _ => {}
         }
         self.publish();
-        false
     }
 
     pub fn state_outbox(&mut self) -> &mut crate::commands::outbox::Outbox {
@@ -553,6 +628,7 @@ impl Owner {
         events: Updates,
     ) {
         if let Some(network) = self.network.take() {
+            self.abandon_requests();
             tokio::spawn(async move {
                 let peer = network.peer.clone();
                 drop(network);
@@ -594,6 +670,36 @@ impl Owner {
         self.refresh();
         self.state_outbox().reconnected();
         self.drain();
+    }
+
+    /// A replaced connection's requests never answer: nothing waits for them
+    /// any more, and a provider command scan is asked again.
+    pub(super) fn abandon_requests(&mut self) {
+        let now = now_ms();
+        let sources = &mut self.state.sources;
+        for entry in sources.provider_commands.values_mut() {
+            if entry.in_flight {
+                entry.in_flight = false;
+                entry.retry_at_ms = Some(now);
+            }
+        }
+        for entry in sources.refs.values_mut() {
+            entry.in_flight = false;
+        }
+        for icon in self.state.project_icons.values_mut() {
+            if icon.in_flight {
+                icon.in_flight = false;
+                icon.version.clear();
+            }
+        }
+        let import = &mut self.state.session_import;
+        import.scan_pending = false;
+        import.importing = false;
+        for sync in self.state.threads.values_mut() {
+            if sync.has_pending_requests() {
+                Arc::make_mut(sync).requests_abandoned();
+            }
+        }
     }
 
     fn disconnected(&mut self, error: String) {

@@ -432,6 +432,16 @@ fn names_the_icon_by_its_content_and_falls_back_when_it_is_deleted() {
     assert_eq!(read(Some(&updated.hash)), None);
 }
 
+#[test]
+fn an_icon_file_over_four_mebibytes_shows_the_fallback() {
+    let (_directory, root) = workspace();
+    let limit = MAX_SOURCE_BYTES as usize;
+    fs::write(root.join("favicon.png"), vec![0u8; limit]).unwrap();
+    assert_eq!(icon(&root, None, None).unwrap().data.map(|data| data.len()), Some(limit));
+    fs::write(root.join("favicon.png"), vec![0u8; limit + 1]).unwrap();
+    assert_eq!(icon(&root, None, None), None);
+}
+
 // "issues project favicon capabilities for a saved override", "ignores a client
 // favicon path hint" (the request names only the project; the saved path is the
 // Host's) and "keeps automatic favicon resolution separate from a saved override".

@@ -91,7 +91,7 @@ contracts! {
     Keybindings, "host/keybindings/subscribe" => (m::Empty, crate::keybindings::KeybindingsConfig),
     UpsertKeybinding, "host/keybindings/upsert" => (crate::keybindings::UpsertKeybinding, crate::keybindings::KeybindingsConfig) [clone],
     RemoveKeybinding, "host/keybindings/remove" => (crate::keybindings::KeybindingRule, crate::keybindings::KeybindingsConfig) [clone],
-    UpdateConversationSettings, "host/conversation/settings/update" => (m::ConversationSettings, m::ConversationSettings),
+    UpdateConversationSettings, "host/conversation/settings/update" => (m::ConversationSettingsPatch, m::ConversationSettings),
     ListWorktrees, "host/worktree/list" => (m::Empty, Vec<m::Worktree>),
     RemoveWorktree, "host/worktree/remove" => (op::RemoveWorktree, ()) [clone],
     ListAccounts, "host/account/list" => (m::Empty, op::Accounts),

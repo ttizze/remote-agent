@@ -46,14 +46,6 @@ pub fn account_error_message(message: String) -> String {
 }
 
 #[uniffi::export]
-pub fn apply_model_preferences(
-    persisted: Vec<u8>,
-    defaults: Vec<u8>,
-) -> Result<Vec<u8>, AgentError> {
-    crate::persistence::apply_model_preferences(&persisted, &defaults).map_err(error)
-}
-
-#[uniffi::export]
 pub fn generate_identity() -> Vec<u8> {
     Identity::generate().to_bytes().to_vec()
 }
@@ -226,9 +218,12 @@ impl AgentStore {
 
 #[uniffi::export(async_runtime = "tokio")]
 impl AgentStore {
+    /// `state_file` holds this Host's device state, which the store keeps
+    /// written; `model_defaults` are the model preferences every Host shares.
     #[uniffi::constructor]
     pub async fn offline(
-        persisted: Vec<u8>,
+        state_file: String,
+        model_defaults: Vec<u8>,
         cache_directory: Option<String>,
         diagnostics_directory: Option<String>,
     ) -> Result<Arc<Self>, AgentError> {
@@ -238,12 +233,20 @@ impl AgentStore {
             trace.persist(directory.into()).map_err(error)?;
         }
         trace.activate();
-        let snapshot = crate::persistence::decode(&persisted).map_err(error)?;
+        let state_file = std::path::PathBuf::from(state_file);
+        let snapshot = crate::persistence::load(&state_file, &model_defaults);
+        trace.record(
+            ConnectionPhase::SnapshotRead,
+            0,
+            0,
+            started.elapsed().as_micros() as u64,
+        );
         let store = crate::connection::Store::offline(
             snapshot,
             StoreOptions {
                 creation_source: "mobile".into(),
                 cache_directory: cache_directory.map(Into::into),
+                state_file: Some(state_file),
                 start_on_list: true,
             },
         );
@@ -263,11 +266,18 @@ impl AgentStore {
     #[uniffi::constructor]
     pub async fn connect(
         connection: Connection,
-        persisted: Vec<u8>,
+        state_file: String,
+        model_defaults: Vec<u8>,
         cache_directory: Option<String>,
         diagnostics_directory: Option<String>,
     ) -> Result<Arc<Self>, AgentError> {
-        let store = Self::offline(persisted, cache_directory, diagnostics_directory).await?;
+        let store = Self::offline(
+            state_file,
+            model_defaults,
+            cache_directory,
+            diagnostics_directory,
+        )
+        .await?;
         store.reconnect(connection).await?;
         Ok(store)
     }
@@ -285,7 +295,6 @@ impl AgentStore {
         if matches!(
             phase,
             ConnectionPhase::AppPreparation
-                | ConnectionPhase::SnapshotRead
                 | ConnectionPhase::ClientBuild
                 | ConnectionPhase::IdentityRead
                 | ConnectionPhase::UiConnectStart
@@ -305,6 +314,12 @@ impl AgentStore {
 
     pub fn snapshot(&self) -> Arc<Snapshot> {
         self.store.snapshot()
+    }
+
+    /// Resolves once the latest device state is written, as the app leaves
+    /// the foreground.
+    pub async fn flush(&self) -> Result<(), AgentError> {
+        self.store.flush().await.map_err(error)
     }
 
     /// The app returned to the foreground; subscriptions resume from their cursors.

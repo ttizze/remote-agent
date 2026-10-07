@@ -165,6 +165,30 @@ impl Draft {
             .collect();
         self
     }
+    /// Puts back content a send cleared: its text after what was typed since,
+    /// the attachments the draft lacks and the context records the text
+    /// references.
+    pub fn restore(
+        &mut self,
+        text: &str,
+        attachments: &[Attachment],
+        context: Option<&MessageContext>,
+    ) {
+        self.text = merge_restored_text(&self.text, text);
+        for attachment in attachments {
+            if !self
+                .attachments
+                .iter()
+                .any(|existing| existing.remote_id.as_deref() == Some(attachment.id.as_str()))
+            {
+                self.attachments
+                    .push(DraftAttachment::from_remote(attachment));
+            }
+        }
+        if context.is_some() {
+            self.context = merge_referenced_context(&self.text, self.context.as_ref(), context);
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -241,7 +265,7 @@ pub fn merge_draft_text(base: String, edited: String, current: String) -> String
 }
 
 /// Restored content joins the draft after a blank line, once.
-pub fn merge_restored_text(existing: &str, incoming: &str) -> String {
+fn merge_restored_text(existing: &str, incoming: &str) -> String {
     if incoming.is_empty() {
         return existing.into();
     }
@@ -252,6 +276,64 @@ pub fn merge_restored_text(existing: &str, incoming: &str) -> String {
         return existing.into();
     }
     format!("{existing}\n\n{incoming}")
+}
+
+/// The records of both contexts, the later one winning per id, that `text`
+/// still references.
+fn merge_referenced_context(
+    text: &str,
+    first: Option<&MessageContext>,
+    second: Option<&MessageContext>,
+) -> Option<MessageContext> {
+    let mut records: Vec<agent_domain::Json> = vec![];
+    for record in first.into_iter().chain(second).flat_map(|c| &c.records) {
+        match records
+            .iter_mut()
+            .find(|kept| kept.0["contextId"] == record.0["contextId"])
+        {
+            Some(kept) => *kept = record.clone(),
+            None => records.push(record.clone()),
+        }
+    }
+    referenced_context(
+        text,
+        MessageContext {
+            version: 1,
+            records,
+        },
+    )
+}
+
+/// The records `text` links to, with the screenshot of a linked annotation.
+fn referenced_context(text: &str, context: MessageContext) -> Option<MessageContext> {
+    let mut ids: Vec<String> = agent_domain::context_references(text)
+        .into_iter()
+        .map(|reference| reference.context_id)
+        .collect();
+    for record in &context.records {
+        let linked = record.0["contextId"]
+            .as_str()
+            .is_some_and(|id| ids.iter().any(|kept| kept == id));
+        if linked
+            && record.0["kind"] == "preview-annotation"
+            && let Some(screenshot) = record.0["screenshotContextId"].as_str()
+        {
+            ids.push(screenshot.to_owned());
+        }
+    }
+    let records: Vec<_> = context
+        .records
+        .into_iter()
+        .filter(|record| {
+            record.0["contextId"]
+                .as_str()
+                .is_some_and(|id| ids.iter().any(|kept| kept == id))
+        })
+        .collect();
+    (!records.is_empty()).then_some(MessageContext {
+        version: 1,
+        records,
+    })
 }
 
 /// A rollback whose rolled-back message returns to the composer once it succeeds.
@@ -1281,6 +1363,80 @@ mod tests {
             "typed\n\nsent"
         );
         assert_eq!(merge_restored_text("sent", "sent"), "sent");
+    }
+
+    fn skills(start: usize, count: usize) -> (String, MessageContext) {
+        let ids: Vec<String> = (start..start + count).map(|i| format!("skill-{i}")).collect();
+        let text = ids
+            .iter()
+            .map(|id| format!("[Skill](context://v1/skill/{id})"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let records = ids
+            .iter()
+            .map(|id| {
+                agent_domain::Json(serde_json::json!({
+                    "version": 1, "contextId": id, "kind": "skill", "label": "Skill", "name": "skill",
+                }))
+            })
+            .collect();
+        (
+            text,
+            MessageContext {
+                version: 1,
+                records,
+            },
+        )
+    }
+    fn context_ids(context: &Option<MessageContext>) -> Vec<&str> {
+        context.iter().flat_map(|context| &context.records)
+            .filter_map(|record| record.0["contextId"].as_str())
+            .collect()
+    }
+
+    #[test]
+    fn prunes_unreferenced_context_during_a_content_merge() {
+        let (_, existing) = skills(0, 2);
+        let (_, incoming) = skills(2, 2);
+        let mut draft = Draft {
+            text: "[Skill](context://v1/skill/skill-0)".into(),
+            context: Some(existing),
+            ..Draft::default()
+        };
+        draft.restore("[Skill](context://v1/skill/skill-2)", &[], Some(&incoming));
+        assert_eq!(context_ids(&draft.context), ["skill-0", "skill-2"]);
+    }
+
+    #[test]
+    fn a_refused_send_restores_its_context_with_its_text() {
+        let (text, context) = skills(0, 1);
+        let mut draft = Draft::default();
+        draft.restore(&text, &[], Some(&context));
+        assert_eq!(draft.text, text);
+        assert_eq!(draft.context, Some(context));
+    }
+
+    #[test]
+    fn removes_deleted_payloads_but_keeps_the_screenshot_linked_to_a_remaining_annotation() {
+        let record = |value: serde_json::Value| agent_domain::Json(value);
+        let terminal = record(serde_json::json!({"contextId": "terminal", "kind": "terminal"}));
+        let annotation = record(serde_json::json!({
+            "contextId": "annotation", "kind": "preview-annotation", "screenshotContextId": "image",
+        }));
+        let image = record(serde_json::json!({"contextId": "image", "kind": "image"}));
+        let context = MessageContext {
+            version: 1,
+            records: vec![terminal, annotation.clone(), image.clone()],
+        };
+        assert_eq!(
+            referenced_context(
+                "[Note](context://v1/preview-annotation/annotation)",
+                context.clone()
+            )
+            .map(|context| context.records),
+            Some(vec![annotation, image])
+        );
+        assert_eq!(referenced_context("plain text", context), None);
     }
 
     #[test]

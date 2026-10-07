@@ -65,6 +65,8 @@ impl StoreSession {
         }
     }
 
+    /// Keeps the model preferences every Host shares saved at `path`; the
+    /// Store writes its own device state.
     pub(crate) fn persist<E: Send + 'static>(
         &mut self,
         path: PathBuf,
@@ -72,40 +74,30 @@ impl StoreSession {
         failure: impl Fn(String) -> E + Send + 'static,
     ) {
         let (send, mut receive) = watch::channel(self.store.snapshot());
-        let mut preferences =
-            std::fs::read(path.with_file_name("model-preferences.json")).unwrap_or_default();
+        let mut saved = std::fs::read(&path).unwrap_or_default();
         self.persistence = Some(send);
         self.persistence_task = Some(self.runtime.closing.spawn_on(
             async move {
                 while receive.changed().await.is_ok() {
-                    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
                     let snapshot = receive.borrow_and_update().clone();
-                    let path = path.clone();
-                    let next_preferences =
+                    let preferences =
                         agent_core::persistence::encode_model_preferences(&snapshot)
                             .unwrap_or_default();
-                    let preferences_changed = preferences != next_preferences;
-                    let saved_preferences = next_preferences.clone();
+                    if preferences == saved {
+                        continue;
+                    }
+                    let (path, bytes) = (path.clone(), preferences.clone());
                     let result = tokio::task::spawn_blocking(move || {
-                        if preferences_changed {
-                            host_daemon::platform::save_private_bytes(
-                                &path.with_file_name("model-preferences.json"),
-                                &saved_preferences,
-                            )?;
-                        }
-                        host_daemon::platform::save_private_bytes(
-                            &path,
-                            &agent_core::persistence::encode(&snapshot)?,
-                        )
+                        host_daemon::platform::save_private_bytes(&path, &bytes)
                     })
                     .await
                     .map_err(anyhow::Error::from)
                     .and_then(|result| result);
-                    if result.is_ok() {
-                        preferences = next_preferences;
-                    }
-                    if let Err(error) = result {
-                        let _ = updates.send(failure(format!("{error:#}"))).await;
+                    match result {
+                        Ok(()) => saved = preferences,
+                        Err(error) => {
+                            let _ = updates.send(failure(format!("{error:#}"))).await;
+                        }
                     }
                 }
             },
@@ -167,10 +159,69 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn closing_flushes_the_latest_draft_and_closes_the_store() {
+    async fn closing_writes_the_latest_draft_and_model_preferences_and_closes_the_store() {
         tokio::time::timeout(Duration::from_secs(5), async {
             let directory = tempfile::tempdir().unwrap();
-            let path = directory.path().join("snapshot.json");
+            let state_file = directory.path().join("device.json");
+            let path = directory.path().join("model-preferences.json");
+            let runtime = runtime();
+            let store = Arc::new(Store::offline(
+                Snapshot::default(),
+                agent_core::connection::StoreOptions {
+                    state_file: Some(state_file.clone()),
+                    ..Default::default()
+                },
+            ));
+            let (updates, incoming) = async_channel::unbounded();
+            let publish = tokio::spawn(StoreSession::publish(
+                Ok(store.clone()),
+                runtime.clone(),
+                updates.clone(),
+                Update::Connected,
+                |_| Update::Snapshot,
+            ));
+            let Update::Connected(Ok(mut session)) = incoming.recv().await.unwrap() else {
+                panic!("missing session")
+            };
+            session.persist(path.clone(), updates, |_| Update::Error);
+            store
+                .dispatch(Intent::SetRuntimeMode {
+                    mode: agent_domain::RuntimeMode::Auto,
+                })
+                .await
+                .unwrap()
+                .unwrap();
+            store
+                .dispatch(Intent::EditDraft {
+                    text: "last edit before close".into(),
+                    base_text: None,
+                })
+                .await
+                .unwrap()
+                .unwrap();
+            // No UI snapshot/save notification is needed for the final flush.
+            drop(session);
+            runtime.closing.close();
+            runtime.closing.wait().await;
+            publish.await.unwrap();
+            let preferences = std::fs::read(&path).unwrap();
+            let restored = agent_core::persistence::load(&state_file, &preferences);
+            assert_eq!(restored.current_draft().text, "last edit before close");
+            assert!(store.dispatch(Intent::LeaveThread).await.unwrap().is_err());
+            let other = agent_core::persistence::load(&directory.path().join("other.json"), &preferences);
+            assert_eq!(other.default_draft, restored.default_draft);
+            assert!(other.drafts.is_empty());
+        })
+        .await
+        .expect("session close stalled");
+    }
+
+    #[tokio::test]
+    async fn a_model_preferences_failure_is_reported_and_a_later_save_recovers() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("model-preferences.json");
+            std::fs::create_dir(&path).unwrap();
             let runtime = runtime();
             let store = Arc::new(Store::offline(Snapshot::default(), Default::default()));
             let (updates, incoming) = async_channel::unbounded();
@@ -192,67 +243,12 @@ mod tests {
                 .await
                 .unwrap()
                 .unwrap();
-            let mut draft = store.snapshot().current_draft();
-            draft.text = "last edit before close".into();
-            store
-                .dispatch(Intent::EditDraft {
-                    text: draft.text,
-                    base_text: None,
-                })
-                .await
-                .unwrap()
-                .unwrap();
-            // No UI snapshot/save notification is needed for the final flush.
-            drop(session);
-            runtime.closing.close();
-            runtime.closing.wait().await;
-            publish.await.unwrap();
-            let restored: Snapshot =
-                agent_core::persistence::decode(&std::fs::read(path).unwrap()).unwrap();
-            assert_eq!(restored.current_draft().text, "last edit before close");
-            assert!(store.dispatch(Intent::LeaveThread).await.unwrap().is_err());
-            let preferences =
-                std::fs::read(directory.path().join("model-preferences.json")).unwrap();
-            let other = agent_core::persistence::decode(
-                &agent_core::persistence::apply_model_preferences(&[], &preferences).unwrap(),
-            )
-            .unwrap();
-            assert_eq!(other.default_draft, restored.default_draft);
-            assert!(other.drafts.is_empty());
-        })
-        .await
-        .expect("session close stalled");
-    }
-
-    #[tokio::test]
-    async fn persistence_failure_is_reported_and_a_later_save_recovers() {
-        tokio::time::timeout(Duration::from_secs(5), async {
-            let directory = tempfile::tempdir().unwrap();
-            let path = directory.path().join("snapshot.json");
-            std::fs::create_dir(&path).unwrap();
-            let runtime = runtime();
-            let store = Arc::new(Store::offline(Snapshot::default(), Default::default()));
-            let (updates, incoming) = async_channel::unbounded();
-            let publish = tokio::spawn(StoreSession::publish(
-                Ok(store.clone()),
-                runtime.clone(),
-                updates.clone(),
-                Update::Connected,
-                |_| Update::Snapshot,
-            ));
-            let Update::Connected(Ok(mut session)) = incoming.recv().await.unwrap() else {
-                panic!("missing session")
-            };
-            session.persist(path.clone(), updates, |_| Update::Error);
             session.save(store.snapshot());
             while !matches!(incoming.recv().await.unwrap(), Update::Error) {}
             std::fs::remove_dir(&path).unwrap();
-            let mut draft = store.snapshot().current_draft();
-            draft.text = "recovered".into();
             store
-                .dispatch(Intent::EditDraft {
-                    text: draft.text,
-                    base_text: None,
+                .dispatch(Intent::SetRuntimeMode {
+                    mode: agent_domain::RuntimeMode::FullAccess,
                 })
                 .await
                 .unwrap()
@@ -262,9 +258,14 @@ mod tests {
             runtime.closing.close();
             runtime.closing.wait().await;
             publish.await.unwrap();
-            let restored: Snapshot =
-                agent_core::persistence::decode(&std::fs::read(path).unwrap()).unwrap();
-            assert_eq!(restored.current_draft().text, "recovered");
+            let restored = agent_core::persistence::load(
+                &directory.path().join("device.json"),
+                &std::fs::read(&path).unwrap(),
+            );
+            assert_eq!(
+                restored.default_draft.runtime_mode,
+                agent_domain::RuntimeMode::FullAccess
+            );
         })
         .await
         .expect("persistence recovery stalled");

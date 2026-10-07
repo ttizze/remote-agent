@@ -9,7 +9,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-const MAX_ENTRIES: usize = 25_000;
 const MAX_LIMIT: u32 = 200;
 const MAX_QUERY: usize = 256;
 /// A rebuilt index sees files the agent or the user just wrote.
@@ -28,7 +27,8 @@ pub(crate) struct WorkspaceSearch {
     indexes: Mutex<HashMap<PathBuf, (Instant, Index)>>,
 }
 
-/// Every file and directory under `root`, sorted, at most 25,000.
+/// Every file and directory under `root`, sorted. Searches rank all of them
+/// and limit only what they return.
 fn build(root: &Path) -> Vec<WorkspaceEntry> {
     let mut entries = vec![];
     let walker = ignore::WalkBuilder::new(root)
@@ -42,9 +42,6 @@ fn build(root: &Path) -> Vec<WorkspaceEntry> {
         .sort_by_file_name(|a, b| a.cmp(b))
         .build();
     for entry in walker.flatten() {
-        if entries.len() == MAX_ENTRIES {
-            break;
-        }
         let Ok(relative) = entry.path().strip_prefix(root) else {
             continue;
         };

@@ -264,13 +264,13 @@ impl Desktop {
         self.runtime.handle.spawn(async move {
             let state = (|| -> anyhow::Result<(PathBuf, Snapshot, StoreOptions)> {
                 let directory = platform::state_dir().map_err(anyhow::Error::msg)?;
-                let path = directory.join(format!("device-{name}.json"));
-                let bytes = std::fs::read(&path).unwrap_or_default();
-                let preferences = std::fs::read(path.with_file_name("model-preferences.json"))
-                    .unwrap_or_default();
-                let snapshot = agent_core::persistence::recover(&bytes, &preferences);
+                let state_file = directory.join(format!("device-{name}.json"));
+                let path = directory.join("model-preferences.json");
+                let preferences = std::fs::read(&path).unwrap_or_default();
+                let snapshot = agent_core::persistence::load(&state_file, &preferences);
                 let options = StoreOptions {
                     cache_directory: Some(directory.join("cache").join(&name)),
+                    state_file: Some(state_file),
                     ..StoreOptions::default()
                 };
                 Ok((path, snapshot, options))
