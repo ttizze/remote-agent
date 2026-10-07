@@ -14,6 +14,7 @@ pub(super) enum Payload {
     Shell(ShellUpdate),
     Thread(ThreadUpdate),
     Setup(Option<WorktreeSetupSnapshot>),
+    TerminalMetadata(agent_protocol::operations::TerminalMetadataEvent),
     /// The stream closed; `None` when it ended without an error.
     Ended(Option<PeerError>),
 }

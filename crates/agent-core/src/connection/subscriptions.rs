@@ -47,6 +47,9 @@ impl Owner {
             }
             StreamKey::Thread(_) => tokio::spawn(follow(target, call, Payload::Thread)),
             StreamKey::Setup(_) => tokio::spawn(follow(target, call, Payload::Setup)),
+            StreamKey::TerminalMetadata => {
+                tokio::spawn(follow(target, call, Payload::TerminalMetadata))
+            }
         };
         let failures = network
             .streams
@@ -117,6 +120,47 @@ impl Owner {
                 thread_id: thread.clone(),
             }),
         );
+    }
+
+    /// Every thread's terminal labels and running processes.
+    pub(super) fn subscribe_terminal_metadata(&mut self) {
+        if !self.connected() {
+            return;
+        }
+        self.open_stream(
+            StreamKey::TerminalMetadata,
+            Call::TerminalMetadata(agent_protocol::models::Empty {}),
+        );
+    }
+
+    fn terminal_metadata(&mut self, event: agent_protocol::operations::TerminalMetadataEvent) {
+        use agent_protocol::operations::TerminalMetadataEvent as Metadata;
+        let terminals = &mut self.state.terminal_metadata;
+        match event {
+            Metadata::Snapshot { terminals: all } => {
+                *terminals = all
+                    .into_iter()
+                    .map(|summary| {
+                        (
+                            (summary.thread.clone(), summary.terminal_id.clone()),
+                            summary,
+                        )
+                    })
+                    .collect();
+            }
+            Metadata::Upsert { terminal } => {
+                terminals.insert(
+                    (terminal.thread.clone(), terminal.terminal_id.clone()),
+                    terminal,
+                );
+            }
+            Metadata::Remove {
+                thread,
+                terminal_id,
+            } => {
+                terminals.remove(&(thread, terminal_id));
+            }
+        }
     }
 
     fn close_thread_streams(&mut self, thread: &ThreadId) {
@@ -265,6 +309,7 @@ impl Owner {
                     self.subscribe_setup(&thread);
                 }
             }
+            StreamKey::TerminalMetadata => self.subscribe_terminal_metadata(),
         }
     }
 
@@ -299,6 +344,10 @@ impl Owner {
                 self.healthy(&StreamKey::Setup(thread.clone()));
                 self.setup_update(&thread, setup);
             }
+            (StreamKey::TerminalMetadata, Payload::TerminalMetadata(event)) => {
+                self.healthy(&StreamKey::TerminalMetadata);
+                self.terminal_metadata(event);
+            }
             _ => {}
         }
     }
@@ -324,7 +373,7 @@ impl Owner {
                         shell.stream_error();
                     }
                 }
-                StreamKey::Setup(_) => {}
+                StreamKey::Setup(_) | StreamKey::TerminalMetadata => {}
             }
             self.schedule_resubscribe(key);
             return;

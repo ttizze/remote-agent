@@ -158,6 +158,8 @@ pub struct SidebarThreadRow {
     pub title_tone: SidebarTitleTone,
     pub title_regenerating: bool,
     pub has_unsent_draft: bool,
+    /// "2 terminal processes running" while any of its terminals runs a command.
+    pub terminal_processes: Option<String>,
     pub draggable: bool,
     pub can_snooze: bool,
     pub actions: Vec<SidebarRowAction>,
@@ -679,6 +681,11 @@ fn thread_row(
         title_tone,
         title_regenerating: thread.title_regenerating,
         has_unsent_draft,
+        terminal_processes: agent_domain::ThreadId::new(thread.id.clone())
+            .ok()
+            .map(|id| crate::view::terminals::running_terminal_ids(context.snapshot, &id).len())
+            .filter(|count| *count > 0)
+            .map(crate::view::terminals::terminal_process_label),
         draggable: section != SidebarSection::Working,
         can_snooze,
         actions,

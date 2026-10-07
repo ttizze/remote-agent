@@ -69,6 +69,7 @@ pub(super) enum StreamKey {
     Archive,
     Thread(ThreadId),
     Setup(ThreadId),
+    TerminalMetadata,
 }
 impl StreamKey {
     pub fn location(&self) -> Option<ShellLocation> {
@@ -587,6 +588,7 @@ impl Owner {
         if let Some(thread) = self.state.selected_thread.clone() {
             self.subscribe_thread(&thread);
         }
+        self.subscribe_terminal_metadata();
         self.refresh();
         self.state_outbox().reconnected();
         self.drain();
