@@ -23,10 +23,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.LinearProgressIndicator
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -57,10 +54,6 @@ import dev.remoteagent.core.BrowserKey
 import dev.remoteagent.core.BrowserRequest
 import dev.remoteagent.core.FileEntry
 import dev.remoteagent.core.Intent
-import dev.remoteagent.core.ProviderKind
-import dev.remoteagent.core.TurnDiffOption
-import dev.remoteagent.core.accountErrorMessage
-import dev.remoteagent.core.privacyPolicy
 import java.io.File
 import java.util.UUID
 import kotlinx.coroutines.Dispatchers
@@ -72,139 +65,15 @@ import kotlinx.coroutines.withContext
 
 private const val BROWSER_REFRESH_MILLIS = 500L
 
+/** The open thread's files, diff and browser, each as its own screen. */
 @Composable
-// Declarative native layout; the conversation decisions are supplied by core.
-@Suppress("LongMethod", "CyclomaticComplexMethod")
-internal fun SettingsDialog(model: AndroidAppModel, dismiss: () -> Unit) {
-    val context = LocalContext.current
-    var code by remember { mutableStateOf("") }
-    LaunchedEffect(Unit) { model.perform(Intent.LoadAccounts) }
-    Dialog(dismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
-        Surface(Modifier.fillMaxSize()) {
-            LazyColumn(contentPadding = PaddingValues(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                item {
-                    Row {
-                        Text("Settings", Modifier.weight(1f), style = MaterialTheme.typography.titleLarge)
-                        TextButton(onClick = dismiss) { Text("Done") }
-                    }
-                }
-                item {
-                    TextButton(
-                        onClick = {
-                            dismiss()
-                            model.showHosts()
-                        }
-                    ) {
-                        Text("Hosts and pairing")
-                    }
-                }
-                item { Text("Provider accounts", style = MaterialTheme.typography.titleMedium) }
-                items(model.snapshot.accounts()?.accounts.orEmpty(), key = { it.id }) { account ->
-                    Column {
-                        Text(account.email ?: account.id)
-                        account.usage?.windows?.forEach { window ->
-                            Text(
-                                "${window.label}: ${window.remainingPercent}% remaining",
-                                style = MaterialTheme.typography.bodySmall,
-                            )
-                            LinearProgressIndicator(
-                                progress = { window.remainingPercent.toFloat() / 100f },
-                                modifier = Modifier.fillMaxWidth(),
-                            )
-                        }
-                        account.usage?.error?.let {
-                            Text(accountErrorMessage(it), color = AppTheme.color("warningForeground"))
-                        }
-                        Row {
-                            TextButton(
-                                onClick = { model.perform(Intent.SelectAccount(account.provider, account.id)) }
-                            ) {
-                                Text("Select")
-                            }
-                            TextButton(
-                                onClick = { model.perform(Intent.DeleteAccount(account.provider, account.id)) }
-                            ) {
-                                Text("Remove")
-                            }
-                        }
-                    }
-                }
-                item {
-                    Button(onClick = { model.perform(Intent.StartLogin(ProviderKind.CODEX)) }) {
-                        Text("Sign in to Codex")
-                    }
-                }
-                item {
-                    Button(onClick = { model.perform(Intent.StartLogin(ProviderKind.CLAUDE)) }) {
-                        Text("Sign in to Claude")
-                    }
-                }
-                model.snapshot.accountLogin()?.let { login ->
-                    item {
-                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            if (login.userCode.isNotBlank()) {
-                                Text(login.userCode)
-                                CopyButton(login.userCode)
-                            }
-                            TextButton(
-                                onClick = {
-                                    val uri = android.net.Uri.parse(login.verificationUrl)
-                                    if (uri.scheme == "https")
-                                        context.startActivity(
-                                            android.content.Intent(android.content.Intent.ACTION_VIEW, uri)
-                                        )
-                                }
-                            ) {
-                                Text("Open sign-in page")
-                            }
-                            if (login.requiresCodeSubmission) {
-                                OutlinedTextField(
-                                    code,
-                                    { code = it },
-                                    label = { Text("Authorization code") },
-                                    visualTransformation = PasswordVisualTransformation(),
-                                )
-                                Button(
-                                    onClick = {
-                                        model.perform(Intent.CompleteLogin(login.provider, login.loginId, code))
-                                        code = ""
-                                    },
-                                    enabled = code.isNotBlank(),
-                                ) {
-                                    Text("Complete sign in")
-                                }
-                            }
-                            TextButton(
-                                onClick = {
-                                    model.perform(Intent.CancelLogin(login.provider, login.loginId))
-                                    code = ""
-                                }
-                            ) {
-                                Text("Cancel sign in")
-                            }
-                        }
-                    }
-                }
-                item { Text(privacyPolicy(), style = MaterialTheme.typography.bodySmall) }
-            }
-        }
-    }
-}
-
-@Composable
-internal fun WorkspaceDialog(model: AndroidAppModel, tab: String, dismiss: () -> Unit) {
-    Dialog(dismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
-        Surface(Modifier.fillMaxSize()) {
-            Column {
-                Row(Modifier.padding(horizontal = 20.dp), horizontalArrangement = Arrangement.SpaceBetween) {
-                    Text(tab, Modifier.weight(1f), style = MaterialTheme.typography.titleLarge)
-                    TextButton(onClick = dismiss) { Text("Close") }
-                }
-                when (tab) {
-                    "Files" -> WorkspaceFiles(model, Modifier.weight(1f))
-                    "Diff" -> WorkspaceDiff(model, Modifier.weight(1f))
-                    "Browser" -> WorkspaceBrowser(model, Modifier.weight(1f))
-                }
+internal fun WorkspaceScreen(model: AndroidAppModel, tab: WorkspaceTab) {
+    ScreenScaffold(tab.name, onBack = model::back) {
+        Column(Modifier.fillMaxSize()) {
+            when (tab) {
+                WorkspaceTab.Files -> WorkspaceFiles(model, Modifier.weight(1f))
+                WorkspaceTab.Diff -> WorkspaceDiff(model, Modifier.weight(1f))
+                WorkspaceTab.Browser -> WorkspaceBrowser(model, Modifier.weight(1f))
             }
         }
     }
@@ -297,10 +166,9 @@ private fun WorkspaceFiles(model: AndroidAppModel, modifier: Modifier) {
             }
             TextButton(onClick = { upload.launch(arrayOf("*/*")) }) { Text("Upload") }
         }
-        error?.let { Text(it, color = AppTheme.color("errorForeground")) }
+        error?.let { Text(it, color = AppTheme.colors.dangerForeground) }
         val files = model.snapshot.directory()?.takeIf { it.path == directory }
-        if (files?.truncated == true)
-            Text("Showing the first 2,000 entries", style = MaterialTheme.typography.bodySmall)
+        if (files?.truncated == true) Text("Showing the first 2,000 entries", style = AppTheme.caption)
         LazyColumn {
             items(files?.entries.orEmpty(), key = { it.path }) { entry ->
                 Row(Modifier.fillMaxWidth()) {
@@ -339,7 +207,7 @@ private fun WorkspaceFiles(model: AndroidAppModel, modifier: Modifier) {
                         Text(entry.name, Modifier.weight(1f))
                         TextButton(onClick = { selected = null }) { Text("Close") }
                     }
-                    model.snapshot.error()?.let { Text(it, color = AppTheme.color("errorForeground")) }
+                    model.snapshot.error()?.let { Text(it, color = AppTheme.colors.dangerForeground) }
                     val file = model.snapshot.file()?.takeIf { it.path == entry.path }
                     var text by remember(entry.path) { mutableStateOf("") }
                     var pending by remember(entry.path) { mutableStateOf<Long?>(null) }
@@ -360,7 +228,7 @@ private fun WorkspaceFiles(model: AndroidAppModel, modifier: Modifier) {
                                 }
                             },
                             Modifier.weight(1f).fillMaxWidth(),
-                            textStyle = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace),
+                            textStyle = AppTheme.footnote.copy(fontFamily = FontFamily.Monospace),
                         )
                         Button(onClick = { model.perform(Intent.SaveFile(entry.path)) }) { Text("Save") }
                     }
@@ -370,75 +238,76 @@ private fun WorkspaceFiles(model: AndroidAppModel, modifier: Modifier) {
     }
 }
 
+/** The diff panel core describes: scope, turn, whitespace, then the files of the loaded diff. */
 @Composable
-// Declarative native layout; the conversation decisions are supplied by core.
-@Suppress("LongMethod", "CyclomaticComplexMethod")
+@Suppress("LongMethod")
 private fun WorkspaceDiff(model: AndroidAppModel, modifier: Modifier) {
-    val cwd = model.snapshot.currentDirectory()
-    val thread = model.snapshot.selectedThreadId()
-    var expanded by remember(thread) { mutableStateOf(false) }
-    var selection by remember(thread) { mutableStateOf<TurnDiffOption?>(null) }
-    fun refresh() {
-        val range = selection
-        if (range != null) model.perform(Intent.ReadTurnDiff(range.fromTurnCount, range.toTurnCount, false))
-        else if (cwd.isNotBlank()) model.perform(Intent.ReviewWorkspace(cwd))
-    }
-    LaunchedEffect(cwd, thread, selection) { refresh() }
+    val thread = model.snapshot.selectedThreadId() ?: return
+    val panel = model.snapshot.diff(thread)
+    var menu by remember { mutableStateOf(false) }
+    LaunchedEffect(thread, panel.request) { if (panel.request != null) model.perform(Intent.LoadDiff) }
     val review = model.snapshot.review()
     var files by remember { mutableStateOf<List<dev.remoteagent.core.WorkspaceDiffFile>>(emptyList()) }
     LaunchedEffect(model.snapshot.reviewRevision()) {
         files = withContext(Dispatchers.Default) { review?.diffFiles().orEmpty() }
     }
+    val colors = AppTheme.colors
     Column(modifier) {
-        Row {
+        Row(Modifier.padding(horizontal = 12.dp)) {
             Box(Modifier.weight(1f)) {
-                TextButton(onClick = { expanded = true }) { Text(selection?.label ?: "Workspace changes") }
-                DropdownMenu(expanded, { expanded = false }) {
-                    DropdownMenuItem(
-                        text = { Text("Workspace changes") },
-                        onClick = {
-                            selection = null
-                            expanded = false
-                        },
-                    )
-                    model.snapshot.turnDiffOptions().forEach { option ->
+                TextButton(onClick = { menu = true }) { Text(panel.scopeLabel, color = colors.foreground) }
+                AnchoredMenu(menu, { menu = false }) {
+                    panel.scopes.forEach { scope ->
                         DropdownMenuItem(
-                            text = { Text(option.label) },
+                            text = { Text(if (scope.selected) "✓  ${scope.label}" else scope.label) },
                             onClick = {
-                                selection = option
-                                expanded = false
+                                menu = false
+                                model.perform(Intent.SelectDiffScope(scope.choice))
+                            },
+                        )
+                    }
+                    panel.turns.forEach { turn ->
+                        DropdownMenuItem(
+                            text = { Text(if (turn.selected) "✓  ${turn.label}" else turn.label) },
+                            onClick = {
+                                menu = false
+                                model.perform(Intent.SelectDiffTurn(turn.runId, null))
                             },
                         )
                     }
                 }
             }
-            TextButton(onClick = { refresh() }) { Text("Refresh") }
+            TextButton(onClick = { model.perform(Intent.SetDiffIgnoreWhitespace(!panel.ignoreWhitespace)) }) {
+                Text(panel.whitespaceToggleLabel, color = colors.foreground)
+            }
         }
         LazyColumn(
             Modifier.weight(1f),
             contentPadding = PaddingValues(20.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            if (review == null) item { CircularProgressIndicator() }
-            else if (files.isEmpty()) item { Text("No changes") }
+            val empty = panel.emptyMessage
+            when {
+                empty != null -> item { Text(empty, color = colors.foregroundMuted) }
+                review == null -> item { CircularProgressIndicator() }
+                files.isEmpty() -> item { Text("No changes", color = colors.foregroundMuted) }
+            }
             items(files, key = { it.path }) { file ->
                 Column {
-                    Text(file.path, style = MaterialTheme.typography.labelLarge)
+                    Text(file.path, style = AppTheme.label, color = colors.foreground)
                     androidx.compose.foundation.text.selection.SelectionContainer {
                         Column {
                             file.rows.forEach { row ->
                                 Text(
                                     row.text,
                                     fontFamily = FontFamily.Monospace,
-                                    style = MaterialTheme.typography.bodySmall,
+                                    style = AppTheme.caption,
                                     color =
-                                        AppTheme.color(
-                                            when (row.kind) {
-                                                "+" -> "successForeground"
-                                                "-" -> "errorForeground"
-                                                else -> "text"
-                                            }
-                                        ),
+                                        when (row.kind) {
+                                            "+" -> colors.emerald
+                                            "-" -> colors.rose
+                                            else -> colors.foreground
+                                        },
                                 )
                             }
                         }
@@ -521,7 +390,7 @@ private fun WorkspaceBrowser(model: AndroidAppModel, modifier: Modifier) {
                 }
             }
         }
-        error?.let { Text(it, color = AppTheme.color("errorForeground")) }
+        error?.let { Text(it, color = AppTheme.colors.dangerForeground) }
         frame?.dialog?.let { dialog ->
             Text(dialog.message)
             if (dialog.prompt) OutlinedTextField(dialogText, { dialogText = it })
