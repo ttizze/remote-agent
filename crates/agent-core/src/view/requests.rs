@@ -2,6 +2,7 @@
 //! request cards on mobile, with the device's answer drafts.
 use crate::commands::outbox::Outbox;
 use crate::js_text::{is_js_space, js_trim};
+use crate::state::{Snapshot, answer_draft_key};
 use crate::view::quantity;
 use crate::view::queue::outbox_commands;
 use agent_domain::{
@@ -722,6 +723,59 @@ pub fn requests_view(
         }),
         question_request_count: questions.len() as u32,
     }
+}
+
+/// A question request's answer drafts with the state of each answer's files.
+pub fn answer_drafts(snapshot: &Snapshot, request_id: &str) -> Vec<QuestionDraft> {
+    let mut drafts = snapshot
+        .question_drafts
+        .get(request_id)
+        .map(|drafts| drafts.drafts.clone())
+        .unwrap_or_default();
+    let prefix = answer_draft_key(request_id, "");
+    for (key, files) in snapshot.drafts.iter() {
+        let Some(question) = key
+            .strip_prefix(&prefix)
+            .filter(|_| !files.attachments.is_empty())
+        else {
+            continue;
+        };
+        let attachment_count = files.attachments.len() as u32;
+        let attachments_blocked = files.attachments.iter().any(|a| a.status != "ready");
+        match drafts
+            .iter_mut()
+            .find(|draft| draft.question_id == question)
+        {
+            Some(draft) => {
+                draft.attachment_count = attachment_count;
+                draft.attachments_blocked = attachments_blocked;
+            }
+            None => drafts.push(QuestionDraft {
+                question_id: question.into(),
+                attachment_count,
+                attachments_blocked,
+                ..Default::default()
+            }),
+        }
+    }
+    drafts
+}
+
+/// A thread's requests with this device's answers to its oldest question request.
+pub fn thread_requests_view(snapshot: &Snapshot, state: &State) -> RequestsView {
+    let request = pending_questions(state)
+        .first()
+        .map(|request| request.id.to_string());
+    let (drafts, question_index) = request.map_or_else(Default::default, |request| {
+        (
+            answer_drafts(snapshot, &request),
+            snapshot
+                .question_drafts
+                .get(&request)
+                .map_or(0, |drafts| drafts.question_index as usize),
+        )
+    });
+    requests_view(state, &snapshot.outbox, &drafts, question_index)
 }
 
 /// The tallest the mobile question card may grow above the keyboard and composer.

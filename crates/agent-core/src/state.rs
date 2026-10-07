@@ -285,6 +285,8 @@ pub struct Snapshot {
     /// The last setup a closed stream reported, kept for the card.
     pub held_setups: BTreeMap<ThreadId, WorktreeSetupSnapshot>,
     pub error_dismissals: crate::view::timeline::banners::ThreadErrorDismissals,
+    /// Timeline rows already built; every snapshot of the store shares them.
+    pub timelines: Arc<std::sync::Mutex<crate::view::timeline::rows::TimelineCache>>,
 }
 
 impl Snapshot {
@@ -585,10 +587,13 @@ pub enum Intent {
         draft_key: String,
         files: Vec<LocalFile>,
     },
+    /// `draft_key` names an answer's files; `None` is the composer.
     RetryAttachment {
+        draft_key: Option<String>,
         id: String,
     },
     RemoveAttachment {
+        draft_key: Option<String>,
         id: String,
     },
     /// `alternate` is the second send gesture (Mod+Enter, long press).

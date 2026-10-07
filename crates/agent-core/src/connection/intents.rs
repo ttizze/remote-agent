@@ -397,12 +397,13 @@ impl Owner {
                 self.state.session_import = SessionImport::default();
                 Next::Done
             }
-            Intent::RetryAttachment { id } => {
-                self.begin_attachment(self.state.draft_key(), id)?;
+            Intent::RetryAttachment { draft_key, id } => {
+                let key = draft_key.unwrap_or_else(|| self.state.draft_key());
+                self.begin_attachment(key, id)?;
                 Next::Done
             }
-            Intent::RemoveAttachment { id } => {
-                let key = self.state.draft_key();
+            Intent::RemoveAttachment { draft_key, id } => {
+                let key = draft_key.unwrap_or_else(|| self.state.draft_key());
                 if let Some(draft) = self.state.drafts.get_mut(&key) {
                     draft.attachments.retain(|a| a.id != id);
                 }
@@ -937,12 +938,13 @@ impl Owner {
         {
             return Err(invalid("The attachment draft is no longer available"));
         }
-        let mut draft = self
-            .state
-            .drafts
-            .get(&key)
-            .cloned()
-            .unwrap_or_else(|| self.state.current_draft());
+        let mut draft = self.state.drafts.get(&key).cloned().unwrap_or_else(|| {
+            if key.starts_with("answer:") {
+                Draft::default()
+            } else {
+                self.state.current_draft()
+            }
+        });
         let mut candidates = vec![];
         let mut readable = vec![];
         let mut error = None;

@@ -3,6 +3,7 @@ mod domain;
 mod json;
 mod protocol;
 mod snapshot;
+mod views;
 
 use crate::{
     connection::{Outcome, StoreOptions},

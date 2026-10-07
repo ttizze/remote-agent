@@ -8,6 +8,7 @@ pub mod hero;
 pub mod menu;
 pub mod prompt;
 pub mod stash;
+pub mod view;
 
 /// `120000` as `120,000`, as the web formats counts in English.
 fn group_thousands(value: impl ToString) -> String {

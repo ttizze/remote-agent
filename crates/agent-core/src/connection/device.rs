@@ -24,7 +24,7 @@ use crate::{
             traits::{TraitChange, select_trait, toggle_trait},
         },
         requests::{
-            carry_displaced_custom_answer_into_prompt, question_answers,
+            answer_drafts, carry_displaced_custom_answer_into_prompt, question_answers,
             set_question_custom_answer, toggle_question_option,
         },
         sidebar::SidebarThreadDropPlan,
@@ -278,47 +278,10 @@ impl Owner {
         Ok(Next::Done)
     }
 
-    /// Answer drafts with the state of each question's attached files.
-    pub(crate) fn answer_drafts(
-        snapshot: &Snapshot,
-        request_id: &str,
-    ) -> Vec<crate::view::requests::QuestionDraft> {
-        let mut drafts = snapshot
-            .question_drafts
-            .get(request_id)
-            .map(|drafts| drafts.drafts.clone())
-            .unwrap_or_default();
-        for (key, files) in snapshot.drafts.iter() {
-            let Some(question) = key
-                .strip_prefix(&format!("answer:{request_id}:"))
-                .filter(|_| !files.attachments.is_empty())
-            else {
-                continue;
-            };
-            let blocked = files.attachments.iter().any(|a| a.status != "ready");
-            match drafts
-                .iter_mut()
-                .find(|draft| draft.question_id == question)
-            {
-                Some(draft) => {
-                    draft.attachment_count = files.attachments.len() as u32;
-                    draft.attachments_blocked = blocked;
-                }
-                None => drafts.push(crate::view::requests::QuestionDraft {
-                    question_id: question.into(),
-                    attachment_count: files.attachments.len() as u32,
-                    attachments_blocked: blocked,
-                    ..Default::default()
-                }),
-            }
-        }
-        drafts
-    }
-
     pub(super) fn submit_answers(&mut self, request_id: String) -> Result<Next, PeerError> {
         let thread = self.selected()?;
         let (request, questions) = self.question_request(&thread, &request_id)?;
-        let drafts = Self::answer_drafts(&self.state, &request_id);
+        let drafts = answer_drafts(&self.state, &request_id);
         let answers = question_answers(&questions, &drafts)
             .ok_or_else(|| invalid("Answer every question"))?;
         let mut attachments = BTreeMap::new();
@@ -336,7 +299,7 @@ impl Owner {
         let command = crate::commands::build::answers_command(request, answers, attachments);
         let entry = self.command(thread, command);
         self.state.question_drafts.remove(&request_id);
-        let prefix = format!("answer:{request_id}:");
+        let prefix = answer_draft_key(&request_id, "");
         self.state.drafts.retain(|key, _| !key.starts_with(&prefix));
         Ok(Next::Commands(vec![entry]))
     }

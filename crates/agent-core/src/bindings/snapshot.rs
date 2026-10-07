@@ -110,9 +110,6 @@ impl Snapshot {
     pub fn account_login(&self) -> Option<AccountLogin> {
         self.account_login.clone()
     }
-    pub fn terminal(&self, handle: String, after: u64) -> crate::state::TerminalView {
-        self.terminal_view(&handle, after)
-    }
 }
 #[derive(uniffi::Object)]
 pub struct WorkspaceReview(pub(crate) Arc<crate::models::WorkspaceReview>);

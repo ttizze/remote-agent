@@ -14,6 +14,7 @@ pub const HISTORY_ERROR: &str = "Could not load earlier activity.";
 pub const NOT_CONNECTED: &str = "Environment is not connected.";
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum ThreadStatus {
     #[default]
     Empty,

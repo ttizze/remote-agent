@@ -265,6 +265,45 @@ fn activity_run(state: &State) -> Option<&Run> {
     })
 }
 
+/// The setup a thread shows and where its first turn stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SetupProgress<'a> {
+    pub visible: Option<&'a WorktreeSetupSnapshot>,
+    pub preparing_worktree: bool,
+    /// The thread's activity run has started.
+    pub turn_started: bool,
+    /// When the agent's live turn started, if one is running.
+    pub working_since_ms: Option<i64>,
+}
+
+impl SetupProgress<'_> {
+    /// Sends wait for the agent handoff, not for the setup script.
+    pub fn blocks_send(&self) -> bool {
+        match self.visible {
+            Some(setup) => setup.phase == WorktreeSetupPhase::Running && !agent_started(setup),
+            None => self.preparing_worktree,
+        }
+    }
+
+    pub fn view(&self, layout: SetupCardLayout, now_ms: i64) -> SetupView {
+        SetupView {
+            card: self.visible.map(|setup| {
+                setup_card(
+                    setup,
+                    &CardContext {
+                        layout,
+                        turn_started: self.turn_started,
+                        working_since_ms: self.working_since_ms,
+                        now_ms,
+                    },
+                )
+            }),
+            preparing_worktree: self.preparing_worktree,
+            blocks_send: self.blocks_send(),
+        }
+    }
+}
+
 /// The setup of `thread` as the thread screen shows it.
 pub fn setup_view(
     snapshot: &Snapshot,
@@ -272,6 +311,10 @@ pub fn setup_view(
     layout: SetupCardLayout,
     now_ms: i64,
 ) -> SetupView {
+    setup_progress(snapshot, thread).view(layout, now_ms)
+}
+
+pub fn setup_progress<'a>(snapshot: &'a Snapshot, thread: &ThreadId) -> SetupProgress<'a> {
     let state = snapshot.thread_state(thread);
     let run = state.and_then(activity_run);
     let local_preparing = snapshot.outbox.pending_launches().any(|entry| {
@@ -301,29 +344,14 @@ pub fn setup_view(
     });
     let follow_up_sent =
         user_messages + snapshot.outbox.undelivered_messages(thread, state).len() > 1;
-    let visible = resolve_visible_setup(live, turn_started, follow_up_sent);
-    let blocks_send = match visible {
-        Some(setup) => setup.phase == WorktreeSetupPhase::Running && !agent_started(setup),
-        None => preparing_worktree,
-    };
-    let working_since_ms = state
-        .and_then(State::active_run)
-        .and_then(|run| run.started_at.as_ref())
-        .map(Timestamp::millis);
-    SetupView {
-        card: visible.map(|setup| {
-            setup_card(
-                setup,
-                &CardContext {
-                    layout,
-                    turn_started,
-                    working_since_ms,
-                    now_ms,
-                },
-            )
-        }),
+    SetupProgress {
+        visible: resolve_visible_setup(live, turn_started, follow_up_sent),
         preparing_worktree,
-        blocks_send,
+        turn_started,
+        working_since_ms: state
+            .and_then(State::active_run)
+            .and_then(|run| run.started_at.as_ref())
+            .map(Timestamp::millis),
     }
 }
 
