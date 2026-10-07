@@ -168,6 +168,9 @@ pub enum AutoSettle {
 pub struct ProjectConversationSettings {
     pub auto_settle: Option<AutoSettle>,
     pub continue_after_restart: Option<bool>,
+    pub branch_naming_mode: Option<agent_domain::BranchNamingMode>,
+    pub branch_name_prefix: Option<String>,
+    pub branch_name_instructions: Option<String>,
 }
 
 /// Host conversation settings.
@@ -179,15 +182,23 @@ pub struct ConversationSettings {
     pub continue_after_restart: bool,
     pub snooze_limited_threads: bool,
     pub auto_resume_limited_threads: bool,
+    /// How launches name the worktree branches they generate.
+    pub branch_naming_mode: agent_domain::BranchNamingMode,
+    pub branch_name_prefix: String,
+    pub branch_name_instructions: String,
     pub project_overrides: std::collections::BTreeMap<String, ProjectConversationSettings>,
 }
 impl Default for ConversationSettings {
     fn default() -> Self {
+        let naming = agent_domain::BranchNaming::default();
         Self {
             auto_settle: AutoSettle::AfterDays(3),
             continue_after_restart: false,
             snooze_limited_threads: false,
             auto_resume_limited_threads: false,
+            branch_naming_mode: naming.mode,
+            branch_name_prefix: naming.prefix,
+            branch_name_instructions: naming.instructions,
             project_overrides: Default::default(),
         }
     }

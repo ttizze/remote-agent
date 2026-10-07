@@ -91,22 +91,30 @@ fn validate<'a>(attachments: impl IntoIterator<Item = Limits<'a>>) -> Result<()>
     }
     Ok(())
 }
-/// `pending:<token>` uploads and `chat:<thread hash>:<token>` claims.
+/// Whether the id names an upload no thread has claimed yet.
+pub(crate) fn is_pending_upload(id: &str) -> bool {
+    id.starts_with("pending-")
+}
+/// `pending-<token>` uploads and `chat-<thread hash>-<token>` claims. Both fit
+/// the attachment ID schema of messages and context records:
+/// `^[a-z0-9_-]{1,128}$`, ignoring case.
 fn stored_path(root: &Path, id: &str) -> Option<PathBuf> {
-    let parts: Vec<_> = id.split(':').collect();
     let safe = |s: &str| {
         !s.is_empty()
             && s.len() <= 128
             && s.bytes()
                 .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
     };
-    match parts.as_slice() {
-        ["pending", token] if safe(token) => Some(root.join("pending").join(token)),
-        ["chat", thread, token] if thread.len() == 43 && safe(thread) && safe(token) => {
-            Some(root.join("chat").join(thread).join(token))
-        }
-        _ => None,
+    if let Some(token) = id.strip_prefix("pending-") {
+        return safe(token).then(|| root.join("pending").join(token));
     }
+    let claimed = id.strip_prefix("chat-")?;
+    let (thread, token) = (claimed.get(..43)?, claimed.get(43..)?.strip_prefix('-')?);
+    (safe(thread) && safe(token) && id.len() <= 128)
+        .then(|| root.join("chat").join(thread).join(token))
+}
+fn claimed_id(thread: &str, token: &str) -> String {
+    format!("chat-{}-{token}", hash(thread.as_bytes()))
 }
 
 struct NewClaims(Vec<PathBuf>);
@@ -274,14 +282,14 @@ impl WorkspaceFiles {
                 return Err(anyhow!("attachment metadata changed"));
             }
             let mut attachment = attachment.clone();
-            let target = match attachment.id.strip_prefix("pending:") {
+            let target = match attachment.id.strip_prefix("pending-") {
                 Some(token) => {
                     let mut file = File::open(&source)?;
                     let (size, digest) = digest_file(&mut file)?;
                     if size != attachment.size || digest != manifest.sha256 {
                         return Err(anyhow!("pending attachment content changed"));
                     }
-                    let id = format!("chat:{}:{token}", hash(thread.as_bytes()));
+                    let id = claimed_id(thread, token);
                     let target =
                         stored_path(&self.upload_directory, &id).context("invalid claim id")?;
                     attachment.id = id;
@@ -370,6 +378,21 @@ mod tests {
     use super::*;
 
     fn upload(files: &WorkspaceFiles, token: &str, contents: &[u8]) -> Attachment {
+        upload_as(
+            files,
+            token,
+            contents,
+            &format!("{token}.txt"),
+            "text/plain",
+        )
+    }
+    fn upload_as(
+        files: &WorkspaceFiles,
+        token: &str,
+        contents: &[u8],
+        name: &str,
+        mime: &str,
+    ) -> Attachment {
         let pending = files.attachment_root().join("pending");
         files.prepare_attachment_directory(&pending).unwrap();
         let path = pending.join(token);
@@ -378,15 +401,19 @@ mod tests {
         let uploaded = files
             .save_attachment_upload(
                 &path,
-                format!("pending:{token}"),
-                &format!("{token}.txt"),
-                "text/plain",
+                format!("pending-{token}"),
+                name,
+                mime,
                 contents.len() as u64,
                 digest,
             )
             .unwrap();
         Attachment {
-            kind: agent_domain::AttachmentKind::File,
+            kind: if uploaded.kind == orchestration::AttachmentKind::Image {
+                agent_domain::AttachmentKind::Image
+            } else {
+                agent_domain::AttachmentKind::File
+            },
             source: None,
             id: uploaded.id,
             name: uploaded.name,
@@ -405,7 +432,7 @@ mod tests {
             .claim("thread", std::slice::from_ref(&pending))
             .unwrap();
         let stored = files.attachment_path(&claimed[0].id).unwrap();
-        assert!(claimed[0].id.starts_with("chat:"));
+        assert!(claimed[0].id.starts_with("chat-"));
         assert_eq!(claimed[0].path, stored.to_string_lossy());
         fs::write(&stored, b"edited").unwrap();
         // A resent claim keeps the stored copy and the original upload.
@@ -422,7 +449,7 @@ mod tests {
                 .unwrap(),
             claimed
         );
-        assert!(files.attachment_path("pending:../../checkout").is_err());
+        assert!(files.attachment_path("pending-../../checkout").is_err());
         let mut changed = pending.clone();
         changed.name = "renamed.txt".into();
         assert!(files.claim("thread", &[changed]).is_err());
@@ -446,7 +473,7 @@ mod tests {
         let files = WorkspaceFiles::new(directory.path().join("assets"));
         let first = upload(&files, "one", b"original");
         let missing = Attachment {
-            id: "pending:missing".into(),
+            id: "pending-missing".into(),
             ..first.clone()
         };
         assert!(files.claim("thread", &[first.clone(), missing]).is_err());
@@ -457,5 +484,86 @@ mod tests {
             0
         );
         assert!(files.claim("thread", &[first]).is_ok());
+    }
+
+    // Context records name uploads by attachment ID; a claim rebinds them to
+    // the thread's copies, which the record schema must still accept.
+    #[test]
+    fn claimed_uploads_keep_their_context_records() {
+        let directory = tempfile::tempdir().unwrap();
+        let files = WorkspaceFiles::new(directory.path().join("assets"));
+        let image = upload_as(
+            &files,
+            "0123456789abcdef0123456789abcdef",
+            b"\x89PNG\r\n\x1a\nimage",
+            "shot.png",
+            "image/png",
+        );
+        let file = upload(&files, "fedcba9876543210fedcba9876543210", b"notes");
+        let record = |kind: &str, context: &str, attachment: &Attachment| {
+            agent_domain::Json(serde_json::json!({
+                "version": 1, "contextId": context, "kind": kind, "label": attachment.name,
+                "attachmentId": attachment.id, "name": attachment.name,
+                "mimeType": attachment.mime_type, "sizeBytes": attachment.size,
+            }))
+        };
+        let mut context = agent_domain::MessageContext {
+            version: 1,
+            records: vec![
+                record("image", "ctx_image", &image),
+                record("file", "ctx_file", &file),
+            ],
+        };
+        assert_eq!(context.normalized().unwrap(), context);
+        let claimed = files
+            .claim("thread-1", &[image.clone(), file.clone()])
+            .unwrap();
+        context.remap_attachments(&std::collections::HashMap::from([
+            (image.id.clone(), claimed[0].id.clone()),
+            (file.id.clone(), claimed[1].id.clone()),
+        ]));
+        let normalized = context.normalized().unwrap();
+        assert_eq!(
+            normalized
+                .records
+                .iter()
+                .map(|record| (
+                    record.0["kind"].as_str().unwrap(),
+                    record.0["attachmentId"].as_str().unwrap()
+                ))
+                .collect::<Vec<_>>(),
+            [
+                ("image", claimed[0].id.as_str()),
+                ("file", claimed[1].id.as_str())
+            ]
+        );
+        let provider = agent_domain::project_context_for_provider(
+            "See ![shot.png](context://v1/image/ctx_image) and [notes](context://v1/file/ctx_file)",
+            Some(&normalized),
+        );
+        assert!(provider.contains(&claimed[0].id), "{provider}");
+        assert!(provider.contains(&claimed[1].id), "{provider}");
+    }
+
+    proptest::proptest! {
+        // Upload and claim IDs satisfy `^[a-z0-9_-]{1,128}$` (ignoring case)
+        // and name the storage they were made for.
+        #[test]
+        fn attachment_ids_fit_the_schema_and_resolve_to_their_storage(
+            thread in proptest::prelude::any::<String>(),
+            token in "[0-9a-f]{32}",
+        ) {
+            let schema = regex::Regex::new("^[A-Za-z0-9_-]{1,128}$").unwrap();
+            let root = Path::new("/assets");
+            let pending = format!("pending-{token}");
+            proptest::prop_assert!(schema.is_match(&pending));
+            proptest::prop_assert_eq!(stored_path(root, &pending), Some(root.join("pending").join(&token)));
+            let claimed = claimed_id(&thread, &token);
+            proptest::prop_assert!(schema.is_match(&claimed), "{}", claimed);
+            proptest::prop_assert_eq!(
+                stored_path(root, &claimed),
+                Some(root.join("chat").join(hash(thread.as_bytes())).join(&token))
+            );
+        }
     }
 }

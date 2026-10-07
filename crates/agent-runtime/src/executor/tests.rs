@@ -56,6 +56,9 @@ pub(crate) struct FakeOps {
     pub(crate) generations: Mutex<Vec<TextGenerationRequest>>,
     /// The next checkpoint file summaries.
     pub(crate) files: Mutex<Result<Vec<agent_domain::CheckpointFile>, String>>,
+    /// Answers branch name generations; the default names `generated-branch`.
+    pub(crate) branch_names: Mutex<Option<Hook<TextGenerationRequest, Result<String, String>>>>,
+    pub(crate) branch_naming: Mutex<agent_domain::BranchNaming>,
 }
 
 impl FakeOps {
@@ -81,6 +84,8 @@ impl FakeOps {
             titles: Mutex::new(VecDeque::new()),
             generations: Mutex::new(vec![]),
             files: Mutex::new(Ok(vec![])),
+            branch_names: Mutex::new(None),
+            branch_naming: Mutex::new(Default::default()),
         })
     }
     pub(crate) fn record(&self, entry: impl Into<String>) {
@@ -308,12 +313,35 @@ impl HostOperations for Ops {
             Ok(())
         })
     }
+    fn branch_naming(&self, _project: &str) -> agent_domain::BranchNaming {
+        self.0.branch_naming.lock().unwrap().clone()
+    }
+    fn rename_branch(
+        &self,
+        cwd: String,
+        old: String,
+        new: String,
+        exact: bool,
+    ) -> BoxFuture<'_, Result<String, String>> {
+        Box::pin(async move {
+            self.0
+                .record(format!("rename-branch {cwd} {old} {new} exact={exact}"));
+            Ok(new)
+        })
+    }
     fn generate_text(
         &self,
         request: TextGenerationRequest,
     ) -> BoxFuture<'_, Result<String, String>> {
         Box::pin(async move {
-            self.0.generations.lock().unwrap().push(request);
+            self.0.generations.lock().unwrap().push(request.clone());
+            if request.operation == "generateBranchName" {
+                let hook = self.0.branch_names.lock().unwrap().clone();
+                return match hook {
+                    Some(hook) => hook(request).await,
+                    None => Ok(r#"{"branch":"generated-branch"}"#.into()),
+                };
+            }
             self.0
                 .titles
                 .lock()

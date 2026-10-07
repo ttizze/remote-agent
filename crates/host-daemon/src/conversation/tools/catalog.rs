@@ -133,6 +133,25 @@ fn model_selection() -> Value {
         &["instanceId", "model"],
     )
 }
+/// A chat image or file attachment; an image's capture source is app-owned.
+fn attachment() -> Value {
+    let fields = |kind: &str, size: Value| {
+        json!({
+            "type": literals(&[kind]),
+            "id": text(Some(128)),
+            "name": text(Some(255)),
+            "mimeType": text(Some(100)),
+            "sizeBytes": size,
+        })
+    };
+    let mut file = fields("file", int(1, Some(50 * 1024 * 1024)));
+    file["source"] = object(json!({"_tag": literals(&["pasted-text"])}), &["_tag"]);
+    let required = ["type", "id", "name", "mimeType", "sizeBytes"];
+    json!({"anyOf":[
+        object(fields("image", int(0, Some(10 * 1024 * 1024))), &required),
+        object(file, &required),
+    ]})
+}
 fn source_point() -> Value {
     json!({"anyOf":[
         object(json!({"type":literals(&["latest_stable"])}), &["type"]),
@@ -527,7 +546,7 @@ fn project() -> Vec<Value> {
                     json!({"type":"string","maxLength":120_000}),
                     "First task prompt, delivered after workspace preparation. Omit message and attachments to create an idle thread.",
                 ),
-                "attachments": {"type":"array","maxItems":8,"items":{"type":"object"}},
+                "attachments": {"type":"array","maxItems":8,"items":attachment()},
             }),
             &["title"],
             Hints {

@@ -1,5 +1,6 @@
 //! Host conversation runtime: one writer actor per thread over a SQLite fact log.
 mod actor;
+mod branch;
 mod clock;
 mod error;
 mod executor;
@@ -19,6 +20,7 @@ mod sync;
 mod title;
 
 pub use actor::*;
+pub use branch::*;
 pub use clock::*;
 pub use error::*;
 pub use executor::*;

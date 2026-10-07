@@ -1388,3 +1388,351 @@ async fn cancelling_a_setup_removes_its_worktree_and_fails_the_run() {
     assert_eq!(record.worktree_path, None);
     assert!(!rig.context.setups.cancel(&thread).await);
 }
+
+// A cancel during the checkout stops the Host's checkout and waits for it: the
+// cancellation reaches the Host, and a checkout that finished meanwhile is still
+// removed (the reference claims the checkout before it settles).
+#[tokio::test(flavor = "multi_thread")]
+async fn cancelling_during_the_checkout_waits_for_it_and_removes_what_it_made() {
+    use agent_domain::WorktreeSetupPhase;
+    let rig = rig();
+    let ops = rig.ops.clone();
+    *rig.ops.worktree.lock().unwrap() = Some(Arc::new(move |request| {
+        let ops = ops.clone();
+        Box::pin(async move {
+            request.cancel.cancelled().await;
+            // The Host is still finishing the checkout it was stopping.
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            ops.record("checkout-stopped");
+            Ok(CreatedWorktree {
+                path: "/repo-worktrees/late".into(),
+                branch: Some("agent/session-late".into()),
+            })
+        })
+    }));
+    let launched = launch_on(
+        &rig,
+        request(
+            "command:launch:cancel-checkout",
+            Some("thread:launch:cancel-checkout"),
+            Some("Cancel the checkout"),
+            worktree_strategy(),
+        ),
+    )
+    .await
+    .unwrap();
+    let thread = launched.thread.clone();
+    let cancelled = async {
+        until("the checkout runs", async || {
+            !rig.ops.logged_with("worktree").is_empty()
+        })
+        .await;
+        rig.context.setups.cancel(&thread).await
+    };
+    let ((), cancelled) = tokio::join!(rig.drain(), cancelled);
+    assert!(cancelled);
+    assert_eq!(
+        rig.context.setups.get(&thread).unwrap().phase,
+        WorktreeSetupPhase::Cancelled
+    );
+    let log = rig.ops.logged_with("");
+    let stopped = log.iter().position(|entry| entry == "checkout-stopped");
+    let removed = log
+        .iter()
+        .position(|entry| entry == "remove-worktree /repo-worktrees/late");
+    assert!(
+        stopped.is_some() && stopped < removed,
+        "the checkout stops before its removal: {log:?}"
+    );
+    let current = state(&rig, &thread).await;
+    assert_eq!(current.runs[0].status, RunStatus::Failed);
+    assert_eq!(error_text(&current).unwrap(), "Worktree setup cancelled.");
+    assert_eq!(current.thread.as_ref().unwrap().workspace, None);
+    let record = rig.context.store.thread_launch(&thread).unwrap().unwrap();
+    assert_eq!(record.worktree_path, None);
+}
+
+const TEMPORARY_BRANCH: &str = "agent/session-abcd12345678";
+
+/// A rig whose Host checks out `/repo-worktrees/temp` on the requested branch,
+/// or on a temporary one, and whose generated names need no prefix.
+fn renaming_rig() -> Rig {
+    let rig = rig();
+    *rig.ops.worktree.lock().unwrap() = Some(Arc::new(|request| {
+        Box::pin(async move {
+            Ok(CreatedWorktree {
+                path: "/repo-worktrees/temp".into(),
+                branch: Some(request.branch.unwrap_or_else(|| TEMPORARY_BRANCH.into())),
+            })
+        })
+    }));
+    rig.ops.branch_naming.lock().unwrap().mode = agent_domain::BranchNamingMode::Semantic;
+    rig
+}
+
+fn branch_generations(rig: &Rig) -> Vec<crate::TextGenerationRequest> {
+    rig.ops
+        .generations
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|request| request.operation == "generateBranchName")
+        .cloned()
+        .collect()
+}
+
+async fn branch(rig: &Rig, thread: &ThreadId) -> Option<String> {
+    state(rig, thread)
+        .await
+        .thread
+        .as_ref()
+        .and_then(|thread| thread.workspace.as_ref())
+        .and_then(|workspace| workspace.branch.clone())
+}
+
+// "renames a temporary <prefix>/<hash> branch off the provisioning critical path"
+#[tokio::test(flavor = "multi_thread")]
+async fn renames_a_temporary_branch_off_the_provisioning_critical_path() {
+    let rig = renaming_rig();
+    let gate = Arc::new(Gate::default());
+    let hook_gate = gate.clone();
+    *rig.ops.branch_names.lock().unwrap() = Some(Arc::new(move |_| {
+        let gate = hook_gate.clone();
+        Box::pin(async move {
+            gate.pass().await;
+            Ok(r#"{"branch":"generated-branch"}"#.into())
+        })
+    }));
+    let launched = launch_on(
+        &rig,
+        request(
+            "command:launch:temp-branch",
+            Some("thread:launch:temp-branch"),
+            Some("Build the feature"),
+            WorkspaceStrategy::Worktree {
+                base_ref: "main".into(),
+                branch: Some(TEMPORARY_BRANCH.into()),
+                start_from_origin: false,
+            },
+        ),
+    )
+    .await
+    .unwrap();
+    let thread = launched.thread.clone();
+    let renamed = async {
+        gate.until_arrived(1).await;
+        until("the run starts", async || {
+            state(&rig, &thread).await.runs[0].status == RunStatus::Starting
+        })
+        .await;
+        assert_eq!(
+            branch(&rig, &thread).await.as_deref(),
+            Some(TEMPORARY_BRANCH)
+        );
+        gate.release();
+        until("the branch is renamed", async || {
+            branch(&rig, &thread).await.as_deref() == Some("generated-branch")
+        })
+        .await;
+    };
+    tokio::join!(rig.drain(), renamed);
+    assert_eq!(
+        rig.ops.logged_with("rename-branch"),
+        [format!(
+            "rename-branch /repo-worktrees/temp {TEMPORARY_BRANCH} generated-branch exact=false"
+        )]
+    );
+    let generations = branch_generations(&rig);
+    assert_eq!(generations.len(), 1);
+    assert_eq!(generations[0].cwd, "/repo-worktrees/temp");
+    assert!(generations[0].prompt.contains("Build the feature"));
+}
+
+// "keeps an explicit branch name instead of generating one"
+#[tokio::test(flavor = "multi_thread")]
+async fn keeps_an_explicit_branch_name_instead_of_generating_one() {
+    let rig = renaming_rig();
+    let launched = launch_on(
+        &rig,
+        request(
+            "command:launch:explicit-branch",
+            Some("thread:launch:explicit-branch"),
+            Some("Build the feature"),
+            WorkspaceStrategy::Worktree {
+                base_ref: "main".into(),
+                branch: Some("my-feature".into()),
+                start_from_origin: false,
+            },
+        ),
+    )
+    .await
+    .unwrap();
+    rig.drain().await;
+    assert_eq!(
+        branch(&rig, &launched.thread).await.as_deref(),
+        Some("my-feature")
+    );
+    assert!(branch_generations(&rig).is_empty());
+    assert!(rig.ops.logged_with("rename-branch").is_empty());
+}
+
+// "keeps the temporary branch when branch generation fails"
+#[tokio::test(flavor = "multi_thread")]
+async fn keeps_the_temporary_branch_when_branch_generation_fails() {
+    let rig = renaming_rig();
+    *rig.ops.branch_names.lock().unwrap() = Some(Arc::new(|_| {
+        Box::pin(async { Err("branch generation is down".into()) })
+    }));
+    let launched = launch_on(
+        &rig,
+        request(
+            "command:launch:branch-fallback",
+            Some("thread:launch:branch-fallback"),
+            Some("Build the feature"),
+            worktree_strategy(),
+        ),
+    )
+    .await
+    .unwrap();
+    rig.drain().await;
+    until("the branch is generated", async || {
+        branch_generations(&rig).len() == 1
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(
+        state(&rig, &launched.thread).await.runs[0].status,
+        RunStatus::Starting
+    );
+    assert!(rig.ops.logged_with("rename-branch").is_empty());
+    assert_eq!(
+        branch(&rig, &launched.thread).await.as_deref(),
+        Some(TEMPORARY_BRANCH)
+    );
+}
+
+// "renames a temporary branch on an existing worktree to a generated name"
+#[tokio::test(flavor = "multi_thread")]
+async fn renames_a_temporary_branch_on_an_existing_worktree_to_a_generated_name() {
+    let rig = renaming_rig();
+    let launched = launch_on(
+        &rig,
+        request(
+            "command:launch:existing-worktree-rename",
+            Some("thread:launch:existing-worktree-rename"),
+            Some("Build the feature"),
+            WorkspaceStrategy::ExistingWorktree {
+                path: "/repo-worktrees/agent-session-abcd12345678".into(),
+                branch: Some(TEMPORARY_BRANCH.into()),
+            },
+        ),
+    )
+    .await
+    .unwrap();
+    rig.drain().await;
+    until("the branch is renamed", async || {
+        branch(&rig, &launched.thread).await.as_deref() == Some("generated-branch")
+    })
+    .await;
+    assert_eq!(
+        rig.ops.logged_with("rename-branch"),
+        [format!(
+            "rename-branch /repo-worktrees/agent-session-abcd12345678 {TEMPORARY_BRANCH} generated-branch exact=false"
+        )]
+    );
+}
+
+// "a retry reuses a recorded worktree without undoing its branch rename"
+#[tokio::test(flavor = "multi_thread")]
+async fn a_retry_reuses_a_recorded_worktree_without_undoing_its_branch_rename() {
+    let rig = renaming_rig();
+    fail_setup_once(&rig.ops, "setup failed");
+    let launched = launch_on(
+        &rig,
+        request(
+            "command:launch:reuse-renamed",
+            Some("thread:launch:reuse-renamed"),
+            Some("Reuse the worktree"),
+            worktree_strategy(),
+        ),
+    )
+    .await
+    .unwrap();
+    rig.drain().await;
+    until("the run fails with the branch renamed", async || {
+        let current = state(&rig, &launched.thread).await;
+        current.runs[0].status == RunStatus::Failed
+            && branch(&rig, &launched.thread).await.as_deref() == Some("generated-branch")
+    })
+    .await;
+    let failed = state(&rig, &launched.thread).await;
+    rig.command(
+        &launched.thread,
+        Command::RetryPrepared {
+            run: failed.runs[0].id.clone(),
+        },
+    )
+    .await;
+    rig.drain().await;
+    let retried = state(&rig, &launched.thread).await;
+    assert_eq!(retried.runs[0].status, RunStatus::Starting);
+    // The retry neither checks out again nor puts back the temporary branch.
+    assert_eq!(rig.ops.logged_with("worktree").len(), 1);
+    assert_eq!(rig.ops.logged_with("rename-branch").len(), 1);
+    let workspace = retried.thread.as_ref().unwrap().workspace.clone().unwrap();
+    assert_eq!(workspace.branch.as_deref(), Some("generated-branch"));
+    assert_eq!(
+        workspace.worktree_path.as_deref(),
+        Some("/repo-worktrees/temp")
+    );
+}
+
+// The custom mode renames to the model's exact name; the static mode prefixes
+// the generated words with the configured prefix.
+#[tokio::test(flavor = "multi_thread")]
+async fn names_follow_the_projects_branch_naming() {
+    for (mode, answer, expected, exact) in [
+        (
+            agent_domain::BranchNamingMode::Custom,
+            "Julius/ABC-123",
+            "Julius/ABC-123",
+            true,
+        ),
+        (
+            agent_domain::BranchNamingMode::Static,
+            "Fix Login",
+            "agent/fix-login",
+            false,
+        ),
+    ] {
+        let rig = renaming_rig();
+        rig.ops.branch_naming.lock().unwrap().mode = mode;
+        let answer = serde_json::json!({ "branch": answer }).to_string();
+        *rig.ops.branch_names.lock().unwrap() = Some(Arc::new(move |_| {
+            let answer = answer.clone();
+            Box::pin(async move { Ok(answer) })
+        }));
+        let launched = launch_on(
+            &rig,
+            request(
+                "command:launch:naming",
+                Some("thread:launch:naming"),
+                Some("Fix the login"),
+                worktree_strategy(),
+            ),
+        )
+        .await
+        .unwrap();
+        rig.drain().await;
+        until("the branch is renamed", async || {
+            branch(&rig, &launched.thread).await.as_deref() == Some(expected)
+        })
+        .await;
+        assert_eq!(
+            rig.ops.logged_with("rename-branch"),
+            [format!(
+                "rename-branch /repo-worktrees/temp {TEMPORARY_BRANCH} {expected} exact={exact}"
+            )]
+        );
+    }
+}

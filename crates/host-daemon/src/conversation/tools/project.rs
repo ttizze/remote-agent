@@ -1,12 +1,15 @@
 //! The project toolkit: thread launch and the registered projects.
-use super::backend::ProjectFailure;
+use super::backend::{NamedProjectFailure, ProjectFailure};
 use super::orchestrator::{parse_interaction_mode, parse_runtime_mode};
 use super::thread::{SelectionInput, model_selection_json};
 use super::{
     AgentTools, Outcome, Scope, ToolError, decode, failure, invalid, new_command, unavailable,
 };
 use crate::conversation::operations::CHATS_PROJECT;
-use agent_domain::{InteractionMode, MessageAuthor, MessageId, RuntimeMode, ThreadId};
+use crate::workspace_files::is_pending_upload;
+use agent_domain::{
+    Attachment, AttachmentKind, InteractionMode, MessageAuthor, MessageId, RuntimeMode, ThreadId,
+};
 use agent_protocol::models::ProjectScript;
 use agent_runtime::{HostProject, InitialMessage, LaunchThread, WorkspaceStrategy};
 use serde::Deserialize;
@@ -44,7 +47,56 @@ struct LaunchInput {
     interaction_mode: Option<String>,
     workspace_strategy: Option<Value>,
     message: Option<String>,
-    attachments: Option<Vec<Value>>,
+    attachments: Option<Vec<AttachmentInput>>,
+}
+/// A chat image or file attachment; an image's capture source is app-owned and
+/// not taken from tools.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AttachmentInput {
+    #[serde(rename = "type")]
+    kind: String,
+    id: String,
+    name: String,
+    mime_type: String,
+    size_bytes: u64,
+}
+const MAX_IMAGE_BYTES: u64 = 10 * 1024 * 1024;
+const MAX_FILE_BYTES: u64 = 50 * 1024 * 1024;
+
+impl AttachmentInput {
+    fn attachment(self) -> Result<Attachment, ToolError> {
+        let id = super::trimmed("id", &self.id, Some(128))?;
+        // The chat attachment ID schema: `^[a-z0-9_-]+$`, ignoring case.
+        if !id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+        {
+            return Err(invalid("Invalid attachment"));
+        }
+        let name = super::trimmed("name", &self.name, Some(255))?;
+        let mime_type = super::trimmed("mimeType", &self.mime_type, Some(100))?;
+        let kind = match self.kind.as_str() {
+            "image" if mime_type.to_ascii_lowercase().starts_with("image/") => {
+                super::bounded("sizeBytes", self.size_bytes, 0, Some(MAX_IMAGE_BYTES))?;
+                AttachmentKind::Image
+            }
+            "file" => {
+                super::bounded("sizeBytes", self.size_bytes, 1, Some(MAX_FILE_BYTES))?;
+                AttachmentKind::File
+            }
+            _ => return Err(invalid("Invalid attachment")),
+        };
+        Ok(Attachment {
+            kind,
+            source: None,
+            id,
+            name,
+            mime_type,
+            path: String::new(),
+            size: self.size_bytes,
+        })
+    }
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -63,8 +115,28 @@ struct CreateInput {
     title: String,
     workspace_root: Option<String>,
     create_workspace_root_if_missing: Option<bool>,
+    /// Present even when null, which a title-only create also rejects.
+    #[serde(default, deserialize_with = "present")]
     default_model_selection: Option<Value>,
     scripts: Option<Vec<ProjectScript>>,
+}
+fn present<'de, D: serde::Deserializer<'de>>(input: D) -> Result<Option<Value>, D::Error> {
+    Value::deserialize(input).map(Some)
+}
+/// A model selection, or null. Project creation records no default model, so
+/// it is only validated.
+fn default_model_selection(value: &Value) -> Result<(), ToolError> {
+    if value.is_null() {
+        return Ok(());
+    }
+    let selection: SelectionInput =
+        serde_json::from_value(value.clone()).map_err(|error| invalid(error.to_string()))?;
+    super::trimmed("instanceId", &selection.instance_id, None)?;
+    super::trimmed("model", &selection.model, None)?;
+    if let Some(options) = &selection.options {
+        super::orchestrator::option_selections(options)?;
+    }
+    Ok(())
 }
 
 fn workspace_strategy(value: Option<&Value>) -> Result<WorkspaceStrategy, ToolError> {
@@ -109,6 +181,10 @@ impl AgentTools {
         if attachments.len() > 8 {
             return Err(invalid("attachments must contain at most 8 entries"));
         }
+        let attachments = attachments
+            .into_iter()
+            .map(AttachmentInput::attachment)
+            .collect::<Result<Vec<_>, _>>()?;
         let runtime_mode = input
             .runtime_mode
             .as_deref()
@@ -135,7 +211,10 @@ impl AgentTools {
         let command = new_command();
         let thread = ThreadId::new(command.as_str()).expect("derived id");
         let message = MessageId::new(command.as_str()).expect("derived id");
-        if !attachments.is_empty() {
+        if attachments
+            .iter()
+            .any(|attachment| !is_pending_upload(&attachment.id))
+        {
             return Err(failure(
                 "invalid_request",
                 "A new thread accepts only pending attachment uploads.",
@@ -157,6 +236,24 @@ impl AgentTools {
             Some(selection) => self.selection(selection).await?,
             None => caller.selection.clone(),
         };
+        // Pending uploads are claimed into the new thread before it exists.
+        let attachments = if attachments.is_empty() {
+            attachments
+        } else {
+            self.backend
+                .claim_attachments(&thread, attachments)
+                .await
+                .map_err(|error| failure("orchestration_error", error))?
+        };
+        let initial_message =
+            (input.message.is_some() || !attachments.is_empty()).then(|| InitialMessage {
+                id: Some(message.clone()),
+                text: input.message.unwrap_or_default(),
+                attachments,
+                created_by: MessageAuthor::Agent,
+                creation_source: "mcp".into(),
+                context: None,
+            });
         let launched = self
             .backend
             .launch(LaunchThread {
@@ -169,14 +266,7 @@ impl AgentTools {
                 runtime_mode: runtime_mode.unwrap_or(caller.runtime_mode),
                 interaction_mode: interaction_mode.unwrap_or(caller.interaction_mode),
                 workspace: strategy,
-                initial_message: input.message.map(|text| InitialMessage {
-                    id: Some(message.clone()),
-                    text,
-                    attachments: vec![],
-                    created_by: MessageAuthor::Agent,
-                    creation_source: "mcp".into(),
-                    context: None,
-                }),
+                initial_message,
                 created_by: MessageAuthor::Agent,
                 creation_source: "mcp".into(),
             })
@@ -233,6 +323,9 @@ impl AgentTools {
             .as_deref()
             .map(|root| super::trimmed("workspaceRoot", root, None))
             .transpose()?;
+        if let Some(selection) = &input.default_model_selection {
+            default_model_selection(selection)?;
+        }
         let caller_state = self.read_mutation_caller(scope).await?;
         let caller = caller_state.thread.as_ref().expect("loaded");
         if caller.archived_at.is_some()
@@ -254,17 +347,22 @@ impl AgentTools {
                     "A project started from its title takes only a title.",
                 ));
             }
-            return Err(failure(
-                "orchestration_error",
-                "This Host cannot start a project from just its title.",
-            ));
+            let (project, commit_error) =
+                self.backend
+                    .create_named_project(title)
+                    .await
+                    .map_err(|error| match error {
+                        NamedProjectFailure::Named(error) => {
+                            failure("orchestration_error", error.message())
+                        }
+                        NamedProjectFailure::Unavailable => unavailable(),
+                    })?;
+            let mut created = project_json(&project, self.backend.project_scripts(&project.id));
+            if let Some(commit_error) = commit_error {
+                created["commitError"] = json!(commit_error);
+            }
+            return Ok(created);
         };
-        if input.default_model_selection.is_some() {
-            return Err(failure(
-                "invalid_request",
-                "This Host does not keep a project default model selection.",
-            ));
-        }
         let scripts = crate::projects::valid_scripts(input.scripts.unwrap_or_default())
             .map_err(|error| invalid(error.to_string()))?;
         let project = self

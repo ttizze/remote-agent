@@ -331,7 +331,7 @@ fn thread_title_prompt_suffix(input: &ThreadTitlePrompt<'_>) -> String {
     suffix
 }
 
-fn limit_section(value: &str, max: usize) -> String {
+pub(crate) fn limit_section(value: &str, max: usize) -> String {
     if utf16_len(value) <= max {
         return value.to_owned();
     }
@@ -440,7 +440,7 @@ fn utf16_tail(text: &str, units: usize) -> &str {
 /// JavaScript `\s` and `trim()` whitespace: Unicode White_Space without U+0085, plus U+FEFF.
 use crate::sync::js_space as is_js_space;
 
-fn js_trim(text: &str) -> &str {
+pub(crate) fn js_trim(text: &str) -> &str {
     text.trim_matches(is_js_space)
 }
 

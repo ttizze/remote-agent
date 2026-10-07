@@ -29,6 +29,7 @@ const EDIT_LIMIT: u64 = 1024 * 1024;
 pub(crate) const TRANSFER_LIMIT: u64 = 512 * 1024 * 1024;
 const GRANT_LIFETIME: Duration = Duration::from_secs(120);
 mod attachments;
+pub(crate) use attachments::is_pending_upload;
 
 #[derive(Clone)]
 pub(crate) struct WorkspaceFiles {
@@ -236,7 +237,7 @@ impl WorkspaceFiles {
                 }
                 if let Some(mime) = &params.attachment_mime_type {
                     Self::attachment_metadata(
-                        "pending:validation".into(),
+                        "pending-validation".into(),
                         &params.file_name,
                         mime,
                         params.size,
@@ -369,7 +370,7 @@ impl WorkspaceFiles {
                     let attachment = if let Some(mime) = attachment_mime_type {
                         match self.save_attachment_upload(
                             &path,
-                            format!("pending:{token}"),
+                            format!("pending-{token}"),
                             &file_name,
                             &mime,
                             grant.size,

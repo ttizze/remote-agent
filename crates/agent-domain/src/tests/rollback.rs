@@ -262,7 +262,7 @@ fn the_host_filled_answer_path_is_not_part_of_the_answer_identity() {
             vec![Attachment {
                 kind: AttachmentKind::File,
                 source: None,
-                id: "chat:file".into(),
+                id: "chat-file".into(),
                 name: "notes.txt".into(),
                 mime_type: "text/plain".into(),
                 path: path.into(),

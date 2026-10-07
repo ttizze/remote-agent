@@ -19,3 +19,5 @@ url.workspace = true
 test-support = []
 
 [dev-dependencies]
+proptest = "1.11"
+regex = "1"

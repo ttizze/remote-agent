@@ -1,10 +1,10 @@
 //! Reads outside the subscription streams: history pages, one turn item, and search.
 use crate::sync::{
     HistoryPage, HistoryRow, InvalidCursor, PagePolicy, ProjectDirectory, client_state,
-    detail_item, history_before, js_space, recent_history, timeline,
+    detail_item, detail_task, history_before, js_space, recent_history, timeline,
 };
 use crate::{ActorHandle, RuntimeError, Store, StoreError};
-use agent_domain::{State, ThreadId, Timestamp, TurnItemId};
+use agent_domain::{ItemKind, State, Task, ThreadId, Timestamp, TurnItemId};
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 
@@ -37,14 +37,23 @@ impl ActorHandle {
         })
     }
 
-    pub async fn turn_item(&self, item: &TurnItemId) -> Result<Option<HistoryRow>, QueryError> {
+    pub async fn turn_item(&self, item: &TurnItemId) -> Result<Option<TurnItemDetail>, QueryError> {
         Ok(turn_item(&self.view().await?.state, item))
     }
 }
 
+/// One visible item read on demand.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TurnItemDetail {
+    pub row: HistoryRow,
+    /// The task a local subagent item shows, with its prompt, progress and
+    /// result.
+    pub task: Option<Task>,
+}
+
 /// One visible item with its message and plan, at its timeline position, with the
-/// detail the timeline withholds.
-pub fn turn_item(state: &State, item: &TurnItemId) -> Option<HistoryRow> {
+/// detail the timeline withholds, each part bounded to 256 KiB.
+pub fn turn_item(state: &State, item: &TurnItemId) -> Option<TurnItemDetail> {
     timeline(state)
         .iter()
         .enumerate()
@@ -52,7 +61,15 @@ pub fn turn_item(state: &State, item: &TurnItemId) -> Option<HistoryRow> {
         .map(|(position, row)| {
             let mut owned = row.owned(position);
             owned.item = detail_item(row.item);
-            owned
+            let task = match &row.item.kind {
+                ItemKind::Subagent { task } if !row.inherited => state
+                    .tasks
+                    .iter()
+                    .find(|candidate| &candidate.id == task)
+                    .map(detail_task),
+                _ => None,
+            };
+            TurnItemDetail { row: owned, task }
         })
 }
 

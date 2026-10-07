@@ -52,7 +52,7 @@ contracts! {
     ThreadStream, "conversation/subscribeThread" => (c::SubscribeThread, c::ThreadUpdate),
     ShellStream, "conversation/subscribeShell" => (c::SubscribeShell, c::ShellUpdate),
     GetThread, "conversation/getThread" => (c::GetThread, c::ThreadSnapshot) [clone],
-    TurnItem, "conversation/getTurnItem" => (c::GetTurnItem, Option<c::HistoryRow>) [clone],
+    TurnItem, "conversation/getTurnItem" => (c::GetTurnItem, Option<c::TurnItemDetail>) [clone],
     ReadHistory, "conversation/readHistory" => (c::ReadHistory, c::HistoryPage) [clone],
     Search, "conversation/search" => (c::Search, Vec<c::SearchMatch>) [clone],
     TurnDiff, "conversation/turnDiff" => (c::GetTurnDiff, c::TurnDiff) [clone],

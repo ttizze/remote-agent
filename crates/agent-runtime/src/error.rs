@@ -39,6 +39,9 @@ pub enum RuntimeError {
     Closed,
     #[error("{0} is not accepted through this entry point")]
     InvalidInput(&'static str),
+    /// An attachment the command refers to cannot be read; nothing was dispatched.
+    #[error("{0}")]
+    AttachmentUnavailable(String),
 }
 impl From<StoreError> for RuntimeError {
     fn from(error: StoreError) -> Self {

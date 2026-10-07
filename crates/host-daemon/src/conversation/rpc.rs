@@ -245,7 +245,11 @@ impl Conversation {
             .resources
             .files
             .claim(thread.as_str(), attachments)
-            .map_err(|error| ConversationError::AttachmentUnavailable(format!("{error:#}")))?;
+            .map_err(|error| {
+                ConversationError::AttachmentUnavailable(format!(
+                    "attachment is unavailable: {error:#}"
+                ))
+            })?;
         if let Some(context) = context {
             let claimed = before
                 .into_iter()
@@ -296,6 +300,9 @@ impl Conversation {
             .await
             .map_err(|error| match error {
                 RuntimeError::Closed => ConversationError::Unavailable(error.to_string()),
+                RuntimeError::AttachmentUnavailable(message) => {
+                    ConversationError::AttachmentUnavailable(message)
+                }
                 error => unavailable(error),
             })?;
         match &result.reply {
@@ -513,9 +520,16 @@ impl Conversation {
         )))
     }
 
-    async fn turn_item(&self, params: &wire::GetTurnItem) -> Result<Option<wire::HistoryRow>> {
+    async fn turn_item(&self, params: &wire::GetTurnItem) -> Result<Option<wire::TurnItemDetail>> {
         let view = self.existing(&params.thread_id).await?;
-        Ok(agent_runtime::turn_item(&view.state, &params.item_id).map(history_row))
+        Ok(
+            agent_runtime::turn_item(&view.state, &params.item_id).map(|detail| {
+                wire::TurnItemDetail {
+                    row: history_row(detail.row),
+                    task: detail.task,
+                }
+            }),
+        )
     }
 
     async fn read_history(&self, params: &wire::ReadHistory) -> Result<wire::HistoryPage> {

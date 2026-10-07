@@ -2,7 +2,9 @@
 //! the live provider catalog.
 use super::ModelCatalog;
 use crate::conversation::ProjectCatalog;
-use agent_domain::{Command, CommandId, Reply, State, ThreadId, ThreadShell};
+use crate::projects::NamedProjectError;
+use crate::workspace_files::WorkspaceFiles;
+use agent_domain::{Attachment, Command, CommandId, Reply, State, ThreadId, ThreadShell};
 use agent_protocol::{
     models::{Model, ProjectScript},
     provider::ProviderKind,
@@ -15,6 +17,15 @@ use std::{path::PathBuf, sync::Arc};
 /// A committed command: its reply and the global sequence number.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Dispatched {
+    pub(crate) reply: Reply,
+    pub(crate) sequence: u64,
+}
+
+/// A handled command's durable receipt: its thread, reply and global sequence
+/// number.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CommandReceipt {
+    pub(crate) thread: ThreadId,
     pub(crate) reply: Reply,
     pub(crate) sequence: u64,
 }
@@ -49,6 +60,13 @@ pub(crate) enum ProjectFailure {
     Operation(String),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NamedProjectFailure {
+    Named(NamedProjectError),
+    /// The created project could not be read back.
+    Unavailable,
+}
+
 pub(crate) trait Orchestration: Send + Sync {
     /// A thread's committed state; a thread never created has no `thread`.
     fn state(&self, thread: &ThreadId) -> BoxFuture<'_, Result<Arc<State>, String>>;
@@ -58,6 +76,8 @@ pub(crate) trait Orchestration: Send + Sync {
         id: CommandId,
         command: Command,
     ) -> BoxFuture<'_, Result<Dispatched, String>>;
+    /// The receipt of a command already handled.
+    fn receipt(&self, id: &CommandId) -> BoxFuture<'_, Result<Option<CommandReceipt>, String>>;
     /// Every thread that is not deleted.
     fn shells(&self) -> BoxFuture<'_, Result<Vec<ThreadShell>, String>>;
     fn search(
@@ -66,6 +86,13 @@ pub(crate) trait Orchestration: Send + Sync {
         limit: Option<usize>,
     ) -> BoxFuture<'_, Result<Vec<SearchMatch>, String>>;
     fn launch(&self, request: LaunchThread) -> BoxFuture<'_, Result<ThreadId, String>>;
+    /// Claims uploads into the thread's attachment storage, as a message's
+    /// intake does; the error says why an attachment cannot be sent.
+    fn claim_attachments(
+        &self,
+        thread: &ThreadId,
+        attachments: Vec<Attachment>,
+    ) -> BoxFuture<'_, Result<Vec<Attachment>, String>>;
     fn providers(&self) -> BoxFuture<'_, Result<Vec<ProviderSnapshot>, String>>;
     fn projects(&self) -> Vec<HostProject>;
     fn project_scripts(&self, project: &str) -> Vec<ProjectScript>;
@@ -76,12 +103,19 @@ pub(crate) trait Orchestration: Send + Sync {
         create_missing: bool,
         scripts: Vec<ProjectScript>,
     ) -> BoxFuture<'_, Result<HostProject, ProjectFailure>>;
+    /// Starts a project from just its title in a new repository of its own; the
+    /// project, and why its first commit failed if it did.
+    fn create_named_project(
+        &self,
+        title: String,
+    ) -> BoxFuture<'_, Result<(HostProject, Option<String>), NamedProjectFailure>>;
 }
 
 /// The runtime, project catalog and model catalog this Host serves.
 pub(crate) struct HostOrchestration {
     pub(crate) runtime: Arc<Runtime>,
     pub(crate) projects: Arc<ProjectCatalog>,
+    pub(crate) files: WorkspaceFiles,
     pub(crate) models: Arc<dyn ModelCatalog>,
     /// Drivers with a configured program.
     pub(crate) installed: Vec<ProviderKind>,
@@ -118,6 +152,24 @@ impl Orchestration for HostOrchestration {
         })
     }
 
+    fn receipt(&self, id: &CommandId) -> BoxFuture<'_, Result<Option<CommandReceipt>, String>> {
+        let id = id.clone();
+        Box::pin(async move {
+            self.runtime
+                .store()
+                .blocking(move |store| store.receipt(&id))
+                .await
+                .map(|stored| {
+                    stored.map(|stored| CommandReceipt {
+                        thread: stored.thread,
+                        reply: stored.receipt.reply,
+                        sequence: stored.global_seq,
+                    })
+                })
+                .map_err(|error| error.to_string())
+        })
+    }
+
     fn shells(&self) -> BoxFuture<'_, Result<Vec<ThreadShell>, String>> {
         Box::pin(async move {
             self.runtime
@@ -140,6 +192,20 @@ impl Orchestration for HostOrchestration {
                 .await
                 .map_err(|error| error.to_string())?
                 .map_err(|error| error.to_string())
+        })
+    }
+
+    fn claim_attachments(
+        &self,
+        thread: &ThreadId,
+        attachments: Vec<Attachment>,
+    ) -> BoxFuture<'_, Result<Vec<Attachment>, String>> {
+        let (files, thread) = (self.files.clone(), thread.clone());
+        Box::pin(async move {
+            tokio::task::spawn_blocking(move || files.claim(thread.as_str(), &attachments))
+                .await
+                .map_err(|error| error.to_string())?
+                .map_err(|error| format!("{error:#}"))
         })
     }
 
@@ -219,6 +285,29 @@ impl Orchestration for HostOrchestration {
                 .into_iter()
                 .find(|project| project.id == id)
                 .ok_or_else(|| ProjectFailure::Operation("The project was not registered.".into()))
+        })
+    }
+
+    fn create_named_project(
+        &self,
+        title: String,
+    ) -> BoxFuture<'_, Result<(HostProject, Option<String>), NamedProjectFailure>> {
+        Box::pin(async move {
+            let created = crate::projects::create_named_project(
+                self.projects.store(),
+                &title,
+                &crate::projects::Git::default(),
+            )
+            .await
+            .map_err(NamedProjectFailure::Named)?;
+            crate::conversation::project_added(&self.runtime, &self.projects, &created.id).await;
+            let project = self
+                .projects
+                .list()
+                .into_iter()
+                .find(|project| project.id == created.id)
+                .ok_or(NamedProjectFailure::Unavailable)?;
+            Ok((project, created.commit_error))
         })
     }
 }
