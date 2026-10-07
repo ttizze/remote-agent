@@ -56,6 +56,8 @@ pub enum CatalogSheetItem {
         /// Highlighted: the staged model, else the applied one.
         displayed: bool,
         is_legacy: bool,
+        /// The provider's default model ("Default" pill).
+        is_default: bool,
         /// The model is no longer offered.
         unavailable: bool,
         is_first: bool,
@@ -69,6 +71,9 @@ pub struct CatalogSheetView {
     pub items: Vec<CatalogSheetItem>,
     /// The "Show legacy models" switch shows.
     pub has_legacy_models: bool,
+    /// "No favorite models", "No matching models" or "No available models"
+    /// when nothing is listed.
+    pub empty_label: Option<String>,
     /// The filter menu's providers, in catalogue order.
     pub providers: Vec<ProviderInstance>,
 }
@@ -93,6 +98,7 @@ struct Entry {
     slug: String,
     label: String,
     is_legacy: bool,
+    is_default: bool,
     unavailable: bool,
 }
 
@@ -127,6 +133,7 @@ pub fn catalog_sheet(snapshot: &Snapshot, options: &CatalogSheetOptions) -> Cata
                 slug: model.slug.clone(),
                 label: model.name.clone(),
                 is_legacy: model.is_legacy,
+                is_default: model.is_default,
                 unavailable: false,
             })
             .collect();
@@ -140,6 +147,7 @@ pub fn catalog_sheet(snapshot: &Snapshot, options: &CatalogSheetOptions) -> Cata
                 slug: draft.model.clone(),
                 label: draft.model.clone(),
                 is_legacy: false,
+                is_default: false,
                 unavailable: true,
             });
         }
@@ -201,15 +209,27 @@ pub fn catalog_sheet(snapshot: &Snapshot, options: &CatalogSheetOptions) -> Cata
                 slug: entry.slug,
                 label: entry.label,
                 is_legacy: entry.is_legacy,
+                is_default: entry.is_default,
                 unavailable: entry.unavailable,
                 is_first: index == 0,
                 is_last: index == last,
             }
         }));
     }
+    let empty_label = items.is_empty().then(|| {
+        if options.filter == CatalogFilter::Favorites && query.is_empty() {
+            "No favorite models"
+        } else if narrowed {
+            "No matching models"
+        } else {
+            "No available models"
+        }
+        .to_owned()
+    });
     CatalogSheetView {
         items,
         has_legacy_models,
+        empty_label,
         providers: listed.into_iter().cloned().collect(),
     }
 }
@@ -309,6 +329,15 @@ mod tests {
             keys(&searched),
             ["provider:codex_work:false", "model:codex_work:gpt-5.4"]
         );
+        assert_eq!(searched.empty_label, None);
+        let nothing = catalog_sheet(
+            &snapshot,
+            &CatalogSheetOptions {
+                query: "zzz".into(),
+                ..Default::default()
+            },
+        );
+        assert_eq!(nothing.empty_label.as_deref(), Some("No matching models"));
     }
 
     #[test]
