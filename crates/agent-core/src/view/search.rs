@@ -12,6 +12,9 @@ use std::collections::BTreeSet;
 pub const SEARCH_QUERY_MIN_LENGTH: usize = 2;
 pub const SEARCH_QUERY_MAX_LENGTH: usize = 200;
 
+pub const SEARCH_DEBOUNCE_MS: u64 = 200;
+pub const SEARCH_RESULT_LIMIT: u32 = 50;
+
 /// The trimmed query when the Host can search messages for it.
 pub fn content_search_query(query: &str) -> Option<&str> {
     let query = query.trim();

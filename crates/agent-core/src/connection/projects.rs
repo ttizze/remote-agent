@@ -7,14 +7,8 @@ use super::{
 use crate::{
     peer::PeerError,
     protocol::Call,
-    view::{
-        projects::import::{
-            default_import_selection, resolve_import_project_id, set_import_selection,
-        },
-        settings::{
-            ConversationSettingChange, ProjectSettingKey, SettingsScope, clear_project_overrides,
-            plan_conversation_settings_update,
-        },
+    view::projects::import::{
+        default_import_selection, resolve_import_project_id, set_import_selection,
     },
 };
 use agent_protocol::{conversation as c, models as m, operations as op};
@@ -23,39 +17,6 @@ use agent_protocol::{conversation as c, models as m, operations as op};
 pub(super) type ImportStep = (String, Result<(String, c::ImportCounts), PeerError>);
 
 impl Owner {
-    fn host_settings(&self) -> Result<&m::ConversationSettings, PeerError> {
-        self.state
-            .conversation_settings
-            .as_ref()
-            .ok_or_else(|| invalid("Settings are loading"))
-    }
-
-    pub(super) fn update_conversation_settings(
-        &mut self,
-        scope: &SettingsScope,
-        change: &ConversationSettingChange,
-    ) -> Result<Next, PeerError> {
-        Ok(
-            match plan_conversation_settings_update(self.host_settings()?, scope, change) {
-                Some(next) => Next::call(Call::UpdateConversationSettings(next), None),
-                None => Next::Done,
-            },
-        )
-    }
-
-    pub(super) fn reset_project_settings(&mut self, project_id: &str) -> Result<Next, PeerError> {
-        let next = clear_project_overrides(
-            self.host_settings()?,
-            project_id,
-            &[
-                ProjectSettingKey::AutoSettle,
-                ProjectSettingKey::ContinueAfterRestart,
-                ProjectSettingKey::NewWorktreesStartFromOrigin,
-            ],
-        );
-        Ok(Next::call(Call::UpdateConversationSettings(next), None))
-    }
-
     pub(super) fn update_project_scripts(
         &mut self,
         project_id: String,

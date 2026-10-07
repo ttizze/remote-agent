@@ -72,7 +72,6 @@ import dev.remoteagent.core.SetupStageStatus
 import dev.remoteagent.core.StagedModel
 import dev.remoteagent.core.StatusTone
 import dev.remoteagent.core.TraitControl
-import dev.remoteagent.core.stagedModelAfterPress
 import dev.remoteagent.core.stagedModelKey
 
 /** A Material bottom sheet with the Android sheet header. */
@@ -316,9 +315,7 @@ internal fun ThreadSettingsSheet(model: AndroidAppModel, composer: ComposerView,
                     color = colors.foregroundSecondary,
                 )
             },
-            confirmButton = {
-                TextButton(onClick = { unavailable = false }) { Text("OK", color = colors.foreground) }
-            },
+            confirmButton = { TextButton(onClick = { unavailable = false }) { Text("OK", color = colors.foreground) } },
         )
     val screen = choosing
     BottomSheet(
@@ -364,7 +361,7 @@ internal fun ThreadSettingsSheet(model: AndroidAppModel, composer: ComposerView,
                             onFavorite = { model.perform(Intent.ToggleFavoriteModel(item.instanceId, item.slug)) },
                         ) {
                             val pressed = StagedModel(item.instanceId, item.driver, item.slug, emptyList())
-                            staged = stagedModelAfterPress(staged, pressed, item.applied)
+                            staged = model.snapshot.stageModel(staged, pressed, item.applied)
                         }
                 }
             }

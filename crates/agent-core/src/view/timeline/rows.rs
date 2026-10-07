@@ -840,10 +840,27 @@ pub fn timeline_rows(source: TimelineSource<'_>, options: &TimelineOptions) -> V
     }
 }
 
+/// Shared timeline storage; native clients read values only after its revision changes.
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Object))]
+pub struct ThreadRows(Vec<TimelineRow>);
+impl std::ops::Deref for ThreadRows {
+    type Target = Vec<TimelineRow>;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+#[cfg_attr(feature = "bindings", uniffi::export)]
+impl ThreadRows {
+    pub fn values(&self) -> Vec<TimelineRow> {
+        self.0.clone()
+    }
+}
+
 /// The rows of one thread with a revision that advances when they change.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ThreadTimeline {
-    pub rows: Arc<Vec<TimelineRow>>,
+    pub rows: Arc<ThreadRows>,
     pub revision: u64,
 }
 
@@ -921,7 +938,7 @@ impl TimelineCache {
         }
         let rows = timeline_rows(source, options);
         let revision = match self.threads.get(source.thread) {
-            Some((_, previous)) if *previous.rows == rows => {
+            Some((_, previous)) if previous.rows.as_slice() == rows.as_slice() => {
                 let timeline = previous.clone();
                 self.threads
                     .insert(source.thread.clone(), (key, timeline.clone()));
@@ -931,7 +948,7 @@ impl TimelineCache {
             None => 1,
         };
         let timeline = ThreadTimeline {
-            rows: Arc::new(rows),
+            rows: Arc::new(ThreadRows(rows)),
             revision,
         };
         self.threads

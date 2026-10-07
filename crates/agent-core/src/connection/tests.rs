@@ -446,7 +446,11 @@ fn a_drop_on_another_section_changes_the_threads_state_with_its_key() {
         oneshot::channel().0,
     );
     let shown = owner.state.shell_view().unwrap();
-    let pinned = shown.threads.iter().find(|row| row.id == thread_id()).unwrap();
+    let pinned = shown
+        .threads
+        .iter()
+        .find(|row| row.id == thread_id())
+        .unwrap();
     assert!(pinned.pinned_at.is_some());
     assert!(owner.state.thread_order.is_none());
     let pending = owner.state.outbox.entries.len();
@@ -1275,7 +1279,8 @@ async fn answer<C: crate::protocol::contracts::Contract>(
 #[tokio::test]
 async fn a_healthy_resume_reuses_the_connection_and_timed_out_sends_keep_their_id_and_order() {
     tokio::time::timeout(std::time::Duration::from_secs(10), async {
-        let mut host = Loopback::connect(std::time::Duration::from_millis(150), options(), |_| {}).await;
+        let mut host =
+            Loopback::connect(std::time::Duration::from_millis(150), options(), |_| {}).await;
         let (complete, timed_out) = oneshot::channel();
         host.owner
             .handle(Event::Resume {
@@ -1403,14 +1408,14 @@ async fn an_expanded_item_shows_the_withheld_output_the_host_reads() {
         .await;
         host.owner.load_detail(item.id.clone()).unwrap();
         let mut request = host.next_call().await;
-        let Call::TurnItem(read) = &request.call else {
+        let Call::GetTurnItem(read) = &request.call else {
             panic!("item read")
         };
         assert_eq!(read.item_id, item.id);
         let mut full = item.clone();
         full.output_omitted = false;
         full.text = "the complete output".into();
-        answer::<crate::protocol::contracts::TurnItem>(
+        answer::<crate::protocol::contracts::GetTurnItem>(
             &mut request,
             Some(agent_protocol::conversation::TurnItemDetail {
                 row: agent_protocol::conversation::HistoryRow {
@@ -1791,7 +1796,7 @@ fn attached_terminal_output_joins_the_draft_as_a_linked_record() {
             ..draft()
         },
     );
-    let output = crate::view::terminals::TerminalOutputContext {
+    let output = crate::view::terminals::output_context::TerminalOutputContext {
         terminal_id: "term-1".into(),
         terminal_label: "Terminal 1".into(),
         line_start: 2,
@@ -1799,7 +1804,10 @@ fn attached_terminal_output_joins_the_draft_as_a_linked_record() {
         text: "error[E0308]: mismatched types".into(),
     };
     owner
-        .prepare(Intent::AttachTerminalOutput { output })
+        .prepare(Intent::AttachTerminalOutput {
+            thread_id: thread_id().to_string(),
+            output,
+        })
         .unwrap();
     let draft = owner.state.current_draft();
     let records = &draft.context.as_ref().unwrap().records;
@@ -1985,15 +1993,18 @@ fn attached_terminal_output_joins_the_threads_draft_as_a_context_link() {
             base_text: None,
         })
         .unwrap();
-    let attach = |start, end| Intent::AttachTerminalOutput {
+    let attach = |state: &Snapshot, start, end| Intent::AttachTerminalOutput {
         thread_id: thread.clone(),
-        terminal_id: "term-2".into(),
-        output: "$ make\nok\n\n".into(),
-        start,
-        end,
+        output: state.terminal_output_context(
+            thread.clone(),
+            "term-2".into(),
+            "$ make\nok\n\n".into(),
+            start,
+            end,
+        ),
     };
-    assert!(owner.prepare(attach(0, 5)).is_err());
-    owner.prepare(attach(0, 1)).unwrap();
+    assert!(owner.prepare(attach(&owner.state, 0, 5)).is_err());
+    owner.prepare(attach(&owner.state, 0, 1)).unwrap();
     let draft = owner.state.current_draft();
     let record = &draft.context.as_ref().unwrap().records[0].0;
     assert_eq!(record["kind"], "terminal");
@@ -2569,13 +2580,18 @@ async fn a_command_reaches_the_host_only_once_the_device_state_holds_it() {
         assert_eq!(host.owner.state.outbox.entries[0].phase, Phase::Queued);
         host.owner.tick();
         let written = host.events.recv().await.unwrap();
-        assert!(matches!(written, Event::Written(owner::Written::Device, true)));
+        assert!(matches!(
+            written,
+            Event::Written(owner::Written::Device, true)
+        ));
         let saved = crate::persistence::load(&state_file, &[]);
         assert_eq!(saved.outbox.entries[0].id, entry.id);
         host.owner.handle(written).await;
         assert_eq!(host.owner.state.outbox.entries[0].phase, Phase::InFlight);
         let request = host.next_call().await;
-        assert!(matches!(&request.call, Call::Dispatch(dispatch) if dispatch.command_id == entry.id));
+        assert!(
+            matches!(&request.call, Call::Dispatch(dispatch) if dispatch.command_id == entry.id)
+        );
         host.close().await;
     })
     .await
@@ -2603,7 +2619,9 @@ async fn closing_writes_the_latest_device_state() {
         .unwrap();
     store.close().await.unwrap();
     assert_eq!(
-        crate::persistence::load(&state_file, &[]).current_draft().text,
+        crate::persistence::load(&state_file, &[])
+            .current_draft()
+            .text,
         "typed just before closing"
     );
 }

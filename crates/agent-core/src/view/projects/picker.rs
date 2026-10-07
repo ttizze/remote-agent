@@ -73,7 +73,11 @@ pub fn project_scopes(projects: &[Project], threads: &[ThreadSummary]) -> Vec<Pr
         })
         .collect();
     scopes.sort_by(|(left_at, left), (right_at, right)| {
-        (Reverse(left_at), &left.title, &left.key).cmp(&(Reverse(right_at), &right.title, &right.key))
+        (Reverse(left_at), &left.title, &left.key).cmp(&(
+            Reverse(right_at),
+            &right.title,
+            &right.key,
+        ))
     });
     scopes.into_iter().map(|(_, scope)| scope).collect()
 }
@@ -110,7 +114,13 @@ pub fn project_picker(snapshot: &Snapshot, query: &str) -> ProjectPickerView {
         .shell
         .snapshot
         .as_ref()
-        .map(|shell| shell.threads.iter().map(ThreadSummary::from_shell).collect())
+        .map(|shell| {
+            shell
+                .threads
+                .iter()
+                .map(ThreadSummary::from_shell)
+                .collect()
+        })
         .unwrap_or_default();
     let projects = snapshot.shell_projects();
     let scopes = project_scopes(projects, &threads);
@@ -207,7 +217,10 @@ mod tests {
 
     #[test]
     fn leaves_threads_without_a_project_to_the_no_project_row() {
-        let projects = [project(CHATS_PROJECT, "/chats"), project("app", "/work/app")];
+        let projects = [
+            project(CHATS_PROJECT, "/chats"),
+            project("app", "/work/app"),
+        ];
         assert_eq!(ids(&project_scopes(&projects, &[])), ["app"]);
     }
 }

@@ -15,6 +15,7 @@ extension BexAppViewModel {
             presentation?.cancel()
             presentation = nil
             threadView = nil
+            timelineRows = []
             return
         }
         guard presentation == nil else { return }
@@ -31,11 +32,18 @@ extension BexAppViewModel {
                 let latest = snapshot
                 let options = threadOptions
                 let now = Int64(Date().timeIntervalSince1970 * 1000)
-                let view = await Task.detached(priority: .userInitiated) {
-                    latest.selectedThread(nowMs: now, options: options)
+                let previousRows = threadView.map { "\($0.threadId):\($0.rowsRevision)" }
+                let (view, rows) = await Task.detached(priority: .userInitiated) {
+                    let view = latest.selectedThread(nowMs: now, options: options)
+                    let rows = view.flatMap { view in
+                        previousRows != "\(view.threadId):\(view.rowsRevision)" ? view.rows
+                            .values() : nil
+                    }
+                    return (view, rows)
                 }.value
                 guard !Task.isCancelled, store === owner, selectedProfileId == expectedHost else { return }
                 if snapshot.selectedThreadId() == latest.selectedThreadId() {
+                    timelineRows = rows ?? (view == nil ? [] : timelineRows)
                     threadView = view
                     scheduleTick(view)
                 }

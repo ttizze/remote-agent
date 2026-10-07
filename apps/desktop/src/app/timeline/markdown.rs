@@ -6,7 +6,16 @@ use super::super::{
     ui::{color, tint},
 };
 use agent_core::{
-    presentation::markdown::links::{MarkdownLinkPresentation, markdown_link_presentation},
+    presentation::markdown::{
+        artifact_templates::{
+            append_artifact_template_use_prompt, artifact_template_presentation_label,
+        },
+        directives::{
+            ArtifactTemplateMarkdownSegment, render_file_citations_as_markdown,
+            split_artifact_template_markdown,
+        },
+        links::{MarkdownLinkPresentation, markdown_link_presentation},
+    },
     state::Intent,
     view::composer::chips::{ContextChip, ContextChipKind},
 };
@@ -43,6 +52,66 @@ fn style() -> TextViewStyle {
 /// Markdown at the prompt size with relaxed lines; links open in the right
 /// place, and `chips` resolve the context links of a sent prompt.
 pub(super) fn chat_markdown(
+    id: impl Into<ElementId>,
+    text: impl Into<SharedString>,
+    chips: Arc<Vec<ContextChip>>,
+    cx: &mut Context<Desktop>,
+) -> Stateful<Div> {
+    let id = id.into();
+    let text = text.into();
+    let mut body = div().id(id.clone());
+    for (index, segment) in split_artifact_template_markdown(&text)
+        .into_iter()
+        .enumerate()
+    {
+        let key = SharedString::from(format!("{id:?}-segment-{index}"));
+        match segment {
+            ArtifactTemplateMarkdownSegment::Markdown { markdown, .. } => {
+                body = body.child(markdown_text(
+                    key,
+                    render_file_citations_as_markdown(&markdown),
+                    chips.clone(),
+                    cx,
+                ));
+            }
+            ArtifactTemplateMarkdownSegment::ArtifactTemplate { template, .. } => {
+                let label = artifact_template_presentation_label(template.artifact_kind);
+                let name = template.display_name.clone();
+                let button = gpui_kit::component::button::Button::new(key)
+                    .label("Use template")
+                    .on_click(cx.listener(move |view, _, window, cx| {
+                        let (draft, _) = view.editor_text_and_cursor(cx);
+                        let next = append_artifact_template_use_prompt(&draft, &template);
+                        view.replace_composer_text(next, window, cx);
+                    }));
+                body = body.child(
+                    div()
+                        .my(px(10.))
+                        .p(px(12.))
+                        .flex()
+                        .items_center()
+                        .gap(px(12.))
+                        .border_1()
+                        .border_color(color("border"))
+                        .rounded(px(12.))
+                        .bg(color("card"))
+                        .child(
+                            div().flex_1().child(div().text_sm().child(name)).child(
+                                div()
+                                    .text_xs()
+                                    .text_color(color("secondaryLabel"))
+                                    .child(label),
+                            ),
+                        )
+                        .child(button),
+                );
+            }
+        }
+    }
+    body
+}
+
+fn markdown_text(
     id: impl Into<ElementId>,
     text: impl Into<SharedString>,
     chips: Arc<Vec<ContextChip>>,

@@ -219,12 +219,17 @@ pub fn delivery_action(
 }
 
 /// A committed entry whose stream reached its sequence.
-fn reached(entry: &PendingCommand, shell: Option<u64>, thread: impl Fn(&ThreadId) -> Option<u64>) -> bool {
+fn reached(
+    entry: &PendingCommand,
+    shell: Option<u64>,
+    thread: impl Fn(&ThreadId) -> Option<u64>,
+) -> bool {
     let Some(sequence) = entry.committed_sequence() else {
         return false;
     };
     shell.is_some_and(|cursor| cursor >= sequence)
-        || (entry.overlay.is_none() && thread(&entry.thread).is_some_and(|cursor| cursor >= sequence))
+        || (entry.overlay.is_none()
+            && thread(&entry.thread).is_some_and(|cursor| cursor >= sequence))
 }
 
 /// 1 s doubling to 16 s between attempts of a request that did not reach the Host.
@@ -401,7 +406,8 @@ impl Outbox {
 
     /// A deleted thread shows none of its messages.
     pub fn thread_deleted(&mut self, thread: &ThreadId) {
-        self.acknowledged.retain(|message| &message.thread != thread);
+        self.acknowledged
+            .retain(|message| &message.thread != thread);
     }
 
     /// The user stopped retrying a request that is not in flight.

@@ -1,5 +1,5 @@
 // Declarative native layout with the fixed mobile metrics; the line range rules are supplied by core.
-@file:Suppress("MagicNumber")
+@file:Suppress("MagicNumber", "LongMethod")
 
 package dev.remoteagent.mobile
 
@@ -27,18 +27,18 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
-import dev.remoteagent.core.terminalOutputSelection
-import dev.remoteagent.core.visibleTerminalLines
+import dev.remoteagent.core.visibleOutputLines
+import dev.remoteagent.core.visibleOutputSelection
 
 /** The captured viewport's lines; tapping the first and then the last line picks the range to attach. */
 @Composable
 internal fun TerminalContextSheet(output: String, onClose: () -> Unit, onAttach: (UInt, UInt) -> Unit) {
     val colors = AppTheme.colors
-    val lines = remember(output) { visibleTerminalLines(output) }
+    val lines = remember(output) { visibleOutputLines(output) }
     var range by remember(output) { mutableStateOf(0 to lines.lastIndex) }
     var anchor by remember(output) { mutableStateOf<Int?>(null) }
     val selection =
-        remember(lines, range) { terminalOutputSelection(lines, range.first.toUInt(), range.second.toUInt()) }
+        remember(lines, range) { visibleOutputSelection(lines, range.first.toUInt(), range.second.toUInt()) }
     BackHandler(onBack = onClose)
     Surface(Modifier.fillMaxSize(), color = colors.sheet) {
         Column(Modifier.fillMaxSize()) {

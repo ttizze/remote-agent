@@ -1,6 +1,6 @@
 # Native protocol
 
-`remote-agent/streams/12` uses Postcard over iroh QUIC, with one request per
+`remote-agent/streams/13` uses Postcard over iroh QUIC, with one request per
 bidirectional stream. The unreleased product supports only the current format.
 The RPC table is `agent-protocol/src/protocol/requests.rs`; conversation records
 come from `agent-domain` and `agent-protocol/src/conversation.rs`.

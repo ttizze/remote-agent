@@ -710,44 +710,6 @@ pub fn markdown_link_presentation(href: &str) -> MarkdownLinkPresentation {
     }
 }
 
-/// What tapping a Markdown link in the mobile feed does.
-#[derive(Clone, Debug, PartialEq, Eq)]
-#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
-pub enum MarkdownLinkTarget {
-    /// A web page, mail or phone link the system opens.
-    Open { url: String },
-    /// A file in the thread's workspace, by absolute path, at a line.
-    File { path: String, line: Option<u64> },
-    None,
-}
-
-/// The target of `href` in a thread whose workspace is `workspace_root`.
-/// Files outside the workspace do nothing.
-pub fn markdown_link_target(href: &str, workspace_root: Option<&str>) -> MarkdownLinkTarget {
-    match markdown_link_presentation(href) {
-        MarkdownLinkPresentation::External { href, .. }
-        | MarkdownLinkPresentation::Link { href: Some(href) } => MarkdownLinkTarget::Open { url: href },
-        MarkdownLinkPresentation::Link { href: None } => MarkdownLinkTarget::None,
-        MarkdownLinkPresentation::File { link } => {
-            let Some(root) = workspace_root.filter(|root| !root.is_empty()) else {
-                return MarkdownLinkTarget::None;
-            };
-            let relative = if is_relative_file_path(&link.path) {
-                Some(link.path.trim_start_matches("./").to_owned())
-            } else {
-                workspace_relative_file_path(&link.path, Some(root))
-            };
-            match relative {
-                Some(relative) => MarkdownLinkTarget::File {
-                    path: format!("{}/{relative}", root.trim_end_matches('/')),
-                    line: link.line,
-                },
-                None => MarkdownLinkTarget::None,
-            }
-        }
-    }
-}
-
 /// Backticks become file references only when the shared path heuristic recognizes the whole span.
 pub fn markdown_inline_code_presentation(content: &str) -> Option<MarkdownFileLink> {
     match markdown_link_presentation(&inline_code_file_path_candidate(content)?) {

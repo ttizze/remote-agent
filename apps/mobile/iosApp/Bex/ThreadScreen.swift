@@ -48,7 +48,7 @@ struct ThreadScreen: View {
         .sheet(isPresented: $showingAgents) { AgentsSheet(model: model) }
         .sheet(item: $openedFile) { ThreadFileSheet(model: model, target: $0) }
         .environment(\.markdownLinks, MarkdownLinkOpener(
-            workspaceRoot: model.cwd.isEmpty ? nil : model.cwd, openFile: { openedFile = $0 }
+            workspaceRoot: model.cwd.isEmpty ? nil : model.cwd, openFile: { openedFile = $0 }, loadFile: model.download
         ))
         .sheet(isPresented: $showingSettings) {
             if let controls = model.threadView?.composer.controls {
@@ -103,12 +103,13 @@ struct ThreadScreen: View {
     }
 
     private func feed(_ view: ThreadView) -> some View {
-        let firstUserMessage = view.rows.firstIndex(where: \.isUserMessage)
+        let rows = model.timelineRows
+        let firstUserMessage = rows.firstIndex(where: \.isUserMessage)
         return LazyVStack(alignment: .leading, spacing: 0) {
             if view.history.hasMore || view.history.loading {
                 LoadEarlierButton(history: view.history) { model.loadEarlier() }
             }
-            if view.rows.isEmpty, view.syncStatus != .synchronizing, view.setup.card == nil {
+            if rows.isEmpty, view.syncStatus != .synchronizing, view.setup.card == nil {
                 EmptyStateText(
                     title: "No conversation yet",
                     detail: "Ask the agent to inspect the repo, run a command, or continue the active thread."
@@ -117,7 +118,7 @@ struct ThreadScreen: View {
             if firstUserMessage == nil {
                 setupCard(view)
             }
-            ForEach(Array(view.rows.enumerated()), id: \.element.id) { index, row in
+            ForEach(Array(rows.enumerated()), id: \.element.id) { index, row in
                 FeedRowView(row: row, actions: actions(view), forking: forkingRun != nil).equatable()
                 if index == firstUserMessage {
                     setupCard(view)

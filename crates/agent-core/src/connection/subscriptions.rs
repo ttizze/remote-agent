@@ -16,8 +16,7 @@ use crate::{
 use agent_domain::WorktreeSetupSnapshot;
 use agent_domain::{Item, RunStatus, ThreadId, TurnItemId};
 use agent_protocol::conversation::{
-    GetTurnItem, HistoryPage, ReadHistory, ShellLocation, ShellUpdate, SubscribeSetup,
-    ThreadUpdate,
+    GetTurnItem, HistoryPage, ReadHistory, ShellLocation, ShellUpdate, SubscribeSetup, ThreadUpdate,
 };
 use std::{sync::Arc, time::Duration};
 

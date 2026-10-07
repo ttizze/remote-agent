@@ -339,7 +339,10 @@ mod tests {
         state.drafts.insert("thread".into(), Draft::default());
         save(&path, &state).unwrap();
         assert_eq!(load(&path, &[]).drafts["thread"].text, "");
-        assert_eq!(std::fs::read_dir(path.parent().unwrap()).unwrap().count(), 1);
+        assert_eq!(
+            std::fs::read_dir(path.parent().unwrap()).unwrap().count(),
+            1
+        );
     }
 
     fn queued(id: &str) -> PendingCommand {
@@ -361,7 +364,9 @@ mod tests {
         let mut writer = StateWriter::restored(&state);
         writer.observe(&state, 0);
         assert_eq!(writer.next_due(), None);
-        Arc::make_mut(&mut state.outbox).enqueue(queued("command")).unwrap();
+        Arc::make_mut(&mut state.outbox)
+            .enqueue(queued("command"))
+            .unwrap();
         writer.observe(&state, 10);
         assert_eq!(writer.next_due(), Some(10));
         let id = CommandId::new("command").unwrap();
@@ -380,7 +385,9 @@ mod tests {
     #[test]
     fn a_failed_write_is_tried_again_and_restored_entries_are_stored() {
         let mut state = Snapshot::default();
-        Arc::make_mut(&mut state.outbox).enqueue(queued("restored")).unwrap();
+        Arc::make_mut(&mut state.outbox)
+            .enqueue(queued("restored"))
+            .unwrap();
         let mut writer = StateWriter::restored(&state);
         assert!(writer.stored(&CommandId::new("restored").unwrap()));
         state.follow_up = FollowUpBehavior::Steer;

@@ -247,15 +247,15 @@ internal fun ArrangeSheet(model: AndroidAppModel, onDismiss: () -> Unit) {
                     }
                 }
                 current?.let { lifted ->
-                    val top = (lifted.startY + lifted.translation - px(ROW_HEIGHT) / 2).coerceIn(
-                        0f,
-                        (viewport - px(ROW_HEIGHT)).coerceAtLeast(0f),
-                    )
+                    val top =
+                        (lifted.startY + lifted.translation - px(ROW_HEIGHT) / 2).coerceIn(
+                            0f,
+                            (viewport - px(ROW_HEIGHT)).coerceAtLeast(0f),
+                        )
                     Surface(
-                        Modifier.padding(horizontal = 20.dp)
-                            .fillMaxWidth()
-                            .height(ROW_HEIGHT.dp)
-                            .offset { IntOffset(0, top.toInt()) },
+                        Modifier.padding(horizontal = 20.dp).fillMaxWidth().height(ROW_HEIGHT.dp).offset {
+                            IntOffset(0, top.toInt())
+                        },
                         shape = RoundedCornerShape(12.dp),
                         color = colors.screen,
                         border = BorderStroke(1.dp, colors.border),
@@ -302,6 +302,8 @@ private fun HeaderRow(header: ArrangementRowKind.Header, onToggle: () -> Unit) {
     }
 }
 
+// Drag lifecycle callbacks are independent of accessibility moves; keep their inputs explicit.
+@Suppress("LongParameterList")
 @Composable
 private fun ThreadRow(
     locked: Boolean,
@@ -319,7 +321,13 @@ private fun ThreadRow(
     val latestEnd by rememberUpdatedState(onEnd)
     Column(Modifier.fillMaxSize()) {
         Row(Modifier.weight(1f).padding(horizontal = 20.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text(row.title, Modifier.weight(1f), style = AppTheme.body, color = AppTheme.colors.foreground, maxLines = 2)
+            Text(
+                row.title,
+                Modifier.weight(1f),
+                style = AppTheme.body,
+                color = AppTheme.colors.foreground,
+                maxLines = 2,
+            )
             Box(
                 Modifier.size(48.dp)
                     .alpha(if (!locked) 1f else 0.3f)

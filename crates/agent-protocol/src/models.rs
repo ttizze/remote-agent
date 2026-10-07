@@ -258,6 +258,63 @@ pub struct ProjectConversationSettings {
     pub branch_name_instructions: Option<String>,
 }
 
+/// One sparse project override edit, including an explicit return to inheritance.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum OverrideChange<T> {
+    Inherit,
+    Value(T),
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ProjectConversationSettingsPatch {
+    pub auto_settle: Option<OverrideChange<AutoSettle>>,
+    pub continue_after_restart: Option<OverrideChange<bool>>,
+    pub new_worktrees_start_from_origin: Option<OverrideChange<bool>>,
+    pub branch_naming_mode: Option<OverrideChange<agent_domain::BranchNamingMode>>,
+    pub branch_name_prefix: Option<OverrideChange<String>>,
+    pub branch_name_instructions: Option<OverrideChange<String>>,
+}
+
+fn patched_override<T: Clone>(
+    current: &Option<T>,
+    change: &Option<OverrideChange<T>>,
+) -> Option<T> {
+    match change {
+        None => current.clone(),
+        Some(OverrideChange::Inherit) => None,
+        Some(OverrideChange::Value(value)) => Some(value.clone()),
+    }
+}
+impl ProjectConversationSettings {
+    fn patched(&self, patch: &ProjectConversationSettingsPatch) -> Self {
+        Self {
+            auto_settle: patched_override(&self.auto_settle, &patch.auto_settle),
+            continue_after_restart: patched_override(
+                &self.continue_after_restart,
+                &patch.continue_after_restart,
+            ),
+            new_worktrees_start_from_origin: patched_override(
+                &self.new_worktrees_start_from_origin,
+                &patch.new_worktrees_start_from_origin,
+            ),
+            branch_naming_mode: patched_override(
+                &self.branch_naming_mode,
+                &patch.branch_naming_mode,
+            ),
+            branch_name_prefix: patched_override(
+                &self.branch_name_prefix,
+                &patch.branch_name_prefix,
+            ),
+            branch_name_instructions: patched_override(
+                &self.branch_name_instructions,
+                &patch.branch_name_instructions,
+            ),
+        }
+    }
+}
+
 /// Host conversation settings.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -298,14 +355,15 @@ impl Default for ConversationSettings {
 pub struct ConversationSettingsPatch {
     pub auto_settle: Option<AutoSettle>,
     pub continue_after_restart: Option<bool>,
+    pub new_worktrees_start_from_origin: Option<bool>,
     pub snooze_limited_threads: Option<bool>,
     pub auto_resume_limited_threads: Option<bool>,
     pub branch_naming_mode: Option<agent_domain::BranchNamingMode>,
     pub branch_name_prefix: Option<String>,
     pub branch_name_instructions: Option<String>,
-    /// Each entry replaces one project's whole override set; `None` removes it.
+    /// Each entry edits only the supplied project fields; `None` removes all overrides.
     pub project_overrides:
-        std::collections::BTreeMap<String, Option<ProjectConversationSettings>>,
+        std::collections::BTreeMap<String, Option<ProjectConversationSettingsPatch>>,
 }
 
 impl ConversationSettings {
@@ -315,6 +373,7 @@ impl ConversationSettings {
         let ConversationSettingsPatch {
             auto_settle,
             continue_after_restart,
+            new_worktrees_start_from_origin,
             snooze_limited_threads,
             auto_resume_limited_threads,
             branch_naming_mode,
@@ -327,6 +386,9 @@ impl ConversationSettings {
         }
         if let Some(value) = continue_after_restart {
             next.continue_after_restart = value;
+        }
+        if let Some(value) = new_worktrees_start_from_origin {
+            next.new_worktrees_start_from_origin = value;
         }
         if let Some(value) = snooze_limited_threads {
             next.snooze_limited_threads = value;
@@ -345,7 +407,19 @@ impl ConversationSettings {
         }
         for (project, overrides) in project_overrides {
             match overrides {
-                Some(overrides) => next.project_overrides.insert(project, overrides),
+                Some(patch) => {
+                    let overrides = next
+                        .project_overrides
+                        .get(&project)
+                        .cloned()
+                        .unwrap_or_default()
+                        .patched(&patch);
+                    if overrides == ProjectConversationSettings::default() {
+                        next.project_overrides.remove(&project)
+                    } else {
+                        next.project_overrides.insert(project, overrides)
+                    }
+                }
                 None => next.project_overrides.remove(&project),
             };
         }

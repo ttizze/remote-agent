@@ -169,3 +169,28 @@ fn a_dropped_row_lands_after_the_row_above_or_first_under_a_header() {
         "nothing is above the first header"
     );
 }
+
+#[test]
+fn a_hovering_thread_can_pin_or_settle_and_cannot_drop_onto_itself() {
+    let snapshot = snapshot();
+    let pin = thread_arrangement_drop(&snapshot, ms(NOW), OPEN, "older", "pinned", true).unwrap();
+    assert_eq!(pin.label, "Pin");
+    assert_eq!(
+        pin.destination,
+        MoveDestination::Drop {
+            target: Some("pinned".into()),
+            section: Some(DropSection::Pinned),
+            placement: Placement::After,
+        }
+    );
+    assert_eq!(
+        thread_arrangement_drop(&snapshot, ms(NOW), OPEN, "older", "section:settled", false)
+            .unwrap()
+            .label,
+        "Settle"
+    );
+    assert_eq!(
+        thread_arrangement_drop(&snapshot, ms(NOW), OPEN, "older", "older", false),
+        None
+    );
+}

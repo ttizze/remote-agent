@@ -2,8 +2,7 @@
 use super::history::{HistoryMeta, merge_history_page};
 use agent_domain::{CommandId, Fact, FactBody, Item, State, ThreadId, TurnItemId, apply};
 use agent_protocol::conversation::{
-    ErrorCode, HistoryPage, SequencedFact, SubscribeThread, ThreadSnapshot,
-    ThreadUpdate,
+    ErrorCode, HistoryPage, SequencedFact, SubscribeThread, ThreadSnapshot, ThreadUpdate,
 };
 use agent_protocol::error::RpcFailure;
 use serde::{Deserialize, Serialize};
@@ -574,7 +573,11 @@ impl ThreadSync {
         if let Some(cursor) = self.history.cursor.clone() {
             self.history_abandoned(&cursor);
         }
-        if self.details.values().any(|detail| detail == &Detail::Loading) {
+        if self
+            .details
+            .values()
+            .any(|detail| detail == &Detail::Loading)
+        {
             Arc::make_mut(&mut self.details).retain(|_, detail| detail != &Detail::Loading);
             self.detail_revision += 1;
             self.touch();

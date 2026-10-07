@@ -23,7 +23,7 @@ use crate::view::timeline::banners::{
 };
 use crate::view::timeline::mobile_follow::{StreamingMessageMark, latest_streaming_message};
 use crate::view::timeline::rows::{
-    ChangedFilesExpansion, TimelineLayout, TimelineOptions, TimelineRow, TimelineSource,
+    ChangedFilesExpansion, ThreadRows, TimelineLayout, TimelineOptions, TimelineSource,
 };
 use crate::view::working_status::{
     ConnectionStatus, FloatingStatusInput, PillSegment, ThreadContentKind, ThreadCreation,
@@ -31,7 +31,10 @@ use crate::view::working_status::{
 };
 use agent_domain::{RunAttemptId, RunId, ThreadId, ThreadShell};
 use agent_protocol::conversation::WorkspaceStrategy;
-use std::collections::{BTreeSet, HashMap};
+use std::{
+    collections::{BTreeSet, HashMap},
+    sync::Arc,
+};
 
 /// The folder disclosure of one run's changed-files card.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -82,7 +85,7 @@ pub struct ThreadView {
     pub sync_status: ThreadStatus,
     /// `None` until the Host has the thread.
     pub header: Option<ThreadHeaderView>,
-    pub rows: Vec<TimelineRow>,
+    pub rows: Arc<ThreadRows>,
     /// Advances whenever `rows` change; equal revisions mean equal rows.
     pub rows_revision: u64,
     /// The response streaming into the feed, for its haptic ticks.
@@ -290,7 +293,7 @@ pub fn thread_view(
         thread_id: thread.to_string(),
         sync_status: sync.status,
         header: snapshot_thread_header(snapshot, thread, &options.panels),
-        rows: timeline.rows.as_ref().clone(),
+        rows: timeline.rows.clone(),
         rows_revision: timeline.revision,
         streaming_message: latest_streaming_message(&timeline.rows),
         history: ThreadHistoryView {

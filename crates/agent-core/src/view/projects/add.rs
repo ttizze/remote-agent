@@ -178,10 +178,17 @@ pub fn folder_browser(
 #[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum AddProjectTarget {
     /// Register the folder with `Intent::AddProject`.
-    Add { path: String },
+    Add {
+        path: String,
+    },
     /// The folder is already this project: "Project already exists".
-    Existing { project_id: String, title: String },
-    Invalid { message: String },
+    Existing {
+        project_id: String,
+        title: String,
+    },
+    Invalid {
+        message: String,
+    },
 }
 
 /// The target of the mobile "Local folder" screen, which has no current

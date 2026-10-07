@@ -927,7 +927,8 @@ pub enum Intent {
     },
     /// Adds visible terminal lines to the open thread's draft as context.
     AttachTerminalOutput {
-        output: crate::view::terminals::TerminalOutputContext,
+        thread_id: String,
+        output: crate::view::terminals::output_context::TerminalOutputContext,
     },
     /// Drops an unsent draft: a thread's (its id) or a new thread's (`new:<project>`).
     DiscardDraft {
@@ -1220,15 +1221,6 @@ pub enum Intent {
     SetTerminalFontSize {
         size: f64,
     },
-    /// Adds lines `start..=end` (zero-based) of a terminal's captured viewport
-    /// to the thread's draft as context.
-    AttachTerminalOutput {
-        thread_id: String,
-        terminal_id: String,
-        output: String,
-        start: u32,
-        end: u32,
-    },
     RunProjectScript {
         thread_id: String,
         script_id: String,
@@ -1396,7 +1388,9 @@ mod tests {
     }
 
     fn skills(start: usize, count: usize) -> (String, MessageContext) {
-        let ids: Vec<String> = (start..start + count).map(|i| format!("skill-{i}")).collect();
+        let ids: Vec<String> = (start..start + count)
+            .map(|i| format!("skill-{i}"))
+            .collect();
         let text = ids
             .iter()
             .map(|id| format!("[Skill](context://v1/skill/{id})"))
@@ -1419,7 +1413,9 @@ mod tests {
         )
     }
     fn context_ids(context: &Option<MessageContext>) -> Vec<&str> {
-        context.iter().flat_map(|context| &context.records)
+        context
+            .iter()
+            .flat_map(|context| &context.records)
             .filter_map(|record| record.0["contextId"].as_str())
             .collect()
     }

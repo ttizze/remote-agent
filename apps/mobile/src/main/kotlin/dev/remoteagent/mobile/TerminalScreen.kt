@@ -5,12 +5,12 @@ package dev.remoteagent.mobile
 
 import android.view.KeyEvent
 import android.view.inputmethod.InputMethodManager
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
@@ -156,9 +156,10 @@ internal fun TerminalScreen(
                     Modifier.weight(1f),
                 )
             }
-            if (WindowInsets.isImeVisible) TerminalKeys(native, onDismissKeyboard = { native?.hideKeyboard() }) {
-                if (terminalId.isNotEmpty()) model.perform(Intent.ClearTerminal(threadId, terminalId))
-            }
+            if (WindowInsets.isImeVisible)
+                TerminalKeys(native, onDismissKeyboard = { native?.hideKeyboard() }) {
+                    if (terminalId.isNotEmpty()) model.perform(Intent.ClearTerminal(threadId, terminalId))
+                }
             else
                 KeyboardHiddenBar(
                     onAttach = {
@@ -175,7 +176,12 @@ internal fun TerminalScreen(
             output,
             onClose = { captured = null },
             onAttach = { start, end ->
-                model.perform(Intent.AttachTerminalOutput(threadId, terminalId, output, start, end)) { result ->
+                model.perform(
+                    Intent.AttachTerminalOutput(
+                        threadId,
+                        model.snapshot.terminalOutputContext(threadId, terminalId, output, start, end),
+                    )
+                ) { result ->
                     if (result.isSuccess) {
                         captured = null
                         model.back()

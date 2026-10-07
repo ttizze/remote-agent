@@ -205,8 +205,20 @@ impl Desktop {
         });
     }
 
+    pub(in crate::app) fn replace_composer_text(
+        &mut self,
+        text: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.composer.editor.update(cx, |editor, cx| {
+            editor.set_value(text, window, cx);
+            editor.focus(window, cx);
+        });
+    }
+
     /// The editor's text and its caret as a UTF-16 offset.
-    pub(super) fn editor_text_and_cursor(&self, cx: &App) -> (String, u32) {
+    pub(in crate::app) fn editor_text_and_cursor(&self, cx: &App) -> (String, u32) {
         let editor = self.composer.editor.read(cx);
         let text = editor.value().to_string();
         let cursor = utf16_offset(&text, editor.cursor());

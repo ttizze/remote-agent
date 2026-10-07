@@ -346,25 +346,26 @@ private fun BranchRow(branch: BranchChoice, shape: RoundedCornerShape, enabled: 
 }
 
 /**
- * The headline: "What should we work on?" with a "Choose a project" control for a draft without a project, else
- * "What should we build in <project>?" whose project opens "Choose project". The Host the task runs on follows.
+ * The headline: "What should we work on?" with a "Choose a project" control for a draft without a project, else "What
+ * should we build in <project>?" whose project opens "Choose project". The Host the task runs on follows.
  */
 @Composable
 private fun Hero(model: AndroidAppModel, view: NewThreadView) {
     val colors = AppTheme.colors
     val heading = AppTheme.largeTitle.copy(fontWeight = FontWeight.Medium, color = colors.foreground)
     val chooseProject = { model.navigate(Route.ChooseProject) }
-    val environment = @Composable {
-        model.snapshot.hostName()?.let { host ->
-            InlineControl(
-                "on $host",
-                maxWidth = if (view.hero.kind == DraftHeroHeadlineKind.BUILD_IN) 260.dp else 170.dp,
-                chevron = false,
-                icon = { ControlIcon(Icons.Outlined.Computer) },
-                onClick = null,
-            )
+    val environment =
+        @Composable {
+            model.snapshot.hostName()?.let { host ->
+                InlineControl(
+                    "on $host",
+                    maxWidth = if (view.hero.kind == DraftHeroHeadlineKind.BUILD_IN) 260.dp else 170.dp,
+                    chevron = false,
+                    icon = { ControlIcon(Icons.Outlined.Computer) },
+                    onClick = null,
+                )
+            }
         }
-    }
     Column(Modifier.padding(horizontal = 24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
         if (view.hero.kind == DraftHeroHeadlineKind.BUILD_IN) {
             Text("What should we build", style = heading, textAlign = TextAlign.Center)

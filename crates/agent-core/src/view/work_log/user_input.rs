@@ -245,7 +245,10 @@ mod tests {
                 ],
             };
             let history = question_answer_history(&value);
-            let questions: Vec<_> = history.iter().filter_map(|q| q.question.as_deref()).collect();
+            let questions: Vec<_> = history
+                .iter()
+                .filter_map(|q| q.question.as_deref())
+                .collect();
             assert_eq!(questions, ["Provide a spec", "Provide a screenshot"]);
             let files: Vec<_> = history.iter().flat_map(|q| &q.files).collect();
             assert_eq!(files.len(), 2);
@@ -253,7 +256,11 @@ mod tests {
             assert!(files[1].image);
             for (_, answer) in &answers {
                 let text = question_answer_text(answer);
-                assert!(history.iter().any(|q| q.answer.as_deref() == Some(text.as_str())));
+                assert!(
+                    history
+                        .iter()
+                        .any(|q| q.answer.as_deref() == Some(text.as_str()))
+                );
             }
         }
     }

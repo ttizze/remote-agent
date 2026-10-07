@@ -184,6 +184,7 @@ pub fn markdown_without_images(source: &str) -> (Cow<'_, str>, Vec<String>) {
 
 #[cfg_attr(feature = "bindings", uniffi::export)]
 pub fn markdown_blocks(source: String) -> Vec<MarkdownBlock> {
+    let source = directives::render_file_citations_as_markdown(&source);
     let root = parse(&source);
     let mut blocks = Vec::new();
     block(

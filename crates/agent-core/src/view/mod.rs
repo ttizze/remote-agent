@@ -31,7 +31,6 @@ pub mod thread;
 pub mod thread_arrangement;
 pub mod thread_list;
 pub mod thread_menu;
-pub mod thread_arrangement;
 pub mod thread_order;
 pub mod thread_sort;
 pub mod thread_summary;

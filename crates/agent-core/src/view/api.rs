@@ -1,7 +1,6 @@
 //! The conversation views apps render. Each getter calls one `view` function
 //! with the device state the snapshot holds.
 use crate::commands::build::FollowUpBehavior;
-use crate::presentation::markdown::links::MarkdownLinkTarget;
 use crate::state::{DraftAttachment, Snapshot};
 use crate::view::{
     archived::{ArchivedOptions, ArchivedView, archived_view},
@@ -34,17 +33,12 @@ use crate::view::{
     sidebar::{SidebarOptions, SidebarThreadDropPlan, SidebarView, plan_sidebar_drop, sidebar},
     snooze::{CustomSnoozeInput, SnoozePreset, resolve_custom_snooze, resolve_snooze_presets},
     terminals::{
-        TerminalTab, TerminalView,
-        output_context::TerminalOutputSelection,
-        terminal_tabs, terminal_view,
+        TerminalTab, TerminalView, terminal_tabs, terminal_view,
         text_size::{TerminalTextSize, terminal_text_size},
     },
     thread::{ThreadView, ThreadViewOptions, selected_thread_view, thread_view},
-    thread_arrangement::{
-        ArrangementDrop, ArrangementOptions,
-    },
-    thread_list::{ThreadListHolds, ThreadListOptions, ThreadListView, queued_threads, thread_list},
-    thread_summary::ThreadSummary,
+    thread_arrangement::{ArrangementDrop, ArrangementOptions},
+    thread_list::{ThreadListHolds, ThreadListOptions, ThreadListView, thread_list},
     thread_menu::{ThreadMenuOptions, ThreadMenuView, thread_menu},
     time::TimestampFormat,
     timeline::mobile_follow::{LiveFollowEvent, StreamHaptic, StreamingMessageMark},
@@ -397,6 +391,33 @@ impl Snapshot {
             .map(|draft| draft.attachments.clone())
             .unwrap_or_default()
     }
+    /// Captured viewport lines with the terminal's display metadata.
+    pub fn terminal_output_context(
+        &self,
+        thread_id: String,
+        terminal_id: String,
+        output: String,
+        start: u32,
+        end: u32,
+    ) -> crate::view::terminals::output_context::TerminalOutputContext {
+        let lines = crate::view::terminals::output_context::visible_output_lines(&output);
+        let selection =
+            crate::view::terminals::output_context::visible_output_selection(&lines, start, end);
+        crate::view::terminals::output_context::TerminalOutputContext {
+            terminal_label: ThreadId::new(thread_id)
+                .ok()
+                .map(|thread| crate::view::terminals::tab_label(self, &thread, &terminal_id))
+                .unwrap_or_default(),
+            terminal_id,
+            line_start: start.saturating_add(1),
+            line_end: end.saturating_add(1),
+            text: if end as usize >= lines.len() {
+                String::new()
+            } else {
+                selection.text
+            },
+        }
+    }
     /// The terminal's text size and the menu's "Text size" steps.
     pub fn terminal_text_size(&self) -> TerminalTextSize {
         terminal_text_size(self.preferences.terminal_font_size)
@@ -419,6 +440,21 @@ impl Snapshot {
     /// What adding the typed folder does.
     pub fn add_project_target(&self, raw_path: String) -> AddProjectTarget {
         add_project_target(self.shell_projects(), &raw_path)
+    }
+    /// A model picked in the sheet starts with its last chosen options.
+    pub fn stage_model(
+        &self,
+        current: Option<StagedModel>,
+        mut pressed: StagedModel,
+        pressed_is_applied: bool,
+    ) -> Option<StagedModel> {
+        pressed.options = staging::with_remembered_model_options(
+            &self.preferences.model_options,
+            &pressed.instance_id,
+            &pressed.model,
+            pressed.options,
+        );
+        staging::staged_model_after_press(current, pressed, pressed_is_applied)
     }
     /// The settings sheet's option rows while a model is staged.
     pub fn staged_model_traits(&self, staged: StagedModel) -> TraitsView {
@@ -447,11 +483,6 @@ impl Snapshot {
     pub fn can_save_staged_model(&self, staged: StagedModel) -> bool {
         staging::can_save_staged_model(&catalog(self), &staged)
     }
-    /// What tapping `href` in the open thread's feed does.
-    pub fn markdown_link_target(&self, href: String) -> MarkdownLinkTarget {
-        let root = self.cwd();
-        crate::presentation::markdown::links::markdown_link_target(&href, Some(&root))
-    }
     /// The mobile "Arrange threads" sheet.
     pub fn thread_arrangement_drop(
         &self,
@@ -461,7 +492,14 @@ impl Snapshot {
         target_key: String,
         after: bool,
     ) -> Option<ArrangementDrop> {
-        crate::view::thread_arrangement::thread_arrangement_drop(self, now_ms, options, &thread_id, &target_key, after)
+        crate::view::thread_arrangement::thread_arrangement_drop(
+            self,
+            now_ms,
+            options,
+            &thread_id,
+            &target_key,
+            after,
+        )
     }
 }
 
@@ -471,37 +509,10 @@ pub fn staged_model_key(staged: StagedModel) -> String {
     staged.key()
 }
 
-/// The staged model after pressing a catalogue model.
-#[cfg_attr(feature = "bindings", uniffi::export)]
-pub fn staged_model_after_press(
-    current: Option<StagedModel>,
-    pressed: StagedModel,
-    pressed_is_applied: bool,
-) -> Option<StagedModel> {
-    staging::staged_model_after_press(current, pressed, pressed_is_applied)
-}
-
 /// The add-project path field's first text: the configured folder, or home.
 #[cfg_attr(feature = "bindings", uniffi::export)]
 pub fn add_project_initial_query(base_directory: Option<String>) -> String {
     crate::view::projects::add::add_project_initial_query(base_directory.as_deref())
-}
-
-/// The lines of a terminal viewport captured to attach to a draft.
-#[cfg_attr(feature = "bindings", uniffi::export)]
-pub fn visible_terminal_lines(output: String) -> Vec<String> {
-    crate::view::terminals::output_context::visible_terminal_lines(&output)
-}
-
-/// Lines `start..=end` (zero-based) of a captured viewport and whether they
-/// can be attached.
-#[cfg_attr(feature = "bindings", uniffi::export)]
-pub fn terminal_output_selection(
-    lines: Vec<String>,
-    start: u32,
-    end: u32,
-) -> TerminalOutputSelection {
-    crate::view::terminals::output_context::terminal_output_selection(&lines, start, end)
 }
 
 /// How to bring a list showing `previous` rows to `next`.
@@ -571,7 +582,7 @@ pub fn markdown_image_display_size(
 /// A terminal's visible output as the attach sheet lists it.
 #[cfg_attr(feature = "bindings", uniffi::export)]
 pub fn visible_output_lines(text: String) -> Vec<String> {
-    crate::view::terminals::visible_output_lines(&text)
+    crate::view::terminals::output_context::visible_output_lines(&text)
 }
 
 /// Lines `start` through `end` (0-based) of the attach sheet.
@@ -580,8 +591,8 @@ pub fn visible_output_selection(
     lines: Vec<String>,
     start: u32,
     end: u32,
-) -> crate::view::terminals::VisibleOutputSelection {
-    crate::view::terminals::visible_output_selection(&lines, start, end)
+) -> crate::view::terminals::output_context::VisibleOutputSelection {
+    crate::view::terminals::output_context::visible_output_selection(&lines, start, end)
 }
 
 /// Whether a feed message appearing now fades in.

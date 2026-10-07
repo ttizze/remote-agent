@@ -9,7 +9,9 @@ pub const MAX_TERMINAL_FONT_SIZE: f64 = 14.0;
 /// The size to use: the stored one within the bounds, else the default.
 pub fn normalize_terminal_font_size(value: Option<f64>) -> f64 {
     match value {
-        Some(size) if size.is_finite() => size.clamp(MIN_TERMINAL_FONT_SIZE, MAX_TERMINAL_FONT_SIZE),
+        Some(size) if size.is_finite() => {
+            size.clamp(MIN_TERMINAL_FONT_SIZE, MAX_TERMINAL_FONT_SIZE)
+        }
         _ => DEFAULT_TERMINAL_FONT_SIZE,
     }
 }

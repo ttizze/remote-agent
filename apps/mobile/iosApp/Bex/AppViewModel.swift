@@ -17,6 +17,7 @@ final class BexAppViewModel: ObservableObject {
     @Published var composerText = ""
     var draftEdits = DraftRevision()
     private var composerKey = ""
+    @Published var timelineRows: [TimelineRow] = []
     @Published var threadView: ThreadView?
     @Published var disclosure = TimelineDisclosure.empty {
         didSet {
@@ -60,6 +61,8 @@ final class BexAppViewModel: ObservableObject {
         if selectedProfileId == id, store != nil {
             connect(); return
         }
+        connection?.cancel()
+        isConnecting = false
         let old = detachStore()
         selectedProfileId = id
         UserDefaults.standard.set(id, forKey: "bex.selected-host")
@@ -77,6 +80,8 @@ final class BexAppViewModel: ObservableObject {
             let remaining = profiles.filter { $0.id != id }
             try DeviceIdentity.remove(id)
             if selectedProfileId == id {
+                connection?.cancel()
+                isConnecting = false
                 let old = detachStore()
                 selectedProfileId = nil
                 UserDefaults.standard.removeObject(forKey: "bex.selected-host")
@@ -99,12 +104,11 @@ final class BexAppViewModel: ObservableObject {
         presentation = nil
         presentationTick?.cancel()
         threadView = nil
-        connection?.cancel()
+        timelineRows = []
         observation?.cancel()
         cancelInitialization()
         let old = store
         store = nil
-        isConnecting = false
         return old
     }
 
@@ -182,7 +186,9 @@ final class BexAppViewModel: ObservableObject {
                     self?.persist()
                     await self?.persistenceWrite?.value
                     // The new store reads the state the current one keeps for this Host.
-                    if self?.selectedProfileId == id { try? await self?.store?.flush() }
+                    if self?.selectedProfileId == id {
+                        try? await self?.store?.flush()
+                    }
                     let owner = try await AgentStore.connect(connection: Connection(
                         ticket: invitation.endpoint,
                         identity: DeviceIdentity.loadOrGenerate(id),
@@ -190,17 +196,12 @@ final class BexAppViewModel: ObservableObject {
                         useRelays: true
                     ), stateFile: SnapshotFiles.stateFile(id), modelDefaults: SnapshotFiles.modelDefaults(),
                     cacheDirectory: SnapshotFiles.cacheDirectory(id),
-                    diagnosticsDirectory: SnapshotFiles.diagnosticsDirectory(id))
+                    diagnosticsDirectory: SnapshotFiles.diagnosticsDirectory(
+                        id
+                    ))
                     guard let self, !Task.isCancelled else { try? await owner.shutdown(); return }
-                    persist()
-                    observation?.cancel()
-                    cancelInitialization()
-                    let old = store
-                    presentation?.cancel()
-                    presentation = nil
-                    store = nil
+                    let old = detachStore()
                     publish(AgentCore.Snapshot.empty())
-                    draftEdits.reset()
                     profiles.removeAll { $0.id == id }
                     profiles.append(HostProfile(id: id, name: invitation.hostName, ticket: invitation.endpoint))
                     try HostProfile.save(profiles)

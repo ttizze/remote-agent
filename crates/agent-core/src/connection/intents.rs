@@ -18,7 +18,8 @@ use crate::{
         attachments::{
             AttachmentCandidate, AttachmentFileKind, admit_attachments, image_preparation_error,
         },
-        models::staging::{remember_model_options, with_remembered_model_options},
+        models::staging::remember_model_options,
+        settings::{ProjectSettingKey, clear_project_overrides, plan_conversation_settings_update},
     },
 };
 use agent_domain::{
@@ -217,7 +218,10 @@ impl Owner {
                 cursor,
                 thread_ids,
             } => self.add_thread_contexts(text, cursor, &thread_ids),
-            Intent::AttachTerminalOutput { output } => self.attach_terminal_output(&output)?,
+            Intent::AttachTerminalOutput {
+                thread_id: id,
+                output,
+            } => self.attach_terminal_output(thread_id(id)?, &output)?,
             Intent::DiscardDraft { draft_key } => {
                 self.discard_draft(draft_key);
                 Next::Done
@@ -440,13 +444,6 @@ impl Owner {
                 );
                 Next::Done
             }
-            Intent::AttachTerminalOutput {
-                thread_id: id,
-                terminal_id,
-                output,
-                start,
-                end,
-            } => self.attach_terminal_output(thread_id(id)?, terminal_id, &output, start, end)?,
             Intent::SetFollowUpBehavior { behavior } => {
                 self.state.follow_up = behavior;
                 Next::Done
@@ -512,11 +509,22 @@ impl Owner {
                 Next::call(Call::ReadConversationSettings(m::Empty {}), None)
             }
             Intent::UpdateConversationSettings { scope, change } => {
-                self.update_conversation_settings(&scope, &change)?
+                match plan_conversation_settings_update(&scope, &change) {
+                    Some(patch) => Next::call(Call::UpdateConversationSettings(patch), None),
+                    None => Next::Done,
+                }
             }
-            Intent::ResetProjectSettings { project_id } => {
-                self.reset_project_settings(&project_id)?
-            }
+            Intent::ResetProjectSettings { project_id } => Next::call(
+                Call::UpdateConversationSettings(clear_project_overrides(
+                    &project_id,
+                    &[
+                        ProjectSettingKey::AutoSettle,
+                        ProjectSettingKey::ContinueAfterRestart,
+                        ProjectSettingKey::NewWorktreesStartFromOrigin,
+                    ],
+                )),
+                None,
+            ),
             Intent::UpdateProjectScripts {
                 project_id,
                 scripts,
@@ -687,20 +695,12 @@ impl Owner {
                 self.state.drafts.insert(key, draft);
                 self.thread_command(select_model_command(selection))
             }
-            Intent::SaveStagedModel { staged } => {
-                let options = with_remembered_model_options(
-                    &self.state.preferences.model_options,
-                    &staged.instance_id,
-                    &staged.model,
-                    staged.options,
-                );
-                self.prepare(Intent::SetModel {
-                    instance_id: staged.instance_id,
-                    driver: staged.driver,
-                    model: staged.model,
-                    options,
-                })?
-            }
+            Intent::SaveStagedModel { staged } => self.prepare(Intent::SetModel {
+                instance_id: staged.instance_id,
+                driver: staged.driver,
+                model: staged.model,
+                options: staged.options,
+            })?,
             Intent::RememberModelOptions {
                 instance_id,
                 model,

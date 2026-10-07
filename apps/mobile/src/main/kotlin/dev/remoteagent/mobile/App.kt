@@ -64,7 +64,7 @@ internal sealed interface Route {
     ) : Route
 
     /** `file` opens that file of the Files tab. */
-    data class Workspace(val tab: WorkspaceTab, val file: String? = null) : Route
+    data class Workspace(val tab: WorkspaceTab, val file: String? = null, val line: ULong? = null) : Route
 
     data class Settings(val projectId: String? = null) : Route
 
@@ -535,6 +535,16 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
     fun background() {
         backgrounds += 1
         persist()
+    }
+
+    suspend fun downloadBytes(path: String): ByteArray {
+        val temporary = File.createTempFile("markdown-", ".image", context.cacheDir)
+        try {
+            download(path, temporary.path)
+            return withContext(Dispatchers.IO) { temporary.readBytes() }
+        } finally {
+            temporary.delete()
+        }
     }
 
     suspend fun download(path: String, destination: String) = withStore { it.downloadFile(path, destination) }

@@ -58,8 +58,8 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import dev.remoteagent.core.DictationFailure
 import dev.remoteagent.core.DictationPhase
-import dev.remoteagent.core.DictationPresentation
 import dev.remoteagent.core.DictationPreparation
+import dev.remoteagent.core.DictationPresentation
 import dev.remoteagent.core.Intent
 import dev.remoteagent.core.dictationElapsedLabel
 import dev.remoteagent.core.dictationPresentation
@@ -117,25 +117,32 @@ internal class Dictation(private val model: AndroidAppModel, private val scope: 
     fun record() {
         if (phase != DictationPhase.Preparing) return
         val token = operation
-        val size = maxOf(
-            AudioRecord.getMinBufferSize(SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT),
-            METERING_BYTES,
-        )
+        val size =
+            maxOf(
+                AudioRecord.getMinBufferSize(SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT),
+                METERING_BYTES,
+            )
         val audio =
             try {
                 AudioRecord(
-                        MediaRecorder.AudioSource.VOICE_RECOGNITION,
-                        SAMPLE_RATE,
-                        AudioFormat.CHANNEL_IN_MONO,
-                        AudioFormat.ENCODING_PCM_16BIT,
-                        size * 2,
-                    )
-                    .also { it.startRecording() }
+                    MediaRecorder.AudioSource.VOICE_RECOGNITION,
+                    SAMPLE_RATE,
+                    AudioFormat.CHANNEL_IN_MONO,
+                    AudioFormat.ENCODING_PCM_16BIT,
+                    size * 2,
+                )
             } catch (_: Exception) {
-                return fail(DictationFailure.CouldNotStart)
+                null
             }
-        if (audio.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
-            audio.release()
+        val started = audio?.let {
+            runCatching {
+                    it.startRecording()
+                    it.recordingState == AudioRecord.RECORDSTATE_RECORDING
+                }
+                .getOrDefault(false)
+        }
+        if (audio == null || started != true) {
+            audio?.release()
             return fail(DictationFailure.CouldNotStart)
         }
         recorder = audio
@@ -146,7 +153,8 @@ internal class Dictation(private val model: AndroidAppModel, private val scope: 
         capture = scope.launch {
             val chunk = ByteArray(METERING_BYTES)
             val limit = voiceRecordingLimitSeconds().toInt() * BYTES_PER_SECOND
-            while (isActive && token == operation && !finishing && samples.size() < limit) {
+            while (isActive && token == operation && !finishing) {
+                if (samples.size() >= limit) break
                 val read = withContext(Dispatchers.IO) { audio.read(chunk, 0, chunk.size) }
                 if (token != operation) return@launch
                 if (read < 0) return@launch fail(DictationFailure.Interrupted)
@@ -263,17 +271,13 @@ internal fun rememberDictation(model: AndroidAppModel, draftKey: String): Pair<D
         if (dictation.presentation.opensSettings) {
             dictation.cancel()
             context.startActivity(
-                android.content.Intent(
-                        Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
-                        Uri.parse("package:${context.packageName}"),
-                    )
+                android.content
+                    .Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:${context.packageName}"))
                     .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
             )
         } else {
             dictation.preparing(key)
-            if (
-                context.checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
-            )
+            if (context.checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED)
                 dictation.record()
             else permission.launch(Manifest.permission.RECORD_AUDIO)
         }
@@ -347,9 +351,9 @@ internal fun DictationStatus(dictation: Dictation, modifier: Modifier) {
         ) {
             Text(status, Modifier.weight(1f), style = AppTheme.footnote, color = colors.dangerForeground, maxLines = 2)
             Box(
-                Modifier.size(28.dp).clickable { dictation.cancel() }.semantics {
-                    contentDescription = "Dismiss voice input error"
-                },
+                Modifier.size(28.dp)
+                    .clickable { dictation.cancel() }
+                    .semantics { contentDescription = "Dismiss voice input error" },
                 contentAlignment = Alignment.Center,
             ) {
                 Icon(Icons.Outlined.Close, null, Modifier.size(12.dp), tint = colors.iconMuted)

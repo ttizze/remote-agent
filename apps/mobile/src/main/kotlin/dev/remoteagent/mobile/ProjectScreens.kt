@@ -46,6 +46,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import dev.remoteagent.core.AddProjectTarget
+import dev.remoteagent.core.FolderBrowserView
 import dev.remoteagent.core.Intent
 import dev.remoteagent.core.ProjectPickerEmpty
 import dev.remoteagent.core.addProjectInitialQuery
@@ -78,10 +79,7 @@ internal fun ChooseProjectScreen(model: AndroidAppModel) {
                 ProjectsEmpty(model, empty)
                 return@Column
             }
-            LazyColumn(
-                contentPadding = PaddingValues(16.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
+            LazyColumn(contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 if (current.noProject)
                     item(key = "no-project") {
                         ListCard {
@@ -208,7 +206,7 @@ internal fun LocalFolderScreen(model: AndroidAppModel) {
     val listFailure = failed?.takeIf { it.first == directory }?.second
     LaunchedEffect(directory, browser?.isBrowsing) {
         val target = browser
-        if (target == null || !target.isBrowsing || target.listed) return@LaunchedEffect
+        if (target?.isBrowsing != true || target.listed) return@LaunchedEffect
         val requested = target.directoryPath
         model.perform(Intent.ListFiles(requested)) { result ->
             result.exceptionOrNull()?.let { failure ->
@@ -227,10 +225,13 @@ internal fun LocalFolderScreen(model: AndroidAppModel) {
                 submitting = true
                 model.perform(Intent.AddProject(target.path)) { result ->
                     submitting = false
-                    result.exceptionOrNull()?.let { failure ->
-                        model.notice = null
-                        error = failure.message
-                    } ?: model.snapshot.selectedProjectId()?.let(model::projectAdded)
+                    result.fold(
+                        onSuccess = { model.snapshot.selectedProjectId()?.let(model::projectAdded) },
+                        onFailure = { failure ->
+                            model.notice = null
+                            error = failure.message
+                        },
+                    )
                 }
             }
         }
@@ -272,28 +273,28 @@ internal fun LocalFolderScreen(model: AndroidAppModel) {
                 )
             }
             listFailure?.let { message -> item(key = "list-error") { ErrorBanner(message) } }
-            item(key = "folders") {
-                val current = browser
-                ListCard {
-                    if (current?.isBrowsing == true && !current.listed && listFailure == null)
-                        Box(Modifier.fillMaxWidth().padding(vertical = 20.dp), contentAlignment = Alignment.Center) {
-                            CircularProgressIndicator(
-                                Modifier.size(20.dp),
-                                color = colors.iconMuted,
-                                strokeWidth = 2.dp,
-                            )
-                        }
-                    current?.parentQuery?.let { parent ->
-                        ListRow("..", null, leading = { RowIcon(Icons.Outlined.SubdirectoryArrowLeft) }, chevron = false) {
-                            path = parent
-                        }
-                    }
-                    current?.entries?.forEach { entry ->
-                        ListRow(entry.name, null, leading = { RowIcon(Icons.Outlined.Folder) }, chevron = false) {
-                            path = entry.query
-                        }
-                    }
-                }
+            item(key = "folders") { FolderBrowserCard(browser, listFailure) { path = it } }
+        }
+    }
+}
+
+/** The core's parent and folder entries, while a directory listing is loading. */
+@Composable
+private fun FolderBrowserCard(current: FolderBrowserView?, listFailure: String?, onQuery: (String) -> Unit) {
+    val colors = AppTheme.colors
+    ListCard {
+        if (current?.isBrowsing == true && !current.listed && listFailure == null)
+            Box(Modifier.fillMaxWidth().padding(vertical = 20.dp), contentAlignment = Alignment.Center) {
+                CircularProgressIndicator(Modifier.size(20.dp), color = colors.iconMuted, strokeWidth = 2.dp)
+            }
+        current?.parentQuery?.let { parent ->
+            ListRow("..", null, leading = { RowIcon(Icons.Outlined.SubdirectoryArrowLeft) }, chevron = false) {
+                onQuery(parent)
+            }
+        }
+        current?.entries?.forEach { entry ->
+            ListRow(entry.name, null, leading = { RowIcon(Icons.Outlined.Folder) }, chevron = false) {
+                onQuery(entry.query)
             }
         }
     }

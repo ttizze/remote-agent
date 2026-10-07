@@ -365,7 +365,11 @@ impl Owner {
             )
             .chain(retention)
             .chain(self.sources_deadline())
-            .chain(self.device.as_ref().and_then(|device| device.writer.next_due()))
+            .chain(
+                self.device
+                    .as_ref()
+                    .and_then(|device| device.writer.next_due()),
+            )
             .min()
     }
 
@@ -410,9 +414,7 @@ impl Owner {
     /// Runs a file job after every one asked before it.
     pub fn write_file(&mut self, job: impl FnOnce() -> Option<Event> + Send + 'static) {
         let sender = self.sender.clone();
-        self.disk
-            .get_or_insert_with(|| Disk::new(sender))
-            .run(job);
+        self.disk.get_or_insert_with(|| Disk::new(sender)).run(job);
     }
 
     fn write_cache(
@@ -491,10 +493,9 @@ impl Owner {
         };
         if let Some(cached) = entry.teardown(sync) {
             let thread = id.clone();
-            self.write_cache(
-                Written::Thread(id.clone(), cached.clone()),
-                move |cache| cache.save_thread(&thread, &cached),
-            );
+            self.write_cache(Written::Thread(id.clone(), cached.clone()), move |cache| {
+                cache.save_thread(&thread, &cached)
+            });
         }
     }
 

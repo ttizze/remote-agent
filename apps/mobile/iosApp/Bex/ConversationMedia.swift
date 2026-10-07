@@ -8,6 +8,7 @@ struct MarkdownLinkOpener {
     let workspaceRoot: String?
     /// Opens a Host file, by absolute path, at a line.
     let openFile: (FileTarget) -> Void
+    let loadFile: @MainActor (String) async throws -> URL
 }
 
 extension EnvironmentValues {
@@ -66,8 +67,8 @@ enum MarkdownLinkURL {
     }
 }
 
-/// An image in a response: remote and inline images load directly; a Host
-/// file shows as unavailable. Tapping a loaded image previews it.
+/// Remote and inline images load directly; workspace images use the authenticated Host.
+/// Tapping a loaded image previews it.
 struct MarkdownImage: View {
     let href: String
     let alt: String
@@ -89,7 +90,7 @@ struct MarkdownImage: View {
                     .accessibilityLabel(alt.isEmpty ? "Markdown image" : alt)
                 } else {
                     Group {
-                        if failed || !source.isDirect {
+                        if failed {
                             Text("Image unavailable").font(AppTheme.font(13)).foregroundStyle(AppTheme.muted)
                         } else {
                             Text("Loading image…").font(AppTheme.font(13)).foregroundStyle(AppTheme.muted)
@@ -107,7 +108,7 @@ struct MarkdownImage: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width = $0 }
-        .task(id: href) { await load(source) }
+        .task(id: source) { await load(source) }
         .fullScreenCover(isPresented: $previewing) {
             if let image {
                 ImagePreview(image: image, name: alt.isEmpty ? "Image" : alt)
@@ -127,27 +128,48 @@ struct MarkdownImage: View {
         return CGSize(width: placeholder, height: placeholder * 9 / 16)
     }
 
+    private func inlineImageData(_ uri: String) throws -> Data {
+        let parts = uri.dropFirst(5).split(separator: ",", maxSplits: 1, omittingEmptySubsequences: false)
+        guard parts.count == 2 else { throw URLError(.badURL) }
+        if parts[0].hasSuffix(";base64") {
+            guard let decoded = Data(base64Encoded: String(parts[1])) else { throw URLError(.cannotDecodeContentData) }
+            return decoded
+        }
+        guard let decoded = String(parts[1]).removingPercentEncoding else { throw URLError(.badURL) }
+        return Data(decoded.utf8)
+    }
+
     private func load(_ source: MarkdownImageSource) async {
         image = nil
         failed = false
-        guard case let .direct(uri) = source,
-              let url = URL(string: uri.hasPrefix("//") ? "https:" + uri : uri) else { return }
         do {
-            let (data, _) = try await URLSession.shared.data(from: url)
+            let data: Data
+            switch source {
+            case let .workspaceFile(path):
+                guard let links else { throw URLError(.notConnectedToInternet) }
+                let file = try await links.loadFile(path)
+                defer { try? FileManager.default.removeItem(at: file.deletingLastPathComponent()) }
+                data = try await Task.detached(priority: .utility) { try Data(contentsOf: file) }.value
+            case let .direct(uri):
+                guard let url = URL(string: uri.hasPrefix("//") ? "https:" + uri : uri) else {
+                    throw URLError(.badURL)
+                }
+                if uri.hasPrefix("data:") {
+                    data = try inlineImageData(uri)
+                } else {
+                    data = try await URLSession.shared.data(from: url).0
+                }
+            case .blocked:
+                throw URLError(.badURL)
+            }
             guard let decoded = UIImage(data: data) else { throw URLError(.cannotDecodeContentData) }
+            try Task.checkCancellation()
             image = decoded
         } catch {
-            failed = true
+            if !Task.isCancelled {
+                failed = true
+            }
         }
-    }
-}
-
-extension MarkdownImageSource {
-    var isDirect: Bool {
-        if case .direct = self {
-            return true
-        }
-        return false
     }
 }
 

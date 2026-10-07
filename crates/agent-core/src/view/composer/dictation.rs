@@ -22,7 +22,9 @@ pub fn voice_waveform_sample_count() -> u32 {
 #[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum DictationFailure {
     /// `open_settings`: the permission can now only be granted in Settings.
-    MicrophoneDenied { open_settings: bool },
+    MicrophoneDenied {
+        open_settings: bool,
+    },
     CouldNotStart,
     Interrupted,
     Backgrounded,
@@ -48,7 +50,9 @@ pub enum DictationPhase {
     Preparing,
     Recording,
     Transcribing,
-    Error { failure: DictationFailure },
+    Error {
+        failure: DictationFailure,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -79,7 +83,10 @@ pub fn dictation_elapsed_label(seconds: u32) -> String {
 
 /// The composer toolbar for a dictation phase `elapsed_seconds` into it.
 #[cfg_attr(feature = "bindings", uniffi::export)]
-pub fn dictation_presentation(phase: DictationPhase, elapsed_seconds: u32) -> DictationPresentation {
+pub fn dictation_presentation(
+    phase: DictationPhase,
+    elapsed_seconds: u32,
+) -> DictationPresentation {
     let active = |status: String, confirmation_enabled: bool| DictationPresentation {
         cancel: true,
         confirm: true,
@@ -196,7 +203,12 @@ mod tests {
 
     #[test]
     fn treats_a_missing_or_invalid_reading_as_silence() {
-        for decibels in [None, Some(f64::NAN), Some(f64::INFINITY), Some(f64::NEG_INFINITY)] {
+        for decibels in [
+            None,
+            Some(f64::NAN),
+            Some(f64::INFINITY),
+            Some(f64::NEG_INFINITY),
+        ] {
             assert_eq!(normalize_voice_input_decibels(decibels), 0.0);
         }
     }

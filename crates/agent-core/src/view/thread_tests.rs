@@ -151,3 +151,21 @@ fn a_pending_question_can_be_submitted_once_answered() {
         "Type your own answer, or leave this blank to use the selected option"
     );
 }
+
+#[test]
+fn composer_edits_reuse_timeline_storage_until_rows_change() {
+    let mut snapshot = showing(finished_state());
+    let first = view(&snapshot);
+    snapshot.drafts.insert(
+        thread_id().to_string(),
+        Draft {
+            text: "another prompt".into(),
+            ..Draft::default()
+        },
+    );
+    let second = view(&snapshot);
+    assert_eq!(first.rows_revision, second.rows_revision);
+    assert!(Arc::ptr_eq(&first.rows, &second.rows));
+    assert_eq!(second.rows.values().as_slice(), first.rows.as_slice());
+    assert_eq!(second.composer.text, "another prompt");
+}

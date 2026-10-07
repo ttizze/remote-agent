@@ -53,7 +53,33 @@ internal fun RemoteAgentApp(
     BackHandler(model.stack.size > 1) { model.back() }
     AppMaterialTheme {
         val context = LocalContext.current
-        val markdown = remember(model, context) { markdownActions(model, context) }
+        val root = model.snapshot.currentDirectory()
+        val markdown =
+            MarkdownActions(
+                root,
+                { href ->
+                    when (val target = dev.remoteagent.core.markdownLinkAction(href, root)) {
+                        is dev.remoteagent.core.MarkdownLinkAction.WorkspaceFile ->
+                            model.navigate(
+                                Route.Workspace(WorkspaceTab.Files, java.io.File(root, target.path).path, target.line)
+                            )
+                        is dev.remoteagent.core.MarkdownLinkAction.HostFile ->
+                            model.navigate(Route.Workspace(WorkspaceTab.Files, target.path, target.line))
+                        is dev.remoteagent.core.MarkdownLinkAction.External ->
+                            runCatching {
+                                    context.startActivity(
+                                        android.content.Intent(
+                                            android.content.Intent.ACTION_VIEW,
+                                            android.net.Uri.parse(target.url),
+                                        )
+                                    )
+                                }
+                                .onFailure { model.notice = it.message }
+                        dev.remoteagent.core.MarkdownLinkAction.Nothing -> Unit
+                    }
+                },
+                model::downloadBytes,
+            )
         CompositionLocalProvider(LocalSnapshot provides model.snapshot, LocalMarkdownActions provides markdown) {
             AppSurface(model, requestQrScan)
         }
@@ -76,7 +102,7 @@ private fun AppSurface(model: AndroidAppModel, requestQrScan: (onContents: (Stri
                     Route.NewTask -> NewTaskScreen(model)
                     is Route.Terminal ->
                         TerminalScreen(model, route.threadId, route.terminalId, route.project, route.cwd)
-                    is Route.Workspace -> WorkspaceScreen(model, route.tab, route.file)
+                    is Route.Workspace -> WorkspaceScreen(model, route.tab, route.file, route.line)
                     is Route.Settings -> SettingsScreen(model, route.projectId)
                     Route.Archived -> ArchivedScreen(model)
                 }

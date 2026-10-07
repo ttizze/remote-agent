@@ -135,7 +135,7 @@ struct TerminalScreen: View {
 
     /// Adds the chosen lines to the thread's draft and returns to the thread.
     private func attach(_ output: TerminalOutputContext) {
-        model.perform(.attachTerminalOutput(output: output)) { result in
+        model.perform(.attachTerminalOutput(threadId: threadId, output: output)) { result in
             captured = nil
             switch result {
             case .success: dismiss()

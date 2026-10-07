@@ -1,4 +1,5 @@
-@file:Suppress("TooGenericExceptionCaught") // Downloads surface heterogeneous I/O errors; cancellation is rethrown.
+// Attachment previews and answer history share this native layout; downloads rethrow cancellation.
+@file:Suppress("TooGenericExceptionCaught", "TooManyFunctions")
 
 package dev.remoteagent.mobile
 

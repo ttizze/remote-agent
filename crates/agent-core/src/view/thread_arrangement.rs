@@ -355,10 +355,13 @@ pub fn thread_arrangement_drop(
     target: &str,
     after: bool,
 ) -> Option<ArrangementDrop> {
-    if moved == target { return None; }
+    if moved == target {
+        return None;
+    }
     let view = thread_arrangement(snapshot, now_ms, options);
     let index = view.rows.iter().position(|row| row.key == target)?;
-    let destination = index + usize::from(after || matches!(view.rows[index].kind, ArrangementRowKind::Header { .. }));
+    let destination = index
+        + usize::from(after || matches!(view.rows[index].kind, ArrangementRowKind::Header { .. }));
     thread_arrangement_move(snapshot, now_ms, options, moved, destination as u32)
 }
 

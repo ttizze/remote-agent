@@ -18,7 +18,7 @@ struct ThreadSettingsSheet: View {
     var body: some View {
         let catalog = model.snapshot.catalogSheet(options: CatalogSheetOptions(
             filter: filter, showLegacy: showLegacy, query: query,
-            expansionOverrides: expansionOverrides, stagedKey: staged?.key
+            expansionOverrides: expansionOverrides, stagedKey: staged.map { stagedModelKey(staged: $0) }
         ))
         NavigationStack {
             List {
@@ -41,7 +41,7 @@ struct ThreadSettingsSheet: View {
                         .frame(maxWidth: .infinity).padding(.vertical, 56)
                         .listRowBackground(Color.clear)
                 }
-                OptionsSection(model: model, controls: controls)
+                OptionsSection(model: model, controls: controls, staged: $staged)
             }
             .listStyle(.insetGrouped)
             .scrollContentBackground(.hidden)
@@ -94,8 +94,10 @@ struct ThreadSettingsSheet: View {
     /// Pressing the applied model drops the staged one; another model is staged.
     private func press(_ row: CatalogModelItem) {
         Haptics.selection()
-        staged = row.applied ? nil : StagedModel(key: row.key, instanceId: row.instanceId, driver: row.driver,
-                                                 slug: row.slug)
+        staged = model.snapshot.stageModel(current: staged,
+                                           pressed: StagedModel(instanceId: row.instanceId, driver: row.driver,
+                                                                model: row.slug, options: []),
+                                           pressedIsApplied: row.applied)
     }
 
     private func filterMenu(_ catalog: CatalogSheetView) -> some View {
@@ -130,18 +132,11 @@ struct ThreadSettingsSheet: View {
     private func save() {
         if let staged {
             Haptics.selection()
-            model.perform(.setModel(instanceId: staged.instanceId, driver: staged.driver, model: staged.slug,
-                                    options: []))
+            guard model.snapshot.canSaveStagedModel(staged: staged) else { return }
+            model.perform(.saveStagedModel(staged: staged))
         }
         dismiss()
     }
-}
-
-private struct StagedModel {
-    let key: String
-    let instanceId: String
-    let driver: Driver
-    let slug: String
 }
 
 private struct ProviderHeaderItem {
@@ -258,9 +253,15 @@ private struct CatalogModelRow: View {
 private struct OptionsSection: View {
     @ObservedObject var model: BexAppViewModel
     let controls: ComposerControls
+    @Binding var staged: StagedModel?
+
+    private func edit(_ next: StagedModel) {
+        staged = next
+        model.perform(.rememberModelOptions(instanceId: next.instanceId, model: next.model, options: next.options))
+    }
 
     var body: some View {
-        let traits = model.snapshot.traits()
+        let traits = staged.map { model.snapshot.stagedModelTraits(staged: $0) } ?? model.snapshot.traits()
         Section {
             ForEach(Array(traits.controls.enumerated()), id: \.offset) { _, control in
                 switch control {
@@ -268,7 +269,13 @@ private struct OptionsSection: View {
                     NavigationLink {
                         ChoicePage(title: label, choices: choices.map {
                             Choice(id: $0.id, label: $0.label, description: $0.description)
-                        }, selected: selected) { model.perform(.selectTrait(descriptorId: id, choice: $0)) }
+                        }, selected: selected) { choice in
+                            if let staged {
+                                edit(model.snapshot.selectStagedTrait(staged: staged, descriptorId: id, choice: choice))
+                            } else {
+                                model.perform(.selectTrait(descriptorId: id, choice: choice))
+                            }
+                        }
                     } label: {
                         OptionRow(label: label, value: choices.first { $0.id == selected }?.label ?? "")
                     }
@@ -276,7 +283,11 @@ private struct OptionsSection: View {
                     .accessibilityHint(note ?? "")
                 case let .toggle(id, label, isOn):
                     Toggle(label, isOn: Binding(get: { isOn }, set: {
-                        model.perform(.toggleTrait(descriptorId: id, on: $0))
+                        if let staged {
+                            edit(model.snapshot.toggleStagedTrait(staged: staged, descriptorId: id, on: $0))
+                        } else {
+                            model.perform(.toggleTrait(descriptorId: id, on: $0))
+                        }
                     }))
                     .font(AppTheme.font(14, weight: .medium))
                 }

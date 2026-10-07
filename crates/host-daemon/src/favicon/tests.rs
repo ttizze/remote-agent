@@ -437,7 +437,10 @@ fn an_icon_file_over_four_mebibytes_shows_the_fallback() {
     let (_directory, root) = workspace();
     let limit = MAX_SOURCE_BYTES as usize;
     fs::write(root.join("favicon.png"), vec![0u8; limit]).unwrap();
-    assert_eq!(icon(&root, None, None).unwrap().data.map(|data| data.len()), Some(limit));
+    assert_eq!(
+        icon(&root, None, None).unwrap().data.map(|data| data.len()),
+        Some(limit)
+    );
     fs::write(root.join("favicon.png"), vec![0u8; limit + 1]).unwrap();
     assert_eq!(icon(&root, None, None), None);
 }

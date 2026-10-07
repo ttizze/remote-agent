@@ -86,7 +86,7 @@ private const val BROWSER_REFRESH_MILLIS = 500L
 
 /** The open thread's files, diff and browser, each as its own screen. */
 @Composable
-internal fun WorkspaceScreen(model: AndroidAppModel, tab: WorkspaceTab, file: String? = null) {
+internal fun WorkspaceScreen(model: AndroidAppModel, tab: WorkspaceTab, file: String? = null, line: ULong? = null) {
     if (tab == WorkspaceTab.Diff) {
         ReviewScreen(model)
         return
@@ -94,7 +94,7 @@ internal fun WorkspaceScreen(model: AndroidAppModel, tab: WorkspaceTab, file: St
     ScreenScaffold(tab.name, onBack = model::back) {
         Column(Modifier.fillMaxSize()) {
             when (tab) {
-                WorkspaceTab.Files -> WorkspaceFiles(model, file, Modifier.weight(1f))
+                WorkspaceTab.Files -> WorkspaceFiles(model, file, line, Modifier.weight(1f))
                 WorkspaceTab.Diff -> Unit
                 WorkspaceTab.Browser -> WorkspaceBrowser(model, Modifier.weight(1f))
             }
@@ -105,15 +105,13 @@ internal fun WorkspaceScreen(model: AndroidAppModel, tab: WorkspaceTab, file: St
 @Composable
 // Declarative native layout; the conversation decisions are supplied by core.
 @Suppress("LongMethod", "CyclomaticComplexMethod")
-private fun WorkspaceFiles(model: AndroidAppModel, file: String?, modifier: Modifier) {
+private fun WorkspaceFiles(model: AndroidAppModel, file: String?, line: ULong?, modifier: Modifier) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var directory by remember { mutableStateOf(file?.let { File(it).parent } ?: model.snapshot.currentDirectory()) }
     var path by remember { mutableStateOf(directory) }
     // A linked file opens over its folder.
-    var selected by remember {
-        mutableStateOf(file?.let { FileEntry(File(it).name, it, false, 0uL) })
-    }
+    var selected by remember { mutableStateOf(file?.let { FileEntry(File(it).name, it, false, 0uL) }) }
     LaunchedEffect(file) { file?.let { model.perform(Intent.ReadFile(it, false)) } }
     var error by remember { mutableStateOf<String?>(null) }
     var downloading by remember { mutableStateOf<Pair<String, String?>?>(null) }
@@ -243,7 +241,24 @@ private fun WorkspaceFiles(model: AndroidAppModel, file: String?, modifier: Modi
                         if (pending == null && file != null) text = model.snapshot.fileDraft(entry.path) ?: file.text
                     }
                     if (file == null) CircularProgressIndicator()
-                    else {
+                    else if (line != null && entry.path == file) {
+                        val lines = text.split('\n')
+                        val scroll = androidx.compose.foundation.lazy.rememberLazyListState()
+                        LaunchedEffect(file, line, lines.size) {
+                            scroll.scrollToItem((line - 1uL).coerceAtMost((lines.size - 1).toULong()).toInt())
+                        }
+                        androidx.compose.foundation.text.selection.SelectionContainer(Modifier.weight(1f)) {
+                            LazyColumn(state = scroll) {
+                                items(lines.size) { index ->
+                                    Text(
+                                        "${index + 1}  ${lines[index]}",
+                                        fontFamily = FontFamily.Monospace,
+                                        modifier = Modifier.fillMaxWidth().padding(4.dp),
+                                    )
+                                }
+                            }
+                        }
+                    } else {
                         OutlinedTextField(
                             text,
                             { value ->
@@ -294,8 +309,7 @@ private fun ReviewScreen(model: AndroidAppModel) {
         remember(lazy, files) {
             lazy?.files?.map { WorkspaceDiffFile(it.path, it.additions, it.deletions, it.rows) } ?: files
         }
-    val notices =
-        remember(lazy) { lazy?.files?.mapNotNull { file -> file.notice?.let { file.path to it } }?.toMap() }
+    val notices = remember(lazy) { lazy?.files?.mapNotNull { file -> file.notice?.let { file.path to it } }?.toMap() }
     val loading = (gitScope && git?.loading == true) || (panel?.request != null && review == null)
     val subtitle =
         panel?.let {
@@ -359,9 +373,7 @@ private fun ReviewScreen(model: AndroidAppModel) {
             if (!loading)
                 items(shownFiles, key = { it.path }) { file ->
                     if (notices != null)
-                        LaunchedEffect(file.path) {
-                            model.perform(Intent.RevealDiffFile(file.path, false))
-                        }
+                        LaunchedEffect(file.path) { model.perform(Intent.RevealDiffFile(file.path, false)) }
                     Column(Modifier.padding(horizontal = 16.dp)) {
                         Row(
                             Modifier.then(

@@ -36,7 +36,7 @@ use crate::{
             set_question_custom_answer, toggle_question_option,
         },
         sidebar::SidebarThreadDropPlan,
-        terminals::{TerminalOutputContext, append_context_reference},
+        terminals::output_context::{TerminalOutputContext, append_context_reference},
         thread_list::{ordered_section, queued_threads},
         thread_order::{
             DropSection, MoveDestination, OrderSection, PendingThreadOrder, ThreadMovePlanner,
@@ -199,9 +199,21 @@ impl Owner {
     /// the end of the text.
     pub(super) fn attach_terminal_output(
         &mut self,
+        thread: ThreadId,
         output: &TerminalOutputContext,
     ) -> Result<Next, PeerError> {
-        let mut draft = self.state.current_draft();
+        if crate::js_text::utf16_len(&output.text)
+            > crate::view::terminals::output_context::TERMINAL_CONTEXT_TEXT_MAX_CHARS
+        {
+            return Err(invalid("Select fewer lines to fit the context limit."));
+        }
+        if crate::js_text::js_trim(&output.text).is_empty()
+            || output.line_start == 0
+            || output.line_end < output.line_start
+        {
+            return Err(invalid("There is no visible output to attach."));
+        }
+        let mut draft = self.state.draft_for_thread(&thread);
         let context = draft
             .context
             .get_or_insert_with(|| agent_domain::MessageContext {
@@ -214,7 +226,7 @@ impl Owner {
         let (record, reference) = output.record(&uuid::Uuid::new_v4().to_string());
         context.records.push(Json(record));
         draft.text = append_context_reference(&draft.text, &reference);
-        self.set_draft(draft);
+        self.state.drafts.insert(thread.to_string(), draft);
         Ok(Next::Done)
     }
 
@@ -472,19 +484,23 @@ impl Owner {
             _ => section,
         };
         let threads = self.summaries();
-        let Some(thread) = threads
+        if !threads
             .iter()
-            .find(|thread| thread.id == moved && thread.archived_at.is_none())
-        else {
+            .any(|thread| thread.id == moved && thread.archived_at.is_none())
+        {
             return Ok(Next::Done);
-        };
+        }
         let id = ThreadId::new(moved).map_err(invalid)?;
         // A drop names its section; the thread may come from another one.
         let section = match destination {
             MoveDestination::Drop {
                 section: Some(DropSection::Settled),
                 ..
-            } => return Ok(Next::Commands(vec![self.lifecycle(id, LifecycleAction::Settle)])),
+            } => {
+                return Ok(Next::Commands(vec![
+                    self.lifecycle(id, LifecycleAction::Settle),
+                ]));
+            }
             MoveDestination::Drop {
                 section: Some(DropSection::Pinned),
                 ..
@@ -515,10 +531,17 @@ impl Owner {
             .into_iter()
             .map(|assignment| {
                 let thread = ThreadId::new(assignment.id.clone()).map_err(invalid)?;
-                Ok(self.lifecycle(thread, match section {
-                    OrderSection::Pinned => LifecycleAction::ReorderPinned { order: assignment.order_key },
-                    OrderSection::Active => LifecycleAction::ReorderActive { order: assignment.order_key },
-                }))
+                Ok(self.lifecycle(
+                    thread,
+                    match section {
+                        OrderSection::Pinned => LifecycleAction::ReorderPinned {
+                            order: assignment.order_key,
+                        },
+                        OrderSection::Active => LifecycleAction::ReorderActive {
+                            order: assignment.order_key,
+                        },
+                    },
+                ))
             })
             .collect::<Result<Vec<_>, PeerError>>()?;
         self.state.thread_order = Some(ThreadOrderHold {

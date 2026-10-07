@@ -20,7 +20,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -36,9 +35,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
@@ -274,7 +271,7 @@ private fun Feed(
     actions: FeedActions,
     onSetupDetails: () -> Unit,
 ) {
-    val rows = remember(view.rowsRevision) { view.rows.asReversed() }
+    val rows = remember(view.threadId, view.rowsRevision) { view.rows.values().asReversed() }
     LazyColumn(
         Modifier.fillMaxSize().widthIn(max = 960.dp),
         state = listState,
@@ -283,7 +280,9 @@ private fun Feed(
     ) {
         // The setup card follows the first user message; the list runs newest first.
         val setup = view.setup.card?.takeIf { it.showInTimeline }
-        val anchor = rows.indexOfLast { it.kind is TimelineRowKind.UserMessage || it.kind is TimelineRowKind.PendingMessage }
+        val anchor = rows.indexOfLast {
+            it.kind is TimelineRowKind.UserMessage || it.kind is TimelineRowKind.PendingMessage
+        }
         rows.forEachIndexed { index, row ->
             if (setup != null && index == anchor) item(key = "setup") { SetupCard(setup, onSetupDetails) }
             item(key = row.id) { FeedRow(model, row, now, actions) }

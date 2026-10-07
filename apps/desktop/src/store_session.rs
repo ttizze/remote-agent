@@ -80,9 +80,8 @@ impl StoreSession {
             async move {
                 while receive.changed().await.is_ok() {
                     let snapshot = receive.borrow_and_update().clone();
-                    let preferences =
-                        agent_core::persistence::encode_model_preferences(&snapshot)
-                            .unwrap_or_default();
+                    let preferences = agent_core::persistence::encode_model_preferences(&snapshot)
+                        .unwrap_or_default();
                     if preferences == saved {
                         continue;
                     }
@@ -208,7 +207,8 @@ mod tests {
             let restored = agent_core::persistence::load(&state_file, &preferences);
             assert_eq!(restored.current_draft().text, "last edit before close");
             assert!(store.dispatch(Intent::LeaveThread).await.unwrap().is_err());
-            let other = agent_core::persistence::load(&directory.path().join("other.json"), &preferences);
+            let other =
+                agent_core::persistence::load(&directory.path().join("other.json"), &preferences);
             assert_eq!(other.default_draft, restored.default_draft);
             assert!(other.drafts.is_empty());
         })
