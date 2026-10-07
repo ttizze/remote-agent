@@ -27,11 +27,14 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.FormatListBulleted
 import androidx.compose.material.icons.automirrored.outlined.InsertDriveFile
 import androidx.compose.material.icons.automirrored.outlined.Undo
+import androidx.compose.material.icons.outlined.AccountCircle
 import androidx.compose.material.icons.outlined.ArrowUpward
 import androidx.compose.material.icons.outlined.ChatBubbleOutline
 import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.ExpandMore
 import androidx.compose.material.icons.outlined.Folder
+import androidx.compose.material.icons.outlined.GridView
+import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.Stop
 import androidx.compose.material.icons.outlined.Terminal
 import androidx.compose.material.icons.outlined.ViewInAr
@@ -73,6 +76,7 @@ import dev.remoteagent.core.Intent
 import dev.remoteagent.core.MobileSendIcon
 import dev.remoteagent.core.Outcome
 import dev.remoteagent.core.QueueAction
+import dev.remoteagent.core.SkillSourceKind
 import dev.remoteagent.core.TimelineLayout
 
 private fun followUpLabel(behavior: FollowUpBehavior) =
@@ -243,11 +247,22 @@ private fun menuGroupLabel(kind: ComposerTriggerKind?) =
         null -> null
     }
 
-private fun menuItemIcon(target: ComposerCommandTarget): ImageVector =
-    when (target) {
+private fun skillIcon(source: SkillSourceKind?): ImageVector =
+    when (source) {
+        SkillSourceKind.APP -> Icons.Outlined.GridView
+        SkillSourceKind.REPO,
+        SkillSourceKind.PROJECT -> Icons.Outlined.Folder
+        SkillSourceKind.PERSONAL -> Icons.Outlined.AccountCircle
+        SkillSourceKind.SYSTEM -> Icons.Outlined.Settings
+        SkillSourceKind.OTHER,
+        null -> Icons.Outlined.ViewInAr
+    }
+
+private fun menuItemIcon(item: ComposerCommandItem): ImageVector =
+    when (val target = item.target) {
         is ComposerCommandTarget.BuiltIn,
         is ComposerCommandTarget.ProviderCommand -> Icons.Outlined.Terminal
-        is ComposerCommandTarget.Skill -> Icons.Outlined.ViewInAr
+        is ComposerCommandTarget.Skill -> skillIcon(item.skillSource)
         is ComposerCommandTarget.Path ->
             if (target.directory) Icons.Outlined.Folder else Icons.AutoMirrored.Outlined.InsertDriveFile
         is ComposerCommandTarget.Thread -> Icons.Outlined.ChatBubbleOutline
@@ -306,7 +321,7 @@ private fun CommandRow(item: ComposerCommandItem, kind: ComposerTriggerKind?, on
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        Icon(menuItemIcon(item.target), null, Modifier.size(if (path) 16.dp else 14.dp), tint = colors.iconMuted)
+        Icon(menuItemIcon(item), null, Modifier.size(if (path) 16.dp else 14.dp), tint = colors.iconMuted)
         val slashSkill =
             kind == ComposerTriggerKind.SLASH_COMMAND &&
                 item.target is ComposerCommandTarget.Skill &&

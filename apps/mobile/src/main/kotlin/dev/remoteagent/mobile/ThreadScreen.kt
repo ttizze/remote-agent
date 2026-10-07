@@ -218,20 +218,7 @@ internal fun ThreadScreen(model: AndroidAppModel, threadId: String) {
             ThreadSheet.Queue -> current.queue?.let { QueueSheet(model, it) { sheet = null } }
             ThreadSheet.Agents -> current.agents?.let { AgentsSheet(model, it) { sheet = null } }
             ThreadSheet.Settings -> ThreadSettingsSheet(model, current.composer) { sheet = null }
-            ThreadSheet.Setup ->
-                current.setup.card?.let { card ->
-                    SetupDetailsSheet(
-                        model,
-                        card,
-                        { terminal ->
-                            model.navigate(
-                                Route.Terminal(threadId, terminal, current.header?.project?.name, current.header?.cwd)
-                            )
-                        },
-                    ) {
-                        sheet = null
-                    }
-                }
+            ThreadSheet.Setup -> current.setup.card?.let { card -> SetupDetailsSheet(model, card) { sheet = null } }
             null -> Unit
         }
     }

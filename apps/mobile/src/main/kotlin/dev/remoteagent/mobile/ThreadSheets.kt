@@ -24,7 +24,11 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
+import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.ChevronRight
+import androidx.compose.material.icons.outlined.ExpandLess
+import androidx.compose.material.icons.outlined.ExpandMore
+import androidx.compose.material.icons.outlined.FilterList
 import androidx.compose.material.icons.outlined.MoreVert
 import androidx.compose.material.icons.outlined.Star
 import androidx.compose.material.icons.outlined.StarBorder
@@ -47,15 +51,18 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import dev.remoteagent.core.AgentRoster
+import dev.remoteagent.core.CatalogFilter
+import dev.remoteagent.core.CatalogSheetItem
+import dev.remoteagent.core.CatalogSheetOptions
+import dev.remoteagent.core.CatalogSheetView
 import dev.remoteagent.core.ComposerView
 import dev.remoteagent.core.Intent
-import dev.remoteagent.core.LegacyModelsSection
-import dev.remoteagent.core.ModelPickerRow
-import dev.remoteagent.core.PickerRail
 import dev.remoteagent.core.QueueAction
 import dev.remoteagent.core.QueueRowView
 import dev.remoteagent.core.QueueView
@@ -262,19 +269,30 @@ internal fun AgentsSheet(model: AndroidAppModel, roster: AgentRoster, onDismiss:
     }
 }
 
-/** Model list with a provider filter, then Options. A new model applies on Save. */
+/** Why the catalogue lists no model. */
+internal fun catalogEmptyLabel(filter: CatalogFilter, query: String): String =
+    when {
+        filter is CatalogFilter.Favorites -> "No favorite models"
+        query.isNotBlank() -> "No matching models"
+        else -> "No available models"
+    }
+
+/**
+ * The model catalogue by provider, then Options and Runtime, then the legacy switch. A staged model applies on Save.
+ */
 @Composable
 internal fun ThreadSettingsSheet(model: AndroidAppModel, composer: ComposerView, onDismiss: () -> Unit) {
     val colors = AppTheme.colors
     var query by remember { mutableStateOf("") }
-    var rail by remember { mutableStateOf<PickerRail?>(null) }
-    var pending by remember { mutableStateOf<ModelPickerRow?>(null) }
-    var toggledLegacy by remember { mutableStateOf(emptyList<String>()) }
+    var filter by remember { mutableStateOf<CatalogFilter>(CatalogFilter.All) }
+    var showLegacy by remember { mutableStateOf(false) }
+    var overrides by remember { mutableStateOf(emptyList<String>()) }
+    var staged by remember { mutableStateOf<CatalogSheetItem.Model?>(null) }
     var choosing by remember { mutableStateOf<OptionScreen?>(null) }
-    val picker by
-        rememberView(model.snapshot, query, rail, toggledLegacy) { it.modelPicker(query, rail, toggledLegacy) }
+    val options = CatalogSheetOptions(filter, showLegacy, query, overrides, staged?.key)
+    val catalog by rememberView(model.snapshot, options) { it.catalogSheet(options) }
     fun save() {
-        pending?.let { row -> model.perform(Intent.SetModel(row.instanceId, row.driver, row.slug, emptyList())) }
+        staged?.let { row -> model.perform(Intent.SetModel(row.instanceId, row.driver, row.slug, emptyList())) }
         onDismiss()
     }
     val screen = choosing
@@ -285,68 +303,44 @@ internal fun ThreadSettingsSheet(model: AndroidAppModel, composer: ComposerView,
         leading =
             screen?.let { { HeaderIconButton(Icons.AutoMirrored.Outlined.ArrowBack, "Back") { choosing = null } } },
         trailing = {
-            if (screen == null)
-                TextButton(onClick = ::save) {
-                    Text(if (pending != null) "Save" else "Done", color = colors.foreground)
-                }
+            if (screen == null) {
+                CatalogFilterMenu(catalog, filter, showLegacy, onFilter = { filter = it }) { showLegacy = !showLegacy }
+                if (staged != null) TextButton(onClick = ::save) { Text("Save", color = colors.foreground) }
+            }
         },
     ) {
         if (screen != null) {
             OptionChoices(screen) { choosing = null }
             return@BottomSheet
         }
-        SettingsField(query, { query = it }, "Find a model", Modifier.padding(horizontal = 16.dp))
-        picker?.let { view ->
-            Row(
-                Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                FilterChip("All providers", rail == null) { rail = null }
-                view.rail.forEach { item ->
-                    FilterChip(item.label, rail == item.rail && rail != null) { rail = item.rail }
-                }
-            }
-            view.emptyLabel?.let {
-                Text(it, Modifier.padding(20.dp), style = AppTheme.footnote, color = colors.foregroundMuted)
-            }
-            var provider: String? = null
-            view.rows.forEachIndexed { index, row ->
-                view.legacy
-                    ?.takeIf { it.currentCount.toInt() == index }
-                    ?.let { legacy -> LegacyModelsRow(legacy) { toggledLegacy = toggledLegacy.toggled(it) } }
-                if (row.providerName != provider) {
-                    provider = row.providerName
-                    Text(
-                        row.providerName,
-                        Modifier.padding(start = 20.dp, top = 14.dp, bottom = 4.dp),
-                        style = AppTheme.label,
-                        fontWeight = FontWeight.Medium,
-                        color = colors.foregroundSecondary,
-                    )
-                }
-                val selected = pending?.key?.let { it == row.key } ?: row.selected
-                ChoiceRow(
-                    row.name,
-                    row.disabledReason,
-                    selected,
-                    enabled = row.disabledReason == null,
-                    trailing = {
-                        IconButton(onClick = { model.perform(Intent.ToggleFavoriteModel(row.instanceId, row.slug)) }) {
-                            Icon(
-                                if (row.favorite) Icons.Outlined.Star else Icons.Outlined.StarBorder,
-                                if (row.favorite) "Remove from favorites: ${row.name}"
-                                else "Add to favorites: ${row.name}",
-                                tint = if (row.favorite) colors.icon else colors.iconMuted,
-                            )
+        SettingsField(
+            query,
+            { query = it },
+            "Find a model",
+            Modifier.padding(start = 16.dp, end = 16.dp, bottom = 8.dp),
+        )
+        catalog?.let { view ->
+            if (view.items.none { it is CatalogSheetItem.Model })
+                Text(
+                    catalogEmptyLabel(filter, query),
+                    Modifier.fillMaxWidth().padding(horizontal = 32.dp, vertical = 56.dp),
+                    style = AppTheme.footnote,
+                    color = colors.foregroundMuted,
+                    textAlign = TextAlign.Center,
+                )
+            view.items.forEach { item ->
+                when (item) {
+                    is CatalogSheetItem.Provider ->
+                        CatalogProviderRow(item) { overrides = overrides.toggled(item.instance.instanceId) }
+                    is CatalogSheetItem.Model ->
+                        CatalogModelRow(
+                            item,
+                            onFavorite = { model.perform(Intent.ToggleFavoriteModel(item.instanceId, item.slug)) },
+                        ) {
+                            staged = if (item.applied) null else item
                         }
-                    },
-                ) {
-                    pending = if (row.selected) null else row
                 }
             }
-            view.legacy
-                ?.takeIf { it.currentCount.toInt() >= view.rows.size }
-                ?.let { legacy -> LegacyModelsRow(legacy) { toggledLegacy = toggledLegacy.toggled(it) } }
         }
         SheetSection("Options")
         if (composer.traits.visible)
@@ -384,8 +378,190 @@ internal fun ThreadSettingsSheet(model: AndroidAppModel, composer: ComposerView,
                     model.perform(Intent.SetRuntimeMode(runtime.runtimeModeChoices[index].mode))
                 }
         }
+        if (catalog?.hasLegacyModels == true) {
+            Text(
+                "Catalog",
+                Modifier.padding(start = 20.dp, top = 28.dp, bottom = 8.dp),
+                style = AppTheme.label,
+                fontWeight = FontWeight.Medium,
+                color = colors.foregroundSecondary,
+            )
+            SwitchRow("Legacy models", showLegacy) { showLegacy = it }
+        }
         Spacer(Modifier.heightIn(min = 24.dp))
     }
+}
+
+/** "Model filters": the provider filter and the legacy switch. */
+@Composable
+private fun CatalogFilterMenu(
+    catalog: CatalogSheetView?,
+    filter: CatalogFilter,
+    showLegacy: Boolean,
+    onFilter: (CatalogFilter) -> Unit,
+    onToggleLegacy: () -> Unit,
+) {
+    var open by remember { mutableStateOf(false) }
+    var providers by remember { mutableStateOf(false) }
+    fun close() {
+        open = false
+        providers = false
+    }
+    Box {
+        HeaderIconButton(
+            Icons.Outlined.FilterList,
+            "Filter models",
+            selected = filter !is CatalogFilter.All || showLegacy,
+        ) {
+            open = true
+        }
+        AnchoredMenu(open || providers, ::close) {
+            if (providers) {
+                CatalogFilterItem("All providers", filter is CatalogFilter.All) {
+                    close()
+                    onFilter(CatalogFilter.All)
+                }
+                CatalogFilterItem("Favorites", filter is CatalogFilter.Favorites) {
+                    close()
+                    onFilter(CatalogFilter.Favorites)
+                }
+                catalog?.providers.orEmpty().forEach { instance ->
+                    val selected = (filter as? CatalogFilter.Instance)?.instanceId == instance.instanceId
+                    CatalogFilterItem(instance.displayName, selected) {
+                        close()
+                        onFilter(CatalogFilter.Instance(instance.instanceId))
+                    }
+                }
+            } else {
+                Text(
+                    "Model filters",
+                    Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                    style = AppTheme.caption,
+                    color = AppTheme.colors.foregroundSecondary,
+                )
+                DropdownMenuItem(
+                    text = { Text("Provider", style = AppTheme.footnote) },
+                    trailingIcon = { Icon(Icons.Outlined.ChevronRight, null) },
+                    onClick = {
+                        open = false
+                        providers = true
+                    },
+                )
+                if (catalog?.hasLegacyModels == true)
+                    CatalogFilterItem("Show legacy models", showLegacy) {
+                        close()
+                        onToggleLegacy()
+                    }
+            }
+        }
+    }
+}
+
+@Composable
+private fun CatalogFilterItem(label: String, checked: Boolean, onClick: () -> Unit) {
+    DropdownMenuItem(
+        text = { Text(label, style = AppTheme.footnote) },
+        trailingIcon = if (checked) ({ Icon(Icons.Outlined.Check, null) }) else null,
+        onClick = onClick,
+    )
+}
+
+/** A provider section header; a collapsed one shows its model count. */
+@Composable
+private fun CatalogProviderRow(item: CatalogSheetItem.Provider, onToggle: () -> Unit) {
+    val colors = AppTheme.colors
+    Row(
+        Modifier.fillMaxWidth()
+            .padding(start = 16.dp, end = 16.dp, top = 4.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .clickable(enabled = item.collapsible, onClick = onToggle)
+            .heightIn(min = if (item.collapsible) 48.dp else 36.dp)
+            .padding(start = 4.dp, end = 4.dp, top = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        ProviderIcon(item.instance.driver, 15.dp)
+        Text(
+            item.instance.displayName,
+            style = AppTheme.footnote,
+            fontWeight = FontWeight.Medium,
+            color = colors.foregroundMuted,
+        )
+        Spacer(Modifier.weight(1f))
+        if (item.collapsible) {
+            if (item.collapsed)
+                Text(
+                    item.modelCount.toString(),
+                    style = AppTheme.caption,
+                    fontWeight = FontWeight.Medium,
+                    color = colors.foregroundMuted,
+                )
+            Icon(
+                if (item.collapsed) Icons.Outlined.ExpandMore else Icons.Outlined.ExpandLess,
+                "${item.instance.displayName}, ${item.modelCount} models",
+                Modifier.size(12.dp),
+                tint = colors.iconMuted,
+            )
+        }
+    }
+}
+
+/** A model in its provider's grouped card: radio, label and badges, favorite star. */
+@Composable
+private fun CatalogModelRow(item: CatalogSheetItem.Model, onFavorite: () -> Unit, onPick: () -> Unit) {
+    val colors = AppTheme.colors
+    val top = if (item.isFirst) 16.dp else 0.dp
+    val bottom = if (item.isLast) 16.dp else 0.dp
+    Column(Modifier.padding(horizontal = 16.dp)) {
+        Row(
+            Modifier.fillMaxWidth()
+                .clip(RoundedCornerShape(top, top, bottom, bottom))
+                .background(if (item.displayed) colors.secondary else colors.groupedCard)
+                .clickable(enabled = !item.unavailable, onClick = onPick)
+                .heightIn(min = 56.dp)
+                .padding(start = 16.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            RadioIndicator(item.displayed)
+            Row(
+                Modifier.weight(1f).padding(vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Text(
+                    item.label,
+                    Modifier.weight(1f, fill = false),
+                    style = AppTheme.body,
+                    fontWeight = FontWeight.Medium,
+                    color = colors.foreground,
+                    maxLines = 2,
+                )
+                if (item.isLegacy) ModelBadge("Legacy", colors.subtle)
+                if (item.unavailable) Text("Unavailable", style = AppTheme.label, color = colors.foreground)
+            }
+            IconButton(onClick = onFavorite) {
+                Icon(
+                    if (item.favorite) Icons.Outlined.Star else Icons.Outlined.StarBorder,
+                    if (item.favorite) "Remove from favorites: ${item.label}" else "Add to favorites: ${item.label}",
+                    Modifier.size(18.dp),
+                    tint = if (item.favorite) colors.icon else colors.iconMuted,
+                )
+            }
+        }
+        if (!item.isLast) HorizontalDivider(color = colors.borderSubtle)
+    }
+}
+
+@Composable
+private fun ModelBadge(label: String, background: androidx.compose.ui.graphics.Color) {
+    Text(
+        label,
+        Modifier.background(background, RoundedCornerShape(6.dp)).padding(horizontal = 6.dp, vertical = 2.dp),
+        style = AppTheme.micro,
+        fontWeight = FontWeight.Bold,
+        color = AppTheme.colors.foregroundMuted,
+    )
 }
 
 private class OptionScreenChoice(val label: String, val description: String?, val selected: Boolean)
@@ -402,24 +578,6 @@ private fun OptionChoices(screen: OptionScreen, onDone: () -> Unit) {
         }
     }
     Spacer(Modifier.heightIn(min = 24.dp))
-}
-
-/** An instance's legacy models, folded until the switch shows them. */
-@Composable
-private fun LegacyModelsRow(legacy: LegacyModelsSection, onToggle: (String) -> Unit) {
-    Row(
-        Modifier.fillMaxWidth()
-            .heightIn(min = 56.dp)
-            .clickable { onToggle(legacy.instanceId) }
-            .padding(horizontal = 20.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Column(Modifier.weight(1f).padding(vertical = 8.dp)) {
-            Text(legacy.label, style = AppTheme.footnote, fontWeight = FontWeight.Medium)
-            Text(legacy.detail, style = AppTheme.caption, color = AppTheme.colors.foregroundMuted)
-        }
-        AppSwitch(legacy.expanded) { onToggle(legacy.instanceId) }
-    }
 }
 
 @Composable
@@ -478,21 +636,6 @@ private fun SheetSection(title: String) {
     )
 }
 
-@Composable
-private fun FilterChip(label: String, selected: Boolean, onClick: () -> Unit) {
-    val colors = AppTheme.colors
-    Text(
-        label,
-        Modifier.background(if (selected) colors.secondary else colors.screen, CircleShape)
-            .border(1.dp, colors.border, CircleShape)
-            .clickable(onClick = onClick)
-            .padding(horizontal = 12.dp, vertical = 6.dp),
-        style = AppTheme.caption,
-        fontWeight = FontWeight.Medium,
-        color = colors.foreground,
-    )
-}
-
 /** Android settings rows: 56 tall, a leading radio and the secondary fill when selected. */
 @Composable
 internal fun ChoiceRow(
@@ -530,7 +673,7 @@ internal fun ChoiceRow(
 }
 
 @Composable
-private fun RadioIndicator(selected: Boolean) {
+internal fun RadioIndicator(selected: Boolean) {
     val colors = AppTheme.colors
     Box(
         Modifier.size(20.dp).border(2.dp, if (selected) colors.primary else colors.iconMuted, CircleShape),
@@ -540,14 +683,9 @@ private fun RadioIndicator(selected: Boolean) {
     }
 }
 
-/** "Worktree setup" details: stages, the output tail, cancel, and the setup terminal. */
+/** "Worktree setup" details: stages, the output tail, cancel and work locally. */
 @Composable
-internal fun SetupDetailsSheet(
-    model: AndroidAppModel,
-    card: SetupCardView,
-    onOpenTerminal: (String) -> Unit,
-    onDismiss: () -> Unit,
-) {
+internal fun SetupDetailsSheet(model: AndroidAppModel, card: SetupCardView, onDismiss: () -> Unit) {
     val colors = AppTheme.colors
     BottomSheet(
         onDismiss,
@@ -603,19 +741,9 @@ internal fun SetupDetailsSheet(
                     )
                 }
             }
-            val terminal = card.openTerminalId
-            if (card.canCancel || card.canWorkLocally || terminal != null) {
+            if (card.canCancel || card.canWorkLocally) {
                 HorizontalDivider(Modifier.padding(top = 12.dp), color = colors.border)
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(16.dp, Alignment.End)) {
-                    if (terminal != null)
-                        TextButton(
-                            onClick = {
-                                onDismiss()
-                                onOpenTerminal(terminal)
-                            }
-                        ) {
-                            Text("Open terminal", style = AppTheme.footnote, color = colors.foreground)
-                        }
                     if (card.canCancel)
                         TextButton(
                             onClick = {

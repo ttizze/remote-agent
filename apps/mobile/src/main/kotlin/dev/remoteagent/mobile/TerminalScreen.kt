@@ -61,6 +61,9 @@ internal fun fallbackTerminal(tabs: List<TerminalTab>, closing: String): String?
     return others.filter { order(it) < rank }.maxByOrNull(order) ?: others.minByOrNull(order)
 }
 
+/** The last path component, as the terminal menu names a directory. */
+internal fun folderName(path: String): String? = path.trimEnd('/').substringAfterLast('/').takeIf { it.isNotEmpty() }
+
 /** A thread's terminal: one shell at a time, the others in the header menu. */
 @Composable
 internal fun TerminalScreen(
@@ -118,7 +121,7 @@ private fun TerminalMenu(
 ) {
     val colors = AppTheme.colors
     var open by remember { mutableStateOf(false) }
-    val folder = cwd?.trimEnd('/')?.substringAfterLast('/')?.takeIf { it.isNotEmpty() }
+    val folder = cwd?.let(::folderName)
     Box {
         HeaderIconButton(Icons.Outlined.Terminal, "Terminals") { open = true }
         AnchoredMenu(open, { open = false }) {
@@ -133,7 +136,7 @@ private fun TerminalMenu(
                 MenuRow(
                     Icons.Outlined.Terminal,
                     tab.label,
-                    listOfNotNull(tab.menuStatus, folder).joinToString(" · "),
+                    listOfNotNull(tab.menuStatus, folderName(tab.cwd)).joinToString(" · "),
                     checked = tab.terminalId == selected?.terminalId,
                 ) {
                     open = false

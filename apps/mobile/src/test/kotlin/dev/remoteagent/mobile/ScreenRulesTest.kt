@@ -1,14 +1,13 @@
 package dev.remoteagent.mobile
 
-import dev.remoteagent.core.DiffScopeChoice
-import dev.remoteagent.core.GitDiffView
+import dev.remoteagent.core.CatalogFilter
 import dev.remoteagent.core.TerminalTab
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
 
 class ScreenRulesTest {
-    private fun tab(id: String) = TerminalTab(id, id, id, "", true, false, false, "Ready")
+    private fun tab(id: String) = TerminalTab(id, id, id, "", true, false, false, "/repo", "Ready")
 
     @Test
     fun aClosedTerminalFallsBackToTheNearestLowerThenHigher() {
@@ -20,11 +19,16 @@ class ScreenRulesTest {
     }
 
     @Test
-    fun anEmptyDiffSaysWhatItCompares() {
-        val git = GitDiffView(true, false, null, "main", null, false, null, emptyList(), false)
-        assertEquals("main ... HEAD", reviewEmptyDetail(DiffScopeChoice.Branch, git))
-        assertEquals("Base branch unavailable", reviewEmptyDetail(DiffScopeChoice.Branch, git.copy(baseRef = null)))
-        assertEquals("Staged, unstaged, and untracked files", reviewEmptyDetail(DiffScopeChoice.Unstaged, git))
-        assertEquals("This diff is empty.", reviewEmptyDetail(DiffScopeChoice.LatestTurn, git))
+    fun theTerminalMenuNamesTheLastFolder() {
+        assertEquals("app", folderName("/Users/me/app/"))
+        assertEquals("app", folderName("app"))
+        assertNull(folderName("/"))
+    }
+
+    @Test
+    fun anEmptyCatalogSaysWhy() {
+        assertEquals("No favorite models", catalogEmptyLabel(CatalogFilter.Favorites, "opus"))
+        assertEquals("No matching models", catalogEmptyLabel(CatalogFilter.All, "opus"))
+        assertEquals("No available models", catalogEmptyLabel(CatalogFilter.Instance("codex"), " "))
     }
 }

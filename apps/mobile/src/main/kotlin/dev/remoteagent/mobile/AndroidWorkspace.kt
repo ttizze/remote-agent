@@ -67,7 +67,6 @@ import dev.remoteagent.core.BrowserRequest
 import dev.remoteagent.core.DiffPanelView
 import dev.remoteagent.core.DiffScopeChoice
 import dev.remoteagent.core.FileEntry
-import dev.remoteagent.core.GitDiffView
 import dev.remoteagent.core.Intent
 import dev.remoteagent.core.WorkspaceDiffFile
 import java.io.File
@@ -258,15 +257,6 @@ private fun WorkspaceFiles(model: AndroidAppModel, modifier: Modifier) {
     }
 }
 
-/** What an empty diff compares, as the review sheet words it. */
-internal fun reviewEmptyDetail(choice: DiffScopeChoice?, git: GitDiffView?): String =
-    when (choice) {
-        DiffScopeChoice.Branch ->
-            git?.baseRef?.let { base -> "$base ... ${git.headRef ?: "HEAD"}" } ?: "Base branch unavailable"
-        DiffScopeChoice.Unstaged -> "Staged, unstaged, and untracked files"
-        else -> "This diff is empty."
-    }
-
 /** "Review changes": the selected diff, chosen from the header menu, then its files. */
 @Composable
 @Suppress("LongMethod", "CyclomaticComplexMethod")
@@ -330,7 +320,8 @@ private fun ReviewScreen(model: AndroidAppModel) {
                             Text("Loading diff…", style = AppTheme.label, color = colors.foregroundMuted)
                         }
                     }
-                files.isEmpty() -> item { ReviewMessage("No changes", reviewEmptyDetail(choice, git)) }
+                files.isEmpty() ->
+                    item { ReviewMessage("No changes", git?.subtitle?.takeIf { gitScope } ?: "This diff is empty.") }
             }
             if (gitScope && git?.truncated == true && !loading)
                 item {
