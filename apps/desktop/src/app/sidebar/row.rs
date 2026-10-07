@@ -745,6 +745,8 @@ impl Desktop {
         let (menu_key, menu_project) = (draft.draft_key.clone(), draft.project_id.clone());
         let discard = draft.draft_key.clone();
         let hover_key = draft.draft_key.clone();
+        // The open draft shows the row it had when it was opened.
+        let active = draft.active;
         div()
             .py_0p5()
             .child(
@@ -753,8 +755,14 @@ impl Desktop {
                     .rounded(px(8.))
                     .overflow_hidden()
                     .cursor_pointer()
-                    .bg(tint("warning", 0.04))
-                    .hover(|row| row.bg(tint("warning", 0.08)))
+                    .map(|row| {
+                        if active {
+                            row.bg(color("sidebarRowActive"))
+                        } else {
+                            row.bg(tint("warning", 0.04))
+                                .hover(|row| row.bg(tint("warning", 0.08)))
+                        }
+                    })
                     .on_hover(cx.listener(move |view, hovered: &bool, _, cx| {
                         view.sidebar.hovered = hovered.then(|| hover_key.clone());
                         cx.notify();
