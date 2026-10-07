@@ -2,10 +2,13 @@
 //! completed requests in order and publishes immutable snapshots.
 mod calls;
 mod delivery;
+mod device;
 mod intents;
 mod owner;
+mod projects;
 mod streams;
 mod subscriptions;
+mod terminals;
 
 use crate::{peer::PeerError, protocol::Call, state::Snapshot, transport};
 use agent_protocol::{models as m, operations as op};
@@ -27,6 +30,23 @@ pub enum Outcome {
     },
     RemoteHostPaired {
         id: String,
+    },
+    /// The composer text changed; the client moves its cursor here (UTF-16).
+    ComposerEdited {
+        cursor: u32,
+    },
+    /// The draft went to the stash; its images follow with
+    /// `Intent::FinalizeStashImages`.
+    Stashed {
+        entry_id: String,
+    },
+    /// A restored stash entry's images, for the client to attach as files.
+    StashRestored {
+        images: Vec<crate::view::composer::stash::StashImage>,
+        warning: Option<String>,
+    },
+    TerminalOpened {
+        terminal_id: String,
     },
 }
 pub type Receipt = oneshot::Receiver<Result<Outcome, PeerError>>;

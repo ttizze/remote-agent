@@ -14,6 +14,7 @@ use crate::{
         thread::{Applied, FailureAction, LoadEarlier, NOT_CONNECTED, Resync, RollbackResult},
     },
 };
+use agent_domain::WorktreeSetupSnapshot;
 use agent_domain::{RunStatus, ThreadId, TurnItemId};
 use agent_protocol::conversation::{
     GetTurnItem, HistoryPage, HistoryRow, ReadHistory, ShellLocation, ShellUpdate, SubscribeSetup,
@@ -296,14 +297,7 @@ impl Owner {
             }
             (StreamKey::Setup(thread), Payload::Setup(setup)) => {
                 self.healthy(&StreamKey::Setup(thread.clone()));
-                match setup {
-                    Some(setup) => {
-                        self.state.setups.insert(thread, setup);
-                    }
-                    None => {
-                        self.state.setups.remove(&thread);
-                    }
-                }
+                self.setup_update(&thread, setup);
             }
             _ => {}
         }
@@ -425,6 +419,8 @@ impl Owner {
         }
         self.state.drafts.remove(thread.as_str());
         self.state.setups.remove(thread);
+        self.state.held_setups.remove(thread);
+        self.state.diff_panels.remove(thread);
         if self.state.selected_thread.as_ref() == Some(thread) {
             self.state.selected_thread = None;
             self.state.editing_run = None;
@@ -633,6 +629,21 @@ impl Owner {
         match result {
             Ok(row) => sync.detail_loaded(item, row),
             Err(error) => sync.detail_failed(item, error.to_string()),
+        }
+    }
+
+    /// A closed setup stream keeps its last snapshot for the card.
+    pub(super) fn setup_update(&mut self, thread: &ThreadId, setup: Option<WorktreeSetupSnapshot>) {
+        match setup {
+            Some(setup) => {
+                self.state.held_setups.remove(thread);
+                self.state.setups.insert(thread.clone(), setup);
+            }
+            None => {
+                if let Some(setup) = self.state.setups.remove(thread) {
+                    self.state.held_setups.insert(thread.clone(), setup);
+                }
+            }
         }
     }
 

@@ -764,3 +764,23 @@ fn a_question_request_names_its_progress_options_and_shortcuts() {
     assert!(!view.dismissible);
     assert_eq!(view.unavailable_notice, None);
 }
+
+#[test]
+fn a_reply_sends_attachment_only_answers_as_text_and_chosen_options_as_choices() {
+    let drafts = [
+        with_attachments(draft("areas", &[], ""), false),
+        draft("scope", &["Orchestration-first"], ""),
+    ];
+    let answers = question_answers(&[multi_select(), single_select()], &drafts).unwrap();
+    assert_eq!(answers["areas"], agent_domain::Answer::Text(String::new()));
+    assert_eq!(
+        answers["scope"],
+        agent_domain::Answer::Text("Orchestration-first".into())
+    );
+    let answers = question_answers(&[multi_select()], &[draft("areas", &["Web"], "")]).unwrap();
+    assert_eq!(
+        answers["areas"],
+        agent_domain::Answer::Choices(vec!["Web".into()])
+    );
+    assert_eq!(question_answers(&[multi_select()], &[]), None);
+}

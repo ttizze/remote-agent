@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet};
 
 /// A favorite model, keyed by instance and slug.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct FavoriteModel {
     pub instance_id: String,

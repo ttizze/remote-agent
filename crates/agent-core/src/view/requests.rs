@@ -2,7 +2,6 @@
 //! request cards on mobile, with the device's answer drafts.
 use crate::commands::outbox::Outbox;
 use crate::js_text::{is_js_space, js_trim};
-use crate::state::QuestionAnswer;
 use crate::view::quantity;
 use crate::view::queue::outbox_commands;
 use agent_domain::{
@@ -287,6 +286,14 @@ pub fn approval_view(
     })
 }
 
+/// One question's answer values, as the reply lists them.
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct QuestionAnswer {
+    pub question_id: String,
+    pub values: Vec<String>,
+}
+
 /// One question's answer draft on this device.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
@@ -473,6 +480,24 @@ pub fn build_question_answers(
                 question_id: question.id.clone(),
                 values: resolve_question_answer(question, draft_for(drafts, question))?.values(),
             })
+        })
+        .collect()
+}
+
+/// The answers a reply carries: typed and attachment-only answers are text,
+/// chosen options of a multiple-choice question are choices.
+pub fn question_answers(
+    questions: &[Question],
+    drafts: &[QuestionDraft],
+) -> Option<agent_domain::Answers> {
+    questions
+        .iter()
+        .map(|question| {
+            let answer = match resolve_question_answer(question, draft_for(drafts, question))? {
+                ResolvedAnswer::Text { value } => agent_domain::Answer::Text(value),
+                ResolvedAnswer::Choices { values } => agent_domain::Answer::Choices(values),
+            };
+            Some((question.id.clone(), answer))
         })
         .collect()
 }

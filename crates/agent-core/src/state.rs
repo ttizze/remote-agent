@@ -4,8 +4,8 @@ use crate::commands::build::FollowUpBehavior;
 use crate::commands::outbox::Outbox;
 use crate::sync::{ShellCache, ShellStatus, ThreadSync};
 use agent_domain::{
-    Attachment, AttachmentKind, CheckpointId, Driver, InteractionMode, ModelSelection, RunId,
-    RuntimeMode, State, ThreadId, ThreadShell, WorktreeSetupSnapshot,
+    Attachment, AttachmentKind, CheckpointId, Driver, InteractionMode, MessageContext,
+    ModelSelection, RunId, RuntimeMode, State, ThreadId, ThreadShell, WorktreeSetupSnapshot,
 };
 use agent_protocol::conversation::{SearchMatch, ShellLocation, ShellSnapshot};
 use serde::{Deserialize, Serialize};
@@ -15,6 +15,9 @@ use std::{
     ops::{Deref, DerefMut},
     sync::Arc,
 };
+
+mod device;
+pub use device::*;
 
 /// The project a new thread uses when none is chosen.
 pub const CHATS_PROJECT: &str = "chats";
@@ -72,6 +75,8 @@ pub struct Draft {
     pub options: Vec<ModelOption>,
     pub runtime_mode: RuntimeMode,
     pub interaction_mode: InteractionMode,
+    /// Payloads behind the text's context links.
+    pub context: Option<MessageContext>,
 }
 impl Default for Draft {
     fn default() -> Self {
@@ -84,6 +89,7 @@ impl Default for Draft {
             options: vec![],
             runtime_mode: RuntimeMode::FullAccess,
             interaction_mode: InteractionMode::Default,
+            context: None,
         }
     }
 }
@@ -266,6 +272,19 @@ pub struct Snapshot {
     pub host_status: Option<crate::models::HostStatus>,
     pub remote_hosts: Vec<crate::models::RemoteHost>,
     pub invitation: Option<crate::models::Invitation>,
+    pub preferences: Preferences,
+    pub inbox_returns: crate::view::inbox::InboxReturns,
+    pub thread_order: Option<ThreadOrderHold>,
+    /// The Host's conversation settings once read.
+    pub conversation_settings: Option<crate::models::ConversationSettings>,
+    pub session_import: SessionImport,
+    /// Answer drafts by question request id.
+    pub question_drafts: BTreeMap<String, QuestionDrafts>,
+    pub diff_panels: BTreeMap<ThreadId, crate::view::checkpoints::DiffPanelSelection>,
+    pub stash: Shared<crate::view::composer::stash::PromptStash>,
+    /// The last setup a closed stream reported, kept for the card.
+    pub held_setups: BTreeMap<ThreadId, WorktreeSetupSnapshot>,
+    pub error_dismissals: crate::view::timeline::banners::ThreadErrorDismissals,
 }
 
 impl Snapshot {
@@ -368,7 +387,22 @@ impl Snapshot {
         })
     }
     pub fn cwd(&self) -> String {
-        let workspace = self.selected_thread.as_ref().and_then(|id| {
+        self.directory_of(self.selected_thread.as_ref())
+    }
+    /// Where a thread's files and terminals open: its worktree or checkout,
+    /// else its project's root.
+    pub fn thread_cwd(&self, thread: &ThreadId) -> String {
+        self.directory_of(Some(thread))
+    }
+    /// The project a thread belongs to.
+    pub fn thread_project(&self, thread: &ThreadId) -> Option<&str> {
+        self.thread_state(thread)
+            .and_then(|state| state.thread.as_ref())
+            .map(|thread| thread.project.as_str())
+            .or_else(|| self.thread_row(thread).map(|row| row.project.as_str()))
+    }
+    fn directory_of(&self, thread: Option<&ThreadId>) -> String {
+        let workspace = thread.and_then(|id| {
             self.thread_state(id)
                 .and_then(|state| state.thread.as_ref())
                 .map(|thread| (thread.workspace.clone(), thread.project.clone()))
@@ -400,31 +434,6 @@ impl Snapshot {
             ShellLocation::Archived => self.archived.as_deref(),
         }
     }
-    pub fn terminal_view(&self, handle: &str, after: u64) -> TerminalView {
-        let terminal = self.terminals.get(handle);
-        TerminalView {
-            status: terminal.map(|t| match &t.phase {
-                TerminalPhase::Starting => "Starting".into(),
-                TerminalPhase::Running => "Running".into(),
-                TerminalPhase::Suspended => "Waiting for reconnect".into(),
-                TerminalPhase::Detached => "Detached".into(),
-                TerminalPhase::Exited(code) => format!("Exited · {code}"),
-                TerminalPhase::Failed(message) => message.clone(),
-            }),
-            loading: terminal.is_some_and(|t| t.phase == TerminalPhase::Starting),
-            accepts_input: self.connected
-                && terminal.is_some_and(|t| t.phase == TerminalPhase::Running),
-            output: terminal
-                .map(|t| {
-                    t.output
-                        .iter()
-                        .filter(|o| o.sequence > after)
-                        .map(|output| output.as_ref().clone())
-                        .collect()
-                })
-                .unwrap_or_default(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -445,14 +454,21 @@ pub struct FileDraft {
     pub text: String,
     pub revision: String,
 }
+/// One terminal of a thread, keyed by its handle in `Snapshot::terminals`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Terminal {
+    pub thread: ThreadId,
+    pub terminal_id: String,
+    /// Terminals split side by side share the id of the first one.
+    pub group: String,
     pub cwd: String,
     pub size: agent_protocol::operations::TerminalSize,
     pub phase: TerminalPhase,
     pub output: Shared<std::collections::VecDeque<Arc<TerminalOutput>>>,
     pub sequence: u64,
     pub output_bytes: usize,
+    /// Written once the Host started the terminal (a project script's command).
+    pub pending_input: Vec<u8>,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
@@ -471,22 +487,6 @@ pub struct TerminalOutput {
     pub data: Vec<u8>,
     pub reset_size: Option<agent_protocol::operations::TerminalSize>,
 }
-#[derive(Debug, Clone)]
-#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
-pub struct TerminalView {
-    pub status: Option<String>,
-    pub loading: bool,
-    pub accepts_input: bool,
-    pub output: Vec<TerminalOutput>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
-pub struct QuestionAnswer {
-    pub question_id: String,
-    pub values: Vec<String>,
-}
-
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum ThreadAction {
@@ -510,17 +510,44 @@ pub enum ThreadAction {
 #[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum QueueAction {
     Resume,
-    Cancel { run_id: String },
-    Edit { run_id: String },
+    Cancel {
+        run_id: String,
+    },
+    Edit {
+        run_id: String,
+    },
     SaveEdit,
     CancelEdit,
-    Reorder { run_ids: Vec<String> },
-    Steer { run_id: String },
+    /// Moves one queued run before another, or to the end.
+    Move {
+        run_id: String,
+        before_run_id: Option<String>,
+    },
+    Steer {
+        run_id: String,
+    },
+}
+
+/// A file on this device to attach.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct LocalFile {
+    pub path: String,
+    pub name: String,
+    pub mime_type: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
+pub enum AnswerEdit {
+    ToggleOption { value: String },
+    Custom { text: String },
 }
 
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum Intent {
+    // Navigation and filters.
     OpenThread {
         thread_id: String,
     },
@@ -537,19 +564,26 @@ pub enum Intent {
     FilterProject {
         project_id: Option<String>,
     },
-    ReorderPinned {
-        thread_id: String,
-        before_thread_id: Option<String>,
-    },
+    Refresh,
+
+    // Composer.
     EditDraft {
         text: String,
         base_text: Option<String>,
     },
-    AttachFile {
-        path: String,
-        name: String,
-        mime_type: String,
+    /// Chooses an item of the composer menu at `cursor` (UTF-16).
+    SelectComposerItem {
+        text: String,
+        cursor: u32,
+        item_id: String,
+    },
+    RemoveDraftContext {
+        context_id: String,
+    },
+    /// `draft_key` is the composer's (or an answer's) key when the files were picked.
+    AttachFiles {
         draft_key: String,
+        files: Vec<LocalFile>,
     },
     RetryAttachment {
         id: String,
@@ -563,33 +597,19 @@ pub enum Intent {
     },
     Stop,
     StopSessions,
-    DiscardPending {
-        command_id: String,
-    },
-    Fork {
-        source_thread_id: String,
-        run_id: String,
-    },
-    MergeBack,
-    PlanFollowUp {
-        new_thread: bool,
-    },
-    Rollback {
-        checkpoint_id: String,
-        restore_files: bool,
-    },
-    Thread {
-        thread_id: String,
-        action: ThreadAction,
-    },
-    Queue {
-        action: QueueAction,
-    },
     SetModel {
         instance_id: String,
         driver: Driver,
         model: String,
         options: Vec<ModelOption>,
+    },
+    SelectTrait {
+        descriptor_id: String,
+        choice: String,
+    },
+    ToggleTrait {
+        descriptor_id: String,
+        on: bool,
     },
     SetRuntimeMode {
         mode: RuntimeMode,
@@ -597,28 +617,218 @@ pub enum Intent {
     SetInteractionMode {
         mode: InteractionMode,
     },
-    RespondApproval {
-        request_id: String,
-        decision: String,
+    StashDraft,
+    /// Images of a stash entry the client finished encoding.
+    FinalizeStashImages {
+        entry_id: String,
+        images: crate::view::composer::stash::StashImages,
     },
-    RespondQuestions {
-        request_id: String,
-        answers: Vec<QuestionAnswer>,
+    /// The entry's images return in `Outcome::StashRestored` for the client to attach.
+    RestoreStash {
+        entry_id: String,
     },
-    DismissInput {
-        request_id: String,
+    DeleteStash {
+        entry_id: String,
     },
-    LoadEarlier,
-    LoadItemDetail {
-        item_id: String,
-    },
-    CancelSetup,
-    Refresh,
     Transcribe {
         draft_key: String,
         preparation: Option<String>,
         audio: Vec<u8>,
     },
+
+    // Queue, requests and plans.
+    Queue {
+        action: QueueAction,
+    },
+    RespondApproval {
+        request_id: String,
+        decision: String,
+    },
+    EditAnswer {
+        request_id: String,
+        question_id: String,
+        edit: AnswerEdit,
+    },
+    ShowQuestion {
+        request_id: String,
+        index: u32,
+    },
+    SubmitAnswers {
+        request_id: String,
+    },
+    DismissInput {
+        request_id: String,
+    },
+    PlanFollowUp {
+        new_thread: bool,
+    },
+
+    // Thread lifecycle.
+    Thread {
+        thread_id: String,
+        action: ThreadAction,
+    },
+    ReorderPinned {
+        thread_id: String,
+        before_thread_id: Option<String>,
+    },
+    /// A move in the mobile list; the list holds the new order until it lands.
+    MoveThread {
+        thread_id: String,
+        section: crate::view::thread_order::OrderSection,
+        destination: crate::view::thread_order::MoveDestination,
+    },
+    /// A drop planned by `Snapshot::sidebar_drop`.
+    DropThread {
+        thread_id: String,
+        plan: crate::view::sidebar::SidebarThreadDropPlan,
+    },
+    LimitRecovery {
+        thread_id: String,
+        action: crate::view::timeline::banners::RecoveryAction,
+    },
+    /// Hides a thread error banner by its `dismiss_key` for this app session.
+    DismissThreadError {
+        dismiss_key: String,
+    },
+    Fork {
+        source_thread_id: String,
+        run_id: String,
+    },
+    MergeBack,
+    Rollback {
+        checkpoint_id: String,
+        restore_files: bool,
+    },
+    DiscardPending {
+        command_id: String,
+    },
+
+    // Timeline.
+    LoadEarlier,
+    LoadItemDetail {
+        item_id: String,
+    },
+    CancelSetup,
+
+    // Diff panel of the open thread.
+    SelectDiffScope {
+        choice: crate::view::checkpoints::DiffScopeChoice,
+    },
+    SelectDiffTurn {
+        run_id: String,
+        file_path: Option<String>,
+    },
+    SelectDiffBaseRef {
+        base_ref: Option<String>,
+    },
+    SetDiffIgnoreWhitespace {
+        ignore: bool,
+    },
+    LoadDiff,
+    ReviewWorkspace {
+        cwd: String,
+    },
+    ReadTurnDiff {
+        from_run_ordinal: u64,
+        to_run_ordinal: u64,
+        ignore_whitespace: bool,
+    },
+
+    // Thread terminals.
+    OpenTerminal {
+        thread_id: String,
+        terminal_id: String,
+        cols: u16,
+        rows: u16,
+    },
+    NewTerminal {
+        thread_id: String,
+        cols: u16,
+        rows: u16,
+    },
+    SplitTerminal {
+        thread_id: String,
+        terminal_id: String,
+        cols: u16,
+        rows: u16,
+    },
+    WriteTerminal {
+        thread_id: String,
+        terminal_id: String,
+        data: Vec<u8>,
+    },
+    ResizeTerminal {
+        thread_id: String,
+        terminal_id: String,
+        cols: u16,
+        rows: u16,
+    },
+    DetachTerminal {
+        thread_id: String,
+        terminal_id: String,
+    },
+    CloseTerminal {
+        thread_id: String,
+        terminal_id: String,
+    },
+    RunProjectScript {
+        thread_id: String,
+        script_id: String,
+        cols: u16,
+        rows: u16,
+    },
+
+    // Settings and projects.
+    SetFollowUpBehavior {
+        behavior: crate::commands::build::FollowUpBehavior,
+    },
+    SetTimestampFormat {
+        format: crate::view::time::TimestampFormat,
+    },
+    SetWorkingSection {
+        enabled: bool,
+    },
+    ToggleFavoriteModel {
+        instance_id: String,
+        model: String,
+    },
+    SetModelOrder {
+        instance_id: String,
+        models: Vec<String>,
+    },
+    LoadConversationSettings,
+    UpdateConversationSettings {
+        scope: crate::view::settings::SettingsScope,
+        change: crate::view::settings::ConversationSettingChange,
+    },
+    ResetProjectSettings {
+        project_id: String,
+    },
+    AddProject {
+        path: String,
+    },
+    UpdateProjectScripts {
+        project_id: String,
+        scripts: Vec<crate::models::ProjectScript>,
+    },
+    ScanSessions,
+    SelectImportSessions {
+        paths: Vec<String>,
+        checked: bool,
+    },
+    ImportSessions,
+    CloseImport,
+    LoadWorktreeSettings,
+    SaveWorktreeSettings {
+        settings: crate::models::WorktreeSettings,
+    },
+    ListWorktrees,
+    RemoveWorktree {
+        path: String,
+    },
+
+    // Files.
     ListFiles {
         path: String,
     },
@@ -633,43 +843,8 @@ pub enum Intent {
     SaveFile {
         path: String,
     },
-    ReviewWorkspace {
-        cwd: String,
-    },
-    ReadTurnDiff {
-        from_run_ordinal: u64,
-        to_run_ordinal: u64,
-        ignore_whitespace: bool,
-    },
-    LoadWorktreeSettings,
-    SaveWorktreeSettings {
-        settings: crate::models::WorktreeSettings,
-    },
-    ListWorktrees,
-    RemoveWorktree {
-        path: String,
-    },
-    StartTerminal {
-        handle: String,
-        cwd: String,
-        cols: u16,
-        rows: u16,
-    },
-    ResizeTerminal {
-        handle: String,
-        cols: u16,
-        rows: u16,
-    },
-    WriteTerminal {
-        handle: String,
-        data: Vec<u8>,
-    },
-    DetachTerminal {
-        handle: String,
-    },
-    KillTerminal {
-        handle: String,
-    },
+
+    // Accounts and Hosts.
     LoadAccounts,
     SelectAccount {
         provider: crate::provider::ProviderKind,
@@ -704,9 +879,6 @@ pub enum Intent {
     CreateInvitation,
     RevokeDevice {
         id: String,
-    },
-    RegisterProject {
-        path: String,
     },
 }
 

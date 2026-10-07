@@ -34,6 +34,8 @@ pub(super) enum Reply {
     Remote(m::RemoteHost),
     Invitation(m::Invitation),
     Transcription(String),
+    ConversationSettings(m::ConversationSettings),
+    SessionScan(c::SessionScan),
     Done,
 }
 
@@ -50,6 +52,10 @@ async fn execute(peer: &Peer, call: &Call) -> Result<Reply, PeerError> {
             Reply::WorktreeSettings(peer.request(call).await?)
         }
         Call::ListWorktrees(_) => Reply::Worktrees(peer.request(call).await?),
+        Call::ReadConversationSettings(_) | Call::UpdateConversationSettings(_) => {
+            Reply::ConversationSettings(peer.request(call).await?)
+        }
+        Call::ScanAgentSessions(_) => Reply::SessionScan(peer.request(call).await?),
         Call::ListAccounts(_) => Reply::Accounts(peer.request(call).await?),
         Call::StartAccountLogin(_) => Reply::Login(peer.request(call).await?),
         Call::HostStatus(_) => Reply::HostStatus(peer.request(call).await?),
@@ -295,8 +301,20 @@ impl Owner {
             result
         };
         let paired = match &result {
-            Ok(Reply::Remote(host)) => Some(host.id.clone()),
-            _ => None,
+            Ok(Reply::Remote(host)) => Some(Outcome::RemoteHostPaired {
+                id: host.id.clone(),
+            }),
+            Ok(_) => match &call {
+                Call::StartTerminal(params) => {
+                    self.state.terminals.get(&params.handle).map(|terminal| {
+                        Outcome::TerminalOpened {
+                            terminal_id: terminal.terminal_id.clone(),
+                        }
+                    })
+                }
+                _ => None,
+            },
+            Err(_) => None,
         };
         let outcome = match result {
             Err(error) => {
@@ -305,6 +323,13 @@ impl Owner {
                         || matches!(call, Call::StartTerminal(_) | Call::Transcribe(_)))
                 {
                     self.state.error = Some(crate::presentation::error::error_message(
+                        &error.to_string(),
+                    ));
+                }
+                if let Call::ScanAgentSessions(_) = &call {
+                    let import = &mut self.state.session_import;
+                    import.scan_pending = false;
+                    import.scan_error = Some(crate::presentation::error::error_message(
                         &error.to_string(),
                     ));
                 }
@@ -322,7 +347,7 @@ impl Owner {
                     self.state.error = None;
                 }
                 self.reply(&call, reply, sent);
-                Ok(paired.map_or(Outcome::Applied, |id| Outcome::RemoteHostPaired { id }))
+                Ok(paired.unwrap_or_default())
             }
         };
         if let Some(complete) = complete {
@@ -447,6 +472,16 @@ impl Owner {
                 self.state.remote_hosts.push(host);
             }
             Reply::Invitation(invitation) => self.state.invitation = Some(invitation),
+            Reply::ConversationSettings(settings) => {
+                self.state.conversation_settings = Some(settings)
+            }
+            Reply::SessionScan(scan) => {
+                let import = &mut self.state.session_import;
+                import.scan_pending = false;
+                import.scan_error = None;
+                import.scan = Some(scan);
+                import.selection = None;
+            }
             Reply::Transcription(text) => {
                 if let Some((key, original)) = sent {
                     let draft = self.state.drafts.entry(key).or_insert(original);
@@ -463,13 +498,7 @@ impl Owner {
                 self.state.remote_hosts.retain(|host| host.id != params.id)
             }
             Call::Revoke(_) => self.job(Call::HostStatus(m::Empty {}), None, None),
-            Call::StartTerminal(params) => {
-                if let Some(terminal) = self.state.terminals.get_mut(&params.handle)
-                    && terminal.phase == TerminalPhase::Starting
-                {
-                    terminal.phase = TerminalPhase::Running;
-                }
-            }
+            Call::StartTerminal(params) => self.terminal_started(&params.handle),
             Call::ResizeTerminal(params) => {
                 if let Some(terminal) = self.state.terminals.get_mut(&params.handle) {
                     terminal.size = params.size;

@@ -132,6 +132,11 @@ pub(super) enum Event {
     Notification(u64, protocol::Notification),
     Disconnected(u64, String),
     Finished(u64, Box<JobResult>),
+    Imported {
+        epoch: u64,
+        steps: Vec<super::projects::ImportStep>,
+        complete: Waiter,
+    },
     AttachmentFinished(u64, String, String, Result<Attachment, PeerError>),
     Close(oneshot::Sender<()>),
     Browser(
@@ -188,7 +193,11 @@ pub(super) struct Owner {
     pub visited: BTreeMap<ThreadId, Timestamp>,
     pub waiters: BTreeMap<CommandId, Waiter>,
     pub dictations: BTreeMap<String, CancellationToken>,
+    /// The shell, outbox and Working preference the list holds last saw.
+    pub observed_list: Option<ObservedList>,
 }
+
+pub(super) type ObservedList = (Arc<ShellCache>, Arc<crate::commands::outbox::Outbox>, bool);
 
 pub(super) fn now_ms() -> u64 {
     SystemTime::now()
@@ -234,6 +243,7 @@ impl Owner {
             visited: BTreeMap::new(),
             waiters: BTreeMap::new(),
             dictations: BTreeMap::new(),
+            observed_list: None,
         };
         if let Some(thread) = owner.state.selected_thread.clone() {
             owner.open_thread(&thread);
@@ -280,6 +290,7 @@ impl Owner {
     }
 
     pub fn publish(&mut self) {
+        self.observe_list();
         self.state.revision += 1;
         self.snapshots.send_replace(Arc::new(self.state.clone()));
     }
@@ -471,6 +482,15 @@ impl Owner {
             }
             Event::Disconnected(epoch, error) if epoch == self.epoch => self.disconnected(error),
             Event::Finished(epoch, result) if epoch == self.epoch => self.finished(*result),
+            Event::Imported {
+                epoch,
+                steps,
+                complete,
+            } if epoch == self.epoch => self.imported(steps, complete),
+            Event::Imported { complete, .. } => {
+                self.state.session_import.importing = false;
+                let _ = complete.send(Err(invalid("Host connection closed")));
+            }
             Event::AttachmentFinished(epoch, key, id, result) if epoch == self.epoch => {
                 self.attachment_finished(key, id, result)
             }

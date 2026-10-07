@@ -1,7 +1,8 @@
 //! Device-owned state the native app stores: drafts, navigation, settings and
 //! commands the Host has not confirmed. Host data lives in the disk cache.
 use crate::commands::{build::FollowUpBehavior, outbox::Outbox};
-use crate::state::{Draft, PendingRollback, Snapshot};
+use crate::state::{Draft, PendingRollback, Preferences, Snapshot};
+use crate::view::composer::stash::PromptStash;
 use agent_domain::{CommandId, ThreadId};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, sync::Arc};
@@ -15,6 +16,8 @@ struct LocalState {
     selected_project: Option<String>,
     outbox: Outbox,
     rollbacks: BTreeMap<CommandId, PendingRollback>,
+    preferences: Preferences,
+    stash: PromptStash,
 }
 
 pub fn encode(snapshot: &Snapshot) -> Result<Vec<u8>, serde_json::Error> {
@@ -26,6 +29,8 @@ pub fn encode(snapshot: &Snapshot) -> Result<Vec<u8>, serde_json::Error> {
         selected_project: snapshot.selected_project.clone(),
         outbox: snapshot.outbox.persisted(),
         rollbacks: snapshot.rollbacks.clone(),
+        preferences: snapshot.preferences.clone(),
+        stash: (*snapshot.stash).clone(),
     })
 }
 
@@ -43,6 +48,8 @@ pub fn decode(bytes: &[u8]) -> Result<Snapshot, serde_json::Error> {
         selected_project: local.selected_project,
         outbox: Arc::new(local.outbox),
         rollbacks: local.rollbacks,
+        preferences: local.preferences,
+        stash: local.stash.into(),
         ..Snapshot::default()
     })
 }
@@ -87,6 +94,7 @@ pub fn recover(persisted: &[u8], defaults: &[u8]) -> Snapshot {
         }
     }
     state.default_draft.attachments.clear();
+    state.stash.settle_pending_images();
     state
 }
 

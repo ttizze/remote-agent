@@ -169,10 +169,19 @@ impl Owner {
                 }
                 self.complete_outbox();
             }
-            Resolution::Failed { entry, reason } => {
+            Resolution::Failed {
+                entry,
+                reason,
+                rejected,
+            } => {
                 if not_found && let Some(thread) = &thread {
                     self.thread_deleted(thread);
                 }
+                let reason = if rejected {
+                    self.rejection_message(&entry.thread, &reason)
+                } else {
+                    reason
+                };
                 self.fail(*entry, reason);
             }
             Resolution::Uncertain => {
@@ -259,9 +268,35 @@ impl Owner {
         self.select_thread(Some(target.clone()));
     }
 
+    /// The sentence for a refusal the Host committed, naming the thread's provider.
+    fn rejection_message(&self, thread: &ThreadId, reason: &str) -> String {
+        let driver = self
+            .state
+            .thread_state(thread)
+            .and_then(|state| state.thread.as_ref())
+            .map(|thread| thread.selection.driver)
+            .or_else(|| {
+                self.state
+                    .thread_row(thread)
+                    .map(|row| row.selection.driver)
+            });
+        match driver {
+            Some(driver) => crate::view::rejection::provider_rejection_message(reason, driver),
+            None => crate::view::rejection::rejection_message(reason),
+        }
+    }
+
     /// A refused request: its preview disappears and the sent content returns
     /// to the composer.
     pub(super) fn fail(&mut self, entry: PendingCommand, reason: String) {
+        if self
+            .state
+            .thread_order
+            .as_ref()
+            .is_some_and(|hold| hold.commands.contains(&entry.id))
+        {
+            self.state.thread_order = None;
+        }
         if let Some(restore) = &entry.restore {
             let mut draft = self
                 .state

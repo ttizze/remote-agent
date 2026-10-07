@@ -14,13 +14,16 @@ use crate::{
     peer::PeerError,
     protocol::Call,
     state::*,
+    view::attachments::{
+        AttachmentCandidate, AttachmentFileKind, admit_attachments, image_preparation_error,
+    },
 };
 use agent_domain::{
-    Answer, Answers, ApprovalDecision, Command, InteractionMode, ItemKind, MessageId, Plan,
-    PlanKind, PlanRef, RequestBody, RunId, RuntimeRequestId, State, ThreadId, Timestamp,
+    ApprovalDecision, Command, InteractionMode, MessageId, Plan, PlanRef, RunId, RuntimeRequestId,
+    State, ThreadId, Timestamp,
 };
 use agent_protocol::{conversation as c, models as m, operations as op};
-use std::{collections::BTreeMap, sync::Arc};
+use std::sync::Arc;
 
 pub(super) enum Next {
     Done,
@@ -28,14 +31,16 @@ pub(super) enum Next {
     Commands(Vec<PendingCommand>),
     /// A request whose reply resolves the intent.
     Call(Box<Call>, Option<(String, Draft)>),
+    /// Applied at once with this outcome.
+    Outcome(Outcome),
 }
 impl Next {
-    fn call(call: Call, sent: Option<(String, Draft)>) -> Self {
+    pub(super) fn call(call: Call, sent: Option<(String, Draft)>) -> Self {
         Self::Call(Box::new(call), sent)
     }
 }
 
-fn invalid(error: impl std::fmt::Display) -> PeerError {
+pub(super) fn invalid(error: impl std::fmt::Display) -> PeerError {
     super::invalid(error)
 }
 fn thread_id(value: String) -> Result<ThreadId, PeerError> {
@@ -55,37 +60,33 @@ fn approval_decision(value: &str) -> Result<ApprovalDecision, PeerError> {
     })
 }
 
-/// The proposed plan a follow-up implements or refines.
-pub(super) fn actionable_plan(state: &State) -> Option<&Plan> {
-    let thread = state.thread.as_ref()?;
-    if thread.interaction_mode != InteractionMode::Plan || state.active_run().is_some() {
-        return None;
-    }
-    state
+/// The proposed plan the composer offers to implement or refine, by the
+/// plan follow-up rules of the open thread and its draft.
+pub(super) fn actionable_plan(snapshot: &Snapshot) -> Option<&Plan> {
+    let view = crate::view::plan::selected_plan_view(snapshot)?;
+    let id = view
+        .active_proposed_plan
+        .filter(|_| view.show_plan_follow_up_prompt)?
+        .id;
+    snapshot
+        .selected_state()?
         .plans
         .iter()
-        .rev()
-        .find(|plan| plan.kind == PlanKind::Proposed && plan.implemented_by.is_none())
-}
-
-/// Bounded snapshots keep the plan text on its item only.
-fn plan_markdown(state: &State, plan: &Plan) -> String {
-    if !plan.markdown.is_empty() {
-        return plan.markdown.clone();
-    }
-    state
-        .items
-        .iter()
-        .find(|item| matches!(&item.kind, ItemKind::ProposedPlan { plan: id } if id == &plan.id))
-        .map(|item| item.text.clone())
-        .unwrap_or_default()
+        .find(|plan| plan.id.as_str() == id)
 }
 
 impl Owner {
     pub(super) fn intent(&mut self, intent: Intent, complete: Waiter) {
-        if let Intent::PairRemoteHost { invitation, name } = intent {
-            self.pair(invitation, name, complete);
-            return;
+        match intent {
+            Intent::PairRemoteHost { invitation, name } => {
+                self.pair(invitation, name, complete);
+                return;
+            }
+            Intent::ImportSessions => {
+                self.import_sessions(complete);
+                return;
+            }
+            _ => {}
         }
         match self.prepare(intent) {
             Err(error) => {
@@ -96,6 +97,9 @@ impl Owner {
             }
             Ok(Next::Done) => {
                 let _ = complete.send(Ok(Outcome::Applied));
+            }
+            Ok(Next::Outcome(outcome)) => {
+                let _ = complete.send(Ok(outcome));
             }
             Ok(Next::Commands(mut entries)) => {
                 let Some(last) = entries.pop() else {
@@ -131,11 +135,11 @@ impl Owner {
         self.state.drafts.insert(restore.draft_key.clone(), draft);
     }
 
-    fn command(&self, thread: ThreadId, command: Command) -> PendingCommand {
+    pub(super) fn command(&self, thread: ThreadId, command: Command) -> PendingCommand {
         self.pending(thread, command)
     }
 
-    fn lifecycle(&self, thread: ThreadId, action: LifecycleAction) -> PendingCommand {
+    pub(super) fn lifecycle(&self, thread: ThreadId, action: LifecycleAction) -> PendingCommand {
         let overlay = LifecycleOverlay::of(&action);
         let mut entry = self.command(thread, lifecycle_command(action));
         entry.overlay = overlay;
@@ -195,13 +199,202 @@ impl Owner {
                 self.state.drafts.insert(key, draft);
                 Next::Done
             }
-            Intent::AttachFile {
-                path,
-                name,
-                mime_type,
-                draft_key,
+            Intent::AttachFiles { draft_key, files } => {
+                self.attach_files(draft_key, files)?;
+                Next::Done
+            }
+            Intent::SelectComposerItem {
+                text,
+                cursor,
+                item_id,
+            } => self.select_composer_item(text, cursor, item_id)?,
+            Intent::RemoveDraftContext { context_id } => {
+                self.remove_draft_context(&context_id);
+                Next::Done
+            }
+            Intent::SelectTrait {
+                descriptor_id,
+                choice,
+            } => self.select_trait(&descriptor_id, &choice)?,
+            Intent::ToggleTrait { descriptor_id, on } => self.toggle_trait(&descriptor_id, on)?,
+            Intent::StashDraft => self.stash_draft()?,
+            Intent::FinalizeStashImages { entry_id, images } => {
+                self.finalize_stash_images(&entry_id, images);
+                Next::Done
+            }
+            Intent::RestoreStash { entry_id } => self.restore_stash(&entry_id)?,
+            Intent::DeleteStash { entry_id } => {
+                self.state.stash.take(&entry_id);
+                Next::Done
+            }
+            Intent::EditAnswer {
+                request_id,
+                question_id,
+                edit,
+            } => self.edit_answer(request_id, &question_id, edit)?,
+            Intent::ShowQuestion { request_id, index } => {
+                self.state
+                    .question_drafts
+                    .entry(request_id)
+                    .or_default()
+                    .question_index = index;
+                Next::Done
+            }
+            Intent::SubmitAnswers { request_id } => self.submit_answers(request_id)?,
+            Intent::MoveThread {
+                thread_id: moved,
+                section,
+                destination,
+            } => self.move_thread(&moved, section, &destination)?,
+            Intent::DropThread {
+                thread_id: id,
+                plan,
+            } => self.drop_thread(thread_id(id)?, plan)?,
+            Intent::LimitRecovery {
+                thread_id: id,
+                action,
+            } => self.limit_recovery(thread_id(id)?, action)?,
+            Intent::DismissThreadError { dismiss_key } => {
+                self.state.error_dismissals.dismiss(Some(&dismiss_key));
+                self.state.error = None;
+                Next::Done
+            }
+            Intent::SelectDiffScope { choice } => self.select_diff_scope(&choice)?,
+            Intent::SelectDiffTurn { run_id, file_path } => {
+                self.select_diff_turn(&run_id, file_path.as_deref())?
+            }
+            Intent::SelectDiffBaseRef { base_ref } => {
+                self.select_diff_base_ref(base_ref.as_deref())?
+            }
+            Intent::SetDiffIgnoreWhitespace { ignore } => {
+                self.state.preferences.diff_ignore_whitespace = ignore;
+                if self.state.selected_thread.is_some() {
+                    self.load_diff()?
+                } else {
+                    Next::Done
+                }
+            }
+            Intent::LoadDiff => self.load_diff()?,
+            Intent::OpenTerminal {
+                thread_id: id,
+                terminal_id,
+                cols,
+                rows,
+            } => self.open_terminal(
+                thread_id(id)?,
+                terminal_id,
+                None,
+                op::TerminalSize { cols, rows },
+                vec![],
+            )?,
+            Intent::NewTerminal {
+                thread_id: id,
+                cols,
+                rows,
+            } => self.new_terminal(
+                thread_id(id)?,
+                None,
+                op::TerminalSize { cols, rows },
+                vec![],
+            )?,
+            Intent::SplitTerminal {
+                thread_id: id,
+                terminal_id,
+                cols,
+                rows,
+            } => self.new_terminal(
+                thread_id(id)?,
+                Some(&terminal_id),
+                op::TerminalSize { cols, rows },
+                vec![],
+            )?,
+            Intent::RunProjectScript {
+                thread_id: id,
+                script_id,
+                cols,
+                rows,
+            } => self.run_project_script(
+                thread_id(id)?,
+                &script_id,
+                op::TerminalSize { cols, rows },
+            )?,
+            Intent::WriteTerminal {
+                thread_id: id,
+                terminal_id,
+                data,
+            } => self.terminal_call(&thread_id(id)?, &terminal_id, |handle| {
+                Call::WriteTerminal(op::TerminalWrite {
+                    process_handle: handle,
+                    data,
+                })
+            }),
+            Intent::ResizeTerminal {
+                thread_id: id,
+                terminal_id,
+                cols,
+                rows,
+            } => self.terminal_call(&thread_id(id)?, &terminal_id, |handle| {
+                Call::ResizeTerminal(op::ResizeTerminal {
+                    handle,
+                    size: op::TerminalSize { cols, rows },
+                })
+            }),
+            Intent::DetachTerminal {
+                thread_id: id,
+                terminal_id,
+            } => self.terminal_call(&thread_id(id)?, &terminal_id, |handle| {
+                Call::DetachTerminal(op::DetachTerminal { handle })
+            }),
+            Intent::CloseTerminal {
+                thread_id: id,
+                terminal_id,
+            } => self.close_terminal(&thread_id(id)?, &terminal_id),
+            Intent::SetFollowUpBehavior { behavior } => {
+                self.state.follow_up = behavior;
+                Next::Done
+            }
+            Intent::SetTimestampFormat { format } => {
+                self.state.preferences.timestamp_format = format;
+                Next::Done
+            }
+            Intent::SetWorkingSection { enabled } => {
+                self.state.preferences.working_section = enabled;
+                Next::Done
+            }
+            Intent::ToggleFavoriteModel { instance_id, model } => {
+                self.toggle_favorite_model(&instance_id, &model);
+                Next::Done
+            }
+            Intent::SetModelOrder {
+                instance_id,
+                models,
             } => {
-                self.attach_file(path, name, mime_type, draft_key)?;
+                self.state
+                    .preferences
+                    .model_order
+                    .insert(instance_id, models);
+                Next::Done
+            }
+            Intent::LoadConversationSettings => {
+                Next::call(Call::ReadConversationSettings(m::Empty {}), None)
+            }
+            Intent::UpdateConversationSettings { scope, change } => {
+                self.update_conversation_settings(&scope, &change)?
+            }
+            Intent::ResetProjectSettings { project_id } => {
+                self.reset_project_settings(&project_id)?
+            }
+            Intent::UpdateProjectScripts {
+                project_id,
+                scripts,
+            } => self.update_project_scripts(project_id, scripts),
+            Intent::ScanSessions => self.scan_sessions(),
+            Intent::SelectImportSessions { paths, checked } => {
+                self.select_import_sessions(&paths, checked);
+                Next::Done
+            }
+            Intent::CloseImport => {
+                self.state.session_import = SessionImport::default();
                 Next::Done
             }
             Intent::RetryAttachment { id } => {
@@ -374,38 +567,6 @@ impl Owner {
                 let command = approval_command(request, approval_decision(&decision)?);
                 Next::Commands(vec![self.command(thread, command)])
             }
-            Intent::RespondQuestions {
-                request_id,
-                answers,
-            } => {
-                let thread = self.selected()?;
-                let request = RuntimeRequestId::new(request_id).map_err(invalid)?;
-                let questions = self
-                    .state
-                    .thread_state(&thread)
-                    .and_then(|state| state.requests.iter().find(|r| r.id == request))
-                    .and_then(|r| match &r.body {
-                        RequestBody::Questions { questions } => Some(questions.clone()),
-                        RequestBody::Approval { .. } => None,
-                    })
-                    .ok_or_else(|| invalid("Question is unavailable"))?;
-                let answers: Answers = answers
-                    .into_iter()
-                    .map(|answer| {
-                        let multiple = questions
-                            .iter()
-                            .any(|q| q.id == answer.question_id && q.multiple);
-                        let value = if multiple {
-                            Answer::Choices(answer.values)
-                        } else {
-                            Answer::Text(answer.values.into_iter().next().unwrap_or_default())
-                        };
-                        (answer.question_id, value)
-                    })
-                    .collect();
-                let command = answers_command(request, answers, BTreeMap::new());
-                Next::Commands(vec![self.command(thread, command)])
-            }
             Intent::DismissInput { request_id } => {
                 let thread = self.selected()?;
                 let command = Command::DismissQuestion {
@@ -513,11 +674,7 @@ impl Owner {
         }
         if self.options.creation_source == "desktop"
             && !alternate
-            && self
-                .state
-                .selected_state()
-                .and_then(actionable_plan)
-                .is_some()
+            && actionable_plan(&self.state).is_some()
         {
             return self.plan_follow_up(false);
         }
@@ -532,14 +689,14 @@ impl Owner {
             id: MessageId::new(new_id("message")).map_err(invalid)?,
             text: draft.text.clone(),
             attachments: attachments.clone(),
-            context: None,
+            context: draft.context.clone(),
         };
         let key = self.state.draft_key();
         let restore = Restore {
             draft_key: key.clone(),
             text: draft.text.clone(),
             attachments,
-            context: None,
+            context: draft.context.clone(),
         };
         let mut entry = match self.state.selected_thread.clone() {
             Some(thread) => {
@@ -592,6 +749,7 @@ impl Owner {
         let mut cleared = draft;
         cleared.text.clear();
         cleared.attachments.clear();
+        cleared.context = None;
         self.state.drafts.insert(key, cleared);
         Ok(Next::Commands(vec![entry]))
     }
@@ -602,8 +760,8 @@ impl Owner {
             .state
             .thread_state(&thread)
             .ok_or_else(|| invalid("Thread not loaded"))?;
-        let plan = actionable_plan(state).ok_or_else(|| invalid("No actionable plan"))?;
-        let markdown = plan_markdown(state, plan);
+        let plan = actionable_plan(&self.state).ok_or_else(|| invalid("No actionable plan"))?;
+        let markdown = crate::view::plan::proposed_plan_markdown(state, plan);
         let plan_ref = PlanRef {
             thread: thread.clone(),
             plan: plan.id.clone(),
@@ -717,6 +875,7 @@ impl Owner {
                     .iter()
                     .map(DraftAttachment::from_remote)
                     .collect();
+                draft.context = queued.context;
                 self.state.editing_run = Some(run);
                 let key = self.state.draft_key();
                 self.state.drafts.insert(key, draft);
@@ -736,14 +895,14 @@ impl Owner {
                         run,
                         text: draft.text.clone(),
                         attachments: Some(attachments.clone()),
-                        context: None,
+                        context: draft.context.clone(),
                     },
                 );
                 entry.restore = Some(Restore {
                     draft_key: thread.to_string(),
                     text: draft.text.clone(),
                     attachments,
-                    context: None,
+                    context: draft.context.clone(),
                 });
                 let key = self.state.draft_key();
                 self.state.drafts.remove(&key);
@@ -756,83 +915,86 @@ impl Owner {
                 self.state.editing_run = None;
                 Next::Done
             }
-            QueueAction::Reorder { run_ids } => {
-                let ordered = run_ids
-                    .into_iter()
-                    .map(run_id)
-                    .collect::<Result<Vec<_>, _>>()?;
-                let entries = ordered
-                    .iter()
-                    .enumerate()
-                    .rev()
-                    .map(|(index, run)| {
-                        self.command(
-                            thread.clone(),
-                            Command::ReorderQueued {
-                                run: run.clone(),
-                                before: ordered.get(index + 1).cloned(),
-                            },
-                        )
-                    })
-                    .collect();
-                Next::Commands(entries)
-            }
+            QueueAction::Move {
+                run_id: run,
+                before_run_id,
+            } => Next::Commands(vec![self.command(
+                thread,
+                Command::ReorderQueued {
+                    run: run_id(run)?,
+                    before: before_run_id.map(run_id).transpose()?,
+                },
+            )]),
         })
     }
 
-    fn attach_file(
-        &mut self,
-        path: String,
-        name: String,
-        mime_type: String,
-        key: String,
-    ) -> Result<(), PeerError> {
-        let metadata = std::fs::metadata(&path).map_err(invalid)?;
-        if !metadata.is_file() {
-            return Err(invalid("Choose a regular file"));
-        }
-        if key != self.state.draft_key() && !self.state.drafts.contains_key(&key) {
+    /// Admits the picked files as T3 does, then uploads the accepted ones.
+    /// Images over the size limit must be downscaled by the client first.
+    fn attach_files(&mut self, key: String, files: Vec<LocalFile>) -> Result<(), PeerError> {
+        if key != self.state.draft_key()
+            && !self.state.drafts.contains_key(&key)
+            && !key.starts_with("answer:")
+        {
             return Err(invalid("The attachment draft is no longer available"));
         }
-        let mime_type = mime_type.to_ascii_lowercase();
-        let id = new_id("attachment");
-        let attachment = DraftAttachment {
-            id: id.clone(),
-            remote_id: None,
-            name,
-            kind: if native_image(&mime_type) {
-                "image"
-            } else {
-                "file"
-            }
-            .into(),
-            mime_type,
-            size_bytes: metadata.len(),
-            local_path: path,
-            status: "failed".into(),
-            error: Some("Connect to upload".into()),
-        };
         let mut draft = self
             .state
             .drafts
             .get(&key)
             .cloned()
             .unwrap_or_else(|| self.state.current_draft());
-        let mut references: Vec<_> = draft
-            .attachments
-            .iter()
-            .map(DraftAttachment::metadata)
-            .collect();
-        references.push(attachment.metadata());
-        if references.len() > 100 {
-            return Err(invalid("You can attach up to 100 files per message."));
+        let mut candidates = vec![];
+        let mut readable = vec![];
+        let mut error = None;
+        for file in files {
+            match std::fs::metadata(&file.path) {
+                Ok(metadata) if metadata.is_file() => {
+                    candidates.push(AttachmentCandidate {
+                        name: file.name.clone(),
+                        mime_type: file.mime_type.to_ascii_lowercase(),
+                        size_bytes: metadata.len(),
+                    });
+                    readable.push(file);
+                }
+                _ => error = Some(format!("'{}' is empty or could not be read.", file.name)),
+            }
         }
-        draft.attachments.push(attachment);
+        let admission = admit_attachments(&draft.attachments, &candidates);
+        let mut added = vec![];
+        for admitted in admission.accepted {
+            let index = admitted.index as usize;
+            if admitted.needs_compression {
+                error = Some(image_preparation_error(&admitted.name, false));
+                continue;
+            }
+            let id = new_id("attachment");
+            draft.attachments.push(DraftAttachment {
+                id: id.clone(),
+                remote_id: None,
+                name: admitted.name,
+                kind: match admitted.kind {
+                    AttachmentFileKind::Image => "image",
+                    _ => "file",
+                }
+                .into(),
+                mime_type: admitted.mime_type,
+                size_bytes: candidates[index].size_bytes,
+                local_path: readable[index].path.clone(),
+                status: "failed".into(),
+                error: Some("Connect to upload".into()),
+            });
+            added.push(id);
+        }
         self.state.drafts.insert(key.clone(), draft);
         if self.state.connected {
-            self.begin_attachment(key, id)?;
+            for id in added {
+                self.begin_attachment(key.clone(), id)?;
+            }
         }
-        Ok(())
+        match admission.error.or(error) {
+            Some(error) => Err(invalid(error)),
+            None => Ok(()),
+        }
     }
 
     pub(super) fn begin_attachment(&mut self, key: String, id: String) -> Result<(), PeerError> {
@@ -1032,51 +1194,6 @@ impl Owner {
             Intent::RemoveWorktree { path } => {
                 Next::call(Call::RemoveWorktree(op::RemoveWorktree { path }), None)
             }
-            Intent::StartTerminal {
-                handle,
-                cwd,
-                cols,
-                rows,
-            } => {
-                let size = op::TerminalSize { cols, rows };
-                let previous = self.state.terminals.get(&handle);
-                let terminal = Terminal {
-                    cwd: cwd.clone(),
-                    size,
-                    phase: TerminalPhase::Starting,
-                    output: previous.map(|t| t.output.clone()).unwrap_or_default(),
-                    sequence: previous.map_or(0, |t| t.sequence),
-                    output_bytes: previous.map_or(0, |t| t.output_bytes),
-                };
-                self.state.terminals.insert(handle.clone(), terminal);
-                Next::call(
-                    Call::StartTerminal(op::StartTerminal { handle, cwd, size }),
-                    None,
-                )
-            }
-            Intent::ResizeTerminal { handle, cols, rows } => Next::call(
-                Call::ResizeTerminal(op::ResizeTerminal {
-                    handle,
-                    size: op::TerminalSize { cols, rows },
-                }),
-                None,
-            ),
-            Intent::WriteTerminal { handle, data } => Next::call(
-                Call::WriteTerminal(op::TerminalWrite {
-                    process_handle: handle,
-                    data,
-                }),
-                None,
-            ),
-            Intent::DetachTerminal { handle } => {
-                Next::call(Call::DetachTerminal(op::DetachTerminal { handle }), None)
-            }
-            Intent::KillTerminal { handle } => Next::call(
-                Call::KillTerminal(op::TerminalKill {
-                    process_handle: handle,
-                }),
-                None,
-            ),
             Intent::LoadAccounts => Next::call(Call::ListAccounts(m::Empty {}), None),
             Intent::SelectAccount { provider, id } => Next::call(
                 Call::SelectAccount(op::SelectAccount { provider, id }),
@@ -1109,7 +1226,7 @@ impl Owner {
             }
             Intent::CreateInvitation => Next::call(Call::Invite(m::Empty {}), None),
             Intent::RevokeDevice { id } => Next::call(Call::Revoke(op::RevokeDevice { id }), None),
-            Intent::RegisterProject { path } => {
+            Intent::AddProject { path } => {
                 Next::call(Call::AddProject(op::AddProject { cwd: path }), None)
             }
             _ => unreachable!("conversation intents are prepared above"),

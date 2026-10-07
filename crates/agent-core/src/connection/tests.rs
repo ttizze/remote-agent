@@ -876,10 +876,26 @@ fn file_reloads_and_saves_preserve_edits_and_their_base_revision() {
 #[test]
 fn a_failed_terminal_start_is_terminal_and_terminal_output_stays_bounded() {
     let mut owner = owner(Snapshot::default());
+    let thread = ThreadId::new("thread").unwrap();
+    let row = row(&thread);
+    owner.shell_update(
+        ShellLocation::Active,
+        ShellUpdate::Snapshot(ShellSnapshot {
+            snapshot_sequence: 1,
+            projects: vec![crate::models::Project {
+                id: row.project.clone(),
+                roots: vec![crate::models::ProjectRoot {
+                    path: "/tmp".into(),
+                }],
+                ..Default::default()
+            }],
+            threads: vec![row],
+        }),
+    );
     let Next::Call(call, _) = owner
-        .prepare(Intent::StartTerminal {
-            handle: "terminal".into(),
-            cwd: "/tmp".into(),
+        .prepare(Intent::OpenTerminal {
+            thread_id: thread.to_string(),
+            terminal_id: "term-1".into(),
             cols: 80,
             rows: 24,
         })
@@ -887,32 +903,34 @@ fn a_failed_terminal_start_is_terminal_and_terminal_output_stays_bounded() {
     else {
         panic!("terminal start")
     };
+    let terminal = op::thread_terminal_handle_for("thread", "term-1");
+    let terminal = terminal.as_str();
     let call = *call;
     for _ in 0..10 {
-        owner.terminal_output("terminal", vec![1; 1024 * 1024], None);
+        owner.terminal_output(terminal, vec![1; 1024 * 1024], None);
     }
     let old = owner.state.clone();
-    assert_eq!(old.terminals["terminal"].output_bytes, 8 * 1024 * 1024);
+    assert_eq!(old.terminals[terminal].output_bytes, 8 * 1024 * 1024);
     assert!(
-        old.terminals["terminal"]
+        old.terminals[terminal]
             .output
-            .shares_storage(&owner.state.terminals["terminal"].output)
+            .shares_storage(&owner.state.terminals[terminal].output)
     );
     assert!(old.drafts.shares_storage(&owner.state.drafts));
     owner.terminal_output(
-        "terminal",
+        terminal,
         b"reset".to_vec(),
         Some(op::TerminalSize { cols: 80, rows: 24 }),
     );
-    assert_eq!(owner.state.terminals["terminal"].output_bytes, 5);
-    assert_eq!(old.terminals["terminal"].output.len(), 8);
+    assert_eq!(owner.state.terminals[terminal].output_bytes, 5);
+    assert_eq!(old.terminals[terminal].output.len(), 8);
     owner.finished(job(
         call,
         Err(PeerError::ConnectionClosed("lost".into())),
         None,
     ));
     assert!(matches!(
-        owner.state.terminals["terminal"].phase,
+        owner.state.terminals[terminal].phase,
         TerminalPhase::Failed(_)
     ));
 }
@@ -1111,4 +1129,317 @@ async fn a_healthy_resume_reuses_the_connection_and_timed_out_sends_keep_their_i
     })
     .await
     .unwrap();
+}
+
+#[test]
+fn a_committed_refusal_reads_as_a_sentence_and_a_transport_failure_keeps_its_text() {
+    let mut owner = opened(thread_state("Thread"));
+    owner.state.drafts.insert(
+        thread_id().to_string(),
+        Draft {
+            text: "Send me".into(),
+            ..draft()
+        },
+    );
+    let entry = commands(owner.prepare(Intent::Send { alternate: false }).unwrap()).remove(0);
+    let id = entry.id.clone();
+    owner.enqueue(entry, None).unwrap();
+    owner.delivered(
+        id,
+        committed(
+            2,
+            Reply::Rejected {
+                reason: "thread-archived".into(),
+            },
+        ),
+    );
+    let worded = crate::view::rejection::provider_rejection_message(
+        "thread-archived",
+        agent_domain::Driver::Codex,
+    );
+    assert_ne!(worded, "thread-archived");
+    assert_eq!(owner.state.error.as_deref(), Some(worded.as_str()));
+
+    owner.state.drafts.insert(
+        thread_id().to_string(),
+        Draft {
+            text: "Again".into(),
+            ..draft()
+        },
+    );
+    let entry = commands(owner.prepare(Intent::Send { alternate: false }).unwrap()).remove(0);
+    let id = entry.id.clone();
+    owner.enqueue(entry, None).unwrap();
+    owner.delivered(
+        id,
+        Delivered::NotSent(agent_protocol::error::RpcFailure {
+            code: "invalid_command".into(),
+            message: "thread-archived".into(),
+            delivery: agent_protocol::error::Delivery::NotSent,
+        }),
+    );
+    assert_eq!(owner.state.error.as_deref(), Some("thread-archived"));
+}
+
+#[test]
+fn moving_a_queued_message_sends_one_reorder() {
+    let mut state = thread_state("Thread");
+    state.runs.push(run("active", 1, RunStatus::Running));
+    let mut first = run("first", 2, RunStatus::Queued);
+    first.queue_position = Some(1);
+    let mut second = run("second", 3, RunStatus::Queued);
+    second.queue_position = Some(2);
+    state.runs.extend([first, second]);
+    let mut owner = opened(state);
+    let entries = commands(
+        owner
+            .prepare(Intent::Queue {
+                action: QueueAction::Move {
+                    run_id: "second".into(),
+                    before_run_id: Some("first".into()),
+                },
+            })
+            .unwrap(),
+    );
+    assert_eq!(entries.len(), 1);
+    let Request::Dispatch(dispatch) = &entries[0].request else {
+        panic!("dispatch")
+    };
+    assert_eq!(
+        dispatch.command,
+        Command::ReorderQueued {
+            run: agent_domain::RunId::new("second").unwrap(),
+            before: Some(agent_domain::RunId::new("first").unwrap()),
+        }
+    );
+}
+
+fn question_request(multiple: bool) -> agent_domain::Request {
+    agent_domain::Request {
+        owner_path: vec![],
+        id: agent_domain::RuntimeRequestId::new("request").unwrap(),
+        attempt: agent_domain::RunAttemptId::new("attempt").unwrap(),
+        native_key: "native".into(),
+        body: agent_domain::RequestBody::Questions {
+            questions: vec![agent_domain::Question {
+                required: true,
+                id: "areas".into(),
+                header: "Areas".into(),
+                question: "Which areas?".into(),
+                multiple,
+                options: vec![agent_domain::QuestionOption {
+                    label: "Server".into(),
+                    description: None,
+                }],
+            }],
+        },
+        capability: agent_domain::ResponseCapability::Message,
+        status: agent_domain::RequestStatus::Pending,
+        decision: None,
+        answers: None,
+        attachments: BTreeMap::new(),
+        created_at: at(),
+        resolved_at: None,
+    }
+}
+
+#[test]
+fn an_attachment_only_answer_is_empty_text_and_chosen_options_are_choices() {
+    let mut state = thread_state("Thread");
+    state.requests.push(question_request(true));
+    let mut owner = opened(state);
+    let key = answer_draft_key("request", "areas");
+    owner.state.drafts.insert(
+        key,
+        Draft {
+            attachments: vec![DraftAttachment {
+                id: "local".into(),
+                remote_id: Some("upload".into()),
+                name: "notes.txt".into(),
+                mime_type: "text/plain".into(),
+                kind: "file".into(),
+                size_bytes: 4,
+                local_path: String::new(),
+                status: "ready".into(),
+                error: None,
+            }],
+            ..Draft::default()
+        },
+    );
+    let entries = commands(
+        owner
+            .prepare(Intent::SubmitAnswers {
+                request_id: "request".into(),
+            })
+            .unwrap(),
+    );
+    let Request::Dispatch(dispatch) = &entries[0].request else {
+        panic!("dispatch")
+    };
+    let Command::Respond {
+        answers,
+        attachments,
+        ..
+    } = &dispatch.command
+    else {
+        panic!("respond")
+    };
+    assert_eq!(
+        answers.as_ref().unwrap()["areas"],
+        agent_domain::Answer::Text(String::new())
+    );
+    assert_eq!(attachments["areas"][0].id, "upload");
+    assert!(
+        owner
+            .state
+            .drafts
+            .keys()
+            .all(|key| !key.starts_with("answer:"))
+    );
+
+    let mut state = thread_state("Thread");
+    state.requests.push(question_request(true));
+    let mut owner = opened(state);
+    owner
+        .prepare(Intent::EditAnswer {
+            request_id: "request".into(),
+            question_id: "areas".into(),
+            edit: AnswerEdit::ToggleOption {
+                value: "Server".into(),
+            },
+        })
+        .unwrap();
+    let entries = commands(
+        owner
+            .prepare(Intent::SubmitAnswers {
+                request_id: "request".into(),
+            })
+            .unwrap(),
+    );
+    let Request::Dispatch(dispatch) = &entries[0].request else {
+        panic!("dispatch")
+    };
+    let Command::Respond { answers, .. } = &dispatch.command else {
+        panic!("respond")
+    };
+    assert_eq!(
+        answers.as_ref().unwrap()["areas"],
+        agent_domain::Answer::Choices(vec!["Server".into()])
+    );
+}
+
+#[test]
+fn a_typed_answer_moves_to_the_thread_draft_when_an_option_replaces_it() {
+    let mut state = thread_state("Thread");
+    state.requests.push(question_request(false));
+    let mut owner = opened(state);
+    for edit in [
+        AnswerEdit::Custom {
+            text: "Only the server".into(),
+        },
+        AnswerEdit::ToggleOption {
+            value: "Server".into(),
+        },
+    ] {
+        owner
+            .prepare(Intent::EditAnswer {
+                request_id: "request".into(),
+                question_id: "areas".into(),
+                edit,
+            })
+            .unwrap();
+    }
+    assert_eq!(owner.state.current_draft().text, "Only the server");
+    let drafts = &owner.state.question_drafts["request"];
+    assert_eq!(
+        drafts.get("areas").unwrap().selected_option_values,
+        ["Server"]
+    );
+}
+
+#[test]
+fn a_stashed_draft_restores_its_text_and_uploaded_files() {
+    let mut owner = opened(thread_state("Thread"));
+    owner.state.drafts.insert(
+        thread_id().to_string(),
+        Draft {
+            text: "Park this".into(),
+            attachments: vec![DraftAttachment {
+                id: "local".into(),
+                remote_id: Some("upload".into()),
+                name: "notes.txt".into(),
+                mime_type: "text/plain".into(),
+                kind: "file".into(),
+                size_bytes: 4,
+                local_path: String::new(),
+                status: "ready".into(),
+                error: None,
+            }],
+            ..draft()
+        },
+    );
+    let Next::Outcome(Outcome::Stashed { entry_id }) = owner.prepare(Intent::StashDraft).unwrap()
+    else {
+        panic!("stashed")
+    };
+    assert!(owner.state.current_draft().is_empty());
+    assert_eq!(owner.state.stash.entries.len(), 1);
+    let Next::Outcome(Outcome::StashRestored { images, warning }) =
+        owner.prepare(Intent::RestoreStash { entry_id }).unwrap()
+    else {
+        panic!("restored")
+    };
+    assert!(images.is_empty() && warning.is_none());
+    let restored = owner.state.current_draft();
+    assert_eq!(restored.text, "Park this");
+    assert_eq!(restored.attachments[0].remote_id.as_deref(), Some("upload"));
+    assert!(owner.state.stash.entries.is_empty());
+}
+
+#[test]
+fn a_closed_setup_stream_keeps_its_last_snapshot_for_the_card() {
+    let mut owner = opened(thread_state("Thread"));
+    let setup = agent_domain::WorktreeSetupSnapshot {
+        thread: thread_id(),
+        phase: agent_domain::WorktreeSetupPhase::Running,
+        started_at: at(),
+        ended_at: None,
+        branch: None,
+        base_ref: None,
+        worktree_path: None,
+        setup_script: None,
+        stages: vec![],
+        error: None,
+        sequence: 3,
+    };
+    owner.setup_update(&thread_id(), Some(setup.clone()));
+    owner.setup_update(&thread_id(), None);
+    assert!(owner.state.setups.is_empty());
+    assert_eq!(owner.state.held_setups[&thread_id()], setup);
+    owner.setup_update(&thread_id(), Some(setup));
+    assert!(owner.state.held_setups.is_empty());
+}
+
+#[test]
+fn preferences_change_on_the_device_and_survive_a_restart() {
+    let mut owner = owner(Snapshot::default());
+    for intent in [
+        Intent::SetTimestampFormat {
+            format: crate::view::time::TimestampFormat::TwentyFourHour,
+        },
+        Intent::SetWorkingSection { enabled: true },
+        Intent::ToggleFavoriteModel {
+            instance_id: "codex".into(),
+            model: "gpt".into(),
+        },
+        Intent::SetDiffIgnoreWhitespace { ignore: false },
+    ] {
+        owner.prepare(intent).unwrap();
+    }
+    let restored =
+        crate::persistence::decode(&crate::persistence::encode(&owner.state).unwrap()).unwrap();
+    assert_eq!(restored.preferences, owner.state.preferences);
+    assert!(restored.preferences.working_section);
+    assert!(!restored.preferences.diff_ignore_whitespace);
+    assert_eq!(restored.preferences.favorite_models.len(), 1);
 }

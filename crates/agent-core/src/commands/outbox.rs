@@ -160,6 +160,8 @@ pub enum Resolution {
     Failed {
         entry: Box<PendingCommand>,
         reason: String,
+        /// The Host committed a refusal; `reason` is its code or sentence.
+        rejected: bool,
     },
     Uncertain,
     /// No pending entry has this id any more.
@@ -313,15 +315,18 @@ impl Outbox {
         let Some(index) = self.entries.iter().position(|entry| &entry.id == id) else {
             return Resolution::Gone;
         };
-        let failed = |entries: &mut Vec<PendingCommand>, reason: String| Resolution::Failed {
-            entry: Box::new(entries.remove(index)),
-            reason,
+        let failed = |entries: &mut Vec<PendingCommand>, reason: String, rejected: bool| {
+            Resolution::Failed {
+                entry: Box::new(entries.remove(index)),
+                reason,
+                rejected,
+            }
         };
         match delivered {
             Delivered::Committed(Committed {
                 reply: Reply::Rejected { reason },
                 ..
-            }) => failed(&mut self.entries, reason),
+            }) => failed(&mut self.entries, reason, true),
             Delivered::Committed(committed) => {
                 self.entries[index].phase = Phase::Committed {
                     sequence: committed.sequence,
@@ -330,7 +335,7 @@ impl Outbox {
                 Resolution::Waiting
             }
             Delivered::NotSent(failure) if failure.delivery == Delivery::NotSent => {
-                failed(&mut self.entries, failure.message)
+                failed(&mut self.entries, failure.message, false)
             }
             Delivered::NotSent(failure) => {
                 self.entries[index].phase = Phase::Uncertain {

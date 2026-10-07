@@ -3,7 +3,7 @@ use chrono::{DateTime, Datelike, NaiveDateTime, TimeZone, Timelike};
 
 /// The clock preference for wall-clock labels. `Locale` follows the default
 /// English locale (12-hour).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum TimestampFormat {
     #[default]

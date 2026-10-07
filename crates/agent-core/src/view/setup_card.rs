@@ -284,7 +284,7 @@ pub fn setup_view(
         local_preparing,
         run.map(|run| run.status),
         snapshot.setups.get(thread),
-        None,
+        snapshot.held_setups.get(thread),
     );
     let turn_started = run.is_some_and(|run| run.started_at.is_some());
     let user_messages = state.map_or(0, |state| {

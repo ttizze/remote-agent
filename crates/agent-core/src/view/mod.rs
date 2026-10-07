@@ -21,6 +21,7 @@ pub mod settings;
 pub mod setup_card;
 pub mod sidebar;
 pub mod snooze;
+pub mod terminals;
 pub mod thread_list;
 pub mod thread_menu;
 pub mod thread_order;
