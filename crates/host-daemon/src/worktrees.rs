@@ -281,7 +281,7 @@ fn fetch_origin(cwd: &Path, base_ref: &str) -> Result<()> {
     let fetch = |refspec: Option<&str>| {
         let mut command = std::process::Command::new("git");
         command
-            .args(["fetch", "--quiet", "origin"])
+            .args(["fetch", "--quiet", "--end-of-options", "origin"])
             .args(refspec)
             .current_dir(cwd)
             .env("LC_ALL", "C")
@@ -442,6 +442,14 @@ fn checkout(
     base: impl FnOnce() -> Result<String>,
     branch: Option<String>,
 ) -> Result<(PathBuf, String)> {
+    // Branch names reach Git as arguments; reject what Git would not accept as
+    // a branch before any Git command runs.
+    if let Some(branch) = branch
+        .as_deref()
+        .filter(|branch| !crate::git::valid_branch_name(branch))
+    {
+        return Err(anyhow!("fatal: '{branch}' is not a valid branch name"));
+    }
     let cwd = dunce::canonicalize(cwd)?;
     let root =
         dunce::canonicalize(crate::git::text(&cwd, &["rev-parse", "--show-toplevel"])?.trim_end())?;
@@ -496,7 +504,7 @@ fn checkout(
             return Ok((working_directory(&destination, relative_cwd)?, branch));
         }
         // An attempt that stopped before recording it may have left it incomplete.
-        crate::git::text(&root, &["worktree", "remove", "--force", &key])?;
+        crate::git::text(&root, &["worktree", "remove", "--force", "--", &key])?;
     }
     if fs::symlink_metadata(&destination).is_ok() {
         fs::remove_dir_all(&destination)?;
@@ -850,7 +858,7 @@ fn create_checkout(
     }
     crate::platform::create_state_directory(destination)?;
     if let Some(base) = base
-        && let Err(error) = crate::git::text(source, &["branch", branch, base])
+        && let Err(error) = crate::git::text(source, &["branch", "--end-of-options", branch, base])
     {
         let _ = fs::remove_dir(destination);
         return Err(error);
@@ -860,16 +868,18 @@ fn create_checkout(
     // One --force replaces a missing registration but continues to respect locks.
     if let Err(error) = crate::git::text(
         source,
-        &["worktree", "add", "--force", destination_text, branch],
+        &["worktree", "add", "--force", "--", destination_text, branch],
     ) {
         let _ = fs::remove_dir(destination);
         let Some(branch) = created else {
             return Err(error);
         };
-        return Err(match crate::git::text(source, &["branch", "-D", branch]) {
-            Ok(_) => error,
-            Err(cleanup) => error.context(format!("branch cleanup failed: {cleanup:#}")),
-        });
+        return Err(
+            match crate::git::text(source, &["branch", "-D", "--", branch]) {
+                Ok(_) => error,
+                Err(cleanup) => error.context(format!("branch cleanup failed: {cleanup:#}")),
+            },
+        );
     }
     let prepared = (|| {
         for entry in copy_paths {
@@ -914,11 +924,12 @@ fn discard_checkout(
                 "worktree",
                 "remove",
                 "--force",
+                "--",
                 destination.to_str().context("worktree path is not UTF-8")?,
             ],
         )?;
         if let Some(branch) = branch {
-            crate::git::text(source, &["branch", "-D", branch])?;
+            crate::git::text(source, &["branch", "-D", "--", branch])?;
         }
         Ok(())
     })();
@@ -1154,6 +1165,57 @@ mod tests {
                 .unwrap()
                 .contains_key(first.0.to_str().unwrap())
         );
+    }
+
+    // A branch or base named like an option is never read as one: neither
+    // deletes, forces or otherwise changes an existing branch.
+    #[tokio::test]
+    async fn option_shaped_branch_and_base_names_change_no_branch() {
+        let repository = repository();
+        let root = dunce::canonicalize(repository.path()).unwrap();
+        crate::git::text(&root, &["switch", "--quiet", "-c", "valuable-topic"]).unwrap();
+        let unmerged = commit(&root, "topic.txt", "unmerged work");
+        crate::git::text(&root, &["switch", "--quiet", "main"]).unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let projects = directory.path().join("projects.json");
+        let store = Worktrees::new(&projects);
+        let branches = || crate::git::text(&root, &["branch", "--list"]).unwrap();
+        let before = branches();
+        for (branch, base) in [
+            (Some("-D"), "valuable-topic"),
+            (Some("--force"), "valuable-topic"),
+            (Some("-m"), "valuable-topic"),
+            (Some("HEAD"), "main"),
+            (Some("a..b"), "main"),
+            (Some("ok-name"), "-D"),
+            (None, "--orphan"),
+        ] {
+            let error = store
+                .create(
+                    &new_thread(),
+                    root.to_str().unwrap(),
+                    base,
+                    branch.map(str::to_owned),
+                    false,
+                    Default::default(),
+                )
+                .await
+                .unwrap_err();
+            if let Some(branch) = branch.filter(|branch| !crate::git::valid_branch_name(branch)) {
+                assert_eq!(
+                    error.to_string(),
+                    format!("fatal: '{branch}' is not a valid branch name")
+                );
+            }
+            assert_eq!(branches(), before, "{branch:?} from {base}");
+            assert_eq!(
+                crate::git::text(&root, &["rev-parse", "valuable-topic"])
+                    .unwrap()
+                    .trim(),
+                unmerged
+            );
+        }
+        assert!(workspace_roots(&projects).await.unwrap().is_empty());
     }
 
     // "Start from origin" fetches only when the repository has an origin, and
