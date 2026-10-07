@@ -285,7 +285,67 @@ impl Default for ConversationSettings {
         }
     }
 }
+/// `host/conversation/settings/update`: the settings to change. The Host
+/// merges it into its current settings and keeps every field it leaves out.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ConversationSettingsPatch {
+    pub auto_settle: Option<AutoSettle>,
+    pub continue_after_restart: Option<bool>,
+    pub snooze_limited_threads: Option<bool>,
+    pub auto_resume_limited_threads: Option<bool>,
+    pub branch_naming_mode: Option<agent_domain::BranchNamingMode>,
+    pub branch_name_prefix: Option<String>,
+    pub branch_name_instructions: Option<String>,
+    /// Each entry replaces one project's whole override set; `None` removes it.
+    pub project_overrides:
+        std::collections::BTreeMap<String, Option<ProjectConversationSettings>>,
+}
+
 impl ConversationSettings {
+    /// These settings with the patch's fields replaced.
+    pub fn patched(&self, patch: &ConversationSettingsPatch) -> Self {
+        let mut next = self.clone();
+        let ConversationSettingsPatch {
+            auto_settle,
+            continue_after_restart,
+            snooze_limited_threads,
+            auto_resume_limited_threads,
+            branch_naming_mode,
+            branch_name_prefix,
+            branch_name_instructions,
+            project_overrides,
+        } = patch.clone();
+        if let Some(value) = auto_settle {
+            next.auto_settle = value;
+        }
+        if let Some(value) = continue_after_restart {
+            next.continue_after_restart = value;
+        }
+        if let Some(value) = snooze_limited_threads {
+            next.snooze_limited_threads = value;
+        }
+        if let Some(value) = auto_resume_limited_threads {
+            next.auto_resume_limited_threads = value;
+        }
+        if let Some(value) = branch_naming_mode {
+            next.branch_naming_mode = value;
+        }
+        if let Some(value) = branch_name_prefix {
+            next.branch_name_prefix = value;
+        }
+        if let Some(value) = branch_name_instructions {
+            next.branch_name_instructions = value;
+        }
+        for (project, overrides) in project_overrides {
+            match overrides {
+                Some(overrides) => next.project_overrides.insert(project, overrides),
+                None => next.project_overrides.remove(&project),
+            };
+        }
+        next
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         let days = |settle: &AutoSettle| match settle {
             AutoSettle::AfterDays(days) if !(1..=90).contains(days) => {

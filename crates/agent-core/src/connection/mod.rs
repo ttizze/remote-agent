@@ -3,6 +3,7 @@
 mod calls;
 mod delivery;
 mod device;
+mod disk;
 mod intents;
 mod owner;
 mod projects;
@@ -191,6 +192,17 @@ impl Store {
         self.inner
             .sender
             .send(Event::Close(sender))
+            .await
+            .map_err(invalid)?;
+        receiver.await.map_err(invalid)
+    }
+
+    /// Resolves once the latest device state is written.
+    pub async fn flush(&self) -> Result<(), PeerError> {
+        let (sender, receiver) = oneshot::channel();
+        self.inner
+            .sender
+            .send(Event::Flush(sender))
             .await
             .map_err(invalid)?;
         receiver.await.map_err(invalid)

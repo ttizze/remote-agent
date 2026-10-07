@@ -121,13 +121,14 @@ impl Owner {
         }
     }
 
-    /// The next time a debounced search or a provider command retry is due.
+    /// The next time a debounced search or a provider command retry is due. A
+    /// retry waits for a connection to ask on.
     pub(super) fn sources_deadline(&self) -> Option<u64> {
         let sources = &self.state.sources;
         let retry = sources
             .provider_commands
             .values()
-            .filter(|entry| !entry.in_flight)
+            .filter(|entry| !entry.in_flight && self.connected())
             .filter_map(|entry| entry.retry_at_ms);
         sources.entries.due_at_ms.into_iter().chain(retry).min()
     }

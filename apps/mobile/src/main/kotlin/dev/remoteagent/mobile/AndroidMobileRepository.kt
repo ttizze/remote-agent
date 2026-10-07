@@ -10,7 +10,7 @@ import kotlinx.serialization.json.Json
 
 @Serializable internal data class HostProfile(val id: String, val name: String, val ticket: String)
 
-/** Platform persistence owns profile metadata and opaque core snapshots. */
+/** Platform persistence owns profile metadata and the shared model preferences; core writes each Host's state. */
 internal class AndroidMobileRepository(context: Context) {
     private val directory = context.filesDir
     private val preferences = context.getSharedPreferences("agent-hosts", Context.MODE_PRIVATE)
@@ -41,14 +41,8 @@ internal class AndroidMobileRepository(context: Context) {
         preferences.edit().putString("orchestration-model-defaults", Base64.getEncoder().encodeToString(bytes)).apply()
     }
 
-    fun load(id: String): ByteArray {
-        val file = snapshotFile(id)
-        return if (file.baseFile.exists()) file.openRead().use { it.readBytes() } else byteArrayOf()
-    }
-
-    fun save(id: String, bytes: ByteArray) = snapshotFile(id).writeSynced(bytes)
-
-    private fun snapshotFile(id: String) = AtomicFile(File(directory, "orchestration-${encodedId(id)}.json"))
+    /** The device state core keeps for the Host. */
+    fun stateFile(id: String): String = File(directory, "orchestration-${encodedId(id)}.json").absolutePath
 
     private fun encodedId(id: String): String =
         Base64.getUrlEncoder().withoutPadding().encodeToString(id.encodeToByteArray())

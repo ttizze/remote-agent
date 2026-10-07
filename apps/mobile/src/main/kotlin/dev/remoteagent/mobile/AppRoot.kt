@@ -45,7 +45,7 @@ internal fun RemoteAgentApp(
     requestQrScan: (onContents: (String) -> Unit) -> Unit,
 ) {
     DisposableEffect(model, activity) {
-        val observer = AndroidConnectionLifecycle(model::foreground, model::persist)
+        val observer = AndroidConnectionLifecycle(model::foreground, model::background)
         activity.lifecycle.addObserver(observer)
         onDispose { activity.lifecycle.removeObserver(observer) }
     }

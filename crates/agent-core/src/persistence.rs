@@ -1,11 +1,23 @@
-//! Device-owned state the native app stores: drafts, navigation, settings and
-//! commands the Host has not confirmed. Host data lives in the disk cache.
+//! Device-owned state core keeps in one file per Host: drafts, navigation,
+//! settings and commands the Host has not confirmed. Host data lives in the
+//! disk cache.
 use crate::commands::{build::FollowUpBehavior, outbox::Outbox};
-use crate::state::{Draft, PendingRollback, Preferences, Snapshot};
+use crate::state::{Draft, PendingRollback, Preferences, Shared, Snapshot};
 use crate::view::composer::stash::PromptStash;
 use agent_domain::{CommandId, ThreadId};
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs, io,
+    io::Write,
+    path::Path,
+    sync::Arc,
+};
+
+/// How long a change other than a new outbox entry waits before it is written.
+pub const STATE_WRITE_DELAY_MS: u64 = 250;
+/// A failed write is tried again after this.
+pub const STATE_RETRY_MS: u64 = 1_000;
 
 #[derive(Default, Serialize, Deserialize)]
 struct LocalState {
@@ -20,7 +32,7 @@ struct LocalState {
     stash: PromptStash,
 }
 
-pub fn encode(snapshot: &Snapshot) -> Result<Vec<u8>, serde_json::Error> {
+pub(crate) fn encode(snapshot: &Snapshot) -> Result<Vec<u8>, serde_json::Error> {
     serde_json::to_vec(&LocalState {
         drafts: (*snapshot.drafts).clone(),
         default_draft: snapshot.default_draft.clone(),
@@ -34,7 +46,7 @@ pub fn encode(snapshot: &Snapshot) -> Result<Vec<u8>, serde_json::Error> {
     })
 }
 
-pub fn decode(bytes: &[u8]) -> Result<Snapshot, serde_json::Error> {
+pub(crate) fn decode(bytes: &[u8]) -> Result<Snapshot, serde_json::Error> {
     let local: LocalState = if bytes.is_empty() {
         LocalState::default()
     } else {
@@ -58,24 +70,54 @@ pub fn encode_model_preferences(snapshot: &Snapshot) -> Result<Vec<u8>, serde_js
     serde_json::to_vec(&snapshot.default_draft)
 }
 
-pub fn apply_model_preferences(
-    persisted: &[u8],
-    defaults: &[u8],
-) -> Result<Vec<u8>, serde_json::Error> {
-    let mut state = recover(persisted, defaults);
-    // Recovery warnings are runtime state, not saved data.
-    state.error = None;
-    encode(&state)
+/// The device state saved at `path` with the model `defaults` every Host
+/// shares; a missing file is a new device.
+pub fn load(path: &Path, defaults: &[u8]) -> Snapshot {
+    let saved = match fs::read(path) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(vec![]),
+        read => read,
+    };
+    recover(saved.ok().as_deref(), defaults)
 }
 
-/// Decodes independent device-owned components; a damaged file must not lock
-/// out a Host.
-pub fn recover(persisted: &[u8], defaults: &[u8]) -> Snapshot {
-    let mut state = decode(persisted).unwrap_or_else(|_| Snapshot {
-        follow_up: FollowUpBehavior::default(),
-        error: Some("Saved device state could not be read. Device drafts were reset.".into()),
-        ..Default::default()
-    });
+/// Replaces the device state file once the new bytes reach storage.
+pub fn save(path: &Path, snapshot: &Snapshot) -> io::Result<()> {
+    write_file(path, &encode(snapshot)?)
+}
+
+/// Replaces `path` once the new bytes reach storage, readable by the user only.
+pub(crate) fn write_file(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| io::Error::other("A saved file needs a directory."))?;
+    fs::create_dir_all(parent)?;
+    let temporary = parent.join(format!(".{}.tmp", uuid::Uuid::new_v4()));
+    let written = (|| {
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        let mut file = options.open(&temporary)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        fs::rename(&temporary, path)
+    })();
+    if written.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    written
+}
+
+/// Decodes independent device-owned components; a damaged or unreadable file
+/// must not lock out a Host.
+fn recover(saved: Option<&[u8]>, defaults: &[u8]) -> Snapshot {
+    let mut state = saved
+        .and_then(|bytes| decode(bytes).ok())
+        .unwrap_or_else(|| Snapshot {
+            follow_up: FollowUpBehavior::default(),
+            error: Some("Saved device state could not be read. Device drafts were reset.".into()),
+            ..Default::default()
+        });
     if !defaults.is_empty() {
         match serde_json::from_slice(defaults) {
             Ok(draft) => state.default_draft = draft,
@@ -98,6 +140,156 @@ pub fn recover(persisted: &[u8], defaults: &[u8]) -> Snapshot {
     state
 }
 
+/// The saved parts of a published state: shared storage by identity, the
+/// rest by value.
+struct Saved {
+    drafts: Shared<BTreeMap<String, Draft>>,
+    outbox: Arc<Outbox>,
+    stash: Shared<PromptStash>,
+    default_draft: Draft,
+    follow_up: FollowUpBehavior,
+    selected_thread: Option<ThreadId>,
+    selected_project: Option<String>,
+    rollbacks: BTreeMap<CommandId, PendingRollback>,
+    preferences: Preferences,
+}
+impl Saved {
+    fn of(snapshot: &Snapshot) -> Self {
+        Self {
+            drafts: snapshot.drafts.clone(),
+            outbox: snapshot.outbox.clone(),
+            stash: snapshot.stash.clone(),
+            default_draft: snapshot.default_draft.clone(),
+            follow_up: snapshot.follow_up,
+            selected_thread: snapshot.selected_thread.clone(),
+            selected_project: snapshot.selected_project.clone(),
+            rollbacks: snapshot.rollbacks.clone(),
+            preferences: snapshot.preferences.clone(),
+        }
+    }
+    fn same(&self, other: &Self) -> bool {
+        self.drafts.shares_storage(&other.drafts)
+            && Arc::ptr_eq(&self.outbox, &other.outbox)
+            && self.stash.shares_storage(&other.stash)
+            && self.default_draft == other.default_draft
+            && self.follow_up == other.follow_up
+            && self.selected_thread == other.selected_thread
+            && self.selected_project == other.selected_project
+            && self.rollbacks == other.rollbacks
+            && self.preferences == other.preferences
+    }
+}
+
+/// When the device state is written. A new outbox entry is written at once
+/// and is sent only once a write holds it; other changes wait 250 ms.
+#[derive(Default)]
+pub struct StateWriter {
+    observed: Option<Saved>,
+    due_at: Option<u64>,
+    changed: bool,
+    /// The outbox entries the write in progress holds.
+    writing: Option<BTreeSet<CommandId>>,
+    /// The outbox entries the last stored write holds.
+    durable: BTreeSet<CommandId>,
+}
+impl StateWriter {
+    /// For state read from its file, whose outbox entries are stored.
+    pub fn restored(snapshot: &Snapshot) -> Self {
+        Self {
+            observed: Some(Saved::of(snapshot)),
+            durable: snapshot
+                .outbox
+                .entries
+                .iter()
+                .map(|entry| entry.id.clone())
+                .collect(),
+            ..Self::default()
+        }
+    }
+
+    /// Notes a published state.
+    pub fn observe(&mut self, snapshot: &Snapshot, now: u64) {
+        let saved = Saved::of(snapshot);
+        if self
+            .observed
+            .as_ref()
+            .is_some_and(|observed| observed.same(&saved))
+        {
+            return;
+        }
+        self.observed = Some(saved);
+        self.changed = true;
+        let unstored = snapshot.outbox.entries.iter().any(|entry| {
+            !self.durable.contains(&entry.id)
+                && !self
+                    .writing
+                    .as_ref()
+                    .is_some_and(|writing| writing.contains(&entry.id))
+        });
+        let at = if unstored {
+            now
+        } else {
+            now + STATE_WRITE_DELAY_MS
+        };
+        self.due_at = Some(self.due_at.map_or(at, |due| due.min(at)));
+    }
+
+    pub fn next_due(&self) -> Option<u64> {
+        self.due_at.filter(|_| self.writing.is_none())
+    }
+
+    /// Whether a write of `snapshot` is due; it starts if so.
+    pub fn due(&mut self, snapshot: &Snapshot, now: u64) -> bool {
+        if self.writing.is_some() || self.due_at.is_none_or(|due| due > now) {
+            return false;
+        }
+        self.due_at = None;
+        self.changed = false;
+        self.writing = Some(
+            snapshot
+                .outbox
+                .entries
+                .iter()
+                .map(|entry| entry.id.clone())
+                .collect(),
+        );
+        true
+    }
+
+    /// A write ended; a failed one is tried again.
+    pub fn written(&mut self, stored: bool, now: u64) {
+        let entries = self.writing.take().unwrap_or_default();
+        if stored {
+            self.durable = entries;
+        } else {
+            self.changed = true;
+            let retry = now + STATE_RETRY_MS;
+            self.due_at = Some(self.due_at.map_or(retry, |due| due.max(retry)));
+        }
+    }
+
+    /// Whether a write holds this outbox entry.
+    pub fn stored(&self, id: &CommandId) -> bool {
+        self.durable.contains(id)
+    }
+
+    /// Whether the latest state is written or being written.
+    pub fn changed(&self) -> bool {
+        self.changed
+    }
+
+    pub fn writing(&self) -> bool {
+        self.writing.is_some()
+    }
+
+    /// Writes the latest state now.
+    pub fn hurry(&mut self, now: u64) {
+        if self.changed {
+            self.due_at = Some(now);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -114,14 +306,89 @@ mod tests {
                 ..Default::default()
             },
         );
-        let recovered = recover(&encode(&state).unwrap(), b"broken preferences");
+        let recovered = recover(Some(&encode(&state).unwrap()), b"broken preferences");
         assert_eq!(recovered.drafts["thread"].text, "keep me");
         assert_eq!(recovered.default_draft.model, "valid model");
         assert!(recovered.error.is_some());
-        let recovered = recover(b"broken state", &encode_model_preferences(&state).unwrap());
+        let preferences = encode_model_preferences(&state).unwrap();
+        let recovered = recover(Some(b"broken state"), &preferences);
         assert_eq!(recovered.default_draft.model, "valid model");
         assert!(recovered.error.is_some());
-        assert!(decode(&apply_model_preferences(b"bad", b"bad").unwrap()).is_ok());
+        let directory = tempfile::tempdir().unwrap();
+        let unreadable = load(directory.path(), &preferences);
+        assert_eq!(unreadable.default_draft.model, "valid model");
+        assert!(unreadable.error.is_some());
+    }
+
+    #[test]
+    fn a_saved_state_loads_back_and_a_missing_file_is_a_new_device() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("host").join("device.json");
+        let new = load(&path, &[]);
+        assert_eq!(new.error, None);
+        assert!(new.drafts.is_empty());
+        let mut state = Snapshot::default();
+        state.drafts.insert(
+            "thread".into(),
+            Draft {
+                text: "saved".into(),
+                ..Default::default()
+            },
+        );
+        save(&path, &state).unwrap();
+        state.drafts.insert("thread".into(), Draft::default());
+        save(&path, &state).unwrap();
+        assert_eq!(load(&path, &[]).drafts["thread"].text, "");
+        assert_eq!(std::fs::read_dir(path.parent().unwrap()).unwrap().count(), 1);
+    }
+
+    fn queued(id: &str) -> PendingCommand {
+        let thread = ThreadId::new("thread").unwrap();
+        PendingCommand::new(
+            thread.clone(),
+            Request::Dispatch(Box::new(dispatch(
+                thread,
+                CommandId::new(id).unwrap(),
+                agent_domain::Command::MarkUnread,
+            ))),
+            agent_domain::Timestamp::from_millis(0).unwrap(),
+        )
+    }
+
+    #[test]
+    fn a_new_outbox_entry_is_written_at_once_and_stored_once_the_write_ends() {
+        let mut state = Snapshot::default();
+        let mut writer = StateWriter::restored(&state);
+        writer.observe(&state, 0);
+        assert_eq!(writer.next_due(), None);
+        Arc::make_mut(&mut state.outbox).enqueue(queued("command")).unwrap();
+        writer.observe(&state, 10);
+        assert_eq!(writer.next_due(), Some(10));
+        let id = CommandId::new("command").unwrap();
+        assert!(writer.due(&state, 10));
+        assert!(!writer.stored(&id));
+        // A draft typed during the write waits for it, then 250 ms.
+        state.drafts.insert("thread".into(), Draft::default());
+        writer.observe(&state, 20);
+        assert_eq!(writer.next_due(), None);
+        assert!(!writer.due(&state, 300));
+        writer.written(true, 30);
+        assert!(writer.stored(&id));
+        assert_eq!(writer.next_due(), Some(20 + STATE_WRITE_DELAY_MS));
+    }
+
+    #[test]
+    fn a_failed_write_is_tried_again_and_restored_entries_are_stored() {
+        let mut state = Snapshot::default();
+        Arc::make_mut(&mut state.outbox).enqueue(queued("restored")).unwrap();
+        let mut writer = StateWriter::restored(&state);
+        assert!(writer.stored(&CommandId::new("restored").unwrap()));
+        state.follow_up = FollowUpBehavior::Steer;
+        writer.observe(&state, 0);
+        assert!(writer.due(&state, STATE_WRITE_DELAY_MS));
+        writer.written(false, 300);
+        assert!(writer.changed());
+        assert_eq!(writer.next_due(), Some(300 + STATE_RETRY_MS));
     }
 
     #[test]

@@ -1,5 +1,7 @@
 use agent_domain::{WorktreeSetupStageId, WorktreeSetupStageStatus};
-use agent_protocol::models::{ConversationSettings, Worktree, WorktreeSettings};
+use agent_protocol::models::{
+    ConversationSettings, ConversationSettingsPatch, Worktree, WorktreeSettings,
+};
 use agent_runtime::{SetupEvent, SetupProgress};
 use anyhow::{Context as _, Result, anyhow};
 use serde::{Deserialize, Serialize};
@@ -64,14 +66,16 @@ impl Worktrees {
     }
 
     /// Reads, or replaces and saves, the conversation settings.
+    /// The conversation settings, after merging `update` into them.
     pub(crate) async fn conversation_settings(
         &self,
-        update: Option<ConversationSettings>,
+        update: Option<ConversationSettingsPatch>,
     ) -> Result<ConversationSettings> {
         let settings = self
             .locked(move |path| {
                 let mut state = read(path)?;
-                if let Some(settings) = update {
+                if let Some(patch) = update {
+                    let settings = state.conversation.patched(&patch);
                     settings.validate().map_err(|error| anyhow!(error))?;
                     state.conversation = settings;
                     save(path, &state)?;
@@ -2712,15 +2716,26 @@ mod tests {
         let mut changed = defaults.clone();
         changed.auto_settle = AutoSettle::Never;
         changed.continue_after_restart = true;
-        store
-            .conversation_settings(Some(changed.clone()))
-            .await
-            .unwrap();
+        // Two devices change different settings from the same snapshot.
+        for patch in [
+            ConversationSettingsPatch {
+                auto_settle: Some(AutoSettle::Never),
+                ..Default::default()
+            },
+            ConversationSettingsPatch {
+                continue_after_restart: Some(true),
+                ..Default::default()
+            },
+        ] {
+            store.conversation_settings(Some(patch)).await.unwrap();
+        }
         assert_eq!(store.conversation(), changed);
         let reopened = Worktrees::new(&state);
         assert_eq!(reopened.conversation_settings(None).await.unwrap(), changed);
-        let mut invalid = changed.clone();
-        invalid.auto_settle = AutoSettle::AfterDays(91);
+        let invalid = ConversationSettingsPatch {
+            auto_settle: Some(AutoSettle::AfterDays(91)),
+            ..Default::default()
+        };
         assert!(store.conversation_settings(Some(invalid)).await.is_err());
         assert_eq!(store.conversation(), changed);
     }

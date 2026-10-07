@@ -135,25 +135,12 @@ fn pull_request(record: &Value) -> Option<&Value> {
     record.get("pullRequest").filter(|value| value.is_object())
 }
 
-fn legacy_pull_request_number(file_path: &str) -> Option<u64> {
-    file_path
-        .strip_prefix("PR #")
-        .filter(|digits| !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))
-        .and_then(|digits| digits.parse().ok())
-}
-
 pub fn is_pull_request_summary(record: &Value) -> bool {
     pull_request(record).is_some()
-        || (field(record, "sectionId").starts_with("pull-request:")
-            && field(record, "diff").trim().is_empty()
-            && legacy_pull_request_number(field(record, "filePath")).is_some())
 }
 
 fn pull_request_number(record: &Value) -> Option<u64> {
-    match pull_request(record) {
-        Some(pull) => pull.get("number").and_then(Value::as_u64),
-        None => legacy_pull_request_number(field(record, "filePath")),
-    }
+    pull_request(record)?.get("number").and_then(Value::as_u64)
 }
 
 /// `open`, `draft`, `merged` or `closed`, for a record with pull request metadata.
@@ -214,9 +201,7 @@ fn review_range_label(range: &str) -> String {
 
 /// `#42` for a pull request summary, else `<file> <range>`.
 pub fn review_comment_label(record: &Value) -> String {
-    if is_pull_request_summary(record)
-        && let Some(number) = pull_request_number(record)
-    {
+    if let Some(number) = pull_request_number(record) {
         return format!("#{number}");
     }
     let file_path = field(record, "filePath");

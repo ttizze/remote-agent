@@ -735,6 +735,12 @@ fn status(cwd: &Path) -> Result<VcsStatus> {
         else {
             continue;
         };
+        // A rename counts toward its new path.
+        let path = path.trim();
+        let path = match path.split_once(" => ") {
+            Some((_, renamed)) if !renamed.trim().is_empty() => renamed.trim(),
+            _ => path,
+        };
         let entry = totals.entry(path.to_owned()).or_default();
         entry.0 += added.parse::<u64>().unwrap_or(0);
         entry.1 += deleted.parse::<u64>().unwrap_or(0);

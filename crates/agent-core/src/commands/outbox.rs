@@ -172,6 +172,10 @@ pub enum Resolution {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Outbox {
     pub entries: Vec<PendingCommand>,
+    /// Messages of completed sends their thread does not show yet: the shell
+    /// can reach a send's sequence before the thread stream does.
+    #[serde(skip)]
+    acknowledged: Vec<PendingMessage>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -212,6 +216,15 @@ pub fn delivery_action(
     } else {
         DeliveryAction::Wait
     }
+}
+
+/// A committed entry whose stream reached its sequence.
+fn reached(entry: &PendingCommand, shell: Option<u64>, thread: impl Fn(&ThreadId) -> Option<u64>) -> bool {
+    let Some(sequence) = entry.committed_sequence() else {
+        return false;
+    };
+    shell.is_some_and(|cursor| cursor >= sequence)
+        || (entry.overlay.is_none() && thread(&entry.thread).is_some_and(|cursor| cursor >= sequence))
 }
 
 /// 1 s doubling to 16 s between attempts of a request that did not reach the Host.
@@ -351,26 +364,44 @@ impl Outbox {
         }
     }
 
+    /// Whether `complete` would remove an entry or forget an acknowledged message.
+    pub fn completes(
+        &self,
+        shell: Option<u64>,
+        thread: impl Fn(&ThreadId) -> Option<u64>,
+        shown: impl Fn(&PendingMessage) -> bool,
+    ) -> bool {
+        self.entries
+            .iter()
+            .any(|entry| reached(entry, shell, &thread))
+            || self.acknowledged.iter().any(shown)
+    }
+
     /// Removes committed entries whose change has arrived. A lifecycle preview
-    /// waits for the shell so the Host's row replaces it without a flash.
+    /// waits for the shell so the Host's row replaces it without a flash. A
+    /// removed message stays visible until its thread `shown` it.
     pub fn complete(
         &mut self,
         shell: Option<u64>,
         thread: impl Fn(&ThreadId) -> Option<u64>,
+        shown: impl Fn(&PendingMessage) -> bool,
     ) -> Vec<PendingCommand> {
-        let reached = |entry: &PendingCommand| {
-            let Some(sequence) = entry.committed_sequence() else {
-                return false;
-            };
-            shell.is_some_and(|cursor| cursor >= sequence)
-                || (entry.overlay.is_none()
-                    && thread(&entry.thread).is_some_and(|cursor| cursor >= sequence))
-        };
-        let (done, pending) = std::mem::take(&mut self.entries)
+        let (done, pending): (Vec<_>, _) = std::mem::take(&mut self.entries)
             .into_iter()
-            .partition(|entry| reached(entry));
+            .partition(|entry| reached(entry, shell, &thread));
         self.entries = pending;
+        for message in done.iter().filter_map(PendingCommand::message) {
+            if !self.acknowledged.iter().any(|kept| kept.id == message.id) {
+                self.acknowledged.push(message);
+            }
+        }
+        self.acknowledged.retain(|message| !shown(message));
         done
+    }
+
+    /// A deleted thread shows none of its messages.
+    pub fn thread_deleted(&mut self, thread: &ThreadId) {
+        self.acknowledged.retain(|message| &message.thread != thread);
     }
 
     /// The user stopped retrying a request that is not in flight.
@@ -417,10 +448,11 @@ impl Outbox {
         thread: &ThreadId,
         state: Option<&State>,
     ) -> Vec<PendingMessage> {
-        self.entries
-            .iter()
-            .filter(|entry| &entry.thread == thread)
-            .filter_map(PendingCommand::message)
+        let acknowledged = self.acknowledged.iter().cloned();
+        let pending = self.entries.iter().filter_map(PendingCommand::message);
+        acknowledged
+            .chain(pending)
+            .filter(|message| &message.thread == thread)
             .filter(|message| state.is_none_or(|state| state.message(&message.id).is_none()))
             .collect()
     }

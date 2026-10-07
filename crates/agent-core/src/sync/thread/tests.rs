@@ -2,7 +2,7 @@ use super::*;
 use crate::sync::cache::{ThreadCacheEntry, cached_thread};
 use crate::sync::fixtures::*;
 use agent_domain::{ItemKind, ItemStatus};
-use agent_protocol::conversation::ConversationError;
+use agent_protocol::conversation::{ConversationError, HistoryRow};
 use proptest::prelude::*;
 
 const CACHED: u64 = 7;
@@ -399,6 +399,18 @@ fn a_deletion_clears_the_data_and_its_pending_cache_write() {
 }
 
 #[test]
+fn a_snapshot_of_a_deleted_thread_deletes_the_cached_one() {
+    let (mut sync, _) = opened(cached("Cached thread", None, false, None));
+    let mut state = thread_state("Cached thread");
+    state.thread.as_mut().unwrap().deleted_at = Some(at());
+    let applied = sync.apply(vec![snapshot(state, 9, None), ThreadUpdate::Synchronized]);
+    assert!(applied.deleted);
+    assert_eq!(sync.status, ThreadStatus::Deleted);
+    assert!(sync.state.is_none());
+    assert_eq!(sync.cursor, 9);
+}
+
+#[test]
 fn preserves_data_after_a_domain_failure_and_resumes_on_a_replacement_session() {
     let (mut sync, _) = opened(cached("Cached thread", None, false, None));
     sync.apply(vec![snapshot(thread_state("Cached thread"), 1, None)]);
@@ -561,18 +573,10 @@ fn a_fact_touching_an_item_invalidates_its_loaded_detail() {
     done.status = ItemStatus::Completed;
     sync.apply(vec![facts(vec![(3, projected(done.clone()))])]);
     assert_eq!(sync.details.get(&item.id), None);
-    let row = HistoryRow {
-        position: 0,
-        source: thread_id(),
-        inherited: false,
-        item: done.clone(),
-        message: None,
-        plan: None,
-    };
-    sync.detail_loaded(&item.id, Some(row.clone()));
+    sync.detail_loaded(&item.id, Some(done.clone()));
     assert_eq!(sync.details.get(&item.id), None);
     assert!(sync.begin_detail(&item.id));
-    sync.detail_loaded(&item.id, Some(row));
+    sync.detail_loaded(&item.id, Some(done.clone()));
     assert_eq!(
         sync.details.get(&item.id),
         Some(&Detail::Loaded(Box::new(done)))

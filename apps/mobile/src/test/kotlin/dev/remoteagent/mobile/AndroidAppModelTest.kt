@@ -5,7 +5,6 @@ import dev.remoteagent.core.Snapshot
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.StandardTestDispatcher
-import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
@@ -31,7 +30,7 @@ class AndroidAppModelTest {
         val preferences = "saved model preferences".encodeToByteArray()
         repository.saveProfiles(listOf(HostProfile("fixture", "Fixture", "invalid-ticket")))
         repository.selected = "fixture"
-        repository.save("fixture", saved)
+        java.io.File(repository.stateFile("fixture")).writeBytes(saved)
         repository.saveModelPreferences(preferences)
         val model = AndroidAppModel(context)
         val viewModels = ViewModelStore().apply { put("fixture", model) }
@@ -50,11 +49,15 @@ class AndroidAppModelTest {
                 Thread.sleep(10)
             }
             assertEquals("recovered draft", model.snapshot.draft().text)
-            model.persist()
-            advanceTimeBy(300)
-            runCurrent()
-            Thread.sleep(100)
-            assertEquals("recovered draft", Snapshot.restore(repository.load("fixture")).draft().text)
+            model.background()
+            for (attempt in 0 until 200) {
+                runCurrent()
+                val state = java.io.File(repository.stateFile("fixture")).readBytes()
+                if (runCatching { Snapshot.restore(state).draft().text }.getOrNull() == "recovered draft") break
+                Thread.sleep(10)
+            }
+            val state = java.io.File(repository.stateFile("fixture")).readBytes()
+            assertEquals("recovered draft", Snapshot.restore(state).draft().text)
             assertEquals("fixture", repository.selected)
         } finally {
             viewModels.clear()

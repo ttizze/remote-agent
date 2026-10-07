@@ -122,16 +122,14 @@ final class BexAppViewModel: ObservableObject {
         let preparationStarted = ProcessInfo.processInfo.systemUptime
         async let previousClosed: Void? = try? old?.shutdown()
         do {
-            let bytes = try await SnapshotFiles.load(id)
-            let snapshotRead = ProcessInfo.processInfo.systemUptime - preparationStarted
             let owner = try await AgentStore.offline(
-                persisted: bytes,
+                stateFile: SnapshotFiles.stateFile(id),
+                modelDefaults: SnapshotFiles.modelDefaults(),
                 cacheDirectory: SnapshotFiles.cacheDirectory(id),
                 diagnosticsDirectory: SnapshotFiles.diagnosticsDirectory(id)
             )
             guard !Task.isCancelled, selectedProfileId == id else { try? await owner.shutdown(); return }
             store = owner
-            owner.recordConnectionEvent(phase: .snapshotRead, value: UInt64(snapshotRead * 1_000_000))
             owner.recordConnectionEvent(
                 phase: .appPreparation,
                 value: UInt64((ProcessInfo.processInfo.systemUptime - preparationStarted) * 1_000_000)
@@ -183,16 +181,16 @@ final class BexAppViewModel: ObservableObject {
                 do {
                     self?.persist()
                     await self?.persistenceWrite?.value
-                    let persisted = try await SnapshotFiles.load(id)
+                    // The new store reads the state the current one keeps for this Host.
+                    if self?.selectedProfileId == id { try? await self?.store?.flush() }
                     let owner = try await AgentStore.connect(connection: Connection(
                         ticket: invitation.endpoint,
                         identity: DeviceIdentity.loadOrGenerate(id),
                         invitation: invitation.invitation,
                         useRelays: true
-                    ), persisted: persisted, cacheDirectory: SnapshotFiles.cacheDirectory(id),
-                    diagnosticsDirectory: SnapshotFiles.diagnosticsDirectory(
-                        id
-                    ))
+                    ), stateFile: SnapshotFiles.stateFile(id), modelDefaults: SnapshotFiles.modelDefaults(),
+                    cacheDirectory: SnapshotFiles.cacheDirectory(id),
+                    diagnosticsDirectory: SnapshotFiles.diagnosticsDirectory(id))
                     guard let self, !Task.isCancelled else { try? await owner.shutdown(); return }
                     persist()
                     observation?.cancel()
@@ -357,23 +355,22 @@ extension BexAppViewModel {
         }
     }
 
+    /// Saves the model preferences every Host shares; the store writes its own state.
     func persist() {
-        guard let id = selectedProfileId, let owner = store else { return }
+        guard let owner = store else { return }
         let current = owner.snapshot()
         let previous = persistenceWrite
         persistenceWrite = Task { [weak self] in
             await previous?.value
             do {
-                try await SnapshotFiles.save(id, snapshot: current)
+                try await SnapshotFiles.saveModelPreferences(current)
             } catch { self?.notice = error.localizedDescription }
         }
     }
 
     func persistBeforeBackground() async {
-        for operation in Array(operations.values) {
-            await operation.value
-        }
         persist()
         await persistenceWrite?.value
+        try? await store?.flush()
     }
 }

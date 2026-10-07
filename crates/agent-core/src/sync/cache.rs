@@ -232,16 +232,11 @@ impl DiskCache {
         (stored.format == STATE_FORMAT).then_some(stored.value)
     }
     fn write<T: Serialize>(path: &Path, value: &T) -> io::Result<()> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
         let bytes = agent_protocol::protocol::encode(Stored {
             format: STATE_FORMAT,
             value,
         })?;
-        let temporary = path.with_extension("tmp");
-        std::fs::write(&temporary, bytes)?;
-        std::fs::rename(temporary, path)
+        crate::persistence::write_file(path, &bytes)
     }
     pub fn load_shell(&self) -> Option<ShellSnapshot> {
         Self::read(&self.shell_path())

@@ -13,7 +13,6 @@ import dev.remoteagent.core.Intent
 import dev.remoteagent.core.Invitation
 import dev.remoteagent.core.Outcome
 import dev.remoteagent.core.Snapshot
-import dev.remoteagent.core.applyModelPreferences
 import dev.remoteagent.core.generateIdentity
 import dev.remoteagent.core.parseInvitation
 import dev.remoteagent.core.validateInvitation
@@ -109,14 +108,11 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
     private var persistence: Job? = null
     private val pending = ArrayDeque<Pair<Intent, (Result<Outcome>) -> Unit>>()
     private val operations = mutableSetOf<Job>()
-    private val writes = Channel<Pair<String, Snapshot>>(PERSISTENCE_QUEUE_CAPACITY)
+    private val writes = Channel<Snapshot>(PERSISTENCE_QUEUE_CAPACITY)
     private val writer =
         scope.launch(Dispatchers.IO) {
-            for ((id, current) in writes) {
-                runCatching {
-                        repository.save(id, current.serializeLocalState())
-                        repository.saveModelPreferences(current.serializeModelPreferences())
-                    }
+            for (current in writes) {
+                runCatching { repository.saveModelPreferences(current.serializeModelPreferences()) }
                     .onFailure { error -> withContext(Dispatchers.Main) { notice = error.message } }
             }
         }
@@ -252,12 +248,13 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
         scope.launch { runCatching { old?.shutdown() } }
         initialization = scope.launch {
             try {
-                val bytes =
-                    withContext(Dispatchers.IO) {
-                        applyModelPreferences(repository.load(id), repository.modelPreferences())
-                    }
                 val store =
-                    AgentStore.offline(bytes, repository.cacheDirectory(id), repository.diagnosticsDirectory(id))
+                    AgentStore.offline(
+                        repository.stateFile(id),
+                        repository.modelPreferences(),
+                        repository.cacheDirectory(id),
+                        repository.diagnosticsDirectory(id),
+                    )
                 if (profileId != id || !isActive) {
                     store.shutdown()
                     return@launch
@@ -340,15 +337,14 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
                 val id = validateInvitation(target, (System.currentTimeMillis() / MILLIS_PER_SECOND).toULong())
                 val identity =
                     withContext(Dispatchers.IO) { AndroidCredentialStore(context, id).loadOrCreate(::generateIdentity) }
-                val bytes =
-                    withContext(Dispatchers.IO) {
-                        applyModelPreferences(repository.load(id), repository.modelPreferences())
-                    }
+                // The new store reads the state the current one keeps for this Host.
+                if (profileId == id) runCatching { owner?.flush() }
                 val store =
                     try {
                         AgentStore.connect(
                             Connection(target.endpoint, identity, target.invitation, true),
-                            bytes,
+                            repository.stateFile(id),
+                            repository.modelPreferences(),
                             repository.cacheDirectory(id),
                             repository.diagnosticsDirectory(id),
                         )
@@ -479,10 +475,17 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
         }
     }
 
+    /** Saves the model preferences every Host shares; the store writes its own state. */
     fun persist() {
-        val id = profileId ?: return
         val current = owner?.snapshot() ?: return
-        scope.launch { writes.send(id to current) }
+        scope.launch { writes.send(current) }
+    }
+
+    /** The app left the foreground: everything the store holds reaches storage. */
+    fun background() {
+        persist()
+        val store = owner ?: return
+        scope.launch { runCatching { store.flush() } }
     }
 
     private suspend fun <T> withStore(block: suspend (AgentStore) -> T): T {
@@ -514,7 +517,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
             operations.toList().joinAll()
             owner?.let { store ->
                 runCatching { store.shutdown() }
-                profileId?.let { writes.send(it to store.snapshot()) }
+                writes.send(store.snapshot())
             }
             writes.close()
             writer.join()

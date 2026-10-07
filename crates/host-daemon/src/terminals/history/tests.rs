@@ -349,3 +349,15 @@ fn a_finished_process_drops_its_unfinished_sequence() {
     assert!(history.record(b"le\x07"));
     assert_eq!(history.value(), "le\x07");
 }
+
+#[test]
+fn an_unterminated_control_sequence_is_kept_as_output_past_its_bound() {
+    let mut history = History::new(Limits::default(), "");
+    assert!(!history.record(b"\x1b]0;"));
+    let text = "x".repeat(MAX_UNFINISHED_CONTROL_BYTES);
+    assert!(history.record(text.as_bytes()));
+    assert!(history.control.is_empty());
+    assert_eq!(history.value(), format!("\x1b]0;{text}"));
+    assert!(history.record(b"more\x07"));
+    assert!(history.control.is_empty());
+}

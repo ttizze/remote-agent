@@ -5,7 +5,8 @@ use crate::projects::normalize_lexically;
 use agent_protocol::models::{ProjectFavicon, image_mime_type};
 use std::{
     collections::HashMap,
-    fs, io,
+    fs,
+    io::{self, Read},
     path::{Component, Path, PathBuf},
     sync::{LazyLock, Mutex},
     time::{Duration, Instant},
@@ -306,6 +307,9 @@ impl Resolver {
     }
 }
 
+/// Larger icon files are not read; the project shows its fallback icon.
+const MAX_SOURCE_BYTES: u64 = 4 * 1024 * 1024;
+
 static RESOLVER: LazyLock<Resolver> = LazyLock::new(|| Resolver::new(Instant::now));
 
 /// The project's icon, or `None` for the fallback icon.
@@ -356,7 +360,13 @@ fn read_with(
     let Some(file) = file.filter(|file| file.is_file()) else {
         return Ok(None);
     };
-    let bytes = fs::read(&file)?;
+    let mut bytes = vec![];
+    fs::File::open(&file)?
+        .take(MAX_SOURCE_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_SOURCE_BYTES {
+        return Ok(None);
+    }
     let hash: String = ring::digest::digest(&ring::digest::SHA256, &bytes)
         .as_ref()
         .iter()
