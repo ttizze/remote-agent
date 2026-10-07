@@ -510,8 +510,13 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
         scope.launch { writes.send(current) }
     }
 
+    /** Counts the app's moves to the background, which end a dictation. */
+    var backgrounds by mutableIntStateOf(0)
+        private set
+
     /** The app left the foreground: everything the store holds reaches storage. */
     fun background() {
+        backgrounds += 1
         persist()
         val store = owner ?: return
         scope.launch { runCatching { store.flush() } }
@@ -527,15 +532,6 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
 
     /** Warms the Host's transcription while a recording runs; dropping it cancels. */
     fun prepareDictation(): DictationPreparation? = owner?.prepareDictation()
-
-    /** Counts the app's moves to the background, which end a dictation. */
-    var backgrounds by mutableIntStateOf(0)
-        private set
-
-    fun background() {
-        backgrounds += 1
-        persist()
-    }
 
     suspend fun downloadBytes(path: String): ByteArray {
         val temporary = File.createTempFile("markdown-", ".image", context.cacheDir)

@@ -105,14 +105,16 @@ internal fun WorkspaceScreen(model: AndroidAppModel, tab: WorkspaceTab, file: St
 @Composable
 // Declarative native layout; the conversation decisions are supplied by core.
 @Suppress("LongMethod", "CyclomaticComplexMethod")
-private fun WorkspaceFiles(model: AndroidAppModel, file: String?, line: ULong?, modifier: Modifier) {
+private fun WorkspaceFiles(model: AndroidAppModel, linkedFile: String?, line: ULong?, modifier: Modifier) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    var directory by remember { mutableStateOf(file?.let { File(it).parent } ?: model.snapshot.currentDirectory()) }
+    var directory by remember {
+        mutableStateOf(linkedFile?.let { File(it).parent } ?: model.snapshot.currentDirectory())
+    }
     var path by remember { mutableStateOf(directory) }
     // A linked file opens over its folder.
-    var selected by remember { mutableStateOf(file?.let { FileEntry(File(it).name, it, false, 0uL) }) }
-    LaunchedEffect(file) { file?.let { model.perform(Intent.ReadFile(it, false)) } }
+    var selected by remember { mutableStateOf(linkedFile?.let { FileEntry(File(it).name, it, false, 0uL) }) }
+    LaunchedEffect(linkedFile) { linkedFile?.let { model.perform(Intent.ReadFile(it, false)) } }
     var error by remember { mutableStateOf<String?>(null) }
     var downloading by remember { mutableStateOf<Pair<String, String?>?>(null) }
     val download =
@@ -241,7 +243,7 @@ private fun WorkspaceFiles(model: AndroidAppModel, file: String?, line: ULong?, 
                         if (pending == null && file != null) text = model.snapshot.fileDraft(entry.path) ?: file.text
                     }
                     if (file == null) CircularProgressIndicator()
-                    else if (line != null && entry.path == file) {
+                    else if (line != null && entry.path == linkedFile) {
                         val lines = text.split('\n')
                         val scroll = androidx.compose.foundation.lazy.rememberLazyListState()
                         LaunchedEffect(file, line, lines.size) {

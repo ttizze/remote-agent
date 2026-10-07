@@ -215,7 +215,7 @@ internal fun ArrangeSheet(model: AndroidAppModel, onDismiss: () -> Unit) {
                                     }
                                 is ArrangementRowKind.Thread ->
                                     ThreadRow(
-                                        view.locked,
+                                        view?.locked ?: true,
                                         model,
                                         row.section,
                                         kind,
