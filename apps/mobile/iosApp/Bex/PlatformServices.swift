@@ -18,6 +18,12 @@ enum SnapshotFiles {
         return directory.appendingPathComponent(name).appendingPathExtension("json")
     }
 
+    static func cacheDirectory(_ host: String) throws -> String {
+        let directory = try location(host).deletingPathExtension().appendingPathExtension("cache")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        return directory.path
+    }
+
     static func diagnosticsDirectory(_ host: String) throws -> String {
         try location(host).deletingPathExtension().appendingPathExtension("diagnostics").path
     }

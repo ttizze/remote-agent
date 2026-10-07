@@ -24,12 +24,13 @@ use crate::view::{
     search::{SearchOptions, SearchView, search_view},
     settings::{SettingsScope, SettingsView, settings_view},
     sidebar::{SidebarOptions, SidebarThreadDropPlan, SidebarView, plan_sidebar_drop, sidebar},
-    snooze::{SnoozePreset, resolve_snooze_presets},
+    snooze::{CustomSnoozeInput, SnoozePreset, resolve_custom_snooze, resolve_snooze_presets},
     terminals::{TerminalTab, TerminalView, terminal_tabs, terminal_view},
     thread::{ThreadView, ThreadViewOptions, selected_thread_view, thread_view},
     thread_list::{ThreadListHolds, ThreadListOptions, ThreadListView, thread_list},
     thread_menu::{ThreadMenuOptions, ThreadMenuView, thread_menu},
     time::TimestampFormat,
+    timeline::mobile_follow::LiveFollowEvent,
     timeline::rows::{TimelineRow, TimelineUpdate},
 };
 use agent_domain::ThreadId;
@@ -249,12 +250,25 @@ impl Snapshot {
     pub fn conversation_settings_loaded(&self) -> bool {
         self.conversation_settings.is_some()
     }
+    /// The files of one draft, such as a question answer's.
+    pub fn draft_attachments(&self, draft_key: String) -> Vec<DraftAttachment> {
+        self.drafts
+            .get(&draft_key)
+            .map(|draft| draft.attachments.clone())
+            .unwrap_or_default()
+    }
 }
 
 /// How to bring a list showing `previous` rows to `next`.
 #[uniffi::export]
 pub fn timeline_update(previous: Vec<TimelineRow>, next: Vec<TimelineRow>) -> TimelineUpdate {
     crate::view::timeline::rows::timeline_update(&previous, &next)
+}
+
+/// Whether the mobile feed keeps following its end after `event`.
+#[uniffi::export]
+pub fn feed_live_follow(current: bool, event: LiveFollowEvent) -> bool {
+    crate::view::timeline::mobile_follow::feed_live_follow(current, event)
 }
 
 /// The draft key holding the files attached to one question's answer.
@@ -281,4 +295,14 @@ pub fn snooze_presets(now_ms: i64, format: TimestampFormat) -> Vec<SnoozePreset>
         .single()
         .map(|now| resolve_snooze_presets(&now, format))
         .unwrap_or_default()
+}
+
+/// The wake time of a custom snooze at `now_ms` in the device's time zone;
+/// `None` for invalid or past input.
+#[uniffi::export]
+pub fn custom_snooze(now_ms: i64, input: CustomSnoozeInput) -> Option<String> {
+    Local
+        .timestamp_millis_opt(now_ms)
+        .single()
+        .and_then(|now| resolve_custom_snooze(&input, &now))
 }

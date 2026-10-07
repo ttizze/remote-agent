@@ -6,87 +6,34 @@ struct BexSwiftUIRoot: View {
     @ObservedObject var model: BexAppViewModel
 
     var body: some View {
-        BexScreen(model: model)
-            .alert(
-                "Delete thread?",
-                isPresented: Binding(
-                    get: { model.deleteThreadId != nil },
-                    set: {
-                        if !$0 {
-                            model.deleteThreadId = nil
-                        }
-                    }
-                )
-            ) {
-                Button("Delete", role: .destructive) {
-                    if let id = model.deleteThreadId {
-                        let wasOpen = model.selectedThreadId == id
-                        model.perform(.thread(threadId: id, action: .delete)) { result in
-                            if case .success = result, model.screen == .thread, wasOpen,
-                               model.selectedThreadId == id || model.selectedThreadId == nil {
-                                model.showThreadList()
-                            }
-                        }
-                    }
-                    model.deleteThreadId = nil
-                }
-                Button("Cancel", role: .cancel) { model.deleteThreadId = nil }
-            } message: { Text("This permanently deletes the conversation.") }
-            .sheet(isPresented: $model.isScanning) {
-                BexQrScannerSheet { model.scanned($0) }
-                    .interactiveDismissDisabled()
-            }
-    }
-}
-
-private struct BexScreen: View {
-    @ObservedObject var model: BexAppViewModel
-    var body: some View {
-        NavigationStack(path: Binding<[AppScreen]>(
-            get: {
-                switch model.screen {
-                case .thread: [.threads, .thread]
-                case .threads: [.threads]
-                default: []
-                }
-            },
-            set: { path in
-                if path.last == .threads, model.screen == .thread {
-                    model.showThreadList()
-                } else if path.isEmpty, model.screen == .threads || model.screen == .thread {
-                    model.showProfiles()
-                }
-            }
-        )) {
-            Group {
-                if model.profiles.isEmpty {
-                    pairingScreen
-                } else {
+        Group {
+            if model.profiles.isEmpty || model.screen == .pairing && model.profiles.isEmpty {
+                NavigationStack { pairingScreen }
+            } else if model.screen == .profiles || model.screen == .pairing {
+                NavigationStack {
                     ProfilesScreen(profiles: model.profiles, notice: model.notice,
                                    select: model.selectProfile, remove: model.removeProfile, add: model.openPairing)
-                        .sheet(isPresented: Binding(
-                            get: { model.screen == .pairing },
-                            set: {
-                                if !$0, model.screen == .pairing {
-                                    model.dismissPairing()
-                                }
-                            }
-                        )) {
-                            NavigationStack { pairingScreen }
+                }
+                .sheet(isPresented: Binding(
+                    get: { model.screen == .pairing },
+                    set: {
+                        if !$0, model.screen == .pairing {
+                            model.dismissPairing()
                         }
+                    }
+                )) {
+                    NavigationStack { pairingScreen }
                 }
+            } else {
+                WorkspaceRoot(model: model)
             }
-            .navigationDestination(for: AppScreen.self) { screen in
-                switch screen {
-                case .threads: ThreadsScreen(model: model)
-                case .thread: ConversationDestination(model: model)
-                default: EmptyView()
-                }
-            }
-            .navigationBarTitleDisplayMode(.inline)
         }
-        .preferredColorScheme(.dark)
-        .tint(AppTheme.color("mobilePrimaryText")).font(AppTheme.font()).background(AppTheme.color("canvas"))
+        .tint(AppTheme.color("mobilePrimaryText"))
+        .font(AppTheme.font())
+        .sheet(isPresented: $model.isScanning) {
+            QRScannerSheet { model.scanned($0) }
+                .interactiveDismissDisabled()
+        }
     }
 
     private var pairingScreen: some View {
@@ -101,286 +48,123 @@ private struct BexScreen: View {
     }
 }
 
-private struct PairingScreen: View {
-    let canCancel: Bool
-    let connecting: Bool
-    let error: String?
-    let scan: () -> Void
-    let hostName: String?
-    let aiRecipients: [String]
-    let transcriptionRecipient: String?
-    let prepare: (String) -> Void
-    let confirm: () -> Void
-    let change: () -> Void
-    let cancel: () -> Void
-    @State private var contents = ""
-    @State private var showsManualPairing = false
-    @FocusState private var editingContents: Bool
+/// Screens pushed over a thread.
+enum ThreadRoute: Hashable {
+    case thread
+    case terminal(String?, UUID)
+    case files
+    case review
+}
+
+/// The thread list and the open thread: a stack on phones, side by side when
+/// the window is at least 720 by 600.
+private struct WorkspaceRoot: View {
+    @ObservedObject var model: BexAppViewModel
+    @State private var routes: [ThreadRoute] = []
+    @State private var showingSettings = false
+    @State private var showingNewTask = false
+    @State private var returnThread: String?
 
     var body: some View {
         GeometryReader { geometry in
-            ScrollView {
-                VStack(spacing: hostName == nil ? 16 : 12) {
-                    if hostName == nil {
-                        Spacer(minLength: 0)
-                    }
-                    VStack(spacing: hostName == nil ? 18 : 8) {
-                        Image(systemName: "text.bubble")
-                            .font(.system(size: hostName == nil ? 36 : 24, weight: .medium))
-                            .foregroundStyle(Color.accentColor)
-                            .frame(width: hostName == nil ? 72 : 32, height: hostName == nil ? 72 : 32)
-                            .background(AppTheme.color("surface"))
-                            .clipShape(RoundedRectangle(cornerRadius: 28))
-                        Text("どこでも、\nこれひとつで。")
-                            .font(.system(size: hostName == nil ? 34 : 28, weight: .bold))
-                            .accessibilityIdentifier("pairing.welcome")
-                        Text("AIとの会話も、ファイルも、ターミナルも。\nいつもの作業を、手元から。")
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-                    }
-                    .multilineTextAlignment(.center)
-                    if hostName == nil {
-                        Spacer(minLength: 0)
-                    }
-                    if let hostName {
-                        VStack(alignment: .leading, spacing: 6) {
-                            HStack(spacing: 16) {
-                                Image(systemName: "laptopcomputer").font(.system(size: 28))
-                                VStack(alignment: .leading, spacing: 4) {
-                                    Text("接続先").font(.caption).foregroundStyle(.secondary)
-                                    Text(hostName).font(.headline)
-                                        .accessibilityIdentifier("pairing.host")
-                                }
-                                Spacer()
-                                Button("変更") {
-                                    contents = ""
-                                    showsManualPairing = false
-                                    change()
-                                }
-                                .disabled(connecting)
-                                .accessibilityIdentifier("pairing.change")
-                            }
-                            Divider()
-                            Text("送信する内容").font(.subheadline.bold())
-                            Text("メッセージ・添付ファイル・作業に必要なプロジェクトの内容を、このPCと利用するAIサービスに送信します。")
-                                .foregroundStyle(.secondary)
-                            Divider()
-                            Text("このPCの送信先").font(.subheadline.bold())
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text("AI処理：" +
-                                    (aiRecipients.isEmpty ? "未設定" : aiRecipients
-                                        .joined(separator: "、")))
-                                    .accessibilityIdentifier("pairing.recipients")
-                                if let recipient = transcriptionRecipient {
-                                    Text("音声入力：\(recipient)（文字起こし）")
-                                }
-                            }
-                            .foregroundStyle(.secondary)
-                            Divider()
-                            Text("共有PCでは、管理者などが内容を閲覧できる場合があります。")
-                                .foregroundStyle(.secondary)
+            let split = geometry.size.width >= 720 && geometry.size.height >= 600
+            Group {
+                if split {
+                    HStack(spacing: 0) {
+                        NavigationStack { list(sidebar: true) }
+                            .frame(width: min(380, max(280, (geometry.size.width * 0.32).rounded())))
+                        Rectangle().fill(AppTheme.border).frame(width: 1).ignoresSafeArea()
+                        NavigationStack(path: $routes) {
+                            detail.navigationDestination(for: ThreadRoute.self, destination: destination)
                         }
-                        .font(.footnote)
-                        .padding(16)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(AppTheme.color("surface"))
-                        .clipShape(RoundedRectangle(cornerRadius: 20))
-                    } else {
-                        VStack(spacing: 16) {
-                            Image(systemName: "laptopcomputer")
-                                .font(.system(size: 36)).foregroundStyle(.secondary)
-                            Text("まずはPCとつなぐ").font(.title3.bold())
-                            Text("PCでBexを開き、表示されたQRコードを読み取ってください。")
-                                .font(.subheadline).foregroundStyle(.secondary)
-                                .multilineTextAlignment(.center)
-                            Button(action: scan) {
-                                Label("QRコードを読み取る", systemImage: "qrcode.viewfinder")
-                                    .font(.headline)
-                                    .frame(maxWidth: .infinity, minHeight: 24)
-                            }
-                            .buttonStyle(.borderedProminent)
-                            .controlSize(.large)
-                            .accessibilityIdentifier("pairing.scan")
-                            Button("接続情報を入力") { showsManualPairing.toggle() }
-                                .accessibilityIdentifier("pairing.manual")
-                            if showsManualPairing {
-                                SecureField("接続情報を貼り付け", text: $contents)
-                                    .focused($editingContents)
-                                    .font(.system(.footnote, design: .monospaced))
-                                    .frame(minHeight: 44)
-                                    .textFieldStyle(.roundedBorder)
-                                    .accessibilityIdentifier("pairing.contents")
-                                Button("接続先を確認") {
-                                    editingContents = false
-                                    prepare(contents)
-                                    contents = ""
-                                }
-                                .buttonStyle(.bordered)
-                                .disabled(contents.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                                .accessibilityIdentifier("pairing.submit")
-                            }
-                        }
-                        .padding(16)
-                        .background(AppTheme.color("surface"))
-                        .clipShape(RoundedRectangle(cornerRadius: 20))
                     }
-                    if connecting {
-                        ProgressView("接続中…").accessibilityIdentifier("pairing.progress")
-                    } else if let error {
-                        BexNotice(text: error)
+                } else {
+                    NavigationStack(path: compactPath) {
+                        list(sidebar: false).navigationDestination(for: ThreadRoute.self, destination: destination)
                     }
-                    PrivacyPolicyButton()
-                        .font(.footnote)
-                        .tint(.secondary)
-                    if hostName != nil {
-                        Button(action: confirm) {
-                            Text("同意して接続")
-                                .font(.headline)
-                                .frame(maxWidth: .infinity, minHeight: 24)
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .controlSize(.large)
-                        .disabled(connecting)
-                        .accessibilityIdentifier("pairing.confirm")
-                    }
-                }
-                .padding(.horizontal, 24)
-                .padding(.vertical, 16)
-                .frame(minHeight: geometry.size.height)
-            }
-            .scrollDismissesKeyboard(.interactively)
-        }
-        .background(AppTheme.color("canvas").ignoresSafeArea())
-        .navigationTitle("Bex")
-        .toolbar {
-            ToolbarItem(placement: .cancellationAction) {
-                if canCancel {
-                    Button("キャンセル", action: cancel)
-                        .accessibilityIdentifier("pairing.cancel")
                 }
             }
         }
+        .sheet(isPresented: $showingSettings) { SettingsScreen(model: model) }
+        .sheet(isPresented: $showingNewTask, onDismiss: restoreThread) {
+            NewTaskFlow(model: model) { _ in
+                returnThread = nil
+                routes = []
+                model.screen = .thread
+            }
+            .presentationDetents([.fraction(0.92)])
+        }
+        .onChange(of: model.selectedThreadId) { _, _ in routes = [] }
     }
-}
 
-private struct ProfilesScreen: View {
-    let profiles: [HostProfile]
-    let notice: String?
-    let select: (String) -> Void
-    let remove: (String) -> Void
-    let add: () -> Void
-    @State private var removing: HostProfile?
-
-    var body: some View {
-        GeometryReader { geometry in
-            ScrollView {
-                VStack(alignment: .leading, spacing: 24) {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("接続するPC").font(.largeTitle.bold())
-                        Text("いつもの作業を、ここから。")
-                            .foregroundStyle(.secondary)
-                    }
-                    .padding(.vertical, 20)
-                    if let notice {
-                        BexNotice(text: notice)
-                    }
-                    ForEach(profiles, id: \.id) { profile in
-                        Button { select(profile.id) } label: {
-                            HStack(spacing: 16) {
-                                Image(systemName: "laptopcomputer")
-                                    .font(.system(size: 30)).foregroundStyle(.secondary)
-                                VStack(alignment: .leading, spacing: 6) {
-                                    Text(profile.name).font(.headline)
-                                    Text("登録済みのPC").font(.subheadline).foregroundStyle(.secondary)
-                                }
-                                Spacer()
-                                Image(systemName: "chevron.right").foregroundStyle(.secondary)
-                            }
-                            .padding(20)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(AppTheme.color("surface"))
-                            .clipShape(RoundedRectangle(cornerRadius: 18))
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityIdentifier("profiles.\(profile.id)")
-                        .contextMenu {
-                            Button("接続を解除", role: .destructive) { removing = profile }
-                                .accessibilityIdentifier("connection.remove.\(profile.id)")
-                        }
-                    }
-                    Button(action: add) {
-                        Label("PCを追加", systemImage: "plus")
-                            .font(.headline)
-                            .frame(maxWidth: .infinity, minHeight: 52)
-                            .overlay(RoundedRectangle(cornerRadius: 16).stroke(Color.accentColor))
-                    }
-                    .accessibilityIdentifier("profiles.add")
-                    Spacer(minLength: 32)
-                    PrivacyPolicyButton()
-                        .font(.footnote).tint(.secondary)
-                        .frame(maxWidth: .infinity)
-                }
-                .padding(24)
-                .frame(minHeight: geometry.size.height, alignment: .top)
-            }
-        }
-        .background(AppTheme.color("canvas").ignoresSafeArea())
-        .safeAreaInset(edge: .top, spacing: 0) {
-            SettingsScopeBar { Text("すべてのプロジェクト") } environment: { Text("このiPhone") }
-        }
-        .navigationTitle("Bex")
-        .alert("このPCとの接続を解除しますか？", isPresented: Binding(
-            get: { removing != nil }, set: {
-                if !$0 {
-                    removing = nil
-                }
-            }
-        )) {
-            if let removing {
-                Button("接続を解除", role: .destructive) { remove(removing.id) }
-            }
-            Button("キャンセル", role: .cancel) { removing = nil }
-        } message: {
-            Text("このiPhoneの接続先と認証鍵を削除します。再接続にはペアリングが必要です。")
-        }
+    private func list(sidebar: Bool) -> some View {
+        ThreadListScreen(model: model, sidebar: sidebar, openSettings: { showingSettings = true }, newTask: newTask)
     }
-}
 
-struct BexNotice: View {
-    let text: String
-
-    var body: some View {
-        Text(text)
-            .foregroundColor(AppTheme.color("errorForeground"))
-            .accessibilityIdentifier("notice")
-    }
-}
-
-private struct BexQrScannerSheet: View {
-    let completion: (String?) -> Void
-
-    var body: some View {
-        NavigationStack {
-            BexQrScannerController(completion: completion)
-                .navigationTitle("QRコードを読み取る")
-                .navigationBarTitleDisplayMode(.inline)
+    @ViewBuilder
+    private var detail: some View {
+        if model.screen == .thread, model.selectedThreadId != nil {
+            threadScreen
+        } else {
+            Color.clear
+                .background(AppTheme.screen.ignoresSafeArea())
                 .toolbar {
-                    ToolbarItem(placement: .cancellationAction) {
-                        Button("キャンセル") { completion(nil) }
-                            .accessibilityIdentifier("scanner.cancel")
+                    ToolbarItem(placement: .topBarLeading) {
+                        Button(action: newTask) { Image(systemName: "square.and.pencil") }
+                            .accessibilityLabel("New task")
                     }
                 }
         }
-        .accessibilityIdentifier("scanner.sheet")
-    }
-}
-
-private struct BexQrScannerController: UIViewControllerRepresentable {
-    let completion: (String?) -> Void
-
-    func makeUIViewController(context _: Context) -> BexQrCaptureViewController {
-        BexQrCaptureViewController(completion: completion)
     }
 
-    func updateUIViewController(_: BexQrCaptureViewController, context _: Context) {}
+    private var threadScreen: some View {
+        ThreadScreen(model: model, routes: ThreadRoutes(
+            terminal: { routes.append(.terminal($0, UUID())) },
+            files: { routes.append(.files) },
+            review: { routes.append(.review) }
+        ))
+    }
+
+    private var compactPath: Binding<[ThreadRoute]> {
+        Binding(
+            get: { model.screen == .thread ? [.thread] + routes : [] },
+            set: { path in
+                if path.isEmpty, model.screen == .thread {
+                    routes = []
+                    model.showThreadList()
+                } else {
+                    routes = Array(path.dropFirst())
+                }
+            }
+        )
+    }
+
+    @ViewBuilder
+    private func destination(_ route: ThreadRoute) -> some View {
+        switch route {
+        case .thread:
+            threadScreen
+        case let .terminal(terminal, _):
+            if let thread = model.selectedThreadId {
+                TerminalScreen(model: model, threadId: thread, terminalId: terminal)
+            }
+        case .files:
+            WorkspaceToolsScreen(model: model) { routes.removeAll { $0 == .files } }
+        case .review:
+            ReviewScreen(model: model)
+        }
+    }
+
+    private func newTask() {
+        returnThread = model.selectedThreadId
+        showingNewTask = true
+    }
+
+    /// Leaving the new task without starting one reopens the thread it left.
+    private func restoreThread() {
+        if let thread = returnThread, model.selectedThreadId == nil {
+            model.openThread(thread)
+        }
+        returnThread = nil
+    }
 }

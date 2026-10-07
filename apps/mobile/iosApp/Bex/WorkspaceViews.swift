@@ -64,62 +64,17 @@ private struct WorkspaceNavigation: UIViewControllerRepresentable {
 struct WorkspaceScreen: View {
     @ObservedObject var model: BexAppViewModel
     let root: String
-    @Binding var showingDiff: Bool
     let close: () -> Void
-    @State private var diffSelection: TurnDiffOption?
 
     var body: some View {
-        VStack(spacing: 0) {
-            Picker("表示", selection: $showingDiff) {
-                Text("変更済み").tag(true).accessibilityIdentifier("files.diff")
-                Text("すべてのファイル").tag(false).accessibilityIdentifier("files.all")
-            }
-            .pickerStyle(.segmented).padding(.horizontal).padding(.bottom)
-            Divider()
-            if showingDiff {
-                HStack {
-                    Menu(diffSelection?.label ?? "Workspace changes") {
-                        Button("Workspace changes") { diffSelection = nil }
-                        ForEach(model.snapshot.turnDiffOptions(), id: \.label) { option in
-                            Button(option.label) { diffSelection = option }
-                        }
-                    }
-                    Spacer()
-                }.padding()
-                WorkspaceDiffScreen { complete in
-                    let intent = diffSelection.map { Intent.readTurnDiff(
-                        fromTurnCount: $0.fromTurnCount,
-                        toTurnCount: $0.toTurnCount,
-                        ignoreWhitespace: false
-                    ) } ?? .reviewWorkspace(cwd: root)
-                    request(intent) { snapshot, result in
-                        if case let .failure(failure) = result {
-                            complete(.failure(failure))
-                        } else if let review = snapshot.review() {
-                            Task {
-                                let files = await Task.detached(priority: .userInitiated) { review.diffFiles() }.value
-                                complete(.success(files))
-                            }
-                        } else {
-                            complete(.failure(NSError(domain: "BexWorkspace", code: 1,
-                                                      userInfo: [
-                                                          NSLocalizedDescriptionKey: "差分を取得できませんでした。再試行してください。"
-                                                      ])))
-                        }
-                    }
-                }
-                .id(diffSelection.map { "\($0.fromTurnCount):\($0.toTurnCount)" } ?? "workspace")
-            } else {
-                WorkspaceNavigation(root: root) { directory, openDirectory in
-                    WorkspaceDirectoryScreen(snapshot: model.snapshot, directory: directory,
-                                             perform: request, fileDraft: fileDraft,
-                                             downloadFile: model.download,
-                                             aiEdit: { model.draft = "このファイルを編集してください: \($0)\n変更内容: " },
-                                             close: close, openDirectory: openDirectory)
-                }
-            }
+        WorkspaceNavigation(root: root) { directory, openDirectory in
+            WorkspaceDirectoryScreen(snapshot: model.snapshot, directory: directory,
+                                     perform: request, fileDraft: fileDraft,
+                                     downloadFile: model.download,
+                                     aiEdit: { model.draft = "このファイルを編集してください: \($0)\n変更内容: " },
+                                     close: close, openDirectory: openDirectory)
         }
-        .background(AppTheme.color("canvas"))
+        .background(AppTheme.screen)
     }
 
     private func request(_ intent: Intent, completion: @escaping (AgentCore.Snapshot, Result<Outcome, Error>) -> Void) {
@@ -156,7 +111,7 @@ private struct WorkspaceDirectoryScreen: View {
     var body: some View {
         VStack(spacing: 0) {
             if let error {
-                BexNotice(text: error).padding()
+                NoticeText(text: error).padding()
             }
             if busy {
                 ProgressView().padding()
@@ -253,101 +208,5 @@ private struct WorkspaceDirectoryScreen: View {
             try? FileManager.default.removeItem(at: directory)
         }
         sharedFile = nil
-    }
-}
-
-private struct WorkspaceDiffScreen: View {
-    let load: (@escaping (Result<[WorkspaceDiffFile], Error>) -> Void) -> Void
-    @State private var files: [WorkspaceDiffFile] = []
-    @State private var error: String?
-    @State private var busy = true
-
-    var body: some View {
-        Group {
-            if busy {
-                ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if let error {
-                VStack {
-                    BexNotice(text: error).padding()
-                    Button("再試行", action: loadDiff).accessibilityIdentifier("files.diff.retry")
-                }.frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if files.isEmpty {
-                Text("変更はありません").foregroundColor(.secondary)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                ScrollView {
-                    LazyVStack(spacing: 16) {
-                        ForEach(files, id: \.path) { file in
-                            WorkspaceDiffCard(file: file)
-                        }
-                    }.padding(12)
-                }
-            }
-        }
-        .onAppear(perform: loadDiff)
-    }
-
-    private func loadDiff() {
-        busy = true; error = nil
-        load { result in
-            busy = false
-            switch result {
-            case let .success(result): files = result
-            case let .failure(failure): error = failure.localizedDescription
-            }
-        }
-    }
-}
-
-private struct WorkspaceDiffCard: View {
-    let file: WorkspaceDiffFile
-    @State private var expanded = true
-
-    var body: some View {
-        LazyVStack(spacing: 0) {
-            Button { expanded.toggle() } label: {
-                HStack(alignment: .top, spacing: 8) {
-                    Image(systemName: expanded ? "chevron.down" : "chevron.right")
-                    Text(file.path).fontWeight(.semibold).frame(maxWidth: .infinity, alignment: .leading)
-                    if let additions = file.additions {
-                        Text("+\(additions)").foregroundColor(AppTheme.color("successForeground"))
-                    }
-                    if let deletions = file.deletions {
-                        Text("−\(deletions)").foregroundColor(AppTheme.color("errorForeground"))
-                    }
-                }.font(.subheadline).padding(12).contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityIdentifier("diff.file.\(file.path)")
-            .background(AppTheme.color("mobileGroupedCard"))
-            if expanded {
-                if file.rows.isEmpty {
-                    Text("テキスト差分はありません").font(.caption).foregroundColor(.secondary).padding()
-                }
-                ForEach(file.rows.indices, id: \.self) { index in
-                    let row = file.rows[index]
-                    HStack(alignment: .top, spacing: 0) {
-                        if row.kind == "+" || row.kind == "-" || row.kind == " " {
-                            Text((row.new ?? row.old).map(String.init) ?? "")
-                                .foregroundColor(.secondary).frame(width: 40, alignment: .trailing).padding(
-                                    .trailing,
-                                    8
-                                )
-                        }
-                        Text(row.text.isEmpty ? " " : row.text)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .textSelection(.enabled)
-                    }
-                    .font(.system(.footnote, design: .monospaced))
-                    .padding(.vertical, 3).padding(.horizontal, 8)
-                    .background(row.kind == "+" ? AppTheme.color("successForeground").opacity(0.18) :
-                        row.kind == "-" ? AppTheme.color("errorForeground").opacity(0.18) :
-                        row.kind == "@" ? Color.secondary.opacity(0.12) : Color.clear)
-                }
-            }
-        }
-        .background(AppTheme.color("surface"))
-        .clipShape(RoundedRectangle(cornerRadius: 12))
     }
 }
