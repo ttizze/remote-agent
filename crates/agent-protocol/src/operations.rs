@@ -499,7 +499,7 @@ pub struct ReadAccountUsage {
     pub id: String,
 }
 
-/// The prefix of every terminal handle of a thread.
+/// The prefix every terminal of a thread shares; the Host's cleanup matches it.
 pub fn thread_terminal_handle(thread: &str) -> String {
     format!("terminal:{thread}")
 }
@@ -582,5 +582,12 @@ mod terminal_tests {
             .unwrap(),
             json!({"processHandle": "terminal:thread-1:term-1", "deleteHistory": true})
         );
+    }
+
+    #[test]
+    fn a_thread_terminal_handle_extends_the_thread_prefix_with_its_id() {
+        let handle = thread_terminal_handle_for("thread:1", "setup-install");
+        assert_eq!(handle, "terminal:thread:1:setup-install");
+        assert!(handle.starts_with(&format!("{}:", thread_terminal_handle("thread:1"))));
     }
 }

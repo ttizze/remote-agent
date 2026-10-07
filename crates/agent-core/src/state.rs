@@ -1,54 +1,151 @@
-//! Device state. The Host owns conversation decisions and the domain log.
-use orchestration::*;
+//! Device state published to native views. The Host owns conversation
+//! decisions; this holds what the device folded, sent and is editing.
+use crate::commands::build::FollowUpBehavior;
+use crate::commands::outbox::Outbox;
+use crate::sync::{ShellCache, ShellStatus, ThreadSync};
+use agent_domain::{
+    Attachment, AttachmentKind, CheckpointId, Driver, InteractionMode, MessageContext,
+    ModelSelection, RunId, RuntimeMode, State, ThreadId, ThreadShell, WorktreeSetupSnapshot,
+};
+use agent_protocol::conversation::{SearchMatch, ShellLocation, ShellSnapshot};
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    borrow::Cow,
+    collections::BTreeMap,
+    ops::{Deref, DerefMut},
+    sync::Arc,
+};
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+mod device;
+pub use device::*;
+
+/// The project a new thread uses when none is chosen.
+pub const CHATS_PROJECT: &str = "chats";
+
+/// Copy-on-write storage shared between published snapshots.
+#[derive(Debug, PartialEq)]
+pub struct Shared<T>(Arc<T>);
+impl<T> Clone for Shared<T> {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+impl<T: Default> Default for Shared<T> {
+    fn default() -> Self {
+        Self(Arc::default())
+    }
+}
+impl<T> From<T> for Shared<T> {
+    fn from(value: T) -> Self {
+        Self(Arc::new(value))
+    }
+}
+impl<T> Deref for Shared<T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        &self.0
+    }
+}
+impl<T: Clone> DerefMut for Shared<T> {
+    fn deref_mut(&mut self) -> &mut T {
+        Arc::make_mut(&mut self.0)
+    }
+}
+impl<T> Shared<T> {
+    pub fn shares_storage(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct ModelOption {
+    pub key: String,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct Draft {
     pub attachments: Vec<DraftAttachment>,
     pub text: String,
     pub instance_id: String,
+    pub driver: Driver,
     pub model: String,
-    pub effort: Option<String>,
-    pub service_tier: Option<String>,
-    pub runtime_mode: String,
-    pub interaction_mode: String,
+    pub options: Vec<ModelOption>,
+    pub runtime_mode: RuntimeMode,
+    pub interaction_mode: InteractionMode,
+    /// Payloads behind the text's context links.
+    pub context: Option<MessageContext>,
+}
+impl Default for Draft {
+    fn default() -> Self {
+        Self {
+            attachments: vec![],
+            text: String::new(),
+            instance_id: String::new(),
+            driver: Driver::Codex,
+            model: String::new(),
+            options: vec![],
+            runtime_mode: RuntimeMode::FullAccess,
+            interaction_mode: InteractionMode::Default,
+            context: None,
+        }
+    }
+}
+fn attachment_error(code: &str) -> String {
+    match code {
+        "too-many-attachments" => "You can attach up to 100 files per message.",
+        "duplicate-attachment-id" => "Duplicate attachment ids are not allowed.",
+        "image-too-large" => "Images must be 10 MB or smaller.",
+        _ => "This attachment cannot be sent.",
+    }
+    .into()
 }
 impl Draft {
+    pub fn is_empty(&self) -> bool {
+        self.text.trim().is_empty() && self.attachments.is_empty()
+    }
     pub fn attachment_refs(&self) -> Result<Vec<Attachment>, String> {
-        let result = self
+        let attachments = self
             .attachments
             .iter()
             .map(DraftAttachment::reference)
             .collect::<Result<Vec<_>, _>>()?;
-        orchestration::attachments::validate(&result)?;
-        Ok(result)
+        agent_domain::validate_attachments(&attachments).map_err(attachment_error)?;
+        Ok(attachments)
     }
     pub fn selection(&self) -> Result<ModelSelection, String> {
-        if self.model.trim().is_empty() {
+        if self.model.trim().is_empty() || self.instance_id.trim().is_empty() {
             return Err("Select a model".into());
         }
-        let mut options = BTreeMap::new();
-        if let Some(effort) = &self.effort {
-            options.insert(
-                "reasoningEffort".into(),
-                Json(serde_json::Value::String(effort.clone())),
-            );
-        }
-        if let Some(tier) = &self.service_tier {
-            options.insert(
-                "serviceTier".into(),
-                Json(serde_json::Value::String(tier.clone())),
-            );
-        }
         Ok(ModelSelection {
-            instance_id: ProviderInstanceId::new(&self.instance_id).map_err(|e| e.to_string())?,
+            instance: self.instance_id.clone(),
+            driver: self.driver,
             model: self.model.clone(),
-            options,
+            options: self
+                .options
+                .iter()
+                .map(|option| (option.key.clone(), option.value.clone()))
+                .collect(),
         })
     }
+    pub fn with_selection(mut self, selection: &ModelSelection) -> Self {
+        self.instance_id = selection.instance.clone();
+        self.driver = selection.driver;
+        self.model = selection.model.clone();
+        self.options = selection
+            .options
+            .iter()
+            .map(|(key, value)| ModelOption {
+                key: key.clone(),
+                value: value.clone(),
+            })
+            .collect();
+        self
+    }
 }
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct DraftAttachment {
@@ -62,18 +159,26 @@ pub struct DraftAttachment {
     pub status: String,
     pub error: Option<String>,
 }
+pub fn native_image(mime: &str) -> bool {
+    matches!(
+        mime,
+        "image/png" | "image/jpeg" | "image/gif" | "image/webp"
+    )
+}
 impl DraftAttachment {
     pub fn metadata(&self) -> Attachment {
         Attachment {
-            id: self.remote_id.clone().unwrap_or_else(|| self.id.clone()),
             kind: if self.kind == "image" {
                 AttachmentKind::Image
             } else {
                 AttachmentKind::File
             },
+            source: None,
+            id: self.remote_id.clone().unwrap_or_else(|| self.id.clone()),
             name: self.name.clone(),
             mime_type: self.mime_type.clone(),
-            size_bytes: self.size_bytes,
+            path: String::new(),
+            size: self.size_bytes,
         }
     }
     pub fn reference(&self) -> Result<Attachment, String> {
@@ -85,19 +190,18 @@ impl DraftAttachment {
             .ok_or("Attachment has not uploaded")?;
         Ok(self.metadata())
     }
-    pub fn from_remote(a: &Attachment) -> Self {
+    pub fn from_remote(attachment: &Attachment) -> Self {
         Self {
-            id: a.id.clone(),
-            remote_id: Some(a.id.clone()),
-            name: a.name.clone(),
-            mime_type: a.mime_type.clone(),
-            kind: if a.kind == AttachmentKind::Image {
-                "image"
-            } else {
-                "file"
+            id: attachment.id.clone(),
+            remote_id: Some(attachment.id.clone()),
+            name: attachment.name.clone(),
+            mime_type: attachment.mime_type.clone(),
+            kind: match attachment.kind {
+                AttachmentKind::Image => "image",
+                AttachmentKind::File => "file",
             }
             .into(),
-            size_bytes: a.size_bytes,
+            size_bytes: attachment.size,
             local_path: String::new(),
             status: "ready".into(),
             error: None,
@@ -105,16 +209,35 @@ impl DraftAttachment {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct ThreadCache {
-    pub projection: Arc<ThreadProjection>,
-    pub sequence: u64,
-    pub snapshot_sequence: u64,
-    pub history_cursor: Option<HistoryCursor>,
-    pub has_more_history: bool,
-    pub synchronized: bool,
-    pub latest_local_turn_ordinal: Option<u64>,
-    pub accessed_at: u64,
+/// Keeps text appended to the draft (by dictation) after the base the native
+/// edit started from.
+pub fn merge_draft_text(base: String, edited: String, current: String) -> String {
+    if current != base && current.starts_with(&base) {
+        format!("{}{}", edited, &current[base.len()..])
+    } else {
+        edited
+    }
+}
+
+/// Restored content joins the draft after a blank line, once.
+pub fn merge_restored_text(existing: &str, incoming: &str) -> String {
+    if incoming.is_empty() {
+        return existing.into();
+    }
+    if existing.is_empty() {
+        return incoming.into();
+    }
+    if existing == incoming || existing.ends_with(&format!("\n\n{incoming}")) {
+        return existing.into();
+    }
+    format!("{existing}\n\n{incoming}")
+}
+
+/// A rollback whose rolled-back message returns to the composer once it succeeds.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PendingRollback {
+    pub thread: ThreadId,
+    pub checkpoint: CheckpointId,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -125,23 +248,23 @@ pub struct Snapshot {
     pub connected: bool,
     pub host_name: Option<String>,
     pub error: Option<String>,
-    pub shell: Option<Arc<ShellSnapshot>>,
-    pub shell_synchronized: bool,
-    pub threads: BTreeMap<ThreadId, ThreadCache>,
-    pub selected_thread: Option<ThreadId>,
-    pub selected_project: Option<String>,
-    pub search: String,
-    pub search_matches: Vec<SearchMatch>,
-    pub observed_returns: BTreeMap<ThreadId, Timestamp>,
+    pub shell: Arc<ShellCache>,
+    /// Open only while the archive is shown.
+    pub archived: Option<Arc<ShellCache>>,
+    pub threads: BTreeMap<ThreadId, Arc<ThreadSync>>,
+    pub setups: BTreeMap<ThreadId, WorktreeSetupSnapshot>,
+    pub outbox: Arc<Outbox>,
+    pub rollbacks: BTreeMap<agent_domain::CommandId, PendingRollback>,
     pub drafts: Shared<BTreeMap<String, Draft>>,
     pub default_draft: Draft,
+    pub follow_up: FollowUpBehavior,
+    pub selected_thread: Option<ThreadId>,
+    pub selected_project: Option<String>,
     pub editing_run: Option<RunId>,
+    pub search: String,
+    pub search_matches: Vec<SearchMatch>,
     pub models: Vec<crate::models::Model>,
-    pub projects: Vec<crate::models::Project>,
     pub model_errors: BTreeMap<String, String>,
-    pub uncertain_commands: std::collections::BTreeSet<CommandId>,
-    pub pending_commands: Shared<Vec<Command>>,
-    pub pending_launches: Shared<Vec<agent_protocol::orchestration::LaunchThread>>,
     pub workspace: Workspace,
     pub terminals: BTreeMap<String, Terminal>,
     pub accounts: Option<agent_protocol::operations::Accounts>,
@@ -149,13 +272,62 @@ pub struct Snapshot {
     pub host_status: Option<crate::models::HostStatus>,
     pub remote_hosts: Vec<crate::models::RemoteHost>,
     pub invitation: Option<crate::models::Invitation>,
+    pub preferences: Preferences,
+    pub inbox_returns: crate::view::inbox::InboxReturns,
+    pub thread_order: Option<ThreadOrderHold>,
+    /// The Host's conversation settings once read.
+    pub conversation_settings: Option<crate::models::ConversationSettings>,
+    pub session_import: SessionImport,
+    /// Answer drafts by question request id.
+    pub question_drafts: BTreeMap<String, QuestionDrafts>,
+    pub diff_panels: BTreeMap<ThreadId, crate::view::checkpoints::DiffPanelSelection>,
+    pub stash: Shared<crate::view::composer::stash::PromptStash>,
+    /// The last setup a closed stream reported, kept for the card.
+    pub held_setups: BTreeMap<ThreadId, WorktreeSetupSnapshot>,
+    pub error_dismissals: crate::view::timeline::banners::ThreadErrorDismissals,
+    /// Timeline rows already built; every snapshot of the store shares them.
+    pub timelines: Arc<std::sync::Mutex<crate::view::timeline::rows::TimelineCache>>,
 }
+
 impl Snapshot {
     pub fn accepts_after(&self, previous: &Snapshot) -> bool {
         self.store_id != previous.store_id || self.revision >= previous.revision
     }
     pub fn terminal_available(&self) -> bool {
         self.connected && !self.cwd().is_empty()
+    }
+    /// The active shell with pending lifecycle previews applied.
+    pub fn shell_view(&self) -> Option<Cow<'_, ShellSnapshot>> {
+        self.shell
+            .snapshot
+            .as_ref()
+            .map(|shell| self.outbox.overlay_shell(shell))
+    }
+    pub fn shell_status(&self) -> ShellStatus {
+        self.shell.status
+    }
+    pub fn thread_row(&self, id: &ThreadId) -> Option<&ThreadShell> {
+        [Some(&self.shell), self.archived.as_ref()]
+            .into_iter()
+            .flatten()
+            .filter_map(|cache| cache.snapshot.as_ref())
+            .flat_map(|shell| &shell.threads)
+            .find(|row| &row.id == id)
+    }
+    pub fn thread(&self, id: &ThreadId) -> Option<&ThreadSync> {
+        self.threads.get(id).map(Arc::as_ref)
+    }
+    pub fn thread_state(&self, id: &ThreadId) -> Option<&State> {
+        self.thread(id)?.state.as_deref()
+    }
+    pub fn selected_state(&self) -> Option<&State> {
+        self.thread_state(self.selected_thread.as_ref()?)
+    }
+    pub fn shell_projects(&self) -> &[crate::models::Project] {
+        self.shell
+            .snapshot
+            .as_ref()
+            .map_or(&[], |shell| shell.projects.as_slice())
     }
     pub fn draft_key(&self) -> String {
         if let (Some(thread), Some(run)) = (&self.selected_thread, &self.editing_run) {
@@ -164,30 +336,13 @@ impl Snapshot {
         self.selected_thread
             .as_ref()
             .map(ToString::to_string)
-            .unwrap_or_else(|| {
-                format!(
-                    "new:{}",
-                    self.selected_project.as_deref().unwrap_or("bex:chats")
-                )
-            })
+            .unwrap_or_else(|| self.new_thread_draft_key())
     }
-    pub fn draft_pending(&self) -> bool {
-        let draft = self.current_draft();
-        self.pending_commands.iter().any(|command| self.selected_thread.as_ref() == Some(&command.thread_id) && match &command.body {
-            CommandBody::MessageDispatch(message) => self.editing_run.is_none() && (message.text == draft.text && draft.attachment_refs().is_ok_and(|a|a==message.attachments) || message.source_plan_ref.as_ref().is_some_and(|r| self.selected_thread.as_ref() == Some(&r.thread_id))),
-            CommandBody::QueuedRunEdit { run_id, text, .. } => self.editing_run.as_ref() == Some(run_id) && *text == draft.text,
-            _ => false,
-        }) || self.pending_launches.iter().any(|launch| launch.input.source_plan_ref.as_ref().is_some_and(|r| self.selected_thread.as_ref() == Some(&r.thread_id))
-            || self.selected_thread.is_none() && matches!(&launch.create.body, CommandBody::ThreadCreate { project_id, .. } if project_id.as_str() == self.selected_project.as_deref().unwrap_or("bex:chats")))
-    }
-    pub fn context_pending(&self, thread_id: &ThreadId) -> bool {
-        self.pending_commands.iter().any(|command| {
-            command.thread_id == *thread_id
-                && matches!(
-                    command.body,
-                    CommandBody::ThreadFork { .. } | CommandBody::ThreadMergeBack { .. }
-                )
-        })
+    pub fn new_thread_draft_key(&self) -> String {
+        format!(
+            "new:{}",
+            self.selected_project.as_deref().unwrap_or(CHATS_PROJECT)
+        )
     }
     pub fn current_draft(&self) -> Draft {
         self.drafts
@@ -200,94 +355,86 @@ impl Snapshot {
                 )
             })
     }
+    /// A thread's draft, or one with the thread's model and modes.
     pub fn draft_for_thread(&self, id: &ThreadId) -> Draft {
-        self.drafts.get(id.as_str()).cloned().unwrap_or_else(|| {
-            if let Some(thread) = self.shell.as_ref().and_then(|shell| {
-                shell
-                    .threads
-                    .iter()
-                    .chain(&shell.archived_threads)
-                    .find(|s| &s.thread.id == id)
-            }) {
-                Draft {
-                    attachments: vec![],
-                    text: String::new(),
-                    instance_id: thread.thread.provider_instance_id.to_string(),
-                    model: thread.thread.model_selection.model.clone(),
-                    effort: thread
-                        .thread
-                        .model_selection
-                        .options
-                        .get("reasoningEffort")
-                        .and_then(|j| j.0.as_str())
-                        .map(str::to_owned),
-                    service_tier: thread
-                        .thread
-                        .model_selection
-                        .options
-                        .get("serviceTier")
-                        .and_then(|j| j.0.as_str())
-                        .map(str::to_owned),
-                    runtime_mode: thread.thread.runtime_mode.as_str().into(),
-                    interaction_mode: thread.thread.interaction_mode.as_str().into(),
-                }
-            } else {
-                self.default_draft.clone()
-            }
+        if let Some(draft) = self.drafts.get(id.as_str()) {
+            return draft.clone();
+        }
+        let thread = self
+            .thread_state(id)
+            .and_then(|state| state.thread.as_ref())
+            .map(|t| (&t.selection, t.runtime_mode, t.interaction_mode))
+            .or_else(|| {
+                self.thread_row(id)
+                    .map(|row| (&row.selection, row.runtime_mode, row.interaction_mode))
+            });
+        match thread {
+            Some((selection, runtime_mode, interaction_mode)) => Draft {
+                runtime_mode,
+                interaction_mode,
+                ..Draft::default().with_selection(selection)
+            },
+            None => self.default_draft.clone(),
+        }
+    }
+    /// A fork or merge back from this thread is waiting for the Host.
+    pub fn context_pending(&self, thread: &ThreadId) -> bool {
+        self.outbox.entries.iter().any(|entry| {
+            &entry.thread == thread
+                && matches!(
+                    &entry.request,
+                    crate::commands::outbox::Request::Dispatch(dispatch)
+                        if matches!(dispatch.command, agent_domain::Command::Fork { .. } | agent_domain::Command::MergeBack { .. })
+                )
         })
     }
-    pub fn projection(&self) -> Option<&ThreadProjection> {
-        self.selected_thread
-            .as_ref()
-            .and_then(|id| self.threads.get(id))
-            .map(|cache| cache.projection.as_ref())
-    }
     pub fn cwd(&self) -> String {
-        let thread = self.projection().map(|p| &p.thread).or_else(|| {
-            self.selected_thread
-                .as_ref()
-                .and_then(|id| {
-                    self.shell
-                        .as_ref()?
-                        .threads
-                        .iter()
-                        .chain(&self.shell.as_ref()?.archived_threads)
-                        .find(|s| &s.thread.id == id)
+        self.directory_of(self.selected_thread.as_ref())
+    }
+    /// Where a thread's files and terminals open: its worktree or checkout,
+    /// else its project's root.
+    pub fn thread_cwd(&self, thread: &ThreadId) -> String {
+        self.directory_of(Some(thread))
+    }
+    /// The project a thread belongs to.
+    pub fn thread_project(&self, thread: &ThreadId) -> Option<&str> {
+        self.thread_state(thread)
+            .and_then(|state| state.thread.as_ref())
+            .map(|thread| thread.project.as_str())
+            .or_else(|| self.thread_row(thread).map(|row| row.project.as_str()))
+    }
+    fn directory_of(&self, thread: Option<&ThreadId>) -> String {
+        let workspace = thread.and_then(|id| {
+            self.thread_state(id)
+                .and_then(|state| state.thread.as_ref())
+                .map(|thread| (thread.workspace.clone(), thread.project.clone()))
+                .or_else(|| {
+                    self.thread_row(id)
+                        .map(|row| (row.workspace.clone(), row.project.clone()))
                 })
-                .map(|s| &s.thread)
         });
-        thread
-            .and_then(|t| t.worktree_path.clone())
-            .or_else(|| {
-                let project = thread
-                    .map(|t| t.project_id.as_str())
-                    .or(self.selected_project.as_deref())
-                    .unwrap_or("bex:chats");
-                self.projects
-                    .iter()
-                    .find(|p| p.id == project)?
-                    .roots
-                    .first()
-                    .map(|r| r.path.clone())
-            })
+        if let Some((Some(workspace), _)) = &workspace {
+            return workspace
+                .worktree_path
+                .clone()
+                .unwrap_or_else(|| workspace.cwd.clone());
+        }
+        let project = workspace
+            .map(|(_, project)| project)
+            .or_else(|| self.selected_project.clone())
+            .unwrap_or_else(|| CHATS_PROJECT.into());
+        self.shell_projects()
+            .iter()
+            .find(|p| p.id == project)
+            .and_then(|p| p.roots.first())
+            .map(|root| root.path.clone())
             .unwrap_or_default()
     }
-}
-
-#[cfg_attr(feature = "bindings", uniffi::export)]
-impl Snapshot {
-    pub fn turn_diff_options(&self) -> Vec<crate::presentation::diff::TurnDiffOption> {
-        let Some(projection) = self.projection() else {
-            return vec![];
-        };
-        let Some(scope) = projection
-            .checkpoint_scopes
-            .iter()
-            .find(|scope| scope.kind == ScopeKind::RootRun)
-        else {
-            return vec![];
-        };
-        crate::presentation::diff::turn_diff_options(&projection.checkpoints, &scope.id)
+    pub fn shell_location(&self, location: ShellLocation) -> Option<&ShellCache> {
+        match location {
+            ShellLocation::Active => Some(&self.shell),
+            ShellLocation::Archived => self.archived.as_deref(),
+        }
     }
 }
 
@@ -300,7 +447,7 @@ pub struct Workspace {
     pub file_drafts: BTreeMap<String, Arc<FileDraft>>,
     pub review_generation: u64,
     pub review: Option<Arc<crate::models::WorkspaceReview>>,
-    pub diff_request: Option<agent_protocol::orchestration::GetTurnDiff>,
+    pub diff_request: Option<agent_protocol::conversation::GetTurnDiff>,
     pub worktree_settings: Option<crate::models::WorktreeSettings>,
     pub worktrees: Vec<crate::models::Worktree>,
 }
@@ -309,14 +456,21 @@ pub struct FileDraft {
     pub text: String,
     pub revision: String,
 }
+/// One terminal of a thread, keyed by its handle in `Snapshot::terminals`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Terminal {
+    pub thread: ThreadId,
+    pub terminal_id: String,
+    /// Terminals split side by side share the id of the first one.
+    pub group: String,
     pub cwd: String,
     pub size: agent_protocol::operations::TerminalSize,
     pub phase: TerminalPhase,
     pub output: Shared<std::collections::VecDeque<Arc<TerminalOutput>>>,
     pub sequence: u64,
     pub output_bytes: usize,
+    /// Written once the Host started the terminal (a project script's command).
+    pub pending_input: Vec<u8>,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
@@ -335,29 +489,6 @@ pub struct TerminalOutput {
     pub data: Vec<u8>,
     pub reset_size: Option<agent_protocol::operations::TerminalSize>,
 }
-#[derive(Debug, Clone)]
-#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
-pub struct TerminalView {
-    pub status: Option<String>,
-    pub loading: bool,
-    pub accepts_input: bool,
-    pub output: Vec<TerminalOutput>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
-pub enum SendBehavior {
-    Default,
-    Steer,
-    Restart,
-}
-#[derive(Debug, Clone, PartialEq)]
-#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
-pub struct QuestionAnswer {
-    pub question_id: String,
-    pub values: Vec<String>,
-}
-
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum ThreadAction {
@@ -368,6 +499,7 @@ pub enum ThreadAction {
     Snooze { until: String },
     Unsnooze,
     Rename { title: String },
+    RegenerateTitle,
     MarkUnread,
     AutoSettle { enabled: bool },
     Archive,
@@ -380,17 +512,44 @@ pub enum ThreadAction {
 #[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum QueueAction {
     Resume,
-    Cancel { run_id: String },
-    Edit { run_id: String },
+    Cancel {
+        run_id: String,
+    },
+    Edit {
+        run_id: String,
+    },
     SaveEdit,
     CancelEdit,
-    Reorder { run_ids: Vec<String> },
-    Steer { run_id: String },
+    /// Moves one queued run before another, or to the end.
+    Move {
+        run_id: String,
+        before_run_id: Option<String>,
+    },
+    Steer {
+        run_id: String,
+    },
+}
+
+/// A file on this device to attach.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct LocalFile {
+    pub path: String,
+    pub name: String,
+    pub mime_type: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
+pub enum AnswerEdit {
+    ToggleOption { value: String },
+    Custom { text: String },
 }
 
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum Intent {
+    // Navigation and filters.
     OpenThread {
         thread_id: String,
     },
@@ -398,95 +557,283 @@ pub enum Intent {
     NewThread {
         project_id: Option<String>,
     },
+    ShowArchived {
+        open: bool,
+    },
     Search {
         query: String,
     },
     FilterProject {
         project_id: Option<String>,
     },
-    MovePinned {
+    Refresh,
+
+    // Composer.
+    EditDraft {
+        text: String,
+        base_text: Option<String>,
+    },
+    /// Chooses an item of the composer menu at `cursor` (UTF-16).
+    SelectComposerItem {
+        text: String,
+        cursor: u32,
+        item_id: String,
+    },
+    RemoveDraftContext {
+        context_id: String,
+    },
+    /// `draft_key` is the composer's (or an answer's) key when the files were picked.
+    AttachFiles {
+        draft_key: String,
+        files: Vec<LocalFile>,
+    },
+    /// `draft_key` names an answer's files; `None` is the composer.
+    RetryAttachment {
+        draft_key: Option<String>,
+        id: String,
+    },
+    RemoveAttachment {
+        draft_key: Option<String>,
+        id: String,
+    },
+    /// `alternate` is the second send gesture (Mod+Enter, long press).
+    Send {
+        alternate: bool,
+    },
+    Stop,
+    StopSessions,
+    SetModel {
+        instance_id: String,
+        driver: Driver,
+        model: String,
+        options: Vec<ModelOption>,
+    },
+    SelectTrait {
+        descriptor_id: String,
+        choice: String,
+    },
+    ToggleTrait {
+        descriptor_id: String,
+        on: bool,
+    },
+    SetRuntimeMode {
+        mode: RuntimeMode,
+    },
+    SetInteractionMode {
+        mode: InteractionMode,
+    },
+    StashDraft,
+    /// Images of a stash entry the client finished encoding.
+    FinalizeStashImages {
+        entry_id: String,
+        images: crate::view::composer::stash::StashImages,
+    },
+    /// The entry's images return in `Outcome::StashRestored` for the client to attach.
+    RestoreStash {
+        entry_id: String,
+    },
+    DeleteStash {
+        entry_id: String,
+    },
+    Transcribe {
+        draft_key: String,
+        preparation: Option<String>,
+        audio: Vec<u8>,
+    },
+
+    // Queue, requests and plans.
+    Queue {
+        action: QueueAction,
+    },
+    RespondApproval {
+        request_id: String,
+        decision: String,
+    },
+    EditAnswer {
+        request_id: String,
+        question_id: String,
+        edit: AnswerEdit,
+    },
+    ShowQuestion {
+        request_id: String,
+        index: u32,
+    },
+    SubmitAnswers {
+        request_id: String,
+    },
+    DismissInput {
+        request_id: String,
+    },
+    PlanFollowUp {
+        new_thread: bool,
+    },
+
+    // Thread lifecycle.
+    Thread {
         thread_id: String,
-        up: bool,
+        action: ThreadAction,
     },
     ReorderPinned {
         thread_id: String,
         before_thread_id: Option<String>,
     },
-    EditDraft {
-        text: String,
-        base_text: Option<String>,
+    /// A move in the mobile list; the list holds the new order until it lands.
+    MoveThread {
+        thread_id: String,
+        section: crate::view::thread_order::OrderSection,
+        destination: crate::view::thread_order::MoveDestination,
     },
-    AttachFile {
-        path: String,
-        name: String,
-        mime_type: String,
-        draft_key: String,
+    /// A drop planned by `Snapshot::sidebar_drop`.
+    DropThread {
+        thread_id: String,
+        plan: crate::view::sidebar::SidebarThreadDropPlan,
     },
-    RetryAttachment {
-        id: String,
+    LimitRecovery {
+        thread_id: String,
+        action: crate::view::timeline::banners::RecoveryAction,
     },
-    RemoveAttachment {
-        id: String,
-    },
-    Send {
-        behavior: SendBehavior,
-    },
-    Stop,
-    DiscardPending {
-        command_id: String,
+    /// Hides a thread error banner by its `dismiss_key` for this app session.
+    DismissThreadError {
+        dismiss_key: String,
     },
     Fork {
         source_thread_id: String,
         run_id: String,
     },
     MergeBack,
-    PlanFollowUp {
-        new_thread: bool,
-    },
     Rollback {
         checkpoint_id: String,
         restore_files: bool,
     },
-    Thread {
-        thread_id: String,
-        action: ThreadAction,
+    DiscardPending {
+        command_id: String,
     },
-    Queue {
-        action: QueueAction,
-    },
-    SetModel {
-        instance_id: String,
-        model: String,
-        effort: Option<String>,
-        service_tier: Option<String>,
-    },
-    SetRuntimeMode {
-        mode: String,
-    },
-    SetInteractionMode {
-        mode: String,
-    },
-    RespondApproval {
-        request_id: String,
-        decision: String,
-    },
-    RespondQuestions {
-        request_id: String,
-        answers: Vec<QuestionAnswer>,
-    },
-    DismissInput {
-        request_id: String,
-    },
-    LoadHistory,
-    LoadItem {
+
+    // Timeline.
+    LoadEarlier,
+    LoadItemDetail {
         item_id: String,
     },
-    Refresh,
-    Transcribe {
-        draft_key: String,
-        preparation: Option<String>,
-        audio: Vec<u8>,
+    CancelSetup,
+
+    // Diff panel of the open thread.
+    SelectDiffScope {
+        choice: crate::view::checkpoints::DiffScopeChoice,
     },
+    SelectDiffTurn {
+        run_id: String,
+        file_path: Option<String>,
+    },
+    SelectDiffBaseRef {
+        base_ref: Option<String>,
+    },
+    SetDiffIgnoreWhitespace {
+        ignore: bool,
+    },
+    LoadDiff,
+    ReviewWorkspace {
+        cwd: String,
+    },
+    ReadTurnDiff {
+        from_run_ordinal: u64,
+        to_run_ordinal: u64,
+        ignore_whitespace: bool,
+    },
+
+    // Thread terminals.
+    OpenTerminal {
+        thread_id: String,
+        terminal_id: String,
+        cols: u16,
+        rows: u16,
+    },
+    NewTerminal {
+        thread_id: String,
+        cols: u16,
+        rows: u16,
+    },
+    SplitTerminal {
+        thread_id: String,
+        terminal_id: String,
+        cols: u16,
+        rows: u16,
+    },
+    WriteTerminal {
+        thread_id: String,
+        terminal_id: String,
+        data: Vec<u8>,
+    },
+    ResizeTerminal {
+        thread_id: String,
+        terminal_id: String,
+        cols: u16,
+        rows: u16,
+    },
+    DetachTerminal {
+        thread_id: String,
+        terminal_id: String,
+    },
+    CloseTerminal {
+        thread_id: String,
+        terminal_id: String,
+    },
+    RunProjectScript {
+        thread_id: String,
+        script_id: String,
+        cols: u16,
+        rows: u16,
+    },
+
+    // Settings and projects.
+    SetFollowUpBehavior {
+        behavior: crate::commands::build::FollowUpBehavior,
+    },
+    SetTimestampFormat {
+        format: crate::view::time::TimestampFormat,
+    },
+    SetWorkingSection {
+        enabled: bool,
+    },
+    ToggleFavoriteModel {
+        instance_id: String,
+        model: String,
+    },
+    SetModelOrder {
+        instance_id: String,
+        models: Vec<String>,
+    },
+    LoadConversationSettings,
+    UpdateConversationSettings {
+        scope: crate::view::settings::SettingsScope,
+        change: crate::view::settings::ConversationSettingChange,
+    },
+    ResetProjectSettings {
+        project_id: String,
+    },
+    AddProject {
+        path: String,
+    },
+    UpdateProjectScripts {
+        project_id: String,
+        scripts: Vec<crate::models::ProjectScript>,
+    },
+    ScanSessions,
+    SelectImportSessions {
+        paths: Vec<String>,
+        checked: bool,
+    },
+    ImportSessions,
+    CloseImport,
+    LoadWorktreeSettings,
+    SaveWorktreeSettings {
+        settings: crate::models::WorktreeSettings,
+    },
+    ListWorktrees,
+    RemoveWorktree {
+        path: String,
+    },
+
+    // Files.
     ListFiles {
         path: String,
     },
@@ -501,43 +848,8 @@ pub enum Intent {
     SaveFile {
         path: String,
     },
-    ReviewWorkspace {
-        cwd: String,
-    },
-    ReadTurnDiff {
-        from_turn_count: u64,
-        to_turn_count: u64,
-        ignore_whitespace: bool,
-    },
-    LoadWorktreeSettings,
-    SaveWorktreeSettings {
-        settings: crate::models::WorktreeSettings,
-    },
-    ListWorktrees,
-    RemoveWorktree {
-        path: String,
-    },
-    StartTerminal {
-        handle: String,
-        cwd: String,
-        cols: u16,
-        rows: u16,
-    },
-    ResizeTerminal {
-        handle: String,
-        cols: u16,
-        rows: u16,
-    },
-    WriteTerminal {
-        handle: String,
-        data: Vec<u8>,
-    },
-    DetachTerminal {
-        handle: String,
-    },
-    KillTerminal {
-        handle: String,
-    },
+
+    // Accounts and Hosts.
     LoadAccounts,
     SelectAccount {
         provider: crate::provider::ProviderKind,
@@ -573,7 +885,86 @@ pub enum Intent {
     RevokeDevice {
         id: String,
     },
-    RegisterProject {
-        path: String,
-    },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_native_edit_keeps_dictation_appended_after_its_base() {
+        assert_eq!(
+            merge_draft_text(
+                "hello".into(),
+                "hello there".into(),
+                "hello\ntranscript".into()
+            ),
+            "hello there\ntranscript"
+        );
+        assert_eq!(
+            merge_draft_text("hello".into(), "".into(), "hello".into()),
+            ""
+        );
+    }
+
+    #[test]
+    fn restored_text_joins_the_draft_once() {
+        assert_eq!(merge_restored_text("", "sent"), "sent");
+        assert_eq!(merge_restored_text("typed", ""), "typed");
+        assert_eq!(merge_restored_text("typed", "sent"), "typed\n\nsent");
+        assert_eq!(
+            merge_restored_text("typed\n\nsent", "sent"),
+            "typed\n\nsent"
+        );
+        assert_eq!(merge_restored_text("sent", "sent"), "sent");
+    }
+
+    #[test]
+    fn a_draft_selection_needs_a_model_and_carries_its_options() {
+        let mut draft = Draft::default();
+        assert!(draft.selection().is_err());
+        draft.instance_id = "codex".into();
+        draft.model = "gpt".into();
+        draft.options.push(ModelOption {
+            key: "reasoningEffort".into(),
+            value: "high".into(),
+        });
+        let selection = draft.selection().unwrap();
+        assert_eq!(selection.options["reasoningEffort"], "high");
+        assert_eq!(
+            Draft::default().with_selection(&selection),
+            Draft {
+                attachments: vec![],
+                text: String::new(),
+                ..draft
+            }
+        );
+    }
+
+    #[test]
+    fn attachments_send_only_after_their_upload() {
+        let mut attachment = DraftAttachment {
+            id: "local".into(),
+            remote_id: None,
+            name: "a.png".into(),
+            mime_type: "image/png".into(),
+            kind: "image".into(),
+            size_bytes: 4,
+            local_path: "/tmp/a.png".into(),
+            status: "uploading".into(),
+            error: None,
+        };
+        assert!(attachment.reference().is_err());
+        attachment.status = "ready".into();
+        attachment.remote_id = Some("pending:1".into());
+        let reference = attachment.reference().unwrap();
+        assert_eq!(reference.id, "pending:1");
+        assert_eq!(reference.kind, AttachmentKind::Image);
+        assert_eq!(
+            DraftAttachment::from_remote(&reference)
+                .remote_id
+                .as_deref(),
+            Some("pending:1")
+        );
+    }
 }

@@ -1,8 +1,8 @@
-//! Mobile receives the same presentation records the desktop uses.
+//! Snapshot getters for native views. Conversation views are built from
+//! `sync` and `commands` results.
 use super::{AgentError, error};
 use crate::{
     models::{FileContent, FileList, Model, Project, WorktreeSettings},
-    presentation::{self, ConversationView, Shelf},
     state::{Draft, Snapshot},
 };
 use agent_protocol::operations::{AccountLogin, Accounts};
@@ -59,37 +59,8 @@ impl Snapshot {
     pub fn draft(&self) -> Draft {
         self.current_draft()
     }
-    pub fn conversation(&self) -> ConversationView {
-        let now = orchestration::Timestamp::from_millis(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis() as i64,
-        )
-        .expect("current timestamp");
-        presentation::conversation(self, &now)
-    }
-    pub fn archived_threads(
-        &self,
-        now_millis: i64,
-    ) -> Result<Vec<presentation::ThreadRow>, AgentError> {
-        Ok(presentation::archived_threads(
-            self,
-            &orchestration::Timestamp::from_millis(now_millis).map_err(error)?,
-        ))
-    }
-    pub fn shelves(&self, now_millis: i64, settled_limit: u32) -> Result<Vec<Shelf>, AgentError> {
-        Ok(presentation::shelves(
-            self,
-            &orchestration::Timestamp::from_millis(now_millis).map_err(error)?,
-            settled_limit as usize,
-        ))
-    }
     pub fn search_query(&self) -> String {
         self.search.clone()
-    }
-    pub fn model_choices(&self) -> Vec<presentation::ModelChoice> {
-        presentation::model_choices(self)
     }
     pub fn can_open_terminal(&self) -> bool {
         self.terminal_available()
@@ -107,7 +78,7 @@ impl Snapshot {
         self.draft_key()
     }
     pub fn projects(&self) -> Vec<Project> {
-        self.projects.clone()
+        self.shell_projects().to_vec()
     }
     pub fn directory(&self) -> Option<FileList> {
         self.workspace.directory.clone()
@@ -138,9 +109,6 @@ impl Snapshot {
     }
     pub fn account_login(&self) -> Option<AccountLogin> {
         self.account_login.clone()
-    }
-    pub fn terminal(&self, handle: String, after: u64) -> crate::state::TerminalView {
-        self.terminal_view(&handle, after)
     }
 }
 #[derive(uniffi::Object)]

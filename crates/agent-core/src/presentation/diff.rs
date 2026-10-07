@@ -200,46 +200,9 @@ pub fn diff_files(review: &WorkspaceReview) -> Vec<WorkspaceDiffFile> {
         .collect()
 }
 
-#[derive(Debug, Clone)]
-#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
-pub struct TurnDiffOption {
-    pub label: String,
-    pub from_turn_count: u64,
-    pub to_turn_count: u64,
-}
-pub fn turn_diff_options(
-    checkpoints: &[orchestration::Checkpoint],
-    scope: &orchestration::CheckpointScopeId,
-) -> Vec<TurnDiffOption> {
-    let mut ordinals: Vec<_> = checkpoints
-        .iter()
-        .filter(|checkpoint| {
-            &checkpoint.scope_id == scope
-                && checkpoint.status == orchestration::CheckpointStatus::Ready
-        })
-        .filter_map(|checkpoint| checkpoint.app_run_ordinal)
-        .collect();
-    ordinals.sort_unstable();
-    ordinals.dedup();
-    let mut options = vec![];
-    for pair in ordinals.windows(2).rev() {
-        options.push(TurnDiffOption {
-            label: format!("Turn {}", pair[1]),
-            from_turn_count: pair[0],
-            to_turn_count: pair[1],
-        });
-    }
-    if ordinals.len() > 2 {
-        options.push(TurnDiffOption {
-            label: "All turns".into(),
-            from_turn_count: ordinals[0],
-            to_turn_count: *ordinals.last().expect("multiple checkpoints"),
-        });
-    }
-    options
-}
-pub fn turn_review(diff: agent_protocol::orchestration::TurnDiff) -> WorkspaceReview {
-    let rows = parse(&diff.diff);
+/// A patch's changed files and line counts, for review.
+pub fn review_from_patch(patch: String) -> WorkspaceReview {
+    let rows = parse(&patch);
     let names = file_names(&rows);
     let mut counts = std::collections::BTreeMap::<u64, (u64, u64)>::new();
     for row in &rows {
@@ -262,11 +225,11 @@ pub fn turn_review(diff: agent_protocol::orchestration::TurnDiff) -> WorkspaceRe
         })
         .collect();
     WorkspaceReview {
-        branch: format!("Turns {}–{}", diff.from_turn_count, diff.to_turn_count),
+        branch: String::new(),
         additions: files.iter().filter_map(|file| file.additions).sum(),
         deletions: files.iter().filter_map(|file| file.deletions).sum(),
         files,
-        diff: diff.diff,
+        diff: patch,
     }
 }
 
@@ -280,10 +243,9 @@ mod tests {
 
     #[test]
     fn turn_review_counts_only_changed_lines_and_keeps_new_file_names() {
-        let review = turn_review(agent_protocol::orchestration::TurnDiff {
-            thread_id: orchestration::ThreadId::new("thread").unwrap(), from_turn_count: 0, to_turn_count: 1,
-            diff: "diff --git a/new b/new\nnew file mode 100644\n--- /dev/null\n+++ b/new\n@@ -0,0 +1,2 @@\n+one\n+two\ndiff --git a/old b/old\n--- a/old\n+++ b/old\n@@ -1 +1 @@\n-before\n+after\n".into(),
-        });
+        let review = review_from_patch(
+            "diff --git a/new b/new\nnew file mode 100644\n--- /dev/null\n+++ b/new\n@@ -0,0 +1,2 @@\n+one\n+two\ndiff --git a/old b/old\n--- a/old\n+++ b/old\n@@ -1 +1 @@\n-before\n+after\n".into(),
+        );
         assert_eq!((review.additions, review.deletions), (3, 1));
         assert_eq!(
             review
@@ -294,28 +256,6 @@ mod tests {
             vec!["new", "old"]
         );
     }
-    proptest! {
-        #[test]
-        fn turn_diff_choices_use_ready_root_checkpoints_in_reverse_order(ordinals in prop::collection::vec(0u64..30, 0..50)) {
-            use orchestration::*;
-            let root = CheckpointScopeId::new("root").unwrap();
-            let checkpoints: Vec<_> = ordinals.iter().map(|ordinal| Checkpoint {
-                id: CheckpointId::new(format!("c{ordinal}")).unwrap(), thread_id: ThreadId::new("thread").unwrap(),
-                scope_id: root.clone(), run_id: None, node_id: NodeId::new("node").unwrap(), parent_checkpoint_id: None,
-                ordinal_within_scope: *ordinal, app_run_ordinal: Some(*ordinal), reference: CheckpointRef::new(format!("refs/test/{ordinal}")).unwrap(),
-                status: CheckpointStatus::Ready, files: vec![], captured_at: crate::test_support::now(),
-            }).collect();
-            let mut sorted = ordinals.clone(); sorted.sort_unstable(); sorted.dedup();
-            let expected: Vec<_> = sorted.iter().skip(1).rev().copied().collect();
-            let options = turn_diff_options(&checkpoints, &root);
-            let actual: Vec<_> = options.iter().filter(|option| option.label != "All turns").map(|option| option.to_turn_count).collect();
-            prop_assert_eq!(actual, expected);
-            prop_assert!(turn_diff_options(&checkpoints, &CheckpointScopeId::new("subagent").unwrap()).is_empty());
-            let mut unavailable = checkpoints; for checkpoint in &mut unavailable { checkpoint.status = CheckpointStatus::Missing; }
-            prop_assert!(turn_diff_options(&unavailable, &root).is_empty());
-        }
-    }
-
     proptest! {
         #[test]
         fn generated_hunks_preserve_text_kind_and_line_numbers(

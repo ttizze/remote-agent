@@ -31,10 +31,6 @@ pub(crate) async fn prepare_dictation(
         .request::<crate::models::Empty>(&crate::protocol::Call::CancelDictation(params))
         .await;
 }
-#[cfg_attr(feature = "bindings", uniffi::export)]
-pub fn terminal_handle(cwd: String) -> String {
-    agent_protocol::operations::terminal_handle(&cwd)
-}
 pub async fn pair_remote(
     local: &crate::transport::Session,
     ticket: &crate::transport::Ticket,

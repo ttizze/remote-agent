@@ -1,27 +1,39 @@
-//! Only device-owned drafts, navigation and unacknowledged commands are durable.
-use crate::state::{Draft, Snapshot};
-use orchestration::{Command, ThreadId};
+//! Device-owned state the native app stores: drafts, navigation, settings and
+//! commands the Host has not confirmed. Host data lives in the disk cache.
+use crate::commands::{build::FollowUpBehavior, outbox::Outbox};
+use crate::state::{Draft, PendingRollback, Preferences, Snapshot};
+use crate::view::composer::stash::PromptStash;
+use agent_domain::{CommandId, ThreadId};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, sync::Arc};
+
 #[derive(Default, Serialize, Deserialize)]
 struct LocalState {
     drafts: BTreeMap<String, Draft>,
     default_draft: Draft,
+    follow_up: FollowUpBehavior,
     selected_thread: Option<ThreadId>,
     selected_project: Option<String>,
-    pending_commands: Vec<Command>,
-    pending_launches: Vec<agent_protocol::orchestration::LaunchThread>,
+    outbox: Outbox,
+    rollbacks: BTreeMap<CommandId, PendingRollback>,
+    preferences: Preferences,
+    stash: PromptStash,
 }
+
 pub fn encode(snapshot: &Snapshot) -> Result<Vec<u8>, serde_json::Error> {
     serde_json::to_vec(&LocalState {
         drafts: (*snapshot.drafts).clone(),
         default_draft: snapshot.default_draft.clone(),
+        follow_up: snapshot.follow_up,
         selected_thread: snapshot.selected_thread.clone(),
         selected_project: snapshot.selected_project.clone(),
-        pending_commands: (*snapshot.pending_commands).clone(),
-        pending_launches: (*snapshot.pending_launches).clone(),
+        outbox: snapshot.outbox.persisted(),
+        rollbacks: snapshot.rollbacks.clone(),
+        preferences: snapshot.preferences.clone(),
+        stash: (*snapshot.stash).clone(),
     })
 }
+
 pub fn decode(bytes: &[u8]) -> Result<Snapshot, serde_json::Error> {
     let local: LocalState = if bytes.is_empty() {
         LocalState::default()
@@ -31,16 +43,21 @@ pub fn decode(bytes: &[u8]) -> Result<Snapshot, serde_json::Error> {
     Ok(Snapshot {
         drafts: local.drafts.into(),
         default_draft: local.default_draft,
+        follow_up: local.follow_up,
         selected_thread: local.selected_thread,
         selected_project: local.selected_project,
-        pending_commands: local.pending_commands.into(),
-        pending_launches: local.pending_launches.into(),
+        outbox: Arc::new(local.outbox),
+        rollbacks: local.rollbacks,
+        preferences: local.preferences,
+        stash: local.stash.into(),
         ..Snapshot::default()
     })
 }
+
 pub fn encode_model_preferences(snapshot: &Snapshot) -> Result<Vec<u8>, serde_json::Error> {
     serde_json::to_vec(&snapshot.default_draft)
 }
+
 pub fn apply_model_preferences(
     persisted: &[u8],
     defaults: &[u8],
@@ -51,9 +68,11 @@ pub fn apply_model_preferences(
     encode(&state)
 }
 
-/// Decode independent device-owned components; a damaged file must not lock out a Host.
+/// Decodes independent device-owned components; a damaged file must not lock
+/// out a Host.
 pub fn recover(persisted: &[u8], defaults: &[u8]) -> Snapshot {
     let mut state = decode(persisted).unwrap_or_else(|_| Snapshot {
+        follow_up: FollowUpBehavior::default(),
         error: Some("Saved device state could not be read. Device drafts were reset.".into()),
         ..Default::default()
     });
@@ -67,20 +86,23 @@ pub fn recover(persisted: &[u8], defaults: &[u8]) -> Snapshot {
         }
     }
     for draft in state.drafts.values_mut() {
-        for a in &mut draft.attachments {
-            if a.status == "uploading" {
-                a.status = "failed".into();
-                a.error = Some("Upload interrupted. Retry to continue.".into());
+        for attachment in &mut draft.attachments {
+            if attachment.status == "uploading" {
+                attachment.status = "failed".into();
+                attachment.error = Some("Upload interrupted. Retry to continue.".into());
             }
         }
     }
     state.default_draft.attachments.clear();
+    state.stash.settle_pending_images();
     state
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::{build::dispatch, outbox::*};
+
     #[test]
     fn damaged_components_do_not_discard_valid_device_work_or_block_startup() {
         let mut state = Snapshot::default();
@@ -101,24 +123,49 @@ mod tests {
         assert!(recovered.error.is_some());
         assert!(decode(&apply_model_preferences(b"bad", b"bad").unwrap()).is_ok());
     }
+
     #[test]
-    fn device_drafts_and_pending_commands_roundtrip_without_host_cache() {
+    fn drafts_settings_and_unconfirmed_commands_roundtrip_without_host_data() {
         let mut snapshot = Snapshot {
             connected: true,
             host_name: Some("Host".into()),
+            follow_up: FollowUpBehavior::Steer,
             ..Snapshot::default()
         };
         snapshot.drafts.insert(
-            "new:bex:chats".into(),
+            "new:chats".into(),
             Draft {
                 text: "Unsent message".into(),
                 ..Draft::default()
             },
         );
+        let thread = ThreadId::new("thread").unwrap();
+        let id = CommandId::new("command").unwrap();
+        let mut outbox = Outbox::default();
+        outbox
+            .enqueue(PendingCommand::new(
+                thread.clone(),
+                Request::Dispatch(Box::new(dispatch(
+                    thread,
+                    id.clone(),
+                    agent_domain::Command::MarkUnread,
+                ))),
+                agent_domain::Timestamp::from_millis(0).unwrap(),
+            ))
+            .unwrap();
+        outbox.sending(&id);
+        snapshot.outbox = Arc::new(outbox);
         let restored = decode(&encode(&snapshot).unwrap()).unwrap();
         assert!(!restored.connected);
         assert!(restored.host_name.is_none());
-        assert_eq!(restored.drafts["new:bex:chats"].text, "Unsent message");
-        assert!(restored.shell.is_none());
+        assert_eq!(restored.drafts["new:chats"].text, "Unsent message");
+        assert_eq!(restored.follow_up, FollowUpBehavior::Steer);
+        assert!(restored.shell.snapshot.is_none());
+        assert_eq!(restored.outbox.entries[0].phase, Phase::Queued);
+    }
+
+    #[test]
+    fn a_new_device_defaults_to_queueing_follow_ups() {
+        assert_eq!(decode(&[]).unwrap().follow_up, FollowUpBehavior::Queue);
     }
 }
