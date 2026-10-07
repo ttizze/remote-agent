@@ -225,11 +225,17 @@ impl Snapshot {
             .and_then(|thread| self.thread_state(thread))
             .map(checkpoint_summaries)
             .unwrap_or_default();
-        diff_panel(
-            &checkpoints,
-            &selection,
-            self.preferences.diff_ignore_whitespace,
-        )
+        let git = thread.as_ref().map(|thread| {
+            crate::view::checkpoints::git_diff_view(self, &self.thread_cwd(thread), &selection)
+        });
+        DiffPanelView {
+            git,
+            ..diff_panel(
+                &checkpoints,
+                &selection,
+                self.preferences.diff_ignore_whitespace,
+            )
+        }
     }
     pub fn project_scripts(&self, project_id: String) -> Option<ProjectScriptsView> {
         project_scripts(

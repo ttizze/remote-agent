@@ -9,6 +9,7 @@ mod projects;
 mod streams;
 mod subscriptions;
 mod terminals;
+mod workspace;
 
 use crate::{peer::PeerError, protocol::Call, state::Snapshot, transport};
 use agent_protocol::{models as m, operations as op};

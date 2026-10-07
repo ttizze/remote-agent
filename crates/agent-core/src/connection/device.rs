@@ -537,13 +537,29 @@ impl Owner {
             self.state.preferences.diff_ignore_whitespace,
         );
         let cwd = self.state.cwd();
-        match panel
-            .request
-            .and_then(|request| request.intent((!cwd.is_empty()).then_some(cwd.as_str())))
-        {
-            Some(intent) => self.prepare(intent),
-            None => Ok(Next::Done),
+        let (base_ref, ignore_whitespace) = match panel.request {
+            Some(crate::view::checkpoints::DiffRequest::Branch {
+                base_ref,
+                ignore_whitespace,
+            }) => (base_ref, ignore_whitespace),
+            Some(crate::view::checkpoints::DiffRequest::Unstaged { ignore_whitespace }) => {
+                (None, ignore_whitespace)
+            }
+            Some(request) => {
+                return match request.intent() {
+                    Some(intent) => self.prepare(intent),
+                    None => Ok(Next::Done),
+                };
+            }
+            None => return Ok(Next::Done),
+        };
+        if cwd.is_empty() {
+            return Ok(Next::Done);
         }
+        self.load_vcs_status(cwd.clone());
+        let call = self.load_diff_preview(cwd, base_ref, ignore_whitespace);
+        self.show_diff_preview();
+        Ok(Next::call(call, None))
     }
 
     pub(super) fn toggle_favorite_model(&mut self, instance_id: &str, model: &str) {

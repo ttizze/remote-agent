@@ -5,7 +5,7 @@ use super::{
     owner::{Event, FileTransfer, Owner, Waiter},
 };
 use crate::{peer::PeerError, protocol::Call, state::*};
-use agent_protocol::{conversation as c, models as m, operations as op};
+use agent_protocol::{conversation as c, models as m, operations as op, workspace as w};
 use std::sync::Arc;
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
@@ -36,6 +36,12 @@ pub(super) enum Reply {
     Transcription(String),
     ConversationSettings(m::ConversationSettings),
     SessionScan(c::SessionScan),
+    ProviderCommands(w::ProviderCommands),
+    EntrySearch(w::EntrySearch),
+    VcsStatus(w::VcsStatus),
+    Refs(w::RefList),
+    DiffPreview(w::DiffPreviewResult),
+    SetupCancelled(c::SetupCancelled),
     Done,
 }
 
@@ -56,6 +62,11 @@ async fn execute(peer: &Peer, call: &Call) -> Result<Reply, PeerError> {
             Reply::ConversationSettings(peer.request(call).await?)
         }
         Call::ScanAgentSessions(_) => Reply::SessionScan(peer.request(call).await?),
+        Call::ProviderCommands(_) => Reply::ProviderCommands(peer.request(call).await?),
+        Call::SearchEntries(_) => Reply::EntrySearch(peer.request(call).await?),
+        Call::VcsStatus(_) => Reply::VcsStatus(peer.request(call).await?),
+        Call::ListRefs(_) => Reply::Refs(peer.request(call).await?),
+        Call::DiffPreview(_) => Reply::DiffPreview(peer.request(call).await?),
         Call::ListAccounts(_) => Reply::Accounts(peer.request(call).await?),
         Call::StartAccountLogin(_) => Reply::Login(peer.request(call).await?),
         Call::HostStatus(_) => Reply::HostStatus(peer.request(call).await?),
@@ -73,10 +84,7 @@ async fn execute(peer: &Peer, call: &Call) -> Result<Reply, PeerError> {
             let _: () = peer.request(call).await?;
             Reply::Done
         }
-        Call::CancelSetup(_) => {
-            let _: c::SetupCancelled = peer.request(call).await?;
-            Reply::Done
-        }
+        Call::CancelSetup(_) => Reply::SetupCancelled(peer.request(call).await?),
         _ => {
             let _: m::Empty = peer.request(call).await?;
             Reply::Done
@@ -326,6 +334,15 @@ impl Owner {
                         &error.to_string(),
                     ));
                 }
+                match &call {
+                    Call::ProviderCommands(request) => {
+                        self.provider_commands_finished(request, Err(&error))
+                    }
+                    Call::ListRefs(request) => self.refs_finished(request, Err(&error)),
+                    Call::DiffPreview(request) => self.diff_preview_finished(request, Err(&error)),
+                    Call::CancelSetup(_) => self.work_locally = None,
+                    _ => {}
+                }
                 if let Call::ScanAgentSessions(_) = &call {
                     let import = &mut self.state.session_import;
                     import.scan_pending = false;
@@ -470,6 +487,40 @@ impl Owner {
                         draft.text.push('\n');
                     }
                     draft.text.push_str(&text);
+                }
+            }
+            Reply::ProviderCommands(commands) => {
+                if let Call::ProviderCommands(request) = call {
+                    self.provider_commands_finished(request, Ok(commands));
+                }
+            }
+            Reply::EntrySearch(found) => {
+                if let Call::SearchEntries(request) = call {
+                    self.entries_found(request, found);
+                }
+            }
+            Reply::VcsStatus(status) => {
+                if let Call::VcsStatus(request) = call {
+                    self.state
+                        .sources
+                        .vcs_status
+                        .insert(request.cwd.clone(), status);
+                }
+            }
+            Reply::Refs(list) => {
+                if let Call::ListRefs(request) = call {
+                    self.refs_finished(request, Ok(list));
+                }
+            }
+            Reply::DiffPreview(preview) => {
+                if let Call::DiffPreview(request) = call {
+                    self.diff_preview_finished(request, Ok(preview));
+                    self.show_diff_preview();
+                }
+            }
+            Reply::SetupCancelled(cancelled) => {
+                if let Call::CancelSetup(request) = call {
+                    self.setup_cancelled(&request.thread_id, cancelled.cancelled);
                 }
             }
             Reply::Done => {}

@@ -353,6 +353,50 @@ impl Owner {
                 thread_id: id,
                 terminal_id,
             } => self.close_terminal(&thread_id(id)?, &terminal_id),
+            Intent::UpdateComposerMenu {
+                text,
+                cursor,
+                layout,
+            } => {
+                self.update_composer_menu(&text, cursor, layout);
+                Next::Done
+            }
+            Intent::SearchDiffBaseRefs { query } => {
+                let cwd = self.state.cwd();
+                self.load_refs(cwd.clone(), crate::state::RefScope::Local, query.clone());
+                self.load_refs(cwd, crate::state::RefScope::Remote, query);
+                Next::Done
+            }
+            Intent::SearchNewThreadBranches { query } => {
+                self.load_new_thread_branches(query);
+                Next::Done
+            }
+            Intent::SetNewThreadWorkspace { mode } => self.set_new_thread_workspace(mode)?,
+            Intent::SelectNewThreadBranch {
+                branch,
+                worktree_path,
+            } => self.select_new_thread_branch(branch, worktree_path)?,
+            Intent::SetNewThreadStartFromOrigin { on } => {
+                self.set_new_thread_start_from_origin(on)?
+            }
+            Intent::NewThreadOnBranch {
+                project_id,
+                branch,
+                worktree_path,
+            } => {
+                self.select_thread(None);
+                self.state.selected_project = Some(project_id);
+                self.select_new_thread_branch(branch, worktree_path)?;
+                self.load_new_thread_branches(String::new());
+                Next::Done
+            }
+            Intent::RetryPreparation { run_id: run } => {
+                let thread = self.selected()?;
+                Next::Commands(vec![
+                    self.command(thread, Command::RetryPrepared { run: run_id(run)? }),
+                ])
+            }
+            Intent::WorkLocally => self.work_locally()?,
             Intent::ClearTerminal {
                 thread_id: id,
                 terminal_id,
@@ -759,6 +803,8 @@ impl Owner {
                 self.command(thread, command)
             }
             None => {
+                let workspace = crate::view::new_thread::new_thread_launch_workspace(&self.state)
+                    .map_err(invalid)?;
                 let thread = thread_id(new_id("thread"))?;
                 let launch = launch(LaunchThread {
                     command_id: self.new_command_id(),
@@ -773,10 +819,7 @@ impl Owner {
                     selection,
                     runtime_mode: draft.runtime_mode,
                     interaction_mode: draft.interaction_mode,
-                    workspace: WorkspaceChoice::Local {
-                        branch: None,
-                        worktree_path: None,
-                    },
+                    workspace,
                     message: Some(message),
                     creation_source: self.options.creation_source.clone(),
                 });

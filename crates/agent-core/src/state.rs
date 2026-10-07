@@ -17,7 +17,9 @@ use std::{
 };
 
 mod device;
+mod sources;
 pub use device::*;
+pub use sources::*;
 
 /// The project a new thread uses when none is chosen.
 pub const CHATS_PROJECT: &str = "chats";
@@ -77,6 +79,20 @@ pub struct Draft {
     pub interaction_mode: InteractionMode,
     /// Payloads behind the text's context links.
     pub context: Option<MessageContext>,
+    /// Where a new thread's first run works; only new-thread drafts set it.
+    pub workspace: Option<DraftWorkspace>,
+}
+
+/// The new-thread composer's workspace choice.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct DraftWorkspace {
+    pub mode: crate::view::projects::selection::ThreadWorkspaceMode,
+    /// The branch to work on locally, or the base of a new worktree.
+    pub branch: Option<String>,
+    /// An existing worktree that has the branch checked out.
+    pub worktree_path: Option<String>,
+    pub start_from_origin: bool,
 }
 impl Default for Draft {
     fn default() -> Self {
@@ -90,6 +106,7 @@ impl Default for Draft {
             runtime_mode: RuntimeMode::FullAccess,
             interaction_mode: InteractionMode::Default,
             context: None,
+            workspace: None,
         }
     }
 }
@@ -267,6 +284,8 @@ pub struct Snapshot {
     pub providers: Option<Vec<crate::models::ProviderInstance>>,
     pub workspace: Workspace,
     pub terminals: BTreeMap<String, Terminal>,
+    /// Provider commands, path search, Git status, refs and diff previews.
+    pub sources: WorkspaceSources,
     /// What the Host's terminal metadata stream reports for every thread's
     /// terminals, by thread and terminal id.
     pub terminal_metadata:
@@ -394,6 +413,86 @@ impl Snapshot {
     }
     pub fn cwd(&self) -> String {
         self.directory_of(self.selected_thread.as_ref())
+    }
+    /// Where the composer's provider commands and `@` paths come from: the
+    /// open thread's checkout, else the new-thread draft's worktree or its
+    /// project's root.
+    pub fn composer_cwd(&self) -> String {
+        if self.selected_thread.is_some() {
+            return self.cwd();
+        }
+        let workspace = self.new_thread_workspace();
+        match workspace.mode {
+            crate::view::projects::selection::ThreadWorkspaceMode::Local => workspace.worktree_path,
+            crate::view::projects::selection::ThreadWorkspaceMode::Worktree => None,
+        }
+        .or_else(|| self.new_thread_project_root())
+        .unwrap_or_default()
+    }
+    /// The root of the project a new thread would use; none for chats.
+    pub fn new_thread_project_root(&self) -> Option<String> {
+        let project = self.selected_project.as_deref()?;
+        self.shell_projects()
+            .iter()
+            .find(|candidate| candidate.id == project)
+            .and_then(|project| project.roots.first())
+            .map(|root| root.path.clone())
+    }
+    /// The checked-out branch of the project's root and the worktree it is
+    /// checked out in when that differs from the root.
+    pub fn new_thread_local_selection(&self) -> (Option<String>, Option<String>) {
+        let Some(root) = self.new_thread_project_root() else {
+            return (None, None);
+        };
+        let current = self
+            .sources
+            .refs(&root, RefScope::All)
+            .and_then(|entry| entry.list.as_ref())
+            .and_then(|list| list.refs.iter().find(|branch| branch.current));
+        match current {
+            Some(branch) => (
+                Some(branch.name.clone()),
+                crate::view::new_thread::branch_worktree_path(
+                    crate::view::projects::selection::ThreadWorkspaceMode::Local,
+                    &root,
+                    branch.worktree_path.as_deref(),
+                ),
+            ),
+            None => (None, None),
+        }
+    }
+    /// The new-thread draft's workspace: its choice, else the Host's default
+    /// mode on the project's checkout.
+    pub fn new_thread_workspace(&self) -> DraftWorkspace {
+        use crate::view::projects::selection::ThreadWorkspaceMode;
+        if let Some(workspace) = self
+            .drafts
+            .get(&self.new_thread_draft_key())
+            .and_then(|draft| draft.workspace.clone())
+        {
+            return workspace;
+        }
+        let worktree = self.new_thread_project_root().is_some()
+            && self
+                .workspace
+                .worktree_settings
+                .as_ref()
+                .is_some_and(|settings| settings.create_on_new_session);
+        let mode = if worktree {
+            ThreadWorkspaceMode::Worktree
+        } else {
+            ThreadWorkspaceMode::Local
+        };
+        let (branch, worktree_path) = match mode {
+            ThreadWorkspaceMode::Local => self.new_thread_local_selection(),
+            ThreadWorkspaceMode::Worktree => (None, None),
+        };
+        DraftWorkspace {
+            mode,
+            branch,
+            worktree_path,
+            start_from_origin: false,
+        }
     }
     /// Where a thread's files and terminals open: its worktree or checkout,
     /// else its project's root.
@@ -853,6 +952,45 @@ pub enum Intent {
         thread_id: String,
         terminal_id: String,
     },
+    /// The composer's text or cursor (UTF-16) changed; loads what its `/`,
+    /// `$` and `@` menu lists.
+    UpdateComposerMenu {
+        text: String,
+        cursor: u32,
+        layout: crate::view::timeline::rows::TimelineLayout,
+    },
+    /// Lists the branches the diff panel's base picker offers.
+    SearchDiffBaseRefs {
+        query: String,
+    },
+    /// Lists the branches the new-thread branch picker offers.
+    SearchNewThreadBranches {
+        query: String,
+    },
+    SetNewThreadWorkspace {
+        mode: crate::view::projects::selection::ThreadWorkspaceMode,
+    },
+    /// Chooses the branch to work on locally, or the base of a new worktree.
+    SelectNewThreadBranch {
+        branch: String,
+        worktree_path: Option<String>,
+    },
+    SetNewThreadStartFromOrigin {
+        on: bool,
+    },
+    /// A new thread in the project on a branch, from a thread's menu.
+    NewThreadOnBranch {
+        project_id: String,
+        branch: String,
+        worktree_path: Option<String>,
+    },
+    /// Prepares the workspace of a run whose preparation failed again.
+    RetryPreparation {
+        run_id: String,
+    },
+    /// Stops the open thread's worktree setup and sends its first message
+    /// again as a new thread on the project's checkout.
+    WorkLocally,
     /// Empties the terminal's history and screens; the shell keeps running.
     ClearTerminal {
         thread_id: String,

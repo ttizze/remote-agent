@@ -195,6 +195,8 @@ pub(super) struct Owner {
     pub dictations: BTreeMap<String, CancellationToken>,
     /// The shell, outbox and Working preference the list holds last saw.
     pub observed_list: Option<ObservedList>,
+    /// The thread whose setup "Work locally" is cancelling.
+    pub work_locally: Option<ThreadId>,
 }
 
 pub(super) type ObservedList = (Arc<ShellCache>, Arc<crate::commands::outbox::Outbox>, bool);
@@ -244,6 +246,7 @@ impl Owner {
             waiters: BTreeMap::new(),
             dictations: BTreeMap::new(),
             observed_list: None,
+            work_locally: None,
         };
         if let Some(thread) = owner.state.selected_thread.clone() {
             owner.open_thread(&thread);
@@ -321,12 +324,14 @@ impl Owner {
                     .filter_map(ThreadCacheEntry::next_due),
             )
             .chain(retention)
+            .chain(self.sources_deadline())
             .min()
     }
 
     /// Writes due cache entries and forgets threads idle past the retention.
     pub fn tick(&mut self) {
         let now = now_ms();
+        self.sources_tick(now);
         if let Some((revision, shell)) = self.shell_cache.due(now) {
             self.write_cache(CacheWrite::Shell(revision), move |cache| {
                 cache.save_shell(&shell)

@@ -365,12 +365,11 @@ pub enum DiffRequest {
     },
 }
 impl DiffRequest {
-    /// The intent that loads this diff. `cwd` is the thread's checkout. The
-    /// Host has no branch-range diff, so "Changes" loads nothing.
-    pub fn intent(&self, cwd: Option<&str>) -> Option<Intent> {
+    /// The intent that loads a turn's diff; the checkout's diffs come from the
+    /// Host's diff preview.
+    pub fn intent(&self) -> Option<Intent> {
         match self {
-            Self::Branch { .. } => None,
-            Self::Unstaged { .. } => cwd.map(|cwd| Intent::ReviewWorkspace { cwd: cwd.into() }),
+            Self::Branch { .. } | Self::Unstaged { .. } => None,
             Self::Turn {
                 from_run_ordinal,
                 to_run_ordinal,
@@ -402,6 +401,8 @@ pub struct DiffPanelView {
     pub ignore_whitespace: bool,
     /// The whitespace toggle's label and tooltip.
     pub whitespace_toggle_label: String,
+    /// The checkout's diffs; set by the thread view, which knows the checkout.
+    pub git: Option<GitDiffView>,
 }
 
 pub fn diff_panel(
@@ -509,6 +510,197 @@ pub fn diff_panel(
             "Hide whitespace changes"
         }
         .into(),
+        git: None,
+    }
+}
+
+/// One base the "Changes" picker offers: a local branch with its remote twin,
+/// or a remote-only branch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct BaseRefChoice {
+    pub id: String,
+    pub label: String,
+    pub local: Option<String>,
+    pub remote: Option<String>,
+    /// What choosing it selects: the remote when it is the current base, else
+    /// the local branch.
+    pub value: String,
+    pub selected: bool,
+}
+
+/// The checkout's "Changes" and "Uncommitted" diffs and the base picker.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct GitDiffView {
+    /// False outside a Git checkout: "Turn diffs are unavailable because this
+    /// project is not a git repository."
+    pub is_repo: bool,
+    pub loading: bool,
+    pub error: Option<String>,
+    pub base_ref: Option<String>,
+    pub head_ref: Option<String>,
+    /// The diff is too large to show whole.
+    pub truncated: bool,
+    /// `<head> → <base>` beside the base picker.
+    pub comparison_label: Option<String>,
+    /// "Automatic" leads the list while the query is empty.
+    pub base_ref_choices: Vec<BaseRefChoice>,
+    pub base_refs_loading: bool,
+}
+
+fn remote_branch_name(branch: &agent_protocol::workspace::VcsRef) -> &str {
+    branch
+        .remote_name
+        .as_deref()
+        .and_then(|remote| branch.name.strip_prefix(remote)?.strip_prefix('/'))
+        .unwrap_or(&branch.name)
+}
+
+/// Local branches paired with their `origin` (or first) remote twin, then the
+/// remote branches no local one claimed.
+pub fn build_base_ref_choices(
+    local: &[agent_protocol::workspace::VcsRef],
+    remote: &[agent_protocol::workspace::VcsRef],
+) -> Vec<(String, String, Option<String>, Option<String>)> {
+    let mut unused: Vec<bool> = vec![true; remote.len()];
+    let mut choices = vec![];
+    for branch in local {
+        let matches: Vec<usize> = remote
+            .iter()
+            .enumerate()
+            .filter(|(index, candidate)| {
+                unused[*index] && remote_branch_name(candidate) == branch.name
+            })
+            .map(|(index, _)| index)
+            .collect();
+        let pick = matches
+            .iter()
+            .copied()
+            .find(|index| remote[*index].remote_name.as_deref() == Some("origin"))
+            .or_else(|| matches.first().copied());
+        if let Some(index) = pick {
+            unused[index] = false;
+        }
+        choices.push((
+            format!("local:{}", branch.name),
+            branch.name.clone(),
+            Some(branch.name.clone()),
+            pick.map(|index| remote[index].name.clone()),
+        ));
+    }
+    for (index, branch) in remote.iter().enumerate() {
+        if unused[index] {
+            choices.push((
+                format!("remote:{}", branch.name),
+                branch.name.clone(),
+                None,
+                Some(branch.name.clone()),
+            ));
+        }
+    }
+    choices
+}
+
+/// The Git part of a thread's diff panel, from the preview, status and refs
+/// the Host returned for its checkout.
+pub fn git_diff_view(
+    snapshot: &crate::state::Snapshot,
+    cwd: &str,
+    selection: &DiffPanelSelection,
+) -> GitDiffView {
+    use crate::state::RefScope;
+    use agent_protocol::workspace::DiffSourceKind;
+    let sources = &snapshot.sources;
+    let preview = sources
+        .diff_preview
+        .as_ref()
+        .filter(|entry| entry.request.cwd == cwd);
+    let kind = match selection.selection {
+        DiffSelection::Unstaged => DiffSourceKind::WorkingTree,
+        _ => DiffSourceKind::BranchRange,
+    };
+    let source = preview
+        .and_then(|entry| entry.result.as_ref())
+        .and_then(|result| result.sources.iter().find(|source| source.kind == kind));
+    let selected_base = match &selection.selection {
+        DiffSelection::Branch { base_ref } => base_ref.clone(),
+        _ => None,
+    };
+    let refs = |scope| sources.refs(cwd, scope);
+    let (local, remote) = (refs(RefScope::Local), refs(RefScope::Remote));
+    let list = |entry: Option<&crate::state::RefsEntry>| {
+        entry
+            .and_then(|entry| entry.list.as_ref())
+            .map(|list| list.refs.clone())
+            .unwrap_or_default()
+    };
+    let head = source.and_then(|source| source.head_ref.clone());
+    let local_refs: Vec<_> = list(local)
+        .into_iter()
+        .filter(|branch| Some(&branch.name) != head.as_ref())
+        .collect();
+    let query = local.map(|entry| entry.query.clone()).unwrap_or_default();
+    let normalized = query.trim().to_lowercase();
+    let mut choices: Vec<BaseRefChoice> = build_base_ref_choices(&local_refs, &list(remote))
+        .into_iter()
+        .filter(|(_, label, local, remote)| {
+            normalized.is_empty()
+                || [Some(label), local.as_ref(), remote.as_ref()]
+                    .into_iter()
+                    .flatten()
+                    .any(|name| name.to_lowercase().contains(&normalized))
+        })
+        .map(|(id, label, local, remote)| {
+            let value = match (&selected_base, &remote) {
+                (Some(selected), Some(remote)) if selected == remote => remote.clone(),
+                _ => local
+                    .clone()
+                    .or_else(|| remote.clone())
+                    .unwrap_or_else(|| id.clone()),
+            };
+            BaseRefChoice {
+                selected: selected_base.as_ref() == Some(&value),
+                id,
+                label,
+                local,
+                remote,
+                value,
+            }
+        })
+        .collect();
+    if normalized.is_empty() {
+        choices.insert(
+            0,
+            BaseRefChoice {
+                id: "automatic".into(),
+                label: "Automatic".into(),
+                local: None,
+                remote: None,
+                value: String::new(),
+                selected: selected_base.is_none(),
+            },
+        );
+    }
+    let base_ref = source.and_then(|source| source.base_ref.clone());
+    GitDiffView {
+        is_repo: sources
+            .vcs_status
+            .get(cwd)
+            .is_none_or(|status| status.is_repo),
+        loading: preview.is_some_and(|entry| entry.result.is_none() && entry.error.is_none()),
+        error: preview.and_then(|entry| entry.error.clone()),
+        comparison_label: base_ref
+            .as_ref()
+            .map(|base| format!("{} \u{2192} {base}", head.as_deref().unwrap_or("HEAD"))),
+        base_ref,
+        head_ref: head,
+        truncated: source.is_some_and(|source| source.truncated),
+        base_ref_choices: choices,
+        base_refs_loading: [local, remote]
+            .into_iter()
+            .flatten()
+            .any(|entry| entry.in_flight && entry.list.is_none()),
     }
 }
 

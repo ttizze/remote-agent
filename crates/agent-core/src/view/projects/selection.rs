@@ -67,7 +67,7 @@ pub fn resolve_draft_project_selection(
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum ThreadWorkspaceMode {
     /// The project's checkout.

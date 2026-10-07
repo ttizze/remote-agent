@@ -340,7 +340,7 @@ fn defaults_to_changes_with_whitespace_hidden() {
         })
     );
     assert_eq!(view.whitespace_toggle_label, "Show whitespace changes");
-    assert!(view.request.unwrap().intent(Some("/repo")).is_none());
+    assert!(view.request.unwrap().intent().is_none());
 }
 
 #[test]
@@ -371,7 +371,7 @@ fn labels_the_latest_turn_and_requests_its_checkpoint_range() {
         }
     );
     assert!(matches!(
-        request.intent(None),
+        request.intent(),
         Some(Intent::ReadTurnDiff {
             from_run_ordinal: 1,
             to_run_ordinal: 2,
@@ -424,7 +424,7 @@ fn shows_no_completed_turns_when_a_turn_is_selected_without_checkpoints() {
 }
 
 #[test]
-fn uncommitted_loads_the_workspace_review() {
+fn uncommitted_reads_the_working_tree_preview() {
     let mut selection = DiffPanelSelection::default();
     selection.select_scope(&DiffScopeChoice::Unstaged, &[]);
 
@@ -432,8 +432,110 @@ fn uncommitted_loads_the_workspace_review() {
 
     assert_eq!(view.scope_label, "Uncommitted");
     assert!(view.scopes[1].selected);
-    assert!(matches!(
-        view.request.unwrap().intent(Some("/repo")),
-        Some(Intent::ReviewWorkspace { cwd }) if cwd == "/repo"
-    ));
+    assert_eq!(
+        view.request,
+        Some(DiffRequest::Unstaged {
+            ignore_whitespace: true
+        })
+    );
+    assert!(view.request.unwrap().intent().is_none());
+}
+
+// lib/baseRefChoices.ts buildBaseRefChoices.
+#[test]
+fn base_choices_pair_local_branches_with_their_origin_twin() {
+    let branch = |name: &str, remote: Option<&str>| agent_protocol::workspace::VcsRef {
+        name: name.into(),
+        is_remote: remote.is_some(),
+        remote_name: remote.map(Into::into),
+        current: false,
+        is_default: false,
+        worktree_path: None,
+    };
+    let choices = build_base_ref_choices(
+        &[branch("main", None), branch("topic", None)],
+        &[
+            branch("upstream/main", Some("upstream")),
+            branch("origin/main", Some("origin")),
+            branch("origin/release", Some("origin")),
+        ],
+    );
+    assert_eq!(
+        choices,
+        vec![
+            (
+                "local:main".to_owned(),
+                "main".to_owned(),
+                Some("main".to_owned()),
+                Some("origin/main".to_owned())
+            ),
+            (
+                "local:topic".to_owned(),
+                "topic".to_owned(),
+                Some("topic".to_owned()),
+                None
+            ),
+            (
+                "remote:upstream/main".to_owned(),
+                "upstream/main".to_owned(),
+                None,
+                Some("upstream/main".to_owned())
+            ),
+            (
+                "remote:origin/release".to_owned(),
+                "origin/release".to_owned(),
+                None,
+                Some("origin/release".to_owned())
+            ),
+        ]
+    );
+}
+
+#[test]
+fn the_git_view_reads_the_preview_source_its_scope_picks() {
+    use crate::state::{DiffPreviewEntry, Snapshot};
+    use agent_protocol::workspace::{DiffPreview, DiffPreviewResult, DiffSource, DiffSourceKind};
+    let source = |kind, title: &str| DiffSource {
+        id: title.into(),
+        kind,
+        title: title.into(),
+        base_ref: (kind == DiffSourceKind::BranchRange).then(|| "main".into()),
+        head_ref: Some("topic".into()),
+        diff: String::new(),
+        diff_hash: "hash".into(),
+        truncated: false,
+        files: Some(vec![]),
+    };
+    let mut snapshot = Snapshot::default();
+    snapshot.sources.diff_preview = Some(DiffPreviewEntry {
+        request: DiffPreview {
+            cwd: "/repo".into(),
+            base_ref: None,
+            ignore_whitespace: false,
+            file: None,
+        },
+        result: Some(std::sync::Arc::new(DiffPreviewResult {
+            cwd: "/repo".into(),
+            generated_at: agent_domain::Timestamp::from_millis(0).unwrap(),
+            sources: vec![
+                source(DiffSourceKind::WorkingTree, "Uncommitted"),
+                source(DiffSourceKind::BranchRange, "Changes"),
+            ],
+        })),
+        error: None,
+    });
+    let changes = git_diff_view(&snapshot, "/repo", &DiffPanelSelection::default());
+    assert_eq!(
+        changes.comparison_label.as_deref(),
+        Some("topic \u{2192} main")
+    );
+    assert!(changes.is_repo && !changes.loading);
+    assert_eq!(changes.base_ref_choices[0].label, "Automatic");
+    assert!(changes.base_ref_choices[0].selected);
+    let mut uncommitted = DiffPanelSelection::default();
+    uncommitted.select_git_scope(DiffGitScope::Unstaged);
+    assert_eq!(
+        git_diff_view(&snapshot, "/repo", &uncommitted).base_ref,
+        None
+    );
 }

@@ -322,11 +322,18 @@ pub fn thread_view(
         limit_recovery: shell
             .as_ref()
             .and_then(|shell| usage_limit_recovery(shell, now_ms)),
-        diff: diff_panel(
-            &state.map(checkpoint_summaries).unwrap_or_default(),
-            snapshot.diff_panels.get(thread).unwrap_or(&unselected),
-            preferences.diff_ignore_whitespace,
-        ),
+        diff: crate::view::checkpoints::DiffPanelView {
+            git: Some(crate::view::checkpoints::git_diff_view(
+                snapshot,
+                &snapshot.thread_cwd(thread),
+                snapshot.diff_panels.get(thread).unwrap_or(&unselected),
+            )),
+            ..diff_panel(
+                &state.map(checkpoint_summaries).unwrap_or_default(),
+                snapshot.diff_panels.get(thread).unwrap_or(&unselected),
+                preferences.diff_ignore_whitespace,
+            )
+        },
         terminals: terminal_tabs(snapshot, thread),
         scripts: snapshot.thread_project(thread).and_then(|project| {
             project_scripts(
