@@ -73,16 +73,18 @@ impl Desktop {
             MarkdownLinkPresentation::External { href, .. }
             | MarkdownLinkPresentation::Link { href: Some(href) } => cx.open_url(&href),
             MarkdownLinkPresentation::File { link } => {
-                self.open_workspace_file(link.path, window, cx)
+                self.open_workspace_file(link.path, link.line, window, cx)
             }
             MarkdownLinkPresentation::Link { href: None } => {}
         }
     }
 
-    /// Opens a file of the thread's workspace in the right panel.
+    /// Opens a file of the thread's workspace in the right panel, at `line`
+    /// (from 1) when the link names one.
     pub(super) fn open_workspace_file(
         &mut self,
         path: String,
+        line: Option<u64>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -98,6 +100,7 @@ impl Desktop {
                 .into_owned()
         };
         self.open_right_panel(PanelTab::Files, window, cx);
+        self.reveal_file_line(path.clone(), line);
         self.perform(Intent::ReadFile {
             path,
             discard_draft: false,
@@ -114,7 +117,7 @@ impl Desktop {
         match chip.kind {
             ContextChipKind::Mention => {
                 if let Some(path) = chip.path.clone() {
-                    self.open_workspace_file(path, window, cx);
+                    self.open_workspace_file(path, None, window, cx);
                 }
             }
             ContextChipKind::Thread => {

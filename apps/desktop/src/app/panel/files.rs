@@ -10,7 +10,7 @@ use gpui_kit::{
         Disableable, Sizable,
         button::{Button, ButtonVariants},
         h_flex,
-        input::{Editor, EditorState, InputEvent},
+        input::{Editor, EditorState, InputEvent, Position},
         v_flex,
     },
     prelude::FluentBuilder,
@@ -28,6 +28,8 @@ pub(super) struct FilesState {
     pending: Option<u64>,
     /// The folder listed when the tab opened.
     listed_for: Option<String>,
+    /// A file to show at a line (from 1) once the editor holds it.
+    reveal: Option<(String, u64)>,
 }
 impl FilesState {
     pub(super) fn new(
@@ -49,6 +51,7 @@ impl FilesState {
             revision: 0,
             pending: None,
             listed_for: None,
+            reveal: None,
         }
     }
     pub(super) fn reset(&mut self) {
@@ -56,6 +59,7 @@ impl FilesState {
         self.value.clear();
         self.pending = None;
         self.listed_for = None;
+        self.reveal = None;
     }
 }
 
@@ -116,6 +120,23 @@ impl Desktop {
                 .editor
                 .update(cx, |editor, cx| editor.set_value(text, window, cx));
         }
+        if let Some((_, line)) = state.reveal.take_if(|(path, _)| *path == file.path) {
+            state.editor.update(cx, |editor, cx| {
+                editor.set_cursor_position(
+                    Position {
+                        line: line.saturating_sub(1) as u32,
+                        character: 0,
+                    },
+                    window,
+                    cx,
+                )
+            });
+        }
+    }
+
+    /// Shows `line` (from 1) of `path` once the Files tab holds the file.
+    pub(crate) fn reveal_file_line(&mut self, path: String, line: Option<u64>) {
+        self.panels.files.reveal = line.map(|line| (path, line));
     }
 
     pub(super) fn render_files(&mut self, _: &mut Window, cx: &mut Context<Self>) -> AnyElement {
