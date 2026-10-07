@@ -1,179 +1,140 @@
-//! GPUI rendering of the shared conversation presentation.
+//! The desktop window: one Host connection, the views agent-core derives from
+//! its snapshots, and the screens that draw them.
 mod attachments;
+mod composer;
+mod dialogs;
 mod dictation;
+mod header;
 mod hosts;
-mod view;
-use crate::{Runtime, diff::DiffView, platform, store_session::StoreSession};
+mod menus;
+mod panel;
+mod settings;
+mod sidebar;
+mod timeline;
+mod ui;
+
+pub(crate) use ui::{apply_appearance, color};
+
+use crate::{Runtime, platform, store_session::StoreSession};
 use agent_core::{
-    presentation::*,
-    state::{Intent, QuestionAnswer, QueueAction, SendBehavior, Snapshot, ThreadAction},
-    store::Outcome,
-};
-use agent_protocol::{models::RemoteHost, provider::ProviderKind};
-use gpui_kit::{
-    component::{
-        button::{Button, ButtonVariants},
-        input::{Editor, EditorState, Input, InputEvent, InputState, Textarea, TextareaState},
-        menu::{ContextMenuExt, DropdownMenu, PopupMenuItem},
-        text::TextView,
-        *,
+    connection::{Outcome, StoreOptions},
+    state::{Intent, Snapshot},
+    view::{
+        new_thread::NewThreadView,
+        sidebar::{SidebarOptions, SidebarView},
+        thread::{ThreadView, ThreadViewOptions},
+        timeline::rows::TimelineLayout,
     },
+};
+use agent_protocol::models::RemoteHost;
+use gpui_kit::{
+    component::{WindowExt, h_flex, notification::Notification, v_flex},
     prelude::FluentBuilder,
     *,
 };
 use hosts::{HostEvent, Hosts};
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    path::PathBuf,
-    sync::{Arc, OnceLock},
-};
+use std::{path::PathBuf, sync::Arc};
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Panel {
-    Diff,
-    Terminal,
-    Files,
-    Browser,
-}
-#[derive(Clone, Copy)]
-enum BufferRevision {
-    Draft(u64),
-    Editor(u64),
-}
+/// Runs once a dispatched intent resolves.
+type Done = Box<
+    dyn FnOnce(&mut Desktop, &Result<Outcome, String>, &mut Window, &mut Context<Desktop>) + Send,
+>;
+
 enum Update {
-    AttachmentsPicked(String, Result<Vec<PathBuf>, String>),
-    AttachmentReady(String, Result<PathBuf, String>),
     Connected(Result<(StoreSession, PathBuf), String>),
     Snapshot(Arc<Snapshot>),
-    Presentation {
-        revision: u64,
-        view: Box<ConversationView>,
-    },
-    Completed(Option<BufferRevision>, Result<Outcome, String>),
-    Folder(Option<PathBuf>),
+    Views(Box<Views>),
+    Completed(Option<Done>, Result<Outcome, String>),
     PersistenceError(String),
+    Attachments(attachments::Update),
     Recording(uuid::Uuid, platform::RecordingEvent),
     Transcribed(uuid::Uuid, Result<Outcome, String>),
     Tick,
 }
-struct QuestionInput {
-    selected: BTreeSet<String>,
-    custom: Entity<InputState>,
-    multi: bool,
+
+/// Which screen the main area shows.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Route {
+    Chat,
+    Settings,
 }
+
+/// What the views were derived from, so a newer request replaces them.
+#[derive(Clone, PartialEq)]
+struct ViewInputs {
+    sidebar: SidebarOptions,
+    thread: ThreadViewOptions,
+}
+
+/// The views of one snapshot, derived off the main thread.
+pub(crate) struct Views {
+    /// The snapshot revision they were derived from.
+    pub(crate) revision: u64,
+    pub(crate) generation: u64,
+    pub(crate) now_ms: i64,
+    pub(crate) sidebar: SidebarView,
+    /// The selected thread's screen.
+    pub(crate) thread: Option<ThreadView>,
+    /// The new-thread draft while no thread is selected.
+    pub(crate) new_thread: Option<NewThreadView>,
+}
+impl Views {
+    fn derive(snapshot: &Snapshot, inputs: &ViewInputs, generation: u64, now_ms: i64) -> Self {
+        Self {
+            revision: snapshot.revision,
+            generation,
+            now_ms,
+            sidebar: snapshot.sidebar(now_ms, inputs.sidebar.clone()),
+            thread: snapshot.selected_thread(now_ms, inputs.thread.clone()),
+            new_thread: snapshot
+                .selected_thread
+                .is_none()
+                .then(|| snapshot.new_thread(inputs.thread.composer.clone())),
+        }
+    }
+}
+
 pub(crate) struct Desktop {
-    attachment_cache: BTreeMap<String, Option<PathBuf>>,
-    attachment_directory: Arc<tempfile::TempDir>,
-    session: Option<StoreSession>,
-    snapshot: Arc<Snapshot>,
-    conversation: Arc<ConversationView>,
-    presentation_running: bool,
-    presented_revision: u64,
-    runtime: Runtime,
+    pub(crate) session: Option<StoreSession>,
+    pub(crate) snapshot: Arc<Snapshot>,
+    pub(crate) views: Arc<Views>,
+    pub(crate) runtime: Runtime,
     updates: async_channel::Sender<(u64, Update)>,
     epoch: u64,
-    connecting: bool,
-    remote: Option<RemoteHost>,
-    hosts: Entity<Hosts>,
-    settings: bool,
-    error: String,
-    composer: Entity<TextareaState>,
-    composer_revision: u64,
-    pending_draft: Option<u64>,
-    composer_base: String,
-    composer_key: String,
-    search: Entity<InputState>,
-    rename: Entity<InputState>,
-    renaming: bool,
-    collapsed_shelves: BTreeSet<ShelfKind>,
-    settled_limit: usize,
-    show_archive: bool,
-    expanded: BTreeSet<String>,
-    questions: BTreeMap<(String, String), QuestionInput>,
-    timeline: ListState,
-    panel: Option<Panel>,
-    terminal: Option<Entity<crate::terminal::Terminal>>,
-    browser: Option<Entity<crate::browser::Browser>>,
-    diff: Entity<DiffView>,
-    file_path: Entity<InputState>,
-    editor: Entity<EditorState>,
-    editor_path: Option<String>,
-    editor_value: String,
-    editor_revision: u64,
-    pending_editor: Option<u64>,
-    account_code: Entity<InputState>,
-    dictation: Option<dictation::Dictation>,
+    pub(crate) connecting: bool,
+    pub(crate) remote: Option<RemoteHost>,
+    pub(crate) hosts: Entity<Hosts>,
+    pub(crate) route: Route,
+    pub(crate) sidebar_hidden: bool,
+    generation: u64,
+    views_running: bool,
+    shown_error: Option<String>,
+    pub(crate) sidebar: sidebar::SidebarState,
+    pub(crate) header: header::HeaderState,
+    pub(crate) timeline: timeline::TimelineState,
+    pub(crate) composer: composer::ComposerState,
+    pub(crate) panels: panel::PanelState,
+    pub(crate) settings: settings::SettingsState,
+    pub(crate) menus: menus::MenuState,
+    pub(crate) attachments: attachments::AttachmentCache,
+    pub(crate) dictation: Option<dictation::Dictation>,
     tick: Option<tokio_util::task::AbortOnDropHandle<()>>,
     _subscriptions: Vec<Subscription>,
 }
-fn palette() -> &'static agent_core::presentation::theme::Theme {
-    static THEME: OnceLock<agent_core::presentation::theme::Theme> = OnceLock::new();
-    THEME.get_or_init(|| agent_core::presentation::theme::theme(true))
+
+/// Keys every window binds; screens handle their own focus-specific keys.
+pub(crate) fn bind_keys(cx: &mut App) {
+    cx.bind_keys([KeyBinding::new(
+        "ctrl-v",
+        gpui_kit::component::input::Paste,
+        Some("ChatComposer > Input"),
+    )]);
 }
-pub(crate) fn color(role: &str) -> Rgba {
-    rgb(u32::from_str_radix(
-        palette()
-            .colors
-            .get(role)
-            .map_or("ffffff", |v| v.trim_start_matches('#')),
-        16,
-    )
-    .unwrap_or(0xffffff))
-}
-pub(crate) fn apply_theme(cx: &mut App) {
-    let theme = gpui_kit::component::Theme::global_mut(cx);
-    theme.font_size = px(palette().prompt_size);
-    theme.mono_font_size = px(palette().code_size);
-    theme.radius = px(palette().radius);
-    for (target, role) in [
-        (&mut theme.colors.background, "canvas"),
-        (&mut theme.colors.foreground, "text"),
-        (&mut theme.colors.border, "border"),
-        (&mut theme.colors.input, "input"),
-        (&mut theme.colors.muted, "muted"),
-        (&mut theme.colors.muted_foreground, "textMuted"),
-        (&mut theme.colors.popover, "surfaceOverlay"),
-        (&mut theme.colors.popover_foreground, "text"),
-        (&mut theme.colors.primary, "accent"),
-        (&mut theme.colors.primary_hover, "messageActionHover"),
-        (&mut theme.colors.primary_foreground, "text"),
-        (&mut theme.colors.ring, "focus"),
-        (&mut theme.colors.accent, "accentSurface"),
-        (&mut theme.colors.accent_foreground, "text"),
-        (&mut theme.colors.sidebar, "sidebar"),
-        (&mut theme.colors.sidebar_foreground, "sidebarForeground"),
-        (&mut theme.colors.sidebar_border, "sidebarBorder"),
-        (&mut theme.colors.link, "accent"),
-        (&mut theme.colors.button, "surface"),
-        (&mut theme.colors.button_foreground, "text"),
-        (&mut theme.colors.button_hover, "toolbarControlHover"),
-        (&mut theme.colors.tab_bar, "toolbar"),
-    ] {
-        *target = color(role).into();
-    }
-}
-fn now() -> orchestration::Timestamp {
-    orchestration::Timestamp::parse(&chrono::Utc::now().to_rfc3339()).expect("UTC timestamp")
-}
-#[derive(Clone)]
-struct PinnedDrag {
-    id: String,
-    title: String,
-}
-impl Render for PinnedDrag {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .p_3()
-            .rounded(px(8.))
-            .bg(color("sidebarRowSelected"))
-            .text_color(color("text"))
-            .child(self.title.clone())
-    }
-}
+
 impl Desktop {
     pub(crate) fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let runtime = cx.global::<Runtime>().clone();
-        let (updates, incoming) = async_channel::bounded(16);
+        let (updates, incoming) = async_channel::bounded(64);
         StoreSession::on_app_quit(cx, |view| &mut view.session);
         cx.spawn_in(window, async move |view, cx| {
             while let Ok((epoch, update)) = incoming.recv().await {
@@ -190,180 +151,96 @@ impl Desktop {
             }
         })
         .detach();
-        let composer = cx.new(|cx| {
-            TextareaState::new(window, cx)
-                .placeholder("Ask anything…")
-                .auto_grow(2, 10)
-                .submit_on_enter(true)
-        });
-        let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search threads…"));
-        let rename = cx.new(|cx| InputState::new(window, cx).placeholder("Thread title"));
-        let file_path = cx.new(|cx| InputState::new(window, cx).placeholder("Path on Host"));
-        let editor = cx.new(|cx| EditorState::new(window, cx));
-        let account_code = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("Authentication code")
-                .masked(true)
-        });
         let hosts = cx.new(|cx| Hosts::new(window, cx));
-        let subscriptions = vec![
-            cx.subscribe(&rename, |view, _, event, cx| {
-                if matches!(event, InputEvent::PressEnter { .. }) {
-                    view.thread_action(ThreadAction::Rename {
-                        title: view.rename.read(cx).value().to_string(),
-                    });
-                    view.renaming = false;
-                    cx.notify();
-                }
-            }),
-            cx.subscribe(&composer, |view, input, event, cx| {
-                if matches!(event, InputEvent::Change) {
-                    let text = input.read(cx).value().to_string();
-                    if view.session.is_some() && text != view.composer_base {
-                        view.composer_revision += 1;
-                        view.pending_draft = Some(view.composer_revision);
-                        let base_text =
-                            Some(std::mem::replace(&mut view.composer_base, text.clone()));
-                        view.perform(
-                            Intent::EditDraft { text, base_text },
-                            Some(BufferRevision::Draft(view.composer_revision)),
-                        );
-                    }
-                }
-            }),
-            cx.subscribe(&composer, |view, _, event, _| {
-                if let InputEvent::PressEnter { shift: false, .. } = event
-                    && (view.conversation.composer.enabled
-                        || view.conversation.composer.plan_follow_up)
-                {
-                    view.perform(
-                        Intent::Send {
-                            behavior: SendBehavior::Default,
-                        },
-                        None,
-                    );
-                }
-            }),
-            cx.subscribe(&search, |view, input, event, cx| {
-                if matches!(event, InputEvent::Change) {
-                    view.perform(
-                        Intent::Search {
-                            query: input.read(cx).value().to_string(),
-                        },
-                        None,
-                    );
-                }
-            }),
-            cx.subscribe(&editor, |view, input, event, cx| {
-                if matches!(event, InputEvent::Change)
-                    && let Some(path) = view.editor_path.clone()
-                {
-                    let text = input.read(cx).value().to_string();
-                    if text != view.editor_value {
-                        view.editor_value = text.clone();
-                        view.editor_revision += 1;
-                        view.pending_editor = Some(view.editor_revision);
-                        view.perform(
-                            Intent::EditFile { path, text },
-                            Some(BufferRevision::Editor(view.editor_revision)),
-                        );
-                    }
-                }
-            }),
-            cx.subscribe_in(&hosts, window, |view, _, event, _, cx| {
+        let mut subscriptions = vec![
+            cx.subscribe_in(&hosts, window, |view, _, event, window, cx| {
                 match event {
                     HostEvent::Selected(remote) => {
-                        view.settings = false;
                         if view.remote.as_ref().map(|r| (&r.id, &r.ticket))
                             != remote.as_ref().map(|r| (&r.id, &r.ticket))
                             || !view.snapshot.connected
                         {
-                            view.connect(remote.clone());
+                            view.connect(remote.clone(), window, cx);
                         }
-                        view.sync_browser_visibility(cx);
                     }
                     HostEvent::Removed(id) if view.remote.as_ref().is_some_and(|r| &r.id == id) => {
-                        view.connect(None)
+                        view.connect(None, window, cx)
                     }
                     _ => {}
                 }
                 cx.notify();
             }),
+            cx.observe_window_appearance(window, |view, window, cx| {
+                apply_appearance(window.appearance(), cx);
+                view.refresh_views(cx);
+            }),
         ];
+        let sidebar = sidebar::SidebarState::new(window, cx);
+        let header = header::HeaderState::new(window, cx);
+        let timeline = timeline::TimelineState::new(window, cx);
+        let composer = composer::ComposerState::new(window, cx, &mut subscriptions);
+        let panels = panel::PanelState::new(window, cx);
+        let settings = settings::SettingsState::new(window, cx);
+        let menus = menus::MenuState::new(window, cx);
         let mut view = Self {
-            attachment_cache: Default::default(),
-            attachment_directory: Arc::new(
-                tempfile::tempdir().expect("attachment cache directory"),
-            ),
             session: None,
             snapshot: Arc::default(),
-            conversation: Arc::new(conversation(&Snapshot::default(), &now())),
-            presentation_running: false,
-            presented_revision: 0,
+            views: Arc::new(Views::derive(
+                &Snapshot::default(),
+                &ViewInputs {
+                    sidebar: SidebarOptions::default(),
+                    thread: ThreadViewOptions::default(),
+                },
+                0,
+                ui::now_ms(),
+            )),
             runtime,
             updates,
             epoch: 0,
             connecting: false,
             remote: None,
             hosts,
-            settings: false,
-            error: String::new(),
+            route: Route::Chat,
+            sidebar_hidden: false,
+            generation: 0,
+            views_running: false,
+            shown_error: None,
+            sidebar,
+            header,
+            timeline,
             composer,
-            composer_revision: 0,
-            pending_draft: None,
-            composer_base: String::new(),
-            composer_key: String::new(),
-            search,
-            rename,
-            renaming: false,
-            collapsed_shelves: BTreeSet::from([ShelfKind::Working, ShelfKind::Snoozed]),
-            settled_limit: 10,
-            show_archive: false,
-            expanded: BTreeSet::new(),
-            questions: BTreeMap::new(),
-            timeline: ListState::new(1, ListAlignment::Bottom, px(600.)),
-            panel: None,
-            terminal: None,
-            browser: None,
-            diff: cx.new(|_| DiffView::new("".into(), true)),
-            file_path,
-            editor,
-            editor_path: None,
-            editor_value: String::new(),
-            editor_revision: 0,
-            pending_editor: None,
-            account_code,
+            panels,
+            settings,
+            menus,
+            attachments: attachments::AttachmentCache::new(),
             dictation: None,
             tick: None,
             _subscriptions: subscriptions,
         };
-        if let Some(error) = &view.runtime.logging_error {
-            view.error = error.clone();
+        if let Some(error) = view.runtime.logging_error.clone() {
+            view.show_error(&error, window, cx);
         }
-        view.connect(None);
+        view.connect(None, window, cx);
         view
     }
-    fn connect(&mut self, remote: Option<RemoteHost>) {
-        self.attachment_cache.clear();
-        self.cancel_recording();
+
+    /// Connects to the local Host, or to `remote`, restoring this device's
+    /// state and the Host's disk cache.
+    pub(crate) fn connect(
+        &mut self,
+        remote: Option<RemoteHost>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.attachments.clear();
+        self.dictation = None;
         self.epoch += 1;
-        self.presentation_running = false;
-        self.presented_revision = 0;
+        self.views_running = false;
         self.connecting = true;
         self.remote = remote;
-        self.pending_draft = None;
-        self.snapshot = Arc::default();
-        self.conversation = Arc::new(conversation(&self.snapshot, &now()));
-        self.timeline.reset(1);
-        self.editor_path = None;
-        self.editor_value.clear();
-        self.pending_editor = None;
-        self.renaming = false;
         self.session.take();
-        self.terminal = None;
-        self.browser = None;
-        self.panel = None;
-        self.questions.clear();
+        self.snapshot = Arc::default();
+        self.disconnected(window, cx);
         let updates = self.updates.clone();
         let epoch = self.epoch;
         let runtime = self.runtime.clone();
@@ -375,16 +252,18 @@ impl Desktop {
             .map(|r| r.id.clone())
             .unwrap_or_else(|| "local".into());
         self.runtime.handle.spawn(async move {
-            let state = (|| -> anyhow::Result<(PathBuf, Snapshot)> {
-                let path = platform::state_dir()
-                    .map_err(anyhow::Error::msg)?
-                    .join(format!("orchestration-{name}.json"));
+            let state = (|| -> anyhow::Result<(PathBuf, Snapshot, StoreOptions)> {
+                let directory = platform::state_dir().map_err(anyhow::Error::msg)?;
+                let path = directory.join(format!("device-{name}.json"));
                 let bytes = std::fs::read(&path).unwrap_or_default();
-                let preferences =
-                    std::fs::read(path.with_file_name("orchestration-model-preferences.json"))
-                        .unwrap_or_default();
+                let preferences = std::fs::read(path.with_file_name("model-preferences.json"))
+                    .unwrap_or_default();
                 let snapshot = agent_core::persistence::recover(&bytes, &preferences);
-                Ok((path, snapshot))
+                let options = StoreOptions {
+                    cache_directory: Some(directory.join("cache").join(&name)),
+                    ..StoreOptions::default()
+                };
+                Ok((path, snapshot, options))
             })();
             match state {
                 Err(error) => {
@@ -392,7 +271,7 @@ impl Desktop {
                         .send((epoch, Update::Connected(Err(error.to_string()))))
                         .await;
                 }
-                Ok((path, snapshot)) => {
+                Ok((path, snapshot, options)) => {
                     let (tx, rx) = async_channel::bounded(8);
                     let relay = updates.clone();
                     let forward = tokio::spawn(async move {
@@ -403,7 +282,9 @@ impl Desktop {
                         }
                     });
                     StoreSession::publish(
-                        connections.connect(ticket.as_deref(), snapshot).await,
+                        connections
+                            .connect(ticket.as_deref(), snapshot, options)
+                            .await,
                         runtime.clone(),
                         tx,
                         move |result| {
@@ -428,59 +309,127 @@ impl Desktop {
             }),
         ));
     }
-    fn perform(&self, intent: Intent, revision: Option<BufferRevision>) {
-        if let Some(session) = &self.session {
-            let receipt = session.store.dispatch(intent);
-            let updates = self.updates.clone();
-            let epoch = self.epoch;
-            self.runtime.handle.spawn(async move {
-                let result = receipt
-                    .await
-                    .map_err(|e| e.to_string())
-                    .and_then(|r| r.map_err(|e| e.to_string()));
-                let _ = updates
-                    .send((epoch, Update::Completed(revision, result)))
-                    .await;
-            });
-        }
+
+    /// Sends an intent to the Host connection's owner.
+    pub(crate) fn perform(&self, intent: Intent) {
+        self.dispatch(intent, None);
     }
-    fn receive(&mut self, update: Update, window: &mut Window, cx: &mut Context<Self>) {
-        if matches!(update, Update::Tick) {
-            cx.notify();
+
+    /// Sends an intent and runs `done` once it resolves.
+    pub(crate) fn perform_then(
+        &self,
+        intent: Intent,
+        done: impl FnOnce(&mut Desktop, &Result<Outcome, String>, &mut Window, &mut Context<Desktop>)
+        + Send
+        + 'static,
+    ) {
+        self.dispatch(intent, Some(Box::new(done)));
+    }
+
+    fn dispatch(&self, intent: Intent, done: Option<Done>) {
+        let Some(session) = &self.session else {
+            return;
+        };
+        let receipt = session.store.dispatch(intent);
+        let updates = self.updates.clone();
+        let epoch = self.epoch;
+        self.runtime.handle.spawn(async move {
+            let result = receipt
+                .await
+                .map_err(|e| e.to_string())
+                .and_then(|r| r.map_err(|e| e.to_string()));
+            let _ = updates.send((epoch, Update::Completed(done, result))).await;
+        });
+    }
+
+    /// The Host connection's store, once connected.
+    pub(crate) fn store(&self) -> Option<Arc<agent_core::connection::Store>> {
+        self.session.as_ref().map(|session| session.store.clone())
+    }
+
+    /// Spawns `task` on the async runtime and delivers its result to `done`
+    /// on the window, unless the connection changed meanwhile.
+    pub(crate) fn spawn_task<T: Send + 'static>(
+        &self,
+        task: impl std::future::Future<Output = T> + Send + 'static,
+        done: impl FnOnce(&mut Desktop, T, &mut Window, &mut Context<Desktop>) + Send + 'static,
+    ) {
+        let updates = self.updates.clone();
+        let epoch = self.epoch;
+        self.runtime.handle.spawn(async move {
+            let value = task.await;
+            let done: Done = Box::new(move |view, _, window, cx| done(view, value, window, cx));
+            let _ = updates
+                .send((epoch, Update::Completed(Some(done), Ok(Outcome::Applied))))
+                .await;
+        });
+    }
+
+    /// An error the user should read, shown once per message.
+    pub(crate) fn show_error(&mut self, error: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let message = agent_core::presentation::error::error_message(error);
+        if message.is_empty() {
             return;
         }
-        let mut prepared = None;
-        match update {
-            Update::AttachmentsPicked(key, paths) => {
-                let paths = match paths {
-                    Ok(paths) => paths,
-                    Err(error) => {
-                        self.error = error;
-                        return;
-                    }
-                };
-                for path in paths {
-                    if let Some(name) = path.file_name().and_then(|s| s.to_str()).map(str::to_owned)
-                    {
-                        self.perform(
-                            Intent::AttachFile {
-                                path: path.to_string_lossy().into_owned(),
-                                mime_type: agent_core::commands::attachment_mime(&name).into(),
-                                name,
-                                draft_key: key.clone(),
-                            },
-                            None,
-                        );
-                    }
-                }
+        self.shown_error = Some(message.clone());
+        window.push_notification(Notification::error(message), cx);
+    }
+
+    /// Derives the views again after a change to what they read besides the
+    /// snapshot, such as an expanded row.
+    pub(crate) fn refresh_views(&mut self, cx: &mut Context<Self>) {
+        self.generation += 1;
+        self.schedule_views(cx);
+    }
+
+    fn view_inputs(&self) -> ViewInputs {
+        ViewInputs {
+            sidebar: self.sidebar.options(),
+            thread: ThreadViewOptions {
+                layout: TimelineLayout::Desktop,
+                disclosure: self.timeline.disclosure(),
+                panels: self.panels.header_panels(),
+                composer: self.composer.options(),
+                show_scroll_to_end: false,
+            },
+        }
+    }
+
+    fn schedule_views(&mut self, cx: &mut Context<Self>) {
+        if self.views_running {
+            return;
+        }
+        if self.views.revision == self.snapshot.revision
+            && self.views.generation == self.generation
+            && ui::now_ms() - self.views.now_ms < 1_000
+        {
+            return;
+        }
+        self.views_running = true;
+        let snapshot = self.snapshot.clone();
+        let inputs = self.view_inputs();
+        let generation = self.generation;
+        let epoch = self.epoch;
+        let updates = self.updates.clone();
+        self.runtime.handle.spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(16)).await;
+            if let Ok(views) = tokio::task::spawn_blocking(move || {
+                Views::derive(&snapshot, &inputs, generation, ui::now_ms())
+            })
+            .await
+            {
+                let _ = updates.send((epoch, Update::Views(Box::new(views)))).await;
             }
-            Update::AttachmentReady(id, result) => {
-                match result {
-                    Ok(path) => {
-                        self.attachment_cache.insert(id, Some(path));
-                    }
-                    Err(error) => self.error = error,
-                };
+        });
+        cx.notify();
+    }
+
+    fn receive(&mut self, update: Update, window: &mut Window, cx: &mut Context<Self>) {
+        match update {
+            Update::Tick => {
+                self.schedule_views(cx);
+                cx.notify();
+                return;
             }
             Update::Connected(Ok((mut session, path))) => {
                 let (tx, rx) = async_channel::bounded(4);
@@ -497,50 +446,56 @@ impl Desktop {
                 self.snapshot = session.store.snapshot();
                 self.session = Some(session);
                 self.connecting = false;
-                self.perform(Intent::LoadAccounts, None);
+                self.perform(Intent::LoadAccounts);
+                self.perform(Intent::LoadConversationSettings);
+                self.snapshot_changed(window, cx);
             }
             Update::Connected(Err(error)) => {
                 self.connecting = false;
-                self.error = error;
+                self.show_error(&error, window, cx);
             }
             Update::Snapshot(snapshot) => {
-                if !snapshot_is_newer(self.snapshot.revision, snapshot.revision) {
+                if !snapshot.accepts_after(&self.snapshot) {
                     return;
                 }
                 self.snapshot = snapshot;
                 if let Some(session) = &self.session {
                     session.save(self.snapshot.clone());
                 }
+                self.snapshot_changed(window, cx);
             }
-            Update::Completed(revision, result) => {
-                if matches!(revision, Some(BufferRevision::Editor(r)) if self.pending_editor == Some(r))
-                {
-                    self.pending_editor = None;
+            Update::Views(views) => {
+                self.views_running = false;
+                if views.revision <= self.snapshot.revision {
+                    let previous = std::mem::replace(&mut self.views, Arc::new(*views));
+                    self.views_changed(&previous, window, cx);
                 }
-                if matches!(revision, Some(BufferRevision::Draft(r)) if self.pending_draft == Some(r))
-                {
-                    self.pending_draft = None;
-                }
+                self.schedule_views(cx);
+            }
+            Update::Completed(done, result) => {
                 if let Some(session) = &self.session {
                     let snapshot = session.store.snapshot();
-                    if snapshot_is_newer(self.snapshot.revision, snapshot.revision) {
+                    if snapshot.accepts_after(&self.snapshot) {
                         self.snapshot = snapshot;
                     }
                     session.save(self.snapshot.clone());
                 }
-                if let Err(error) = result {
-                    self.error = error;
+                match (&result, done.is_some()) {
+                    (Ok(outcome), _) => self.outcome(outcome, window, cx),
+                    (Err(error), false) => {
+                        let error = error.clone();
+                        self.show_error(&error, window, cx);
+                    }
+                    (Err(_), true) => {}
                 }
+                if let Some(done) = done {
+                    done(self, &result, window, cx);
+                }
+                self.snapshot_changed(window, cx);
             }
-            Update::Folder(Some(path)) => self.perform(
-                Intent::RegisterProject {
-                    path: path.to_string_lossy().into(),
-                },
-                None,
-            ),
-            Update::Folder(None) => {}
-            Update::PersistenceError(error) => self.error = error,
-            Update::Recording(id, event) => self.recording_update(id, event),
+            Update::PersistenceError(error) => self.show_error(&error, window, cx),
+            Update::Attachments(update) => self.attachments_update(update, window, cx),
+            Update::Recording(id, event) => self.recording_update(id, event, window, cx),
             Update::Transcribed(id, result) => {
                 if self.dictation.as_ref().is_some_and(|d| d.id == id) {
                     self.dictation = None;
@@ -549,400 +504,175 @@ impl Desktop {
                     self.snapshot = session.store.snapshot();
                 }
                 if let Err(error) = result {
-                    self.error = error;
+                    self.show_error(&error, window, cx);
                 }
-            }
-            Update::Presentation { revision, view } => {
-                self.presentation_running = false;
-                if revision >= self.presented_revision
-                    && view.thread_id.as_deref()
-                        == self.snapshot.selected_thread.as_ref().map(|id| id.as_str())
-                {
-                    self.presented_revision = revision;
-                    prepared = Some(*view);
-                }
-            }
-            Update::Tick => {}
-        }
-        let key = self.snapshot.draft_key();
-        if key != self.composer_key {
-            self.pending_draft = None;
-            self.composer_key = key;
-        }
-        if self.pending_draft.is_none() {
-            let text = self.snapshot.current_draft().text;
-            if self.composer.read(cx).value().as_ref() != text {
-                self.composer_base = text.clone();
-                self.composer
-                    .update(cx, |input, cx| input.set_value(text, window, cx));
+                self.snapshot_changed(window, cx);
             }
         }
-        if let Some(view) = prepared {
-            self.preload_attachments(&view);
-            self.set_conversation(view, window, cx);
-        } else if self.conversation.thread_id.as_deref()
-            != self.snapshot.selected_thread.as_ref().map(|id| id.as_str())
-            || self.conversation.cwd != self.snapshot.cwd()
+        cx.notify();
+    }
+
+    fn outcome(&mut self, outcome: &Outcome, window: &mut Window, cx: &mut Context<Self>) {
+        self.composer_outcome(outcome, window, cx);
+        self.panel_outcome(outcome, window, cx);
+    }
+
+    fn snapshot_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(error) = self.snapshot.error.clone()
+            && self.shown_error.as_deref()
+                != Some(agent_core::presentation::error::error_message(&error).as_str())
         {
-            self.presented_revision = self.snapshot.revision;
-            self.set_conversation(conversation(&self.snapshot, &now()), window, cx);
+            self.show_error(&error, window, cx);
         }
-        self.schedule_presentation();
-        if let Some(file) = &self.snapshot.workspace.file {
-            let text = self
-                .snapshot
-                .workspace
-                .file_drafts
-                .get(&file.path)
-                .map(|draft| &draft.text)
-                .unwrap_or(&file.text);
-            if self.editor_path.as_ref() != Some(&file.path)
-                || (self.pending_editor.is_none() && self.editor_value != *text)
-            {
-                self.editor_path = Some(file.path.clone());
-                self.editor_value = text.clone();
-                self.editor
-                    .update(cx, |input, cx| input.set_value(text.clone(), window, cx));
-            }
-        }
-        self.diff.update(cx, |view, cx| {
-            view.set_source(
-                self.snapshot
-                    .workspace
-                    .review
-                    .as_ref()
-                    .map_or("", |review| &review.diff),
-                cx,
-            )
-        });
+        self.sync_composer(window, cx);
+        self.sync_panels(window, cx);
+        self.sync_settings(window, cx);
+        self.schedule_views(cx);
+    }
+
+    fn views_changed(&mut self, previous: &Views, window: &mut Window, cx: &mut Context<Self>) {
+        self.timeline_views_changed(previous, window, cx);
+        self.sync_composer(window, cx);
+        self.sync_panels(window, cx);
+    }
+
+    /// The connection went away; screens drop what belonged to it.
+    fn disconnected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.timeline.reset();
+        self.panels.reset(window, cx);
+        self.sync_composer(window, cx);
+    }
+
+    /// The selected thread's id.
+    pub(crate) fn thread_id(&self) -> Option<String> {
+        self.snapshot
+            .selected_thread
+            .as_ref()
+            .map(ToString::to_string)
+    }
+
+    /// Opens a thread, leaving settings.
+    pub(crate) fn open_thread(&mut self, thread_id: String, cx: &mut Context<Self>) {
+        self.route = Route::Chat;
+        self.perform(Intent::OpenThread { thread_id });
         cx.notify();
     }
-    fn schedule_presentation(&mut self) {
-        if self.presentation_running || self.presented_revision >= self.snapshot.revision {
-            return;
-        }
-        self.presentation_running = true;
-        let snapshot = self.snapshot.clone();
-        let epoch = self.epoch;
-        let updates = self.updates.clone();
-        self.runtime.handle.spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(16)).await;
-            let revision = snapshot.revision;
-            if let Ok(view) =
-                tokio::task::spawn_blocking(move || conversation(&snapshot, &now())).await
-            {
-                let _ = updates
-                    .send((
-                        epoch,
-                        Update::Presentation {
-                            revision,
-                            view: Box::new(view),
-                        },
-                    ))
-                    .await;
-            }
-        });
+
+    /// Starts a new-thread draft in `project_id`, leaving settings.
+    pub(crate) fn new_thread(&mut self, project_id: Option<String>, cx: &mut Context<Self>) {
+        self.route = Route::Chat;
+        self.perform(Intent::NewThread { project_id });
+        cx.notify();
     }
-    fn set_conversation(
+
+    fn global_key(
         &mut self,
-        conversation: ConversationView,
+        event: &KeyDownEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
-        let before = self.conversation.clone();
-        let follow = self.timeline.max_offset_for_scrollbar().y
-            + self.timeline.scroll_px_offset_for_scrollbar().y
-            <= px(80.);
-        let switched = before.thread_id != conversation.thread_id || before.cwd != conversation.cwd;
-        if switched {
-            self.renaming = false;
-            self.pending_editor = None;
-            self.editor_path = None;
-            self.editor_value.clear();
-            self.terminal = None;
-            if !conversation.cwd.is_empty() {
-                match self.panel {
-                    Some(Panel::Diff) => self.perform(
-                        Intent::ReviewWorkspace {
-                            cwd: conversation.cwd.clone(),
-                        },
-                        None,
-                    ),
-                    Some(Panel::Files) => self.perform(
-                        Intent::ListFiles {
-                            path: conversation.cwd.clone(),
-                        },
-                        None,
-                    ),
-                    Some(Panel::Terminal) => {
-                        if let Some(session) = &self.session {
-                            self.terminal = Some(crate::terminal::Terminal::new(
-                                session.store.clone(),
-                                conversation.cwd.clone(),
-                                window,
-                                cx,
-                            ));
-                        }
-                    }
-                    _ => {}
-                }
+    ) -> bool {
+        let keystroke = &event.keystroke;
+        let modifiers = keystroke.modifiers;
+        if !modifiers.secondary() {
+            return false;
+        }
+        let key = keystroke.key.as_str();
+        match (key, modifiers.shift, modifiers.alt) {
+            ("b", false, false) => {
+                self.sidebar_hidden = !self.sidebar_hidden;
+                cx.notify();
             }
-            self.timeline.reset(conversation.rows.len() + 1);
-        } else {
-            let (range, count) = timeline_splice(&before.rows, &conversation.rows);
-            self.timeline.splice(range, count);
-            for (index, (old, new)) in before.rows.iter().zip(&conversation.rows).enumerate() {
-                if old != new {
-                    self.timeline.remeasure_items(index + 1..index + 2);
-                }
+            ("b", false, true) => self.toggle_right_panel(window, cx),
+            ("j", false, false) => self.toggle_terminal_drawer(window, cx),
+            ("n", false, false) | ("o", true, false) => {
+                let project = self
+                    .snapshot
+                    .selected_thread
+                    .as_ref()
+                    .and_then(|thread| self.snapshot.thread_project(thread))
+                    .map(str::to_owned)
+                    .or_else(|| self.snapshot.selected_project.clone());
+                self.new_thread(project, cx);
             }
+            ("[", true, false) => self.select_adjacent_thread(false, cx),
+            ("]", true, false) => self.select_adjacent_thread(true, cx),
+            _ => return false,
         }
-        if switched || (follow && before.rows.last() != conversation.rows.last()) {
-            self.timeline.scroll_to_end();
-        }
-        self.conversation = Arc::new(conversation);
-        self.composer.update(cx, |input, cx| {
-            input.set_placeholder(self.conversation.composer.placeholder.clone(), window, cx)
-        });
-        let mut live = BTreeSet::new();
-        for row in &self.conversation.requests {
-            if let Some(request) = &row.request_id {
-                for question in &row.questions {
-                    let key = (request.clone(), question.id.clone());
-                    live.insert(key.clone());
-                    self.questions.entry(key).or_insert_with(|| QuestionInput {
-                        selected: BTreeSet::new(),
-                        multi: question.multi_select,
-                        custom: cx
-                            .new(|cx| InputState::new(window, cx).placeholder("Your answer…")),
-                    });
-                }
-            }
-        }
-        self.questions.retain(|key, _| live.contains(key));
-    }
-    fn action(
-        &self,
-        id: impl Into<ElementId>,
-        label: impl Into<SharedString>,
-        intent: Intent,
-        cx: &Context<Self>,
-    ) -> Button {
-        Button::new(id)
-            .label(label)
-            .small()
-            .ghost()
-            .on_click(cx.listener(move |view, _, _, _| view.perform(intent.clone(), None)))
-    }
-    fn thread_action(&self, action: ThreadAction) {
-        if let Some(id) = &self.snapshot.selected_thread {
-            self.perform(
-                Intent::Thread {
-                    thread_id: id.to_string(),
-                    action,
-                },
-                None,
-            );
-        }
-    }
-    fn pick_folder(&self) {
-        let updates = self.updates.clone();
-        let epoch = self.epoch;
-        self.runtime.handle.spawn(async move {
-            let path = tokio::task::spawn_blocking(platform::choose_folder)
-                .await
-                .ok()
-                .flatten();
-            let _ = updates.send((epoch, Update::Folder(path))).await;
-        });
-    }
-    fn open_panel(&mut self, panel: Panel, window: &mut Window, cx: &mut Context<Self>) {
-        if self.panel == Some(panel) {
-            self.panel = None;
-        } else {
-            match panel {
-                Panel::Terminal if !self.snapshot.terminal_available() => return,
-                Panel::Terminal if self.terminal.is_none() => {
-                    if let Some(session) = &self.session {
-                        self.terminal = Some(crate::terminal::Terminal::new(
-                            session.store.clone(),
-                            self.snapshot.cwd(),
-                            window,
-                            cx,
-                        ));
-                    }
-                }
-                Panel::Browser if self.browser.is_none() => {
-                    match crate::browser::Browser::new(
-                        wry::WebViewBuilder::new(),
-                        #[cfg(target_os = "macos")]
-                        crate::browser::ChromeProfileSource::default(),
-                        window,
-                        cx,
-                    ) {
-                        Ok(browser) => self.browser = Some(browser),
-                        Err(error) => self.error = error,
-                    }
-                }
-                Panel::Files => self.perform(
-                    Intent::ListFiles {
-                        path: self.snapshot.cwd(),
-                    },
-                    None,
-                ),
-                Panel::Diff => self.perform(
-                    Intent::ReviewWorkspace {
-                        cwd: self.snapshot.cwd(),
-                    },
-                    None,
-                ),
-                _ => {}
-            }
-            self.panel = Some(panel);
-        }
-        if let Some(browser) = &self.browser {
-            browser.update(cx, |browser, cx| {
-                browser.set_visible(!self.settings && self.panel == Some(Panel::Browser), cx)
-            });
-        }
-        cx.notify();
-    }
-    fn sync_browser_visibility(&mut self, cx: &mut Context<Self>) {
-        if let Some(browser) = &self.browser {
-            browser.update(cx, |browser, cx| {
-                browser.set_visible(!self.settings && self.panel == Some(Panel::Browser), cx)
-            });
-        }
-    }
-    fn confirm_thread_action(
-        &self,
-        id: String,
-        action: ThreadAction,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if matches!(action, ThreadAction::Delete) {
-            let answer = window.prompt(
-                gpui::PromptLevel::Warning,
-                "Delete this thread?",
-                Some("This permanently deletes the conversation."),
-                &["Cancel", "Delete"],
-                cx,
-            );
-            cx.spawn(async move |view, cx| {
-                if let Ok(1) = answer.await {
-                    let _ = view.update(cx, |view, _| {
-                        view.perform(
-                            Intent::Thread {
-                                thread_id: id,
-                                action: ThreadAction::Delete,
-                            },
-                            None,
-                        )
-                    });
-                }
-            })
-            .detach();
-        } else {
-            self.perform(
-                Intent::Thread {
-                    thread_id: id,
-                    action,
-                },
-                None,
-            );
-        }
-    }
-    fn answers(&self, request: &str, cx: &App) -> Vec<QuestionAnswer> {
-        self.questions
-            .iter()
-            .filter(|((id, _), _)| id == request)
-            .map(|((_, id), input)| {
-                let values = question_answer_values(
-                    input.selected.iter().cloned().collect(),
-                    input.custom.read(cx).value().to_string(),
-                    input.multi,
-                );
-                QuestionAnswer {
-                    question_id: id.clone(),
-                    values,
-                }
-            })
-            .collect()
+        true
     }
 }
+
 impl Render for Desktop {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.view(window, cx)
-    }
-}
-
-fn timeline_splice(old: &[TimelineRow], new: &[TimelineRow]) -> (std::ops::Range<usize>, usize) {
-    let prefix = old
-        .iter()
-        .zip(new)
-        .take_while(|(a, b)| a.id == b.id)
-        .count();
-    let suffix = old[prefix..]
-        .iter()
-        .rev()
-        .zip(new[prefix..].iter().rev())
-        .take_while(|(a, b)| a.id == b.id)
-        .count();
-    (
-        prefix + 1..old.len() - suffix + 1,
-        new.len() - prefix - suffix,
-    )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{ListAlignment, ListOffset, ListState, RowKind, TimelineRow, px, timeline_splice};
-    fn row(id: &str) -> TimelineRow {
-        TimelineRow {
-            attachments: vec![],
-            id: id.into(),
-            kind: RowKind::Assistant,
-            text: id.into(),
-            title: String::new(),
-            status: String::new(),
-            streaming: false,
-            collapsible: false,
-            work: vec![],
-            request_id: None,
-            choices: vec![],
-            questions: vec![],
-            response_mode_message: false,
-            actionable: false,
-            run_id: None,
-            rollback_checkpoint_id: None,
-            fork_source_thread_id: None,
-            duration_ms: None,
-        }
-    }
-    #[test]
-    fn prepending_history_preserves_the_visible_item_anchor() {
-        let old = vec![row("a"), row("b")];
-        let new = vec![row("history"), row("older"), row("a"), row("b")];
-        let list = ListState::new(old.len() + 1, ListAlignment::Bottom, px(600.));
-        list.scroll_to(ListOffset {
-            item_ix: 2,
-            offset_in_item: px(17.),
-        });
-        let (range, count) = timeline_splice(&old, &new);
-        assert_eq!(range, 1..1);
-        assert_eq!(count, 2);
-        list.splice(range, count);
-        assert_eq!(list.logical_scroll_top().item_ix, 4);
-        assert_eq!(list.logical_scroll_top().offset_in_item, px(17.));
-    }
-    #[test]
-    fn replacing_middle_rows_preserves_the_suffix_and_streaming_reuses_identity() {
-        let old = vec![row("a"), row("b"), row("c")];
-        let new = vec![row("a"), row("replacement"), row("extra"), row("c")];
-        assert_eq!(timeline_splice(&old, &new), (2..3, 2));
-        let mut streamed = old.clone();
-        streamed[2].text.push_str(" more output");
-        assert_eq!(timeline_splice(&old, &streamed), (4..4, 0));
+        let metrics = ui::metrics();
+        let main = match self.route {
+            Route::Settings => self.render_settings(window, cx),
+            Route::Chat => {
+                let body = if self.snapshot.selected_thread.is_some() {
+                    v_flex()
+                        .flex_1()
+                        .min_h_0()
+                        .child(self.render_timeline(window, cx))
+                        .child(self.render_composer(window, cx))
+                        .into_any_element()
+                } else {
+                    self.render_new_thread(window, cx)
+                };
+                let column = v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .child(self.render_header(window, cx))
+                    .child(
+                        h_flex()
+                            .flex_1()
+                            .min_h_0()
+                            .child(
+                                v_flex()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .h_full()
+                                    .child(body)
+                                    .children(self.render_terminal_drawer(window, cx)),
+                            )
+                            .children(self.render_thread_details(window, cx)),
+                    );
+                h_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .child(column)
+                    .children(self.render_right_panel(window, cx))
+                    .into_any_element()
+            }
+        };
+        div()
+            .id("desktop")
+            .key_context("Desktop")
+            .capture_key_down(cx.listener(|view, event: &KeyDownEvent, window, cx| {
+                if view.global_key(event, window, cx) {
+                    cx.stop_propagation();
+                }
+            }))
+            .relative()
+            .size_full()
+            .bg(color("canvas"))
+            .text_color(color("text"))
+            .text_size(px(metrics.prompt_size))
+            .child(
+                h_flex()
+                    .size_full()
+                    .when(!self.sidebar_hidden, |root| {
+                        root.child(match self.route {
+                            Route::Settings => self.render_settings_nav(window, cx),
+                            Route::Chat => self.render_sidebar(window, cx),
+                        })
+                    })
+                    .child(main),
+            )
+            .children(gpui_kit::component::Root::render_dialog_layer(window, cx))
+            .children(gpui_kit::component::Root::render_notification_layer(
+                window, cx,
+            ))
     }
 }

@@ -1,6 +1,6 @@
 use crate::Runtime;
+use agent_core::connection::Store;
 use agent_core::state::{Intent, Snapshot, TerminalPhase};
-use agent_core::store::Store;
 use agent_protocol::operations::TerminalSize;
 use alacritty_terminal::{
     Term,
@@ -13,6 +13,7 @@ use alacritty_terminal::{
 };
 use gpui_kit::{
     component::{h_flex, v_flex},
+    prelude::FluentBuilder,
     *,
 };
 use std::{ops::Range, sync::Arc};
@@ -52,8 +53,9 @@ pub(crate) struct Terminal {
     snapshot: Arc<Snapshot>,
     runtime: Runtime,
     events: async_channel::Sender<Event>,
+    thread_id: String,
+    terminal_id: String,
     handle: String,
-    cwd: String,
     started: bool,
     sequence: u64,
     size: TerminalSize,
@@ -71,16 +73,23 @@ pub(crate) struct Terminal {
 impl Drop for Terminal {
     fn drop(&mut self) {
         let store = self.store.clone();
-        let handle = self.handle.clone();
+        let thread_id = self.thread_id.clone();
+        let terminal_id = self.terminal_id.clone();
         self.runtime.handle.spawn(async move {
-            let _ = store.dispatch(Intent::DetachTerminal { handle }).await;
+            let _ = store
+                .dispatch(Intent::DetachTerminal {
+                    thread_id,
+                    terminal_id,
+                })
+                .await;
         });
     }
 }
 impl Terminal {
     pub(crate) fn new(
         store: Arc<Store>,
-        cwd: String,
+        thread_id: String,
+        terminal_id: String,
         window: &mut Window,
         cx: &mut App,
     ) -> Entity<Self> {
@@ -117,8 +126,12 @@ impl Terminal {
                 store,
                 snapshot: Arc::default(),
                 runtime,
-                handle: agent_core::client::terminal_handle(cwd.clone()),
-                cwd,
+                handle: agent_protocol::operations::thread_terminal_handle_for(
+                    &thread_id,
+                    &terminal_id,
+                ),
+                thread_id,
+                terminal_id,
                 started: false,
                 sequence: 0,
                 size,
@@ -162,7 +175,8 @@ impl Terminal {
         self.term.scroll_display(Scroll::Bottom);
         self.term.selection = None;
         self.dispatch(Intent::WriteTerminal {
-            handle: self.handle.clone(),
+            thread_id: self.thread_id.clone(),
+            terminal_id: self.terminal_id.clone(),
             data,
         });
         cx.notify();
@@ -175,9 +189,9 @@ impl Terminal {
         }
         if self.snapshot.connected && !self.started {
             self.started = true;
-            self.dispatch(Intent::StartTerminal {
-                handle: self.handle.clone(),
-                cwd: self.cwd.clone(),
+            self.dispatch(Intent::OpenTerminal {
+                thread_id: self.thread_id.clone(),
+                terminal_id: self.terminal_id.clone(),
                 cols: self.size.cols,
                 rows: self.size.rows,
             });
@@ -219,7 +233,8 @@ impl Terminal {
             .is_some_and(|terminal| terminal.phase == TerminalPhase::Running)
         {
             self.dispatch(Intent::ResizeTerminal {
-                handle: self.handle.clone(),
+                thread_id: self.thread_id.clone(),
+                terminal_id: self.terminal_id.clone(),
                 cols: size.cols,
                 rows: size.rows,
             });
@@ -365,7 +380,8 @@ impl Terminal {
             }
         };
         self.dispatch(Intent::WriteTerminal {
-            handle: self.handle.clone(),
+            thread_id: self.thread_id.clone(),
+            terminal_id: self.terminal_id.clone(),
             data,
         });
     }
@@ -387,42 +403,33 @@ impl Terminal {
 }
 impl Render for Terminal {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let status = self.error.clone().unwrap_or_else(|| {
-            self.snapshot
-                .terminals
-                .get(&self.handle)
-                .and_then(|_| {
-                    self.snapshot
-                        .terminal_view(&self.handle, self.sequence)
-                        .status
+        let status = self.error.clone().or_else(|| {
+            agent_domain::ThreadId::new(self.thread_id.clone())
+                .ok()
+                .and_then(|thread| {
+                    agent_core::view::terminals::terminal_view(
+                        &self.snapshot,
+                        &thread,
+                        &self.terminal_id,
+                        self.sequence,
+                    )
+                    .status
                 })
-                .unwrap_or_else(|| "接続中…".into())
         });
         v_flex()
             .size_full()
             .min_h_0()
             .bg(crate::app::color("terminalBackground"))
-            .child(
-                h_flex()
-                    .px_3()
-                    .py_2()
-                    .text_xs()
-                    .text_color(crate::app::color("textMuted"))
-                    .child(div().flex_1().child(self.cwd.clone()))
-                    .child(status)
-                    .child(
-                        div()
-                            .id("terminal-stop")
-                            .ml_3()
-                            .cursor_pointer()
-                            .child("終了")
-                            .on_click(cx.listener(|s, _, _, _| {
-                                s.dispatch(Intent::KillTerminal {
-                                    handle: s.handle.clone(),
-                                })
-                            })),
-                    ),
-            )
+            .when_some(status, |view, status| {
+                view.child(
+                    h_flex()
+                        .px_3()
+                        .py_1()
+                        .text_xs()
+                        .text_color(crate::app::color("textMuted"))
+                        .child(status),
+                )
+            })
             .child(
                 div()
                     .id("native-terminal")

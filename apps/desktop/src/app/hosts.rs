@@ -1,8 +1,8 @@
-use super::view::section_heading;
+use super::ui::icon;
 use crate::{Runtime, store_session::StoreSession};
 use agent_core::{
+    connection::{Outcome, StoreOptions},
     state::{Intent, Snapshot},
-    store::Outcome,
 };
 use agent_protocol::models::{Invitation, RemoteHost};
 use gpui_kit::{
@@ -17,7 +17,7 @@ use gpui_kit::{
 };
 use std::{io::Write, sync::Arc};
 
-pub(super) enum HostEvent {
+pub(crate) enum HostEvent {
     Selected(Option<RemoteHost>),
     Removed(String),
 }
@@ -36,7 +36,7 @@ enum Update {
 
 /// Local management is a separate view/session from the selected conversation
 /// host. The parent borrows this snapshot for the host menu, never its connection.
-pub(super) struct Hosts {
+pub(crate) struct Hosts {
     session: Option<StoreSession>,
     snapshot: Arc<Snapshot>,
     runtime: Runtime,
@@ -99,7 +99,9 @@ impl Hosts {
         let runtime = self.runtime.clone();
         self.runtime.handle.spawn(async move {
             StoreSession::publish(
-                connections.connect(None, Snapshot::default()).await,
+                connections
+                    .connect(None, Snapshot::default(), StoreOptions::default())
+                    .await,
                 runtime,
                 updates,
                 Update::Connected,
@@ -275,7 +277,7 @@ impl Hosts {
                                         .child(if remote.is_some() {
                                             Icon::new(IconName::Network)
                                         } else {
-                                            Icon::default().path("bex/monitor.svg")
+                                            icon("monitor")
                                         })
                                         .child(name.to_owned()),
                                 )
@@ -478,7 +480,7 @@ impl Hosts {
             .accessibility_label(format!("実行先: {name}"))
             .tooltip(format!("実行先: {name}"))
             .label(name)
-            .icon(Icon::default().path("bex/monitor.svg"))
+            .icon(icon("monitor"))
             .dropdown_caret(true)
             .h_8()
             .min_w_0()
@@ -553,7 +555,7 @@ impl Render for Hosts {
                 .child(
                     Button::new("invite")
                         .label("接続用QRを表示")
-                        .icon(Icon::default().path("bex/qr-code.svg"))
+                        .icon(icon("qr-code"))
                         .primary()
                         .disabled(disabled)
                         .on_click(cx.listener(|view, _, _, cx| {
@@ -685,4 +687,16 @@ impl Render for Hosts {
         }
         body.child(devices).into_any_element()
     }
+}
+
+fn section_heading(title: &'static str, description: &'static str) -> Div {
+    v_flex()
+        .gap_1()
+        .child(div().text_lg().font_semibold().child(title))
+        .child(
+            div()
+                .text_sm()
+                .text_color(super::color("textMuted"))
+                .child(description),
+        )
 }

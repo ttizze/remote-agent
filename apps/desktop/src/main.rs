@@ -5,10 +5,7 @@ mod platform;
 mod store_session;
 mod terminal;
 use futures_util::FutureExt;
-use gpui_kit::{
-    component::{Root, Theme, ThemeMode},
-    *,
-};
+use gpui_kit::{component::Root, *};
 const WINDOW_HEADER_HEIGHT: f32 = 52.;
 #[derive(Clone)]
 pub(crate) struct Runtime {
@@ -19,49 +16,147 @@ pub(crate) struct Runtime {
 }
 impl Global for Runtime {}
 struct DesktopAssets;
+/// Lucide icons as `lucide/<name>.svg`.
+macro_rules! lucide {
+    ($($name:literal),* $(,)?) => {
+        &[$((
+            concat!("lucide/", $name, ".svg"),
+            include_bytes!(concat!("../assets/lucide/", $name, ".svg")) as &[u8],
+        )),*]
+    };
+}
 impl DesktopAssets {
-    const FILES: &[(&str, &[u8])] = &[
+    const ICONS: &[(&str, &[u8])] = lucide![
+        "alarm-clock-off",
+        "alarm-clock",
+        "archive",
+        "arrow-down",
+        "arrow-left",
+        "arrow-up",
+        "book-open",
+        "bot",
+        "brain",
+        "check",
+        "chevron-down",
+        "chevron-left",
+        "chevron-right",
+        "chevron-up",
+        "circle-alert",
+        "circle-check",
+        "circle-dashed",
+        "circle-dot",
+        "circle-x",
+        "clock",
+        "columns-2",
+        "copy",
+        "corner-up-right",
+        "cpu",
+        "download",
+        "ellipsis",
+        "external-link",
+        "eye-off",
+        "eye",
+        "file-diff",
+        "file-text",
+        "file",
+        "folder-closed",
+        "folder-open",
+        "folder-plus",
+        "folder",
+        "gauge",
+        "git-branch",
+        "git-compare",
+        "git-fork",
+        "git-merge",
+        "globe",
+        "grip-vertical",
+        "hammer",
+        "hard-drive",
+        "history",
+        "image",
+        "info",
+        "keyboard",
+        "laptop",
+        "layers",
+        "link-2",
+        "list-ordered",
+        "list-plus",
+        "list-todo",
+        "loader-circle",
+        "lock-open",
+        "lock",
+        "maximize-2",
+        "message-circle-question",
+        "message-square-dashed",
+        "message-square",
+        "mic",
+        "minimize-2",
+        "minus",
+        "monitor",
+        "panel-bottom",
+        "panel-left",
+        "panel-right",
+        "paperclip",
+        "pen-line",
+        "pencil-ruler",
+        "pencil",
+        "pin-off",
+        "pin",
+        "play",
+        "plus",
+        "qr-code",
+        "quote",
+        "redo-2",
+        "refresh-cw",
+        "rotate-ccw",
+        "rows-3",
+        "search",
+        "server",
+        "settings",
+        "shield-question",
+        "shield",
+        "sparkles",
+        "square-pen",
+        "square-split-horizontal",
+        "square-split-vertical",
+        "square-terminal",
+        "square",
+        "star",
+        "terminal",
+        "text-wrap",
+        "trash-2",
+        "triangle-alert",
+        "undo-2",
+        "unplug",
+        "users",
+        "wrench",
+        "x",
+        "zap",
+    ];
+    /// Provider marks as `brand/<name>.svg`.
+    const BRANDS: &[(&str, &[u8])] = &[
         (
-            "bex/openai.svg",
+            "brand/openai.svg",
             include_bytes!("../../mobile/iosApp/Bex/Assets.xcassets/openai.imageset/openai.svg"),
         ),
         (
-            "bex/anthropic.svg",
+            "brand/anthropic.svg",
             include_bytes!(
                 "../../mobile/iosApp/Bex/Assets.xcassets/anthropic.imageset/anthropic.svg"
             ),
         ),
         (
-            "bex/claude.svg",
+            "brand/claude.svg",
             include_bytes!("../../mobile/iosApp/Bex/Assets.xcassets/claude.imageset/claude.svg"),
         ),
-        ("bex/shield.svg", include_bytes!("../assets/shield.svg")),
-        ("bex/bolt.svg", include_bytes!("../assets/bolt.svg")),
-        (
-            "bex/bolt-fill.svg",
-            include_bytes!("../assets/bolt-fill.svg"),
-        ),
-        (
-            "bex/microphone.svg",
-            include_bytes!("../assets/microphone.svg"),
-        ),
-        ("bex/stop.svg", include_bytes!("../assets/stop.svg")),
-        ("bex/pencil.svg", include_bytes!("../assets/pencil.svg")),
-        ("bex/download.svg", include_bytes!("../assets/download.svg")),
-        (
-            "bex/square-pen.svg",
-            include_bytes!("../assets/square-pen.svg"),
-        ),
-        ("bex/branch.svg", include_bytes!("../assets/branch.svg")),
-        ("bex/merge.svg", include_bytes!("../assets/merge.svg")),
-        ("bex/diff.svg", include_bytes!("../assets/diff.svg")),
-        ("bex/monitor.svg", include_bytes!("../assets/monitor.svg")),
-        ("bex/qr-code.svg", include_bytes!("../assets/qr-code.svg")),
     ];
+    fn files() -> impl Iterator<Item = &'static (&'static str, &'static [u8])> {
+        Self::ICONS.iter().chain(Self::BRANDS)
+    }
 }
 impl AssetSource for DesktopAssets {
     fn load(&self, path: &str) -> gpui_kit::Result<Option<std::borrow::Cow<'static, [u8]>>> {
-        if let Some((_, bytes)) = Self::FILES.iter().find(|(name, _)| *name == path) {
+        if let Some((_, bytes)) = Self::files().find(|(name, _)| *name == path) {
             Ok(Some(std::borrow::Cow::Borrowed(*bytes)))
         } else {
             gpui_kit::assets::Assets.load(path)
@@ -70,8 +165,7 @@ impl AssetSource for DesktopAssets {
     fn list(&self, path: &str) -> gpui_kit::Result<Vec<SharedString>> {
         let mut paths = gpui_kit::assets::Assets.list(path)?;
         paths.extend(
-            Self::FILES
-                .iter()
+            Self::files()
                 .map(|(name, _)| *name)
                 .filter(|item| item.starts_with(path))
                 .map(SharedString::from),
@@ -94,7 +188,7 @@ fn main() {
             .map_err(|error| error.to_string())
         })
         .err()
-        .map(|error| format!("エラーログを保存できません: {error}"));
+        .map(|error| format!("Error logs cannot be saved: {error}"));
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -113,7 +207,7 @@ fn main() {
                 connections: std::sync::Arc::new(platform::Connections::default()),
             });
             cx.on_app_quit(|cx| {
-                tracing::info!(target: "bex", operation = "shutdown", "Bex shutting down");
+                tracing::info!(target: "desktop", operation = "shutdown", "Desktop shutting down");
                 let runtime = cx.global::<Runtime>().clone();
                 async move {
                     runtime.closing.close();
@@ -129,13 +223,7 @@ fn main() {
             })
             .detach();
             gpui_kit::init(cx);
-            cx.bind_keys([KeyBinding::new(
-                "ctrl-v",
-                gpui_kit::component::input::Paste,
-                Some("ChatComposer > Input"),
-            )]);
-            Theme::change(ThemeMode::Dark, None, cx);
-            app::apply_theme(cx);
+            app::bind_keys(cx);
             cx.on_window_closed(|cx, _| {
                 if cx.windows().is_empty() {
                     cx.quit();
@@ -158,11 +246,12 @@ fn main() {
                         ..Default::default()
                     },
                     |window, cx| {
+                        app::apply_appearance(window.appearance(), cx);
                         let desktop = cx.new(|cx| app::Desktop::new(window, cx));
                         cx.new(|cx| Root::new(desktop, window, cx))
                     },
                 )
-                .expect("open Bex window");
+                .expect("open the main window");
             })
             .detach();
             cx.activate(true);

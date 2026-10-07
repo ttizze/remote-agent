@@ -1054,6 +1054,7 @@ version = "0.1.0"
 dependencies = [
  "aes",
  "agent-core",
+ "agent-domain",
  "agent-protocol",
  "agent-transport",
  "alacritty_terminal",
@@ -1076,7 +1077,6 @@ dependencies = [
  "objc2-av-foundation",
  "objc2-foundation 0.3.2",
  "objc2-web-kit",
- "orchestration",
  "pbkdf2",
  "proptest",
  "qrcode",

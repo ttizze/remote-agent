@@ -121,7 +121,7 @@ fn authorize_microphone(
 ) -> Result<(), String> {
     use objc2::runtime::Bool;
 
-    let denied = "システム設定の「プライバシーとセキュリティ → マイク」で Bex のアクセスを許可してください。";
+    let denied = "Allow Bex in System Settings › Privacy & Security › Microphone.";
     // AVMediaTypeAudio is a framework constant and both APIs accept this media type
     // on any thread. The completion block owns its sender until Apple releases it.
     let audio = unsafe { AVMediaTypeAudio }.ok_or("audio media type unavailable")?;
