@@ -1413,3 +1413,85 @@ async fn shell_projects_carry_their_repository_identity() {
     assert_eq!(identity.provider.as_deref(), Some("github"));
     host.conversation.shutdown().await;
 }
+
+async fn next_terminal_event(
+    events: &mut crate::host_rpc::connections::HostSubscription,
+) -> agent_protocol::operations::TerminalMetadataEvent {
+    let frame = events.recv().await.expect("the stream stays open");
+    protocol::decode(&frame).unwrap()
+}
+
+// Manager.test.ts "subscribes terminal metadata with an initial snapshot and live
+// deltas" through the Host, and ThreadSettlementService.ts: settling a thread
+// closes its idle shells.
+#[cfg(unix)]
+#[tokio::test]
+async fn settling_a_thread_closes_its_idle_terminals_on_the_metadata_stream() {
+    use agent_protocol::operations::{
+        StartTerminal, TerminalMetadataEvent, TerminalSize, TerminalStatus,
+    };
+    let host = host().await;
+    let launched: wire::Launched = host.call(launch(&host, "settle", "hello")).await.unwrap();
+    let thread = launched.thread_id.clone();
+    let (mut folded, mut updates) = subscribe(&host, &thread, None).await;
+    until(&mut folded, &mut updates, answered).await;
+    let metadata = host
+        .reply(Call::TerminalMetadata(agent_protocol::models::Empty {}))
+        .await;
+    let Response::Success {
+        result: TerminalMetadataEvent::Snapshot { terminals },
+    } = protocol::decode::<Response<TerminalMetadataEvent>>(&metadata.initial).unwrap()
+    else {
+        panic!("the metadata stream opens with a snapshot");
+    };
+    assert!(terminals.is_empty());
+    let mut events = metadata.updates.expect("the stream stays open");
+    let _: agent_protocol::models::Empty = host
+        .call(Call::StartTerminal(StartTerminal {
+            thread: thread.clone(),
+            terminal_id: "term-1".into(),
+            cwd: Some(host.project_root.to_string_lossy().into_owned()),
+            worktree_path: None,
+            size: TerminalSize { cols: 80, rows: 24 },
+            env: BTreeMap::new(),
+            restart_if_not_running: false,
+        }))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            if let TerminalMetadataEvent::Upsert { terminal } =
+                next_terminal_event(&mut events).await
+                && terminal.status == TerminalStatus::Running
+            {
+                assert_eq!(terminal.thread, thread);
+                assert_eq!(terminal.label, "Terminal 1");
+                break;
+            }
+        }
+        // A shell still drawing its first prompt counts as active.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let _: wire::Committed = host
+            .call(Call::Dispatch(Box::new(wire::Dispatch {
+                thread_id: thread.clone(),
+                command_id: command("settle-it"),
+                command: Command::Settle {
+                    settled: true,
+                    at: None,
+                },
+            })))
+            .await
+            .unwrap();
+        loop {
+            if let TerminalMetadataEvent::Remove { terminal_id, .. } =
+                next_terminal_event(&mut events).await
+            {
+                assert_eq!(terminal_id, "term-1");
+                break;
+            }
+        }
+    })
+    .await
+    .expect("settling closes the idle shell");
+    host.conversation.shutdown().await;
+}

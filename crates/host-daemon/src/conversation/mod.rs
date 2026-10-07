@@ -70,6 +70,7 @@ pub(crate) struct Conversation {
     resources: SharedResources,
     bridge: Arc<ToolBridge>,
     tools: Arc<AgentTools>,
+    settled_terminals: OnceLock<tokio_util::task::AbortOnDropHandle<()>>,
 }
 
 impl Conversation {
@@ -113,6 +114,7 @@ impl Conversation {
             resources,
             bridge,
             tools,
+            settled_terminals: OnceLock::new(),
         }))
     }
 
@@ -121,6 +123,14 @@ impl Conversation {
         self.resources.projects.refresh().await?;
         self.resources.worktrees.conversation_settings(None).await?;
         self.runtime.start().await?;
+        let _ = self
+            .settled_terminals
+            .set(tokio_util::task::AbortOnDropHandle::new(tokio::spawn(
+                close_idle_terminals_when_settled(
+                    Arc::downgrade(&self.runtime),
+                    self.resources.terminals.clone(),
+                ),
+            )));
         self.bridge
             .serve(Arc::downgrade(&self.tools))
             .map_err(anyhow::Error::msg)
@@ -147,6 +157,50 @@ impl Conversation {
     /// are imported.
     pub(crate) async fn project_added(&self, project: &str) {
         project_added(&self.runtime, &self.resources.projects, project).await;
+    }
+}
+
+/// Settling a thread closes its shells that sit at an idle prompt, so they stop
+/// holding the worktree; a shell running a command stays.
+async fn close_idle_terminals_when_settled(
+    runtime: std::sync::Weak<Runtime>,
+    terminals: Arc<Terminals>,
+) {
+    use agent_runtime::{ShellSubscribe, ShellUpdate};
+    loop {
+        let Some(subscription) = (match runtime.upgrade() {
+            Some(runtime) => runtime
+                .subscribe_shell(ShellSubscribe::default())
+                .await
+                .ok(),
+            None => return,
+        }) else {
+            return;
+        };
+        let mut updates = subscription.updates;
+        let mut settled = std::collections::HashMap::new();
+        while let Some(update) = updates.recv().await {
+            let thread = match update {
+                ShellUpdate::Snapshot(snapshot) => {
+                    settled = snapshot
+                        .threads
+                        .into_iter()
+                        .map(|thread| (thread.thread, thread.row.summary.settled))
+                        .collect();
+                    continue;
+                }
+                ShellUpdate::ThreadUpdated { thread, .. } => thread,
+                _ => continue,
+            };
+            let now = thread.row.summary.settled;
+            if settled.insert(thread.thread.clone(), now) != Some(Some(true)) && now == Some(true) {
+                let terminals = terminals.clone();
+                tokio::spawn(async move { terminals.close_idle(&thread.thread, None).await });
+            }
+        }
+        if !updates.overflowed() {
+            return;
+        }
     }
 }
 
