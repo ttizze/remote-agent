@@ -8,8 +8,11 @@ shift
 test_name=$(basename "$test_binary")
 test_directory=$(dirname "$test_binary")/../native-test-binaries/${NEXTEST_RUN_ID:?}/$test_name
 mkdir -p "$test_directory"
-test_link=$test_directory/$test_name
-if ! ln "$test_binary" "$test_link" 2>/dev/null; then
-    [[ $test_binary -ef $test_link ]]
-fi
-exec "$test_link" "$@"
+for test_source in "$test_binary" "$(dirname "$test_binary")/../bex-provider-supervisor"; do
+    [[ -f $test_source ]] || continue
+    test_link=$test_directory/$(basename "$test_source")
+    if ! ln "$test_source" "$test_link" 2>/dev/null; then
+        [[ $test_source -ef $test_link ]]
+    fi
+done
+exec "$test_directory/$test_name" "$@"
