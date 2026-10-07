@@ -20,6 +20,7 @@ pub enum SessionPhase {
 /// What the thread is doing, summarised from its list row. `status` is `None`
 /// while the thread is idle.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct ThreadRuntime {
     pub status: Option<RunStatus>,
     pub active_run: Option<RunId>,

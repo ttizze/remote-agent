@@ -29,6 +29,7 @@ use serde_json::json;
 
 /// How a group of activities is drawn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum WorkLogLayout {
     Empty,
     /// A subagent card or group.
@@ -281,6 +282,7 @@ pub fn work_log_row(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum WorkToggleIcon {
     Logo(ToolLogo),
     Surface(ToolSurface),
@@ -288,6 +290,7 @@ pub enum WorkToggleIcon {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct WorkTogglePresentation {
     pub icon: WorkToggleIcon,
     pub accessibility_label: String,
@@ -352,6 +355,7 @@ pub fn subagent_card_elapsed(agents: &[SubagentTiming], now_ms: i64) -> Option<S
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum SubagentGroupTone {
     Default,
     Active,
@@ -359,6 +363,7 @@ pub enum SubagentGroupTone {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct SubagentMember {
     pub link: SubagentLink,
     pub elapsed: Option<String>,
@@ -367,6 +372,7 @@ pub struct SubagentMember {
 
 /// A card of adjacent subagents. More than one draws a collapsible header.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct SubagentGroupCard {
     pub grouped: bool,
     pub label: String,
@@ -374,7 +380,7 @@ pub struct SubagentGroupCard {
     pub accessibility_label: String,
     pub tone: SubagentGroupTone,
     /// Avatars beyond the first three, drawn as "+N".
-    pub overflow: usize,
+    pub overflow: u32,
     pub elapsed: Option<String>,
     pub expanded: bool,
     pub shows_members: bool,
@@ -422,7 +428,7 @@ pub fn subagent_group_card(
         } else {
             SubagentGroupTone::Default
         },
-        overflow: agents.len().saturating_sub(3),
+        overflow: crate::view::count(agents.len().saturating_sub(3)),
         elapsed: subagent_card_elapsed(&timings, now_ms),
         expanded,
         shows_members: !grouped || expanded,
@@ -470,6 +476,7 @@ pub fn thread_activity_metadata(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum ActivityStatusTone {
     Active,
     Danger,
@@ -479,6 +486,7 @@ pub enum ActivityStatusTone {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct ActivityStatus {
     pub label: String,
     pub tone: ActivityStatusTone,
@@ -512,6 +520,7 @@ pub enum ContentConnectionPhase {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum ThreadContentPresentation {
     Ready,
     Loading,
@@ -555,6 +564,7 @@ pub fn thread_content_presentation(
 
 /// A file an activity names, opened in the selected thread's workspace.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct ActivityFileTarget {
     pub thread: ThreadId,
     pub path: Vec<String>,

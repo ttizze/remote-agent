@@ -35,3 +35,8 @@ pub mod working_status;
 pub(crate) fn quantity(count: usize, noun: &str) -> String {
     format!("{count} {noun}{}", if count == 1 { "" } else { "s" })
 }
+
+/// A length as the native views count it.
+pub(crate) fn count(len: usize) -> u32 {
+    u32::try_from(len).unwrap_or(u32::MAX)
+}

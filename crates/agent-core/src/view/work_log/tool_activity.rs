@@ -20,6 +20,7 @@ fn as_trimmed_string(value: Option<&Value>) -> Option<&str> {
 
 /// A Claude `Skill` call: the skill it loads and the arguments it passes.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct SkillInvocation {
     pub name: String,
     pub args: Option<String>,
@@ -119,6 +120,7 @@ pub fn collect_tool_file_paths(data: &Value) -> Vec<String> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum ToolActivityAction {
     Command,
     Read,

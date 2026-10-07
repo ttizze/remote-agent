@@ -109,6 +109,7 @@ pub fn context_compaction_label(item: &Item) -> String {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum ToolGroupAction {
     Read,
     Edit,
@@ -136,6 +137,7 @@ impl ToolGroupAction {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum ToolGroupSummaryKind {
     Action(ToolGroupAction),
     DynamicTool,
@@ -184,6 +186,7 @@ fn work_entry_tool_output(entry: &WorkLogEntry) -> Option<Value> {
 
 /// How a recognized orchestration tool call reads in a row.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct WorkEntryToolPresentation {
     pub display_name: String,
     pub icon: ToolLogo,
@@ -427,6 +430,7 @@ pub fn work_entry_viewed_image_path(entry: &WorkLogEntry) -> Option<String> {
 
 /// A Host image the thread's environment serves.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct ViewedImageAsset {
     pub thread: ThreadId,
     pub path: String,
@@ -521,6 +525,7 @@ fn summary_action_priority(key: &str) -> u8 {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct ToolGroupSummary {
     pub summary: String,
     pub has_failure: bool,
@@ -608,7 +613,7 @@ pub fn summarize_tool_group(entries: &[WorkLogEntry]) -> ToolGroupSummary {
                     let calls: Vec<_> =
                         group.entries.iter().map(|e| tool_summary_call(e)).collect();
                     let summary = summarize_tool_calls(summary_action, &calls);
-                    (summary.label, summary.failed_count)
+                    (summary.label, summary.failed_count as usize)
                 }
                 None => (
                     tool_group_action_label(

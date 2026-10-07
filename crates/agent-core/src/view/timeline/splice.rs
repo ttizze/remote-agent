@@ -1,18 +1,25 @@
 //! The smallest replacement that turns one row list into another, matched by
 //! row id, so a virtual list keeps its scroll anchor and measured rows.
+use crate::view::count;
 use std::ops::Range;
 
-/// Replace `range` of the old rows with `count` rows taken from the new list
-/// at `range.start`.
+/// Replace the old rows `start..end` with `count` rows taken from the new list
+/// at `start`.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct Splice {
-    pub range: Range<usize>,
-    pub count: usize,
+    pub start: u32,
+    pub end: u32,
+    pub count: u32,
 }
 
 impl Splice {
     pub fn is_empty(&self) -> bool {
-        self.range.is_empty() && self.count == 0
+        self.start == self.end && self.count == 0
+    }
+
+    pub fn range(&self) -> Range<usize> {
+        self.start as usize..self.end as usize
     }
 }
 
@@ -29,8 +36,9 @@ pub fn splice<T, I: PartialEq>(old: &[T], new: &[T], id: impl Fn(&T) -> &I) -> S
         .take_while(|(a, b)| id(a) == id(b))
         .count();
     Splice {
-        range: prefix..old.len() - suffix,
-        count: new.len() - prefix - suffix,
+        start: count(prefix),
+        end: count(old.len() - suffix),
+        count: count(new.len() - prefix - suffix),
     }
 }
 
@@ -40,7 +48,8 @@ pub fn changed<T: PartialEq, I: PartialEq>(
     new: &[T],
     id: impl Fn(&T) -> &I,
 ) -> Vec<usize> {
-    let Splice { range, count } = splice(old, new, &id);
+    let splice = splice(old, new, &id);
+    let (range, count) = (splice.range(), splice.count as usize);
     let kept = (0..range.start).chain(range.start + count..new.len());
     kept.filter(|&index| {
         let old_index = if index < range.start {
@@ -69,7 +78,8 @@ mod tests {
         assert_eq!(
             splice(&old, &new, |row| &row.0),
             Splice {
-                range: 0..0,
+                start: 0,
+                end: 0,
                 count: 2
             }
         );
@@ -88,7 +98,8 @@ mod tests {
         assert_eq!(
             ids(&[("a", 0), ("b", 0)]),
             Splice {
-                range: 0..2,
+                start: 0,
+                end: 2,
                 count: 0
             }
         );
@@ -100,7 +111,8 @@ mod tests {
             old in proptest::collection::vec(0u8..6, 0..12),
             new in proptest::collection::vec(0u8..6, 0..12),
         ) {
-            let Splice { range, count } = splice(&old, &new, |id| id);
+            let splice = splice(&old, &new, |id| id);
+            let (range, count) = (splice.range(), splice.count as usize);
             let mut applied = old.clone();
             applied.splice(range.clone(), new[range.start..range.start + count].iter().copied());
             prop_assert_eq!(applied, new);

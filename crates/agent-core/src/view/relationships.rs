@@ -119,6 +119,7 @@ pub fn relationship_status_tone(status: Option<RelationshipStatus>) -> StatusTon
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct RelationshipEdge {
     pub source: ThreadId,
     pub target: ThreadId,
@@ -142,6 +143,7 @@ impl<'a> RelationshipGraph<'a> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct RelationshipRow {
     pub thread: ThreadId,
     pub from: ThreadId,

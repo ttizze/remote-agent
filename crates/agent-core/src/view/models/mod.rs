@@ -65,6 +65,7 @@ pub struct CatalogModel {
 /// Every instance in display order and every model, grouped by instance in
 /// the Host's order.
 #[derive(Debug, Clone, PartialEq, Default)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct ModelCatalog {
     pub instances: Vec<ProviderInstance>,
     pub models: Vec<CatalogModel>,

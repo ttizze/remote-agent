@@ -112,6 +112,7 @@ pub fn plan_markdown_for_export(markdown: &str) -> String {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct PlanCard {
     pub plan: PlanId,
     pub run: Option<RunId>,

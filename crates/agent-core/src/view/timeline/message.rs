@@ -20,6 +20,7 @@ fn status_name(status: ItemStatus) -> &'static str {
 
 /// A user-role message written by an agent rather than the user.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct AgentAttribution {
     pub label: String,
     /// The thread that sent it, when known; the label then opens it.
@@ -41,6 +42,7 @@ pub fn user_message_attribution(state: &State, message: &Message) -> Option<Agen
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum IntentTone {
     Queued,
     Steer,
@@ -48,6 +50,7 @@ pub enum IntentTone {
 
 /// The desktop marker above a user message that did not start a turn.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct IntentMarker {
     pub label: String,
     pub tooltip: String,
@@ -86,6 +89,7 @@ pub fn user_message_intent_marker(intent: InputIntent) -> Option<IntentMarker> {
 
 /// The mobile badge beside a user message that did not start a turn.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct IntentBadge {
     pub label: String,
     pub accessibility_label: String,
@@ -119,6 +123,7 @@ pub fn user_message_collapsible(text: &str) -> bool {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct UserMessageCopy {
     pub text: String,
     /// The message carries context records; clients add the structured
@@ -154,6 +159,7 @@ pub fn user_message_copy(message: &Message) -> Option<UserMessageCopy> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct EditFromHere {
     pub turn_count: u64,
     pub enabled: bool,
@@ -187,6 +193,7 @@ pub fn user_status_chip(item: Option<&Item>) -> Option<String> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct UserMessageDecorations {
     pub attribution: Option<AgentAttribution>,
     pub intent: Option<IntentMarker>,
@@ -224,6 +231,7 @@ pub fn assistant_display_text(message: &Message) -> String {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct ForkAction {
     pub run: RunId,
     pub label: String,
@@ -247,6 +255,7 @@ pub fn fork_thread_title(source_title: &str) -> String {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct AssistantCopyState {
     pub text: Option<String>,
     pub visible: bool,
@@ -273,6 +282,7 @@ pub fn assistant_copy_state(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct AssistantMeta {
     pub fork: Option<ForkAction>,
     pub status_chip: Option<String>,

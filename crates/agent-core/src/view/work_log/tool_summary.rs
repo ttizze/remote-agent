@@ -26,9 +26,10 @@ pub struct ToolSummaryCall {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct ToolCallsSummary {
     pub label: String,
-    pub failed_count: usize,
+    pub failed_count: u32,
 }
 
 fn as_record(value: Option<&Value>) -> Option<&Record> {
@@ -381,7 +382,7 @@ pub fn summarize_tool_calls(
     };
     ToolCallsSummary {
         label,
-        failed_count,
+        failed_count: crate::view::count(failed_count),
     }
 }
 
@@ -399,7 +400,7 @@ mod tests {
         }
     }
 
-    fn summary(label: &str, failed_count: usize) -> ToolCallsSummary {
+    fn summary(label: &str, failed_count: u32) -> ToolCallsSummary {
         ToolCallsSummary {
             label: label.into(),
             failed_count,

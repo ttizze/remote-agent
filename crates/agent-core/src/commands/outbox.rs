@@ -30,6 +30,7 @@ impl Request {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum Phase {
     Queued,
     InFlight,

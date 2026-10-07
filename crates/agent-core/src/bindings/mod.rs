@@ -1,4 +1,5 @@
 //! Native binding boundary. Core owns all conversation state and effects.
+mod domain;
 mod json;
 mod protocol;
 mod snapshot;

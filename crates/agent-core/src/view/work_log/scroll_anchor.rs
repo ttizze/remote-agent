@@ -1,6 +1,7 @@
 //! The row a scrolled tool group returns to after it re-renders.
 
 #[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct WorkGroupScrollAnchor {
     pub row_id: String,
     pub offset_within_row: f64,

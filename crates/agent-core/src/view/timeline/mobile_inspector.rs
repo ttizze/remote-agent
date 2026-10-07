@@ -12,12 +12,14 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct InspectorField {
     pub label: String,
     pub value: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct InspectorBlock {
     pub label: String,
     pub value: String,
@@ -25,6 +27,7 @@ pub struct InspectorBlock {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct InspectorFileLink {
     pub label: String,
     pub path: String,
@@ -32,12 +35,14 @@ pub struct InspectorFileLink {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct InspectorWebLink {
     pub label: String,
     pub url: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct ActivityInspector {
     pub fields: Vec<InspectorField>,
     pub blocks: Vec<InspectorBlock>,

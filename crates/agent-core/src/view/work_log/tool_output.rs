@@ -19,6 +19,7 @@ const MAX_ENVELOPE_NODES: i64 = 128;
 
 /// One entry of a thread creation batch.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct CompactThread {
     pub thread_id: Option<String>,
     pub rolled_back: bool,
@@ -26,6 +27,7 @@ pub struct CompactThread {
 
 /// The IDs and failure metadata grouped tool summaries read.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct CompactToolOutput {
     pub is_error: bool,
     pub thread_id: Option<String>,

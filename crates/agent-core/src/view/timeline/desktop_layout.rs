@@ -9,8 +9,9 @@ pub struct ExpandedGroupAnchor {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct WorkGroupScrollIndex {
-    pub index: usize,
+    pub index: u32,
     pub view_offset: f64,
 }
 
@@ -22,7 +23,7 @@ pub fn resolve_work_group_scroll_index(
     let anchor = anchor?;
     let index = entry_ids.iter().position(|id| *id == anchor.entry_id)?;
     Some(WorkGroupScrollIndex {
-        index,
+        index: crate::view::count(index),
         view_offset: -anchor.offset,
     })
 }
