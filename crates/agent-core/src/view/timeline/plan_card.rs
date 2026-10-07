@@ -2,6 +2,7 @@
 //! preview of a long plan and the file it saves to.
 use super::entries::{PlanStatus, ProposedPlan};
 use crate::commands::build::proposed_plan_title;
+use crate::js_text::utf16_len;
 use agent_domain::{PlanId, RunId};
 
 /// A plan longer than this collapses behind "Expand plan".
@@ -134,8 +135,8 @@ pub struct PlanCard {
 
 pub fn plan_card(plan: &ProposedPlan) -> PlanCard {
     let markdown = &plan.markdown;
-    let collapses = markdown.encode_utf16().count() > COLLAPSE_CHARACTERS
-        || markdown.split('\n').count() > COLLAPSE_LINES;
+    let collapses =
+        utf16_len(markdown) > COLLAPSE_CHARACTERS || markdown.split('\n').count() > COLLAPSE_LINES;
     PlanCard {
         plan: plan.id.clone(),
         run: plan.run.clone(),

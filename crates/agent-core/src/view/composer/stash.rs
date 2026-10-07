@@ -1,5 +1,6 @@
 //! The prompt stash: prompts parked from the composer (⌘S) and restored later,
 //! newest first, across threads and providers.
+use crate::js_text::utf16_units;
 use crate::state::{Draft, DraftAttachment};
 use agent_domain::MessageContext;
 use serde::{Deserialize, Serialize};
@@ -347,7 +348,7 @@ pub fn stash_entry_snippet(entry: &PromptStashEntry) -> String {
         .collect::<Vec<_>>()
         .join(" ");
     if !trimmed.is_empty() {
-        let units: Vec<u16> = trimmed.encode_utf16().collect();
+        let units = utf16_units(&trimmed);
         return if units.len() > SNIPPET_MAX_CHARS {
             format!("{}…", String::from_utf16_lossy(&units[..SNIPPET_MAX_CHARS]))
         } else {

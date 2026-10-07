@@ -1,6 +1,6 @@
 //! The program a shell command line runs, read without executing it, and the
 //! script a plain shell wrapper carries.
-use crate::js_text::{is_js_space, js_trim};
+use crate::js_text::{JS_DOT, is_js_space, js_regex, js_trim, js_trim_start};
 use regex::Regex;
 use std::collections::HashMap;
 use std::sync::LazyLock;
@@ -230,34 +230,18 @@ impl CommandWrapper {
     }
 }
 
-fn js_trim_start(text: &str) -> &str {
-    text.trim_start_matches(is_js_space)
-}
-
-/// Builds a regex whose `\s` and `\S` mean the JavaScript classes.
-fn js_regex(pattern: &str) -> Regex {
-    const SPACE: &str = r"\t\n\x0B\x0C\r \x{A0}\x{1680}\x{2000}-\x{200A}\x{2028}\x{2029}\x{202F}\x{205F}\x{3000}\x{FEFF}";
-    let pattern = pattern
-        .replace(r"\S", &format!("[^{SPACE}]"))
-        .replace(r"\s", &format!("[{SPACE}]"));
-    Regex::new(&pattern).expect("pattern compiles")
-}
-
 macro_rules! js_regex {
     ($name:ident, $pattern:expr) => {
         static $name: LazyLock<Regex> = LazyLock::new(|| js_regex($pattern));
     };
 }
 
-/// JavaScript `.` without the `s` flag.
-const DOT: &str = r"[^\n\r\x{2028}\x{2029}]";
-
 js_regex!(SHELL_COMMAND_OPTION, r"^-[a-zA-Z]*c[a-zA-Z]*$");
 js_regex!(WINDOWS_PATH_PREFIX, r"^(?:[A-Za-z]:|\.{1,2})(?:\\[^\s]*)?$");
 js_regex!(PROCESS_SUBSTITUTION, r"^[<>]\(");
 static REDIRECTION: LazyLock<Regex> = LazyLock::new(|| {
     js_regex(&format!(
-        r"^(?:(?:(?:[0-9]+|\*|\{{[A-Za-z_][A-Za-z0-9_]*\}})?(?:<<<|<<-|<<|<>|>>|>\||<&|>&|<|>))|&>>|&>)({DOT}*)$"
+        r"^(?:(?:(?:[0-9]+|\*|\{{[A-Za-z_][A-Za-z0-9_]*\}})?(?:<<<|<<-|<<|<>|>>|>\||<&|>&|<|>))|&>>|&>)({JS_DOT}*)$"
     ))
 });
 js_regex!(SCRIPT_OPTIONS, r"^-[adkpqr]+$");

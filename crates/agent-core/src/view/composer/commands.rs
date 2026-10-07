@@ -3,6 +3,10 @@
 //! choosing one does to the draft.
 //!
 //! Offsets are UTF-16 code units, the unit of the native text editors.
+use crate::js_text::{is_js_space, js_trim, js_trim_start, utf16_len, utf16_units};
+use crate::view::search_ranking::{
+    QueryMatch, Ranked, insert_ranked, normalize_search_query, score_query_match,
+};
 use agent_domain::{Driver, InteractionMode, Message, Role, State, ThreadShell, Timestamp};
 use serde_json::{Value, json};
 
@@ -32,24 +36,11 @@ pub struct TextReplacement {
     pub cursor: u32,
 }
 
-fn utf16(text: &str) -> Vec<u16> {
-    text.encode_utf16().collect()
-}
-
-fn utf16_len(text: &str) -> u32 {
-    u32::try_from(text.encode_utf16().count()).unwrap_or(u32::MAX)
-}
-
 fn slice(units: &[u16], start: usize, end: usize) -> String {
     if start >= end {
         return String::new();
     }
     String::from_utf16_lossy(&units[start..end])
-}
-
-/// JavaScript `\s`.
-fn js_whitespace(c: char) -> bool {
-    c == '\u{feff}' || (c != '\u{85}' && c.is_whitespace())
 }
 
 fn token_boundary(unit: u16) -> bool {
@@ -103,7 +94,7 @@ fn pull_request_query(token: &str) -> Option<String> {
 /// The slash-command trigger of a line prefix that starts with `/`.
 fn slash_trigger(prefix: &str) -> Option<(ComposerTriggerKind, String)> {
     let command = prefix.strip_prefix('/')?;
-    if !command.chars().any(js_whitespace) {
+    if !command.chars().any(is_js_space) {
         return Some(if command.to_lowercase() == "model" {
             (ComposerTriggerKind::SlashModel, String::new())
         } else {
@@ -111,18 +102,14 @@ fn slash_trigger(prefix: &str) -> Option<(ComposerTriggerKind, String)> {
         });
     }
     let arguments = command.strip_prefix("model")?;
-    let query = arguments.trim_start_matches(js_whitespace);
-    (query.len() < arguments.len() && !query.chars().any(line_terminator)).then(|| {
-        (
-            ComposerTriggerKind::SlashModel,
-            query.trim_matches(js_whitespace).to_owned(),
-        )
-    })
+    let query = js_trim_start(arguments);
+    (query.len() < arguments.len() && !query.chars().any(line_terminator))
+        .then(|| (ComposerTriggerKind::SlashModel, js_trim(query).to_owned()))
 }
 
 /// The `@path`, `#pull-request`, `$skill` or `/command` trigger at the caret.
 pub fn detect_composer_trigger(text: &str, cursor: u32) -> Option<ComposerTrigger> {
-    let units = utf16(text);
+    let units = utf16_units(text);
     let cursor = (cursor as usize).min(units.len());
     let search_from = cursor.saturating_sub(1);
     let line_start = units[..units.len().min(search_from + 1)]
@@ -172,7 +159,7 @@ pub fn detect_composer_trigger(text: &str, cursor: u32) -> Option<ComposerTrigge
 }
 
 pub fn replace_text_range(text: &str, start: u32, end: u32, replacement: &str) -> TextReplacement {
-    let units = utf16(text);
+    let units = utf16_units(text);
     let start = (start as usize).min(units.len());
     let end = (end as usize).min(units.len()).max(start);
     TextReplacement {
@@ -181,7 +168,7 @@ pub fn replace_text_range(text: &str, start: u32, end: u32, replacement: &str) -
             slice(&units, 0, start),
             slice(&units, end, units.len())
         ),
-        cursor: start as u32 + utf16_len(replacement),
+        cursor: start as u32 + utf16_len(replacement) as u32,
     }
 }
 
@@ -214,8 +201,8 @@ pub fn serialize_composer_file_link(path: &str) -> String {
 
 /// A prompt that is only `/plan` or `/default` switches the interaction mode.
 pub fn parse_standalone_slash_command(text: &str) -> Option<InteractionMode> {
-    let command = text.trim_matches(js_whitespace).strip_prefix('/')?;
-    let name = command.trim_end_matches(js_whitespace).to_lowercase();
+    let command = js_trim(text).strip_prefix('/')?;
+    let name = command.trim_end_matches(is_js_space).to_lowercase();
     match name.as_str() {
         "plan" => Some(InteractionMode::Plan),
         "default" => Some(InteractionMode::Default),
@@ -499,7 +486,7 @@ pub fn thread_items(
     current_thread: Option<&str>,
     query: &str,
 ) -> Vec<ComposerCommandItem> {
-    let query = query.trim_matches(js_whitespace).to_lowercase();
+    let query = js_trim(query).to_lowercase();
     if query.is_empty() {
         return vec![];
     }
@@ -676,8 +663,7 @@ pub fn resolve_composer_command_selection(
 }
 
 fn is_compact_command(message: &Message) -> bool {
-    message.attachments.is_empty()
-        && message.text.trim_matches(js_whitespace).to_lowercase() == "/compact"
+    message.attachments.is_empty() && js_trim(&message.text).to_lowercase() == "/compact"
 }
 
 /// `/compact` is offered once the thread has a user message other than a bare
@@ -693,131 +679,6 @@ pub fn has_compactable_conversation(
         .chain(&state.messages)
         .any(|message| message.role == Role::User && !is_compact_command(message))
         || (has_more_history && latest_user_message_at.is_some())
-}
-
-fn normalize_search_query(input: &str, trim_leading: impl Fn(char) -> bool) -> String {
-    input
-        .trim_matches(js_whitespace)
-        .trim_start_matches(trim_leading)
-        .to_lowercase()
-}
-
-struct QueryMatch<'a> {
-    value: &'a str,
-    query: &'a str,
-    exact_base: i64,
-    prefix_base: Option<i64>,
-    boundary_base: Option<i64>,
-    includes_base: Option<i64>,
-    fuzzy_base: Option<i64>,
-    boundary_markers: &'a [&'a str],
-}
-impl<'a> QueryMatch<'a> {
-    fn exact(value: &'a str, query: &'a str, exact_base: i64) -> Self {
-        Self {
-            value,
-            query,
-            exact_base,
-            prefix_base: None,
-            boundary_base: None,
-            includes_base: None,
-            fuzzy_base: None,
-            boundary_markers: &[" ", "-", "_", "/"],
-        }
-    }
-}
-
-fn utf16_index(text: &str, byte: usize) -> i64 {
-    text[..byte].encode_utf16().count() as i64
-}
-
-fn score_subsequence_match(value: &str, query: &str) -> Option<i64> {
-    let (value, query) = (utf16(value), utf16(query));
-    if query.is_empty() {
-        return Some(0);
-    }
-    let (mut query_index, mut first, mut previous, mut gap_penalty) = (0, None, None, 0i64);
-    for (index, unit) in value.iter().enumerate() {
-        if *unit != query[query_index] {
-            continue;
-        }
-        let first = *first.get_or_insert(index);
-        if let Some(previous) = previous {
-            gap_penalty += (index - previous - 1) as i64;
-        }
-        previous = Some(index);
-        query_index += 1;
-        if query_index == query.len() {
-            let span_penalty = (index - first + 1 - query.len()) as i64;
-            let length_penalty = 64.min(value.len() as i64 - query.len() as i64);
-            return Some(first as i64 * 2 + gap_penalty * 3 + span_penalty + length_penalty);
-        }
-    }
-    None
-}
-
-fn length_penalty(value: &str, query: &str) -> i64 {
-    (utf16_len(value) as i64 - utf16_len(query) as i64).clamp(0, 64)
-}
-
-/// Tiered match score, lower is better. Inputs are trimmed and lowercased.
-fn score_query_match(input: &QueryMatch<'_>) -> Option<i64> {
-    let (value, query) = (input.value, input.query);
-    if value.is_empty() || query.is_empty() {
-        return None;
-    }
-    if value == query {
-        return Some(input.exact_base);
-    }
-    if let Some(base) = input.prefix_base
-        && value.starts_with(query)
-    {
-        return Some(base + length_penalty(value, query));
-    }
-    if let Some(base) = input.boundary_base
-        && let Some(index) = input
-            .boundary_markers
-            .iter()
-            .filter_map(|marker| {
-                value
-                    .find(&format!("{marker}{query}"))
-                    .map(|byte| utf16_index(value, byte) + utf16_len(marker) as i64)
-            })
-            .min()
-    {
-        return Some(base + index * 2 + length_penalty(value, query));
-    }
-    if let Some(base) = input.includes_base
-        && let Some(byte) = value.find(query)
-    {
-        return Some(base + utf16_index(value, byte) * 2 + length_penalty(value, query));
-    }
-    input
-        .fuzzy_base
-        .and_then(|base| score_subsequence_match(value, query).map(|score| base + score))
-}
-
-struct Ranked<T> {
-    item: T,
-    score: i64,
-    tie_breaker: String,
-}
-
-/// Keeps `ranked` sorted by score then tie breaker, at most `limit` long;
-/// equal entries keep their insertion order.
-fn insert_ranked<T>(ranked: &mut Vec<Ranked<T>>, candidate: Ranked<T>, limit: usize) {
-    if limit == 0 {
-        return;
-    }
-    let index = ranked.partition_point(|current| {
-        (current.score, current.tie_breaker.as_str())
-            <= (candidate.score, candidate.tie_breaker.as_str())
-    });
-    if index >= limit {
-        return;
-    }
-    ranked.insert(index, candidate);
-    ranked.truncate(limit);
 }
 
 #[cfg(test)]

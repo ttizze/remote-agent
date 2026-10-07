@@ -1,5 +1,7 @@
-//! JavaScript string semantics the ported presentation keeps: `\s` and
-//! `trim()` whitespace, UTF-16 lengths and offsets, and `decodeURIComponent`.
+//! JavaScript string and number semantics the ported presentation keeps:
+//! `\s` and `trim()` whitespace, UTF-16 lengths and offsets,
+//! `decodeURIComponent`, `Number()` and `toFixed`.
+use regex::Regex;
 
 /// JavaScript `\s` as a regex character class.
 pub(crate) const JS_SPACE: &str = r"[\t\n\x0B\x0C\r \x{A0}\x{1680}\x{2000}-\x{200A}\x{2028}\x{2029}\x{202F}\x{205F}\x{3000}\x{FEFF}]";
@@ -15,6 +17,24 @@ pub(crate) fn is_js_space(c: char) -> bool {
 /// JavaScript `String.prototype.trim`.
 pub(crate) fn js_trim(text: &str) -> &str {
     text.trim_matches(is_js_space)
+}
+
+/// JavaScript `String.prototype.trimStart`.
+pub(crate) fn js_trim_start(text: &str) -> &str {
+    text.trim_start_matches(is_js_space)
+}
+
+/// A regex whose `\s` and `\S` mean the JavaScript classes.
+pub(crate) fn js_regex(pattern: &str) -> Regex {
+    let set = &JS_SPACE[1..JS_SPACE.len() - 1];
+    let pattern = pattern
+        .replace(r"\S", &format!("[^{set}]"))
+        .replace(r"\s", JS_SPACE);
+    Regex::new(&pattern).expect("pattern compiles")
+}
+
+pub(crate) fn utf16_units(text: &str) -> Vec<u16> {
+    text.encode_utf16().collect()
 }
 
 pub(crate) fn utf16_len(text: &str) -> usize {
@@ -71,6 +91,82 @@ pub(crate) fn decode_uri_component(text: &str) -> Option<String> {
         }
     }
     String::from_utf8(out).ok()
+}
+
+/// JavaScript `Number(value)` for a non-blank string, or `None` when it is NaN.
+pub(crate) fn js_number(value: &str) -> Option<f64> {
+    let text = js_trim(value);
+    let radix = |prefix: [&str; 2], radix: u32| {
+        let digits = prefix.iter().find_map(|prefix| text.strip_prefix(prefix))?;
+        let valid = !digits.is_empty() && digits.chars().all(|c| c.is_digit(radix));
+        Some(valid.then(|| {
+            digits.chars().fold(0.0, |total, c| {
+                total * f64::from(radix) + f64::from(c.to_digit(radix).unwrap_or(0))
+            })
+        }))
+    };
+    for (prefix, base) in [(["0x", "0X"], 16), (["0o", "0O"], 8), (["0b", "0B"], 2)] {
+        if let Some(number) = radix(prefix, base) {
+            return number;
+        }
+    }
+    let unsigned = text.strip_prefix(['+', '-']).unwrap_or(text);
+    if unsigned == "Infinity" {
+        return Some(f64::INFINITY);
+    }
+    let (mantissa, exponent) = unsigned
+        .split_once(['e', 'E'])
+        .map_or((unsigned, None), |(mantissa, exponent)| {
+            (mantissa, Some(exponent))
+        });
+    let (whole, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+    let digits = |part: &str| part.bytes().all(|b| b.is_ascii_digit());
+    let exponent_valid = exponent.is_none_or(|exponent| {
+        let exponent = exponent.strip_prefix(['+', '-']).unwrap_or(exponent);
+        !exponent.is_empty() && digits(exponent)
+    });
+    let valid = (!whole.is_empty() || !fraction.is_empty())
+        && digits(whole)
+        && digits(fraction)
+        && exponent_valid;
+    valid.then(|| text.parse().ok()).flatten()
+}
+
+/// JavaScript `Number.prototype.toFixed` for finite, non-negative values:
+/// ties round up.
+pub(crate) fn js_to_fixed(value: f64, digits: usize) -> String {
+    // 60 places print the exact binary value of these magnitudes.
+    let exact = format!("{value:.60}");
+    let (integer, fraction) = exact.split_once('.').unwrap_or((&exact, ""));
+    let mut kept: Vec<u8> = integer
+        .bytes()
+        .chain(fraction.bytes().take(digits))
+        .collect();
+    if fraction
+        .as_bytes()
+        .get(digits)
+        .is_some_and(|digit| *digit >= b'5')
+    {
+        let mut index = kept.len();
+        loop {
+            if index == 0 {
+                kept.insert(0, b'1');
+                break;
+            }
+            index -= 1;
+            if kept[index] == b'9' {
+                kept[index] = b'0';
+            } else {
+                kept[index] += 1;
+                break;
+            }
+        }
+    }
+    let mut text = String::from_utf8(kept).expect("ASCII digits");
+    if digits > 0 {
+        text.insert(text.len() - digits, '.');
+    }
+    text
 }
 
 #[cfg(test)]

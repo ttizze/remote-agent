@@ -10,6 +10,7 @@ use super::{
     },
 };
 use crate::{
+    js_text::{utf16_len, utf16_units},
     state::{Draft, Snapshot},
     view::thread_summary::ThreadSummary,
 };
@@ -23,7 +24,7 @@ const LEGACY_SECTION_KEY_PREFIX: &str = "legacy-models:";
 pub fn model_picker_model_key(instance_id: &str, slug: &str) -> String {
     format!(
         "{MODEL_KEY_PREFIX}{}:{instance_id}{slug}",
-        instance_id.encode_utf16().count()
+        utf16_len(instance_id)
     )
 }
 
@@ -35,7 +36,7 @@ pub fn parse_model_picker_model_key(key: &str) -> Option<(String, String)> {
         return None;
     }
     let length: usize = length.parse().ok()?;
-    let units: Vec<u16> = value.encode_utf16().collect();
+    let units = utf16_units(value);
     if length > units.len() {
         return None;
     }

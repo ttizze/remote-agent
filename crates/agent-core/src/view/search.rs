@@ -2,6 +2,7 @@
 //! matches ahead of message matches, and the highlighted message excerpt.
 use super::thread_summary::ThreadSummary;
 use super::time::compact_relative_time_label;
+use crate::js_text::utf16_len;
 use crate::state::Snapshot;
 use agent_protocol::conversation::{SearchMatch, SearchSource};
 use std::collections::BTreeSet;
@@ -18,7 +19,7 @@ pub const SEARCH_DEBOUNCE_MS: u64 = 200;
 pub fn content_search_query(query: &str) -> Option<&str> {
     let query = query.trim();
     (SEARCH_QUERY_MIN_LENGTH..=SEARCH_QUERY_MAX_LENGTH)
-        .contains(&query.encode_utf16().count())
+        .contains(&utf16_len(query))
         .then_some(query)
 }
 

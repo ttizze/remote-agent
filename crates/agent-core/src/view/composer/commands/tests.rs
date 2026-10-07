@@ -3,6 +3,10 @@ use crate::sync::fixtures::thread_state;
 use agent_domain::{ThreadId, shell};
 use rstest::rstest;
 
+fn utf16_len(text: &str) -> u32 {
+    crate::js_text::utf16_len(text) as u32
+}
+
 fn trigger(text: &str) -> Option<ComposerTrigger> {
     detect_composer_trigger(text, utf16_len(text))
 }
@@ -625,72 +629,4 @@ fn choosing_a_thread_inserts_its_link_and_attaches_it_once() {
         resolve_composer_command_selection("see @fix", &trigger, &item, true, &full),
         Err(TOO_MANY_CONTEXT_ITEMS.into())
     );
-}
-
-#[test]
-fn trims_and_lowercases_queries() {
-    assert_eq!(normalize_search_query("  UI  ", |_| false), "ui");
-}
-
-#[test]
-fn can_strip_leading_trigger_characters() {
-    assert_eq!(normalize_search_query("  $ui", |c| c == '$'), "ui");
-}
-
-#[test]
-fn prefers_exact_matches_over_broader_contains_matches() {
-    assert_eq!(
-        score_query_match(&QueryMatch {
-            prefix_base: Some(10),
-            includes_base: Some(20),
-            ..QueryMatch::exact("ui", "ui", 0)
-        }),
-        Some(0)
-    );
-    assert!(
-        score_query_match(&QueryMatch {
-            prefix_base: Some(10),
-            boundary_base: Some(20),
-            includes_base: Some(30),
-            ..QueryMatch::exact("building native ui", "ui", 0)
-        })
-        .unwrap()
-            > 0
-    );
-}
-
-#[test]
-fn treats_boundary_matches_as_stronger_than_generic_contains_matches() {
-    let score = |value| {
-        score_query_match(&QueryMatch {
-            prefix_base: Some(10),
-            boundary_base: Some(20),
-            includes_base: Some(30),
-            boundary_markers: &["-"],
-            ..QueryMatch::exact(value, "fix", 0)
-        })
-        .unwrap()
-    };
-    assert!(score("gh-fix-ci") < score("highfixci"));
-}
-
-#[test]
-fn scores_tighter_subsequences_ahead_of_looser_ones() {
-    let compact = score_subsequence_match("ghfixci", "gfc").unwrap();
-    let spread = score_subsequence_match("github-fix-ci", "gfc").unwrap();
-    assert!(compact < spread);
-}
-
-#[test]
-fn keeps_the_best_ranked_candidates_within_the_limit() {
-    let entry = |item: &'static str, score| Ranked {
-        item,
-        score,
-        tie_breaker: item.into(),
-    };
-    let mut ranked = vec![entry("b", 20), entry("d", 40)];
-    insert_ranked(&mut ranked, entry("a", 10), 2);
-    insert_ranked(&mut ranked, entry("c", 30), 2);
-    let items: Vec<&str> = ranked.iter().map(|entry| entry.item).collect();
-    assert_eq!(items, ["a", "b"]);
 }

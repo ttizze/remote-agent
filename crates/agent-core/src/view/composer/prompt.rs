@@ -1,6 +1,7 @@
 //! The composer editor: its placeholder, whether it accepts input, whether the
 //! draft has something to send and whether the prompt fits a provider turn.
 use super::actions::SessionPhase;
+use crate::js_text::utf16_len;
 
 /// The longest provider turn input, in UTF-16 code units.
 pub const PROVIDER_SEND_TURN_MAX_INPUT_CHARS: usize = 120_000;
@@ -81,10 +82,6 @@ pub fn has_sendable_content(prompt: &str, attachment_count: usize, context_count
     !strip_inline_context_references(prompt).trim().is_empty()
         || attachment_count > 0
         || context_count > 0
-}
-
-fn utf16_len(text: &str) -> usize {
-    text.chars().map(char::len_utf16).sum()
 }
 
 /// The provider turn contract trims the input before measuring it.

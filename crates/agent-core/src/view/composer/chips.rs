@@ -3,6 +3,7 @@
 //! message's context records.
 //!
 //! Offsets are UTF-16 code units, the unit of the native text editors.
+use crate::js_text::{utf16_offset, utf16_units};
 use agent_domain::{
     Attachment, AttachmentKind, MessageContext, ThreadShell, context_references,
     sanitize_context_label,
@@ -90,7 +91,7 @@ fn context_id_grammar(id: &str) -> bool {
 
 /// Two FNV-1a passes over UTF-16 units, forward and reversed.
 fn fnv1a64(value: &str) -> String {
-    let units: Vec<u16> = value.encode_utf16().collect();
+    let units = utf16_units(value);
     let (mut forward, mut reverse) = (0x811c_9dc5_u32, 0x9dc5_811c_u32);
     for (index, unit) in units.iter().enumerate() {
         forward = (forward ^ u32::from(*unit)).wrapping_mul(0x0100_0193);
@@ -228,7 +229,7 @@ pub fn review_comment_label(record: &Value) -> String {
 pub fn preview_annotation_label(comment: &str, page_title: Option<&str>) -> String {
     let comment = comment.split_whitespace().collect::<Vec<_>>().join(" ");
     if !comment.is_empty() {
-        let units: Vec<u16> = comment.encode_utf16().collect();
+        let units = utf16_units(&comment);
         return if units.len() > PREVIEW_LABEL_MAX_CHARS {
             format!(
                 "{}…",
@@ -277,10 +278,6 @@ pub fn is_video(name: &str, mime_type: &str) -> bool {
             "avi" | "m4v" | "mkv" | "mov" | "mp4" | "ogv" | "webm"
         )
     })
-}
-
-fn utf16_offset(text: &str, byte: usize) -> u32 {
-    u32::try_from(text[..byte].encode_utf16().count()).unwrap_or(u32::MAX)
 }
 
 fn record<'a>(context: Option<&'a MessageContext>, context_id: &str) -> Option<&'a Value> {
@@ -558,8 +555,8 @@ pub fn context_chips(
                 label: &occurrence.label,
             };
             ContextChip {
-                start: utf16_offset(text, occurrence.start),
-                end: utf16_offset(text, occurrence.end),
+                start: utf16_offset(text, occurrence.start) as u32,
+                end: utf16_offset(text, occurrence.end) as u32,
                 ..resolve_chip(
                     &reference,
                     record(context, &occurrence.context_id),

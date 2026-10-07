@@ -15,6 +15,7 @@ pub mod rejection;
 pub mod relationships;
 pub mod requests;
 pub mod search;
+pub mod search_ranking;
 pub mod settings;
 pub mod setup_card;
 pub mod sidebar;

@@ -1,6 +1,7 @@
 //! Domain commands and launches built from what the user chose. The Host
 //! resolves delivery against the live run, so sends carry the user's intent.
 use super::workflows::interrupt_target;
+use crate::js_text::utf16_len;
 use crate::presentation::markdown::assistant_citations::assistant_citations_to_plain_text;
 use agent_domain::{
     Answers, ApprovalDecision, Attachment, Checkpoint, CheckpointStatus, Command, CommandId,
@@ -393,7 +394,7 @@ const TITLE_MAX: usize = 50;
 
 fn truncate_title(text: &str) -> String {
     let text = text.trim();
-    if text.encode_utf16().count() <= TITLE_MAX {
+    if utf16_len(text) <= TITLE_MAX {
         return text.into();
     }
     let mut units = 0;

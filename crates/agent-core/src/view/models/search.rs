@@ -1,87 +1,24 @@
 //! Model picker search: every query token must match a model's name, short
 //! name, sub-provider, driver or instance name; lower scores rank first.
-//!
-//! Positions count UTF-16 code units, as the reference ranking does.
+use crate::js_text::utf16_len;
+use crate::view::search_ranking::{QueryMatch, normalize_search_query, score_query_match};
 
 /// Trimmed and lowercased.
-pub fn normalize_search_query(input: &str) -> String {
-    input.trim().to_lowercase()
-}
-
-fn units(value: &str) -> Vec<u16> {
-    value.encode_utf16().collect()
-}
-
-fn find(value: &[u16], query: &[u16]) -> Option<usize> {
-    if query.len() > value.len() {
-        return None;
-    }
-    (0..=value.len() - query.len()).find(|start| value[*start..].starts_with(query))
-}
-
-fn score_subsequence_match(value: &[u16], query: &[u16]) -> Option<i64> {
-    if query.is_empty() {
-        return Some(0);
-    }
-    let mut query_index = 0;
-    let mut first = None;
-    let mut previous: Option<usize> = None;
-    let mut gap_penalty = 0i64;
-    for (index, unit) in value.iter().enumerate() {
-        if *unit != query[query_index] {
-            continue;
-        }
-        let first_index = *first.get_or_insert(index);
-        if let Some(previous) = previous {
-            gap_penalty += (index - previous - 1) as i64;
-        }
-        previous = Some(index);
-        query_index += 1;
-        if query_index == query.len() {
-            let span_penalty = (index - first_index + 1 - query.len()) as i64;
-            let length_penalty = 64.min(value.len() as i64 - query.len() as i64);
-            return Some(first_index as i64 * 2 + gap_penalty * 3 + span_penalty + length_penalty);
-        }
-    }
-    None
-}
-
-fn length_penalty(value: &[u16], query: &[u16]) -> i64 {
-    (value.len() as i64 - query.len() as i64).clamp(0, 64)
+fn normalize(input: &str) -> String {
+    normalize_search_query(input, |_| false)
 }
 
 /// Exact, then prefix, then word boundary, then substring, then (for tokens
 /// of three or more characters) subsequence matches, each tier offset from
 /// `base`. Both inputs must be normalized.
 fn score_token(value: &str, query: &str, base: i64) -> Option<i64> {
-    if value.is_empty() || query.is_empty() {
-        return None;
-    }
-    if value == query {
-        return Some(base);
-    }
-    let (value, query) = (units(value), units(query));
-    if value.starts_with(&query) {
-        return Some(base + 2 + length_penalty(&value, &query));
-    }
-    let boundary = [' ', '-', '_', '/']
-        .into_iter()
-        .filter_map(|marker| {
-            let mut needle = vec![marker as u16];
-            needle.extend(&query);
-            find(&value, &needle).map(|index| index + 1)
-        })
-        .min();
-    if let Some(index) = boundary {
-        return Some(base + 4 + index as i64 * 2 + length_penalty(&value, &query));
-    }
-    if let Some(index) = find(&value, &query) {
-        return Some(base + 6 + index as i64 * 2 + length_penalty(&value, &query));
-    }
-    if query.len() >= 3 {
-        return score_subsequence_match(&value, &query).map(|score| base + 100 + score);
-    }
-    None
+    score_query_match(&QueryMatch {
+        prefix_base: Some(base + 2),
+        boundary_base: Some(base + 4),
+        includes_base: Some(base + 6),
+        fuzzy_base: (utf16_len(query) >= 3).then_some(base + 100),
+        ..QueryMatch::exact(value, query, base)
+    })
 }
 
 /// The fields a picker row is searched by.
@@ -99,7 +36,7 @@ pub struct SearchableModel<'a> {
 const FAVORITE_SCORE_BOOST: i64 = 24;
 
 pub fn build_model_picker_search_text(model: &SearchableModel) -> String {
-    normalize_search_query(
+    normalize(
         &[
             Some(model.name),
             model.short_name,
@@ -117,7 +54,7 @@ pub fn build_model_picker_search_text(model: &SearchableModel) -> String {
 
 /// `None` when any token matches no field; favorites rank slightly higher.
 pub fn score_model_picker_search<'a>(model: &SearchableModel<'a>, query: &str) -> Option<i64> {
-    let query = normalize_search_query(query);
+    let query = normalize(query);
     let tokens: Vec<&str> = query.split_whitespace().collect();
     if tokens.is_empty() {
         return Some(0);
@@ -130,10 +67,10 @@ pub fn score_model_picker_search<'a>(model: &SearchableModel<'a>, query: &str) -
     ]
     .into_iter()
     .flatten()
-    .map(normalize_search_query)
+    .map(normalize)
     .chain([
-        normalize_search_query(model.driver_kind),
-        normalize_search_query(model.provider_display_name),
+        normalize(model.driver_kind),
+        normalize(model.provider_display_name),
         build_model_picker_search_text(model),
     ])
     .collect();

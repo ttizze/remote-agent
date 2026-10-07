@@ -1,6 +1,6 @@
 //! Decorations around user and assistant messages: attribution, intent
 //! markers, status chips, collapsing, copy text and per-message actions.
-use crate::js_text::is_js_space;
+use crate::js_text::{is_js_space, utf16_len};
 use agent_domain::{
     InputIntent, Item, ItemKind, ItemStatus, Message, MessageAuthor, RunId, State, ThreadId,
     context_references,
@@ -114,7 +114,7 @@ pub const SHOW_LESS: &str = "Show less";
 /// Long bodies start clipped behind "Show full message".
 pub fn user_message_collapsible(text: &str) -> bool {
     !text.trim_matches(is_js_space).is_empty()
-        && (text.encode_utf16().count() > MAX_COLLAPSED_USER_MESSAGE_LENGTH
+        && (utf16_len(text) > MAX_COLLAPSED_USER_MESSAGE_LENGTH
             || text.split('\n').count() > MAX_COLLAPSED_USER_MESSAGE_LINES)
 }
 

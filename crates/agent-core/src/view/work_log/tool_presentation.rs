@@ -1,7 +1,7 @@
 //! A tool row's surface, icon, source and viewed image, read from the
 //! provider-neutral presentation an item carries.
 use super::{NativeApp, ToolIcon, ToolSource, ToolSourceKind, ToolSurface};
-use crate::js_text::{is_js_space, js_trim};
+use crate::js_text::{is_js_space, js_trim, utf16_len};
 use agent_domain::{Item, ItemKind, ToolPresentation};
 use serde_json::Value;
 
@@ -28,8 +28,7 @@ pub fn is_workspace_image_preview_path(path: &str) -> bool {
 /// A trimmed string no longer than `max_length` UTF-16 code units.
 fn trimmed_string(value: Option<&Value>, max_length: usize) -> Option<String> {
     let trimmed = js_trim(value?.as_str()?);
-    (!trimmed.is_empty() && trimmed.encode_utf16().count() <= max_length)
-        .then(|| trimmed.to_owned())
+    (!trimmed.is_empty() && utf16_len(trimmed) <= max_length).then(|| trimmed.to_owned())
 }
 
 fn url_with_scheme(value: Option<&Value>, schemes: &[&str]) -> Option<String> {
@@ -119,7 +118,7 @@ fn read_tool_path(name: &str, input: &Value) -> Option<String> {
     ["file_path", "path"]
         .iter()
         .find_map(|key| trimmed_string(input.get(key), usize::MAX))
-        .filter(|path| path.encode_utf16().count() <= 4096)
+        .filter(|path| utf16_len(path) <= 4096)
 }
 
 fn from_presentation(presentation: &ToolPresentation) -> ExtractedToolPresentation {

@@ -11,7 +11,7 @@ use super::tool_summary::{
     ToolCallOutcome, ToolSummaryCall, summarize_tool_calls, tool_result_indicates_failure,
 };
 use super::{ItemType, ToolLifecycleStatus, ToolSource, ToolSourceKind, WorkLogEntry, WorkTone};
-use crate::js_text::{js_trim, utf16_prefix};
+use crate::js_text::{js_to_fixed, js_trim, utf16_prefix};
 use agent_domain::{Item, ItemKind, ItemStatus, Json, ThreadId};
 use regex::Regex;
 use serde_json::{Value, json};
@@ -59,43 +59,6 @@ pub fn tool_item_for_display(item: &Item) -> Item {
         _ => {}
     }
     display
-}
-
-/// JavaScript `Number.prototype.toFixed` for the finite, non-negative values
-/// token counts produce: ties round up.
-fn js_to_fixed(value: f64, digits: usize) -> String {
-    // 60 places print the exact binary value of these magnitudes.
-    let exact = format!("{value:.60}");
-    let (integer, fraction) = exact.split_once('.').unwrap_or((&exact, ""));
-    let mut kept: Vec<u8> = integer
-        .bytes()
-        .chain(fraction.bytes().take(digits))
-        .collect();
-    if fraction
-        .as_bytes()
-        .get(digits)
-        .is_some_and(|digit| *digit >= b'5')
-    {
-        let mut index = kept.len();
-        loop {
-            if index == 0 {
-                kept.insert(0, b'1');
-                break;
-            }
-            index -= 1;
-            if kept[index] == b'9' {
-                kept[index] = b'0';
-            } else {
-                kept[index] += 1;
-                break;
-            }
-        }
-    }
-    let mut text = String::from_utf8(kept).expect("ASCII digits");
-    if digits > 0 {
-        text.insert(text.len() - digits, '.');
-    }
-    text
 }
 
 /// Compacts a token count to three significant figures with a unit suffix

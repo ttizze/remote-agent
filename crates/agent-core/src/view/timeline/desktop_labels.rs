@@ -1,6 +1,6 @@
 //! Desktop work-log row labels: the collapsed heading of a call, its live
 //! present-tense form, and which calls an expanded group lists.
-use crate::js_text::{JS_SPACE, is_js_space, js_trim, utf16_len};
+use crate::js_text::{JS_SPACE, is_js_space, js_trim, utf16_len, utf16_skip};
 use crate::presentation::markdown::links::{
     file_basename, format_file_path_position, is_windows_absolute_path, split_file_path_position,
     strip_slash_prefixed_windows_drive,
@@ -106,18 +106,6 @@ fn read_raw_paths(entry: &WorkLogEntry) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Skips the first `units` UTF-16 code units, like JavaScript `slice(units)`.
-fn utf16_slice_from(value: &str, units: usize) -> &str {
-    let mut count = 0;
-    for (index, c) in value.char_indices() {
-        if count >= units {
-            return &value[index..];
-        }
-        count += c.len_utf16();
-    }
-    ""
-}
-
 /// A path as the workspace names it: `workspace/src/a.ts` for paths inside
 /// the workspace root, absolute paths outside it, with any `:line:column` kept.
 pub(super) fn format_workspace_relative_path(
@@ -145,7 +133,7 @@ pub(super) fn format_workspace_relative_path(
         if path_compare == root_compare {
             display = label;
         } else if path_compare.starts_with(&format!("{root_compare}/")) {
-            let suffix = utf16_slice_from(&normalized, utf16_len(&normalized_root) + 1);
+            let suffix = utf16_skip(&normalized, utf16_len(&normalized_root) + 1);
             display = format!("{label}/{suffix}");
         } else if !normalized.starts_with('/') {
             let relative = normalized
