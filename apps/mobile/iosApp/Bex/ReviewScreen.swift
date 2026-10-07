@@ -5,6 +5,10 @@ import SwiftUI
 struct ReviewScreen: View {
     @ObservedObject var model: BexAppViewModel
     @State private var files: [WorkspaceDiffFile] = []
+    /// While the diff shows file by file: each file's notice by path.
+    @State private var notices: [String: String]?
+    /// The latest parse; an older one finishing late is dropped.
+    @State private var parsed = 0
     @State private var loading = false
     @State private var error: String?
     @State private var selectedFile: String?
@@ -31,9 +35,18 @@ struct ReviewScreen: View {
                         if git?.truncated == true {
                             PartialDiffNotice()
                         }
-                        ChangedFilesList(files: files, selected: $selectedFile)
+                        ChangedFilesList(files: files, selected: $selectedFile) { path in
+                            if notices != nil {
+                                model.perform(.revealDiffFile(path: path, retry: true))
+                            }
+                        }
                         ForEach(visibleFiles, id: \.path) { file in
-                            DiffFileView(file: file)
+                            DiffFileView(file: file, notice: notices?[file.path])
+                                .onAppear {
+                                    if notices != nil {
+                                        model.perform(.revealDiffFile(path: file.path, retry: false))
+                                    }
+                                }
                         }
                     }
                 }
@@ -62,6 +75,7 @@ struct ReviewScreen: View {
         }
         .onAppear(perform: load)
         .onChange(of: model.snapshot.reviewRevision()) { _, _ in parse(model.snapshot) }
+        .onChange(of: git?.filesRevision) { _, _ in parse(model.snapshot) }
     }
 
     private func showsGitDiff(_ diff: DiffPanelView?) -> Bool {
@@ -100,6 +114,29 @@ struct ReviewScreen: View {
     }
 
     private func parse(_ snapshot: AgentCore.Snapshot) {
+        parsed += 1
+        let generation = parsed
+        // A diff too large to send whole lists every file and reads each one on its own.
+        if let thread = snapshot.selectedThreadId(), model.threadView?.diff.git?.filesRevision != nil {
+            Task {
+                let lazy = await Task.detached(priority: .userInitiated) {
+                    snapshot.reviewFiles(threadId: thread)
+                }.value
+                guard let lazy, generation == parsed else { return }
+                let listed = lazy.files.map {
+                    WorkspaceDiffFile(path: $0.path, additions: $0.additions, deletions: $0.deletions, rows: $0.rows)
+                }
+                if listed.map(\.path) != files.map(\.path) || notices == nil {
+                    selectedFile = nil
+                }
+                files = listed
+                let listedNotices = lazy.files.compactMap { file in file.notice.map { (file.path, $0) } }
+                notices = Dictionary(listedNotices) { first, _ in first }
+                loading = false
+            }
+            return
+        }
+        notices = nil
         guard let review = snapshot.review() else {
             loading = false
             files = []
@@ -107,6 +144,7 @@ struct ReviewScreen: View {
         }
         Task {
             let loaded = await Task.detached(priority: .userInitiated) { review.diffFiles() }.value
+            guard generation == parsed else { return }
             files = loaded
             selectedFile = nil
             loading = false
@@ -171,13 +209,17 @@ private struct PartialDiffNotice: View {
 private struct ChangedFilesList: View {
     let files: [WorkspaceDiffFile]
     @Binding var selected: String?
+    let select: (String) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
             Text("Changed files").font(AppTheme.font(13, weight: .medium)).foregroundStyle(AppTheme.muted)
                 .padding(.horizontal, 10).padding(.top, 8)
             ForEach(files, id: \.path) { file in
-                Button { selected = selected == file.path ? nil : file.path } label: {
+                Button {
+                    selected = selected == file.path ? nil : file.path
+                    select(file.path)
+                } label: {
                     HStack {
                         Text(file.path).font(AppTheme.font(13, weight: selected == file.path ? .bold : .medium))
                             .foregroundStyle(AppTheme.text).lineLimit(2)
@@ -203,6 +245,8 @@ private struct ChangedFilesList: View {
 
 private struct DiffFileView: View {
     let file: WorkspaceDiffFile
+    /// Why the file shows no or partial rows, below them.
+    let notice: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -223,6 +267,16 @@ private struct DiffFileView: View {
                         .background(background(row.kind))
                     }
                 }
+            }
+            if let notice {
+                HStack(spacing: 10) {
+                    Image(systemName: "info.circle").font(.system(size: 14))
+                    Text(notice).font(AppTheme.font(12)).lineLimit(1)
+                }
+                .foregroundStyle(AppTheme.muted)
+                .padding(.horizontal, 10)
+                .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                .overlay(alignment: .bottom) { Rectangle().fill(AppTheme.border.opacity(0.65)).frame(height: 1) }
             }
         }
         .padding(.bottom, 12)
