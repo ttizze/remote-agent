@@ -29,7 +29,7 @@ struct ThreadListRowView: View {
         }
         .buttonStyle(.plain)
         .padding(.horizontal, sidebar ? 8 : 0)
-        .accessibilityHint("Opens the thread. Swipe left for settle and snooze actions.")
+        .accessibilityHint(row.swipeHint)
         .accessibilityLabel(row.hasQueuedMessages ? "\(row.title), messages queued to send" : row.title)
     }
 
@@ -63,9 +63,13 @@ struct ThreadListRowView: View {
             if let snippet = row.searchSnippet {
                 Text(snippet).font(AppTheme.font(13)).foregroundStyle(AppTheme.muted).lineLimit(2)
             }
-            if row.branch != nil || !row.providerInstances.isEmpty {
+            if row.errorText != nil || row.branch != nil || !row.providerInstances.isEmpty {
                 HStack(spacing: 7) {
-                    if let branch = row.branch {
+                    if let error = row.errorText {
+                        Text(error).font(AppTheme.font(13)).lineLimit(1)
+                            .foregroundStyle(row.status == .limited ? AppTheme.warningForeground
+                                : AppTheme.dangerForeground)
+                    } else if let branch = row.branch {
                         Text(branch).font(AppTheme.mono(13)).foregroundStyle(AppTheme.muted).lineLimit(1)
                             .truncationMode(.middle)
                     }
@@ -117,7 +121,7 @@ extension ThreadListStatus {
     }
 }
 
-/// A project's icon from the Host, or its initial when it has none.
+/// A project's icon from the Host, or the folder symbol when it has none.
 struct ProjectGlyph: View {
     let name: String
     let icon: UIImage?
@@ -130,11 +134,10 @@ struct ProjectGlyph: View {
                 .clipShape(RoundedRectangle(cornerRadius: size * 0.16))
                 .accessibilityLabel("\(name) favicon")
         } else {
-            Text(name.first.map { String($0).uppercased() } ?? "·")
-                .font(AppTheme.font(size * 0.6, weight: .bold))
-                .foregroundStyle(AppTheme.muted)
+            Image(systemName: "folder.fill").resizable().scaledToFit()
+                .foregroundStyle(AppTheme.tertiary)
                 .frame(width: size, height: size)
-                .background(AppTheme.subtle, in: RoundedRectangle(cornerRadius: size * 0.23))
+                .accessibilityHidden(true)
         }
     }
 }

@@ -18,7 +18,9 @@ struct ThreadListScreen: View {
     @State private var settledLimit: UInt32 = 10
     @State private var renaming: ThreadRow?
     @State private var title = ""
-    @State private var snoozing: ThreadRow?
+    /// The row whose swipe actions are open; opening another closes it.
+    @State private var openSwipeRow: String?
+    @State private var arranging = false
     @State private var customSnooze: String?
     /// When the soonest snoozed thread woke, between the minute ticks.
     @State private var wokeAt = Date.distantPast
@@ -55,32 +57,19 @@ struct ThreadListScreen: View {
             TextField("Title", text: $title)
             Button("Save") {
                 if let row = renaming {
+                    Haptics.light()
                     model.perform(.thread(threadId: row.id, action: .rename(title: title)))
                 }
             }
             Button("Cancel", role: .cancel) {}
         }
-        .confirmationDialog(
-            "Snooze until",
-            isPresented: Binding(get: { snoozing != nil }, set: {
-                if !$0 {
-                    snoozing = nil
-                }
-            }),
-            titleVisibility: .visible,
-            presenting: snoozing
-        ) { row in
-            ForEach(Array(row.snoozeOptions.enumerated()), id: \.offset) { _, option in
-                Button(option.detail.map { "\(option.label) · \($0)" } ?? option.label) {
-                    run(option.action, row: row)
-                }
-            }
-        }
+        .fullScreenCover(isPresented: $arranging) { ThreadArrangementSheet(model: model) }
         .sheet(item: Binding(
             get: { customSnooze.map(IdentifiedString.init) },
             set: { customSnooze = $0?.value }
         )) { thread in
             CustomSnoozeSheet { until in
+                Haptics.light()
                 model.perform(.thread(threadId: thread.value, action: .snooze(until: until)))
             }
         }
@@ -104,7 +93,7 @@ struct ThreadListScreen: View {
             ThreadListEmptyState(empty: empty, addEnvironment: model.isConnected ? nil : { model.openPairing() })
         } else {
             List {
-                ForEach(Array(list.items.enumerated()), id: \.offset) { _, item in
+                ForEach(list.items, id: \.key) { item in
                     itemView(item, now: now)
                         .listRowInsets(EdgeInsets())
                         .listRowSeparator(.hidden)
@@ -126,6 +115,11 @@ struct ThreadListScreen: View {
             .scrollContentBackground(.hidden)
             .scrollIndicators(.hidden)
             .scrollDismissesKeyboard(.interactively)
+            .onScrollPhaseChange { _, phase in
+                if phase == .interacting {
+                    openSwipeRow = nil
+                }
+            }
             .environment(\.defaultMinListRowHeight, 0)
         }
     }
@@ -134,10 +128,20 @@ struct ThreadListScreen: View {
     private func itemView(_ item: ThreadListItem, now _: Int64) -> some View {
         switch item {
         case let .thread(row):
-            ThreadListRowView(row: row, icon: ProjectIconImages.image(model.snapshot, row.projectId), sidebar: sidebar,
-                              open: { model.openThread(row.id) })
-                .contextMenu { ThreadMenuItems(items: row.menu) { run($0, row: row) } }
-                .swipeActions(edge: .trailing, allowsFullSwipe: true) { swipeButtons(row) }
+            ThreadSwipeable(
+                id: row.key, openRow: $openSwipeRow, primary: primarySwipe(row), secondary: secondarySwipe(row),
+                compact: row.variant == .slim,
+                background: sidebar ? AppTheme.color("mobileDrawer") : AppTheme.screen
+            ) { close in
+                ThreadListRowView(row: row, icon: ProjectIconImages.image(model.snapshot, row.projectId),
+                                  sidebar: sidebar, open: {
+                                      close()
+                                      model.openThread(row.id)
+                                  })
+                                  .contextMenu { ThreadMenuItems(items: row.menu) { run($0, row: row) } }
+            }
+            // A row that changes shelf or action starts closed.
+            .id("\(row.key):\(row.variant):\(row.swipePrimary.label)")
         case let .pendingTask(task):
             PendingTaskRowView(task: task, icon: ProjectIconImages.image(model.snapshot, task.projectId),
                                sidebar: sidebar)
@@ -155,27 +159,31 @@ struct ThreadListScreen: View {
         }
     }
 
-    @ViewBuilder
-    private func swipeButtons(_ row: ThreadRow) -> some View {
-        Button { swipe(row.swipePrimary.action, row: row) } label: {
-            Label(row.swipePrimary.label, systemImage: row.swipePrimary.action.symbol)
-        }
-        .tint(AppTheme.primary)
-        if let secondary = row.swipeSecondary {
-            Button { swipe(secondary.action, row: row) } label: {
-                Label(secondary.label, systemImage: secondary.action.symbol)
+    private func primarySwipe(_ row: ThreadRow) -> SwipeActionSpec {
+        let button = row.swipePrimary
+        return SwipeActionSpec(
+            symbol: button.action.symbol, label: button.label, accessibilityLabel: button.accessibilityLabel
+        ) {
+            let action: ThreadAction? = switch button.action {
+            case .settle: .settle
+            case .unsettle: .unsettle
+            case .unsnooze: .unsnooze
+            case .snooze: nil
             }
-            .tint(AppTheme.card)
+            if let action {
+                Haptics.light()
+                model.perform(.thread(threadId: row.id, action: action))
+            }
         }
     }
 
-    private func swipe(_ action: SwipeAction, row: ThreadRow) {
-        switch action {
-        case .settle: model.perform(.thread(threadId: row.id, action: .settle))
-        case .unsettle: model.perform(.thread(threadId: row.id, action: .unsettle))
-        case .unsnooze: model.perform(.thread(threadId: row.id, action: .unsnooze))
-        case .snooze: snoozing = row
-        }
+    /// Snooze offers its wake times as a menu.
+    private func secondarySwipe(_ row: ThreadRow) -> SwipeMenuSpec? {
+        guard let button = row.swipeSecondary, !row.snoozeOptions.isEmpty else { return nil }
+        return SwipeMenuSpec(
+            symbol: button.action.symbol, label: button.label, accessibilityLabel: button.accessibilityLabel,
+            title: "Snooze until", choices: row.snoozeOptions
+        ) { run($0, row: row) }
     }
 
     private func run(_ action: ThreadMenuAction, row: ThreadRow) {
@@ -184,6 +192,7 @@ struct ThreadListScreen: View {
             if case .delete = value, model.selectedThreadId == row.id {
                 model.showThreadList()
             }
+            Haptics.light()
             model.perform(.thread(threadId: row.id, action: value))
         case let .filterProject(projectId): model.perform(.filterProject(projectId: projectId))
         case let .newThreadOnBranch(projectId, branch, worktreePath):
@@ -194,8 +203,9 @@ struct ThreadListScreen: View {
             title = row.title
             renaming = row
         case .openProjectSettings: openSettings()
-        case .arrange: break
+        case .arrange: arranging = true
         case let .move(direction):
+            Haptics.light()
             model.perform(.moveThread(
                 threadId: row.id, section: row.pinned ? .pinned : .active,
                 destination: direction == .up ? .up : .down
@@ -206,9 +216,9 @@ struct ThreadListScreen: View {
 
     private func copy(_ action: ThreadMenuAction) {
         switch action {
-        case let .copyPath(path): UIPasteboard.general.string = path ?? ""
-        case let .copyBranch(branch): UIPasteboard.general.string = branch
-        case let .copyThreadId(threadId): UIPasteboard.general.string = threadId
+        case let .copyPath(path): Haptics.copy(path ?? "")
+        case let .copyBranch(branch): Haptics.copy(branch)
+        case let .copyThreadId(threadId): Haptics.copy(threadId)
         default: break
         }
     }
@@ -243,6 +253,19 @@ struct IdentifiedString: Identifiable {
     let value: String
     var id: String {
         value
+    }
+}
+
+extension ThreadListItem {
+    /// The list identity: the row's key, or the shelf's.
+    var key: String {
+        switch self {
+        case let .thread(row): row.key
+        case let .pendingTask(task): task.key
+        case .workingShelf: "working-shelf"
+        case .snoozedShelf: "snoozed-shelf"
+        case .settledShelf: "settled-shelf"
+        }
     }
 }
 
