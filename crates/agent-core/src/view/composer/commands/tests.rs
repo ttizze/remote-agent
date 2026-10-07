@@ -575,6 +575,8 @@ fn path_items_follow_thread_matches() {
             ("path:login", "login", ""),
         ]
     );
+    let icons: Vec<Option<MarkdownFileIcon>> = items.iter().map(|item| item.file_icon).collect();
+    assert_eq!(icons, [None, Some(MarkdownFileIcon::Typescript), None]);
 }
 
 #[test]
@@ -614,6 +616,7 @@ fn choosing_a_thread_inserts_its_link_and_attaches_it_once() {
         label: "Fix login".into(),
         description: "Thread".into(),
         skill_source: None,
+        file_icon: None,
         target: ComposerCommandTarget::Thread {
             thread_id: "t1".into(),
             title: "Fix login".into(),

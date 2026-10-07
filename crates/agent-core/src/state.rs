@@ -755,6 +755,10 @@ pub enum Intent {
     RemoveDraftContext {
         context_id: String,
     },
+    /// Adds visible terminal lines to the open thread's draft as context.
+    AttachTerminalOutput {
+        output: crate::view::terminals::TerminalOutputContext,
+    },
     /// Drops an unsent draft: a thread's (its id) or a new thread's (`new:<project>`).
     DiscardDraft {
         draft_key: String,

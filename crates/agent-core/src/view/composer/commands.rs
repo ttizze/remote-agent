@@ -4,6 +4,7 @@
 //!
 //! Offsets are UTF-16 code units, the unit of the native text editors.
 use crate::js_text::{is_js_space, js_trim, js_trim_start, utf16_len, utf16_units};
+use crate::presentation::markdown::links::{MarkdownFileIcon, markdown_file_icon};
 use crate::view::search_ranking::{
     QueryMatch, Ranked, insert_ranked, normalize_search_query, score_query_match,
 };
@@ -247,6 +248,8 @@ pub struct ComposerCommandItem {
     pub target: ComposerCommandTarget,
     /// A skill's source, for its badge and icon.
     pub skill_source: Option<SkillSourceKind>,
+    /// A file's icon; directories show the folder symbol.
+    pub file_icon: Option<MarkdownFileIcon>,
 }
 
 /// Where a provider skill comes from, for its badge.
@@ -358,6 +361,7 @@ pub fn slash_command_items(
         label: format!("/{}", command.name()),
         description: description.into(),
         skill_source: None,
+        file_icon: None,
         target: ComposerCommandTarget::BuiltIn { command },
     })
     .collect();
@@ -386,6 +390,7 @@ pub fn slash_command_items(
             label: format!("/{}", command.name),
             description: command.description.clone().unwrap_or_default(),
             skill_source: None,
+            file_icon: None,
             target: ComposerCommandTarget::ProviderCommand {
                 name: command.name.clone(),
             },
@@ -450,6 +455,7 @@ fn skill_item(skill: &ComposerSkill, label: String) -> ComposerCommandItem {
         label,
         description: skill_description(skill),
         skill_source: Some(skill.source),
+        file_icon: None,
         target: ComposerCommandTarget::Skill {
             name: skill.name.clone(),
         },
@@ -554,6 +560,7 @@ pub fn thread_items(
             label: shell.title.clone(),
             description: "Thread".into(),
             skill_source: None,
+            file_icon: None,
             target: ComposerCommandTarget::Thread {
                 thread_id: shell.id.to_string(),
                 title: shell.title.clone(),
@@ -573,6 +580,7 @@ fn path_item(entry: &ComposerPathEntry) -> ComposerCommandItem {
             String::new()
         },
         skill_source: None,
+        file_icon: (!entry.directory).then(|| markdown_file_icon(&entry.path)),
         target: ComposerCommandTarget::Path {
             path: entry.path.clone(),
             directory: entry.directory,

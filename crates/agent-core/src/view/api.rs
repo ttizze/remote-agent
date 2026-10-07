@@ -33,7 +33,7 @@ use crate::view::{
     thread_list::{ThreadListHolds, ThreadListOptions, ThreadListView, thread_list},
     thread_menu::{ThreadMenuOptions, ThreadMenuView, thread_menu},
     time::TimestampFormat,
-    timeline::mobile_follow::LiveFollowEvent,
+    timeline::mobile_follow::{LiveFollowEvent, StreamHaptic, StreamingMessageMark},
     timeline::rows::{TimelineRow, TimelineUpdate},
 };
 use agent_domain::ThreadId;
@@ -135,6 +135,26 @@ impl Snapshot {
                 inbox_returns: Some(&self.inbox_returns),
                 pending_order: self.thread_order.as_ref().map(|hold| &hold.order),
             },
+        )
+    }
+    /// The "Arrange threads" sheet.
+    pub fn thread_arrangement(
+        &self,
+        now_ms: i64,
+        options: crate::view::thread_arrangement::ArrangementOptions,
+    ) -> crate::view::thread_arrangement::ThreadArrangementView {
+        crate::view::thread_arrangement::thread_arrangement(self, now_ms, options)
+    }
+    /// Where the sheet's `thread_id` lands dropped before row `to_index`.
+    pub fn thread_arrangement_move(
+        &self,
+        now_ms: i64,
+        options: crate::view::thread_arrangement::ArrangementOptions,
+        thread_id: String,
+        to_index: u32,
+    ) -> Option<crate::view::thread_arrangement::ArrangementDrop> {
+        crate::view::thread_arrangement::thread_arrangement_move(
+            self, now_ms, options, &thread_id, to_index,
         )
     }
     pub fn archived(&self, now_ms: i64, options: ArchivedOptions) -> ArchivedView {
@@ -357,6 +377,80 @@ pub fn timeline_update(previous: Vec<TimelineRow>, next: Vec<TimelineRow>) -> Ti
 #[cfg_attr(feature = "bindings", uniffi::export)]
 pub fn feed_live_follow(current: bool, event: LiveFollowEvent) -> bool {
     crate::view::timeline::mobile_follow::feed_live_follow(current, event)
+}
+
+/// The streaming haptic after the feed showed `streaming` for `thread_id`.
+#[cfg_attr(feature = "bindings", uniffi::export)]
+pub fn stream_haptic(
+    previous: Option<StreamHaptic>,
+    thread_id: String,
+    streaming: Option<StreamingMessageMark>,
+    now_ms: i64,
+) -> StreamHaptic {
+    crate::view::timeline::mobile_follow::stream_haptic(previous, &thread_id, streaming, now_ms)
+}
+
+/// What tapping `href` in a thread whose workspace is `workspace_root` does.
+#[cfg_attr(feature = "bindings", uniffi::export)]
+pub fn markdown_link_action(
+    href: String,
+    workspace_root: Option<String>,
+) -> crate::presentation::markdown::links::MarkdownLinkAction {
+    crate::presentation::markdown::links::markdown_link_action(&href, workspace_root.as_deref())
+}
+
+/// The file screen's subtitle for `path` in the project `project_name`.
+#[cfg_attr(feature = "bindings", uniffi::export)]
+pub fn file_header_subtitle(project_name: String, path: String) -> String {
+    crate::presentation::markdown::links::file_header_subtitle(&project_name, &path)
+}
+
+/// Where a conversation image's bytes load from.
+#[cfg_attr(feature = "bindings", uniffi::export)]
+pub fn markdown_image_source(
+    href: String,
+    workspace_root: Option<String>,
+) -> crate::view::work_log::media_source::MarkdownImageSource {
+    crate::view::work_log::media_source::classify_markdown_image_source(
+        Some(&href),
+        workspace_root.as_deref(),
+    )
+}
+
+/// How large a conversation image of the given pixel size is drawn.
+#[cfg_attr(feature = "bindings", uniffi::export)]
+pub fn markdown_image_display_size(
+    source_width: f64,
+    source_height: f64,
+    available_width: f64,
+) -> Option<crate::presentation::markdown::image_size::ImageDisplaySize> {
+    crate::presentation::markdown::image_size::markdown_image_display_size(
+        source_width,
+        source_height,
+        available_width,
+    )
+}
+
+/// A terminal's visible output as the attach sheet lists it.
+#[cfg_attr(feature = "bindings", uniffi::export)]
+pub fn visible_output_lines(text: String) -> Vec<String> {
+    crate::view::terminals::visible_output_lines(&text)
+}
+
+/// Lines `start` through `end` (0-based) of the attach sheet.
+#[cfg_attr(feature = "bindings", uniffi::export)]
+pub fn visible_output_selection(
+    lines: Vec<String>,
+    start: u32,
+    end: u32,
+) -> crate::view::terminals::VisibleOutputSelection {
+    crate::view::terminals::visible_output_selection(&lines, start, end)
+}
+
+/// Whether a feed message appearing now fades in.
+#[cfg_attr(feature = "bindings", uniffi::export)]
+pub fn feed_entry_fades_in(created_at_ms: Option<i64>, now_ms: i64) -> bool {
+    crate::view::timeline::mobile_follow::feed_entry_fades_in(created_at_ms, now_ms)
 }
 
 /// The draft key holding the files attached to one question's answer.

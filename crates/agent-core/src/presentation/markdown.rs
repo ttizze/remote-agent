@@ -3,6 +3,7 @@ pub mod artifact_templates;
 pub mod assistant_citations;
 pub mod citations;
 pub mod directives;
+pub mod image_size;
 pub mod links;
 use ::markdown::{
     ParseOptions,

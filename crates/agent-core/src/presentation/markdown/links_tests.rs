@@ -575,3 +575,97 @@ fn does_not_style_app_routes_as_file_links() {
         MarkdownLinkPresentation::Link { href: None }
     );
 }
+
+#[test]
+fn keeps_normalized_workspace_relative_paths() {
+    assert_eq!(
+        workspace_file_path(Some("/repo"), "./src/../src/main.ts").as_deref(),
+        Some("src/main.ts")
+    );
+}
+
+#[test]
+fn converts_absolute_paths_inside_the_workspace() {
+    assert_eq!(
+        workspace_file_path(Some("/Users/julius/repo"), "/Users/julius/repo/src/main.ts")
+            .as_deref(),
+        Some("src/main.ts")
+    );
+    assert_eq!(
+        workspace_file_path(Some("C:\\repo"), "c:\\repo\\src\\main.ts").as_deref(),
+        Some("src/main.ts")
+    );
+}
+
+#[test]
+fn rejects_paths_outside_the_workspace() {
+    assert_eq!(workspace_file_path(Some("/repo"), "/other/main.ts"), None);
+    assert_eq!(workspace_file_path(Some("/repo"), "../other/main.ts"), None);
+    assert_eq!(
+        workspace_file_path(Some("/repo"), "/repo/../outside.txt"),
+        None
+    );
+    assert_eq!(workspace_file_path(None, "/repo/main.ts"), None);
+}
+
+#[test]
+fn places_a_workspace_file_under_its_project() {
+    assert_eq!(
+        file_header_subtitle(
+            "acme",
+            "apps/mobile/src/features/threads/fileChipMenu.test.ts"
+        ),
+        "acme · apps/mobile/src/features/threads"
+    );
+}
+
+#[test]
+fn shows_only_the_directory_for_a_host_file_outside_the_workspace() {
+    assert_eq!(file_header_subtitle("acme", "/tmp/report.md"), "/tmp");
+}
+
+#[test]
+fn shows_only_the_project_for_a_file_at_the_workspace_root() {
+    assert_eq!(file_header_subtitle("acme", "README.md"), "acme");
+}
+
+#[test]
+fn a_tapped_link_opens_workspace_files_host_files_or_the_web() {
+    assert_eq!(
+        markdown_link_action("src/main.rs#L20", Some("/repo")),
+        MarkdownLinkAction::WorkspaceFile {
+            path: "src/main.rs".into(),
+            line: Some(20)
+        }
+    );
+    assert_eq!(
+        markdown_link_action("/repo/src/lib.rs:7", Some("/repo")),
+        MarkdownLinkAction::WorkspaceFile {
+            path: "src/lib.rs".into(),
+            line: Some(7)
+        }
+    );
+    assert_eq!(
+        markdown_link_action("/tmp/report.md", Some("/repo")),
+        MarkdownLinkAction::HostFile {
+            path: "/tmp/report.md".into(),
+            line: None
+        }
+    );
+    assert_eq!(
+        markdown_link_action("https://example.com/a", Some("/repo")),
+        MarkdownLinkAction::External {
+            url: "https://example.com/a".into()
+        }
+    );
+    assert_eq!(
+        markdown_link_action("mailto:team@example.com", None),
+        MarkdownLinkAction::External {
+            url: "mailto:team@example.com".into()
+        }
+    );
+    assert_eq!(
+        markdown_link_action("/chat/settings", Some("/repo")),
+        MarkdownLinkAction::Nothing
+    );
+}

@@ -13,7 +13,8 @@ use crate::{
         checkpoints::{DiffScopeChoice, checkpoint_summaries, diff_panel},
         composer::{
             commands::{
-                ComposerTrigger, detect_composer_trigger, resolve_composer_command_selection,
+                ComposerTrigger, TOO_MANY_CONTEXT_ITEMS, detect_composer_trigger,
+                resolve_composer_command_selection,
             },
             menu::composer_menu_items,
             stash::{StashImages, evicted_entry_warning, new_stash_entry, restore_stash_entry},
@@ -28,8 +29,12 @@ use crate::{
             set_question_custom_answer, toggle_question_option,
         },
         sidebar::SidebarThreadDropPlan,
+        terminals::{TerminalOutputContext, append_context_reference},
         thread_list::{ordered_section, queued_threads},
-        thread_order::{MoveDestination, OrderSection, PendingThreadOrder, ThreadMovePlanner},
+        thread_order::{
+            DropSection, MoveDestination, OrderSection, PendingThreadOrder, ThreadMovePlanner,
+            thread_drop_lifecycle,
+        },
         thread_summary::ThreadSummary,
         timeline::banners::{
             RecoveryAction, RecoveryToggle, toggle_limit_recovery, usage_limit_recovery,
@@ -97,6 +102,29 @@ impl Owner {
         Ok(Next::Outcome(Outcome::ComposerEdited {
             cursor: selection.cursor,
         }))
+    }
+
+    /// Adds visible terminal lines to the draft: their record, and a link at
+    /// the end of the text.
+    pub(super) fn attach_terminal_output(
+        &mut self,
+        output: &TerminalOutputContext,
+    ) -> Result<Next, PeerError> {
+        let mut draft = self.state.current_draft();
+        let context = draft
+            .context
+            .get_or_insert_with(|| agent_domain::MessageContext {
+                version: 1,
+                records: vec![],
+            });
+        if context.records.len() >= agent_domain::COMPOSER_CONTEXT_MAX_RECORDS {
+            return Err(invalid(TOO_MANY_CONTEXT_ITEMS));
+        }
+        let (record, reference) = output.record(&uuid::Uuid::new_v4().to_string());
+        context.records.push(Json(record));
+        draft.text = append_context_reference(&draft.text, &reference);
+        self.set_draft(draft);
+        Ok(Next::Done)
     }
 
     /// Removes a context record and the links to it from the draft.
@@ -326,14 +354,38 @@ impl Owner {
         if self.state.thread_order.is_some() {
             return Ok(Next::Done);
         }
+        let section = match destination {
+            MoveDestination::Drop {
+                section: Some(DropSection::Settled),
+                ..
+            } => {
+                let thread = ThreadId::new(moved).map_err(invalid)?;
+                return Ok(Next::Commands(vec![
+                    self.lifecycle(thread, LifecycleAction::Settle),
+                ]));
+            }
+            MoveDestination::Drop {
+                section: Some(DropSection::Pinned),
+                ..
+            } => OrderSection::Pinned,
+            MoveDestination::Drop {
+                section: Some(DropSection::Active),
+                ..
+            } => OrderSection::Active,
+            _ => section,
+        };
         let threads = self.summaries();
         let queued = queued_threads(&self.state);
-        let ordered = ordered_section(&threads, section, None, now_ms() as i64, &queued);
+        let now = now_ms() as i64;
+        let ordered = ordered_section(&threads, section, None, now, &queued);
         let Some(assignments) =
             ThreadMovePlanner::new(&ordered, Some(&threads), section).plan(moved, destination)
         else {
             return Ok(Next::Done);
         };
+        if !ordered.iter().any(|row| row.id == moved) {
+            return self.move_across_sections(moved, section, &threads, assignments, now);
+        }
         let Some(order) =
             PendingThreadOrder::begin(section, &ordered, moved, destination, &assignments)
         else {
@@ -361,6 +413,63 @@ impl Owner {
             commands: entries.iter().map(|entry| entry.id.clone()).collect(),
         });
         Ok(Next::Commands(entries))
+    }
+
+    /// A drop from another section: pinning carries the moved thread's key; a
+    /// drop on Active first clears the pin, settlement and snooze it leaves.
+    fn move_across_sections(
+        &mut self,
+        moved: &str,
+        section: OrderSection,
+        threads: &[ThreadSummary],
+        assignments: Vec<crate::view::thread_sort::OrderAssignment>,
+        now: i64,
+    ) -> Result<Next, PeerError> {
+        let Some(summary) = threads.iter().find(|thread| thread.id == moved) else {
+            return Ok(Next::Done);
+        };
+        let thread = ThreadId::new(moved).map_err(invalid)?;
+        let lifecycle = thread_drop_lifecycle(summary, section, now);
+        let mut actions = vec![];
+        if lifecycle.pin {
+            let order = assignments
+                .iter()
+                .find(|assignment| assignment.id == moved)
+                .map(|assignment| assignment.order_key.clone());
+            actions.push((thread.clone(), LifecycleAction::Pin { order }));
+        }
+        for (apply, action) in [
+            (lifecycle.unpin, LifecycleAction::Unpin),
+            (lifecycle.unsettle, LifecycleAction::Unsettle),
+            (lifecycle.unsnooze, LifecycleAction::Unsnooze),
+        ] {
+            if apply {
+                actions.push((thread.clone(), action));
+            }
+        }
+        for assignment in assignments {
+            if lifecycle.pin && summary.pinned_at.is_none() && assignment.id == moved {
+                continue;
+            }
+            let id = ThreadId::new(assignment.id).map_err(invalid)?;
+            actions.push((
+                id,
+                match section {
+                    OrderSection::Pinned => LifecycleAction::ReorderPinned {
+                        order: assignment.order_key,
+                    },
+                    OrderSection::Active => LifecycleAction::ReorderActive {
+                        order: assignment.order_key,
+                    },
+                },
+            ));
+        }
+        Ok(Next::Commands(
+            actions
+                .into_iter()
+                .map(|(thread, action)| self.lifecycle(thread, action))
+                .collect(),
+        ))
     }
 
     /// Reconciles the held list order with the shell and the outbox; the hold

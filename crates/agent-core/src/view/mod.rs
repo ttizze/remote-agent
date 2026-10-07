@@ -25,6 +25,7 @@ pub mod sidebar;
 pub mod snooze;
 pub mod terminals;
 pub mod thread;
+pub mod thread_arrangement;
 pub mod thread_list;
 pub mod thread_menu;
 pub mod thread_order;

@@ -212,6 +212,7 @@ impl Owner {
                 self.remove_draft_context(&context_id);
                 Next::Done
             }
+            Intent::AttachTerminalOutput { output } => self.attach_terminal_output(&output)?,
             Intent::DiscardDraft { draft_key } => {
                 self.state.drafts.remove(&draft_key);
                 Next::Done
