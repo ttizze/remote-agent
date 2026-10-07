@@ -206,6 +206,7 @@ pub(crate) struct FakeHost {
     pub(crate) translate: Mutex<Option<Translate>>,
     /// A write containing this text never completes, as a provider that stopped reading.
     pub(crate) stall: Mutex<Option<&'static str>>,
+    pub(crate) preparing_fork: Mutex<Option<Arc<Gate>>>,
     pub(crate) before_session_write: Mutex<Option<SessionWriteHook>>,
     /// The managed Codex account's login parameters.
     pub(crate) codex_login: Mutex<Option<Value>>,
@@ -230,6 +231,7 @@ impl FakeHost {
             outbound: Mutex::new(VecDeque::new()),
             translate: Mutex::new(None),
             stall: Mutex::new(None),
+            preparing_fork: Mutex::new(None),
             before_session_write: Mutex::new(None),
             codex_login: Mutex::new(None),
         })
@@ -340,6 +342,10 @@ impl SessionHost for FakeHost {
         through: Option<String>,
     ) -> BoxFuture<'_, io::Result<String>> {
         Box::pin(async move {
+            let gate = self.preparing_fork.lock().unwrap().clone();
+            if let Some(gate) = gate {
+                gate.pass().await;
+            }
             let source = (|| -> io::Result<String> {
                 if let Some(transcript) = self.transcripts.lock().unwrap().get(&session) {
                     return Ok(transcript.clone());

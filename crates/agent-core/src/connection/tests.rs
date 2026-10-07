@@ -398,6 +398,7 @@ fn a_discarded_draft_comes_back_unless_new_text_replaced_it() {
         let mut owner = owner(Snapshot::default());
         let draft = Draft {
             text: "half-written prompt".into(),
+            created_at_ms: Some(123),
             ..Draft::default()
         };
         owner.state.drafts.insert("new:app".into(), draft.clone());
@@ -414,6 +415,7 @@ fn a_discarded_draft_comes_back_unless_new_text_replaced_it() {
         if typed_again {
             let newer = Draft {
                 text: "new reply".into(),
+                created_at_ms: Some(124),
                 ..Draft::default()
             };
             owner.state.drafts.insert("new:app".into(), newer.clone());
@@ -1970,13 +1972,19 @@ fn a_saved_staged_model_takes_the_options_it_was_last_given() {
             options: vec![effort("high")],
         })
         .unwrap();
-    owner
-        .prepare(Intent::SaveStagedModel {
-            staged: StagedModel {
+    let selected = owner
+        .state
+        .stage_model(
+            Some(staged.clone()),
+            StagedModel {
                 model: "gpt-a".into(),
                 ..staged
             },
-        })
+            false,
+        )
+        .unwrap();
+    owner
+        .prepare(Intent::SaveStagedModel { staged: selected })
         .unwrap();
     let draft = owner.state.current_draft();
     assert_eq!(draft.model, "gpt-a");

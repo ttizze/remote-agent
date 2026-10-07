@@ -1493,8 +1493,25 @@ async fn a_claude_native_fork_copies_the_transcript_through_the_head() {
     )
     .await;
     rig.drain().await;
+    let gate = Arc::new(Gate::default());
+    *rig.host.preparing_fork.lock().unwrap() = Some(gate.clone());
     rig.send(&child, "child", DispatchMode::StartImmediately)
         .await;
+    let forking = rig.draining();
+    gate.until_arrived(1).await;
+    // A new source turn waits until the SDK has captured its fork transcript.
+    rig.send(&id, "next", DispatchMode::StartImmediately).await;
+    {
+        let starting = rig.run(rig.job(&id, "Provider.Start").await);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), starting)
+                .await
+                .is_err()
+        );
+    }
+    assert_eq!(rig.host.processes.lock().unwrap().len(), 1);
+    gate.release();
+    forking.await.unwrap();
     rig.drain().await;
     let forked = rig
         .state(&child)

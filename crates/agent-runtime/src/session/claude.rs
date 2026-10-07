@@ -290,24 +290,28 @@ impl SessionManager {
         else {
             return Err(ForkError::Rejected("not a native fork".into()));
         };
-        self.keys
-            .with_lock(
-                source.key.clone(),
-                self.close_fork_source(&source.key, &native_thread),
-            )
-            .await?;
         let session = derived_uuid("fork", effect_id);
         let transcript = self
-            .host
-            .prepare_claude_fork(source.clone(), native_thread, session.clone(), through_head)
-            .await
-            .map_err(|error| {
-                if error.kind() == io::ErrorKind::InvalidData {
-                    ForkError::Rejected(error.to_string())
-                } else {
-                    ForkError::Retry(error.to_string())
-                }
-            })?;
+            .keys
+            .with_lock(source.key.clone(), async {
+                self.close_fork_source(&source.key, &native_thread).await?;
+                self.host
+                    .prepare_claude_fork(
+                        source.clone(),
+                        native_thread,
+                        session.clone(),
+                        through_head,
+                    )
+                    .await
+                    .map_err(|error| {
+                        if error.kind() == io::ErrorKind::InvalidData {
+                            ForkError::Rejected(error.to_string())
+                        } else {
+                            ForkError::Retry(error.to_string())
+                        }
+                    })
+            })
+            .await?;
         let reserved = self
             .input(
                 &target.key.thread,
