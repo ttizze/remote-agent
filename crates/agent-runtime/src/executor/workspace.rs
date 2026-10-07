@@ -501,7 +501,7 @@ async fn prepare(
                     snapshot.setup_script = Some(WorktreeSetupScript {
                         name: started.name.clone(),
                         command: started.command.clone(),
-                        terminal_id: None,
+                        terminal_id: Some(started.terminal_id.clone()),
                     });
                 });
             }

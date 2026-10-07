@@ -1,23 +1,48 @@
-//! Device-owned PTYs, retained across transport disconnects. The private supervisor pipe carries terminal I/O;
-//! only this owner publishes events and grants access to a process handle.
+//! Thread-owned PTYs, kept across transport disconnects. Any paired device may
+//! attach and every attached session receives the output; the Host itself opens
+//! terminals for setup scripts. The private supervisor pipe carries terminal I/O;
+//! only this owner publishes events.
 use crate::host_rpc::connections::{Connections, SessionId};
+use agent_domain::{ThreadId, Timestamp};
 use agent_protocol::{
-    operations::TerminalSize,
+    models::Empty,
+    operations::{
+        StartTerminal, TerminalMetadataEvent, TerminalSize, TerminalStatus, TerminalSummary,
+        terminal_label, thread_terminal_handle_for,
+    },
     protocol::{Call, Notification},
 };
 use agent_transport::peer::JsonlReader;
 use alacritty_terminal::grid::Dimensions as _;
 use bex_process::{PtyCommand, PtyEvent};
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, BTreeSet, HashMap},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex, OnceLock, Weak,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::Duration,
 };
 use tokio::{
     io::AsyncWriteExt,
-    sync::{mpsc, oneshot, watch},
+    sync::{broadcast, mpsc, oneshot, watch},
 };
 use tokio_util::sync::CancellationToken;
+
+pub(crate) mod processes;
+use processes::{ProcessSource, ProcessTable, Subprocess, poll_delay};
+
+const MAX_RETAINED_INACTIVE: usize = 128;
+const MAX_LABEL_LENGTH: usize = 128;
+const POLL_INTERVAL: Duration = Duration::from_secs(1);
+const DEFAULT_SIZE: TerminalSize = TerminalSize {
+    cols: 120,
+    rows: 30,
+};
+/// Host variables a user's shell must not inherit.
+const ENV_BLOCKLIST: [&str; 3] = ["PORT", "ELECTRON_RENDERER_PORT", "ELECTRON_RUN_AS_NODE"];
+const APP_ENV_PREFIXES: [&str; 2] = ["BEX_", "VITE_"];
 
 #[derive(Clone, Default)]
 struct Replies(Arc<Mutex<Vec<alacritty_terminal::event::Event>>>);
@@ -47,6 +72,25 @@ impl alacritty_terminal::grid::Dimensions for Dimensions {
         self.0.cols as usize
     }
 }
+
+/// A terminal the Host opens for itself, such as a setup script's.
+pub(crate) struct OpenTerminal {
+    pub(crate) thread: ThreadId,
+    pub(crate) terminal_id: String,
+    pub(crate) cwd: String,
+    pub(crate) worktree_path: Option<String>,
+    pub(crate) env: BTreeMap<String, String>,
+    pub(crate) size: Option<TerminalSize>,
+}
+
+/// What a Host-side observer of one terminal receives.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum TerminalOutput {
+    Data(Vec<u8>),
+    Exited,
+    Closed,
+}
+
 type Receipt = oneshot::Sender<Result<(), String>>;
 struct Command {
     action: Action,
@@ -57,295 +101,909 @@ enum Action {
     Resize(TerminalSize),
     Attach(SessionId, TerminalSize),
 }
-struct Record {
+
+/// Delivery shared by every process a terminal runs over its lifetime.
+struct Channel {
     handle: String,
-    attached: Arc<Mutex<Option<SessionId>>>,
-    started: Arc<std::sync::atomic::AtomicBool>,
-    cwd: PathBuf,
+    router: Connections,
+    attached: Mutex<BTreeSet<SessionId>>,
+    listeners: Mutex<Vec<mpsc::UnboundedSender<TerminalOutput>>>,
+    /// Output chunks and input writes; only grows.
+    activity: AtomicU64,
+}
+impl Channel {
+    fn publish(&self, event: &Notification) {
+        let sessions: Vec<_> = self.attached.lock().unwrap().iter().copied().collect();
+        for session in sessions {
+            if self.router.send(session, event.clone()).is_err() {
+                self.attached.lock().unwrap().remove(&session);
+            }
+        }
+    }
+    fn observe(&self, output: TerminalOutput) {
+        self.listeners
+            .lock()
+            .unwrap()
+            .retain(|listener| listener.send(output.clone()).is_ok());
+    }
+    fn send(&self, session: SessionId, event: Notification) -> Result<(), String> {
+        let result = self.router.send(session, event);
+        if result.is_err() {
+            self.attached.lock().unwrap().remove(&session);
+        }
+        result
+    }
+}
+
+struct Process {
+    generation: u64,
     input: mpsc::Sender<Command>,
     stop: CancellationToken,
     finished: watch::Receiver<Option<Result<(), String>>>,
 }
-#[derive(Default)]
-pub(crate) struct Terminals {
-    records: Arc<Mutex<HashMap<String, Record>>>,
+
+struct Record {
+    thread: ThreadId,
+    terminal_id: String,
+    cwd: PathBuf,
+    worktree_path: Option<String>,
+    env: BTreeMap<String, String>,
+    size: TerminalSize,
+    status: TerminalStatus,
+    pid: Option<u32>,
+    exit_code: Option<i32>,
+    subprocess: Subprocess,
+    updated_at: Timestamp,
+    channel: Arc<Channel>,
+    process: Option<Process>,
+    /// The last screen of a terminal that is not running.
+    screen: Vec<u8>,
+    failure: Option<String>,
 }
-impl Drop for Terminals {
-    fn drop(&mut self) {
-        for record in self.records.lock().unwrap().values() {
-            record.stop.cancel();
+impl Record {
+    fn summary(&self) -> TerminalSummary {
+        let label = match &self.subprocess {
+            Subprocess::Running(Some(label)) if !label.trim().is_empty() => label.trim().to_owned(),
+            _ => terminal_label(&self.terminal_id),
+        };
+        TerminalSummary {
+            thread: self.thread.clone(),
+            terminal_id: self.terminal_id.clone(),
+            cwd: self.cwd.to_string_lossy().into_owned(),
+            worktree_path: self.worktree_path.clone(),
+            status: self.status,
+            pid: self.pid,
+            exit_code: self.exit_code,
+            has_running_subprocess: self.subprocess.running(),
+            label: label.chars().take(MAX_LABEL_LENGTH).collect(),
+            updated_at: self.updated_at.clone(),
         }
     }
+    fn running(&self) -> bool {
+        matches!(
+            self.status,
+            TerminalStatus::Starting | TerminalStatus::Running
+        )
+    }
+    fn touch(&mut self) {
+        self.updated_at = now();
+    }
 }
-impl Terminals {
-    pub(crate) async fn start(
-        &self,
-        router: Connections,
-        owner: SessionId,
-        handle: String,
-        cwd: String,
-        size: TerminalSize,
-    ) -> Result<agent_protocol::models::Empty, String> {
-        if handle.is_empty()
-            || handle.len() > 256
-            || size.rows == 0
-            || size.cols == 0
-            || size.rows > 250
-            || size.cols > 500
-        {
-            return Err("invalid terminal handle or size".into());
-        }
-        let cwd = tokio::fs::canonicalize(cwd)
-            .await
-            .map_err(|error| error.to_string())?;
-        let cwd = dunce::simplified(&cwd).to_owned();
-        if !cwd.is_dir() {
-            return Err("terminal directory is unavailable".into());
-        }
-        let key = format!("{}:{handle}", router.principal(owner)?);
-        let existing = {
-            let records = self.records.lock().unwrap();
-            if let Some(record) = records.get(&key) {
-                if record.cwd != cwd {
-                    return Err("terminal belongs to another device or directory".into());
-                }
-                Some(record.input.clone())
-            } else {
-                None
-            }
-        };
-        if let Some(input) = existing {
-            let (complete, completed) = oneshot::channel();
-            input
-                .send(Command {
-                    action: Action::Attach(owner, size),
-                    complete,
-                })
-                .await
-                .map_err(|_| "terminal has exited")?;
-            completed.await.map_err(|_| "terminal has exited")??;
-            return Ok(agent_protocol::models::Empty {});
-        }
-        let attached = Arc::new(Mutex::new(Some(owner)));
-        let is_started = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let (input, receiver) = mpsc::channel(32);
-        let (complete, finished) = watch::channel(None);
-        let stop = CancellationToken::new();
-        {
-            let mut records = self.records.lock().unwrap();
-            router.ensure_session(owner)?;
-            if records.len() >= 32 {
-                return Err("terminal capacity reached".into());
-            }
-            if records.contains_key(&key) {
-                return Err("terminal handle is already in use".into());
-            }
-            records.insert(
-                key.clone(),
-                Record {
-                    handle: handle.clone(),
-                    attached: attached.clone(),
-                    started: is_started.clone(),
-                    cwd: cwd.clone(),
-                    input,
-                    stop: stop.clone(),
-                    finished,
-                },
-            );
-        }
-        let cancel_start = stop.clone().drop_guard();
-        let (ready, started) = oneshot::channel();
-        let records = Arc::downgrade(&self.records);
-        tokio::spawn(async move {
-            let worker = Worker {
-                router,
-                attached,
-                started: is_started,
-                handle: handle.clone(),
-                stop,
-                input: receiver,
-                ready: Some(ready),
-            };
-            let cleanup = worker.run(cwd, size).await;
-            if cleanup.is_ok()
-                && let Some(records) = records.upgrade()
-            {
-                records.lock().unwrap().remove(&key);
-            }
-            complete.send_replace(Some(cleanup));
+
+fn now() -> Timestamp {
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_millis() as i64);
+    Timestamp::from_millis(millis).expect("the clock is within the timestamp range")
+}
+
+struct Inner {
+    router: Connections,
+    records: Mutex<HashMap<String, Record>>,
+    /// Serializes opening, attaching and closing per thread.
+    locks: Mutex<HashMap<ThreadId, Arc<tokio::sync::Mutex<()>>>>,
+    metadata: broadcast::Sender<TerminalMetadataEvent>,
+    processes: ProcessSource,
+    poll_interval: Duration,
+    poller: OnceLock<tokio_util::task::AbortOnDropHandle<()>>,
+    generation: AtomicU64,
+}
+impl Inner {
+    fn upsert(&self, record: &Record) {
+        let _ = self.metadata.send(TerminalMetadataEvent::Upsert {
+            terminal: record.summary(),
         });
-        tokio::time::timeout(std::time::Duration::from_secs(10), started)
-            .await
-            .map_err(|_| "terminal startup timed out")?
-            .map_err(|_| "terminal startup stopped")??;
-        cancel_start.disarm();
-        Ok(agent_protocol::models::Empty {})
     }
-    pub(crate) async fn request(
-        &self,
-        owner: SessionId,
-        call: &agent_protocol::protocol::Call,
-    ) -> Result<agent_protocol::models::Empty, String> {
-        let detach = matches!(call, Call::DetachTerminal(_));
-        let (handle, action) = match call {
-            agent_protocol::protocol::Call::WriteTerminal(params) => {
-                if params.data.len() > 64 * 1024 {
-                    return Err("terminal input exceeds 64 KiB".into());
-                }
-                (
-                    params.process_handle.clone(),
-                    Some(Action::Write(params.data.clone())),
-                )
-            }
-            agent_protocol::protocol::Call::ResizeTerminal(params) => {
-                if params.size.rows == 0
-                    || params.size.cols == 0
-                    || params.size.rows > 250
-                    || params.size.cols > 500
-                {
-                    return Err("terminal size must be nonzero".into());
-                }
-                (params.handle.clone(), Some(Action::Resize(params.size)))
-            }
-            Call::DetachTerminal(params) => (params.handle.clone(), None),
-            agent_protocol::protocol::Call::KillTerminal(params) => {
-                (params.process_handle.clone(), None)
-            }
-            _ => return Err("unknown terminal operation".into()),
+    fn lock(&self, thread: &ThreadId) -> Arc<tokio::sync::Mutex<()>> {
+        self.locks
+            .lock()
+            .unwrap()
+            .entry(thread.clone())
+            .or_default()
+            .clone()
+    }
+    /// The shell is up: the terminal runs.
+    fn started(&self, handle: &str, generation: u64, pid: Option<u32>) {
+        let mut records = self.records.lock().unwrap();
+        if let Some(record) = records.get_mut(handle).filter(|record| {
+            record
+                .process
+                .as_ref()
+                .is_some_and(|process| process.generation == generation)
+        }) {
+            record.status = TerminalStatus::Running;
+            record.pid = pid;
+            record.touch();
+            self.upsert(record);
+        }
+    }
+    /// The process is gone; the record stays with its last screen until closed.
+    fn finished(&self, handle: &str, generation: u64, outcome: Outcome, screen: Vec<u8>) {
+        let mut records = self.records.lock().unwrap();
+        let Some(record) = records.get_mut(handle).filter(|record| {
+            record
+                .process
+                .as_ref()
+                .is_some_and(|process| process.generation == generation)
+        }) else {
+            return;
         };
-        let (input, stop, mut finished) = {
-            let records = self.records.lock().unwrap();
-            let record = records.values().find(|record| {
-                record.handle == handle && *record.attached.lock().unwrap() == Some(owner)
-            });
-            let Some(record) = record else {
-                return if detach {
-                    Ok(agent_protocol::models::Empty {})
-                } else {
-                    Err("terminal handle is unavailable".into())
-                };
+        record.process = None;
+        record.pid = None;
+        record.subprocess = Subprocess::Idle;
+        record.screen = screen;
+        match outcome {
+            Outcome::Exited(code) => {
+                record.status = TerminalStatus::Exited;
+                record.exit_code = code;
+                record.failure = None;
+            }
+            Outcome::Failed(reason) => {
+                record.status = TerminalStatus::Error;
+                record.exit_code = None;
+                record.failure = Some(reason);
+            }
+        }
+        record.touch();
+        self.upsert(record);
+        Self::evict(&mut records);
+    }
+    /// Keeps the newest inactive terminals; older ones go without an event.
+    fn evict(records: &mut HashMap<String, Record>) {
+        let mut inactive: Vec<(Timestamp, String)> = records
+            .iter()
+            .filter(|(_, record)| !record.running())
+            .map(|(handle, record)| (record.updated_at.clone(), handle.clone()))
+            .collect();
+        if inactive.len() <= MAX_RETAINED_INACTIVE {
+            return;
+        }
+        inactive.sort();
+        for (_, handle) in inactive
+            .into_iter()
+            .take(records.len().saturating_sub(MAX_RETAINED_INACTIVE))
+        {
+            records.remove(&handle);
+        }
+    }
+    /// Applies one process snapshot to every running terminal.
+    fn apply(&self, table: &ProcessTable) {
+        let mut records = self.records.lock().unwrap();
+        for record in records.values_mut() {
+            let (TerminalStatus::Running, Some(pid)) = (record.status, record.pid) else {
+                continue;
             };
-            if detach {
-                let mut attached = record.attached.lock().unwrap();
-                if *attached == Some(owner) {
-                    *attached = None;
-                }
-                return Ok(agent_protocol::models::Empty {});
-            }
-            (
-                record.input.clone(),
-                record.stop.clone(),
-                record.finished.clone(),
-            )
-        };
-        if matches!(call, Call::KillTerminal(_)) {
-            stop.cancel();
-            loop {
-                if let Some(result) = finished.borrow_and_update().clone() {
-                    result?;
-                    break;
-                }
-                finished
-                    .changed()
-                    .await
-                    .map_err(|_| "terminal cleanup stopped")?;
-            }
-            return Ok(agent_protocol::models::Empty {});
-        }
-        let action = action.expect("kill returned above");
-        let (complete, completed) = oneshot::channel();
-        input
-            .send(Command { action, complete })
-            .await
-            .map_err(|_| "terminal has exited")?;
-        completed.await.map_err(|_| "terminal has exited")??;
-        Ok(agent_protocol::models::Empty {})
-    }
-    pub(crate) fn revoke_device(&self, principal: &str) {
-        let prefix = format!("{principal}:");
-        for (key, record) in self.records.lock().unwrap().iter() {
-            if key.starts_with(&prefix) {
-                record.stop.cancel();
+            let next = table.subprocess(pid);
+            if next != record.subprocess {
+                record.subprocess = next;
+                record.channel.activity.fetch_add(1, Ordering::AcqRel);
+                record.touch();
+                self.upsert(record);
             }
         }
     }
-    pub(crate) fn close_session(&self, owner: SessionId) {
-        for record in self.records.lock().unwrap().values() {
-            let mut attached = record.attached.lock().unwrap();
-            if *attached == Some(owner) {
-                *attached = None;
-                if !record.started.load(std::sync::atomic::Ordering::Acquire) {
-                    record.stop.cancel();
-                }
-            }
-        }
-    }
-    pub(crate) fn in_use(&self, path: &Path) -> bool {
+    fn running_shells(&self) -> bool {
         self.records
             .lock()
             .unwrap()
             .values()
-            .any(|record| record.cwd.starts_with(path))
+            .any(|record| record.status == TerminalStatus::Running && record.pid.is_some())
     }
-    pub(crate) async fn cleanup_handle(&self, handle: &str) {
-        let records: Vec<_> = self
-            .records
-            .lock()
-            .unwrap()
-            .values()
-            .filter(|record| record.handle == handle)
-            .map(|record| {
-                record.stop.cancel();
-                record.finished.clone()
-            })
-            .collect();
-        for mut finished in records {
-            while finished.borrow_and_update().is_none() {
-                if finished.changed().await.is_err() {
-                    break;
-                }
-            }
-        }
-    }
-    pub(crate) async fn shutdown(&self) {
-        let records: Vec<_> = self
-            .records
-            .lock()
-            .unwrap()
-            .values()
-            .map(|record| {
-                record.stop.cancel();
-                record.finished.clone()
-            })
-            .collect();
-        for mut finished in records {
-            while finished.borrow_and_update().is_none() {
-                if finished.changed().await.is_err() {
-                    break;
-                }
+}
+
+enum Outcome {
+    Exited(Option<i32>),
+    Failed(String),
+}
+
+pub(crate) struct Terminals {
+    inner: Arc<Inner>,
+}
+impl Drop for Terminals {
+    fn drop(&mut self) {
+        for record in self.inner.records.lock().unwrap().values() {
+            if let Some(process) = &record.process {
+                process.stop.cancel();
             }
         }
     }
 }
+
+/// The shell's environment: the Host's without its own variables, then the
+/// caller's, with `~` expanded in provider homes.
+fn shell_environment(overlay: &BTreeMap<String, String>) -> BTreeMap<String, String> {
+    let home = directories::BaseDirs::new().map(|dirs| dirs.home_dir().to_owned());
+    environment(std::env::vars(), overlay, home.as_deref())
+}
+
+fn environment(
+    base: impl IntoIterator<Item = (String, String)>,
+    overlay: &BTreeMap<String, String>,
+    home: Option<&Path>,
+) -> BTreeMap<String, String> {
+    let blocked = |key: &str| {
+        let upper = key.to_ascii_uppercase();
+        ENV_BLOCKLIST.contains(&upper.as_str())
+            || APP_ENV_PREFIXES
+                .iter()
+                .any(|prefix| upper.starts_with(prefix))
+    };
+    let mut env: BTreeMap<String, String> =
+        base.into_iter().filter(|(key, _)| !blocked(key)).collect();
+    for (key, value) in overlay {
+        let value = match (key.as_str(), home) {
+            ("CODEX_HOME" | "CLAUDE_CONFIG_DIR", Some(home)) if value == "~" => {
+                home.to_string_lossy().into_owned()
+            }
+            ("CODEX_HOME" | "CLAUDE_CONFIG_DIR", Some(home)) if value.starts_with("~/") => {
+                home.join(&value[2..]).to_string_lossy().into_owned()
+            }
+            _ => value.clone(),
+        };
+        env.insert(key.clone(), value);
+    }
+    env.entry("COLORTERM".into())
+        .or_insert_with(|| "truecolor".into());
+    env
+}
+
+async fn directory(cwd: &str) -> Result<PathBuf, String> {
+    let resolved = tokio::fs::canonicalize(cwd)
+        .await
+        .map_err(|_| format!("Terminal cwd does not exist: {cwd}"))?;
+    let resolved = dunce::simplified(&resolved).to_owned();
+    if !resolved.is_dir() {
+        return Err(format!("Terminal cwd is not a directory: {cwd}"));
+    }
+    Ok(resolved)
+}
+
+impl Terminals {
+    pub(crate) fn new(router: Connections) -> Self {
+        Self::with_processes(router, processes::system(), POLL_INTERVAL)
+    }
+
+    pub(crate) fn with_processes(
+        router: Connections,
+        processes: ProcessSource,
+        interval: Duration,
+    ) -> Self {
+        Self {
+            inner: Arc::new(Inner {
+                router,
+                records: Mutex::default(),
+                locks: Mutex::default(),
+                metadata: broadcast::channel(256).0,
+                processes,
+                poll_interval: interval,
+                poller: OnceLock::new(),
+                generation: AtomicU64::new(0),
+            }),
+        }
+    }
+
+    /// Every terminal now, and the changes after it. A subscriber that falls
+    /// behind takes a new snapshot.
+    pub(crate) fn subscribe_metadata(
+        &self,
+    ) -> (
+        Vec<TerminalSummary>,
+        broadcast::Receiver<TerminalMetadataEvent>,
+    ) {
+        let records = self.inner.records.lock().unwrap();
+        let receiver = self.inner.metadata.subscribe();
+        (Self::summaries(&records), receiver)
+    }
+
+    pub(crate) fn summaries_now(&self) -> Vec<TerminalSummary> {
+        Self::summaries(&self.inner.records.lock().unwrap())
+    }
+
+    fn summaries(records: &HashMap<String, Record>) -> Vec<TerminalSummary> {
+        let mut terminals: Vec<_> = records.values().map(Record::summary).collect();
+        terminals.sort_by(|a, b| {
+            b.updated_at
+                .cmp(&a.updated_at)
+                .then_with(|| a.thread.cmp(&b.thread))
+                .then_with(|| a.terminal_id.cmp(&b.terminal_id))
+        });
+        terminals
+    }
+
+    /// Output of one terminal from now on, until it closes.
+    pub(crate) fn observe(
+        &self,
+        thread: &ThreadId,
+        terminal_id: &str,
+    ) -> Option<mpsc::UnboundedReceiver<TerminalOutput>> {
+        let handle = thread_terminal_handle_for(thread.as_str(), terminal_id);
+        let records = self.inner.records.lock().unwrap();
+        let record = records.get(&handle)?;
+        let (sender, receiver) = mpsc::unbounded_channel();
+        record.channel.listeners.lock().unwrap().push(sender);
+        Some(receiver)
+    }
+
+    fn ensure_poller(&self) {
+        if tokio::runtime::Handle::try_current().is_err() {
+            return;
+        }
+        self.inner.poller.get_or_init(|| {
+            tokio_util::task::AbortOnDropHandle::new(tokio::spawn(poll(Arc::downgrade(
+                &self.inner,
+            ))))
+        });
+    }
+
+    /// Opens the terminal: starts it, restarts it when it exited or its
+    /// directory or environment changed, or resizes the running shell.
+    pub(crate) async fn open(&self, request: OpenTerminal) -> Result<(), String> {
+        agent_protocol::operations::validate_terminal_id(&request.terminal_id)?;
+        agent_protocol::operations::validate_terminal_env(&request.env)?;
+        let size = request.size.unwrap_or(DEFAULT_SIZE);
+        size.validate()?;
+        let cwd = directory(&request.cwd).await?;
+        let lock = self.inner.lock(&request.thread);
+        let _guard = lock.lock().await;
+        self.open_locked(request, cwd, size).await
+    }
+
+    async fn open_locked(
+        &self,
+        request: OpenTerminal,
+        cwd: PathBuf,
+        size: TerminalSize,
+    ) -> Result<(), String> {
+        let handle = thread_terminal_handle_for(request.thread.as_str(), &request.terminal_id);
+        let stopping = {
+            let mut records = self.inner.records.lock().unwrap();
+            match records.get_mut(&handle) {
+                None => {
+                    records.insert(
+                        handle.clone(),
+                        Record {
+                            thread: request.thread.clone(),
+                            terminal_id: request.terminal_id.clone(),
+                            cwd: cwd.clone(),
+                            worktree_path: request.worktree_path.clone(),
+                            env: request.env.clone(),
+                            size,
+                            status: TerminalStatus::Starting,
+                            pid: None,
+                            exit_code: None,
+                            subprocess: Subprocess::Idle,
+                            updated_at: now(),
+                            channel: Arc::new(Channel {
+                                handle: handle.clone(),
+                                router: self.inner.router.clone(),
+                                attached: Mutex::default(),
+                                listeners: Mutex::default(),
+                                activity: AtomicU64::new(0),
+                            }),
+                            process: None,
+                            screen: vec![],
+                            failure: None,
+                        },
+                    );
+                    None
+                }
+                Some(record) => {
+                    let changed = record.cwd != cwd
+                        || record.env != request.env
+                        || record.worktree_path != request.worktree_path;
+                    let stopping = if changed {
+                        record.process.take().map(|process| {
+                            process.stop.cancel();
+                            process.finished
+                        })
+                    } else {
+                        None
+                    };
+                    if changed || record.process.is_none() {
+                        record.cwd = cwd.clone();
+                        record.env = request.env.clone();
+                        record.worktree_path = request.worktree_path.clone();
+                        record.screen.clear();
+                    }
+                    stopping
+                }
+            }
+        };
+        if let Some(finished) = stopping {
+            wait(finished).await?;
+        }
+        let resize = {
+            let records = self.inner.records.lock().unwrap();
+            let record = records.get(&handle).ok_or("terminal was closed")?;
+            record
+                .process
+                .as_ref()
+                .filter(|_| record.size != size)
+                .map(|process| process.input.clone())
+        };
+        let running = self
+            .inner
+            .records
+            .lock()
+            .unwrap()
+            .get(&handle)
+            .is_some_and(|record| record.process.is_some());
+        if !running {
+            return self.start(&handle, size).await;
+        }
+        if let Some(input) = resize {
+            send(&input, Action::Resize(size)).await?;
+            if let Some(record) = self.inner.records.lock().unwrap().get_mut(&handle) {
+                record.size = size;
+                record.touch();
+            }
+        }
+        Ok(())
+    }
+
+    /// Runs a new shell for the record under `handle` and waits until it is up.
+    async fn start(&self, handle: &str, size: TerminalSize) -> Result<(), String> {
+        self.ensure_poller();
+        let generation = self.inner.generation.fetch_add(1, Ordering::AcqRel) + 1;
+        let (input, receiver) = mpsc::channel(32);
+        let (complete, finished) = watch::channel(None);
+        let stop = CancellationToken::new();
+        let (channel, cwd, env) = {
+            let mut records = self.inner.records.lock().unwrap();
+            let record = records.get_mut(handle).ok_or("terminal was closed")?;
+            record.process = Some(Process {
+                generation,
+                input,
+                stop: stop.clone(),
+                finished,
+            });
+            record.status = TerminalStatus::Starting;
+            record.pid = None;
+            record.exit_code = None;
+            record.failure = None;
+            record.subprocess = Subprocess::Idle;
+            record.size = size;
+            record.touch();
+            self.inner.upsert(record);
+            (
+                record.channel.clone(),
+                record.cwd.clone(),
+                shell_environment(&record.env),
+            )
+        };
+        let (ready, started) = oneshot::channel();
+        let inner = Arc::downgrade(&self.inner);
+        let handle = handle.to_owned();
+        tokio::spawn(async move {
+            let worker = Worker {
+                channel,
+                inner: inner.clone(),
+                generation,
+                stop,
+                input: receiver,
+                ready: Some(ready),
+            };
+            let (cleanup, outcome, screen) = worker.run(cwd, size, env).await;
+            if let Some(inner) = inner.upgrade() {
+                inner.finished(&handle, generation, outcome, screen);
+            }
+            complete.send_replace(Some(cleanup));
+        });
+        tokio::time::timeout(Duration::from_secs(10), started)
+            .await
+            .map_err(|_| "terminal startup timed out")?
+            .map_err(|_| "terminal startup stopped")?
+    }
+
+    /// `host/terminal/start`: attaches `session` to the thread's terminal,
+    /// opening it first when it does not exist, or restarting an exited one on
+    /// request.
+    pub(crate) async fn attach(
+        &self,
+        session: SessionId,
+        params: &StartTerminal,
+    ) -> Result<Empty, String> {
+        params.validate()?;
+        self.inner.router.ensure_session(session)?;
+        let handle = params.handle();
+        let cwd = match &params.cwd {
+            Some(cwd) => Some(directory(cwd).await?),
+            None => None,
+        };
+        let lock = self.inner.lock(&params.thread);
+        let _guard = lock.lock().await;
+        let running = {
+            let records = self.inner.records.lock().unwrap();
+            records.get(&handle).map(|record| record.process.is_some())
+        };
+        let open = match running {
+            None => true,
+            Some(false) => params.restart_if_not_running && cwd.is_some(),
+            Some(true) => false,
+        };
+        if open {
+            let Some(cwd) = cwd else {
+                return Err(format!(
+                    "Unknown terminal thread: {}, terminal: {}",
+                    params.thread, params.terminal_id
+                ));
+            };
+            self.open_locked(
+                OpenTerminal {
+                    thread: params.thread.clone(),
+                    terminal_id: params.terminal_id.clone(),
+                    cwd: cwd.to_string_lossy().into_owned(),
+                    worktree_path: params.worktree_path.clone(),
+                    env: params.env.clone(),
+                    size: Some(params.size),
+                },
+                cwd,
+                params.size,
+            )
+            .await?;
+        }
+        let (channel, input, restored) = {
+            let records = self.inner.records.lock().unwrap();
+            let record = records.get(&handle).ok_or("terminal was closed")?;
+            record.channel.attached.lock().unwrap().insert(session);
+            let restored = (record.process.is_none()).then(|| {
+                let ended = match (&record.status, &record.failure) {
+                    (TerminalStatus::Error, Some(reason)) => Notification::TerminalFailed {
+                        handle: handle.clone(),
+                        reason: reason.clone(),
+                    },
+                    _ => Notification::Exited {
+                        handle: handle.clone(),
+                        code: record.exit_code.unwrap_or(0),
+                    },
+                };
+                (record.screen.clone(), record.size, ended)
+            });
+            (
+                record.channel.clone(),
+                record.process.as_ref().map(|process| process.input.clone()),
+                restored,
+            )
+        };
+        match (input, restored) {
+            (Some(input), _) => send(&input, Action::Attach(session, params.size)).await?,
+            (None, Some((data, size, ended))) => {
+                channel.send(
+                    session,
+                    Notification::TerminalRestored {
+                        handle: handle.clone(),
+                        data,
+                        cols: size.cols,
+                        rows: size.rows,
+                    },
+                )?;
+                channel.send(session, ended)?;
+            }
+            (None, None) => return Err("terminal was closed".into()),
+        }
+        Ok(Empty {})
+    }
+
+    /// Input for a running terminal; an exited one ignores it.
+    pub(crate) async fn write(&self, handle: &str, data: Vec<u8>) -> Result<(), String> {
+        if data.is_empty() || data.len() > 64 * 1024 {
+            return Err("terminal input must be 1 byte to 64 KiB".into());
+        }
+        let input = {
+            let records = self.inner.records.lock().unwrap();
+            let record = records
+                .get(handle)
+                .ok_or_else(|| format!("Unknown terminal: {handle}"))?;
+            match (record.status, &record.process) {
+                (TerminalStatus::Exited, _) => return Ok(()),
+                (TerminalStatus::Running, Some(process)) => {
+                    record.channel.activity.fetch_add(1, Ordering::AcqRel);
+                    process.input.clone()
+                }
+                _ => return Err(format!("Terminal is not running: {handle}")),
+            }
+        };
+        send(&input, Action::Write(data)).await
+    }
+
+    /// The RPC operations on an existing terminal.
+    pub(crate) async fn request(&self, session: SessionId, call: &Call) -> Result<Empty, String> {
+        match call {
+            Call::WriteTerminal(params) => {
+                self.write(&params.process_handle, params.data.clone())
+                    .await?
+            }
+            Call::ResizeTerminal(params) => {
+                params.size.validate()?;
+                let input = {
+                    let mut records = self.inner.records.lock().unwrap();
+                    let Some(record) = records.get_mut(&params.handle) else {
+                        return Ok(Empty {});
+                    };
+                    let Some(process) = record
+                        .process
+                        .as_ref()
+                        .filter(|_| record.status == TerminalStatus::Running)
+                    else {
+                        return Ok(Empty {});
+                    };
+                    let input = process.input.clone();
+                    record.size = params.size;
+                    record.touch();
+                    input
+                };
+                send(&input, Action::Resize(params.size)).await?;
+            }
+            Call::DetachTerminal(params) => {
+                if let Some(record) = self.inner.records.lock().unwrap().get(&params.handle) {
+                    record.channel.attached.lock().unwrap().remove(&session);
+                }
+            }
+            Call::KillTerminal(params) => self.close(&params.process_handle).await?,
+            _ => return Err("unknown terminal operation".into()),
+        }
+        Ok(Empty {})
+    }
+
+    /// Stops the terminal's shell and forgets it.
+    pub(crate) async fn close(&self, handle: &str) -> Result<(), String> {
+        let Some(record) = self.inner.records.lock().unwrap().remove(handle) else {
+            return Ok(());
+        };
+        let _ = self.inner.metadata.send(TerminalMetadataEvent::Remove {
+            thread: record.thread.clone(),
+            terminal_id: record.terminal_id.clone(),
+        });
+        record.channel.publish(&Notification::TerminalClosed {
+            handle: handle.to_owned(),
+        });
+        record.channel.observe(TerminalOutput::Closed);
+        match record.process {
+            Some(process) => {
+                process.stop.cancel();
+                wait(process.finished).await
+            }
+            None => Ok(()),
+        }
+    }
+
+    /// Closes every terminal of the thread.
+    pub(crate) async fn close_thread(&self, thread: &ThreadId) {
+        let lock = self.inner.lock(thread);
+        let _guard = lock.lock().await;
+        let handles: Vec<String> = self
+            .inner
+            .records
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, record)| &record.thread == thread)
+            .map(|(handle, _)| handle.clone())
+            .collect();
+        for handle in handles {
+            if let Err(error) = self.close(&handle).await {
+                tracing::warn!(operation = "host.terminal.cleanup", message = %error);
+            }
+        }
+        self.inner.locks.lock().unwrap().remove(thread);
+    }
+
+    /// Closes the thread's running shells that run nothing and saw no input or
+    /// output during the check. A failed check closes nothing.
+    pub(crate) async fn close_idle(&self, thread: &ThreadId, terminal_id: Option<&str>) {
+        let lock = self.inner.lock(thread);
+        let _guard = lock.lock().await;
+        let marks: Vec<(String, u32, u64)> = self
+            .inner
+            .records
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, record)| {
+                &record.thread == thread
+                    && record.status == TerminalStatus::Running
+                    && terminal_id.is_none_or(|id| record.terminal_id == id)
+            })
+            .filter_map(|(handle, record)| {
+                Some((
+                    handle.clone(),
+                    record.pid?,
+                    record.channel.activity.load(Ordering::Acquire),
+                ))
+            })
+            .collect();
+        if marks.is_empty() {
+            return;
+        }
+        let table = match (self.inner.processes)().await {
+            Ok(table) => table,
+            Err(error) => {
+                tracing::warn!(operation = "host.terminal.close_idle", message = %error);
+                return;
+            }
+        };
+        for (handle, pid, mark) in marks {
+            let unchanged = self
+                .inner
+                .records
+                .lock()
+                .unwrap()
+                .get(&handle)
+                .is_some_and(|record| record.channel.activity.load(Ordering::Acquire) == mark);
+            if unchanged
+                && !table.subprocess(pid).running()
+                && let Err(error) = self.close(&handle).await
+            {
+                tracing::warn!(operation = "host.terminal.close_idle", message = %error);
+            }
+        }
+    }
+
+    /// The session's connection closed: it no longer receives output.
+    pub(crate) fn close_session(&self, session: SessionId) {
+        for record in self.inner.records.lock().unwrap().values() {
+            record.channel.attached.lock().unwrap().remove(&session);
+        }
+    }
+
+    /// A revoked device stops receiving output; its terminals keep running.
+    pub(crate) fn revoke_device(&self, principal: &str) {
+        for record in self.inner.records.lock().unwrap().values() {
+            let revoked: Vec<SessionId> = record
+                .channel
+                .attached
+                .lock()
+                .unwrap()
+                .iter()
+                .copied()
+                .filter(|session| {
+                    self.inner.router.principal(*session).ok().as_deref() == Some(principal)
+                })
+                .collect();
+            for session in revoked {
+                record.channel.attached.lock().unwrap().remove(&session);
+                let _ = self.inner.router.send(
+                    session,
+                    Notification::TerminalDetached {
+                        handle: record.channel.handle.clone(),
+                    },
+                );
+            }
+        }
+    }
+
+    pub(crate) fn in_use(&self, path: &Path) -> bool {
+        self.inner
+            .records
+            .lock()
+            .unwrap()
+            .values()
+            .any(|record| record.running() && record.cwd.starts_with(path))
+    }
+
+    pub(crate) fn running_threads(&self) -> BTreeSet<ThreadId> {
+        self.inner
+            .records
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|record| record.status == TerminalStatus::Running)
+            .map(|record| record.thread.clone())
+            .collect()
+    }
+
+    pub(crate) async fn shutdown(&self) {
+        let processes: Vec<_> = self
+            .inner
+            .records
+            .lock()
+            .unwrap()
+            .values()
+            .filter_map(|record| {
+                let process = record.process.as_ref()?;
+                process.stop.cancel();
+                Some(process.finished.clone())
+            })
+            .collect();
+        for finished in processes {
+            let _ = wait(finished).await;
+        }
+    }
+}
+
+async fn wait(mut finished: watch::Receiver<Option<Result<(), String>>>) -> Result<(), String> {
+    loop {
+        if let Some(result) = finished.borrow_and_update().clone() {
+            return result;
+        }
+        if finished.changed().await.is_err() {
+            return Err("terminal cleanup stopped".into());
+        }
+    }
+}
+
+async fn send(input: &mpsc::Sender<Command>, action: Action) -> Result<(), String> {
+    let (complete, completed) = oneshot::channel();
+    input
+        .send(Command { action, complete })
+        .await
+        .map_err(|_| "terminal has exited")?;
+    completed.await.map_err(|_| "terminal has exited")?
+}
+
+/// Inspects running shells for subprocesses, once per interval while any
+/// shell runs; failed snapshots back off.
+async fn poll(inner: Weak<Inner>) {
+    let mut failures = 0u32;
+    loop {
+        let Some(this) = inner.upgrade() else {
+            return;
+        };
+        let interval = this.poll_interval;
+        let delay = if this.running_shells() {
+            let source = this.processes.clone();
+            drop(this);
+            match source().await {
+                Ok(table) => {
+                    failures = 0;
+                    if let Some(this) = inner.upgrade() {
+                        this.apply(&table);
+                    }
+                }
+                Err(error) => {
+                    failures = (failures + 1).min(30);
+                    tracing::warn!(operation = "host.terminal.processes", message = %error);
+                }
+            }
+            poll_delay(interval, failures)
+        } else {
+            failures = 0;
+            drop(this);
+            interval
+        };
+        tokio::time::sleep(delay).await;
+    }
+}
+
 struct Worker {
-    router: Connections,
-    attached: Arc<Mutex<Option<SessionId>>>,
-    started: Arc<std::sync::atomic::AtomicBool>,
-    handle: String,
+    channel: Arc<Channel>,
+    inner: Weak<Inner>,
+    generation: u64,
     stop: CancellationToken,
     input: mpsc::Receiver<Command>,
     ready: Option<Receipt>,
 }
 impl Worker {
     fn publish(&self, event: Notification) {
-        let mut attached = self.attached.lock().unwrap();
-        if let Some(owner) = *attached
-            && self.router.send(owner, event).is_err()
-        {
-            *attached = None;
-        }
+        self.channel.publish(&event);
     }
-    async fn run(mut self, cwd: PathBuf, size: TerminalSize) -> Result<(), String> {
+    async fn run(
+        mut self,
+        cwd: PathBuf,
+        size: TerminalSize,
+        env: BTreeMap<String, String>,
+    ) -> (Result<(), String>, Outcome, Vec<u8>) {
+        let handle = self.channel.handle.clone();
         let mut pending: Option<(u64, Receipt)> = None;
         let replies = Replies::default();
         let mut screen = alacritty_terminal::Term::new(
@@ -355,13 +1013,14 @@ impl Worker {
         );
         let mut parser: alacritty_terminal::vte::ansi::Processor = Default::default();
         let mut cleanup = Ok(());
+        let mut exit_code = None;
         let result = async {
             if self.stop.is_cancelled() { return Err("terminal startup cancelled".into()); }
             let mut child = bex_process::terminal_command().and_then(|mut command| command.spawn()).map_err(|error| error.to_string())?;
             cleanup = Err("terminal cleanup incomplete".into());
             let mut stdin = child.stdin().take().ok_or("terminal input pipe unavailable")?;
             let mut output = JsonlReader::new(child.stdout().take().ok_or("terminal output pipe unavailable")?);
-            let initialize = PtyCommand::Start { command:crate::platform::terminal_command().iter().map(|value| (*value).into()).collect(), cwd:cwd.to_string_lossy().into_owned(), rows:size.rows, cols:size.cols };
+            let initialize = PtyCommand::Start { command:crate::platform::terminal_command().iter().map(|value| (*value).into()).collect(), cwd:cwd.to_string_lossy().into_owned(), rows:size.rows, cols:size.cols, env };
             let mut next_id = 0u64;
             let mut query_in_flight = false;
             let mut query_bytes = Vec::new();
@@ -378,7 +1037,11 @@ impl Worker {
                         line = output.read_line() => {
                             let line = line.map_err(|error| error.to_string())?.ok_or("terminal supervisor exited without a result")?;
                             match serde_json::from_str::<PtyEvent>(&line).map_err(|error| error.to_string())? {
-                                PtyEvent::Started => { self.publish(Notification::TerminalRestored { handle: self.handle.clone(), data: screen.ansi_checkpoint(None), cols: size.cols, rows: size.rows }); self.started.store(true, std::sync::atomic::Ordering::Release); if let Some(ready) = self.ready.take() { let _ = ready.send(Ok(())); } }
+                                PtyEvent::Started { pid } => {
+                                    if let Some(inner) = self.inner.upgrade() { inner.started(&handle, self.generation, pid); }
+                                    self.publish(Notification::TerminalRestored { handle: handle.clone(), data: screen.ansi_checkpoint(None), cols: size.cols, rows: size.rows });
+                                    if let Some(ready) = self.ready.take() { let _ = ready.send(Ok(())); }
+                                }
                                 PtyEvent::Output { data } => {
                                     parser.advance(&mut screen, &data);
                                     // The Host is the sole terminal-query responder, even during disconnects.
@@ -400,7 +1063,9 @@ impl Worker {
                                         query_bytes.extend_from_slice(data.as_bytes());
                                         if query_bytes.len() > agent_protocol::protocol::MAX_FRAME_BYTES { return Err("terminal query replies exceed the buffer limit".into()); }
                                     }
-                                    self.publish(Notification::Output { handle: self.handle.clone(), data });
+                                    self.channel.activity.fetch_add(1, Ordering::AcqRel);
+                                    self.channel.observe(TerminalOutput::Data(data.clone()));
+                                    self.publish(Notification::Output { handle: handle.clone(), data });
                                 },
                                 PtyEvent::Ack { id, error } => {
                                     if id == bex_process::TERMINAL_QUERY_REPLY_ID { query_in_flight=false; if let Some(error)=error {return Err(error);} continue; }
@@ -409,26 +1074,26 @@ impl Worker {
                                     if expected != id { let _ = complete.send(Err("terminal acknowledgement ID changed".into())); return Err("terminal acknowledgement ID changed".into()); }
                                     let _ = complete.send(error.map_or(Ok(()), Err));
                                 }
-                                PtyEvent::Exited { code } => { self.publish(Notification::Exited { handle: self.handle.clone(), code: i32::try_from(code).unwrap_or(1) }); return Ok(()); }
+                                PtyEvent::Exited { code } => {
+                                    let code = i32::try_from(code).unwrap_or(1);
+                                    exit_code = Some(code);
+                                    self.channel.observe(TerminalOutput::Exited);
+                                    self.publish(Notification::Exited { handle: handle.clone(), code });
+                                    return Ok(());
+                                }
                                 PtyEvent::Failed { message } => return Err(message),
                             }
                         }
                         command = self.input.recv(), if self.ready.is_none() && pending.is_none() => {
                             let Some(command) = command else { return Ok(()) };
-                            if let Action::Attach(owner, size) = command.action {
-                                if let Err(error) = self.router.ensure_session(owner) { let _=command.complete.send(Err(error)); continue; }
-                                let previous=self.attached.lock().unwrap().replace(owner);
-                                if let Some(previous)=previous.filter(|previous|*previous!=owner) {
-                                    let _=self.router.send(previous, Notification::TerminalDetached { handle: self.handle.clone() });
-                                }
+                            if let Action::Attach(session, size) = command.action {
                                 if screen.columns()!=usize::from(size.cols) || screen.screen_lines()!=usize::from(size.rows) {
                                     screen.resize(Dimensions(size));
                                     write(&mut stdin,&PtyCommand::Resize{id:0,rows:size.rows,cols:size.cols}).await?;
                                 }
                                 let mut data=screen.ansi_checkpoint(parser.preceding_char());
                                 data.extend(parser.checkpoint_tail());
-                                let result=self.router.send(owner, Notification::TerminalRestored { handle: self.handle.clone(), data, cols: screen.columns() as u16, rows: screen.screen_lines() as u16 });
-                                if result.is_err() { *self.attached.lock().unwrap()=None; }
+                                let result=self.channel.send(session, Notification::TerminalRestored { handle: handle.clone(), data, cols: screen.columns() as u16, rows: screen.screen_lines() as u16 });
                                 let _=command.complete.send(result);
                                 continue;
                             }
@@ -457,7 +1122,6 @@ impl Worker {
                 if status.success() { Ok(()) } else { Err(format!("terminal cleanup failed: {status}")) }
             });
             cleanup.clone()?;
-            if self.stop.is_cancelled() { self.publish(Notification::Exited { handle: self.handle.clone(), code: 0 }); }
             interaction
         }.await;
         if let Some(ready) = self.ready.take() {
@@ -469,13 +1133,20 @@ impl Worker {
         if let Some((_, complete)) = pending {
             let _ = complete.send(Err("terminal has exited".into()));
         }
-        if let Err(message) = result {
-            self.publish(Notification::TerminalFailed {
-                handle: self.handle.clone(),
-                reason: message,
-            });
-        }
-        cleanup
+        let mut last = screen.ansi_checkpoint(parser.preceding_char());
+        last.extend(parser.checkpoint_tail());
+        let outcome = match result {
+            Ok(()) => Outcome::Exited(exit_code),
+            Err(message) => {
+                self.channel.observe(TerminalOutput::Exited);
+                self.publish(Notification::TerminalFailed {
+                    handle: handle.clone(),
+                    reason: message.clone(),
+                });
+                Outcome::Failed(message)
+            }
+        };
+        (cleanup, outcome, last)
     }
 }
 async fn write(
@@ -491,213 +1162,4 @@ async fn write(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn checkpoint_restores_screen_modes_and_split_sequences() {
-        use alacritty_terminal::{Term, term::Config, vte::ansi::Processor};
-        let size = TerminalSize { rows: 5, cols: 12 };
-        let basic = [
-            (
-                b"hello\r\nworld\x1b[31m!\x1b[3;8H".as_slice(),
-                b"again".as_slice(),
-            ),
-            (
-                b"original\x1b[?1049h\x1b[2;4r\x1b[?6hALT\x1b[?2004h",
-                b"\r\nmore\x1b[?1049l!",
-            ),
-            (b"012345678901", b"next"),
-            (b"hi\x1b[38;2;12;", b"34;56mcolor"),
-            (b"\xe6\x97", b"\xa5\xe6\x9c\xac"),
-            (b"abc\x1b[2J", b"\x1b[3b"),
-            (b"one\r\ntwo\r\nthree\r\nfour\r\nfive\r\nsix", b"\r\nseven"),
-        ];
-        let sequences = [
-            "日本語\r\n12345678901日\r\ne\u{301}\x1b[31;44;1mred\x1b[0m",
-            "abc\x1b7\r\nother\x1b8!",
-            "123456789012\x1b7\r\nnext\x1b8X",
-            "screen\x1b[?1049h\x1b[2;4r\x1b[?6hALT\x1b[?1049l!",
-            "abc\x1b]0;title\x1b\\hello\x1b[38;2;12;34;56mRGB",
-            "before\x1b[?2026hupdate\r\nmore\x1b[?2026lafter",
-        ];
-        let cases =
-            basic.into_iter().chain(sequences.iter().flat_map(|text| {
-                (0..=text.len()).map(move |index| text.as_bytes().split_at(index))
-            }));
-        for (before, after) in cases {
-            let mut original = Term::new(Config::default(), &Dimensions(size), Replies::default());
-            let mut parser: Processor = Default::default();
-            parser.advance(&mut original, before);
-            let mut restored = Term::new(Config::default(), &Dimensions(size), Replies::default());
-            let mut reader: Processor = Default::default();
-            let mut checkpoint = original.ansi_checkpoint(parser.preceding_char());
-            checkpoint.extend(parser.checkpoint_tail());
-            reader.advance(&mut restored, &checkpoint);
-            parser.advance(&mut original, after);
-            reader.advance(&mut restored, after);
-            assert_eq!(original.mode(), restored.mode(), "{before:?}");
-            assert_eq!(
-                original.grid().cursor.point,
-                restored.grid().cursor.point,
-                "{before:?}"
-            );
-            assert_eq!(
-                original.grid().history_size(),
-                restored.grid().history_size(),
-                "{before:?}"
-            );
-            for row in -(original.grid().history_size() as i32)..5 {
-                for col in 0..12 {
-                    use alacritty_terminal::index::{Column, Line};
-                    let a = &original.grid()[Line(row)][Column(col)];
-                    let b = &restored.grid()[Line(row)][Column(col)];
-                    assert_eq!(
-                        (a.c, a.fg, a.bg, a.flags, a.zerowidth()),
-                        (b.c, b.fg, b.bg, b.flags, b.zerowidth()),
-                        "{before:?}, {row}:{col}"
-                    );
-                }
-            }
-        }
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn reattach_retains_shell_and_detach_only_releases_one_terminal() {
-        tokio::time::timeout(std::time::Duration::from_secs(15), async {
-            let directory = tempfile::tempdir().unwrap();
-            let cwd = directory.path().to_string_lossy().into_owned();
-            let size = TerminalSize { cols: 80, rows: 24 };
-            let router = Connections::new();
-            let terminals = Terminals::default();
-            let first = router.open_authenticated_session(Some("phone".into()));
-            for handle in ["one", "two"] {
-                terminals.start(router.clone(), first.id(), handle.into(), cwd.clone(), size).await.unwrap();
-            }
-            terminals.request(first.id(), &Call::WriteTerminal(agent_protocol::operations::TerminalWrite { process_handle: "one".into(), data: "BEX_RETAINED=survived\n".as_bytes().to_vec() })).await.unwrap();
-            terminals.request(first.id(), &Call::DetachTerminal(agent_protocol::operations::DetachTerminal { handle: "one".into() })).await.unwrap();
-            assert!(terminals.request(first.id(), &Call::WriteTerminal(agent_protocol::operations::TerminalWrite { process_handle: "one".into(), data: b"a".to_vec() })).await.is_err());
-            terminals.request(first.id(), &Call::WriteTerminal(agent_protocol::operations::TerminalWrite { process_handle: "two".into(), data: "true\n".as_bytes().to_vec() })).await.unwrap();
-            router.close_session(first.id()); terminals.close_session(first.id());
-            let mut second = router.open_authenticated_session(Some("phone".into()));
-            terminals.start(router.clone(), second.id(), "one".into(), cwd.clone(), size).await.unwrap();
-            let mut restored = false;
-            while let Some(line) = second.recv().await {
-                if matches!(agent_protocol::protocol::decode::<Notification>(&line).unwrap(), Notification::TerminalRestored { .. }) { restored=true; break; }
-            }
-            assert!(restored);
-            terminals.request(second.id(), &Call::WriteTerminal(agent_protocol::operations::TerminalWrite { process_handle: "one".into(), data: "printf '%s' \"$BEX_RETAINED\" > retained\n".as_bytes().to_vec() })).await.unwrap();
-            loop {
-                if std::fs::read_to_string(directory.path().join("retained")).ok().as_deref()==Some("survived") {break;}
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            }
-            terminals.request(second.id(), &Call::WriteTerminal(agent_protocol::operations::TerminalWrite { process_handle: "one".into(), data: "stty -echo -icanon min 0 time 5; python3 -c 'import os; os.write(1,b\"\\x1b[6n\"*40); data=b\"\"\nwhile data.count(b\"R\")<40:\n part=os.read(0,4096)\n if not part: break\n data+=part\nopen(\"query-reply\",\"wb\").write(data)'; stty sane\n".as_bytes().to_vec() })).await.unwrap();
-            loop {
-                if let Ok(bytes)=std::fs::read(directory.path().join("query-reply"))
-                    && bytes.starts_with(b"\x1b[") && bytes.iter().filter(|byte| **byte==b'R').count()==40 {break;}
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            }
-            let stranger=router.open_authenticated_session(Some("other-phone".into()));
-            assert!(terminals.request(stranger.id(),&Call::KillTerminal(agent_protocol::operations::TerminalKill { process_handle: "one".into() })).await.is_err());
-            terminals.start(router.clone(),stranger.id(),"one".into(),cwd,size).await.unwrap();
-            assert_eq!(terminals.records.lock().unwrap().len(),3);
-            terminals.shutdown().await;
-        }).await.expect("reattach stalled");
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn kill_and_disconnect_keep_ownership_until_shell_job_groups_are_gone() {
-        tokio::time::timeout(std::time::Duration::from_secs(20), async {
-            for disconnect in [false, true] {
-                let directory = tempfile::tempdir().unwrap();
-                let cwd = dunce::canonicalize(directory.path()).unwrap();
-                let terminals = Terminals::default();
-                let router = Connections::new();
-                let connection = router.open_session();
-                terminals.start(router, connection.id(), "jobs".into(), directory.path().to_string_lossy().into_owned(), TerminalSize {rows:24, cols:80}).await.unwrap();
-                // Linux validation runs this Host with SHELL=/bin/sh (dash).
-                // Disable interactive history expansion for Bash and Zsh on macOS.
-                let command = "[ -z \"${BASH_VERSION-}\" ] || set +H\n[ -z \"${ZSH_VERSION-}\" ] || unsetopt BANG_HIST\nsleep 120 & first=$!; sleep 120 & printf '%s %s %s\\n' \"$$\" \"$first\" \"$!\" > owned-pids; wait\n";
-                terminals.request(connection.id(), &agent_protocol::protocol::Call::WriteTerminal(agent_protocol::operations::TerminalWrite { process_handle: "jobs".into(), data: command.as_bytes().to_vec() })).await.unwrap();
-                let pids = loop {
-                    if let Ok(text) = std::fs::read_to_string(directory.path().join("owned-pids"))
-                        && text.split_whitespace().count() == 3
-                    { break text; }
-                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-                };
-                let mut groups = pids.split_whitespace().map(|pid| {
-                    let output = std::process::Command::new("ps").args(["-o","pgid=","-p",pid]).output().unwrap();
-                    String::from_utf8(output.stdout).unwrap().trim().to_owned()
-                });
-                let shell_group = groups.next().unwrap();
-                for group in groups {
-                    assert!(!group.is_empty());
-                    assert_ne!(shell_group, group, "fixture must create job-control groups");
-                }
-                assert!(terminals.in_use(&cwd));
-                if disconnect {
-                    terminals.close_session(connection.id());
-                    assert!(terminals.in_use(&cwd));
-                    terminals.shutdown().await;
-                } else {
-                    let call = agent_protocol::protocol::Call::KillTerminal(agent_protocol::operations::TerminalKill { process_handle: "jobs".into() });
-                    let mut kill = Box::pin(terminals.request(connection.id(), &call));
-                    assert!(futures_util::poll!(&mut kill).is_pending());
-                    assert!(terminals.in_use(&cwd));
-                    kill.await.unwrap();
-                }
-                assert!(!terminals.in_use(&cwd));
-                for pid in pids.split_whitespace() {
-                    loop {
-                        let output = std::process::Command::new("ps").args(["-o","stat=","-p",pid]).output().unwrap();
-                        let state = String::from_utf8_lossy(&output.stdout);
-                        if state.trim().is_empty() || state.trim().starts_with('Z') { break; }
-                        // macOS can report an exiting process as "?E" before it disappears.
-                        assert!(state.contains('E'), "process {pid} survived cleanup: {state}");
-                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-                    }
-                }
-            }
-        }).await.expect("terminal cleanup stalled");
-    }
-
-    #[tokio::test]
-    async fn disconnect_during_startup_releases_the_reservation_before_shutdown_returns() {
-        let directory = tempfile::tempdir().unwrap();
-        let terminals = Terminals::default();
-        let router = Connections::new();
-        let connection = router.open_session();
-        let mut starting = Box::pin(terminals.start(
-            router.clone(),
-            connection.id(),
-            "starting".into(),
-            directory.path().to_string_lossy().into_owned(),
-            TerminalSize { rows: 24, cols: 80 },
-        ));
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            loop {
-                assert!(futures_util::poll!(&mut starting).is_pending());
-                if terminals
-                    .records
-                    .lock()
-                    .unwrap()
-                    .values()
-                    .any(|record| record.handle == "starting")
-                {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-            // On this single-thread runtime the reservation exists, but the
-            // spawned worker cannot start until the next yield.
-            router.close_session(connection.id());
-            terminals.close_session(connection.id());
-            drop(starting);
-            terminals.shutdown().await;
-            assert!(terminals.records.lock().unwrap().is_empty());
-        })
-        .await
-        .unwrap();
-    }
-}
+mod tests;

@@ -1208,6 +1208,7 @@ fn start_script(
         crate::StartedSetup {
             name: "Install".into(),
             command: "vp install".into(),
+            terminal_id: "setup-install".into(),
             run_async,
             completion: request.observe.tracked().then(&completion),
         }
@@ -1245,6 +1246,10 @@ async fn tracks_a_worktree_setup_on_its_card_until_the_turn_starts() {
     );
     assert_eq!(card.base_ref.as_deref(), Some("main"));
     assert_eq!(card.setup_script.as_ref().unwrap().command, "vp install");
+    assert_eq!(
+        card.setup_script.as_ref().unwrap().terminal_id.as_deref(),
+        Some("setup-install")
+    );
     let stage = |id| {
         card.stages
             .iter()

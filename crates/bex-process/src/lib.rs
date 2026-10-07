@@ -70,6 +70,8 @@ pub enum PtyCommand {
         cwd: String,
         rows: u16,
         cols: u16,
+        /// The shell's whole environment.
+        env: std::collections::BTreeMap<String, String>,
     },
     Write {
         id: u64,
@@ -84,7 +86,7 @@ pub enum PtyCommand {
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum PtyEvent {
-    Started,
+    Started { pid: Option<u32> },
     Output { data: Vec<u8> },
     Ack { id: u64, error: Option<String> },
     Exited { code: u32 },

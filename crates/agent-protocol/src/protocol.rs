@@ -43,6 +43,12 @@ pub enum Notification {
         #[serde(rename = "processHandle")]
         handle: String,
     },
+    /// The terminal was closed; its tab goes away.
+    #[serde(rename = "host/terminal/closed")]
+    TerminalClosed {
+        #[serde(rename = "processHandle")]
+        handle: String,
+    },
 }
 
 pub fn encode(value: impl Serialize) -> io::Result<Vec<u8>> {
@@ -98,6 +104,7 @@ results! {
     AccountUsage(crate::operations::AccountUsage),
     Accounts(crate::operations::Accounts), Selected(crate::operations::AccountSelection),
     Login(crate::operations::AccountLogin), LoginStatus(crate::operations::AccountLoginStatus),
+    TerminalMetadata(crate::operations::TerminalMetadataEvent),
     Files(crate::models::FileList), File(crate::models::FileContent), Grant(crate::models::TransferGrant),
     Transcription(crate::operations::Transcription),
     HostStatus(crate::models::HostStatus), Invitation(crate::models::Invitation),

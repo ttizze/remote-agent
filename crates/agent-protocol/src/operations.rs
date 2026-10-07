@@ -205,6 +205,15 @@ pub struct TerminalSize {
     pub cols: u16,
     pub rows: u16,
 }
+impl TerminalSize {
+    /// 1 to 1000 columns and 1 to 500 rows.
+    pub fn validate(self) -> Result<(), String> {
+        if !(1..=1000).contains(&self.cols) || !(1..=500).contains(&self.rows) {
+            return Err("terminal size must be 1 to 1000 columns and 1 to 500 rows".into());
+        }
+        Ok(())
+    }
+}
 
 // Shared Host/Client request records; Store behavior lives in state::operations.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -221,12 +230,123 @@ pub struct UpdateProject {
     pub scripts: Option<Vec<crate::models::ProjectScript>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Opens a thread's terminal or attaches to it; the caller then receives its output.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct StartTerminal {
-    #[serde(rename = "processHandle")]
-    pub handle: String,
-    pub cwd: String,
+    pub thread: agent_domain::ThreadId,
+    /// Chosen by the client, e.g. `term-1`; at most 128 characters.
+    pub terminal_id: String,
+    /// Required when the terminal does not exist yet. A different directory or
+    /// environment restarts an exited terminal only.
+    pub cwd: Option<String>,
+    pub worktree_path: Option<String>,
     pub size: TerminalSize,
+    /// Variables added to the shell's environment.
+    pub env: std::collections::BTreeMap<String, String>,
+    /// Starts an exited terminal again instead of showing its last screen.
+    pub restart_if_not_running: bool,
+}
+impl StartTerminal {
+    pub fn handle(&self) -> String {
+        thread_terminal_handle_for(self.thread.as_str(), &self.terminal_id)
+    }
+    pub fn validate(&self) -> Result<(), String> {
+        validate_terminal_id(&self.terminal_id)?;
+        validate_terminal_env(&self.env)?;
+        if self.cwd.as_deref().is_some_and(|cwd| cwd.trim().is_empty()) {
+            return Err("terminal directory is empty".into());
+        }
+        self.size.validate()
+    }
+}
+
+pub fn validate_terminal_id(terminal_id: &str) -> Result<(), String> {
+    if terminal_id.trim().is_empty()
+        || terminal_id.trim() != terminal_id
+        || terminal_id.chars().count() > 128
+    {
+        return Err("terminal id must be 1 to 128 trimmed characters".into());
+    }
+    Ok(())
+}
+
+/// Keys like shell variables (at most 128 characters), values up to 8192
+/// characters, at most 128 entries.
+pub fn validate_terminal_env(
+    env: &std::collections::BTreeMap<String, String>,
+) -> Result<(), String> {
+    let key = |key: &str| {
+        key.len() <= 128
+            && key
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+            && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    };
+    if env.len() > 128
+        || env
+            .iter()
+            .any(|(name, value)| !key(name) || value.chars().count() > 8192)
+    {
+        return Err("invalid terminal environment".into());
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TerminalStatus {
+    Starting,
+    Running,
+    Exited,
+    Error,
+}
+
+/// What lists and tabs show of a thread's terminal.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalSummary {
+    pub thread: agent_domain::ThreadId,
+    pub terminal_id: String,
+    pub cwd: String,
+    pub worktree_path: Option<String>,
+    pub status: TerminalStatus,
+    pub pid: Option<u32>,
+    pub exit_code: Option<i32>,
+    pub has_running_subprocess: bool,
+    /// The running command's name, otherwise the tab name (`Terminal 1`).
+    pub label: String,
+    pub updated_at: agent_domain::Timestamp,
+}
+
+/// `host/terminal/subscribeMetadata`: every terminal first, then changes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum TerminalMetadataEvent {
+    Snapshot {
+        terminals: Vec<TerminalSummary>,
+    },
+    Upsert {
+        terminal: TerminalSummary,
+    },
+    Remove {
+        thread: agent_domain::ThreadId,
+        terminal_id: String,
+    },
+}
+
+/// `Terminal 3` for `term-3` or `terminal-3`; other ids are their own name.
+pub fn terminal_label(terminal_id: &str) -> String {
+    let lower = terminal_id.to_ascii_lowercase();
+    let digits = lower
+        .strip_prefix("terminal-")
+        .or_else(|| lower.strip_prefix("term-"))
+        .filter(|digits| !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()));
+    match digits {
+        Some(digits) => format!("Terminal {digits}"),
+        None => terminal_id.to_owned(),
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -353,9 +473,14 @@ pub struct ReadAccountUsage {
     pub id: String,
 }
 
-/// A thread's terminal identity, used by the Host's cleanup and every client.
+/// The prefix of every terminal handle of a thread.
 pub fn thread_terminal_handle(thread: &str) -> String {
     format!("terminal:{thread}")
+}
+
+/// One terminal of a thread, e.g. `term-1` or a setup script's `setup-{id}`.
+pub fn thread_terminal_handle_for(thread: &str, terminal_id: &str) -> String {
+    format!("{}:{terminal_id}", thread_terminal_handle(thread))
 }
 
 /// Shared terminal identity for a workspace, used by cleanup and every client.

@@ -87,14 +87,16 @@ pub struct SetupRequest {
     pub observe: SetupProgress,
 }
 
-/// A setup script the Host started.
+/// A setup script the Host started in one of the thread's terminals.
 pub struct StartedSetup {
     pub name: String,
     pub command: String,
+    pub terminal_id: String,
     /// False when the agent waits for the script.
     pub run_async: bool,
-    /// Observed runs only: the exit code, `None` when the script was stopped.
-    /// Dropping it before the script exits stops the script.
+    /// Observed runs only: the exit code, `None` when the terminal exited or
+    /// closed first. Dropping it stops observing; the script keeps running
+    /// until the thread's terminals close.
     pub completion: Option<BoxFuture<'static, Option<i32>>>,
 }
 

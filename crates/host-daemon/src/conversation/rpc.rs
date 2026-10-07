@@ -142,7 +142,7 @@ fn query_error(error: QueryError) -> ConversationError {
 
 /// A response whose first item answers the call and whose later items follow on
 /// the same stream until the subscriber falls behind or disconnects.
-fn stream<T: Serialize + Send + 'static>(
+pub(crate) fn stream<T: Serialize + Send + 'static>(
     mut first: VecDeque<T>,
     empty: T,
     mut next: impl FnMut() -> futures_util::future::BoxFuture<'static, Option<Vec<T>>> + Send + 'static,

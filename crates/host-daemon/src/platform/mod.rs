@@ -36,11 +36,16 @@ pub(crate) fn private_file_options() -> fs::OpenOptions {
 pub(crate) fn terminal_command() -> &'static [&'static str] {
     #[cfg(windows)]
     {
-        &["cmd.exe"]
+        &["powershell.exe", "-NoLogo"]
     }
     #[cfg(not(windows))]
     {
-        &["/bin/sh", "-c", "exec \"${SHELL:-/bin/sh}\" -l"]
+        // zsh's prompt spacer would print `%` before every prompt.
+        &[
+            "/bin/sh",
+            "-c",
+            "case \"${SHELL##*/}\" in zsh) exec \"$SHELL\" -l -o nopromptsp ;; *) exec \"${SHELL:-/bin/sh}\" -l ;; esac",
+        ]
     }
 }
 

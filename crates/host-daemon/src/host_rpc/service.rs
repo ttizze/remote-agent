@@ -119,6 +119,7 @@ impl HostRpcService {
         codex: Result<Arc<CodexAppServer>, String>,
         projects: ProjectStore,
     ) -> anyhow::Result<Self> {
+        let connections = Connections::new();
         let shared = SharedResources {
             files: crate::workspace_files::WorkspaceFiles::new(
                 projects.path().with_file_name("attachments"),
@@ -126,7 +127,7 @@ impl HostRpcService {
             worktrees: Arc::new(crate::worktrees::Worktrees::new(projects.path())),
             projects: Arc::new(ProjectCatalog::new(projects)),
             checkpoints: Arc::default(),
-            terminals: Arc::default(),
+            terminals: Arc::new(crate::terminals::Terminals::new(connections.clone())),
         };
         let resources = Arc::new(HostResources {
             codex: Arc::new(CodexResources::new(codex.clone())),
@@ -143,7 +144,7 @@ impl HostRpcService {
         Ok(Self {
             inner: Arc::new(ServiceInner {
                 resources,
-                connections: Connections::new(),
+                connections,
                 started: AtomicBool::new(false),
             }),
         })
@@ -389,7 +390,41 @@ impl HostRpcService {
                 return Ok(reply);
             }
         }
+        if let Call::TerminalMetadata(_) = call {
+            let cancel = self.inner.connections.cancellation(session)?;
+            return Ok(self.terminal_metadata(cancel));
+        }
         Ok(Response::from_result(self.request(session, call).await).into())
+    }
+    /// Every terminal first, then upserts and removals; a subscriber that fell
+    /// behind gets a fresh snapshot.
+    fn terminal_metadata(&self, cancel: tokio_util::sync::CancellationToken) -> HostReply {
+        let terminals = self.inner.resources.shared.terminals.clone();
+        let (snapshot, receiver) = terminals.subscribe_metadata();
+        let receiver = Arc::new(tokio::sync::Mutex::new(receiver));
+        crate::conversation::stream(
+            std::collections::VecDeque::from([op::TerminalMetadataEvent::Snapshot {
+                terminals: snapshot,
+            }]),
+            op::TerminalMetadataEvent::Snapshot { terminals: vec![] },
+            move || {
+                let (receiver, terminals) = (receiver.clone(), terminals.clone());
+                Box::pin(async move {
+                    let mut receiver = receiver.lock().await;
+                    match receiver.recv().await {
+                        Ok(event) => Some(vec![event]),
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                            *receiver = receiver.resubscribe();
+                            Some(vec![op::TerminalMetadataEvent::Snapshot {
+                                terminals: terminals.summaries_now(),
+                            }])
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => None,
+                    }
+                })
+            },
+            cancel,
+        )
     }
     async fn request(&self, session: SessionId, request: &Call) -> Result<Body, Failure> {
         let resources = &self.inner.resources;
@@ -529,13 +564,7 @@ impl HostRpcService {
                 Call::StartTerminal(params) => (resources
                     .shared
                     .terminals
-                    .start(
-                        self.inner.connections.clone(),
-                        session,
-                        params.handle.clone(),
-                        params.cwd.clone(),
-                        params.size,
-                    )
+                    .attach(session, params)
                     .await
                     .map_err(|error| Failure::new("terminal_start_failed", error))?)
                 .into(),

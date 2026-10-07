@@ -12,6 +12,7 @@ pub mod tools;
 mod tests;
 
 pub(crate) use operations::{HostIo, ProjectCatalog, TextGenerator};
+pub(crate) use rpc::stream;
 pub(crate) use sessions::{
     BrowserConfig, ProviderHost, ProviderPrograms, Spawner, SupervisedSpawner,
 };
@@ -94,7 +95,6 @@ impl Conversation {
             worktrees: resources.worktrees.clone(),
             files: resources.files.clone(),
             terminals: resources.terminals.clone(),
-            setups: Default::default(),
             text: TextGenerator {
                 codex: config.programs.codex.clone(),
                 codex_home: config.programs.codex_home.clone(),

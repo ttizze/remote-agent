@@ -62,8 +62,7 @@ pub enum WorktreeSetupPhase {
 pub struct WorktreeSetupScript {
     pub name: String,
     pub command: String,
-    /// The script runs as a process, not a thread terminal, so there is none
-    /// to open.
+    /// The thread's terminal the script runs in.
     pub terminal_id: Option<String>,
 }
 

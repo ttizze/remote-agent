@@ -66,6 +66,7 @@ pub async fn run() -> io::Result<i32> {
         cwd,
         rows,
         cols,
+        env,
     } = serde_json::from_str(&line)?
     else {
         return Err(io_error("expected terminal initialization"));
@@ -79,12 +80,16 @@ pub async fn run() -> io::Result<i32> {
     let mut command_builder = CommandBuilder::new(program);
     command_builder.args(&command[1..]);
     command_builder.cwd(cwd);
+    command_builder.env_clear();
+    for (key, value) in env {
+        command_builder.env(key, value);
+    }
     command_builder.env("TERM", "xterm-256color");
-    command_builder.env("COLORTERM", "truecolor");
     let mut child = pair
         .slave
         .spawn_command(command_builder)
         .map_err(io_error)?;
+    let pid = child.process_id();
     let mut owned = OwnedPty {
         #[cfg(not(unix))]
         killer: child.clone_killer(),
@@ -137,7 +142,7 @@ pub async fn run() -> io::Result<i32> {
     #[cfg(not(unix))]
     let mut exited = tokio::task::spawn_blocking(move || child.wait());
     let result: io::Result<u32> = async {
-        emit(&mut output, PtyEvent::Started).await?;
+        emit(&mut output, PtyEvent::Started { pid }).await?;
         let mut reading = true;
         loop {
             tokio::select! {
