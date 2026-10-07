@@ -5,6 +5,7 @@ let prompt;
 for await (const line of createInterface({ input: process.stdin })) {
   const frame = JSON.parse(line);
   if (frame.type === "control_request") {
+    if (frame.request.subtype === "initialize" && process.argv.includes("--fixture-startup-failure")) process.exit(7);
     if (frame.request.subtype === "interrupt") send({ type: "control_cancel_request", request_id: "permission" });
     send({ type: "control_response", response: { subtype: "success", request_id: frame.request_id, response: { commands: [], models: [], account: {} } } });
   } else if (frame.type === "user") {

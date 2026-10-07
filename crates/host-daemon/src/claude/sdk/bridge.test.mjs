@@ -114,7 +114,7 @@ test("unknown SDK dialogs cancel immediately without blocking the conversation",
   } finally { h.input.end(); await h.completion; }
 });
 
-test("the actual worker exits after SDK failure while Host stdin stays open", { timeout: 10000 }, async () => {
+for (const startup of [false, true]) test(`the actual worker exits after SDK ${startup ? "startup" : "stream"} failure while Host stdin stays open`, { timeout: 10000 }, async () => {
   const worker = readFileSync(new URL("./bridge.mjs", import.meta.url), "utf8");
   const library = fileURLToPath(new URL("./sdk.mjs", import.meta.url));
   const fixture = fileURLToPath(new URL("./fake-cli.mjs", import.meta.url));
@@ -123,13 +123,18 @@ test("the actual worker exits after SDK failure while Host stdin stays open", { 
   const lines = createInterface({ input: child.stdout })[Symbol.asyncIterator]();
   const exit = once(child, "exit", { signal: AbortSignal.timeout(5000) });
   try {
-    child.stdin.write(JSON.stringify({ type: "control_request", request_id: "initialize", request: { subtype: "initialize" } }) + "\n");
+    child.stdin.write(JSON.stringify({ type: "control_request", request_id: "initialize", request: { subtype: "initialize", options: startup ? { extraArgs: { "fixture-startup-failure": null } } : {} } }) + "\n");
     const initialized = JSON.parse((await lines.next()).value);
-    assert.equal(initialized.response.subtype, "success");
-    child.stdin.write(JSON.stringify({ type: "user", uuid: "one", session_id: "", parent_tool_use_id: null, message: { role: "user", content: "crash" } }) + "\n");
-    const failure = JSON.parse((await lines.next()).value);
-    assert.equal(failure.type, "sdk_error");
-    assert.match(failure.message, /7/);
+    if (startup) {
+      assert.equal(initialized.response.subtype, "error");
+      assert.match(initialized.response.error, /7/);
+    } else {
+      assert.equal(initialized.response.subtype, "success");
+      child.stdin.write(JSON.stringify({ type: "user", uuid: "one", session_id: "", parent_tool_use_id: null, message: { role: "user", content: "crash" } }) + "\n");
+      const failure = JSON.parse((await lines.next()).value);
+      assert.equal(failure.type, "sdk_error");
+      assert.match(failure.message, /7/);
+    }
     assert.equal((await exit)[0], 0);
   } finally { child.stdin.end(); child.kill(); }
 });

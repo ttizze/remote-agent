@@ -118,9 +118,12 @@ export async function runBridge(sdk, program, input, output) {
           item.resolve(response.subtype === "success" ? response.response : null);
         }
       } else if (frame.type === "control_request") {
-        const task = request(frame).catch((error) => send({ type: "control_response", response: {
-          subtype: "error", request_id: frame.request_id, error: error.message,
-        } })).finally(() => tasks.delete(task));
+        const task = request(frame).catch(async (error) => {
+          await send({ type: "control_response", response: {
+            subtype: "error", request_id: frame.request_id, error: error.message,
+          } });
+          if (frame.request.subtype === "initialize") lines.close();
+        }).finally(() => tasks.delete(task));
         tasks.add(task);
       } else throw new Error(`Unsupported Host frame: ${frame.type}`);
     }
