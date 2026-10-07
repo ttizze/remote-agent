@@ -445,6 +445,9 @@ impl Desktop {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let turn = &projected.source;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0., |duration| duration.as_secs_f64());
         let mut body = v_flex().w_full().max_w(px(CHAT_WIDTH)).gap_4();
         let mut expanded = false;
         for row in &projected.rows {
@@ -456,9 +459,6 @@ impl Desktop {
                     let id = &activity.id;
                     expanded = activity_is_expanded(activity, self.expanded_work.get(id).cloned());
                     let label = if activity.is_in_progress {
-                        let now = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .map_or(0., |duration| duration.as_secs_f64());
                         projected.progress_label(!expanded, now)
                     } else {
                         activity.activity_summary.clone()
@@ -529,6 +529,7 @@ impl Desktop {
                                         .icon(IconName::Copy)
                                         .small()
                                         .ghost()
+                                        .debug_selector(|| "response-copy".into())
                                         .tooltip("回答をコピー")
                                         .accessibility_label("回答をコピー")
                                         .on_click(move |_, _, cx| {
@@ -571,8 +572,17 @@ impl Desktop {
                         );
                     }
                 }
-                // Desktop pages via its virtual list and offers Stop in the composer.
-                ConversationRowContent::InProgress { .. } => {}
+                ConversationRowContent::InProgress { .. } => {
+                    body = body.child(
+                        h_flex()
+                            .debug_selector(|| "conversation-in-progress".into())
+                            .gap_2()
+                            .text_sm()
+                            .text_color(rgb(0xa0a0a0))
+                            .child(spinner::Spinner::new().small())
+                            .child(projected.progress_label(false, now)),
+                    );
+                }
             }
         }
         let selector = format!("conversation-turn-{}", turn.id);
@@ -1148,6 +1158,45 @@ mod rendering_tests {
                 window.debug_bounds("response-fork").is_some(),
                 status == "completed"
             );
+        }
+    }
+
+    #[gpui::test]
+    fn background_work_keeps_progress_below_the_response_until_the_turn_ends(
+        cx: &mut TestAppContext,
+    ) {
+        let _runtime = init(cx);
+        for provider in ["codex", "claude"] {
+            for status in ["running", "completed", "failed", "interrupted"] {
+                let source = serde_json::from_value(serde_json::json!({
+                    "id":{"provider":provider,"id":"fixture"}, "turns":[{
+                        "id":"turn", "status":status, "items":[
+                            {"id":"command","status":"completed","body":{"inline":{"body":{
+                                "commandExecution":{"command":"review","cwd":"/fixture","output":"launched","exitCode":null}
+                            }}}},
+                            {"id":"answer","status":"completed","body":{"inline":{"body":{
+                                "assistantText":{"text":"Long answer\n\n".repeat(20)+"結果が出たら報告します。","phase":"final"}
+                            }}}}
+                        ]
+                    }]
+                })).unwrap();
+                let (_, window) = cx.add_window_view(|window, cx| {
+                    ConversationView::new(Snapshot::default(), source, window, cx)
+                });
+                window.run_until_parked();
+                let progress = window.debug_bounds("conversation-in-progress");
+                if status == "running" {
+                    let progress = progress.expect("background work must remain visible");
+                    let response = window.debug_bounds("response-copy").unwrap();
+                    assert!(progress.top() >= response.bottom());
+                    assert!(progress.size.height > px(0.));
+                } else {
+                    assert!(
+                        progress.is_none(),
+                        "{provider}/{status} still shows progress"
+                    );
+                }
+            }
         }
     }
 

@@ -1,11 +1,48 @@
 use std::{path::Path, process::Stdio, time::Duration};
 
 use agent_transport::peer::{JsonlReader, JsonlWriter};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::{
     io::AsyncReadExt,
     process::{Child, ChildStdin, ChildStdout},
 };
+
+pub(super) fn executable(
+    program: &Path,
+    path: Option<&std::ffi::OsStr>,
+) -> Result<std::path::PathBuf, String> {
+    #[cfg(windows)]
+    let program = if program.extension().is_none() {
+        std::borrow::Cow::Owned(program.with_extension("exe"))
+    } else {
+        std::borrow::Cow::Borrowed(program)
+    };
+    let found = if program.components().count() > 1 {
+        program.is_file().then(|| program.to_path_buf())
+    } else {
+        path.and_then(|path| {
+            std::env::split_paths(path)
+                .map(|directory| directory.join(program.as_os_str()))
+                .find(|candidate| candidate.is_file())
+        })
+    }
+    .ok_or_else(|| format!("executable is missing: {}", program.display()))?;
+    std::path::absolute(found).map_err(|error| error.to_string())
+}
+
+pub(super) fn runtime() -> Result<(std::path::PathBuf, std::path::PathBuf), String> {
+    let path = std::env::var_os("PATH");
+    let node = std::env::var_os("BEX_NODE").unwrap_or_else(|| "node".into());
+    let node = executable(Path::new(&node), path.as_deref())?;
+    let host = std::env::current_exe().map_err(|error| error.to_string())?;
+    let bridge = bex_process::companion_path(&host, "bex-claude-sdk.mjs")
+        .map_err(|error| error.to_string())?;
+    if !bridge.is_file() {
+        return Err("bex-claude-sdk.mjs must be installed beside the Host".into());
+    }
+    Ok((node, bridge))
+}
 
 pub(super) struct Process {
     capacity: Option<tokio::sync::OwnedSemaphorePermit>,
@@ -13,6 +50,82 @@ pub(super) struct Process {
     input: JsonlWriter<ChildStdin>,
     output: JsonlReader<ChildStdout>,
     stderr: tokio::task::JoinHandle<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub(crate) enum Input {
+    Usage,
+    Message {
+        id: String,
+        content: Value,
+    },
+    Answer {
+        request_id: String,
+        response: Option<Value>,
+        error: Option<String>,
+    },
+    Interrupt {
+        request_id: String,
+    },
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub(super) enum Event {
+    Usage {
+        usage: Option<Value>,
+        error: Option<String>,
+    },
+    Ready {
+        initialized: Value,
+    },
+    Message {
+        message: Value,
+    },
+    Request {
+        request_id: String,
+        request: SdkRequest,
+    },
+    RequestCancelled {
+        request_id: String,
+    },
+    Interrupted {
+        request_id: String,
+        error: Option<String>,
+    },
+    Error {
+        message: String,
+    },
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub(crate) enum SdkRequest {
+    Tool {
+        tool_name: String,
+        input: Value,
+        tool_use_id: Option<String>,
+    },
+    Elicitation {
+        server_name: String,
+        message: String,
+        mode: Option<String>,
+        url: Option<String>,
+        requested_schema: Option<Value>,
+    },
 }
 
 impl Process {
@@ -25,7 +138,10 @@ impl Process {
         model: Option<(&str, Option<&str>)>,
         browser: Option<Value>,
     ) -> Result<(Self, Value), String> {
-        let mut command = bex_process::command(program).map_err(|error| error.to_string())?;
+        let path = std::env::var_os("PATH");
+        let program = executable(program, path.as_deref())?;
+        let (node, bridge) = runtime()?;
+        let mut command = bex_process::command(&node).map_err(|error| error.to_string())?;
         // Account changes must not replace skills, settings, plugins or history.
         command
             .env("CLAUDE_CONFIG_DIR", config_home)
@@ -36,45 +152,15 @@ impl Process {
             .env_remove("CLAUDE_CODE_OAUTH_TOKEN")
             .env_remove("CLAUDE_CODE_OAUTH_REFRESH_TOKEN")
             .current_dir(cwd)
-            .args([
-                "-p",
-                "--input-format",
-                "stream-json",
-                "--output-format",
-                "stream-json",
-                "--verbose",
-                "--include-partial-messages",
-                "--replay-user-messages",
-                "--permission-prompt-tool",
-                "stdio",
-            ]);
-        if let Some(browser) = browser {
-            command
-                .arg("--mcp-config")
-                .arg(json!({"mcpServers":{"bex_browser":browser}}).to_string());
-        }
-        if let Some((session, resume)) = session {
-            command
-                .arg(if resume { "--resume" } else { "--session-id" })
-                .arg(session);
-        }
-        if let Some((model, effort)) = model {
-            command.arg("--model").arg(model);
-            if let Some(effort) = effort {
-                command.arg("--effort").arg(effort);
-            }
-        }
+            .arg(bridge);
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         let mut child = command.spawn().map_err(|error| {
-            format!(
-                "Claude Codeを起動できません（{}）: {error}",
-                program.display()
-            )
+            format!("Claude SDKを起動できません（{}）: {error}", node.display())
         })?;
-        let mut stderr = child.stderr.take().ok_or("Claude Code stderr is missing")?;
+        let mut stderr = child.stderr.take().ok_or("Claude SDK stderr is missing")?;
         let stderr = tokio::spawn(async move {
             let mut tail = Vec::new();
             let mut buffer = [0; 4096];
@@ -91,23 +177,22 @@ impl Process {
         });
         let mut process = Self {
             capacity: None,
-            input: JsonlWriter::new(child.stdin.take().ok_or("Claude Code stdin is missing")?),
-            output: JsonlReader::new(child.stdout.take().ok_or("Claude Code stdout is missing")?),
+            input: JsonlWriter::new(child.stdin.take().ok_or("Claude SDK stdin is missing")?),
+            output: JsonlReader::new(child.stdout.take().ok_or("Claude SDK stdout is missing")?),
             child,
             stderr,
         };
-        let initialized = tokio::time::timeout(Duration::from_secs(30), async {
-            process.write(&json!({"type":"control_request", "request_id":"initialize", "request":{"subtype":"initialize"}})).await?;
-            loop {
-                let message = process.read().await?.ok_or("Claude Code exited before initialization")?;
-                if message["type"] == "control_response" && message["response"]["request_id"] == "initialize" {
-                    if message["response"]["subtype"] != "success" {
-                        return Err(format!("Claude Code initialization failed: {}", message["response"]["error"]));
-                    }
-                    return Ok(message["response"]["response"].clone());
-                }
+        let initialized: Result<Value, String> = tokio::time::timeout(Duration::from_secs(30), async {
+            process.input.write_line(&json!({"type":"initialize", "program":program,"cwd":cwd,
+                "sessionId":session.map(|(id,_)|id),"resume":session.is_some_and(|(_,resume)|resume),
+                "model":model.map(|(model,_)|model),"effort":model.and_then(|(_,effort)|effort),"browser":browser}).to_string())
+                .await.map_err(|error|error.to_string())?;
+            match process.read().await?.ok_or("Claude SDK exited before initialization")? {
+                Event::Ready { initialized } => Ok(initialized),
+                Event::Error { message } => Err(message),
+                _ => Err("Claude SDK emitted an event before initialization".into()),
             }
-        }).await.map_err(|_| "Claude Codeの初期化がタイムアウトしました。".to_owned())?;
+        }).await.map_err(|_| "Claude SDKの初期化がタイムアウトしました。".to_owned())?;
         match initialized {
             Ok(result) => Ok((process, result)),
             Err(error) => {
@@ -121,21 +206,21 @@ impl Process {
         self.capacity = Some(permit);
     }
 
-    pub(super) async fn write(&mut self, value: &Value) -> Result<(), String> {
+    pub(super) async fn write(&mut self, value: &Input) -> Result<(), String> {
         self.input
-            .write_line(&value.to_string())
+            .write_line(&serde_json::to_string(value).map_err(|error| error.to_string())?)
             .await
             .map_err(|error| error.to_string())
     }
 
-    pub(super) async fn read(&mut self) -> Result<Option<Value>, String> {
+    pub(super) async fn read(&mut self) -> Result<Option<Event>, String> {
         self.output
             .read_line()
             .await
             .map_err(|error| error.to_string())?
             .map(|line| {
                 serde_json::from_str(&line)
-                    .map_err(|error| format!("invalid Claude Code message: {error}"))
+                    .map_err(|error| format!("invalid Claude SDK event: {error}"))
             })
             .transpose()
     }
@@ -170,12 +255,12 @@ impl Process {
             Err(_) => {
                 let _ = child.wait().await;
                 stderr.abort();
-                return Err("Claude Code did not exit after closing its input".into());
+                return Err("Claude SDK did not exit after closing its input".into());
             }
         };
         if !status.success() {
             return Err(format!(
-                "Claude Code exited with {status}: {}",
+                "Claude SDK exited with {status}: {}",
                 stderr_text.trim()
             ));
         }

@@ -1,5 +1,5 @@
 //! Claude Code owns inference, credentials and its transcript. The Host owns
-//! the client-facing conversation and adapts the CLI's streaming protocol.
+//! the client-facing conversation and adapts official Agent SDK events.
 use agent_protocol::{execution::*, items::*};
 mod accounts;
 mod history;
@@ -51,7 +51,10 @@ use crate::host_rpc::{
     service::Failure,
 };
 use futures_util::FutureExt;
+use process::Event as SdkEvent;
+pub(crate) use process::Input as SdkInput;
 use process::Process;
+pub(crate) use process::SdkRequest;
 
 #[derive(Debug, thiserror::Error)]
 #[error("{message}")]
@@ -126,7 +129,7 @@ struct Running {
 }
 
 pub(crate) struct Command {
-    pub(crate) value: Value,
+    pub(crate) value: SdkInput,
     pub(crate) user: Option<Item>,
     pub(crate) delivered: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
 }
@@ -599,7 +602,16 @@ impl Claude {
             (running.input.clone(), running.interrupt.clone())
         };
         if interrupt.borrow().is_none() {
-            input.send(Command { value: json!({"type":"control_request","request_id":"interrupt","request":{"subtype":"interrupt"}}), user: None, delivered: None }).await.map_err(|_| "Claude Code input is closed")?;
+            input
+                .send(Command {
+                    value: SdkInput::Interrupt {
+                        request_id: "interrupt".into(),
+                    },
+                    user: None,
+                    delivered: None,
+                })
+                .await
+                .map_err(|_| "Claude SDK input is closed")?;
         }
         tokio::time::timeout(std::time::Duration::from_secs(15), async {
             loop {
@@ -635,15 +647,30 @@ impl Claude {
             .ok_or("Claudeは実行中ではありません。")?;
         let sender = running.input.clone();
         let turn_id = running.turn_id.clone();
-        let session = state.session_id;
         drop(state);
         let id = client_id.to_owned();
         let (delivered, receipt) = tokio::sync::oneshot::channel();
-        sender.send(Command {
-            value: json!({"type":"user","uuid":id,"session_id":session,"message":{"role":"user","content":content},"parent_tool_use_id":null}),
-            user: Some(Item { id: id.clone().into(), status: ItemStatus::Unknown, client_input_id: Some(client_id.into()), body: ItemContent::Inline { body: Box::new(ItemBody::UserMessage { text: None, content: op::Input::message_parts(input) }) } }),
-            delivered: Some(delivered),
-        }).await.map_err(|_| "Claude Code input is closed")?;
+        sender
+            .send(Command {
+                value: SdkInput::Message {
+                    id: id.clone(),
+                    content: content.into(),
+                },
+                user: Some(Item {
+                    id: id.clone().into(),
+                    status: ItemStatus::Unknown,
+                    client_input_id: Some(client_id.into()),
+                    body: ItemContent::Inline {
+                        body: Box::new(ItemBody::UserMessage {
+                            text: None,
+                            content: op::Input::message_parts(input),
+                        }),
+                    },
+                }),
+                delivered: Some(delivered),
+            })
+            .await
+            .map_err(|_| "Claude SDK input is closed")?;
         tokio::time::timeout(std::time::Duration::from_secs(15), receipt)
             .await
             .map_err(|_| OperationError {
@@ -761,8 +788,17 @@ impl Claude {
         if self.stop.is_cancelled() {
             return Err("Host is shutting down".into());
         }
-        if let Err(error) = process.write(&json!({"type":"user","uuid":params.client_user_message_id,"session_id":session,"message":{"role":"user","content":content},"parent_tool_use_id":null})).await {
-            return Err(OperationError { message: error, delivery: agent_transport::peer::Delivery::Unknown });
+        if let Err(error) = process
+            .write(&SdkInput::Message {
+                id: params.client_user_message_id.to_string(),
+                content: content.into(),
+            })
+            .await
+        {
+            return Err(OperationError {
+                message: error,
+                delivery: agent_transport::peer::Delivery::Unknown,
+            });
         }
         state.model = model.clone();
         let (input, receiver) = mpsc::channel(32);
@@ -864,10 +900,10 @@ impl Worker {
             let turn=self.current_turn().cloned().ok_or("Claude execution state is unavailable")?;
             self.change(SessionChange::Turn {turn,completed:false}).await?;
             loop {
-                let message = tokio::select! {
+                let event = tokio::select! {
                     _ = self.stop.cancelled() => {
                         interrupted = true;
-                        process.write(&json!({"type":"control_request","request_id":"shutdown","request":{"subtype":"interrupt"}})).await?;
+                        process.write(&SdkInput::Interrupt { request_id: "shutdown".into() }).await?;
                         return Ok(());
                     }
                     command = input.recv() => {
@@ -885,7 +921,31 @@ impl Worker {
                         result?;
                         continue;
                     }
-                    message = process.read() => message?.ok_or("Claude Code exited before the turn completed")?,
+                    message = process.read() => message?.ok_or("Claude SDK exited before the turn completed")?,
+                };
+                let message = match event {
+                    SdkEvent::Message { message } => message,
+                    SdkEvent::Request { request_id, request } => {
+                        if let Err(error) = self.permission(&request_id, &request).await {
+                            tracing::warn!(target: "bex", operation = "host.claude.request_rejected", message = %error);
+                            process.write(&SdkInput::Answer { request_id, response: None, error: Some(error) }).await?;
+                        }
+                        continue;
+                    }
+                    SdkEvent::RequestCancelled { request_id } => {
+                        emit(&self.events, AgentChange::Resolved { instance: self.instance, native_id: request_id.into() }).await?;
+                        continue;
+                    }
+                    SdkEvent::Interrupted { request_id, error } => {
+                        if request_id == "interrupt" {
+                            let result = error.map_or_else(|| { interrupted = true; Ok(()) }, Err);
+                            self.interrupt.send_replace(Some(result));
+                        }
+                        continue;
+                    }
+                    SdkEvent::Ready { .. } => return Err("Claude SDK initialized twice".into()),
+                    SdkEvent::Usage { .. } => return Err("Unexpected Claude usage response".into()),
+                    SdkEvent::Error { message } => return Err(message),
                 };
                 let kind = message["type"].as_str().unwrap_or_default();
                 match kind {
@@ -906,27 +966,7 @@ impl Worker {
                             return Err(text);
                         }
                         result_received = true;
-                        if interrupted {
-                            return Ok(());
-                        }
-                    }
-                    "control_request" => {
-                        if let Err(error) = self.permission(&message).await {
-                            tracing::warn!(target: "bex", operation = "host.claude.request_rejected", message = %error);
-                            let response = if message["request"]["subtype"] == "request_user_dialog" {
-                                json!({"subtype":"success","request_id":message["request_id"],"response":{"behavior":"cancelled"}})
-                            } else { json!({"subtype":"error","request_id":message["request_id"],"error":error}) };
-                            process.write(&json!({"type":"control_response","response":response})).await?;
-                        }
-                    }
-                    "control_cancel_request" => {
-                        let request_id = message["request_id"].as_str().ok_or("Claude canceled request ID is missing")?;
-                        emit(&self.events, AgentChange::Resolved {instance:self.instance,native_id:request_id.into()}).await?;
-                    }
-                    "control_response" if message["response"]["request_id"] == "interrupt" => {
-                        let result = if message["response"]["subtype"] == "success" { interrupted = true; Ok(()) }
-                            else { Err(format!("Claude Codeの停止に失敗しました: {}", message["response"]["error"])) };
-                        self.interrupt.send_replace(Some(result));
+                        if interrupted { return Ok(()); }
                     }
                     _ => {
                         let input_consumed = kind == "user"
@@ -941,9 +981,8 @@ impl Worker {
                         self.message(message).await?;
                     }
                 }
-                // A result ends one response, not necessarily the background
-                // work and its follow-up. Idle is Claude's run-end signal.
-                // It can precede the result; queued input must still be consumed.
+                // A result ends a response. SDK session state also covers its
+                // background work; accepted input must be consumed before idle.
                 if result_received && idle && pending_inputs.is_empty() {
                     return Ok(());
                 }
@@ -1047,17 +1086,11 @@ impl Worker {
         }
     }
 
-    async fn permission(&self, message: &Value) -> Result<(), String> {
-        if message.to_string().len() > 32 * 1024 {
-            return Err("Claude control request exceeds its size limit".into());
-        }
-        let request_id = message["request_id"]
-            .as_str()
-            .ok_or("Claude request ID is missing")?;
+    async fn permission(&self, request_id: &str, request: &SdkRequest) -> Result<(), String> {
         let adapted = crate::host_rpc::requests::claude(
             Uuid::new_v4().to_string().into(),
             &self.turn_id,
-            &message["request"],
+            request,
         )?;
         emit(
             &self.events,
@@ -1623,11 +1656,29 @@ impl crate::host_rpc::requests::AnswerSource for RequestSource {
             .map_err(|_| Failure::new("answer_not_sent", "agent input is closed"))?;
         Ok(async move {
             let (delivered, receipt) = tokio::sync::oneshot::channel();
-            permit.send(Command { value: json!({"type":"control_response","response":{"subtype":"success","request_id":request_id,"response":result}}), user: None, delivered: Some(delivered) });
-            tokio::time::timeout(std::time::Duration::from_secs(15), receipt).await.map_err(|_| Failure::unknown("answer_delivery_unknown", "answer delivery timed out"))?
-                .map_err(|_| Failure::unknown("answer_delivery_unknown", "agent exited before confirming the answer write"))?
+            permit.send(Command {
+                value: SdkInput::Answer {
+                    request_id,
+                    response: Some(result),
+                    error: None,
+                },
+                user: None,
+                delivered: Some(delivered),
+            });
+            tokio::time::timeout(std::time::Duration::from_secs(15), receipt)
+                .await
+                .map_err(|_| {
+                    Failure::unknown("answer_delivery_unknown", "answer delivery timed out")
+                })?
+                .map_err(|_| {
+                    Failure::unknown(
+                        "answer_delivery_unknown",
+                        "agent exited before confirming the answer write",
+                    )
+                })?
                 .map_err(|e| Failure::unknown("answer_delivery_unknown", e))
-        }.boxed())
+        }
+        .boxed())
     }
 }
 
@@ -1655,27 +1706,10 @@ impl Agent for Claude {
     }
     fn availability(&self) -> Result<(), Failure> {
         self.validate_create()?;
-        let program = self.program.as_path();
-        #[cfg(windows)]
-        let program = if program.extension().is_none() {
-            std::borrow::Cow::Owned(program.with_extension("exe"))
-        } else {
-            std::borrow::Cow::Borrowed(program)
-        };
-        let available = if program.components().count() > 1 {
-            program.is_file()
-        } else {
-            std::env::var_os("PATH").is_some_and(|path| {
-                std::env::split_paths(&path)
-                    .any(|directory| directory.join(program.as_os_str()).is_file())
-            })
-        };
-        if !available {
-            return Err(Failure::new(
-                "provider_unavailable",
-                "agent executable is missing",
-            ));
-        }
+        let path = std::env::var_os("PATH");
+        process::executable(&self.program, path.as_deref())
+            .map_err(|error| Failure::new("provider_unavailable", error))?;
+        process::runtime().map_err(|error| Failure::new("provider_unavailable", error))?;
         Ok(())
     }
     fn storage_directory(&self) -> &Path {

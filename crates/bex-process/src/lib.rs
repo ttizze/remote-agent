@@ -11,6 +11,23 @@ pub fn command(program: &Path) -> io::Result<Command> {
 
 fn supervisor_command() -> io::Result<Command> {
     let executable = std::env::current_exe()?;
+    let supervisor = companion_path(
+        &executable,
+        &format!("bex-provider-supervisor{}", std::env::consts::EXE_SUFFIX),
+    )?;
+    if !supervisor.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "bex-provider-supervisor must be built and installed beside the Host; process execution is unavailable",
+        ));
+    }
+    let mut command = Command::new(supervisor);
+    // Closing its input lets the supervisor terminate and reap the provider group.
+    command.kill_on_drop(false);
+    Ok(command)
+}
+
+pub fn companion_path(executable: &Path, name: &str) -> io::Result<std::path::PathBuf> {
     let directory = executable
         .parent()
         .ok_or_else(|| io::Error::other("Host executable directory is unavailable"))?;
@@ -19,21 +36,7 @@ fn supervisor_command() -> io::Result<Command> {
     } else {
         directory
     };
-    let supervisor = directory.join(format!(
-        "bex-provider-supervisor{}",
-        std::env::consts::EXE_SUFFIX
-    ));
-    if !supervisor.is_file() {
-        return Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            "bex-provider-supervisor must be built and installed beside the Host; process execution is unavailable",
-        ));
-    }
-    let mut command = Command::new(supervisor);
-    // Do not kill the supervisor on drop: closing its input lets it terminate
-    // and reap the entire provider process group first.
-    command.kill_on_drop(false);
-    Ok(command)
+    Ok(directory.join(name))
 }
 
 /// On Windows the Host owns a Job Object for the supervisor and all PTY

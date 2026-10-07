@@ -884,6 +884,7 @@ pub async fn run(tests: Vec<String>, without_codex: bool, driver: TestDriver) ->
             "--bin",
             "bex-claude-fixture"
         ],
+        args![vec; "node", "scripts/install-claude-sdk.mjs", target.join("debug")],
     ] {
         supervision::run(&arguments, &cwd, Io::Log(&log), &cancel, BUILD_TIMEOUT).await?;
     }

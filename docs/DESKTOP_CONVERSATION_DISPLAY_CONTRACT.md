@@ -31,12 +31,16 @@ explicitly instead of creating a Codex conversation or dropping the draft.
 
 Claude's `result` ends one response, while `session_state_changed: idle` marks
 the end of its run, including background work and the resulting follow-up.
-The Host requests these state events and keeps the turn running until both the
-result and idle have arrived, in either order, and queued input has been consumed.
+The official Agent SDK carries these events in a persistent conversation.
+The Host keeps the turn running until both result and idle have arrived,
+in either order, and queued input has been consumed.
 Intermediate text such as “あとで報告します” therefore retains the loading
-indicator; a promise in the text alone does not imply active work. Reconnection
+indicator after the response, so it remains visible at the latest content even
+when a long response puts the activity header above the viewport;
+a promise in the text alone does not imply active work. Reconnection
 and history refresh retain the running turn and actionable requests.
-Acceptance: `claude_keeps_loading_through_background_results_and_follow_up_after_reconnect`.
+Acceptance: `claude_keeps_loading_through_background_results_and_follow_up_after_reconnect`
+and desktop `background_work_keeps_progress_below_the_response_until_the_turn_ends`.
 
 ## Turn lifecycle
 

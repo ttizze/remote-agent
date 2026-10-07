@@ -1721,7 +1721,18 @@ mod tests {
             thread.requests.get(id).map(|request| request.delivery)
         };
         for native in ["cancelled", "interrupted", "written"] {
-            let adapted = super::super::requests::claude(uuid::Uuid::new_v4().to_string().into(), &"unrelated".into(), &serde_json::json!({"subtype":"elicitation","mcp_server_name":"server","requested_schema":{"type":"object","properties":{}}})).unwrap();
+            let adapted = super::super::requests::claude(
+                uuid::Uuid::new_v4().to_string().into(),
+                &"unrelated".into(),
+                &crate::claude::SdkRequest::Elicitation {
+                    server_name: "server".into(),
+                    message: String::new(),
+                    mode: None,
+                    url: None,
+                    requested_schema: Some(serde_json::json!({"type":"object","properties":{}})),
+                },
+            )
+            .unwrap();
             let id = adapted.request.id.clone();
             router
                 .request(
@@ -1751,7 +1762,9 @@ mod tests {
                 assert!(
                     input
                         .try_send(crate::claude::Command {
-                            value: serde_json::Value::Null,
+                            value: crate::claude::SdkInput::Interrupt {
+                                request_id: "unused".into()
+                            },
                             user: None,
                             delivered: None,
                         })
@@ -1777,7 +1790,9 @@ mod tests {
                 assert_eq!(delivery(&id), Some(RequestDelivery::Unknown));
                 assert!(command.delivered.is_some());
             } else {
-                assert_eq!(command.value["response"]["request_id"], native);
+                assert!(
+                    matches!(command.value, crate::claude::SdkInput::Answer { request_id, .. } if request_id == native)
+                );
                 command.delivered.unwrap().send(Ok(())).unwrap();
                 operation.await.unwrap();
                 assert_eq!(delivery(&id), Some(RequestDelivery::Sent));
@@ -1831,7 +1846,7 @@ mod tests {
             let (input, mut receiver) = tokio::sync::mpsc::channel(1);
             let stopped = tokio_util::sync::CancellationToken::new();
             let adapted = if claude {
-                super::super::requests::claude("request".into(), &"turn".into(), &serde_json::json!({"subtype":"elicitation","requested_schema":{"type":"object","properties":{}}}))
+                super::super::requests::claude("request".into(), &"turn".into(), &crate::claude::SdkRequest::Elicitation { server_name: String::new(), message: String::new(), mode: None, url: None, requested_schema: Some(serde_json::json!({"type":"object","properties":{}})) })
             } else {
                 super::super::requests::codex("request".into(),"mcpServer/elicitation/request",&serde_json::json!({"mode":"form","requestedSchema":{"type":"object","properties":{}}}))
             }.unwrap();

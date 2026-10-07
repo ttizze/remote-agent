@@ -1172,7 +1172,13 @@ mod tests {
         let adapted = super::super::requests::claude(
             "request".into(),
             &"turn".into(),
-            &json!({"subtype":"elicitation","requested_schema":{"type":"object","properties":{}}}),
+            &crate::claude::SdkRequest::Elicitation {
+                server_name: String::new(),
+                message: String::new(),
+                mode: None,
+                url: None,
+                requested_schema: Some(json!({"type":"object","properties":{}})),
+            },
         )
         .unwrap();
         router
@@ -1791,7 +1797,16 @@ fn identical_native_request_ids_keep_their_source_instance() {
             )
             .unwrap()
         } else {
-            super::requests::claude(uuid::Uuid::new_v4().to_string().into(), &"turn".into(), &serde_json::json!({"subtype":"can_use_tool","tool_name":"Bash","tool_use_id":"tool","input":{"command":"pwd"}})).unwrap()
+            super::requests::claude(
+                uuid::Uuid::new_v4().to_string().into(),
+                &"turn".into(),
+                &crate::claude::SdkRequest::Tool {
+                    tool_name: "Bash".into(),
+                    tool_use_id: Some("tool".into()),
+                    input: serde_json::json!({"command":"pwd"}),
+                },
+            )
+            .unwrap()
         };
         let request_id = adapted.request.id.clone();
         let choice_id = adapted.request.body.choices()[0].id.clone();

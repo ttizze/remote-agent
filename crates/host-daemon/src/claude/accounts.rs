@@ -202,24 +202,41 @@ impl Accounts {
         let directory = self.directory.clone();
         let cache = self.usage.entry(id.to_owned()).or_default().clone();
         Ok(async move {
-            cache.read(async {
-                let (mut process, _) = super::process::Process::start(
-                    &program, &config_home, &home, &directory, None, None, None,
-                ).await?;
-                let result = async {
-                    process.write(&serde_json::json!({"type":"control_request","request_id":"usage","request":{"subtype":"get_usage","skip_behaviors":true}})).await?;
-                    while let Some(message) = process.read().await? {
-                        if message["type"] == "control_response" && message["response"]["request_id"] == "usage" {
-                            return if message["response"]["subtype"] == "success" {
-                                Ok(crate::account_usage::claude(&message["response"]["response"]))
-                            } else { Err("Claude usage unavailable".into()) };
+            cache
+                .read(async {
+                    let (mut process, _) = super::process::Process::start(
+                        &program,
+                        &config_home,
+                        &home,
+                        &directory,
+                        None,
+                        None,
+                        None,
+                    )
+                    .await?;
+                    let result = async {
+                        process.write(&super::process::Input::Usage).await?;
+                        while let Some(event) = process.read().await? {
+                            if let super::process::Event::Error { message } = event {
+                                return Err(message);
+                            }
+                            if let super::process::Event::Usage { usage, error } = event {
+                                return match (usage, error) {
+                                    (Some(usage), None) => Ok(crate::account_usage::claude(&usage)),
+                                    (_, error) => {
+                                        Err(error
+                                            .unwrap_or_else(|| "Claude usage unavailable".into()))
+                                    }
+                                };
+                            }
                         }
+                        Err("Claude exited".into())
                     }
-                    Err("Claude exited".into())
-                }.await;
-                let _ = process.finish().await;
-                result
-            }).await
+                    .await;
+                    let _ = process.finish().await;
+                    result
+                })
+                .await
         })
     }
 

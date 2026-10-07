@@ -7,6 +7,16 @@ use std::{
     path::Path,
 };
 
+fn option(args: &[String], name: &str) -> Option<String> {
+    args.iter().enumerate().find_map(|(index, arg)| {
+        if arg == name {
+            args.get(index + 1).cloned()
+        } else {
+            arg.strip_prefix(&format!("{name}=")).map(str::to_owned)
+        }
+    })
+}
+
 fn native(mut value: Value) {
     if value["type"] == "system" && value["subtype"] == "task_notification" {
         let Some(tool) = value["tool_use_id"].as_str() else {
@@ -34,11 +44,9 @@ fn native(mut value: Value) {
         value["toolUseResult"] = result;
     }
     let args: Vec<_> = std::env::args().collect();
-    let session = args
-        .windows(2)
-        .find(|pair| pair[0] == "--session-id" || pair[0] == "--resume")
-        .unwrap()[1]
-        .clone();
+    let session = option(&args, "--resume")
+        .or_else(|| option(&args, "--session-id"))
+        .unwrap();
     let directory = Path::new(&home)
         .join("projects")
         .join("fixture-native-project");
@@ -140,15 +148,18 @@ fn main() {
         return;
     }
 
-    let option = |name: &str| {
-        args.windows(2)
-            .find(|pair| pair[0] == name)
-            .map(|pair| pair[1].clone())
-    };
-    assert!(args.iter().any(|arg| arg == "-p"));
-    assert_eq!(option("--input-format").as_deref(), Some("stream-json"));
-    assert_eq!(option("--output-format").as_deref(), Some("stream-json"));
-    assert_eq!(option("--permission-prompt-tool").as_deref(), Some("stdio"));
+    assert_eq!(
+        option(&args, "--input-format").as_deref(),
+        Some("stream-json")
+    );
+    assert_eq!(
+        option(&args, "--output-format").as_deref(),
+        Some("stream-json")
+    );
+    assert_eq!(
+        option(&args, "--permission-prompt-tool").as_deref(),
+        Some("stdio")
+    );
     assert_eq!(
         std::env::var("CLAUDE_CODE_SDK_READS_SESSION_STATE").as_deref(),
         Ok("1")
@@ -162,8 +173,8 @@ fn main() {
         .ok()
         .map(|bytes| serde_json::from_slice(&bytes).unwrap())
         .unwrap_or(json!({}));
-    let session = option("--resume")
-        .or_else(|| option("--session-id"))
+    let session = option(&args, "--resume")
+        .or_else(|| option(&args, "--session-id"))
         .unwrap_or_else(|| "catalog".into());
     if session != "catalog" {
         let mut trace = fs::OpenOptions::new()
@@ -188,7 +199,7 @@ fn main() {
         .join("projects")
         .join("fixture-native-project")
         .join(format!("{session}.inputs.json"));
-    let mut inputs: Vec<Value> = if option("--resume").is_some() {
+    let mut inputs: Vec<Value> = if option(&args, "--resume").is_some() {
         serde_json::from_slice(
             &fs::read(&history).expect("resume must find the original session in native storage"),
         )
@@ -252,7 +263,7 @@ fn main() {
                     "unauthenticated input must never reach Claude"
                 );
                 assert_eq!(
-                    option("--model").as_deref(),
+                    option(&args, "--model").as_deref(),
                     Some(config["expectedModel"].as_str().unwrap_or("default"))
                 );
                 if waiting.take() == Some("wait") {
@@ -270,7 +281,7 @@ fn main() {
                 }
                 let content = value["message"]["content"].clone();
                 inputs.push(
-                    json!({"content":content,"model":option("--model"),"effort":option("--effort"),"pid":std::process::id()}),
+                    json!({"content":content,"model":option(&args, "--model"),"effort":option(&args, "--effort"),"pid":std::process::id()}),
                 );
                 let bytes = serde_json::to_vec(&inputs).unwrap();
                 fs::create_dir_all(history.parent().unwrap()).unwrap();

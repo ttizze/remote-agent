@@ -283,7 +283,11 @@ pub(crate) fn codex(id: RequestId, method: &str, params: &Value) -> Result<Adapt
             RequestBody::Elicitation {
                 server: string(params, "serverName"),
                 message: string(params, "message"),
-                input: elicitation_input(params, "requestedSchema")?,
+                input: elicitation_input(
+                    params["mode"].as_str(),
+                    params["url"].as_str(),
+                    &params["requestedSchema"],
+                )?,
             },
             NativeAnswers::Elicitation,
         ),
@@ -311,16 +315,19 @@ pub(crate) fn codex(id: RequestId, method: &str, params: &Value) -> Result<Adapt
 pub(crate) fn claude(
     id: RequestId,
     turn_id: &agent_protocol::ids::TurnId,
-    params: &Value,
+    params: &crate::claude::SdkRequest,
 ) -> Result<AdaptedRequest, String> {
-    let (target, body, answers) = match params["subtype"].as_str() {
-        Some("can_use_tool") => {
+    let (target, body, answers) = match params {
+        crate::claude::SdkRequest::Tool {
+            tool_name,
+            input,
+            tool_use_id,
+        } => {
             let target = RequestTarget::Turn {
                 turn_id: turn_id.clone(),
-                item_id: params["tool_use_id"].as_str().map(Into::into),
+                item_id: tool_use_id.as_deref().map(Into::into),
             };
-            let input = &params["input"];
-            if params["tool_name"] == "AskUserQuestion" {
+            if tool_name == "AskUserQuestion" {
                 let (body, answers) = questions(&id, &input["questions"], Some(input.clone()))?;
                 (target, body, answers)
             } else {
@@ -337,16 +344,16 @@ pub(crate) fn claude(
                     ),
                 ]
                 .into();
-                let kind = match params["tool_name"].as_str() {
-                    Some("Bash") => ApprovalKind::Command,
-                    Some("Write" | "Edit" | "NotebookEdit") => ApprovalKind::FileChange,
+                let kind = match tool_name.as_str() {
+                    "Bash" => ApprovalKind::Command,
+                    "Write" | "Edit" | "NotebookEdit" => ApprovalKind::FileChange,
                     _ => ApprovalKind::Tool,
                 };
                 (
                     target,
                     RequestBody::Approval {
                         kind,
-                        description: string(params, "tool_name"),
+                        description: tool_name.clone(),
                         details: detail(input),
                         choices: vec![allow, deny],
                     },
@@ -354,16 +361,25 @@ pub(crate) fn claude(
                 )
             }
         }
-        Some("elicitation") => (
+        crate::claude::SdkRequest::Elicitation {
+            server_name,
+            message,
+            mode,
+            url,
+            requested_schema,
+        } => (
             RequestTarget::Session,
             RequestBody::Elicitation {
-                server: string(params, "mcp_server_name"),
-                message: string(params, "message"),
-                input: elicitation_input(params, "requested_schema")?,
+                server: server_name.clone(),
+                message: message.clone(),
+                input: elicitation_input(
+                    mode.as_deref(),
+                    url.as_deref(),
+                    requested_schema.as_ref().unwrap_or(&Value::Null),
+                )?,
             },
             NativeAnswers::Elicitation,
         ),
-        _ => return Err("unsupported Claude control request".into()),
     };
     Ok(AdaptedRequest {
         request: Request {
@@ -641,10 +657,14 @@ fn permission_description(permissions: &serde_json::Map<String, Value>) -> Optio
     Some(lines.join("\n"))
 }
 
-fn elicitation_input(params: &Value, schema_key: &str) -> Result<ElicitationInput, String> {
-    match params["mode"].as_str().unwrap_or("form") {
+fn elicitation_input(
+    mode: Option<&str>,
+    url: Option<&str>,
+    schema: &Value,
+) -> Result<ElicitationInput, String> {
+    match mode.unwrap_or("form") {
         "url" => {
-            let url = params["url"].as_str().ok_or("elicitation URL is missing")?;
+            let url = url.ok_or("elicitation URL is missing")?;
             let parsed = reqwest::Url::parse(url).map_err(|_| "elicitation URL is invalid")?;
             if !matches!(parsed.scheme(), "http" | "https") {
                 return Err("unsupported elicitation URL scheme".into());
@@ -652,7 +672,7 @@ fn elicitation_input(params: &Value, schema_key: &str) -> Result<ElicitationInpu
             Ok(ElicitationInput::Url { url: url.into() })
         }
         "form" | "openai/form" => Ok(ElicitationInput::Form {
-            fields: form_fields(&params[schema_key])?,
+            fields: form_fields(schema)?,
         }),
         _ => Err("unsupported elicitation mode".into()),
     }
@@ -1045,12 +1065,75 @@ mod tests {
     }
 
     #[test]
+    fn claude_sdk_approvals_keep_the_tool_target_and_native_decisions() {
+        for (tool_name, expected) in [
+            ("Bash", ApprovalKind::Command),
+            ("Write", ApprovalKind::FileChange),
+            ("Edit", ApprovalKind::FileChange),
+            ("NotebookEdit", ApprovalKind::FileChange),
+            ("Read", ApprovalKind::Tool),
+        ] {
+            let input = json!({"command":"pwd","opaque":{"value":"保持"}});
+            let adapted = claude(
+                "request".into(),
+                &"turn".into(),
+                &crate::claude::SdkRequest::Tool {
+                    tool_name: tool_name.into(),
+                    input: input.clone(),
+                    tool_use_id: Some("tool".into()),
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                adapted.request.target,
+                RequestTarget::Turn {
+                    turn_id: "turn".into(),
+                    item_id: Some("tool".into())
+                }
+            );
+            let RequestBody::Approval {
+                kind,
+                description,
+                choices,
+                ..
+            } = &adapted.request.body
+            else {
+                panic!("approval")
+            };
+            assert_eq!(kind, &expected);
+            assert_eq!(description, tool_name);
+            assert_eq!(choices.len(), 2);
+            for (choice, native) in choices.iter().zip([
+                json!({"behavior":"allow","updatedInput":input}),
+                json!({"behavior":"deny","message":"ユーザーがこの操作を拒否しました。"}),
+            ]) {
+                assert_eq!(
+                    adapted
+                        .answers
+                        .translate(
+                            &adapted.request.body,
+                            &Answer::Approval {
+                                choice_id: choice.id.clone()
+                            }
+                        )
+                        .unwrap(),
+                    native
+                );
+            }
+        }
+    }
+
+    #[test]
     fn claude_questions_restore_native_labels_only_at_the_answer_boundary() {
         let input = json!({"questions":[{"question":"Choose colors","header":"colors","multiSelect":true,"options":[{"label":"Red"},{"label":"Blue"}]}],"otherInput":"retained"});
         let adapted = claude(
             "public-request".into(),
             &"turn".into(),
-            &json!({"subtype":"can_use_tool","tool_name":"AskUserQuestion","input":input}),
+            &crate::claude::SdkRequest::Tool {
+                tool_name: "AskUserQuestion".into(),
+                input: input.clone(),
+                tool_use_id: None,
+            },
         )
         .unwrap();
         let RequestBody::Question { questions } = &adapted.request.body else {
@@ -1077,12 +1160,15 @@ mod tests {
         let mut expected = input.clone();
         expected["answers"] = json!({"Choose colors":"Red, Blue"});
         assert_eq!(result, json!({"behavior":"allow","updatedInput":expected}));
-        assert!(claude("request".into(), &"turn".into(), &json!({"subtype":"can_use_tool","tool_name":"AskUserQuestion","input":{"questions":[{"question":"same"},{"question":"same"}]}})).is_err());
         assert!(
             claude(
                 "request".into(),
                 &"turn".into(),
-                &json!({"subtype":"request_user_dialog","dialog_kind":"future"})
+                &crate::claude::SdkRequest::Tool {
+                    tool_name: "AskUserQuestion".into(),
+                    input: json!({"questions":[{"question":"same"},{"question":"same"}]}),
+                    tool_use_id: None
+                }
             )
             .is_err()
         );
@@ -1104,6 +1190,20 @@ mod tests {
         )
         .unwrap();
         assert_eq!(adapted.request.target, RequestTarget::Session);
+        let sdk = claude(
+            "sdk-request".into(),
+            &"turn".into(),
+            &crate::claude::SdkRequest::Elicitation {
+                server_name: "mcp".into(),
+                message: String::new(),
+                mode: None,
+                url: None,
+                requested_schema: Some(schema.clone()),
+            },
+        )
+        .unwrap();
+        assert_eq!(sdk.request.target, RequestTarget::Session);
+        assert_eq!(sdk.request.body, adapted.request.body);
         let RequestBody::Elicitation {
             input: ElicitationInput::Form { fields },
             ..
@@ -1139,8 +1239,37 @@ mod tests {
                 form_fields(&json!({"type":"object","properties":{"field":property}})).is_err()
             );
         }
-        let url = claude("request".into(), &"turn".into(), &json!({"subtype":"elicitation","mcp_server_name":"mcp","mode":"url","url":"https://example.com/login"})).unwrap();
+        let url = claude(
+            "request".into(),
+            &"turn".into(),
+            &crate::claude::SdkRequest::Elicitation {
+                server_name: "mcp".into(),
+                message: String::new(),
+                mode: Some("url".into()),
+                url: Some("https://example.com/login".into()),
+                requested_schema: None,
+            },
+        )
+        .unwrap();
         assert_eq!(url.request.target, RequestTarget::Session);
+        assert_eq!(
+            url.request.body,
+            RequestBody::Elicitation {
+                server: "mcp".into(),
+                message: String::new(),
+                input: ElicitationInput::Url {
+                    url: "https://example.com/login".into()
+                },
+            }
+        );
+        for (mode, url) in [
+            (Some("url"), None),
+            (Some("url"), Some("invalid")),
+            (Some("url"), Some("file:///tmp/private")),
+            (Some("future"), Some("https://example.com")),
+        ] {
+            assert!(elicitation_input(mode, url, &schema).is_err());
+        }
         assert_eq!(
             url.answers
                 .translate(
