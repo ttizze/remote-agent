@@ -1071,6 +1071,7 @@ impl HostRpcService {
         let devices = self.inner.resources.devices.clone();
         let thread = params.thread_id.clone();
         let prefer_mjpeg = params.prefer_mjpeg;
+        let lease = std::sync::Arc::new(devices.acquire_stream(&thread, prefer_mjpeg).await);
         let receiver = Arc::new(tokio::sync::Mutex::new(devices.subscribe()));
         let initial = agent_protocol::device::DeviceEvent::State(devices.state_async().await);
         crate::conversation::stream(
@@ -1079,9 +1080,9 @@ impl HostRpcService {
                 agent_protocol::device::DeviceServiceState::default(),
             ),
             move || {
-                let (receiver, devices, thread) =
-                    (receiver.clone(), devices.clone(), thread.clone());
+                let (receiver, devices, thread, lease) = (receiver.clone(), devices.clone(), thread.clone(), lease.clone());
                 Box::pin(async move {
+                    let _lease = lease;
                     loop {
                         let result = {
                             let mut receiver = receiver.lock().await;
@@ -1092,19 +1093,15 @@ impl HostRpcService {
                             .await
                         };
                         match result {
-                            Ok(Ok(event)) => return Some(vec![event]),
+                            Ok(Ok(event)) if crate::device::DeviceService::event_belongs_to_thread(&event, &thread) => return Some(vec![event]),
+                            Ok(Ok(_)) => continue,
                             Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {
                                 return Some(vec![agent_protocol::device::DeviceEvent::State(
                                     devices.state_async().await,
                                 )]);
                             }
                             Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => return None,
-                            Err(_) => {
-                                let frames = devices.frames_for_thread(&thread, prefer_mjpeg).await;
-                                if !frames.is_empty() {
-                                    return Some(frames);
-                                }
-                            }
+                            Err(_) => {}
                         }
                     }
                 })

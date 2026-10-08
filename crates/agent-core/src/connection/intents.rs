@@ -95,6 +95,44 @@ fn device_orientation(value: &str) -> Result<d::DeviceOrientation, PeerError> {
         _ => Err(invalid("Unknown device orientation")),
     }
 }
+fn device_fold_posture(value: DeviceFoldPostureIntent) -> d::DeviceFoldPosture {
+    match value {
+        DeviceFoldPostureIntent::Closed => d::DeviceFoldPosture::Closed,
+        DeviceFoldPostureIntent::Opened => d::DeviceFoldPosture::Opened,
+    }
+}
+fn device_duo_pose(value: DeviceDuoPoseIntent) -> d::DeviceDuoPose {
+    match value {
+        DeviceDuoPoseIntent::Closed => d::DeviceDuoPose::Closed,
+        DeviceDuoPoseIntent::Book => d::DeviceDuoPose::Book,
+        DeviceDuoPoseIntent::Open => d::DeviceDuoPose::Open,
+        DeviceDuoPoseIntent::Laptop => d::DeviceDuoPose::Laptop,
+        DeviceDuoPoseIntent::Tent => d::DeviceDuoPose::Tent,
+    }
+}
+fn device_duo_physical(value: DeviceDuoPhysicalIntent) -> d::DeviceDuoPhysical {
+    match value {
+        DeviceDuoPhysicalIntent::Faceup => d::DeviceDuoPhysical::Faceup,
+        DeviceDuoPhysicalIntent::Facedown => d::DeviceDuoPhysical::Facedown,
+    }
+}
+fn device_duo_orientation(value: DeviceDuoOrientationIntent) -> d::DeviceOrientation {
+    match value {
+        DeviceDuoOrientationIntent::Portrait => d::DeviceOrientation::Portrait,
+        DeviceDuoOrientationIntent::LandscapeLeft => d::DeviceOrientation::LandscapeLeft,
+        DeviceDuoOrientationIntent::PortraitUpsideDown => d::DeviceOrientation::PortraitUpsideDown,
+        DeviceDuoOrientationIntent::LandscapeRight => d::DeviceOrientation::LandscapeRight,
+    }
+}
+fn device_duo_command(value: DeviceDuoCommandIntent) -> d::DeviceDuoCommand {
+    match value {
+        DeviceDuoCommandIntent::Angle { value } => d::DeviceDuoCommand::Angle { value },
+        DeviceDuoCommandIntent::Pose { value } => d::DeviceDuoCommand::Pose { value: device_duo_pose(value) },
+        DeviceDuoCommandIntent::Table { value } => d::DeviceDuoCommand::Table { value },
+        DeviceDuoCommandIntent::Physical { value } => d::DeviceDuoCommand::Physical { value: device_duo_physical(value) },
+        DeviceDuoCommandIntent::Orientation { value } => d::DeviceDuoCommand::Orientation { value: device_duo_orientation(value) },
+    }
+}
 fn device_permission(value: &str) -> Result<d::DevicePermission, PeerError> {
     match value {
         "camera" => Ok(d::DevicePermission::Camera),
@@ -150,8 +188,8 @@ fn device_action(action: DeviceActionIntent) -> Result<d::DeviceActionKind, Peer
         }
         DeviceActionIntent::HardwareButton { button } => d::DeviceActionKind::Input(d::DeviceInputKind::HardwareButton(device_hardware_button(&button)?)),
         DeviceActionIntent::Rotate => d::DeviceActionKind::Input(d::DeviceInputKind::Rotate),
-        DeviceActionIntent::Fold { command } => d::DeviceActionKind::Input(d::DeviceInputKind::Fold { command }),
-        DeviceActionIntent::Duo { command } => d::DeviceActionKind::Input(d::DeviceInputKind::Duo { command }),
+        DeviceActionIntent::Fold { command } => d::DeviceActionKind::Input(d::DeviceInputKind::Fold { command: device_fold_posture(command) }),
+        DeviceActionIntent::Duo { command } => d::DeviceActionKind::Input(d::DeviceInputKind::Duo { command: device_duo_command(command) }),
     })
 }
 fn device_touch_phase(value: &str) -> Result<d::DeviceTouchPhase, PeerError> {
