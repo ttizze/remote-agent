@@ -126,20 +126,22 @@ impl Desktop {
     }
 
     fn attach_device_recording(&self, draft_key: String, recording: agent_core::view::device::DeviceRecordingView) {
-        let Some(extension) = recording.artifact_extension.clone() else {
+        let file_name = recording.file_name.clone();
+        if file_name.trim().is_empty() {
             let message = "The Host did not return a playable device recording. Save or attach is unavailable until recording finalization succeeds.".to_owned();
             self.stage(draft_key, move || {
                 Err::<(Vec<agent_core::state::LocalFile>, Option<String>), String>(message)
             });
             return;
-        };
-        let Some(mime_type) = recording.artifact_mime_type.clone() else {
+        }
+        let mime_type = recording.mime_type.clone();
+        if mime_type.trim().is_empty() {
             let message = "The Host did not return a playable device recording. Save or attach is unavailable until recording finalization succeeds.".to_owned();
             self.stage(draft_key, move || {
                 Err::<(Vec<agent_core::state::LocalFile>, Option<String>), String>(message)
             });
             return;
-        };
+        }
         if recording.bytes.is_empty() {
             let message = "The Host did not return a playable device recording. Save or attach is unavailable until recording finalization succeeds.".to_owned();
             self.stage(draft_key, move || {
@@ -147,7 +149,7 @@ impl Desktop {
             });
             return;
         }
-        let name = format!("device-recording-{draft_key}.{extension}");
+        let name = file_name;
         let bytes = recording.bytes;
         let directory = self.attachments.directory.clone();
         self.stage(draft_key, move || {
@@ -223,7 +225,7 @@ impl Desktop {
                     session.thread_id.clone(),
                     session.host_id.clone(),
                     session.device_id.clone(),
-                    session.opened_at.clone(),
+                    session.session_epoch.clone(),
                 )
             })
             .collect::<BTreeSet<_>>();
@@ -242,7 +244,6 @@ impl Desktop {
         for image in self.panels.device.decoder.push(&events) {
             let format = match image.format {
                 device_decoder::DeviceImageFormat::Jpeg => ImageFormat::Jpeg,
-                device_decoder::DeviceImageFormat::Png => ImageFormat::Png,
             };
             self.panels.device.frames.insert(
                 (
@@ -448,12 +449,12 @@ impl Desktop {
                         view.perform(Intent::DeviceAction {
                             host_id: Some(host_id.clone()),
                             device_id: device_id.clone(),
-                            action: DeviceActionIntent::Touch { phase: "begin".into(), x: 0.5, y: 0.5, raw: false },
+                            action: DeviceActionIntent::Touch { phase: "begin".into(), x: 0.5, y: 0.5 },
                         });
                         view.perform(Intent::DeviceAction {
                             host_id: Some(host_id.clone()),
                             device_id: device_id.clone(),
-                            action: DeviceActionIntent::Touch { phase: "end".into(), x: 0.5, y: 0.5, raw: false },
+                            action: DeviceActionIntent::Touch { phase: "end".into(), x: 0.5, y: 0.5 },
                         });
                     }
                 })))

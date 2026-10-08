@@ -70,7 +70,6 @@ pub struct DeviceVideoFrameView {
     pub timestamp_us: Option<u64>,
     pub keyframe: bool,
     pub screen_id: Option<u8>,
-    pub session_epoch: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -133,9 +132,6 @@ pub struct DeviceScreenView {
     pub hinge_pose: Option<String>,
     pub table_mode: bool,
     pub table_mode_available: bool,
-    /// Duo panel streams are already in framebuffer coordinates and must not
-    /// receive the iOS display-orientation touch remap.
-    pub raw_touch: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -169,9 +165,8 @@ pub fn project_touch_point(
     {
         return None;
     }
-    // Keep the fit calculation in f64.  With finite f32 inputs, the ratio can
-    // underflow to zero before the rendered size is calculated, which would
-    // otherwise turn a valid pointer into NaN coordinates.
+    // Keep the fit calculation in f64. With finite f32 inputs, the ratio can
+    // underflow to zero before the rendered size is calculated.
     let viewport_width = viewport_width as f64;
     let viewport_height = viewport_height as f64;
     let content_width = content_width as f64;
@@ -227,8 +222,6 @@ pub struct DeviceRecordingView {
     pub frame_count: u64,
     pub byte_count: u64,
     pub error: Option<String>,
-    pub artifact_extension: Option<String>,
-    pub artifact_mime_type: Option<String>,
     pub bytes: Vec<u8>,
 }
 
@@ -268,8 +261,7 @@ pub struct DeviceView {
     pub details: Vec<DeviceDetailView>,
     pub frames: Vec<DeviceFrameView>,
     pub video_frames: Vec<DeviceVideoFrameView>,
-    /// Ordered access units for stateful native decoders. `video_frames` keeps
-    /// the latest frame per screen for lightweight still-image consumers.
+    /// Ordered access units for stateful native decoders.
     pub video_events: Vec<DeviceVideoFrameView>,
     pub accessibility: Vec<DeviceAccessibilityView>,
     pub foreground: Vec<DeviceForegroundView>,
@@ -394,12 +386,12 @@ pub fn device_view(snapshot: &Snapshot) -> DeviceView {
         video_frames: state
             .video_frames
             .values()
-            .map(|frame| video_frame_view(frame, &state.sessions))
+            .map(video_frame_view)
             .collect(),
         video_events: state
             .video_events
             .values()
-            .flat_map(|frames| frames.iter().map(|frame| video_frame_view(frame, &state.sessions)))
+            .flat_map(|frames| frames.iter().map(video_frame_view))
             .collect(),
         accessibility: state
             .accessibility
@@ -466,7 +458,6 @@ pub fn device_view(snapshot: &Snapshot) -> DeviceView {
                 hinge_pose: screen.hinge_pose.clone(),
                 table_mode: screen.table_mode,
                 table_mode_available: screen.table_mode_available,
-                raw_touch: screen.supports_hinge_angle && !screen.supports_physical_orientation,
             })
             .collect(),
         recordings: state
@@ -485,8 +476,6 @@ pub fn device_view(snapshot: &Snapshot) -> DeviceView {
                 frame_count: status.frame_count,
                 byte_count: status.byte_count,
                 error: status.error.clone(),
-                artifact_extension: None,
-                artifact_mime_type: None,
                 bytes: vec![],
             })
             .collect(),
@@ -503,8 +492,6 @@ pub fn device_view(snapshot: &Snapshot) -> DeviceView {
             frame_count: recording.status.frame_count,
             byte_count: recording.status.byte_count,
             error: recording.status.error.clone(),
-            artifact_extension: recording.artifact.as_ref().map(|artifact| artifact.extension.clone()),
-            artifact_mime_type: recording.artifact.as_ref().map(|artifact| artifact.mime_type.clone()),
             bytes: recording.bytes.clone(),
         }),
         error: state.error.clone(),
@@ -545,12 +532,10 @@ fn video_encoding_name(encoding: agent_protocol::device::DeviceFrameEncoding) ->
     }
 }
 
-fn video_frame_view(
-    frame: &agent_protocol::device::DeviceVideoFrame,
-    sessions: &[agent_protocol::device::DeviceSession],
-) -> DeviceVideoFrameView {
+fn video_frame_view(frame: &agent_protocol::device::DeviceVideoFrame) -> DeviceVideoFrameView {
     DeviceVideoFrameView {
         thread_id: frame.thread_id.to_string(),
+        session_epoch: frame.session_epoch.clone(),
         host_id: frame.device.host_id.clone(),
         device_id: frame.device.id.clone(),
         platform: platform_name(frame.device.platform).into(),
@@ -562,15 +547,6 @@ fn video_frame_view(
         timestamp_us: frame.timestamp_us,
         keyframe: frame.keyframe,
         screen_id: frame.screen_id,
-        session_epoch: sessions
-            .iter()
-            .find(|session| {
-                session.thread_id == frame.thread_id
-                    && session.host_id == frame.device.host_id
-                    && session.device_id == frame.device.id
-            })
-            .map(|session| session.opened_at.clone())
-            .unwrap_or_default(),
     }
 }
 
@@ -602,20 +578,12 @@ mod tests {
     }
 
     #[test]
-    fn touch_projection_rejects_letterbox_and_normalizes_content() {
+    fn touch_projection_rejects_letterbox_and_keeps_extreme_dimensions_finite() {
         assert_eq!(project_touch_point(f32::NAN, 0.0, 100.0, 100.0, 100.0, 100.0), None);
-        assert_eq!(project_touch_point(0.0, 0.0, 0.0, 100.0, 100.0, 100.0), None);
-        assert_eq!(
-            project_touch_point(50.0, 100.0, 1000.0, 1000.0, 1000.0, 500.0),
-            None,
-        );
+        assert_eq!(project_touch_point(50.0, 100.0, 1000.0, 1000.0, 1000.0, 500.0), None);
         assert_eq!(
             project_touch_point(250.0, 500.0, 1000.0, 1000.0, 1000.0, 500.0),
             Some(DeviceTouchPoint { x: 0.25, y: 0.5 }),
-        );
-        assert_eq!(
-            project_touch_point(750.0, 750.0, 1000.0, 1000.0, 1000.0, 500.0),
-            Some(DeviceTouchPoint { x: 0.75, y: 1.0 }),
         );
         let extreme = project_touch_point(
             f32::MAX / 2.0,

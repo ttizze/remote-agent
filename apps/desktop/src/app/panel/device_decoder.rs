@@ -2,7 +2,7 @@
 //!
 //! The Host delivers complete access units. This owner keeps the access-unit
 //! order and codec state until a keyframe arrives, then hands a bounded image
-//! to GPUI. JPEG/PNG frames decode directly; H.264 is decoded by the packaged
+//! to GPUI. JPEG frames decode directly; H.264 is decoded by the packaged
 //! ffmpeg runtime selected by `AGENT_FFMPEG_EXECUTABLE` (or its platform
 //! default). No frame is silently replaced with a still screenshot.
 
@@ -17,7 +17,6 @@ type DeviceStreamKey = (String, String, String, String, u8);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum DeviceImageFormat {
     Jpeg,
-    Png,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -117,20 +116,6 @@ impl DeviceVideoDecoder {
                         });
                     } else {
                         self.error = Some("Device stream returned an invalid JPEG frame".into());
-                    }
-                }
-                "png" => {
-                    if !frame.payload.is_empty() {
-                        self.error = None;
-                        decoded.push(DecodedDeviceImage {
-                            host_id: frame.host_id,
-                            session_epoch: frame.session_epoch,
-                            sequence: frame.sequence,
-                            device_id: frame.device_id,
-                            screen_id: screen,
-                            format: DeviceImageFormat::Png,
-                            bytes: frame.payload,
-                        });
                     }
                 }
                 "avcc-description" => {
@@ -413,6 +398,7 @@ mod tests {
             "thread".into(),
             "host".into(),
             "device".into(),
+            "session".into(),
             1,
         )));
     }
