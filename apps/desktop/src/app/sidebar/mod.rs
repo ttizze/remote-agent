@@ -217,6 +217,7 @@ impl Desktop {
     }
 
     fn render_brand_row(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let attention_count = self.notification_badge_count();
         window_drag(
             h_flex()
                 .h(px(ui::metrics().header_height))
@@ -237,7 +238,27 @@ impl Desktop {
                 .text_sm()
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(color("text"))
-                .child("Bex")
+                .child(
+                    h_flex()
+                        .gap_1()
+                        .child("Bex")
+                        .when(attention_count > 0, |brand| {
+                            brand.child(
+                                div()
+                                    .w(px(16.))
+                                    .h_4()
+                                    .px_1()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded_full()
+                                    .bg(color("warning"))
+                                    .text_color(color("canvas"))
+                                    .text_2xs()
+                                    .child(attention_count.to_string()),
+                            )
+                        }),
+                )
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_click(cx.listener(|view, _, _, cx| {
                     view.route = Route::Chat;

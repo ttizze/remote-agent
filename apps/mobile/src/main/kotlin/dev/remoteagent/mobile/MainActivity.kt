@@ -35,7 +35,8 @@ class MainActivity : ComponentActivity() {
             localNetworkGranted = granted
         }
     private val requestNotifications =
-        registerForActivityResult(ActivityResultContracts.RequestPermission()) {
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+            LocalNotifications.permissionResult(this, granted)
             model.refreshPushRegistration()
         }
 
@@ -53,24 +54,9 @@ class MainActivity : ComponentActivity() {
             LocalNotifications.permissionResult(this, true)
         }
         LocalNotifications.clearDelivered(this)
-        requestNotificationPermissionIfNeeded()
         // Reconcile notification permission changes made in system settings and
         // replay every retained Host registration after a background interval.
         model.refreshPushRegistration()
-    }
-
-    override fun onRequestPermissionsResult(
-        requestCode: Int,
-        permissions: Array<out String>,
-        grantResults: IntArray,
-    ) {
-        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (requestCode == 1001) {
-            LocalNotifications.permissionResult(
-                this,
-                grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED,
-            )
-        }
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
@@ -143,10 +129,6 @@ class MainActivity : ComponentActivity() {
             Intent.ACTION_VIEW if intent.data?.scheme == "remote-agent" -> {
                 when (intent.data?.host) {
                     "new" -> model.newThreadFromShortcut()
-                    "thread" -> intent.data?.let { uri ->
-                        LocalNotifications.acknowledge(uri.toString())
-                        model.openNotificationRoute(uri.toString())
-                    }
                     "share" -> {
                         val uri = intent.data ?: return
                         val text = uri.getQueryParameter("text").orEmpty()

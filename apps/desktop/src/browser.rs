@@ -314,18 +314,6 @@ pub(crate) struct PreviewDefaults {
     pub(crate) recording_options: agent_protocol::preview::PreviewRecordingOptions,
 }
 
-impl Default for PreviewDefaults {
-    fn default() -> Self {
-        Self {
-            viewport: PreviewViewportSetting::Fill,
-            appearance: PreviewAppearance::System,
-            zoom: PreviewZoom::X100,
-            profile_id: None,
-            recording_options: agent_protocol::preview::PreviewRecordingOptions::default(),
-        }
-    }
-}
-
 /// Renders frames from the Host-owned Preview browser. The image and every
 /// input action share the Host tab identity, so a panel switch never creates a
 /// second local page behind the user's visible Preview.
@@ -710,7 +698,6 @@ async fn host_browser_request(
         .unwrap_or_default();
     let action = match request {
         HostBrowserRequest::Open => {
-            let defaults = store.snapshot().preferences.browser.resolved();
             dispatch_preview(
                 &store,
                 Intent::PreviewOpen {

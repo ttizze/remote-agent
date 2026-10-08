@@ -29,16 +29,18 @@ internal object LocalNotifications {
     private var permissionDenied = false
 
     fun playSound(context: Context, soundKind: String? = null) {
-        val tone = when (soundKind?.substringAfterLast('.')?.uppercase()) {
-            "COMPLETION" -> android.media.ToneGenerator.TONE_PROP_BEEP
-            else -> android.media.ToneGenerator.TONE_PROP_ACK
+        val resource = when (soundKind?.substringAfterLast('.')?.uppercase()) {
+            "COMPLETION" -> R.raw.notification_completion
+            else -> R.raw.notification_input
         }
-        val generator = android.media.ToneGenerator(android.media.AudioManager.STREAM_NOTIFICATION, 80)
-        generator.startTone(tone, 180)
-        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(
-            { generator.release() },
-            250,
-        )
+        android.media.MediaPlayer.create(context, resource)?.let { player ->
+            player.setOnCompletionListener { it.release() }
+            player.setOnErrorListener { mediaPlayer, _, _ ->
+                mediaPlayer.release()
+                true
+            }
+            player.start()
+        }
     }
 
     fun deliver(
@@ -104,7 +106,7 @@ internal object LocalNotifications {
         val manager = context.getSystemService(NotificationManager::class.java)
         synchronized(activeNotifications) {
             if (count == 0u) {
-                activeNotifications.keys.forEach { id -> manager.cancel(id) }
+                activeNotifications.keys.forEach { id -> manager.cancel(LOCAL_ATTENTION_TAG, id) }
                 activeNotifications.clear()
             } else {
                 // Existing notifications retain the number they were posted
@@ -118,14 +120,21 @@ internal object LocalNotifications {
     }
 
     /** Removes a notification after its content intent has been consumed. */
-    fun acknowledge(deepLink: String?) {
+    fun acknowledge(context: Context, deepLink: String?) {
         val id = deepLink?.hashCode() ?: return
+        context.getSystemService(NotificationManager::class.java).cancel(LOCAL_ATTENTION_TAG, id)
         synchronized(activeNotifications) { activeNotifications.remove(id) }
     }
 
     fun clearDelivered(context: Context) {
-        context.getSystemService(NotificationManager::class.java).cancelAll()
-        synchronized(activeNotifications) { activeNotifications.clear() }
+        val manager = context.getSystemService(NotificationManager::class.java)
+        manager.activeNotifications
+            .filter { it.tag == LOCAL_ATTENTION_TAG }
+            .forEach { manager.cancel(LOCAL_ATTENTION_TAG, it.id) }
+        synchronized(activeNotifications) {
+            activeNotifications.keys.forEach { id -> manager.cancel(LOCAL_ATTENTION_TAG, id) }
+            activeNotifications.clear()
+        }
     }
 
     private fun post(context: Context, request: LocalNotificationRequest) {
@@ -139,9 +148,18 @@ internal object LocalNotifications {
             NotificationManager.IMPORTANCE_HIGH,
         ).apply {
             enableVibration(true)
+            val soundUri =
+                if (soundClass == "completion") {
+                    android.net.Uri.parse(
+                        "android.resource://${context.packageName}/${R.raw.notification_completion}",
+                    )
+                } else {
+                    android.net.Uri.parse(
+                        "android.resource://${context.packageName}/${R.raw.notification_input}",
+                    )
+                }
             setSound(
-                if (request.sound) android.media.RingtoneManager.getDefaultUri(android.media.RingtoneManager.TYPE_NOTIFICATION)
-                else null,
+                if (request.sound) soundUri else null,
                 null,
             )
         }
@@ -152,11 +170,10 @@ internal object LocalNotifications {
             .setContentText(request.body)
             .setAutoCancel(true)
             .setNumber(request.badgeCount.toInt())
-        request.threadId?.let { threadId ->
+        request.deepLink?.let { deepLink ->
             val route = Intent(
                 Intent.ACTION_VIEW,
-                request.deepLink?.let(Uri::parse)
-                    ?: Uri.parse("remote-agent://thread/" + Uri.encode(threadId)),
+                Uri.parse(deepLink),
                 context,
                 MainActivity::class.java,
             )
@@ -165,7 +182,7 @@ internal object LocalNotifications {
             builder.setContentIntent(
                 PendingIntent.getActivity(
                     context,
-                    (request.deepLink ?: threadId).hashCode(),
+                    deepLink.hashCode(),
                     route,
                     PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
                 )
@@ -174,7 +191,7 @@ internal object LocalNotifications {
         val notificationId = request.deepLink?.hashCode()
             ?: request.threadId?.hashCode()
             ?: request.body.hashCode()
-        manager.notify(notificationId, builder.build())
+        manager.notify(LOCAL_ATTENTION_TAG, notificationId, builder.build())
         synchronized(activeNotifications) { activeNotifications[notificationId] = request }
     }
 }

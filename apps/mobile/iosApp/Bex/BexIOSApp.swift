@@ -15,11 +15,6 @@ struct BexIOSApp: App {
                 .onReceive(NotificationCenter.default.publisher(for: .remoteAgentShortcut)) { notification in
                     if notification.userInfo?["type"] as? String == "new-thread" { model.handleShortcut() }
                 }
-                .onReceive(NotificationCenter.default.publisher(for: .remoteAgentNotificationThread)) { notification in
-                    guard let deepLink = notification.userInfo?["deeplink"] as? String,
-                          let url = URL(string: deepLink) else { return }
-                    model.handleSurfaceURL(url)
-                }
                 .onAppear {
                     LocalNotifications.refreshAuthorization()
                     LocalNotifications.clearDelivered()

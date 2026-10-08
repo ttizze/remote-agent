@@ -112,7 +112,7 @@ pub struct NotificationEvent {
 pub fn notification_deep_link(environment_id: Option<&str>, thread_id: &str) -> String {
     environment_id.map_or_else(
         || agent_domain::ACTIVITY_OVERVIEW_DEEP_LINK.to_owned(),
-        |environment| format!("remote-agent://thread/{environment}:{thread_id}"),
+        |environment| agent_domain::activity_thread_deep_link(environment, thread_id),
     )
 }
 
@@ -469,7 +469,7 @@ mod tests {
     fn deep_links_keep_the_owning_environment_and_badges_count_attention() {
         assert_eq!(
             notification_deep_link(Some("host-a"), "thread-1"),
-            "remote-agent://thread/host-a:thread-1"
+            "remoteagent://threads/host-a/thread-1"
         );
         assert_eq!(
             notification_deep_link(None, "thread-1"),
@@ -710,7 +710,7 @@ mod tests {
         let events = between(&previous, &current, false, false);
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].environment_id.as_deref(), Some("host-a"));
-        assert_eq!(events[0].deep_link, "remote-agent://thread/host-a:thread");
+        assert_eq!(events[0].deep_link, "remoteagent://threads/host-a/thread");
     }
 
     #[test]

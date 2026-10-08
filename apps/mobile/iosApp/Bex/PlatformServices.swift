@@ -21,30 +21,42 @@ enum LocalNotifications {
         let soundKind: String?
     }
     private static var pending: [Pending] = []
+    private static var deliveredIdentifiers: Set<String> = []
+    private static var foregroundPlayer: AVAudioPlayer?
 
     private static func schedule(_ pendingRequest: Pending) {
         let content = UNMutableNotificationContent()
         content.title = pendingRequest.title
         content.body = pendingRequest.body
-        content.sound = pendingRequest.sound ? .default : nil
+        content.sound = pendingRequest.sound ? notificationSound(for: pendingRequest.soundKind) : nil
         content.badge = NSNumber(value: pendingRequest.badgeCount)
+        var userInfo: [AnyHashable: Any] = [:]
         if let threadId = pendingRequest.threadId {
             // Keep same-named threads from different Hosts in separate
             // notification groups; the deep link carries the owning route.
             content.threadIdentifier = pendingRequest.deepLink ?? threadId
-            var userInfo: [AnyHashable: Any] = [
-                "threadId": threadId,
-                "deeplink": pendingRequest.deepLink ?? "remote-agent://thread/\(threadId)"
-            ]
-            if let kind = pendingRequest.kind { userInfo["kind"] = kind }
-            if let soundKind = pendingRequest.soundKind { userInfo["soundKind"] = soundKind }
-            content.userInfo = userInfo
+            userInfo["threadId"] = threadId
         }
+        if let deepLink = pendingRequest.deepLink {
+            content.threadIdentifier = deepLink
+            userInfo["deepLink"] = deepLink
+        }
+        if let kind = pendingRequest.kind { userInfo["kind"] = kind }
+        if let soundKind = pendingRequest.soundKind { userInfo["soundKind"] = soundKind }
+        if !userInfo.isEmpty { content.userInfo = userInfo }
         let trigger = UNTimeIntervalNotificationTrigger(timeInterval: 0.1, repeats: false)
+        let identifier = "remoteagent.local.\(UUID().uuidString)"
         let notificationRequest = UNNotificationRequest(
-            identifier: "remoteagent.local.\(UUID().uuidString)", content: content, trigger: trigger
+            identifier: identifier, content: content, trigger: trigger
         )
+        deliveredIdentifiers.insert(identifier)
         UNUserNotificationCenter.current().add(notificationRequest)
+    }
+
+    private static func notificationSound(for soundKind: String?) -> UNNotificationSound {
+        let kind = soundKind?.split(separator: ".").last.map(String.init)?.uppercased()
+        let name = kind == "COMPLETION" ? "RemoteAgentCompletion.caf" : "RemoteAgentInput.caf"
+        return UNNotificationSound(named: UNNotificationSoundName(name))
     }
 
     static func deliver(
@@ -125,15 +137,40 @@ enum LocalNotifications {
     }
 
     static func clearDelivered() {
-        UNUserNotificationCenter.current().removeAllDeliveredNotifications()
+        let center = UNUserNotificationCenter.current()
+        var identifiers = deliveredIdentifiers
+        deliveredIdentifiers.removeAll()
+        center.getDeliveredNotifications { notifications in
+            identifiers.formUnion(
+                notifications
+                    .map(\.request.identifier)
+                    .filter { $0.hasPrefix("remoteagent.local.") }
+            )
+            let values = Array(identifiers)
+            guard !values.isEmpty else { return }
+            center.removeDeliveredNotifications(withIdentifiers: values)
+            center.removePendingNotificationRequests(withIdentifiers: values)
+        }
+        center.getPendingNotificationRequests { requests in
+            let values = requests
+                .map(\.identifier)
+                .filter { $0.hasPrefix("remoteagent.local.") }
+            guard !values.isEmpty else { return }
+            center.removePendingNotificationRequests(withIdentifiers: values)
+        }
         updateBadge(0)
     }
 
     static func playSound(soundKind: String? = nil) {
         // The foreground path has no UNNotificationContent to carry the
-        // event's sound kind, so select the corresponding system cue here.
+        // event's sound kind, so select the same bundled cue as OS delivery.
         let kind = soundKind?.split(separator: ".").last.map(String.init)?.uppercased()
-        AudioServicesPlaySystemSound(kind == "COMPLETION" ? 1004 : 1007)
+        let resource = kind == "COMPLETION" ? "RemoteAgentCompletion" : "RemoteAgentInput"
+        guard let url = Bundle.main.url(forResource: resource, withExtension: "caf"),
+              let player = try? AVAudioPlayer(contentsOf: url) else { return }
+        foregroundPlayer = player
+        player.prepareToPlay()
+        player.play()
     }
 }
 

@@ -3951,6 +3951,7 @@ impl HostRpcService {
         };
         let mut codex = instance(Driver::Codex, "Codex");
         codex.installed = resources.codex.server().is_ok();
+        codex.version = resources.codex.version();
         match resources.codex.availability() {
             Err(error) => {
                 codex.status = ProviderStatus::Error;

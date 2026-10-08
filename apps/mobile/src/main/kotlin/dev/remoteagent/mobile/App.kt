@@ -649,28 +649,12 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
 
     fun openNotificationThread() {
         val route = notificationThreadRoute ?: return
-        val (local, profile) = scopedValue(route)
-        // Keep an environment-scoped route until its owner has been
-        // published. Opening the same thread id on the selected Host would
-        // silently target the wrong environment.
-        if (route.contains(':') && profile == null) {
-            notice = "Connecting to the notification environment…"
-            return
-        }
-        perform(Intent.OpenThread(route)) { result ->
-            if (result.isSuccess) {
-                notificationThreadRoute = null
-                notice = null
-                openThread(local ?: route)
-            } else {
-                notice = result.exceptionOrNull()?.message ?: "The notification thread could not be opened."
-            }
-        }
-    }
-
-    fun openNotificationRoute(route: String) {
-        notificationThreadRoute = route
-        openNotificationThread()
+        notificationThreadRoute = null
+        notice = null
+        openPushDeepLink(
+            android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(route))
+                .putExtra(EXTRA_PUSH_DEEP_LINK, route)
+        )
     }
 
     fun back() {
@@ -1084,10 +1068,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
         attentionEvents.forEach { event ->
             if (event.inApp) {
                 notice = "${event.kind}: ${event.body}"
-                notificationThreadRoute = event.deepLink.substringAfter(
-                    "remote-agent://thread/",
-                    event.threadId,
-                )
+                notificationThreadRoute = event.deepLink
             }
             if (event.operatingSystem) {
                 LocalNotifications.deliver(
@@ -1136,6 +1117,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
         val value = intent.getStringExtra(EXTRA_PUSH_DEEP_LINK)
             ?: intent.data?.takeIf { it.scheme == "remoteagent" }?.toString()
             ?: return
+        LocalNotifications.acknowledge(context, value)
         val uri = runCatching { android.net.Uri.parse(value) }.getOrNull() ?: return
         if (isUsageDeepLink(uri)) {
             openUsageDeepLink()
@@ -1174,7 +1156,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
 
     private fun validPushRouteSegment(value: String): Boolean =
         value.isNotEmpty() && value != "." && value != ".." &&
-            value.none { it == '/' || it == '\\' || it.isISOControl() }
+            value.none { it == '\\' || it.isISOControl() }
 
     private fun openUsageDeepLink() {
         usageDeepLinkRequests += 1

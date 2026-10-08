@@ -1433,15 +1433,26 @@ impl Desktop {
             if event.in_app {
                 let route = event.deep_link.clone();
                 let desktop = cx.entity().downgrade();
+                let notification = match event.kind {
+                    agent_core::view::notifications::NotificationEventKind::Completion => {
+                        Notification::success(event.body.clone())
+                    }
+                    agent_core::view::notifications::NotificationEventKind::Failed => {
+                        Notification::error(event.body.clone())
+                    }
+                    agent_core::view::notifications::NotificationEventKind::Input
+                    | agent_core::view::notifications::NotificationEventKind::Approval
+                    | agent_core::view::notifications::NotificationEventKind::Limited => {
+                        Notification::warning(event.body.clone())
+                    }
+                };
                 window.push_notification(
-                    Notification::warning(event.body.clone())
-                        .title(event.title.clone())
-                        .on_click(move |_, _, app| {
-                            let _ = desktop.update(app, |view, cx| {
-                                view.queue_notification_route(route.clone());
-                                cx.notify();
-                            });
-                        }),
+                    notification.title(event.title.clone()).on_click(move |_, _, app| {
+                        let _ = desktop.update(app, |view, cx| {
+                            view.queue_notification_route(route.clone());
+                            cx.notify();
+                        });
+                    }),
                     cx,
                 );
             }

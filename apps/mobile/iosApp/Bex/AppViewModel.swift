@@ -293,20 +293,6 @@ final class BexAppViewModel: ObservableObject {
             handleShortcut()
             return
         }
-        if url.host == "thread", let threadId = url.pathComponents.dropFirst().first {
-            // A scoped route must be resolved through the environment owner.
-            // If background connection publication has not caught up yet,
-            // keep the route for the notification banner instead of opening
-            // a same-named thread on the selected Host.
-            if threadId.contains(":") && scopedValue(threadId).1 == nil {
-                notificationThreadRoute = url.absoluteString
-                notice = "Connecting to the notification environment…"
-                screen = .threads
-                return
-            }
-            openThread(threadId)
-            return
-        }
         guard url.host == "share" else { return }
         let query = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
         let text = query.filter { $0.name == "text" }.compactMap(\.value).joined(separator: "\n")
@@ -1134,16 +1120,17 @@ extension BexAppViewModel {
     }
 
     func openNotificationThread() {
-        guard let route = notificationThreadRoute, let url = URL(string: route) else { return }
-        // `handleSurfaceURL` deliberately leaves unresolved environment
-        // routes queued. Clear the banner only after the route is known.
-        if let thread = url.host == "thread" ? url.pathComponents.dropFirst().first : nil,
-           thread.contains(":") && scopedValue(thread).1 == nil {
+        guard let route = notificationThreadRoute else { return }
+        if AgentPushCenter.isActivityOverviewDeepLink(route) {
+            notificationThreadRoute = nil
+            notice = nil
+            openActivityOverviewDeepLink()
             return
         }
+        guard let target = AgentPushCenter.threadTarget(from: route) else { return }
         notificationThreadRoute = nil
         notice = nil
-        handleSurfaceURL(url)
+        openPushThread(hostId: target.hostId, threadId: target.threadId)
     }
 
     /// Saves the model preferences every Host shares; the store writes its own state.

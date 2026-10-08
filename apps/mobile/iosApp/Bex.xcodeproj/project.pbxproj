@@ -10,6 +10,8 @@
         B55D00000000000000000001 /* DraftRevision.swift in Sources */ = {isa = PBXBuildFile; fileRef = B55D00000000000000000002; };
         D36E8C890D10474EB83C8D37 /* WorkspaceScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1E85101D97E4E84A7B33C96 /* WorkspaceScreen.swift */; };
 		E50000000000000000000001 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = E50000000000000000000002 /* PrivacyInfo.xcprivacy */; };
+		E50000000000000000000003 /* RemoteAgentInput.caf in Resources */ = {isa = PBXBuildFile; fileRef = E50000000000000000000004 /* RemoteAgentInput.caf */; };
+		E50000000000000000000005 /* RemoteAgentCompletion.caf in Resources */ = {isa = PBXBuildFile; fileRef = E50000000000000000000006 /* RemoteAgentCompletion.caf */; };
         C30000000000000000000001 /* SwiftTerm in Frameworks */ = {isa = PBXBuildFile; productRef = C30000000000000000000002; };
         C30000000000000000000003 /* TerminalScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = C30000000000000000000004; };
 		A10000000000000000000007 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000018 /* Assets.xcassets */; };
@@ -91,6 +93,8 @@
         B55D00000000000000000002 /* DraftRevision.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DraftRevision.swift; sourceTree = "<group>"; };
         F1E85101D97E4E84A7B33C96 /* WorkspaceScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceScreen.swift; sourceTree = "<group>"; };
 		E50000000000000000000002 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
+		E50000000000000000000004 /* RemoteAgentInput.caf */ = {isa = PBXFileReference; lastKnownFileType = audio.caf; path = RemoteAgentInput.caf; sourceTree = "<group>"; };
+		E50000000000000000000006 /* RemoteAgentCompletion.caf */ = {isa = PBXFileReference; lastKnownFileType = audio.caf; path = RemoteAgentCompletion.caf; sourceTree = "<group>"; };
         C30000000000000000000004 /* TerminalScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalScreen.swift; sourceTree = "<group>"; };
 		A10000000000000000000018 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		A10000000000000000000010 /* Bex.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Bex.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -233,6 +237,8 @@
 				5A0CD55A0BBF9DC36773FC9A /* ThreadListHeader.swift */,
 				A10000000000000000000016 /* Info.plist */,
 				E50000000000000000000002 /* PrivacyInfo.xcprivacy */,
+				E50000000000000000000004 /* RemoteAgentInput.caf */,
+				E50000000000000000000006 /* RemoteAgentCompletion.caf */,
 				A10000000000000000000018 /* Assets.xcassets */,
 			);
 			path = Bex;
@@ -352,7 +358,7 @@
 /* End PBXTargetDependency section */
 
 /* Begin PBXResourcesBuildPhase section */
-		A10000000000000000000022 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (F300000000000000000000012 /* dmsans_regular.ttf in Resources */, F300000000000000000000022 /* dmsans_medium.ttf in Resources */, F300000000000000000000032 /* dmsans_bold.ttf in Resources */, A10000000000000000000007 /* Assets.xcassets in Resources */, E50000000000000000000001 /* PrivacyInfo.xcprivacy in Resources */,); runOnlyForDeploymentPostprocessing = 0; };
+		A10000000000000000000022 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (F300000000000000000000012 /* dmsans_regular.ttf in Resources */, F300000000000000000000022 /* dmsans_medium.ttf in Resources */, F300000000000000000000032 /* dmsans_bold.ttf in Resources */, A10000000000000000000007 /* Assets.xcassets in Resources */, E50000000000000000000001 /* PrivacyInfo.xcprivacy in Resources */, E50000000000000000000003 /* RemoteAgentInput.caf in Resources */, E50000000000000000000005 /* RemoteAgentCompletion.caf in Resources */,); runOnlyForDeploymentPostprocessing = 0; };
 		A7100000000000000000002C = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (A7100000000000000000001C, ); runOnlyForDeploymentPostprocessing = 0; };
 		D55000000000000000000032 /* Share Extension Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXResourcesBuildPhase section */

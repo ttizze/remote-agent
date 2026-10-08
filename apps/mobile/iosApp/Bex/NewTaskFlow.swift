@@ -82,23 +82,41 @@ struct NewTaskFlow: View {
                     .accessibilityLabel("Add project")
             }
         }
-        .alert("Add project", isPresented: $adding) {
-            TextField(configuredProjectBaseDirectory() ?? "Absolute path on the environment", text: $projectPath)
-                .textInputAutocapitalization(.never).autocorrectionDisabled()
-            Button("Choose folder") { folderPickerPresented = true }
-            Button("Add") {
-                model.perform(.addProject(path: projectPath))
-                projectPath = ""
+        .sheet(isPresented: $adding) {
+            NavigationStack {
+                Form {
+                    Section("Project folder on the Host") {
+                        TextField(
+                            configuredProjectBaseDirectory() ?? "Absolute path on the environment",
+                            text: $projectPath
+                        )
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        Button("Choose remote folder") { folderPickerPresented = true }
+                    }
+                }
+                .navigationTitle("Add project")
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Cancel") { adding = false }
+                    }
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("Add") {
+                            let path = projectPath.trimmingCharacters(in: .whitespacesAndNewlines)
+                            guard !path.isEmpty else { return }
+                            model.perform(.addProject(path: path))
+                            projectPath = ""
+                            adding = false
+                        }
+                    }
+                }
+                .sheet(isPresented: $folderPickerPresented) {
+                    RemoteFolderPicker(model: model, initialPath: configuredProjectBaseDirectory()) { path in
+                        projectPath = path
+                        folderPickerPresented = false
+                    }
+                }
             }
-            Button("Cancel", role: .cancel) {}
-        }
-        .fileImporter(
-            isPresented: $folderPickerPresented,
-            allowedContentTypes: [.folder],
-            allowsMultipleSelection: false
-        ) { result in
-            guard case let .success(urls) = result, let url = urls.first else { return }
-            projectPath = url.path
         }
     }
 
