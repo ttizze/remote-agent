@@ -158,6 +158,7 @@ impl Owner {
         let network = match self.network() {
             Ok(network) => network,
             Err(error) => {
+                self.preview_recording_failed(&call);
                 if let Some(complete) = complete {
                     self.state.error = Some(error.to_string());
                     let _ = complete.send(Err(error));
@@ -353,30 +354,7 @@ impl Owner {
         };
         let outcome = match result {
             Err(error) => {
-                match &call {
-                    Call::PreviewRecordingStart(request) => {
-                        self.state.preview.recordings.insert(
-                            request.tab_id.clone(),
-                            agent_protocol::preview::PreviewRecordingStatus {
-                                tab_id: request.tab_id.clone(),
-                                recording: false,
-                                started_at: None,
-                            },
-                        );
-                        self.state.preview.last_recordings.remove(&request.tab_id);
-                    }
-                    Call::PreviewRecordingStop(request) => {
-                        self.state.preview.recordings.insert(
-                            request.tab_id.clone(),
-                            agent_protocol::preview::PreviewRecordingStatus {
-                                tab_id: request.tab_id.clone(),
-                                recording: false,
-                                started_at: None,
-                            },
-                        );
-                    }
-                    _ => {}
-                }
+                self.preview_recording_failed(&call);
                 if !cancelled
                     && (complete.is_some()
                         || matches!(
@@ -434,6 +412,25 @@ impl Owner {
         };
         if let Some(complete) = complete {
             let _ = complete.send(outcome);
+        }
+    }
+
+    fn preview_recording_failed(&mut self, call: &Call) {
+        let (tab_id, clear_artifact) = match call {
+            Call::PreviewRecordingStart(request) => (&request.tab_id, true),
+            Call::PreviewRecordingStop(request) => (&request.tab_id, false),
+            _ => return,
+        };
+        self.state.preview.recordings.insert(
+            tab_id.clone(),
+            agent_protocol::preview::PreviewRecordingStatus {
+                tab_id: tab_id.clone(),
+                recording: false,
+                started_at: None,
+            },
+        );
+        if clear_artifact {
+            self.state.preview.last_recordings.remove(tab_id);
         }
     }
 
