@@ -898,11 +898,14 @@ impl Task {
                     tracing::warn!(slot = ?self.slot, stderr = %self.stderr_tail,
                         "provider process exited unsuccessfully");
                 }
-                (
-                    true,
-                    (!success).then(|| "Provider process exited".to_owned()),
-                    None,
-                )
+                // The stderr tail identifies why the provider exited.
+                let stderr = self.stderr_tail.trim();
+                let message = if stderr.is_empty() {
+                    "Provider process exited".to_owned()
+                } else {
+                    format!("Provider process exited: {stderr}")
+                };
+                (true, (!success).then_some(message), None)
             }
         };
         for (_, waiter) in self.replies.drain(..) {
