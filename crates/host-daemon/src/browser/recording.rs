@@ -79,7 +79,7 @@ struct PointerOverlay {
 }
 
 #[derive(Clone, Default, Debug)]
-struct OverlayState {
+pub(super) struct OverlayState {
     key: Option<KeyOverlay>,
     pointer: Option<PointerOverlay>,
 }
@@ -88,6 +88,48 @@ pub(crate) type OverlayHandle = Arc<Mutex<OverlayState>>;
 
 pub(crate) fn new_overlay() -> OverlayHandle {
     Arc::new(Mutex::new(OverlayState::default()))
+}
+
+fn apply_pointer(
+    state: &mut OverlayState,
+    phase: PointerPhase,
+    x: f64,
+    y: f64,
+    width: u32,
+    height: u32,
+    now: Instant,
+) {
+    match phase {
+        PointerPhase::Down => {
+            state.pointer = Some(PointerOverlay {
+                x,
+                y,
+                width,
+                height,
+                held: true,
+                released_at: None,
+            });
+        }
+        PointerPhase::Move => {
+            if let Some(pointer) = state.pointer.as_mut() {
+                pointer.x = x;
+                pointer.y = y;
+                pointer.width = width;
+                pointer.height = height;
+            }
+        }
+        PointerPhase::Up => {
+            if let Some(pointer) = state.pointer.as_mut() {
+                pointer.x = x;
+                pointer.y = y;
+                pointer.width = width;
+                pointer.height = height;
+                pointer.held = false;
+                pointer.released_at = Some(now);
+            }
+        }
+        PointerPhase::Click => unreachable!("clicks are expanded into pointer phases"),
+    }
 }
 
 pub(crate) fn apply_input(overlay: &OverlayHandle, event: InputEvent) {
@@ -103,51 +145,26 @@ pub(crate) fn apply_input(overlay: &OverlayHandle, event: InputEvent) {
             });
         }
         InputEvent::Pointer {
+            phase: PointerPhase::Click,
+            x,
+            y,
+            width,
+            height,
+        } => {
+            // A browser click is the complete pointer lifecycle. Feeding the
+            // same phases used by a future drag source keeps the overlay
+            // state machine identical for clicks and streamed pointer input.
+            for phase in [PointerPhase::Down, PointerPhase::Move, PointerPhase::Up] {
+                apply_pointer(&mut state, phase, x, y, width, height, now);
+            }
+        }
+        InputEvent::Pointer {
             phase,
             x,
             y,
             width,
             height,
-        } => match phase {
-            PointerPhase::Down => {
-                state.pointer = Some(PointerOverlay {
-                    x,
-                    y,
-                    width,
-                    height,
-                    held: true,
-                    released_at: None,
-                });
-            }
-            PointerPhase::Move => {
-                if let Some(pointer) = state.pointer.as_mut() {
-                    pointer.x = x;
-                    pointer.y = y;
-                    pointer.width = width;
-                    pointer.height = height;
-                }
-            }
-            PointerPhase::Up => {
-                if let Some(pointer) = state.pointer.as_mut() {
-                    pointer.x = x;
-                    pointer.y = y;
-                    pointer.width = width;
-                    pointer.height = height;
-                    pointer.held = false;
-                    pointer.released_at = Some(now);
-                }
-            }
-            PointerPhase::Click => {
-                state.pointer = Some(PointerOverlay {
-                    x,
-                    y,
-                    width,
-                    height,
-                    held: false,
-                    released_at: Some(now),
-                });
-            }
-        },
+        } => apply_pointer(&mut state, phase, x, y, width, height, now),
     }
 }
 
@@ -593,7 +610,10 @@ async fn run_capture(
     )
     .await
     {
-        cleanup_cdp(&mut socket, &mut next_id, tab_id, &session).await;
+        let error = with_cleanup_error(
+            error,
+            cleanup_cdp(&mut socket, &mut next_id, tab_id, &session).await,
+        );
         note_target_detached(&error, &externally_detached);
         notify_startup(&mut startup, Err(error.clone()));
         return Err(error);
@@ -601,7 +621,11 @@ async fn run_capture(
     let mut encoder = match Encoder::start(output, options.frame_rate).await {
         Ok(encoder) => encoder,
         Err(error) => {
-            cleanup_cdp(&mut socket, &mut next_id, tab_id, &session).await;
+            let error = with_cleanup_error(
+                error,
+                cleanup_cdp(&mut socket, &mut next_id, tab_id, &session).await,
+            );
+            note_target_detached(&error, &externally_detached);
             notify_startup(&mut startup, Err(error.clone()));
             return Err(error);
         }
@@ -624,16 +648,22 @@ async fn run_capture(
     )
     .await
     {
-        cleanup_cdp(&mut socket, &mut next_id, tab_id, &session).await;
+        let error = with_cleanup_error(
+            error,
+            cleanup_cdp(&mut socket, &mut next_id, tab_id, &session).await,
+        );
         encoder.abort().await;
         note_target_detached(&error, &externally_detached);
         notify_startup(&mut startup, Err(error.clone()));
         return Err(error);
     }
     if cancel.is_cancelled() || stop.is_cancelled() {
-        let error = "recording start was cancelled".to_owned();
-        cleanup_cdp(&mut socket, &mut next_id, tab_id, &session).await;
+        let error = with_cleanup_error(
+            "recording start was cancelled".to_owned(),
+            cleanup_cdp(&mut socket, &mut next_id, tab_id, &session).await,
+        );
         encoder.abort().await;
+        note_target_detached(&error, &externally_detached);
         notify_startup(&mut startup, Err(error.clone()));
         return Err(error);
     }
@@ -890,6 +920,13 @@ async fn cleanup_cdp(
     )
     .await;
     combine_cleanup_results(stop, detach)
+}
+
+fn with_cleanup_error(error: String, cleanup: Result<(), String>) -> String {
+    match cleanup {
+        Ok(()) => error,
+        Err(cleanup) => format!("{error}; recording cleanup also failed: {cleanup}"),
+    }
 }
 
 const CDP_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);

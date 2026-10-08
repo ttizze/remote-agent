@@ -2,6 +2,8 @@
 
 参照を `4ee6bfd50ef4a089440d5c3662db2298da9cc50e` に固定する。旧実装に対する M1/M2 の完了記録は、関数単位の翻訳完了・T3 のテスト通過を意味しない。この表で照合を終えた範囲だけを翻訳済みとする。段階 6 の対応先表は source family の抜粋であり、960 件の全行を逐一検証したという意味ではない。
 
+2026-10-08 の inventory audit では 960 行と source hash の一致を確認した。`PORT_MAP.json` は `未翻訳` 762 行、`対象外` 198 行で、`reviewed_ranges` と `tests` が非空の行はまだない。段階 6 の family 表は production consumer の対応先を示す静的な証拠であり、行単位の翻訳完了や全テスト移植の印ではない。
+
 新設計では段階 1 の `agent-domain` と段階 2 の `agent-providers` を先に実装・検証し、Host の永続化・履歴取り込みは段階 3、core と3クライアントは段階 4、旧 crate の削除は段階 5、M3 の追加領域は段階 6 とする。main のマージ、実 Host の起動・再起動、他 worktree の変更は行わない。
 
 生成されたファイル対応表は、固定版の全ファイルと対象外の理由を保持する。旧方針の翻訳先（`crates/orchestration`、`crates/provider-adapters`）は段階 5 で crate とともに削除した。実装・テストの対応は末尾の「新設計の挙動テスト対応」以降を正本とする。
@@ -21,7 +23,7 @@
 | 境界 | この実装の置換 | 保持する意味／検証 |
 |---|---|---|
 | HTTP / WebSocket | iroh、既存の Postcard framing、QR と端末鍵 | RPC の引数・結果、snapshot/replay/synchronized、afterSequence、順序・fallback 条件。QUIC の handshake/stream decode 保護は通信 owner に置く。 |
-| Claude Agent SDK | `@anthropic-ai/claude-agent-sdk@0.3.293`（T3 の固定版 0.3.276 より新しい）を Node から直接使用 | 公開 query API、canUseTool、interrupt、permission 変更、resume/fork。SDK 内部の制御と履歴変換は再実装しない。Rust は共通イベントへ翻訳する。 |
+| Claude Agent SDK | `@anthropic-ai/claude-agent-sdk@0.3.293`（T3 の固定版 0.3.276 より新しい）を `crates/host-daemon/src/claude/sdk/bridge.mjs` の Node bridge から直接使用 | 公開 `query()` API、canUseTool、interrupt、permission 変更、resume/fork。SDK 内部の制御と履歴変換は再実装しない。Rust は共通イベントへ翻訳する。 |
 | browser/ReactNative の描画 | GPUI / SwiftUI / Compose | client-runtime の結果を表示する。UI の条件・ラベル・操作は元コンポーネントに合わせ、Web 専用機能を追加しない。 |
 | T3 Connect / 外部サービス | 対象外 | T3 Connect の HTTP 認証/relay は作らない。iroh の既存接続機能を保持する。 |
 | V1 migration | 対象外 | ユーザー指示により互換性・旧形式移行は不要。 |
@@ -30,7 +32,7 @@
 
 ## 追加依存対応
 
-SDK の取得記録（tarball の integrity/hash と制御関数）、persistence の各 repository/SQL、shared helper は該当モジュールの翻訳時に追記する。
+SDK の取得記録（lockfile の tarball integrity/hash、license metadata、bridge の protocol fixture）、persistence の各 repository/SQL、shared helper は該当モジュールの翻訳時に追記する。
 
 <!-- generated inventory -->
 
@@ -1174,7 +1176,7 @@ graph replay（fork / rollback / merge back / delegated_task_status）も、単�
 - `ThreadLaunchService.test.ts` の `reuseExistingThread`、自動化・送信元の属性、import した native session（`Command::Import` で取り込む）、attachment の取り込み（RPC の責務）、記録前に失敗した worktree の削除（部分的な checkout の削除は Host の `create_worktree` が行う。runtime は記録に失敗した worktree を削除する）。
 - `ProviderRuntimeRecoveryService.test.ts:522`（取り消すしかない waiting run）: 保存の失敗は結果として run を確定するので、保存を待ったまま残る run は生じない。
 - `EffectWorker.test.ts:728`（置換 session の restart）: restart は domain が attempt を superseded にし、Start は独立した effect になるため複合 effect がない。
-- `RunFinalizationService.test.ts` の pull request 状態の更新 4 件: この Host は pull request の状態を持たない。保存後の通知（`run_finalized`）だけを受け取る。
+- `RunFinalizationService.test.ts` の pull request 状態の更新 4 件: PR state の保存と GitHub 同期は Git/VCS owner に接続しているため、この runtime finalization table の通知だけでは再現しない。保存後の通知（`run_finalized`）は移植する。
 
 ### T3 の外部挙動への揃え直し（2026-10-06）
 
@@ -1194,7 +1196,7 @@ graph replay（fork / rollback / merge back / delegated_task_status）も、単�
 | `ProviderTurnStartService.ts:240`、`Orchestrator.ts:8990`（委任結果の handoff） | `delegated_results_reach_a_later_turn_only_after_the_spawning_run_failed`。 |
 | `Orchestrator.ts:6318`、`SubagentProjection.ts`、`OrchestratorMcpService.ts:1368` | `tests::delegation::*`。 |
 | `runtimeLayer.test.ts:4100, 4282`（手動と自動の継続） | `tests::recovery::*`。`invalid-snooze`（不正な日付）は型で表せず、`replacement` は失敗項目の class を直接書き換える操作が domain の入力にないため対象外。 |
-| `ThreadSettlementService.test.ts`（候補、queued turn start、非活動） | `settlement::tests`。pull request の状態による判定は Host が pull request を持たないため対象外。 |
+| `ThreadSettlementService.test.ts`（候補、queued turn start、非活動） | `settlement::tests`。settle の判断は runtime の activity state で行い、PR state の取得と merge による外部操作は Git/VCS owner の境界に置く。 |
 | `runtimeLayer.test.ts:1773`（auto-settle）、`Orchestrator.ts:2361`（metadata.update）、`:4606`（sourcePlanRef） | `tests::metadata::*`。 |
 | `codexUsageLimits.test.ts`（merge と reset）、`CodexAdapterV2.ts` の account/rateLimits/updated | `agent-providers` の `codex::rate_limit_tests`、`session::tests::shared_rate_limits_reach_every_thread_and_fill_a_stopped_turns_reset`。 |
 | contracts `chatAttachment.ts` | `attachments_follow_the_reference_schemas_and_image_budget`、`attachment_ids_follow_the_reference_schema`（proptest）。Host の添付 ID は `pending-` / `chat-` の形で schema に合う（ARCHITECTURE 2026-10-07）。 |
@@ -1252,7 +1254,7 @@ Codex の app-server を instance ごとに共有し、起動設定・アカウ�
 | `RepositoryIdentityResolver.test.ts`（全 10 件） | `repository::tests`（`refreshes_the_git_root_only_when_requested`、`retries_git_root_discovery_after_the_negative_ttl`、`refreshes_the_primary_upstream_after_add_or_replace_before_cache_expiry`、`keeps_null_identities_cached_across_repeated_resolves_until_the_negative_ttl_expires`、`refreshes_cached_identities_after_the_positive_ttl_…` ほか）、`conversation::tests::shell_projects_carry_their_repository_identity`、`subscribed_shells_see_a_changed_remote_once_the_cached_identity_expires`。 |
 | `ProjectEnrichmentService.test.ts`（favicon の 2 件を除く 4 件） | `repository::enrichment::tests`。null と失敗を通知しない点は ARCHITECTURE 2026-10-07 の項による。 |
 | `SourceControlDiscovery.test.ts` の Forgejo 照合 2 件、packages/shared `sourceControl.test.ts` の provider 判定、`server.ts:285-319` の web URL | `repository::forgejo::tests`、`repository::tests::detects_*`・`matches_self_hosted_providers_by_complete_dns_labels`・`preserves_ports_while_classifying_by_hostname`、`gives_a_remote_a_logged_in_server_its_web_address`。 |
-| `ThreadSettlementService.test.ts`（worker の非活動 2 件） | `sweep::tests::settles_only_the_project_opted_in_while_environment_settlement_is_disabled`、`dispatches_the_last_activity_time_with_the_snapshot_guard`、`settles_after_the_default_three_days_of_inactivity`、`sweeps_read_live_unarchived_rows`。pull request と terminal の件は Host が pull request と thread の terminal を持たないため対象外。 |
+| `ThreadSettlementService.test.ts`（worker の非活動 2 件） | `sweep::tests::settles_only_the_project_opted_in_while_environment_settlement_is_disabled`、`dispatches_the_last_activity_time_with_the_snapshot_guard`、`settles_after_the_default_three_days_of_inactivity`、`sweeps_read_live_unarchived_rows`。PR merge の外部 side effect は Git/VCS owner、terminal cleanup は Host terminal owner のテストで検証するため、この worker-specific coupling はここでは扱わない。 |
 | `UsageLimitRecoveryWorker.ts` | `recovers_usage_limits_only_when_the_settings_opt_in`。判定は既存の `settlement::tests`。 |
 | contracts `settings.ts`（既定値と project の上書き）、`projectSettings` の解決 | `conversation_settings_persist_with_t3_defaults_and_bounds`、`project_overrides_take_precedence_and_absent_values_inherit`。 |
 | `ThreadTitleLinks.test.ts`（全 3 件）、GitHub / GitLab の `resolveLink` | `title_links::tests`。 |
@@ -1271,7 +1273,7 @@ Codex の app-server を instance ごとに共有し、起動設定・アカウ�
 | `Orchestrator.ts:8477-8498`、`EffectWorker.ts:362-392`、`CheckpointRestoreSafety.test.ts` | `tests::rollback::a_restore_the_host_refused_is_rejected_at_admission`、`the_host_refusal_is_not_part_of_the_rollback_identity`、`executor::tests::rollback::a_workspace_shared_after_admission_fails_the_rollback_after_its_retries`、`rewinds_safely`・`preserves_overlapping_workspace_files`（受付での拒否と effect 時の ROLLBACK_FAILED_MESSAGE）。 |
 | command の再送（`Orchestrator.ts:203-226`） | `tests::metadata::a_resent_update_without_the_host_filled_root_replays_its_result`。 |
 
-対象外のまま残したもの: `reuseExistingThread`、pull request の同期と merge による settle、環境の既定 scripts、`worktreeSubmodules` の設定とそれを持つ project file、branch 名を書く model の選択（sourceControlWriterModelSelection）。
+対象外のまま残したもの: `reuseExistingThread`、pull request の merge による settle side effect、環境の既定 scripts、`worktreeSubmodules` の設定とそれを持つ project file、branch 名を書く model の選択（sourceControlWriterModelSelection）。PR state の保存・同期自体は Git/VCS owner の対応表に含める。
 
 ### MCP toolkit の T3 化（2026-10-06）
 
@@ -1287,13 +1289,13 @@ Codex の app-server を instance ごとに共有し、起動設定・アカウ�
 | `toolkits/project/handlers.test.ts`、`project/handlers.ts` の create（scripts） | `launches_threads_from_a_full_access_caller_and_scratch_threads_into_chats`、`starts_a_project_from_just_a_title_when_workspace_root_is_omitted`、`creates_projects_from_a_path_and_rejects_fields_it_cannot_apply`（scripts の保存と結果、path と既定の model の受理）、`launches_claim_pending_uploads_into_the_new_thread_and_reject_other_attachments`。scratch は Chats project の root に launch し、thread ごとのフォルダで動く。 |
 | `ClaudeAdapterV2.test.ts` の read-only 一覧と toolkit の照合、claudeMcpQueryOverrides | `a_read_only_claude_sandbox_pre_approves_every_read_only_tool`、`a_read_only_claude_sandbox_pre_approves_only_read_only_app_tools`、`a_claude_launch_pre_approves_the_app_tools_and_appends_the_instructions`。 |
 | `provider/T3OrchestrationInstructions.test.ts`（provider 共通の 2 件） | `orchestration_instructions_distinguish_subagents_and_structured_schedules`。 |
-| `OrchestratorMcpToolkit.integration.test.ts` の organize・委任・cancel・create_threads・send・queue・wait・interrupt の流れ | `agent_tools_delegate_create_queue_and_interrupt_through_the_runtime`（runtime と、`[hold]` のターンを止める Codex の fake）。schedule の手順は scheduler がないため未移植。 |
+| `OrchestratorMcpToolkit.integration.test.ts` の organize・委任・cancel・create_threads・send・queue・wait・interrupt の流れ | `agent_tools_delegate_create_queue_and_interrupt_through_the_runtime`（runtime と、`[hold]` のターンを止める Codex の fake）。scheduled task の手順は `agent-runtime/src/scheduled/` と scheduled tools の owner tests で検証する。 |
 | ThreadManagementService の waitForThread / interruptThread、readThread の既定値 | `wait_selects_the_latest_run_clamps_its_budget_and_reports_timeouts`、`interrupt_picks_the_newest_interruptible_run_and_reports_t3_statuses`、`read_defaults_to_fifty_messages_of_twenty_thousand_units_and_pages_long_text`、`archived_callers_read_but_cannot_change_threads`、`list_orders_newest_first_and_filters_status_settlement_title_and_subagents`、`queue_tools_page_read_and_change_queued_messages`、`pending_request_tools_answer_only_open_user_questions`、`organize_maps_each_action_and_requires_snooze_time`、`search_returns_only_matches_of_the_calling_project`、`send_maps_t3_modes_and_rejects_escalation`、`transfers_and_configuration_read_the_addressed_thread`。 |
 | `OrchestratorMcpToolkit.integration.test.ts` の同じ clientRequestId の send | `conversation::tests::a_retried_thread_send_returns_its_first_run_after_that_run_starts`、`tools::tests::a_retried_send_replays_its_receipt_after_the_target_starts_running`。 |
 | Effect McpServer の結果の形と大きさ | `the_largest_valid_thread_read_reaches_the_provider_session`、`a_result_beyond_the_framing_guard_is_answered_with_the_internal_tool_error`。 |
 | `SelectionRestart.integration.test.ts`「detaches the old provider session after an active provider handoff」と dispatchSteerIntoRun の instance 変更 | `detaches_the_old_provider_session_after_an_active_provider_handoff`、`a_steer_onto_another_instance_restarts_the_run_with_a_full_handoff`、`a_claude_run_cannot_be_steered_onto_another_instance`、`promoting_to_steer_after_a_provider_switch_restarts_on_the_new_instance`。 |
 
-公開しない T3 の tool（裏付けの機能がない）：`schedule_task`・`list_scheduled_tasks`・`update_scheduled_task`・`delete_scheduled_task`・`run_scheduled_task_now`（scheduler）、`t3_project_update`（Host が変えられる project の設定は scripts だけで、title・workspaceRoot・既定の model などを持たない）、`t3_project_delete`・`t3_project_clone`（project の削除・clone）、`t3_worktree_*`、`t3_attachment_*`、`t3_thread_send_attachments`、`t3_environment_*`、`t3_preview_*`・`preview_*`、`device_*`、pull request の tool。`orchestrator_capabilities` の `scheduledTasks` は false にする。
+公開しない T3 の形式（裏付けの機能がない）：`t3_project_update`（現行 Host が持たない title・workspaceRoot・既定 model の一括更新）、`t3_project_delete`・`t3_project_clone`、`t3_attachment_*`、`t3_thread_send_attachments`、`t3_environment_*` と、廃止した `t3_*` の名前。現行の scheduler、worktree、browser/preview、device、GitHub PR の unprefixed owner tools は提供し、`orchestrator_capabilities` の `scheduledTasks` は true にする。
 
 ### 段階 4: Host（2026-10-07）
 
@@ -1515,7 +1517,7 @@ A5 で接続した（2026-10-07、後述の「A5: 端末の状態・intent・Uni
 - 不正な時刻文字列を扱う test（sort・snooze・settled の malformed / invalid の場合）: `Timestamp` は常に正しい時刻で、壊れた値が届かない。正しい値の部分は移植した。
 - environment をまたぐ並びと絞り込み（id の後の environment での tiebreak、environment の選択）: `packages/client-runtime/src/environment/knownEnvironment.ts`、`scoped.ts`、`registry.ts`、`supervisor.ts`、`packages/contracts/src/environment.ts`、`relay/AgentAwarenessRelay.ts` の Host identity・scoped key・connection state・activity shape を `agent-protocol::models::{EnvironmentDescriptor, EnvironmentCapabilities, AwarenessRegistration, AwarenessSnapshot}`、`agent-core::environment`（scoped keys、capability checks、deterministic environment/activity aggregation）、`Snapshot.environment`/`awareness`、`Snapshot.context_environment_id`、authenticated iroh `host/environment`・`host/awareness/{register,subscribe}`、`host_rpc::service` の Host-local activity projection へ接続した。T3 Connect/web relay transport はこの native Host 境界の外に置き、local Host が authenticated session 上の registration、cleanup、live activity polling を所有する。Tests: scoped-key round trips、first-separator parsing、capability predicates、stable label/id ordering、query filtering、cross-environment activity aggregation。
 - React・DOM・JavaScript の object identity を確かめる test（hook、class 名、pointer と DOM の問い合わせ、recycled list の等価、参照の保持）: 描画は各クライアントが行う。id・順序・内容の比較に置き換えられるものは置き換えた。
-- ソース管理・PR・予定実行・usage・端末プレビュー・アカウント接続の設定と操作: 2026-10-07 の決定で段階 6。
+- ソース管理・PR・予定実行・usage・端末プレビュー・アカウント接続の設定と操作: 2026-10-07 の段階区分として記録した履歴。現行の対応先は後述の段階 6 family 表に置く。
 
 T3 に合わせた判断と残る差:
 
@@ -1553,9 +1555,9 @@ T3 に合わせた判断と残る差:
 
 対象外にしたもの（理由）:
 
-- 製品にない機能・形式: `userMessage.test.ts` 全 5 件（予定実行の旧 prefix）、automation の表示（予定実行は段階 6）、preview / device / browser の MCP tool と pull request の件（提供しない tool。共通の挙動は提供中の tool で確かめた）、`file_search` と `checkpoint` の item を前提にする件（domain に item がない）、idle の状態の件（domain にない）、sender thread の件（domain が記録しない）、anchored の local feedback 発言の件（この製品にない）、mobile の provider question values 2 件（option に raw value がなく、どの質問も自由回答を受ける）。
+- 製品にない機能・形式: `userMessage.test.ts` 全 5 件（予定実行の旧 prefix）、廃止した `t3_*` の tool 名と、project clone/delete・attachments・environment の未提供 API、`file_search` と `checkpoint` の item を前提にする件（domain に item がない）、idle の状態の件（domain にない）、sender thread の件（domain が記録しない）、anchored の local feedback 発言の件（この製品にない）、mobile の provider question values 2 件（option に raw value がなく、どの質問も自由回答を受ける）。scheduler、preview/device/browser、GitHub PR の current tools はこの除外には含めない。
 - JavaScript の object identity と memo: `computeStableMessagesTimelineRows` の 4 件、`...WithState` の再利用の件（session-logic 4 件、MessagesTimeline 3 件）。row は毎回作り直し、thread ごとの cache が同じ入力で再利用する。
-- web の DOM だけの処理: CSS 文字列を返す minimap の 2 関数、asset URL の署名と preview URL（session-logic の image asset 4 件）。
+- web の DOM に固有な object identity と、native Host が所有しない asset URL signing / preview URL の session-logic 4 件。desktop minimap と assistant citations は current core/desktop consumers に接続済みで、この除外には含めない。
 - 旧い server・旧データの経路: `handoff.test.ts` の 2 件、`turnItemPresentation` の older server の assertion、`itemSupport` の node / provider session / thread / turn、`markdownLinks.test.ts` の `repairMarkdownFileLinks`（別 module）、`toolActivity.test` の ACP 用 4 件、`presentation.test` の旧 activity payload（`extractCommandOutputText`）。
 - 他の実装者の範囲: plan（`findLatestProposedPlan`、`deriveActivePlanState`）、composer の停止（`deriveCanInterruptRunningThread`、`isLatestRunSettled`）、sidebar の timer の他の件。
 
@@ -1634,9 +1636,9 @@ UniFFI の公開（`bindings/views.rs`）:
 | terminal の Text size・Attach output・Show keyboard | `TerminalScreen.kt`・`TerminalContextSheet.kt`。添付の record と draft の変更は core の `terminal_output_context` と `Intent::AttachTerminalOutput`。 |
 | model を staged で選び、option を保存 | `ThreadSheets.kt`。`Snapshot::stage_model` が記憶した option を適用し、`Intent::SaveStagedModel` が選択時の明示的な値を保存する。 |
 
-未対応（2026-10-08 の統合の後、Android でまだ作っていないもの）:
+2026-10-08 初版統合時の Android 未対応記録（後述の段階 6 対応で更新）:
 
-- git 操作（段階 6）、端末 preview、Material You の配色。
+- git 操作、端末 preview、Material You の配色。現行 consumer は `GitControls.kt`・`GitSheets.kt`、`ThreadArrangement.kt`、`DeviceScreen.kt`、`AppTheme.kt` に接続済みで、同一 revision の native build と unit test は final QA 待ち。
 
 固定 T3 mobile に既存 session の手動取り込み画面はない。Host の初回自動取り込みと desktop の onboarding を使う。
 
@@ -1668,7 +1670,7 @@ UniFFI の公開（`bindings/views.rs`）:
  - diff の window focus は preview と遅延 file patches を無効化して再読み込みし、環境 cwd が後から届いた場合は pending selection を再試行する。
  - provider ごとの runtime mode capability と draft の現在値。
  - diff の window focus での再読み込み、環境 cwd での再試行。
-- 追加の未接続項目はない。
+- この統合で追加の未接続項目は確認していない。これは static consumer map の記録であり、`PORT_MAP.json` の 960 行を row-by-row 完了にするものではない。
 
 truncated diff の file ごとの遅延読み込みは core の `review_files` と3クライアントの review へ接続した。`newWorktreesStartFromOrigin` は Host と project の疎な設定更新・新規 draft の workspace 選択へ接続した。resume compaction の帯は固定 T3 web と同じく desktop の composer に出す（固定 T3 mobile にはない）。
 
@@ -1696,7 +1698,7 @@ Appearance の保存と Themes・Contrast・Composer context・Motion・Advanced
 - `agent-protocol` の `orchestration` module、旧 `orchestration/*` の Call と Body、cwd から作る `terminal_handle` を削除した。会話の Call は `SubscribeThread`・`SubscribeShell`・`GetTurnItem`・`GetTurnDiff` と呼ぶ。ALPN は `remote-agent/streams/14`（environment identity / awareness の wire models を含む現行形式）。
 - `crate_boundaries` は `agent-domain` の依存が純粋な crate だけであること、`agent-core`（bindings の有無とも）と `agent-ffi` が `agent-runtime`・`agent-providers`・`rusqlite` を含まないことを確かめる。
 - 旧ランタイムを記述した文書（`SESSION_RUNTIME.md`、`BEX_PROTOCOL_DESIGN.md`、`BEX_PROTOCOL_NATIVE_CONTRACTS.md`、`CRATE_BOUNDARIES.md`、`IMPLEMENTATION.md`、`PLAN.md` の設計の節）を現在の設計に書き直し、旧コードの地図 `BEX_ARCHITECTURE_MAP.md` と、削除したテストを根拠にした `PR55_REVIEW.md`、この文書の「中断時の12ファイルの採否」を削除した。
-- どこからも参照されない core と runtime の定数・関数を削除した。T3 から移植してテストだけが使う関数（minimap、drag、citation など）は、未接続の T3 の挙動として残す。
+- どこからも参照されない core と runtime の定数・関数を削除した。minimap、drag arrangement、artifact/citation、assistant citation は現行 core/native consumers に接続している。個別 source row の翻訳状態は `PORT_MAP.json` のまま管理する。
 ### 段階 6: OS ウィジェットと Live Activity（2026-10-08）
 
 | 固定ソース・テスト | 接続先と検証 |
@@ -1721,6 +1723,7 @@ Swift 構文と plist/project 構造、固定 formatter、diff の検証を実�
 | Push/activity and OS widgets | `crates/agent-domain/src/activity.rs`、`crates/agent-core/src/{view/activity.rs,bindings/activity.rs}`、`crates/host-daemon/src/host_rpc/push.rs`、iOS Activity/Push sources、Android Push/Activity sources | activity/domain tests, Android `AgentPushMessagingServiceTest`, native parser and bounded-payload tests |
 | Updater/release runtime | `crates/host-daemon/src/update.rs` and `host_runtime.rs`, `scripts/stage-ffmpeg-runtime.sh`, `scripts/ffmpeg-runtime-test.sh`, release metadata docs | updater unit tests, release metadata/actionlint/shellcheck checks; final same-head builds remain pending |
 | Claude/Codex usage and conversation adapters | `crates/agent-providers/`, `crates/host-daemon/src/{claude,conversation}/`, `crates/codex-app-server/` | provider replay fixtures, Claude bridge tests, conversation/domain tests; no live model calls |
+| Native consumers (Android Git/Material You/drag/device; desktop minimap, artifacts and assistant citations) | Android `GitControls.kt`・`GitSheets.kt`・`AppTheme.kt`・`ThreadArrangement.kt`・`DeviceScreen.kt`; `crates/agent-core/src/view/timeline/desktop_layout.rs`; `apps/desktop/src/app/timeline/markdown.rs`; `crates/agent-core/src/presentation/markdown/{artifact_templates,citations,assistant_citations}.rs` | Android/core/native parser and view tests, desktop timeline/markdown tests; final same-head native builds remain pending |
 
 ### 承認済みの境界
 
@@ -1730,4 +1733,4 @@ Swift 構文と plist/project 構造、固定 formatter、diff の検証を実�
 - transport とペアリングは既存の iroh/QR 境界を維持し、ALPN は `remote-agent/streams/14` の現行形式だけを扱う。
 - browser auto-import と旧 V1/legacy migration paths は対象外とする。現在形式の browser preview と native device surfaces は対応表の production family に含める。
 
-統合 head `7fd114ef` では上記 source family と current consumers の静的な対応を記録した。最終 unit test、workspace clippy (`-D warnings`)、fmt、Host/GPUI、UniFFI 再生成、iOS の共有/Activity/Share Extension、Android の同一 revision build は root の QA として保留している。外部 provider、実機・実端末、稼働中 Host、signing、CI 待ちはこの記録の検証に含めない。
+この checkpoint では上記 source family と current consumers の静的な対応を記録した。`PORT_MAP.json` の固定 commit は `4ee6bfd50ef4a089440d5c3662db2298da9cc50e` で、960 行の内訳は `未翻訳` 762、`対象外` 198、row-level の `reviewed_ranges` / `tests` は未記録である。最終 unit test、workspace clippy (`-D warnings`)、fmt、Host/GPUI、UniFFI 再生成、iOS の共有/Activity/Share Extension、Android の同一 revision build は root の QA として保留している。PR55 の review 用 branch への push/PR 更新以外の push、main の変更、CI 待ち/dispatch、外部 provider、実機・実端末、稼働中 Host、signing、signed launch はこの記録の検証に含めない。上の dated sections に残る旧 SDK、旧 ALPN、段階途中の未実装記録は履歴であり、この checkpoint の current behavior を表さない。

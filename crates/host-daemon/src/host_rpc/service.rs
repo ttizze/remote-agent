@@ -150,8 +150,12 @@ struct HostResources {
 }
 
 enum WorktreeAccessGuard<'a> {
-    Read(tokio::sync::RwLockReadGuard<'a, ()>),
-    Write(tokio::sync::RwLockWriteGuard<'a, ()>),
+    Read {
+        _guard: tokio::sync::RwLockReadGuard<'a, ()>,
+    },
+    Write {
+        _guard: tokio::sync::RwLockWriteGuard<'a, ()>,
+    },
 }
 
 struct ProviderHealthCache {
@@ -1878,9 +1882,9 @@ impl HostRpcService {
             .principal(session)
             .map_err(|error| Failure::new("connection_closed", error))?;
         let _workspace = if matches!(request, Call::CloneRepository(_)) {
-            Some(WorktreeAccessGuard::Write(
-                resources.worktree_access.write().await,
-            ))
+            Some(WorktreeAccessGuard::Write {
+                _guard: resources.worktree_access.write().await,
+            })
         } else if matches!(
             request,
             Call::StartTerminal(_)
@@ -1890,9 +1894,9 @@ impl HostRpcService {
                 | Call::AttachmentPath(_)
                 | Call::ReviewWorkspace(_)
         ) {
-            Some(WorktreeAccessGuard::Read(
-                resources.worktree_access.read().await,
-            ))
+            Some(WorktreeAccessGuard::Read {
+                _guard: resources.worktree_access.read().await,
+            })
         } else {
             None
         };

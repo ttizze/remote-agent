@@ -55,7 +55,7 @@ M1 を完成させてから M2 へ進む。M1 の途中で M2 以降に手を出
 
 ## 進め方（速度のための規則）
 
-- 作業はこの worktree の現在のブランチで行う。main へのマージや push はしない。完成したらブランチを push して PR を作る。途中で main を取り込み直さない。PR を作る直前に一度だけ取り込む。
+- 作業はこの worktree の現在のブランチで行う。main へのマージや push はしない。今回の push と PR 更新は PR55 の review 用 branch に限る。途中で main を取り込み直さず、CI の結果待ちや dispatch もしない。live provider、実機・実端末、signing、signed launch はこの checkpoint の検証に含めない。
 - テストは変更した crate に絞って回す（例: `scripts/dev-env.sh cargo nextest run -p agent-domain`）。全体の `scripts/dev-env.sh just unit-tests` は、M1 の各段階の区切りとコミットの前だけに回す。
 - CI の結果待ち、cargo-mutants、ローカル E2E、Simulator を使う UI テストはしない。iOS と Android は、ビルドが通ることだけを確認する（`scripts/build-agent-ios.sh simulator` と xcodebuild の build、`./gradlew :apps:mobile:assembleDebug`）。
 - 古い会話の仕組みに合わせたテストと fixture は、直そうとせずに削除する。新しい crate のテストは、T3 の状態遷移（キュー、stop、steer、承認、再起動からの復旧、同じコマンド id の再送）を検証する。proptest は decider と projector に使う。
@@ -136,3 +136,5 @@ M1 を完成させてから M2 へ進む。M1 の途中で M2 以降に手を出
 
 - 2026-10-05: ユーザーの新しい規則で、短縮実装・要約からの再実装をやめる。固定 T3 のファイルと関数の分岐、状態遷移、エラー、ID、順序を翻訳し、元のテストと ProviderReplayTranscript を期待値の変更なしで移植する。対応と未翻訳範囲・境界差分は PORT_MAP.md/PORT_MAP.json に記録する。従来の「M1/M2 完成」記録を翻訳完了の証拠にはしない。
 - 2026-10-05: 中断した12ファイルの暫定差分は全件照合し、独自の project 完了印、empty ack、cohort を閉じない task disposal、worker の4並列制限撤去、常に null とする Claude cursor、MCP の購読 wait/固定 ack ID を採用しない。ignored target に差分を保存し HEAD へ戻した。目的が一致する修正も関数全体の翻訳時に元の試験で確かめる。順序はユーザーの指定どおり core → adapters/SDK → importer → client-runtime/native → R3 全件再照合。M3/main/実 Host/他 worktree には触れない。
+
+- 2026-10-08（現行統合 checkpoint）: M3 の production consumers（Git/VCS・GitHub PR、scheduled tasks、usage、settings/platform、worktree、browser/preview/device、push/activity、updater/release）を現行 Rust/native paths に接続した。Android の Git、Material You、drag arrangement、artifact/citation、desktop の minimap と assistant citations も現行 consumer に含める。M3 Settings は実装済みだが、同一 head の最終 unit test・clippy・fmt・Host/native build・UniFFI QA は root 待ちであり、ここでは pass を主張しない。PR55 の review 用 branch への push/PR 更新以外の push、main の変更、CI 待ち/dispatch、live provider、実機・実端末、signing、signed launch はこの checkpoint の範囲外である。以前の「M3 は未実装」「M3 は広告しない」という dated entry は履歴として残し、この項で現行範囲を上書きする。

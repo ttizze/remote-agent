@@ -118,7 +118,7 @@ impl PortScanner {
     }
 
     /// Starts a 3-second poll while the returned subscription is alive.
-    pub fn subscribe(
+    pub(crate) fn subscribe(
         self: &Arc<Self>,
         configured_urls: Vec<String>,
         terminals: Arc<crate::terminals::Terminals>,

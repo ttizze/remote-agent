@@ -61,7 +61,6 @@ pub(super) enum Reply {
     PreviewRecordingArtifact(agent_protocol::preview::PreviewRecordingArtifact),
     ContentSearch(agent_protocol::workspace::ContentSearch),
     Environment(m::EnvironmentDescriptor),
-    AwarenessRegistration(m::AwarenessRegistrationResult),
     Transcription(String),
     HostSettings(m::HostSettings),
     SessionScan(c::SessionScan),
@@ -228,7 +227,10 @@ async fn execute(peer: &Peer, call: &Call) -> Result<Reply, PeerError> {
         }
         Call::SearchContents(_) => Reply::ContentSearch(peer.request(call).await?),
         Call::Environment(_) => Reply::Environment(peer.request(call).await?),
-        Call::RegisterAwareness(_) => Reply::AwarenessRegistration(peer.request(call).await?),
+        Call::RegisterAwareness(_) => {
+            let _: m::AwarenessRegistrationResult = peer.request(call).await?;
+            Reply::Done
+        }
         Call::Transcribe(_) => {
             Reply::Transcription(peer.request::<op::Transcription>(call).await?.text)
         }
@@ -1016,7 +1018,6 @@ impl Owner {
                 self.state.host_name = Some(environment.label.clone());
                 self.state.environment = Some(environment);
             }
-            Reply::AwarenessRegistration(_) => {}
             Reply::HostSettings(settings) => {
                 let mut defaults = self.state.default_draft.user_defaults();
                 defaults.runtime_mode = settings.default_runtime_mode;

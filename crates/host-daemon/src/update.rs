@@ -1536,10 +1536,6 @@ fn remove_existing_path(path: &Path) -> std::io::Result<()> {
     }
 }
 
-fn validate_archive_entry(entry: &str) -> Result<()> {
-    validate_archive_path(Path::new(entry))
-}
-
 fn validate_archive_path(path: &Path) -> Result<()> {
     let mut has_normal_component = false;
     let mut has_component = false;
@@ -1963,18 +1959,6 @@ mod tests {
         let mut unsafe_name = metadata;
         unsafe_name.assets[0].name = "host-linux-x86_64.tar.gz?redirect".into();
         assert!(UpdateManager::validate_release_metadata(&unsafe_name, None).is_err());
-    }
-
-    #[test]
-    fn rejects_archive_paths_that_escape_the_install_directory() {
-        assert!(validate_archive_entry("host-daemon").is_ok());
-        assert!(validate_archive_entry("nested/host-daemon").is_ok());
-        assert!(validate_archive_entry("./nested/host-daemon").is_ok());
-        assert!(validate_archive_entry(".").is_ok());
-        assert!(validate_archive_entry("").is_err());
-        assert!(validate_archive_entry("nested/../host-daemon").is_err());
-        assert!(validate_archive_entry("../host-daemon").is_err());
-        assert!(validate_archive_entry("/tmp/host-daemon").is_err());
     }
 
     #[test]

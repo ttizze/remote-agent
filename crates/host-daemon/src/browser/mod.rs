@@ -381,7 +381,7 @@ impl Browser {
         mcp::listen(&browser)?;
         Ok(browser)
     }
-    pub fn set_preview_resources(
+    pub(crate) fn set_preview_resources(
         &self,
         preview: Arc<crate::preview::PreviewManager>,
         preview_ports: Arc<crate::preview::PortScanner>,

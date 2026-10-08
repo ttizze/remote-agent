@@ -521,7 +521,7 @@ impl DeviceState {
     /// epoch. iOS receives physical modifier transitions; Android keeps its
     /// source semantic key path and does not receive unsupported modifier
     /// pseudo-characters.
-    pub fn key_input_plan(
+    pub(crate) fn key_input_plan(
         &mut self,
         thread_id: ThreadId,
         host_id: Option<String>,
@@ -588,7 +588,7 @@ impl DeviceState {
     /// Releases every key owned by a native surface, including ordinary keys
     /// that were held when focus moved. The target is resolved before the
     /// state is removed so a close/reconnect cannot redirect releases.
-    pub fn release_input_plan(
+    pub(crate) fn release_input_plan(
         &mut self,
         thread_id: ThreadId,
         host_id: Option<String>,
@@ -634,7 +634,7 @@ impl DeviceState {
         Ok(Some(DeviceInputPlan { inputs, target }))
     }
 
-    pub fn clear_input_state(&mut self, target: &DeviceInputTarget) {
+    pub(crate) fn clear_input_state(&mut self, target: &DeviceInputTarget) {
         self.input_state.remove(&Self::input_key(target));
     }
 
@@ -642,7 +642,10 @@ impl DeviceState {
     /// device subscription or thread view is torn down.  Session identity is
     /// kept from the owned key, so a reconnect cannot redirect the cleanup to
     /// a replacement session.
-    pub fn release_input_plans_for_thread(&mut self, thread_id: &ThreadId) -> Vec<DeviceInputPlan> {
+    pub(crate) fn release_input_plans_for_thread(
+        &mut self,
+        thread_id: &ThreadId,
+    ) -> Vec<DeviceInputPlan> {
         let thread_key = thread_id.to_string();
         let targets = self
             .input_state
@@ -690,7 +693,7 @@ impl DeviceState {
     /// that owned it.  The connection owner checks this immediately before
     /// admitting the wire job, so a thread switch or reconnect cannot send a
     /// queued release or key to a replacement session.
-    pub fn accepts_input_target(&self, target: &DeviceInputTarget) -> bool {
+    pub(crate) fn accepts_input_target(&self, target: &DeviceInputTarget) -> bool {
         self.sessions.iter().any(|session| {
             session.thread_id == target.thread_id
                 && session.host_id == target.host_id
