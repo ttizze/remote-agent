@@ -1,8 +1,8 @@
 use crate::*;
 use serde_json::json;
 #[test]
-fn sdk_version_matches_the_reference_lock() {
-    assert_eq!(CLAUDE_SDK_VERSION, "0.3.276");
+fn sdk_version_matches_the_pinned_lockfile() {
+    assert_eq!(CLAUDE_SDK_VERSION, "0.3.293");
 }
 #[test]
 fn resume_dialog_control_has_the_original_question_choices_and_result() {
