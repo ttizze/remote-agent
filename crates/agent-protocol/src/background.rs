@@ -5,7 +5,8 @@
 pub use agent_domain::{
     BackgroundActivityPolicy, BackgroundActivityProfile, BackgroundAppState,
     BackgroundBatteryState, BackgroundBooleanState, BackgroundClientKind, BackgroundPolicySnapshot,
-    BackgroundScope, ClientActivityLease, ClientActivityReport, HostPowerSnapshot, HostPowerSource,
+    BackgroundScope, ClientActivityLease, ClientActivityReport, HostPowerSnapshot,
+    HostPowerSource, HostResourcesSnapshot,
     HostPowerThermalState,
     ProcessDiagnosticsEntry, ProcessDiagnosticsError, ProcessDiagnosticsResult,
     ProcessResourceEntry, ProcessResourceHistoryBucket, ProcessResourceHistoryError,

@@ -516,7 +516,7 @@ pub fn filter_composer_pull_request_matches(
                 .as_ref()
                 .map(|snapshot| snapshot.title.clone())
                 .unwrap_or_else(|| format!("#{}", link.number)),
-            url: link.url,
+            url: link.url.clone(),
             state: link
                 .snapshot
                 .as_ref()

@@ -516,7 +516,7 @@ pub struct ReadAccountUsage {
 pub struct ReadUsageSummary {
     pub input: crate::usage::SummaryInput,
 }
-rpc_method!(ReadUsageSummary, UsageSummary, |self| self.clone());
+rpc_method!(ReadUsageSummary, ReadUsageSummary, |self| self.clone());
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RefreshUsageRates {}
