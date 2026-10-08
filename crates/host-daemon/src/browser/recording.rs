@@ -161,7 +161,7 @@ async fn run_capture(
     height: u32,
     cancel: tokio_util::sync::CancellationToken,
     stop: tokio_util::sync::CancellationToken,
-    mut startup: oneshot::Sender<Result<(), String>>,
+    startup: oneshot::Sender<Result<(), String>>,
 ) -> Result<u64, String> {
     let mut startup = Some(startup);
     let (mut socket, _) = match async_tungstenite::tokio::connect_async(endpoint).await {
