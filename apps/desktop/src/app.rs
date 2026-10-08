@@ -576,6 +576,7 @@ impl Desktop {
         self.connecting = true;
         self.invalidate_load_balancing_attempt();
         self.remote = remote;
+        self.client_preferences.clear_selected_sync();
         self.session.take();
         if let Some(remote) = &remote {
             self.background_sessions.remove(&remote.id);
@@ -813,9 +814,16 @@ impl Desktop {
         else {
             return false;
         };
+        let Some(candidate) = self.background_sessions.get(&profile_id) else {
+            return false;
+        };
+        if !self.store_has_current_client_preferences(&candidate.store) {
+            return false;
+        }
         let Some(session) = self.background_sessions.remove(&profile_id) else {
             return false;
         };
+        self.client_preferences.clear_selected_sync();
         let previous_profile_id = self.remote.as_ref().map(|remote| remote.id.clone());
         if let Some(previous_session) = self.session.take()
             && let Some(previous_profile_id) = previous_profile_id
@@ -893,7 +901,33 @@ impl Desktop {
             return;
         };
         if let Some(session) = self.background_sessions.get(profile_id) {
-            let _ = session.store.dispatch(intent);
+            let store = session.store.clone();
+            let receipt = store.dispatch(intent);
+            let updates = self.updates.clone();
+            let epoch = self.epoch;
+            let done: Done = Box::new(move |view, result, _window, cx| {
+                if result.is_ok()
+                    && view
+                        .background_sessions
+                        .values()
+                        .any(|session| Arc::ptr_eq(&session.store, &store))
+                {
+                    let snapshot = store.snapshot();
+                    view.synchronize_client_preferences_from(&snapshot);
+                    view.environment_registry.update(snapshot);
+                    view.generation += 1;
+                    view.schedule_views(cx);
+                }
+            });
+            self.runtime.handle.spawn(async move {
+                let result = receipt
+                    .await
+                    .map_err(|error| error.to_string())
+                    .and_then(|result| result.map_err(|error| error.to_string()));
+                let _ = updates
+                    .send((epoch, Update::Completed(Some(done), result)))
+                    .await;
+            });
         } else {
             // Device preferences remain editable while a cached environment
             // is disconnected; the selected Store persists the scoped key.
@@ -984,6 +1018,19 @@ impl Desktop {
                     .map(|store| (environment_id.clone(), store.clone()))
             })
             .collect::<Vec<_>>();
+        let canonical_store = self
+            .session
+            .as_ref()
+            .and_then(|session| {
+                session
+                    .store
+                    .snapshot()
+                    .environment
+                    .as_ref()
+                    .map(|environment| environment.environment_id.clone())
+                    .and_then(|environment_id| stores.get(&environment_id).cloned())
+            })
+            .or_else(|| targets.first().map(|(_, store)| store.clone()));
         let clear_targets = targets.clone();
         self.spawn_task(
             async move {
@@ -1037,9 +1084,17 @@ impl Desktop {
                 } else {
                     Vec::new()
                 };
-                (plan, decision, removed)
+                let canonical = if decision
+                    == agent_core::view::browser::BrowserProfileRemovalDecision::Ready
+                    && removed.iter().all(|(_, result)| result.is_ok())
+                {
+                    canonical_store.map(|store| store.snapshot())
+                } else {
+                    None
+                };
+                (plan, decision, removed, canonical)
             },
-            move |view, (_plan, decision, removed), window, cx| {
+            move |view, (_plan, decision, removed, canonical), window, cx| {
                 if view.browser_profile_removal_generation != generation {
                     return;
                 }
@@ -1056,6 +1111,8 @@ impl Desktop {
                                 window,
                                 cx,
                             );
+                        } else if let Some(canonical) = canonical {
+                            view.synchronize_client_preferences_from(&canonical);
                         }
                     }
                     agent_core::view::browser::BrowserProfileRemovalDecision::Failed => {
@@ -1201,7 +1258,7 @@ impl Desktop {
                 return;
             }
             Update::Connected(Ok((mut session, path, local_host_supervised))) => {
-                if !self.selected_store_has_current_client_preferences(&session.store) {
+                if !self.store_has_current_client_preferences(&session.store) {
                     let updates = self.updates.clone();
                     let client_preferences = self.client_preferences.clone();
                     let epoch = self.epoch;
@@ -1284,9 +1341,32 @@ impl Desktop {
                 {
                     return;
                 }
-                self.background_connecting.remove(&profile_id);
                 match result {
                     Ok(mut session) => {
+                        if !self.store_has_current_client_preferences(&session.store) {
+                            let updates = self.updates.clone();
+                            let client_preferences = self.client_preferences.clone();
+                            let epoch = self.epoch;
+                            let retry_profile_id = profile_id.clone();
+                            self.runtime.handle.spawn(async move {
+                                let result = match client_preferences.apply_to(&session.store).await
+                                {
+                                    Ok(()) => Ok(session),
+                                    Err(error) => Err(format!("{error:#}")),
+                                };
+                                let _ = updates
+                                    .send((
+                                        epoch,
+                                        Update::EnvironmentConnected {
+                                            profile_id: retry_profile_id,
+                                            result,
+                                        },
+                                    ))
+                                    .await;
+                            });
+                            return;
+                        }
+                        self.background_connecting.remove(&profile_id);
                         self.background_retry_at.remove(&profile_id);
                         let updates = self.updates.clone();
                         let (tx, rx) = async_channel::bounded(4);
@@ -1331,6 +1411,7 @@ impl Desktop {
                         self.schedule_views(cx);
                     }
                     Err(error) => {
+                        self.background_connecting.remove(&profile_id);
                         self.background_failed(&profile_id);
                         if let Some(environment_id) =
                             self.profile_environment_ids.get(&profile_id).cloned()
@@ -1348,9 +1429,11 @@ impl Desktop {
                 profile_id,
                 snapshot,
             } => {
-                if !self.background_sessions.contains_key(&profile_id)
-                    && !self.background_connecting.contains(&profile_id)
-                {
+                // StoreSession sends the Connected event before its first
+                // snapshot.  While a stale Connected handoff is being
+                // reseeded, snapshots already queued behind it must wait for
+                // the retried session instead of becoming the registry source.
+                if !self.background_sessions.contains_key(&profile_id) {
                     return;
                 }
                 let disconnected = !snapshot.connected;
@@ -1616,21 +1699,57 @@ impl Desktop {
     /// Host-scoped, so an older Store cannot overwrite the current version or
     /// become the source for a later Host switch.
     fn synchronize_client_preferences(&self) {
-        let Ok(bytes) = agent_core::persistence::encode_model_preferences(&self.snapshot) else {
+        self.broadcast_client_preferences(&self.snapshot, false);
+    }
+
+    fn synchronize_client_preferences_from(&self, source: &Snapshot) {
+        self.broadcast_client_preferences(source, true);
+    }
+
+    fn broadcast_client_preferences(&self, source: &Snapshot, include_selected: bool) {
+        let Ok(bytes) = agent_core::persistence::encode_model_preferences(source) else {
             return;
         };
-        if !self.client_preferences.replace(bytes.clone()) {
+        if !include_selected && self.client_preferences.selected_sync_blocks(&bytes) {
             return;
         }
-        for session in self.background_sessions.values() {
-            let receipt = session.store.apply_client_preferences(bytes.clone());
+        let changed = self.client_preferences.replace(bytes.clone());
+        let selected = include_selected
+            .then(|| self.session.as_ref().map(|session| session.store.clone()))
+            .flatten();
+        if !changed && selected.is_none() {
+            return;
+        }
+        if selected.is_some() {
+            self.client_preferences.mark_selected_sync(&bytes);
+        }
+        let mut stores = self
+            .background_sessions
+            .values()
+            .map(|session| session.store.clone())
+            .collect::<Vec<_>>();
+        if !changed {
+            stores.clear();
+        }
+        if let Some(selected) = &selected {
+            stores.push(selected.clone());
+        }
+        for store in stores {
+            let receipt = store.apply_client_preferences(bytes.clone());
+            let client_preferences = self.client_preferences.clone();
+            let applied_bytes = bytes.clone();
+            let is_selected = selected
+                .as_ref()
+                .is_some_and(|selected| Arc::ptr_eq(selected, &store));
             self.runtime.handle.spawn(async move {
-                let _ = receipt.await;
+                if matches!(receipt.await, Ok(Ok(_))) && is_selected {
+                    client_preferences.complete_selected_sync(&applied_bytes);
+                }
             });
         }
     }
 
-    fn selected_store_has_current_client_preferences(&self, store: &Store) -> bool {
+    fn store_has_current_client_preferences(&self, store: &Store) -> bool {
         let current = self.client_preferences.current();
         current.is_empty()
             || agent_core::persistence::encode_model_preferences(&store.snapshot())

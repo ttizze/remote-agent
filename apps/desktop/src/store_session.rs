@@ -10,6 +10,7 @@ use tokio::{sync::watch, task::JoinHandle};
 #[derive(Clone)]
 pub(crate) struct ClientPreferences {
     bytes: Arc<Mutex<Vec<u8>>>,
+    pending_selected: Arc<Mutex<Option<Vec<u8>>>>,
 }
 
 impl ClientPreferences {
@@ -22,6 +23,7 @@ impl ClientPreferences {
             .unwrap_or_default();
         Self {
             bytes: Arc::new(Mutex::new(bytes)),
+            pending_selected: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -29,6 +31,7 @@ impl ClientPreferences {
     fn from_path(path: PathBuf) -> Self {
         Self {
             bytes: Arc::new(Mutex::new(std::fs::read(path).unwrap_or_default())),
+            pending_selected: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -48,6 +51,33 @@ impl ClientPreferences {
         }
         *current = bytes;
         true
+    }
+
+    pub(crate) fn selected_sync_blocks(&self, bytes: &[u8]) -> bool {
+        self.pending_selected
+            .lock()
+            .map(|pending| pending.as_deref().is_some_and(|current| current != bytes))
+            .unwrap_or(false)
+    }
+
+    pub(crate) fn mark_selected_sync(&self, bytes: &[u8]) {
+        if let Ok(mut pending) = self.pending_selected.lock() {
+            *pending = Some(bytes.to_vec());
+        }
+    }
+
+    pub(crate) fn complete_selected_sync(&self, bytes: &[u8]) {
+        if let Ok(mut pending) = self.pending_selected.lock()
+            && pending.as_deref() == Some(bytes)
+        {
+            *pending = None;
+        }
+    }
+
+    pub(crate) fn clear_selected_sync(&self) {
+        if let Ok(mut pending) = self.pending_selected.lock() {
+            *pending = None;
+        }
     }
 
     /// Seeds a newly exposed Host store with the latest client-global values.
@@ -257,6 +287,21 @@ mod tests {
         }
     }
 
+    #[test]
+    fn selected_preference_sync_blocks_a_stale_snapshot_until_receipt_completes() {
+        let preferences = ClientPreferences {
+            bytes: Arc::new(Mutex::new(Vec::new())),
+            pending_selected: Arc::new(Mutex::new(None)),
+        };
+        let current = b"current";
+        let stale = b"stale";
+        preferences.mark_selected_sync(current);
+        assert!(preferences.selected_sync_blocks(stale));
+        assert!(!preferences.selected_sync_blocks(current));
+        preferences.complete_selected_sync(current);
+        assert!(!preferences.selected_sync_blocks(stale));
+    }
+
     #[tokio::test]
     async fn closing_writes_the_latest_draft_and_model_preferences_and_closes_the_store() {
         tokio::time::timeout(Duration::from_secs(5), async {
@@ -334,6 +379,7 @@ mod tests {
                     agent_core::persistence::encode_model_preferences(&Snapshot::default())
                         .unwrap(),
                 )),
+                pending_selected: Arc::new(Mutex::new(None)),
             };
             let runtime = runtime();
             let store = Arc::new(Store::offline(Snapshot::default(), Default::default()));

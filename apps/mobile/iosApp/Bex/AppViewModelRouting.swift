@@ -20,6 +20,7 @@ extension BexAppViewModel {
         connection?.cancel()
         isConnecting = false
         let background = backgroundOwners.removeValue(forKey: id)
+        backgroundTaskGenerations[id, default: 0] &+= 1
         backgroundTasks.removeValue(forKey: id)?.cancel()
         Task { try? await background?.shutdown() }
         let old = detachStore()
@@ -234,6 +235,7 @@ extension BexAppViewModel {
             let remaining = profiles.filter { $0.id != id }
             let unregistration = unregisterPush(id)
             let background = backgroundOwners.removeValue(forKey: id)
+            backgroundTaskGenerations[id, default: 0] &+= 1
             backgroundTasks.removeValue(forKey: id)?.cancel()
             environments.removeAll { $0.profileId == id }
             environmentSnapshots.removeValue(forKey: id)

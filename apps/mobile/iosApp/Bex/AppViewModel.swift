@@ -68,11 +68,14 @@ final class BexAppViewModel: ObservableObject {
     var store: AgentStore?
     var backgroundOwners: [String: AgentStore] = [:]
     var backgroundTasks: [String: Task<Void, Never>] = [:]
+    var backgroundTaskGenerations: [String: UInt64] = [:]
     var initialization: Task<Void, Never>?
     var observation: Task<Void, Never>?
     var persistence: Task<Void, Never>?
     var persistenceWrite: Task<Void, Never>?
     var clientPreferencesData = SnapshotFiles.modelDefaults()
+    var clientPreferencesGeneration: UInt64 = 0
+    var pendingSelectedClientPreferences: (owner: AgentStore, data: Data)?
     var connection: Task<Void, Never>?
     var pending: [(Intent, (Result<Outcome, Error>) -> Void)] = []
     var operations: [UUID: Task<Void, Never>] = [:]

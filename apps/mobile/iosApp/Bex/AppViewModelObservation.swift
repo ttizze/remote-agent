@@ -27,6 +27,7 @@ extension BexAppViewModel {
                     phase: .identityRead,
                     value: UInt64((ProcessInfo.processInfo.systemUptime - identityStarted) * 1_000_000)
                 )
+                try await applyClientPreferences(to: owner)
                 try await owner.resume(connection: Connection(ticket: profile.ticket,
                                                               identity: identity,
                                                               invitation: nil, useRelays: true))
@@ -85,8 +86,12 @@ extension BexAppViewModel {
         }
         let threadChanged = snapshot.selectedThreadId() != next.selectedThreadId()
         snapshot = next
-        synchronizeClientPreferences(next)
-        if let id = selectedProfileId, let profile = profiles.first(where: { $0.id == id }) {
+        if syncClientPreferences {
+            synchronizeClientPreferences(next)
+        }
+        if syncClientPreferences,
+           let id = selectedProfileId,
+           let profile = profiles.first(where: { $0.id == id }) {
             publishEnvironment(profile, next)
         }
         if threadChanged {
@@ -181,21 +186,55 @@ extension BexAppViewModel {
         synchronizeClientPreferences(owner.snapshot())
     }
 
-    private func synchronizeClientPreferences(_ source: AgentCore.Snapshot) {
-        guard let data = try? source.serializeModelPreferences(), data != clientPreferencesData else {
+    private func synchronizeClientPreferences(
+        _ source: AgentCore.Snapshot,
+        includeSelected: Bool = false
+    ) {
+        guard let data = try? source.serializeModelPreferences() else {
             return
         }
-        clientPreferencesData = data
-        let previous = persistenceWrite
-        persistenceWrite = Task { [weak self] in
-            await previous?.value
-            do {
-                try await SnapshotFiles.saveModelPreferences(data)
-            } catch { self?.notice = error.localizedDescription }
+        if !includeSelected,
+           let pending = pendingSelectedClientPreferences,
+           let selected = store,
+           selected === pending.owner,
+           data != pending.data {
+            return
         }
-        for owner in backgroundOwners.values {
+        let selectedNeedsSync = includeSelected && store.map { selected in
+            guard let pending = pendingSelectedClientPreferences else { return true }
+            return pending.owner !== selected || pending.data != data
+        } ?? false
+        let changed = data != clientPreferencesData
+        guard changed || selectedNeedsSync else { return }
+        if changed {
+            clientPreferencesData = data
+            clientPreferencesGeneration &+= 1
+            let previous = persistenceWrite
+            persistenceWrite = Task { [weak self] in
+                await previous?.value
+                do {
+                    try await SnapshotFiles.saveModelPreferences(data)
+                } catch { self?.notice = error.localizedDescription }
+            }
+        }
+        var owners: [AgentStore] = changed ? Array(backgroundOwners.values) : []
+        if includeSelected, let store {
+            pendingSelectedClientPreferences = (store, data)
+            owners.append(store)
+        }
+        for owner in owners {
             guard let receipt = try? owner.applyClientPreferences(preferences: data) else { continue }
-            Task { _ = try? await receipt.wait() }
+            let isSelected = includeSelected && owner === store
+            Task { [weak self, owner] in
+                guard await (try? receipt.wait()) != nil else { return }
+                guard isSelected, let self,
+                      let pending = pendingSelectedClientPreferences,
+                      pending.owner === owner,
+                      pending.data == data,
+                      clientPreferencesData == data
+                else { return }
+                pendingSelectedClientPreferences = nil
+            }
         }
     }
 

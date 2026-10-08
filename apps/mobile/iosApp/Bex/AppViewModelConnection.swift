@@ -20,6 +20,7 @@ extension BexAppViewModel {
         cancelInitialization()
         let old = store
         store = nil
+        pendingSelectedClientPreferences = nil
         return old
     }
 
@@ -43,7 +44,12 @@ extension BexAppViewModel {
                 cacheDirectory: SnapshotFiles.cacheDirectory(id),
                 diagnosticsDirectory: SnapshotFiles.diagnosticsDirectory(id)
             )
-            await applyClientPreferences(to: owner)
+            do {
+                try await applyClientPreferences(to: owner)
+            } catch {
+                try? await owner.shutdown()
+                throw error
+            }
             guard !Task.isCancelled, selectedProfileId == id else { try? await owner.shutdown(); return }
             store = owner
             owner.recordConnectionEvent(
@@ -91,16 +97,24 @@ extension BexAppViewModel {
     }
 
     func superviseBackground(_ profile: HostProfile) {
+        let generation = backgroundTaskGenerations[profile.id, default: 0] &+ 1
+        backgroundTaskGenerations[profile.id] = generation
         let task = Task { [weak self] in
             var delayNanoseconds: UInt64 = 250_000_000
-            defer { self?.backgroundTasks[profile.id] = nil }
+            defer {
+                guard let self, self.backgroundTaskGenerations[profile.id] == generation else {
+                    return
+                }
+                self.backgroundTasks[profile.id] = nil
+                self.backgroundTaskGenerations[profile.id] = nil
+            }
             while !Task.isCancelled {
                 guard let self,
                       profiles.contains(where: { $0.id == profile.id }),
                       selectedProfileId != profile.id
                 else { return }
                 do {
-                    try await runBackgroundProfile(profile)
+                    try await runBackgroundProfile(profile, generation: generation)
                     delayNanoseconds = 250_000_000
                 } catch is CancellationError {
                     return
@@ -119,8 +133,9 @@ extension BexAppViewModel {
         backgroundTasks[profile.id] = task
     }
 
-    private func runBackgroundProfile(_ profile: HostProfile) async throws {
+    private func runBackgroundProfile(_ profile: HostProfile, generation: UInt64) async throws {
         let owner: AgentStore
+        var createdOwner: AgentStore?
         if let existing = backgroundOwners[profile.id] {
             owner = existing
         } else {
@@ -136,35 +151,75 @@ extension BexAppViewModel {
             }
             backgroundOwners[profile.id] = created
             owner = created
+            createdOwner = created
         }
-        await applyClientPreferences(to: owner)
-        registerPushIfReady(profile.id)
-        publishEnvironment(profile, owner.snapshot())
-        let identity = try DeviceIdentity.loadOrGenerate(profile.id)
-        try await owner.resume(connection: Connection(
-            ticket: profile.ticket,
-            identity: identity,
-            invitation: nil,
-            useRelays: true
-        ))
-        publishEnvironment(profile, owner.snapshot())
-        var previous = owner.snapshot()
-        while !Task.isCancelled, selectedProfileId != profile.id {
-            _ = try await owner.nextSnapshot(previous: previous)
-            let latest = owner.snapshot()
-            publishEnvironment(profile, latest)
-            if !latest.connected() {
-                break
+        do {
+            try await applyClientPreferences(to: owner)
+            guard ownsBackground(profile, owner: owner, generation: generation) else {
+                throw CancellationError()
             }
-            previous = latest
+            registerPushIfReady(profile.id)
+            publishEnvironment(profile, owner.snapshot())
+            let identity = try DeviceIdentity.loadOrGenerate(profile.id)
+            try await owner.resume(connection: Connection(
+                ticket: profile.ticket,
+                identity: identity,
+                invitation: nil,
+                useRelays: true
+            ))
+            guard ownsBackground(profile, owner: owner, generation: generation) else {
+                throw CancellationError()
+            }
+            publishEnvironment(profile, owner.snapshot())
+            var previous = owner.snapshot()
+            while ownsBackground(profile, owner: owner, generation: generation) {
+                _ = try await owner.nextSnapshot(previous: previous)
+                guard ownsBackground(profile, owner: owner, generation: generation) else {
+                    throw CancellationError()
+                }
+                let latest = owner.snapshot()
+                publishEnvironment(profile, latest)
+                if !latest.connected() {
+                    break
+                }
+                previous = latest
+            }
+        } catch {
+            if let createdOwner, backgroundOwners[profile.id] === createdOwner {
+                backgroundOwners.removeValue(forKey: profile.id)
+                try? await createdOwner.shutdown()
+            }
+            throw error
         }
     }
 
-    private func applyClientPreferences(to owner: AgentStore) async {
-        guard !clientPreferencesData.isEmpty,
-              let receipt = try? owner.applyClientPreferences(preferences: clientPreferencesData)
-        else { return }
-        _ = try? await receipt.wait()
+    func applyClientPreferences(to owner: AgentStore) async throws {
+        while true {
+            try Task.checkCancellation()
+            let data = clientPreferencesData
+            let generation = clientPreferencesGeneration
+            if data.isEmpty {
+                return
+            }
+            let receipt = try owner.applyClientPreferences(preferences: data)
+            _ = try await receipt.wait()
+            try Task.checkCancellation()
+            if generation == clientPreferencesGeneration {
+                return
+            }
+        }
+    }
+
+    private func ownsBackground(
+        _ profile: HostProfile,
+        owner: AgentStore,
+        generation: UInt64
+    ) -> Bool {
+        !Task.isCancelled
+            && selectedProfileId != profile.id
+            && profiles.contains(where: { $0.id == profile.id })
+            && backgroundTaskGenerations[profile.id] == generation
+            && backgroundOwners[profile.id] === owner
     }
 
     func publishEnvironment(_ profile: HostProfile, _ next: AgentCore.Snapshot) {
@@ -226,6 +281,8 @@ extension BexAppViewModel {
     }
 
     private func finishPairing(id: String, invitation: Invitation) async {
+        let expectedStore = store
+        let expectedProfile = selectedProfileId
         do {
             persist()
             await persistenceWrite?.value
@@ -242,7 +299,16 @@ extension BexAppViewModel {
             cacheDirectory: SnapshotFiles.cacheDirectory(id),
             diagnosticsDirectory: SnapshotFiles.diagnosticsDirectory(id))
             guard !Task.isCancelled else { try? await owner.shutdown(); return }
-            await applyClientPreferences(to: owner)
+            do {
+                try await applyClientPreferences(to: owner)
+            } catch {
+                try? await owner.shutdown()
+                throw error
+            }
+            guard !Task.isCancelled, selectedProfileId == expectedProfile, store === expectedStore else {
+                try? await owner.shutdown()
+                return
+            }
             let old = detachStore()
             publish(AgentCore.Snapshot.empty())
             profiles.removeAll { $0.id == id }

@@ -141,6 +141,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val repository = AndroidMobileRepository(context)
     private var clientPreferences = repository.modelPreferences()
+    private var clientPreferencesGeneration = 0L
     var snapshot by mutableStateOf(Snapshot.empty())
         private set
 
@@ -204,6 +205,9 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
     private var owner: AgentStore? = null
     private val backgroundOwners = mutableMapOf<String, AgentStore>()
     private val backgroundJobs = mutableMapOf<String, Job>()
+    private val backgroundJobGenerations = mutableMapOf<String, Long>()
+    private val clientPreferenceSyncFailures = mutableMapOf<String, String>()
+    private var pendingSelectedClientPreferences: Pair<AgentStore, ByteArray>? = null
     private var initialization: Job? = null
     private var connection: Job? = null
     private var observation: Job? = null
@@ -315,6 +319,12 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
                             removalFailed = true
                         }
                     }
+                    if (!removalFailed) {
+                        val canonicalStore =
+                            owner?.takeIf { selectedOwner -> stores.values.any { it === selectedOwner } }
+                            ?: stores.toSortedMap().values.firstOrNull()
+                        canonicalStore?.let { synchronizeClientPreferences(it.snapshot(), includeSelected = true) }
+                    }
                     if (removalFailed) {
                         notice = "Browser profile could not be removed from every connected Host; try again."
                     }
@@ -421,6 +431,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
             scope.launch {
                 runCatching {
                     store.dispatch(Intent.SetLoadBalancingEnabled(enabled)).wait()
+                    synchronizeClientPreferences(store.snapshot(), includeSelected = true)
                     profiles.firstOrNull { it.id == profile }?.let { publishEnvironment(it, store.snapshot()) }
                 }
             }
@@ -437,6 +448,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
                 scope.launch {
                     runCatching {
                         store.dispatch(intent).wait()
+                        synchronizeClientPreferences(store.snapshot(), includeSelected = true)
                         profiles.firstOrNull { it.id == profile }?.let { publishEnvironment(it, store.snapshot()) }
                     }
                 }
@@ -750,6 +762,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
         }
         val old = detach()
         val background = backgroundOwners.remove(id)
+        backgroundJobGenerations[id] = (backgroundJobGenerations[id] ?: 0L) + 1L
         backgroundJobs.remove(id)?.cancel()
         profileId = id
         repository.selected = id
@@ -770,6 +783,12 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
                         repository.cacheDirectory(id),
                         repository.diagnosticsDirectory(id),
                     )
+               try {
+                   applyCurrentClientPreferences(store)
+               } catch (error: Exception) {
+                   store.shutdown()
+                   throw error
+               }
                 if (profileId != id || !isActive) {
                     store.shutdown()
                     return@launch
@@ -810,6 +829,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
         while (pending.isNotEmpty()) pending.removeFirst().second(Result.failure(CancellationException()))
         val old = owner
         owner = null
+        pendingSelectedClientPreferences = null
         return old
     }
 
@@ -822,21 +842,30 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
     }
 
     private fun superviseBackground(profile: HostProfile) {
+        val generation = (backgroundJobGenerations[profile.id] ?: 0L) + 1L
+        backgroundJobGenerations[profile.id] = generation
         lateinit var job: Job
         job = scope.launch {
             var delayMillis = 250L
             try {
                 while (isActive && profiles.any { it.id == profile.id } && profile.id != profileId) {
+                    var createdStore: AgentStore? = null
                     try {
                         val store =
                             backgroundOwners.getOrPut(profile.id) {
-                                AgentStore.offline(
+                                val created = AgentStore.offline(
                                     repository.stateFile(profile.id),
                                     clientPreferences,
                                     repository.cacheDirectory(profile.id),
                                     repository.diagnosticsDirectory(profile.id),
                                 )
+                                createdStore = created
+                                created
                             }
+                       applyCurrentClientPreferences(store)
+                       if (!ownsBackground(profile, store, generation)) {
+                           throw CancellationException("background owner changed")
+                       }
                         registerPushForHost(profile.id)
                         val identity =
                             withContext(Dispatchers.IO) {
@@ -848,10 +877,16 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
                         } finally {
                             identity.fill(0)
                         }
+                        if (!ownsBackground(profile, store, generation)) {
+                            throw CancellationException("background owner changed")
+                        }
                         publishEnvironment(profile, store.snapshot())
                         var previous = store.snapshot()
-                        while (isActive && profile.id != profileId) {
+                        while (isActive && ownsBackground(profile, store, generation)) {
                             store.nextSnapshot(previous)
+                            if (!ownsBackground(profile, store, generation)) {
+                                throw CancellationException("background owner changed")
+                            }
                             val latest = store.snapshot()
                             publishEnvironment(profile, latest)
                             if (!latest.connected()) break
@@ -859,9 +894,15 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
                         }
                         delayMillis = 250L
                     } catch (error: CancellationException) {
+                        if (createdStore != null && backgroundOwners[profile.id] === createdStore) {
+                            backgroundOwners.remove(profile.id)
+                            createdStore?.shutdown()
+                        }
                         throw error
                     } catch (error: Exception) {
-                        notice = notice ?: "${profile.name}: ${error.message}"
+                        if (clientPreferenceSyncFailures[profile.id] == null) {
+                            notice = notice ?: "${profile.name}: ${error.message}"
+                        }
                     }
                     if (isActive && profile.id != profileId) {
                         delay(delayMillis)
@@ -869,11 +910,20 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
                     }
                 }
             } finally {
-                backgroundJobs.remove(profile.id)
+                if (backgroundJobGenerations[profile.id] == generation) {
+                    backgroundJobs.remove(profile.id)
+                    backgroundJobGenerations.remove(profile.id)
+                }
             }
         }
         backgroundJobs[profile.id] = job
     }
+
+    private fun ownsBackground(profile: HostProfile, store: AgentStore, generation: Long): Boolean =
+        profile.id != profileId &&
+            profiles.any { it.id == profile.id } &&
+            backgroundJobGenerations[profile.id] == generation &&
+            backgroundOwners[profile.id] === store
 
     private fun publishEnvironment(profile: HostProfile, next: Snapshot) {
         val previous = environmentSnapshots[profile.id]
@@ -925,32 +975,34 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
 
     fun removeProfile(id: String) {
         runCatching {
-                val environmentId = environmentSnapshots[id]?.environmentId() ?: id
-                LocalNotifications.removeEnvironment(context, environmentId)
-                val unregistration = unregisterPush(id)
-                val background = backgroundOwners.remove(id)
-                backgroundJobs.remove(id)?.cancel()
-                AndroidCredentialStore(context, id).remove()
-                var old: AgentStore? = null
-                if (profileId == id) {
-                    old = detach()
-                    profileId = null
-                    repository.selected = null
-                    publish(Snapshot.empty())
-                }
-                profiles = profiles.filterNot { it.id == id }
-                environments = environments.filterNot { it.profileId == id }
-                environmentSnapshots = environmentSnapshots - id
-                renderActivityAggregate(removeActivityState(context, id))
-                publishUsageWidget()
-                repository.saveProfiles(profiles)
-                File(repository.cacheDirectory(id)).deleteRecursively()
-                scope.launch {
-                    unregistration?.join()
-                    runCatching { background?.shutdown() }
-                    old?.shutdown()
-                }
-                if (profiles.isEmpty()) stack = listOf(Route.Pairing)
+            val environmentId = environmentSnapshots[id]?.environmentId() ?: id
+            LocalNotifications.removeEnvironment(context, environmentId)
+            val unregistration = unregisterPush(id)
+            val background = backgroundOwners.remove(id)
+            backgroundJobGenerations[id] = (backgroundJobGenerations[id] ?: 0L) + 1L
+            backgroundJobs.remove(id)?.cancel()
+            clientPreferenceSyncFailures.remove(id)
+            AndroidCredentialStore(context, id).remove()
+            var old: AgentStore? = null
+            if (profileId == id) {
+                old = detach()
+                profileId = null
+                repository.selected = null
+                publish(Snapshot.empty(), syncClientPreferences = false)
+            }
+            profiles = profiles.filterNot { it.id == id }
+            environments = environments.filterNot { it.profileId == id }
+            environmentSnapshots = environmentSnapshots - id
+            renderActivityAggregate(removeActivityState(context, id))
+            publishUsageWidget()
+            repository.saveProfiles(profiles)
+            File(repository.cacheDirectory(id)).deleteRecursively()
+            scope.launch {
+                unregistration?.join()
+                runCatching { background?.shutdown() }
+                old?.shutdown()
+            }
+            if (profiles.isEmpty()) stack = listOf(Route.Pairing)
             }
             .onFailure { notice = it.message }
     }
@@ -974,6 +1026,8 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
         if (busy) return
         busy = true
         notice = null
+        val expectedProfile = profileId
+        val expectedOwner = owner
         connection = scope.launch {
             var paired: AgentStore? = null
             try {
@@ -999,13 +1053,19 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
                     store.shutdown()
                     return@launch
                 }
+                applyCurrentClientPreferences(store)
+                if (!isActive || profileId != expectedProfile || owner !== expectedOwner) {
+                    store.shutdown()
+                    return@launch
+                }
                 persist()
                 draftEdits.reset()
                 initialization?.cancel()
                 observation?.cancel()
                 val old = owner
                 owner = null
-                publish(Snapshot.empty())
+                pendingSelectedClientPreferences = null
+                publish(Snapshot.empty(), syncClientPreferences = false)
                 profiles = profiles.filterNot { it.id == id } + HostProfile(id, target.hostName, target.endpoint)
                 repository.saveProfiles(profiles)
                 repository.selected = id
@@ -1093,7 +1153,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
         }
     }
 
-    private fun publish(next: Snapshot) {
+    private fun publish(next: Snapshot, syncClientPreferences: Boolean = true) {
         if (!next.supersedes(snapshot)) return
         if (next === snapshot) return
         val name = next.hostName()
@@ -1102,9 +1162,11 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
             repository.saveProfiles(profiles)
         }
         snapshot = next
-        synchronizeClientPreferences(next)
-        profileId?.let { id ->
-            profiles.firstOrNull { it.id == id }?.let { profile -> publishEnvironment(profile, next) }
+        if (syncClientPreferences) synchronizeClientPreferences(next)
+        if (syncClientPreferences) {
+            profileId?.let { id ->
+                profiles.firstOrNull { it.id == id }?.let { profile -> publishEnvironment(profile, next) }
+            }
         }
 
         val selected = next.selectedThreadId()
@@ -1174,19 +1236,81 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
         synchronizeClientPreferences(current)
     }
 
-    private fun synchronizeClientPreferences(source: Snapshot) {
-        val bytes =
-            runCatching { source.serializeModelPreferences() }
-                .getOrElse {
-                    notice = it.message
-                    return
+    /** Seeds a Store with the current client-global payload before it becomes visible. */
+    private suspend fun applyCurrentClientPreferences(store: AgentStore) {
+        while (true) {
+            if (!kotlinx.coroutines.currentCoroutineContext().isActive) {
+                throw CancellationException()
+            }
+            val bytes = clientPreferences.copyOf()
+            val generation = clientPreferencesGeneration
+            if (bytes.isEmpty()) return
+            try {
+                store.applyClientPreferences(bytes).wait()
+            } catch (error: Exception) {
+                val key = if (owner === store) profileId ?: "selected" else {
+                    backgroundOwners.entries.firstOrNull { it.value === store }?.key ?: "unknown"
                 }
-        if (bytes.contentEquals(clientPreferences)) return
-        clientPreferences = bytes.copyOf()
-        scope.launch { writes.send(bytes) }
-        backgroundOwners.values.toList().forEach { store ->
+                clientPreferenceSyncFailures[key] = error.message ?: "client preferences sync failed"
+                throw error
+            }
+            backgroundOwners.entries.firstOrNull { it.value === store }?.key?.let {
+                clientPreferenceSyncFailures.remove(it)
+            }
+            if (owner === store) clientPreferenceSyncFailures.remove(profileId ?: "selected")
+            if (generation == clientPreferencesGeneration) return
+        }
+    }
+
+    private fun synchronizeClientPreferences(source: Snapshot, includeSelected: Boolean = false) {
+        val bytes = runCatching { source.serializeModelPreferences() }
+            .getOrElse {
+                notice = it.message
+                return
+            }
+        if (!includeSelected) {
+            val pending = pendingSelectedClientPreferences
+            if (pending != null && owner === pending.first && !bytes.contentEquals(pending.second)) {
+                return
+            }
+        }
+        val selectedNeedsSync = includeSelected && owner?.let { selected ->
+            pendingSelectedClientPreferences?.let { pending ->
+                pending.first !== selected || !pending.second.contentEquals(bytes)
+            } ?: true
+        } == true
+        val changed = !bytes.contentEquals(clientPreferences)
+        if (!changed && !selectedNeedsSync) return
+        if (changed) {
+            clientPreferences = bytes.copyOf()
+            clientPreferencesGeneration += 1
+            scope.launch { writes.send(bytes) }
+        }
+        val owners = mutableMapOf<String, AgentStore>()
+        if (includeSelected) owner?.let {
+            pendingSelectedClientPreferences = it to bytes.copyOf()
+            owners[profileId ?: "selected"] = it
+        }
+        if (changed) backgroundOwners.forEach { (profile, store) -> owners[profile] = store }
+        owners.forEach { (profile, store) ->
             val receipt = runCatching { store.applyClientPreferences(bytes) }.getOrNull() ?: return@forEach
-            scope.launch { runCatching { receipt.wait() }.onFailure { error -> if (isActive) notice = error.message } }
+            val isSelected = includeSelected && store === owner
+            scope.launch {
+                val result = runCatching { receipt.wait() }
+                result
+                    .onSuccess { clientPreferenceSyncFailures.remove(profile) }
+                    .onFailure { error ->
+                        clientPreferenceSyncFailures[profile] = error.message ?: "client preferences sync failed"
+                    }
+                if (result.isSuccess
+                    && isSelected
+                    && pendingSelectedClientPreferences?.first === store
+                    && pendingSelectedClientPreferences?.second?.contentEquals(bytes) == true
+                    && clientPreferences.contentEquals(bytes)
+                ) {
+                    pendingSelectedClientPreferences = null
+                }
+            }
         }
     }
 

@@ -83,6 +83,7 @@ extension BexAppViewModel {
                 guard let self, let host = profiles.first(where: { $0.id == profile }) else {
                     return
                 }
+                synchronizeClientPreferences(owner.snapshot(), includeSelected: true)
                 publishEnvironment(host, owner.snapshot())
             }
         }
@@ -102,6 +103,7 @@ extension BexAppViewModel {
                 guard let self, let host = profiles.first(where: { $0.id == profile }) else {
                     return
                 }
+                synchronizeClientPreferences(owner.snapshot(), includeSelected: true)
                 publishEnvironment(host, owner.snapshot())
             }
         } else {

@@ -49,7 +49,10 @@ extension BexAppViewModel {
                         generation: generation
                     )
                     guard browserProfileRemovalGeneration == generation else { return }
-                    if failed {
+                    if !result.failed, let canonical = result.canonical {
+                        synchronizeClientPreferences(canonical, includeSelected: true)
+                    }
+                    if result.failed {
                         notice = "Browser profile could not be removed from every connected Host; try again."
                     }
                 case .failed:
@@ -129,7 +132,7 @@ extension BexAppViewModel {
         plan: AgentCore.BrowserProfileRemovalPlan,
         stores: [String: AgentStore],
         generation: UInt64
-    ) async throws -> Bool {
+    ) async throws -> (failed: Bool, canonical: AgentCore.Snapshot?) {
         var failed = false
         for environmentId in plan.environmentIds {
             guard browserProfileRemovalGeneration == generation else { throw CancellationError() }
@@ -146,7 +149,16 @@ extension BexAppViewModel {
                 failed = true
             }
         }
-        return failed
+        guard !failed else { return (true, nil) }
+        let canonicalOwner: AgentStore? = if selectedProfileId != nil,
+                                             let selectedOwner = store,
+                                             let environmentId = snapshot.environmentId(),
+                                             stores[environmentId] === selectedOwner {
+            selectedOwner
+        } else {
+            stores.keys.sorted().compactMap { stores[$0] }.first
+        }
+        return (false, canonicalOwner?.snapshot())
     }
 
     func performOnCurrent(
@@ -163,7 +175,6 @@ extension BexAppViewModel {
         }
         do {
             let receipt = try owner.dispatch(intent: intent)
-            publish(owner.snapshot())
             let id = UUID()
             let host = selectedProfileId
             operations[id] = Task { [weak self] in
