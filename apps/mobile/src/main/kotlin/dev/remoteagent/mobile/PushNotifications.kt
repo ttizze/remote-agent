@@ -10,6 +10,7 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import androidx.core.app.NotificationCompat
+import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import com.google.firebase.FirebaseApp
 import com.google.firebase.FirebaseOptions
@@ -74,6 +75,12 @@ internal fun notificationTag(key: String, ongoing: Boolean): String =
 internal fun notificationIntentData(key: String): Uri =
     Uri.parse("remoteagent://notifications/${Uri.encode(key)}")
 
+internal fun notificationsAllowed(
+    permissionGranted: Boolean,
+    packageEnabled: Boolean,
+    channelBlocked: Boolean,
+): Boolean = permissionGranted && packageEnabled && !channelBlocked
+
 internal object PushRegistrationStore {
     private const val PREFERENCES = "push-registration"
     private const val DEVICE_ID = "device-id"
@@ -117,10 +124,17 @@ internal object PushNotificationCenter {
         visibleThread = deepLink
     }
 
-    fun notificationsEnabled(context: Context): Boolean =
-        Build.VERSION.SDK_INT < 33 ||
+    fun notificationsEnabled(context: Context): Boolean {
+        val permissionGranted = Build.VERSION.SDK_INT < 33 ||
             ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) ==
                 PackageManager.PERMISSION_GRANTED
+        val packageEnabled = NotificationManagerCompat.from(context).areNotificationsEnabled()
+        val channelBlocked = Build.VERSION.SDK_INT >= 26 &&
+            context.getSystemService(NotificationManager::class.java)
+                ?.getNotificationChannel(CHANNEL_ID)
+                ?.importance == NotificationManager.IMPORTANCE_NONE
+        return notificationsAllowed(permissionGranted, packageEnabled, channelBlocked)
+    }
 
     fun canRequestPermission(context: Context): Boolean =
         Build.VERSION.SDK_INT >= 33 &&

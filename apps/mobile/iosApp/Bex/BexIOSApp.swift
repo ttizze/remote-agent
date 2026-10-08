@@ -64,11 +64,11 @@ struct BexIOSApp: App {
                     case .active where wasBackgrounded:
                         wasBackgrounded = false
                         model.ingestIncomingShareHandoffs()
-                        pushCenter.refreshPreferences()
+                        pushCenter.refreshPreferences(activityStates: model.activityContentStatesForPush())
                         model.connect(afterForeground: true)
                     case .active:
                         model.ingestIncomingShareHandoffs()
-                        pushCenter.refreshPreferences()
+                        pushCenter.refreshPreferences(activityStates: model.activityContentStatesForPush())
                     default:
                         break
                     }

@@ -449,6 +449,9 @@ final class BexAppViewModel: ObservableObject {
     }
 
     private func publishEnvironment(_ profile: HostProfile, _ next: AgentCore.Snapshot) {
+        let previous = environmentSnapshots[profile.id]
+        let pushPreferencesChanged = previous?.preferences().liveActivitiesEnabled
+            != next.preferences().liveActivitiesEnabled
         environmentSnapshots[profile.id] = next
         let row = EnvironmentRow(
             profileId: profile.id,
@@ -474,7 +477,9 @@ final class BexAppViewModel: ObservableObject {
         environments = (environments.filter { $0.profileId != profile.id } + [row])
             .sorted { $0.label.localizedCaseInsensitiveCompare($1.label) == .orderedAscending }
         activityUpdater?(activityContentStatesForPush())
-        if pushRegistrations[profile.id] != nil { registerPushIfReady(profile.id) }
+        if pushRegistrations[profile.id] != nil {
+            registerPushIfReady(profile.id, force: pushPreferencesChanged)
+        }
         publishUsageWidget()
         retryPendingLoadBalancedNewThread()
     }
@@ -697,7 +702,7 @@ final class BexAppViewModel: ObservableObject {
         return backgroundOwners[hostId]
     }
 
-    private func registerPushIfReady(_ hostId: String) {
+    private func registerPushIfReady(_ hostId: String, force: Bool = false) {
         guard let registration = pushRegistrations[hostId], let owner = pushOwner(hostId) else {
             registeredPushOwners.removeValue(forKey: hostId)
             applyPendingPushActiveIfReady(hostId)
@@ -713,9 +718,13 @@ final class BexAppViewModel: ObservableObject {
             apnsEnvironment: registration.apnsEnvironment,
             pushAvailable: registration.pushAvailable,
             notificationsAuthorized: registration.notificationsAuthorized,
-            liveActivitiesEnabled: liveActivitiesEnabled(hostId: hostId)
+            liveActivitiesAvailable: registration.liveActivitiesAvailable
         )
-        if registeredPushOwners[hostId] === owner, registeredPushConfigurations[hostId] == native {
+        if force {
+            registeredPushOwners.removeValue(forKey: hostId)
+            registeredPushConfigurations.removeValue(forKey: hostId)
+        }
+        if !force, registeredPushOwners[hostId] === owner, registeredPushConfigurations[hostId] == native {
             applyPendingPushActiveIfReady(hostId)
             return
         }
@@ -733,7 +742,8 @@ final class BexAppViewModel: ObservableObject {
                 hostId: hostId,
                 deviceId: registration.deviceId,
                 active: native.pushAvailable &&
-                    (native.notificationsAuthorized || native.liveActivitiesEnabled)
+                    (native.notificationsAuthorized ||
+                        (native.liveActivitiesAvailable && liveActivitiesEnabled(hostId: hostId)))
             )
         }
     }
@@ -993,15 +1003,10 @@ extension BexAppViewModel {
                 )
             }
         }
-        let pushPreferencesChanged = snapshot.preferences().liveActivitiesEnabled
-            != next.preferences().liveActivitiesEnabled
         let threadChanged = snapshot.selectedThreadId() != next.selectedThreadId()
         snapshot = next
         if let id = selectedProfileId, let profile = profiles.first(where: { $0.id == id }) {
             publishEnvironment(profile, next)
-        }
-        if pushPreferencesChanged {
-            if let id = selectedProfileId { registerPushIfReady(id) }
         }
         if threadChanged {
             threadView = nil

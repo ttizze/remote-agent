@@ -1510,9 +1510,12 @@ pub struct PushDeviceRegistration {
     /// platform/provider capability fact, not a persisted user preference.
     pub push_available: bool,
     /// The operating system's notification authorization state. Core combines
-    /// this with `push_available` and the persisted Live Activities setting.
+    /// this with `push_available` for alert delivery.
     pub notifications_authorized: bool,
-    pub live_activities_enabled: bool,
+    /// Whether the platform currently permits its Live Activity/ongoing
+    /// activity surface. The persisted user preference is owned by core state
+    /// and is supplied separately when this record is mapped to the protocol.
+    pub live_activities_available: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

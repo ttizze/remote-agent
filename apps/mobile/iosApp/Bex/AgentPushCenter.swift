@@ -15,7 +15,7 @@ struct AgentPushRegistration: Equatable, Sendable {
     let apnsEnvironment: String
     let pushAvailable: Bool
     let notificationsAuthorized: Bool
-    let liveActivitiesEnabled: Bool
+    let liveActivitiesAvailable: Bool
 }
 
 extension Notification.Name {
@@ -84,9 +84,16 @@ final class AgentPushCenter: NSObject, UIApplicationDelegate, UNUserNotification
 
     /// Re-reads the core Live Activities setting and OS authorization after a
     /// settings or foreground transition.
-    func refreshPreferences() {
+    func refreshPreferences(
+        activityStates: [String: AgentActivityAttributes.ContentState]? = nil,
+    ) {
         submitRegistrations()
-        Task { await requestPermissionAndRegister() }
+        Task {
+            await requestPermissionAndRegister()
+            if let activityStates, #available(iOS 16.1, *) {
+                await reconcileActivities(states: activityStates)
+            }
+        }
     }
 
     func application(
@@ -121,7 +128,7 @@ final class AgentPushCenter: NSObject, UIApplicationDelegate, UNUserNotification
         notificationCenter.delegate = self
         let hosts = knownHostIds()
         let wantsAlerts = !hosts.isEmpty
-        let wantsLiveActivities = hosts.contains { liveActivitiesEnabled(for: $0) }
+        let wantsLiveActivities = hosts.contains { liveActivitiesAllowed(for: $0) }
         if !wantsAlerts && !wantsLiveActivities {
             notificationEnabled = false
             submitRegistrations()
@@ -151,6 +158,15 @@ final class AgentPushCenter: NSObject, UIApplicationDelegate, UNUserNotification
         liveActivitiesProvider?(hostId) ?? true
     }
 
+    private func activityKitAvailable() -> Bool {
+        guard #available(iOS 16.1, *) else { return false }
+        return ActivityAuthorizationInfo().areActivitiesEnabled
+    }
+
+    private func liveActivitiesAllowed(for hostId: String) -> Bool {
+        liveActivitiesEnabled(for: hostId) && activityKitAvailable()
+    }
+
     private func setActiveForKnownHosts(_ active: Bool) {
         for hostId in knownHostIds() {
             activeHandler?(hostId, deviceId(for: hostId), active)
@@ -160,7 +176,7 @@ final class AgentPushCenter: NSObject, UIApplicationDelegate, UNUserNotification
     private func setActiveForKnownHosts() {
         for hostId in knownHostIds() {
             let active = deviceToken != nil &&
-                (liveActivitiesEnabled(for: hostId) || notificationEnabled)
+                (liveActivitiesAllowed(for: hostId) || notificationEnabled)
             activeHandler?(hostId, deviceId(for: hostId), active)
         }
     }
@@ -188,7 +204,7 @@ final class AgentPushCenter: NSObject, UIApplicationDelegate, UNUserNotification
                 apnsEnvironment: Self.apnsEnvironment,
                 pushAvailable: true,
                 notificationsAuthorized: notificationEnabled,
-                liveActivitiesEnabled: liveActivitiesEnabled(for: hostId),
+                liveActivitiesAvailable: activityKitAvailable(),
             )
         )
     }
@@ -298,7 +314,7 @@ final class AgentPushCenter: NSObject, UIApplicationDelegate, UNUserNotification
     @available(iOS 16.1, *)
     private func reconcileActivitiesNow(states: [String: AgentActivityAttributes.ContentState]) async {
         let known = Set(knownHostIds())
-        let enabled = Set(known.filter { liveActivitiesEnabled(for: $0) })
+        let enabled = Set(known.filter { liveActivitiesAllowed(for: $0) })
         for (hostId, id) in activityIds where !enabled.contains(hostId) {
             await endActivity(
                 hostId: hostId,

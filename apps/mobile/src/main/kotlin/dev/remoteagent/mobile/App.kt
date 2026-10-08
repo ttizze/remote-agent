@@ -776,7 +776,9 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
         )
         environments = (environments.filterNot { it.profileId == profile.id } + row)
             .sortedBy { it.label.lowercase() }
-        if (pushPreferencesChanged || pushRegistrations[profile.id] == null) registerPushForHost(profile.id)
+        if (pushPreferencesChanged || pushRegistrations[profile.id] == null) {
+            registerPushForHost(profile.id, force = pushPreferencesChanged)
+        }
         publishUsageWidget()
         retryPendingLoadBalancedNewThread()
     }
@@ -1142,11 +1144,12 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
     private fun pushOwner(hostId: String): AgentStore? =
         if (hostId == profileId) owner else backgroundOwners[hostId]
 
-    private fun registerPushForHost(hostId: String) {
+    private fun registerPushForHost(hostId: String, force: Boolean = false) {
         if (profiles.none { it.id == hostId }) return
         val token = PushRegistrationStore.token(context) ?: return
         val pushAvailable = FirebasePushBootstrap.ensure(context)
         if (!pushAvailable) return
+        val notificationsAuthorized = PushNotificationCenter.notificationsEnabled(context)
         val registration = PushDeviceRegistration(
             PushRegistrationStore.deviceId(context, hostId),
             "android",
@@ -1156,8 +1159,8 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
             null,
             null,
             pushAvailable,
-            PushNotificationCenter.notificationsEnabled(context),
-            liveActivitiesEnabled(hostId),
+            notificationsAuthorized,
+            notificationsAuthorized,
         )
         val changed = pushRegistrations[hostId] != registration
         if (changed) {
@@ -1167,7 +1170,11 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
             registeredPushConfigurations.remove(hostId)
         }
         val store = pushOwner(hostId) ?: return
-        if (registeredPushOwners[hostId] === store && registeredPushConfigurations[hostId] == registration) {
+        if (force) {
+            registeredPushOwners.remove(hostId)
+            registeredPushConfigurations.remove(hostId)
+        }
+        if (!force && registeredPushOwners[hostId] === store && registeredPushConfigurations[hostId] == registration) {
             pendingPushActive[hostId]?.let { setPushActive(hostId, it.first, it.second) }
             return
         }
@@ -1179,13 +1186,18 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
             ) {
                 registeredPushOwners[hostId] = store
                 registeredPushConfigurations[hostId] = registration
-                setPushActive(hostId, registration.deviceId, registration.preferencesActive())
+                setPushActive(
+                    hostId,
+                    registration.deviceId,
+                    registration.isActive(liveActivitiesEnabled(hostId)),
+                )
             }
         }
     }
 
-    private fun PushDeviceRegistration.preferencesActive(): Boolean =
-        pushAvailable && (notificationsAuthorized || liveActivitiesEnabled)
+    private fun PushDeviceRegistration.isActive(liveActivitiesEnabled: Boolean): Boolean =
+        pushAvailable &&
+            (notificationsAuthorized || (liveActivitiesAvailable && liveActivitiesEnabled))
 
     private fun dispatchPush(
         hostId: String,

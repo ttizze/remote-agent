@@ -61,13 +61,13 @@ mod tests {
             apns_environment: Some("sandbox".into()),
             push_available: true,
             notifications_authorized: true,
-            live_activities_enabled: true,
+            live_activities_available: true,
         }
     }
 
     #[test]
     fn push_registration_maps_native_values_to_host_contract() {
-        let value = push_registration(registration()).unwrap();
+        let value = push_registration(registration(), true).unwrap();
         assert_eq!(value.platform, agent_protocol::push::PushPlatform::Ios);
         assert_eq!(
             value.apns_environment,
@@ -85,7 +85,7 @@ mod tests {
     fn push_registration_combines_provider_and_os_facts_once() {
         let mut value = registration();
         value.notifications_authorized = false;
-        let request = push_registration(value).unwrap();
+        let request = push_registration(value, true).unwrap();
         assert!(!request.preferences.notifications_enabled);
         assert!(request.preferences.live_activities_enabled);
         assert!(request.preferences.notify_on_approval);
@@ -96,14 +96,17 @@ mod tests {
         let mut value = registration();
         value.push_available = false;
         value.notifications_authorized = true;
-        value.live_activities_enabled = true;
-        let request = push_registration(value).unwrap();
+        let request = push_registration(value, true).unwrap();
         assert!(!request.preferences.notifications_enabled);
         assert!(!request.preferences.live_activities_enabled);
 
+        let request = push_registration(registration(), false).unwrap();
+        assert!(request.preferences.notifications_enabled);
+        assert!(!request.preferences.live_activities_enabled);
+
         let mut value = registration();
-        value.live_activities_enabled = false;
-        let request = push_registration(value).unwrap();
+        value.live_activities_available = false;
+        let request = push_registration(value, true).unwrap();
         assert!(request.preferences.notifications_enabled);
         assert!(!request.preferences.live_activities_enabled);
     }
@@ -112,10 +115,10 @@ mod tests {
     fn push_registration_rejects_unknown_provider_values() {
         let mut value = registration();
         value.platform = "web".into();
-        assert!(push_registration(value).is_err());
+        assert!(push_registration(value, true).is_err());
         let mut value = registration();
         value.apns_environment = Some("staging".into());
-        assert!(push_registration(value).is_err());
+        assert!(push_registration(value, true).is_err());
     }
 }
 
@@ -249,6 +252,7 @@ fn approval_decision(value: &str) -> Result<ApprovalDecision, PeerError> {
 
 fn push_registration(
     registration: PushDeviceRegistration,
+    live_activities_enabled: bool,
 ) -> Result<agent_protocol::push::RegisterPushDevice, PeerError> {
     let platform = match registration.platform.as_str() {
         "ios" => agent_protocol::push::PushPlatform::Ios,
@@ -283,9 +287,11 @@ fn push_registration(
             notify_on_completion: true,
             notify_on_failure: true,
             // Live Activities do not require alert authorization, but still
-            // require the configured push provider.
+            // require the configured provider and the platform's current
+            // ActivityKit/ongoing-activity capability.
             live_activities_enabled: registration.push_available
-                && registration.live_activities_enabled,
+                && registration.live_activities_available
+                && live_activities_enabled,
         },
     };
     request.validate().map_err(invalid)?;
@@ -793,7 +799,10 @@ impl Owner {
             }
             Intent::SubmitAnswers { request_id } => self.submit_answers(request_id)?,
             Intent::RegisterPushDevice { registration } => Next::call(
-                Call::RegisterPushDevice(push_registration(registration)?),
+                Call::RegisterPushDevice(push_registration(
+                    registration,
+                    self.state.preferences.live_activities_enabled,
+                )?),
                 None,
             ),
             Intent::UnregisterPushDevice { device_id } => {

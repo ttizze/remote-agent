@@ -81,4 +81,12 @@ class AgentPushMessagingServiceTest {
             notificationIntentData("remoteagent://threads/host/two"),
         )
     }
+
+    @Test
+    fun notificationAvailabilityIncludesPermissionPackageAndChannelState() {
+        assertTrue(notificationsAllowed(permissionGranted = true, packageEnabled = true, channelBlocked = false))
+        assertFalse(notificationsAllowed(permissionGranted = false, packageEnabled = true, channelBlocked = false))
+        assertFalse(notificationsAllowed(permissionGranted = true, packageEnabled = false, channelBlocked = false))
+        assertFalse(notificationsAllowed(permissionGranted = true, packageEnabled = true, channelBlocked = true))
+    }
 }
