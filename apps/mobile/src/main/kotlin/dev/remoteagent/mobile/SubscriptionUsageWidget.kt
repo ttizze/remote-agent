@@ -7,6 +7,7 @@ import android.appwidget.AppWidgetProvider
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.net.Uri
 import android.view.View
 import android.widget.RemoteViews
 import dev.remoteagent.core.subscriptionWidgetEntryJson
@@ -33,7 +34,10 @@ class SubscriptionUsageWidget : AppWidgetProvider() {
 
     override fun onReceive(context: Context, intent: Intent) {
         super.onReceive(context, intent)
-        if (intent.action == WIDGET_EXPIRY) update(context)
+        when (intent.action) {
+            WIDGET_EXPIRY, Intent.ACTION_BOOT_COMPLETED, Intent.ACTION_TIME_CHANGED,
+            Intent.ACTION_TIMEZONE_CHANGED -> update(context)
+        }
     }
 
     override fun onDisabled(context: Context) {
@@ -47,13 +51,17 @@ class SubscriptionUsageWidget : AppWidgetProvider() {
             if (ids.isEmpty()) return
             val now = System.currentTimeMillis()
             val stored = context.getSharedPreferences(WIDGET_STORAGE, Context.MODE_PRIVATE).getString(WIDGET_KEY, null)
-                ?.takeIf { it.length <= WIDGET_MAX_BYTES } ?: "{\"entries\":[]}"
+                ?.takeIf { it.length <= WIDGET_MAX_BYTES && it.toByteArray(Charsets.UTF_8).size <= WIDGET_MAX_BYTES }
+                ?: "{\"entries\":[]}"
             val entry = JSONObject(subscriptionWidgetEntryJson(stored, now, "android", "auto", "auto"))
             val views = RemoteViews(context.packageName, R.layout.subscription_usage_widget)
             views.removeAllViews(R.id.usage_providers)
             val providers = entry.getJSONArray("providers")
+            var deadline: Long? = null
             for (index in 0 until providers.length()) {
                 val provider = providers.getJSONObject(index)
+                val expiry = provider.getLong("expiresAt")
+                if (expiry > now && (deadline == null || expiry < deadline)) deadline = expiry
                 val row = RemoteViews(context.packageName, R.layout.subscription_usage_provider)
                 row.setTextViewText(R.id.usage_provider_name, provider.getString("name"))
                 val windows = provider.getJSONArray("windows")
@@ -79,11 +87,11 @@ class SubscriptionUsageWidget : AppWidgetProvider() {
             val checked = entry.getLong("checkedAt")
             views.setTextViewText(R.id.usage_checked, if (checked > 0) "As of ${formatDate(context, checked)}" else "Tap to connect")
             val open = Intent(context, MainActivity::class.java).putExtra("open_usage", true)
+                .setAction(Intent.ACTION_VIEW)
+                .setData(Uri.parse("remoteagent://settings/usage?tab=limits"))
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
             views.setOnClickPendingIntent(R.id.usage_widget_root, PendingIntent.getActivity(context, 0, open, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE))
             manager.updateAppWidget(ids, views)
-            val timeline = runCatching { JSONObject(stored).getJSONArray("entries") }.getOrNull()
-            val deadline = timeline?.let { entries -> (0 until entries.length()).map { entries.getJSONObject(it).getLong("date") }.filter { it > now }.minOrNull() }
             val alarms = context.getSystemService(AlarmManager::class.java)
             alarms.cancel(expiryIntent(context))
             if (deadline != null) alarms.set(AlarmManager.RTC_WAKEUP, deadline, expiryIntent(context))
