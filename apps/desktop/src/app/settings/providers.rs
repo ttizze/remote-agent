@@ -44,6 +44,7 @@ fn provider_name(provider: ProviderKind) -> &'static str {
 pub(super) struct ProvidersState {
     selected: ProviderKind,
     code: Entity<InputState>,
+    pub(super) acp_query: Entity<InputState>,
     /// Sign-ins finished or cancelled here; the Host keeps reporting the last one.
     closed_logins: BTreeSet<String>,
     /// A started sign-in and how many accounts its provider had then.
@@ -55,6 +56,9 @@ impl ProvidersState {
         Self {
             selected: ProviderKind::Codex,
             code: cx.new(|cx| InputState::new(window, cx)),
+            acp_query: cx.new(|cx| {
+                InputState::new(window, cx).placeholder("Search ACP agents")
+            }),
             closed_logins: BTreeSet::new(),
             started: None,
         }
@@ -205,6 +209,7 @@ impl Desktop {
                     )
                     .child(card)
                     .child(self.render_provider_instances(window, cx))
+                    .child(self.render_acp_registry(window, cx))
                     .child(self.render_routing_settings(cx))
                     .into_any_element(),
             ],

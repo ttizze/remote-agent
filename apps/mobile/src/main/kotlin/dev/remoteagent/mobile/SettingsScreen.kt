@@ -75,6 +75,7 @@ internal fun SettingsScreen(model: AndroidAppModel, projectId: String?) {
         model.perform(Intent.LoadSettings)
         if (projectId == null) {
             model.perform(Intent.LoadAccounts)
+            model.perform(Intent.LoadProviders)
             model.perform(Intent.LoadWorktreeSettings)
             model.perform(
                 Intent.LoadNativeUpdate(
@@ -657,6 +658,41 @@ private fun AccountsSection(model: AndroidAppModel) {
                     },
                     dismissButton = { TextButton(onClick = { confirmingReset = false }) { Text("Cancel") } },
                 )
+            }
+            HorizontalDivider(color = colors.border)
+        }
+        model.snapshot.providerAdvisories().forEach { advisory ->
+            Column(
+                Modifier.fillMaxWidth().padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        advisory.displayName,
+                        Modifier.weight(1f),
+                        style = AppTheme.body,
+                        color = colors.foreground,
+                    )
+                    Text(advisory.status, style = AppTheme.caption, color = colors.foregroundMuted)
+                }
+                if (advisory.currentVersion != null && advisory.latestVersion != null) {
+                    Text(
+                        "${advisory.currentVersion} → ${advisory.latestVersion}",
+                        style = AppTheme.caption,
+                        color = colors.foregroundMuted,
+                    )
+                }
+                advisory.message?.let {
+                    Text(it, style = AppTheme.caption, color = colors.foregroundMuted)
+                }
+                if (advisory.canUpdate) {
+                    TextButton(onClick = {
+                        model.perform(Intent.UpdateProvider(advisory.instanceId, null))
+                        model.perform(Intent.LoadProviders)
+                    }) {
+                        Text("Update provider", color = colors.primaryText)
+                    }
+                }
             }
             HorizontalDivider(color = colors.border)
         }

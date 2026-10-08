@@ -96,6 +96,25 @@ fn validate<'a>(attachments: impl IntoIterator<Item = Limits<'a>>) -> Result<()>
     }
     Ok(())
 }
+
+fn validate_capture_source(source: Option<&agent_domain::CapturedWindow>) -> Result<()> {
+    let Some(source) = source else {
+        return Ok(());
+    };
+    if source.app_name.len() > 512
+        || source.window_title.len() > 2_048
+        || source
+            .accessible_text
+            .as_ref()
+            .is_some_and(|text| text.len() > 64 * 1024)
+        || serde_json::to_vec(source)
+            .map(|bytes| bytes.len() > 128 * 1024)
+            .unwrap_or(true)
+    {
+        return Err(anyhow!("captured window metadata is too large"));
+    }
+    Ok(())
+}
 /// Whether the id names an upload no thread has claimed yet.
 pub(crate) fn is_pending_upload(id: &str) -> bool {
     id.starts_with("pending-")
@@ -244,7 +263,9 @@ impl WorkspaceFiles {
         name: &str,
         mime: &str,
         size: u64,
+        source: Option<agent_domain::CapturedWindow>,
     ) -> Result<Attachment> {
+        validate_capture_source(source.as_ref())?;
         let mime = mime.to_ascii_lowercase();
         let attachment = Attachment {
             kind: if native_image(&mime) {
@@ -252,7 +273,7 @@ impl WorkspaceFiles {
             } else {
                 AttachmentKind::File
             },
-            source: None,
+            source,
             id,
             name: name.into(),
             mime_type: mime,
@@ -270,8 +291,9 @@ impl WorkspaceFiles {
         mime: &str,
         size: u64,
         sha256: [u8; 32],
+        source: Option<agent_domain::CapturedWindow>,
     ) -> Result<Attachment> {
-        let attachment = Self::attachment_metadata(id, path, name, mime, size)?;
+        let attachment = Self::attachment_metadata(id, path, name, mime, size, source)?;
         if attachment.kind == AttachmentKind::Image {
             let mut bytes = [0; 16];
             let mut file = File::open(path)?;
@@ -467,6 +489,7 @@ impl WorkspaceFiles {
                             &attachment.mime_type,
                             size,
                             digest,
+                            attachment.source.clone(),
                         )
                         .map_err(|_| failed())?;
                     }
@@ -585,6 +608,7 @@ mod tests {
                 mime,
                 contents.len() as u64,
                 digest,
+                None,
             )
             .unwrap();
         Attachment {
@@ -646,6 +670,39 @@ mod tests {
             .unwrap();
         assert!(!stored.exists());
         assert!(outside.exists());
+    }
+
+    #[test]
+    fn screenshot_window_metadata_survives_pending_claim() {
+        let directory = tempfile::tempdir().unwrap();
+        let files = WorkspaceFiles::new(directory.path().join("assets"));
+        let pending = files.attachment_root().join("pending");
+        files.prepare_attachment_directory(&pending).unwrap();
+        let path = pending.join("token");
+        let contents = b"image-bytes";
+        fs::write(&path, contents).unwrap();
+        let digest = digest_file(&mut File::open(&path).unwrap()).unwrap().1;
+        let source = agent_domain::CapturedWindow {
+            app_name: "Editor".into(),
+            window_title: "main.rs".into(),
+            accessible_text: Some("fn main() {}".into()),
+            accessibility: None,
+        };
+        // Use a text attachment to exercise metadata persistence without
+        // weakening the Host's image content validation.
+        let uploaded = files
+            .save_attachment_upload(
+                &path,
+                "pending-token".into(),
+                "shot.txt",
+                "text/plain",
+                contents.len() as u64,
+                digest,
+                Some(source.clone()),
+            )
+            .unwrap();
+        let claimed = files.claim("thread", &[uploaded]).unwrap();
+        assert_eq!(claimed.attachments[0].source, Some(source));
     }
 
     #[test]

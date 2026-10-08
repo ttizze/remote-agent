@@ -90,6 +90,7 @@ enum Update {
         attempt: u64,
         snapshot: agent_protocol::background::HostPowerSnapshot,
     },
+    ExternalSnapshot(String),
     Tick,
 }
 
@@ -216,6 +217,10 @@ pub(crate) struct Desktop {
     /// modifier state but not left/right identity, so the desktop surface
     /// keeps this small edge-triggered latch for the both-Shift shortcut.
     snapshot_shift_presses: u8,
+    snapshot_feedback_until: Option<std::time::Instant>,
+    snapshot_feedback_id: u64,
+    snapshot_feedback_animated: bool,
+    external_snapshot_ids: BTreeSet<String>,
     pub(crate) attachments: attachments::AttachmentCache,
     pub(crate) dictation: Option<dictation::Dictation>,
     last_host_power_report_ms: Option<i64>,
@@ -496,6 +501,10 @@ impl Desktop {
             command_palette_query,
             command_palette_open: false,
             snapshot_shift_presses: 0,
+            snapshot_feedback_until: None,
+            snapshot_feedback_id: 0,
+            snapshot_feedback_animated: true,
+            external_snapshot_ids: BTreeSet::new(),
             attachments: attachments::AttachmentCache::new(),
             dictation: None,
             last_host_power_report_ms: None,
@@ -524,6 +533,7 @@ impl Desktop {
         cx: &mut Context<Self>,
     ) {
         self.attachments.clear();
+        self.external_snapshot_ids.clear();
         self.dictation = None;
         self.selected_retry_at = None;
         if let Some(stop) = self.host_power_probe_stop.take() {
@@ -604,6 +614,15 @@ impl Desktop {
                     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                     if updates.send((epoch, Update::Tick)).await.is_err() {
                         break;
+                    }
+                    for snapshot in platform::pending_snapshots().unwrap_or_default() {
+                        if updates
+                            .send((epoch, Update::ExternalSnapshot(snapshot.id)))
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
                     }
                 }
             }),
@@ -1213,6 +1232,23 @@ impl Desktop {
                     self.show_error(&error, window, cx);
                 }
                 self.snapshot_changed(window, cx);
+            }
+            Update::ExternalSnapshot(id) => {
+                if self.session.is_none() {
+                    return;
+                }
+                if self.external_snapshot_ids.insert(id.clone()) {
+                    match platform::read_pending_snapshot(&id) {
+                        Ok(snapshot) => {
+                            let draft_key = self.snapshot.draft_key();
+                            self.attach_external_snapshot(draft_key, snapshot);
+                        }
+                        Err(error) => {
+                            self.external_snapshot_ids.remove(&id);
+                            self.show_error(&error, window, cx);
+                        }
+                    }
+                }
             }
             Update::HostPowerSample { attempt, snapshot } => {
                 if let Some(stop) = self.host_power_probe_stop.take() {
@@ -1913,6 +1949,27 @@ impl Render for Desktop {
                     .into_any_element()
             }
         };
+        let snapshot_flash = self
+            .snapshot_feedback_until
+            .is_some_and(|until| until > std::time::Instant::now());
+        let snapshot_overlay = snapshot_flash.then(|| {
+            let overlay = div()
+                .id(("snapshot-feedback", self.snapshot_feedback_id))
+                .absolute()
+                .inset_0()
+                .bg(ui::tint("text", 0.12));
+            if self.snapshot_feedback_animated {
+                overlay
+                    .with_animation(
+                        ("snapshot-feedback-fade", self.snapshot_feedback_id),
+                        Animation::new(std::time::Duration::from_millis(220)),
+                        |overlay, progress| overlay.opacity(1. - progress),
+                    )
+                    .into_any_element()
+            } else {
+                overlay.into_any_element()
+            }
+        });
         div()
             .id("desktop")
             .key_context("Desktop")
@@ -1938,6 +1995,7 @@ impl Render for Desktop {
                     .child(self.render_navigation(window, cx))
                     .child(main),
             )
+            .children(snapshot_overlay)
             .children(self.panels.render_preview_mini_player(cx))
             .children(gpui_kit::component::Root::render_dialog_layer(window, cx))
             .children(gpui_kit::component::Root::render_notification_layer(

@@ -61,6 +61,21 @@ pub struct EnvironmentLoadBalancingEvaluationView {
     pub route: Option<EnvironmentLoadBalancedRouteView>,
 }
 
+/// The Host's version-maintenance result for one provider instance. Native
+/// settings surfaces receive the same advisory the desktop editor uses,
+/// including whether the Host can safely run its updater.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct ProviderAdvisoryView {
+    pub instance_id: String,
+    pub display_name: String,
+    pub current_version: Option<String>,
+    pub latest_version: Option<String>,
+    pub status: String,
+    pub update_command: Option<String>,
+    pub can_update: bool,
+    pub can_install_version: bool,
+    pub message: Option<String>,
+}
 fn environment_registry(snapshots: Vec<Arc<Snapshot>>) -> EnvironmentRegistry {
     let mut registry = EnvironmentRegistry::default();
     for snapshot in snapshots {
@@ -201,6 +216,7 @@ pub fn environment_load_balancing_route(
     EnvironmentLoadBalancingEvaluationView {
         candidate_count: evaluation.candidate_count as u64,
         pending_resources: evaluation.pending_resources,
+<<<<<<< HEAD
         route: evaluation
             .route
             .map(|route| EnvironmentLoadBalancedRouteView {
@@ -495,6 +511,39 @@ impl Snapshot {
     }
     pub fn account_login(&self) -> Option<AccountLogin> {
         self.account_login.clone()
+    }
+    pub fn provider_advisories(&self) -> Vec<ProviderAdvisoryView> {
+        let Some(providers) = self.providers.as_deref() else {
+            return vec![];
+        };
+        providers
+            .iter()
+            .filter_map(|provider| {
+                let advisory = provider.version_advisory.as_ref()?;
+                Some(ProviderAdvisoryView {
+                    instance_id: provider.instance.clone(),
+                    display_name: provider.display_name.clone(),
+                    current_version: advisory.current_version.clone(),
+                    latest_version: advisory.latest_version.clone(),
+                    status: match advisory.status {
+                        agent_protocol::models::ProviderVersionAdvisoryStatus::Unknown => {
+                            "unknown"
+                        }
+                        agent_protocol::models::ProviderVersionAdvisoryStatus::Current => {
+                            "current"
+                        }
+                        agent_protocol::models::ProviderVersionAdvisoryStatus::BehindLatest => {
+                            "behindLatest"
+                        }
+                    }
+                    .into(),
+                    update_command: advisory.update_command.clone(),
+                    can_update: advisory.can_update,
+                    can_install_version: advisory.can_install_version,
+                    message: advisory.message.clone(),
+                })
+            })
+            .collect()
     }
     pub fn updates(&self) -> Vec<agent_protocol::models::UpdateState> {
         self.updates.values().cloned().collect()

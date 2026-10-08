@@ -12,6 +12,12 @@ pub struct AppServerConfig {
     pub program: PathBuf,
     pub codex_home: Option<PathBuf>,
     pub config_overrides: Vec<String>,
+    /// Environment values belonging to this provider instance. The process
+    /// supervisor layers these on top of the Host environment so a command
+    /// scan can inspect the same instance that a conversation would launch.
+    pub environment: std::collections::BTreeMap<String, String>,
+    /// Provider arguments appended to the app-server invocation.
+    pub launch_args: Vec<String>,
 }
 
 impl Default for AppServerConfig {
@@ -20,6 +26,8 @@ impl Default for AppServerConfig {
             program: PathBuf::from(executable::DEFAULT_CODEX_PROGRAM),
             codex_home: None,
             config_overrides: Vec::new(),
+            environment: std::collections::BTreeMap::new(),
+            launch_args: Vec::new(),
         }
     }
 }
@@ -69,12 +77,18 @@ impl CodexAppServer {
     pub async fn spawn(config: AppServerConfig) -> Result<Self, Error> {
         let executable = executable::resolve(&config.program)?;
         let mut command = bex_process::command(&executable).map_err(Error::Spawn)?;
+        for (key, value) in &config.environment {
+            if config.codex_home.is_none() || !key.eq_ignore_ascii_case("CODEX_HOME") {
+                command.env(key, value);
+            }
+        }
         if let Some(home) = &config.codex_home {
             command.env("CODEX_HOME", home);
         }
         for value in &config.config_overrides {
             command.arg("-c").arg(value);
         }
+        command.args(&config.launch_args);
         let mut child = command
             .arg("app-server")
             .arg("--listen")

@@ -17,7 +17,7 @@ enum LocalNotifications {
         content.badge = 1
         let trigger = UNTimeIntervalNotificationTrigger(timeInterval: 0.1, repeats: false)
         let request = UNNotificationRequest(
-            identifier: "bex.local.\(UUID().uuidString)", content: content, trigger: trigger
+            identifier: "remoteagent.local.\(UUID().uuidString)", content: content, trigger: trigger
         )
         UNUserNotificationCenter.current().add(request)
     }

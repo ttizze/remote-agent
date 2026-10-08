@@ -52,6 +52,11 @@ pub(super) enum Reply {
     HostSettings(m::HostSettings),
     SessionScan(c::SessionScan),
     ProviderCommands(w::ProviderCommands),
+    ProviderUpdate(op::ProviderUpdate),
+    AcpRegistrySearch(op::AcpRegistrySearchResult),
+    PreparedAcpAgent(op::PreparedAcpAgent),
+    UninstalledAcpAgent(op::UninstalledAcpAgent),
+    AcpProbe(op::AcpProbeResult),
     EntrySearch(w::EntrySearch),
     VcsStatus(w::VcsStatus),
     Refs(w::RefList),
@@ -107,6 +112,11 @@ async fn execute(peer: &Peer, call: &Call) -> Result<Reply, PeerError> {
         }
         Call::ScanAgentSessions(_) => Reply::SessionScan(peer.request(call).await?),
         Call::ProviderCommands(_) => Reply::ProviderCommands(peer.request(call).await?),
+        Call::UpdateProvider(_) => Reply::ProviderUpdate(peer.request(call).await?),
+        Call::SearchAcpRegistry(_) => Reply::AcpRegistrySearch(peer.request(call).await?),
+        Call::PrepareAcpAgent(_) => Reply::PreparedAcpAgent(peer.request(call).await?),
+        Call::UninstallAcpAgent(_) => Reply::UninstalledAcpAgent(peer.request(call).await?),
+        Call::ProbeAcpAgent(_) => Reply::AcpProbe(peer.request(call).await?),
         Call::SearchEntries(_) => Reply::EntrySearch(peer.request(call).await?),
         Call::VcsStatus(_) => Reply::VcsStatus(peer.request(call).await?),
         Call::RefreshVcsStatus(_) => Reply::VcsStatus(peer.request(call).await?),
@@ -586,6 +596,33 @@ impl Owner {
                     Call::ProviderCommands(request) => {
                         self.provider_commands_finished(request, Err(&error))
                     }
+                    Call::SearchAcpRegistry(request)
+                        if request.query == self.state.acp_registry.query =>
+                    {
+                        self.state.acp_registry.search_pending = false;
+                        self.state.acp_registry.error = Some(error.to_string());
+                    }
+                    Call::PrepareAcpAgent(request)
+                        if self.state.acp_registry.prepare_pending.as_deref()
+                            == Some(request.agent_id.as_str()) =>
+                    {
+                        self.state.acp_registry.prepare_pending = None;
+                        self.state.acp_registry.error = Some(error.to_string());
+                    }
+                    Call::UninstallAcpAgent(request)
+                        if self.state.acp_registry.uninstall_pending.as_deref()
+                            == Some(request.agent_id.as_str()) =>
+                    {
+                        self.state.acp_registry.uninstall_pending = None;
+                        self.state.acp_registry.error = Some(error.to_string());
+                    }
+                    Call::ProbeAcpAgent(request)
+                        if self.state.acp_registry.probe_pending.as_deref()
+                            == Some(request.agent_id.as_str()) =>
+                    {
+                        self.state.acp_registry.probe_pending = None;
+                        self.state.acp_registry.error = Some(error.to_string());
+                    }
                     Call::ListRefs(request) => self.refs_finished(request, Err(&error)),
                     Call::DiffPreview(request) if request.file.is_some() => {
                         self.diff_file_finished(request, Err(&error), diff_generation)
@@ -881,6 +918,58 @@ impl Owner {
             Reply::ProviderCommands(commands) => {
                 if let Call::ProviderCommands(request) = call {
                     self.provider_commands_finished(request, Ok(commands));
+                }
+            }
+            Reply::ProviderUpdate(_) => {}
+            Reply::AcpRegistrySearch(result) => {
+                if let Call::SearchAcpRegistry(request) = call
+                    && request.query == self.state.acp_registry.query
+                {
+                    self.state.acp_registry.search_pending = false;
+                    self.state.acp_registry.results = Some(result);
+                    self.state.acp_registry.error = None;
+                }
+            }
+            Reply::PreparedAcpAgent(result) => {
+                if let Call::PrepareAcpAgent(request) = call
+                    && self.state.acp_registry.prepare_pending.as_deref()
+                        == Some(request.agent_id.as_str())
+                    && request.agent_id == result.agent_id
+                {
+                    self.state.acp_registry.prepare_pending = None;
+                    self.state
+                        .acp_registry
+                        .prepared
+                        .insert(result.agent_id.clone(), result);
+                    self.state.acp_registry.error = None;
+                }
+            }
+            Reply::UninstalledAcpAgent(result) => {
+                if let Call::UninstallAcpAgent(request) = call
+                    && self.state.acp_registry.uninstall_pending.as_deref()
+                        == Some(request.agent_id.as_str())
+                    && request.agent_id == result.agent_id
+                {
+                    self.state.acp_registry.uninstall_pending = None;
+                    if result.removed {
+                        self.state.acp_registry.prepared.remove(&result.agent_id);
+                        self.state.acp_registry.probes.remove(&result.agent_id);
+                    }
+                    self.state.acp_registry.error = None;
+                }
+            }
+            Reply::AcpProbe(result) => {
+                if let Call::ProbeAcpAgent(request) = call
+                    && self.state.acp_registry.probe_pending.as_deref()
+                        == Some(request.agent_id.as_str())
+                    && request.agent_id == result.agent_id
+                {
+                    self.state.acp_registry.probe_pending = None;
+                    self.state
+                        .acp_registry
+                        .probes
+                        .insert(result.agent_id.clone(), result);
+                    self.state.acp_registry.error = None;
                 }
             }
             Reply::EntrySearch(found) => {

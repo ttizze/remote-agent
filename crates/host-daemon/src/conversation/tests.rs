@@ -133,6 +133,7 @@ impl tools::ModelCatalog for NoModels {
             enabled: true,
             installed: true,
             version: None,
+            version_advisory: None,
             status: agent_protocol::models::ProviderStatus::Ready,
             message: None,
             unavailable_reason: None,

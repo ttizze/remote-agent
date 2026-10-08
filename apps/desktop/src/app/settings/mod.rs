@@ -3,6 +3,7 @@
 //! Archive).
 mod about;
 mod add_project;
+mod acp_registry;
 mod appearance;
 mod archived;
 mod general;

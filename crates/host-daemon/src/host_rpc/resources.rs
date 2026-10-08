@@ -8,13 +8,17 @@ use agent_protocol::{
 use codex_app_server::CodexAppServer;
 use serde::Serialize;
 use serde_json::Value;
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    path::PathBuf,
+    sync::{Arc, OnceLock},
+};
 pub(super) struct CodexResources {
     accounts: tokio::sync::Mutex<Option<crate::codex_accounts::Accounts>>,
     restoration_error: tokio::sync::watch::Sender<Option<String>>,
     process: Result<Arc<CodexAppServer>, String>,
     pub directory: PathBuf,
 }
+
 impl CodexResources {
     pub fn new(process: Result<Arc<CodexAppServer>, String>) -> Self {
         let directory = process

@@ -29,7 +29,7 @@ use agent_domain::{
 use agent_protocol::{
     conversation as c, device as d, models as m, operations as op, pull_requests as pr,
 };
-use std::sync::Arc;
+use std::{path::Path, sync::Arc};
 
 pub(super) enum Next {
     Done,
@@ -172,6 +172,21 @@ fn approval_decision(value: &str) -> Result<ApprovalDecision, PeerError> {
         "cancel" => ApprovalDecision::Cancel,
         _ => return Err(invalid("Unknown approval decision")),
     })
+}
+
+fn snapshot_metadata_path(path: &str) -> std::path::PathBuf {
+    std::path::PathBuf::from(format!("{path}.meta.json"))
+}
+
+/// Reads the optional desktop-capture metadata beside a staged image. The
+/// sidecar is intentionally advisory: ordinary files and malformed metadata
+/// continue through the regular attachment path without affecting upload.
+fn captured_window_for(path: &str) -> Option<agent_domain::CapturedWindow> {
+    let metadata = snapshot_metadata_path(path);
+    let bytes = std::fs::read(metadata).ok()?;
+    (bytes.len() <= 128 * 1024)
+        .then(|| serde_json::from_slice(&bytes).ok())
+        .flatten()
 }
 
 /// The proposed plan the composer offers to implement or refine, by the
@@ -1828,6 +1843,7 @@ impl Owner {
             attachment.name.clone(),
             attachment.mime_type.clone(),
         );
+        let captured_window = captured_window_for(&source);
         let network = self
             .network
             .as_mut()
@@ -1837,12 +1853,13 @@ impl Owner {
         let (task_key, task_id) = (key.clone(), id.clone());
         network.spawn(async move {
             let (key, id) = (task_key, task_id);
-            let result = agent_transport::transfers::upload_attachment(
+            let result = agent_transport::transfers::upload_attachment_with_source(
                 &peer,
                 || async { session.open_stream().await.map_err(std::io::Error::other) },
-                std::path::Path::new(&source),
+                Path::new(&source),
                 &name,
                 &mime,
+                captured_window,
             )
             .await
             .map_err(invalid)
@@ -2113,6 +2130,63 @@ impl Owner {
                 None,
             ),
             Intent::LoadProviders => Next::call(Call::ListProviders(m::Empty {}), None),
+            Intent::UpdateProvider {
+                instance,
+                target_version,
+            } => Next::call(
+                Call::UpdateProvider(op::UpdateProvider {
+                    instance,
+                    target_version,
+                }),
+                None,
+            ),
+            Intent::SearchAcpRegistry { query } => {
+                let query = query.trim().to_owned();
+                self.state.acp_registry.query = query.clone();
+                self.state.acp_registry.search_pending = true;
+                self.state.acp_registry.error = None;
+                Next::call(
+                    Call::SearchAcpRegistry(op::SearchAcpRegistry { query }),
+                    None,
+                )
+            }
+            Intent::PrepareAcpAgent { agent_id } => {
+                let agent_id = agent_id.trim().to_owned();
+                if agent_id.is_empty() {
+                    return Err(invalid("ACP agent id must not be empty"));
+                }
+                self.state.acp_registry.prepare_pending = Some(agent_id.clone());
+                self.state.acp_registry.error = None;
+                Next::call(
+                    Call::PrepareAcpAgent(op::PrepareAcpAgent { agent_id }),
+                    None,
+                )
+            }
+            Intent::UninstallAcpAgent { agent_id } => {
+                let agent_id = agent_id.trim().to_owned();
+                if agent_id.is_empty() {
+                    return Err(invalid("ACP agent id must not be empty"));
+                }
+                self.state.acp_registry.uninstall_pending = Some(agent_id.clone());
+                self.state.acp_registry.error = None;
+                Next::call(
+                    Call::UninstallAcpAgent(op::UninstallAcpAgent { agent_id }),
+                    None,
+                )
+            }
+            Intent::ProbeAcpAgent { agent_id, cwd } => {
+                let agent_id = agent_id.trim().to_owned();
+                let cwd = cwd.trim().to_owned();
+                if agent_id.is_empty() || cwd.is_empty() {
+                    return Err(invalid("ACP agent id and working directory are required"));
+                }
+                self.state.acp_registry.probe_pending = Some(agent_id.clone());
+                self.state.acp_registry.error = None;
+                Next::call(
+                    Call::ProbeAcpAgent(op::ProbeAcpAgent { agent_id, cwd }),
+                    None,
+                )
+            }
             Intent::SelectAccount { provider, id } => Next::call(
                 Call::SelectAccount(op::SelectAccount { provider, id }),
                 None,

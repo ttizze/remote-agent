@@ -645,6 +645,28 @@ pub enum ProviderStatus {
     Disabled,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderVersionAdvisoryStatus {
+    Unknown,
+    Current,
+    BehindLatest,
+}
+
+/// The Host's update capability and version comparison for one provider
+/// installation. The Host derives every action from the executable owner.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderVersionAdvisory {
+    pub status: ProviderVersionAdvisoryStatus,
+    pub current_version: Option<String>,
+    pub latest_version: Option<String>,
+    pub update_command: Option<String>,
+    pub can_update: bool,
+    pub can_install_version: bool,
+    pub message: Option<String>,
+}
+
 /// One provider instance as the composer and settings show it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -657,6 +679,7 @@ pub struct ProviderInstance {
     pub enabled: bool,
     pub installed: bool,
     pub version: Option<String>,
+    pub version_advisory: Option<ProviderVersionAdvisory>,
     pub status: ProviderStatus,
     /// Why the status is not ready, or advice such as an upgrade.
     pub message: Option<String>,

@@ -1,4 +1,5 @@
 mod account_usage;
+mod acp_registry;
 mod background;
 pub use background::{DesktopProcessMonitor, sample_desktop_power, sample_local_power};
 pub mod browser;
@@ -19,6 +20,7 @@ pub mod local_host;
 pub mod platform;
 mod power_events;
 mod projects;
+mod provider_maintenance;
 pub(crate) mod preview;
 mod repository;
 mod terminals;

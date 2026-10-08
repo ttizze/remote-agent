@@ -1547,6 +1547,7 @@ mod tests {
                 enabled: true,
                 installed: true,
                 version: None,
+                version_advisory: None,
                 status: ProviderStatus::Ready,
                 message: None,
                 unavailable_reason: None,
@@ -1563,6 +1564,7 @@ mod tests {
                 enabled: false,
                 installed: true,
                 version: None,
+                version_advisory: None,
                 status: ProviderStatus::Disabled,
                 message: None,
                 unavailable_reason: None,
@@ -1598,6 +1600,7 @@ mod tests {
             enabled,
             installed,
             version: None,
+            version_advisory: None,
             status: if enabled && installed {
                 ProviderStatus::Ready
             } else {
@@ -1756,6 +1759,7 @@ mod tests {
             enabled: true,
             installed: true,
             version: None,
+            version_advisory: None,
             status: ProviderStatus::Ready,
             message: None,
             unavailable_reason: None,

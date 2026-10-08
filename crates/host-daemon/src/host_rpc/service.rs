@@ -112,6 +112,7 @@ struct AwarenessRegistry {
     registrations: std::sync::Mutex<HashMap<SessionId, AwarenessRegistration>>,
 }
 struct HostResources {
+    state_directory: PathBuf,
     codex: Arc<CodexResources>,
     claude: OnceLock<Arc<ClaudeResources>>,
     startup_errors: std::sync::RwLock<HashMap<ProviderKind, Failure>>,
@@ -139,6 +140,7 @@ struct HostResources {
     background_consumers_task: OnceLock<tokio_util::task::AbortOnDropHandle<()>>,
     provider_cache: tokio::sync::RwLock<Option<ProviderHealthCache>>,
     provider_refresh: tokio::sync::Mutex<()>,
+    provider_update_locks: tokio::sync::Mutex<HashSet<String>>,
     devices: Arc<crate::device::DeviceService>,
 }
 
@@ -342,7 +344,7 @@ impl HostRpcService {
             .parent()
             .map(Path::to_owned)
             .unwrap_or_else(|| PathBuf::from("."));
-        let background = BackgroundOwner::new(state_directory);
+        let background = BackgroundOwner::new(state_directory.clone());
         let devices = crate::device::DeviceService::new(projects.path().with_file_name("device"));
         let shared = SharedResources {
             files: crate::workspace_files::WorkspaceFiles::new(
@@ -360,6 +362,7 @@ impl HostRpcService {
         let source_control_auto_fetch_interval_seconds = Arc::new(AtomicU64::new(30));
         let interval = source_control_auto_fetch_interval_seconds.clone();
         let resources = Arc::new(HostResources {
+            state_directory: state_directory.clone(),
             codex: Arc::new(CodexResources::new(codex.clone())),
             claude: OnceLock::new(),
             startup_errors: Default::default(),
@@ -390,6 +393,7 @@ impl HostRpcService {
             background_consumers_task: OnceLock::new(),
             provider_cache: tokio::sync::RwLock::new(None),
             provider_refresh: tokio::sync::Mutex::new(()),
+            provider_update_locks: tokio::sync::Mutex::new(HashSet::new()),
             devices,
         });
         Ok(Self {
@@ -1778,6 +1782,30 @@ impl HostRpcService {
                 .into(),
             Call::ListProviders(_) => self.providers().await.into(),
             Call::ProviderCommands(params) => self.provider_commands(params).await?.into(),
+            Call::UpdateProvider(params) => self.update_provider(params).await?.into(),
+            Call::SearchAcpRegistry(params) => crate::acp_registry::search(params)
+                .await
+                .map_err(|error| Failure::new("acp_registry_unavailable", error))?
+                .into(),
+            Call::PrepareAcpAgent(params) => {
+                crate::acp_registry::prepare(params, &resources.state_directory)
+                    .await
+                    .map_err(|error| Failure::new("acp_prepare_failed", error))?
+                    .into()
+            }
+            Call::UninstallAcpAgent(params) => crate::acp_registry::uninstall_managed_binary(
+                &params.agent_id,
+                &resources.state_directory,
+            )
+            .await
+            .map_err(|error| Failure::new("acp_uninstall_failed", error))?
+            .into(),
+            Call::ProbeAcpAgent(params) => {
+                crate::acp_registry::probe(params, &resources.state_directory)
+                    .await
+                    .map_err(|error| Failure::new("acp_probe_failed", error))?
+                    .into()
+            }
             Call::SearchEntries(params) => resources
                 .search
                 .search(params.clone())
@@ -3426,6 +3454,91 @@ impl HostRpcService {
         }
         Ok(resources.commands.put(scan))
     }
+    async fn update_provider(
+        &self,
+        params: &agent_protocol::operations::UpdateProvider,
+    ) -> Result<agent_protocol::operations::ProviderUpdate, Failure> {
+        let resources = &self.inner.resources;
+        let settings = resources.shared.worktrees.latest_host_settings();
+        let configured = settings.provider_instances.get(&params.instance).cloned();
+        if configured.as_ref().is_some_and(|config| !config.enabled) {
+            return Err(Failure::new(
+                "provider_unavailable",
+                format!("provider instance {} is disabled", params.instance),
+            ));
+        }
+        let driver = configured
+            .as_ref()
+            .map(|config| config.driver)
+            .or_else(|| match params.instance.as_str() {
+                "codex" => Some(Driver::Codex),
+                "claude" => Some(Driver::Claude),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                Failure::new(
+                    "provider_unavailable",
+                    format!("unknown provider instance {}", params.instance),
+                )
+            })?;
+        let binary = configured
+            .as_ref()
+            .and_then(|config| config.binary_path.as_deref())
+            .map(crate::projects::expand_home)
+            .or_else(|| match driver {
+                Driver::Codex => Some(PathBuf::from("codex")),
+                Driver::Claude => resources
+                    .claude
+                    .get()
+                    .map(|claude| claude.program().program.clone()),
+            })
+            .ok_or_else(|| Failure::new("provider_unavailable", "provider is not installed"))?;
+        let home = configured
+            .as_ref()
+            .and_then(|config| config.home_path.as_deref())
+            .map(crate::projects::expand_home);
+        let environment = configured
+            .as_ref()
+            .map(|config| config.environment.clone())
+            .unwrap_or_default();
+        let lock_keys = [
+            format!("instance:{}", params.instance),
+            format!(
+                "installation:{}",
+                crate::provider_maintenance::installation_lock_key(
+                    driver,
+                    &binary,
+                    home.as_deref()
+                )
+            ),
+        ];
+        {
+            let mut locks = resources.provider_update_locks.lock().await;
+            if lock_keys.iter().any(|key| locks.contains(key)) {
+                return Err(Failure::new(
+                    "provider_update_running",
+                    "another update is already running for this provider instance",
+                ));
+            }
+            locks.extend(lock_keys.iter().cloned());
+        }
+        let result = crate::provider_maintenance::update(
+            params.instance.clone(),
+            driver,
+            binary,
+            home,
+            environment,
+            params.target_version.clone(),
+        )
+        .await
+        .map_err(|error| Failure::new("provider_update_failed", error));
+        let mut locks = resources.provider_update_locks.lock().await;
+        for key in lock_keys {
+            locks.remove(&key);
+        }
+        result
+    }
+
     fn spawn_background_consumers(&self) -> tokio_util::task::AbortOnDropHandle<()> {
         let service = self.clone();
         let stop = self.inner.resources.background_stop.clone();
@@ -3581,6 +3694,7 @@ impl HostRpcService {
         let resources = &self.inner.resources;
         let settings = resources.shared.worktrees.latest_host_settings();
         let check_provider_updates = settings.enable_provider_update_checks;
+        let configured_instances = settings.provider_instances.clone();
         let instance = |driver: Driver, name: &str| ProviderInstance {
             instance: name.to_lowercase(),
             driver,
@@ -3589,6 +3703,7 @@ impl HostRpcService {
             enabled: true,
             installed: true,
             version: None,
+            version_advisory: None,
             status: ProviderStatus::Ready,
             message: None,
             unavailable_reason: None,
@@ -3699,6 +3814,15 @@ impl HostRpcService {
                     provider.message = None;
                 }
             }
+            if config.driver == Driver::Codex && provider.installed {
+                match custom_codex_models(&config).await {
+                    Ok(models) => provider.models = models,
+                    Err(error) => {
+                        provider.status = ProviderStatus::Error;
+                        provider.message = Some(error);
+                    }
+                }
+            }
             merge_custom_models(&mut provider.models, config.custom_models);
             if provider.instance != id {
                 provider.instance = id.clone();
@@ -3711,6 +3835,42 @@ impl HostRpcService {
         }
         let mut result: Vec<_> = builtins.into_values().collect();
         result.extend(custom);
+        for provider in &mut result {
+            if !provider.installed || !provider.enabled {
+                continue;
+            }
+            let configured = configured_instances.get(&provider.instance);
+            let binary = configured
+                .and_then(|config| config.binary_path.as_deref())
+                .map(crate::projects::expand_home)
+                .or_else(|| match provider.driver {
+                    Driver::Codex => Some(PathBuf::from("codex")),
+                    Driver::Claude => resources
+                        .claude
+                        .get()
+                        .map(|claude| claude.program().program.clone()),
+                });
+            let Some(binary) = binary else {
+                continue;
+            };
+            let home = configured
+                .and_then(|config| config.home_path.as_deref())
+                .map(crate::projects::expand_home);
+            let environment = configured
+                .map(|config| config.environment.iter().map(|(key, value)| (key.clone(), value.clone())).collect::<Vec<_>>())
+                .unwrap_or_default();
+            provider.version_advisory = Some(
+                crate::provider_maintenance::advisory(
+                    provider.driver,
+                    &binary,
+                    home.as_deref(),
+                    &environment,
+                    provider.version.clone(),
+                    check_provider_updates,
+                )
+                .await,
+            );
+        }
         result
     }
     async fn worktree_list(&self) -> Result<Vec<agent_protocol::models::Worktree>, Failure> {
@@ -3865,6 +4025,72 @@ fn provider_key(provider: ProviderKind) -> String {
         ProviderKind::Claude => "claude",
     }
     .into()
+}
+
+/// Query each configured Codex executable's own app-server catalogue. A
+/// configured instance may have a different home, environment, or launch
+/// arguments, so sharing the built-in catalogue would silently route custom
+/// instances through the wrong installation.
+async fn custom_codex_models(
+    config: &agent_protocol::models::ProviderInstanceConfig,
+) -> Result<Vec<agent_protocol::models::Model>, String> {
+    let server = codex_app_server::CodexAppServer::spawn(codex_app_server::AppServerConfig {
+        program: config
+            .binary_path
+            .as_deref()
+            .map(crate::projects::expand_home)
+            .unwrap_or_else(|| PathBuf::from("codex")),
+        codex_home: config
+            .home_path
+            .as_deref()
+            .map(crate::projects::expand_home),
+        environment: config.environment.clone(),
+        launch_args: config.launch_args.clone(),
+        ..Default::default()
+    })
+    .await
+    .map_err(|error| format!("configured Codex instance could not start: {error}"))?;
+    let result = async {
+        let mut native = Vec::new();
+        let mut cursor: Option<String> = None;
+        loop {
+            let page: serde_json::Value = server
+                .request(
+                    "model/list",
+                    &serde_json::json!({"limit": 100, "cursor": cursor}),
+                )
+                .await
+                .map_err(|error| format!("configured Codex model list failed: {error}"))?
+                .outcome
+                .map_err(|error| error.get().to_owned())?;
+            native.extend(
+                page["data"]
+                    .as_array()
+                    .ok_or_else(|| "configured Codex model list is invalid".to_owned())?
+                    .iter()
+                    .cloned(),
+            );
+            let next = page["nextCursor"].as_str().map(str::to_owned);
+            if next.is_none() {
+                break;
+            }
+            if next == cursor {
+                return Err("configured Codex model list repeated its cursor".into());
+            }
+            cursor = next;
+        }
+        agent_providers::codex_catalog(&native, false)
+            .map_err(|error| format!("configured Codex models are invalid: {error}"))
+            .map(|models| {
+                models
+                    .into_iter()
+                    .map(super::resources::wire_model)
+                    .collect()
+            })
+    }
+    .await;
+    let _ = server.shutdown().await;
+    result
 }
 
 fn timestamp_now() -> Timestamp {
