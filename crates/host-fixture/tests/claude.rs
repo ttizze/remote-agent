@@ -782,6 +782,13 @@ async fn unconfigured_claude_keeps_codex_usable_without_model_errors() {
                 .dispatch(Intent::NewChat { cwd: String::new() })
                 .await
                 .unwrap();
+            store
+                .dispatch(Intent::SelectModel {
+                    thread_id: store.snapshot().navigation.draft_key.clone(),
+                    model: store.snapshot().models[0].model.clone(),
+                })
+                .await
+                .unwrap();
             let id = send(&store, "Codex remains available", "codex-only").await;
             let snapshot = completed(&store, &id, 1, "completed").await;
             assert!(snapshot.error.is_none());
