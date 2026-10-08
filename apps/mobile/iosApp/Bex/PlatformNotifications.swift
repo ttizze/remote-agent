@@ -1,6 +1,5 @@
 import AgentCore
 import AVFoundation
-import UIKit
 import UserNotifications
 
 enum LocalNotifications {
@@ -122,7 +121,7 @@ enum LocalNotifications {
         UNUserNotificationCenter.current().getNotificationSettings { settings in
             DispatchQueue.main.async {
                 switch settings.authorizationStatus {
-                case .authorized, .provisional:
+                case .authorized, .provisional, .ephemeral:
                     Self.authorized = true
                 case .denied:
                     Self.authorized = false
@@ -153,7 +152,7 @@ enum LocalNotifications {
     /// The native badge counts successfully posted notices, including a
     /// completed notice until focus and excluding in-app toasts.
     static func updateBadge() {
-        UIApplication.shared.applicationIconBadgeNumber = postedIdentifiers.count
+        UNUserNotificationCenter.current().setBadgeCount(postedIdentifiers.count, withCompletionHandler: nil)
     }
 
     static func clearDelivered() {

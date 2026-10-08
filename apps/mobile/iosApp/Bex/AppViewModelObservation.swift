@@ -27,7 +27,7 @@ extension BexAppViewModel {
                     phase: .identityRead,
                     value: UInt64((ProcessInfo.processInfo.systemUptime - identityStarted) * 1_000_000)
                 )
-                try await applyClientPreferences(to: owner)
+                try await self?.applyClientPreferences(to: owner)
                 try await owner.resume(connection: Connection(ticket: profile.ticket,
                                                               identity: identity,
                                                               invitation: nil, useRelays: true))
