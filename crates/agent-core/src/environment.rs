@@ -1389,7 +1389,7 @@ mod tests {
 
     #[test]
     fn capability_checks_and_wire_names_are_explicit() {
-        let capabilities = EnvironmentCapabilities {
+        let mut capabilities = EnvironmentCapabilities {
             agent_activity_publishing: true,
             ..Default::default()
         };
