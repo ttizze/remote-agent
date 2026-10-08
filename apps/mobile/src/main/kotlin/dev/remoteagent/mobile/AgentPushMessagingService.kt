@@ -6,7 +6,6 @@ import com.google.firebase.messaging.RemoteMessage
 import dev.remoteagent.core.aggregateAgentActivityContentStatesJson
 import dev.remoteagent.core.agentActivityDeliveryDecision
 import dev.remoteagent.core.agentActivityExpiryIsDue
-import dev.remoteagent.core.agentActivityMessageIsFresh
 import dev.remoteagent.core.agentActivityTimestampMillis
 import dev.remoteagent.core.agentActivityWidgetJson
 import kotlinx.serialization.json.Json
@@ -115,12 +114,12 @@ internal fun activityUpdatedAtMillis(state: JsonObject): Long? =
         agentActivityTimestampMillis(value).takeIf { it >= 0 }
     }
 
-internal fun activityStateIsFresh(state: JsonObject, nowMillis: Long): Boolean =
-    activityUpdatedAtMillis(state)?.let { agentActivityMessageIsFresh(it, nowMillis) } == true
-
 internal fun activityExpiryDue(expiresAtMillis: Long, nowMillis: Long, expectedExpiryAtMillis: Long?): Boolean =
     agentActivityExpiryIsDue(expiresAtMillis, nowMillis) &&
         (expectedExpiryAtMillis == null || expiresAtMillis <= expectedExpiryAtMillis)
+
+internal fun activityLifecycleNeedsReset(expiredHosts: Boolean, aggregateActive: Boolean): Boolean =
+    expiredHosts && !aggregateActive
 
 private fun storedActivityStates(
     preferences: android.content.SharedPreferences,
@@ -145,10 +144,13 @@ private fun storedActivityExpiries(
 
 internal fun retainedActivityStates(
     states: Map<String, JsonObject>,
+    expiryAtMillis: Map<String, Long> = emptyMap(),
     nowMillis: Long = System.currentTimeMillis(),
 ): List<Pair<String, JsonObject>> =
     states.asSequence()
-        .filter { (_, state) -> activityStateIsFresh(state, nowMillis) }
+        .filter { (hostId, _) ->
+            expiryAtMillis[hostId]?.let { !activityExpiryDue(it, nowMillis, null) } ?: true
+        }
         .sortedWith(
             compareByDescending<Pair<String, JsonObject>> { (_, state) ->
                 activityUpdatedAtMillis(state) ?: Long.MIN_VALUE
@@ -165,8 +167,10 @@ internal fun mergeActivityStates(
     nowMillis: Long,
     deliveryAllowed: Boolean,
     incomingExpiryAtMillis: Long = Long.MAX_VALUE,
+    incomingDeliveryAtMillis: Long = nowMillis,
+    expiryAtMillis: Map<String, Long> = emptyMap(),
 ): ActivityStateMerge {
-    val retained = retainedActivityStates(states, nowMillis).toMap().toMutableMap()
+    val retained = retainedActivityStates(states, expiryAtMillis, nowMillis).toMap().toMutableMap()
     if (!deliveryAllowed) {
         retained.remove(hostId)
         return ActivityStateMerge(ActivityStateMergeDisposition.Blocked, retained)
@@ -179,10 +183,11 @@ internal fun mergeActivityStates(
     }
     when (
         agentActivityDeliveryDecision(
-            updatedAtMs = incomingUpdatedAt,
+            deliveryUpdatedAtMs = incomingDeliveryAtMillis,
+            sourceUpdatedAtMs = incomingUpdatedAt,
             expiryAtMs = incomingExpiryAtMillis,
             nowMs = nowMillis,
-            previousUpdatedAtMs = previousUpdatedAt ?: -1,
+            previousSourceUpdatedAtMs = previousUpdatedAt ?: -1,
             dismissed = false,
             active = false,
             previousActive = false,
@@ -219,7 +224,7 @@ private fun writeActivityStates(
     val editor = preferences.edit()
     preferences.all.keys.filter { it.startsWith(ACTIVITY_HOST_PREFIX) }.forEach { key -> editor.remove(key) }
     preferences.all.keys.filter { it.startsWith(ACTIVITY_EXPIRY_PREFIX) }.forEach { key -> editor.remove(key) }
-    retainedActivityStates(states, nowMillis).forEach { (id, parsed) ->
+    retainedActivityStates(states, expiryAtMillis, nowMillis).forEach { (id, parsed) ->
         editor.putString("$ACTIVITY_HOST_PREFIX$id", Json.encodeToString(JsonObject.serializer(), parsed))
         expiryAtMillis[id]?.let { editor.putLong("$ACTIVITY_EXPIRY_PREFIX$id", it) }
     }
@@ -247,7 +252,7 @@ private fun activityAggregateLocked(
                 !preferences.getBoolean(blockedKey(it), false) &&
                 !activityExpiryDue(expiryAtMillis[it] ?: 0L, nowMillis, null)
         }
-    val retained = retainedActivityStates(states, nowMillis)
+    val retained = retainedActivityStates(states, expiryAtMillis, nowMillis)
     if (retained.size != states.size || expiryAtMillis.keys != states.keys) {
         val retainedIds = retained.mapTo(HashSet()) { (hostId, _) -> hostId }
         writeActivityStates(
@@ -282,6 +287,7 @@ private fun mergeActivityState(
     hostId: String,
     value: String,
     incomingExpiryAtMillis: Long,
+    incomingDeliveryAtMillis: Long,
 ): ActivityDeliveryResult? {
     if (hostId.isBlank() || hostId.toByteArray(Charsets.UTF_8).size > 256) return null
     if (incomingExpiryAtMillis <= 0L) return null
@@ -294,6 +300,7 @@ private fun mergeActivityState(
         val currentStates = storedStates.filterKeys {
             !activityExpiryDue(expiryAtMillis[it] ?: 0L, nowMillis, null)
         }
+        val expiredBeforeMerge = storedStates.keys.any { it !in currentStates }
         val previous = currentStates[hostId]
         val previousActive = if (preferences.contains(ACTIVITY_LAST_ACTIVE_KEY)) {
             preferences.getBoolean(ACTIVITY_LAST_ACTIVE_KEY, false)
@@ -309,6 +316,8 @@ private fun mergeActivityState(
             nowMillis = nowMillis,
             deliveryAllowed = activityDeliveryAllowed(context, preferences, hostId),
             incomingExpiryAtMillis = incomingExpiryAtMillis,
+            incomingDeliveryAtMillis = incomingDeliveryAtMillis,
+            expiryAtMillis = expiryAtMillis,
         )
         if (result.disposition == ActivityStateMergeDisposition.Blocked) {
             preferences.edit().putBoolean(blockedKey(hostId), true).apply()
@@ -321,6 +330,14 @@ private fun mergeActivityState(
         }
         writeActivityStates(preferences, result.states, nextExpiryAtMillis, nowMillis)
         var snapshot = activityAggregateSnapshotLocked(context, preferences, nowMillis)
+        var previousActiveForDecision = previousActive
+        if (activityLifecycleNeedsReset(expiredBeforeMerge, snapshot.active)) {
+            preferences.edit()
+                .putBoolean(ACTIVITY_DISMISSED_KEY, false)
+                .putBoolean(ACTIVITY_LAST_ACTIVE_KEY, false)
+                .apply()
+            previousActiveForDecision = false
+        }
         val incomingUpdatedAt = activityUpdatedAtMillis(state)
         val decision = when (result.disposition) {
             ActivityStateMergeDisposition.Blocked -> "blocked"
@@ -328,13 +345,14 @@ private fun mergeActivityState(
             ActivityStateMergeDisposition.Expired -> "expired"
             ActivityStateMergeDisposition.Accepted -> {
                 val value = agentActivityDeliveryDecision(
-                    updatedAtMs = incomingUpdatedAt ?: -1,
+                    deliveryUpdatedAtMs = incomingDeliveryAtMillis,
+                    sourceUpdatedAtMs = incomingUpdatedAt ?: -1,
                     expiryAtMs = incomingExpiryAtMillis,
                     nowMs = nowMillis,
-                    previousUpdatedAtMs = previous?.let(::activityUpdatedAtMillis) ?: -1,
+                    previousSourceUpdatedAtMs = previous?.let(::activityUpdatedAtMillis) ?: -1,
                     dismissed = preferences.getBoolean(ACTIVITY_DISMISSED_KEY, false),
                     active = snapshot.active,
-                    previousActive = previousActive,
+                    previousActive = previousActiveForDecision,
                 )
                 if (value == "expired") {
                     val states = result.states.toMutableMap().also { it.remove(hostId) }
@@ -431,9 +449,16 @@ internal fun expireActivity(context: android.content.Context, expectedExpiryAtMi
             writeActivityStates(preferences, states, nextExpiries, nowMillis)
         }
         if (expiredHosts.isNotEmpty()) {
+            val snapshot = activityAggregateSnapshotLocked(context, preferences, nowMillis)
+            if (activityLifecycleNeedsReset(true, snapshot.active)) {
+                preferences.edit()
+                    .putBoolean(ACTIVITY_DISMISSED_KEY, false)
+                    .putBoolean(ACTIVITY_LAST_ACTIVE_KEY, false)
+                    .apply()
+            }
             renderActivitySnapshot(
                 context,
-                activityAggregateSnapshotLocked(context, preferences, nowMillis),
+                snapshot,
             )
         } else {
             // On pre-O devices the display timeout is bounded to 24 hours
@@ -499,8 +524,12 @@ internal class AgentPushMessagingService : FirebaseMessagingService() {
         val hostId = data["environmentId"]?.takeIf(String::isNotBlank)
         val activityJson = data["activity"]
         val activityExpiryAtMillis = data["activity_expires_at"]?.toLongOrNull()
+        val activityDeliveryAtMillis = data["updated_at"]?.toLongOrNull()
         val merge = if (hostId != null && activityJson != null) {
-            activityExpiryAtMillis?.let { expiry -> mergeActivityState(this, hostId, activityJson, expiry) }
+            if (activityDeliveryAtMillis == null) null
+            else activityExpiryAtMillis?.let { expiry ->
+                mergeActivityState(this, hostId, activityJson, expiry, activityDeliveryAtMillis)
+            }
         } else null
         if (merge != null) {
             if (merge.decision != "dismissed") {
@@ -515,10 +544,16 @@ internal class AgentPushMessagingService : FirebaseMessagingService() {
             }
         }
         if (alertRequested) {
-            val alertKey = listOfNotNull(deepLink, data["phase"], data["updatedAt"])
-                .joinToString(":")
-                .ifEmpty { "alert:$title:$body" }
-            PushNotificationCenter.show(this, title, body, deepLink, alertKey, deduplicate = true)
+            val alertKey = data["alertId"]?.takeIf(String::isNotBlank)
+                ?: listOfNotNull(deepLink, data["phase"], data["updatedAt"])
+                    .joinToString(":")
+                    .ifEmpty { "alert:$title:$body" }
+            val alertDeepLink = if (data.containsKey("alertDeepLink")) {
+                data["alertDeepLink"]?.takeIf(String::isNotBlank)
+            } else {
+                deepLink
+            }
+            PushNotificationCenter.show(this, title, body, alertDeepLink, alertKey, deduplicate = true)
         }
     }
 

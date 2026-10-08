@@ -7,9 +7,9 @@
 
 use agent_domain::{
     ACTIVITY_LINK_LIMIT, ACTIVITY_ROWS_LIMIT, ACTIVITY_STATUS_LIMIT, ACTIVITY_SUMMARY_LIMIT,
-    BackgroundKind, RUNNING_ACTIVITY_TTL_MS, RunStatus, TERMINAL_ACTIVITY_TTL_MS,
+    ActivityAlert, BackgroundKind, RUNNING_ACTIVITY_TTL_MS, RunStatus, TERMINAL_ACTIVITY_TTL_MS,
     TERMINAL_NOTIFICATION_FRESHNESS_MS, ThreadRelationship, WAITING_ACTIVITY_TTL_MS,
-    activity_expiry_at_ms, activity_expiry_is_due, activity_notification_is_fresh,
+    activity_alert_for_transition, activity_expiry_at_ms, activity_expiry_is_due,
     bounded_activity_link, bounded_activity_text,
 };
 use agent_protocol::push::{
@@ -21,7 +21,7 @@ use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{DateTime, SecondsFormat, Utc};
 use futures_util::StreamExt;
-use ring::{rand::SystemRandom, signature};
+use ring::{digest, rand::SystemRandom, signature};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, HashMap},
@@ -235,7 +235,9 @@ impl PushService {
     ) -> anyhow::Result<Arc<Self>> {
         let state = match std::fs::metadata(&path) {
             Ok(metadata) if metadata.len() > MAX_REGISTRY_BYTES => {
-                return Err(anyhow::anyhow!("saved push registrations exceed the size limit"));
+                return Err(anyhow::anyhow!(
+                    "saved push registrations exceed the size limit"
+                ));
             }
             Ok(_) => {
                 let bytes = std::fs::read(&path).map_err(|error| {
@@ -330,18 +332,20 @@ impl PushService {
         {
             return Err(anyhow::anyhow!("push device limit reached"));
         }
-        let previous_start = state.devices.get(&registration.device_id).and_then(|device| {
-            (device.registration.platform == PushPlatform::Ios
-                && device.registration.push_to_start_token
-                    == registration.push_to_start_token
-                && registration.live_activity_token.is_none())
-            .then(|| {
-                (
-                    device.activity_start_sent.clone(),
-                    device.activity_start_sent_at_ms,
-                )
-            })
-        });
+        let previous_start = state
+            .devices
+            .get(&registration.device_id)
+            .and_then(|device| {
+                (device.registration.platform == PushPlatform::Ios
+                    && device.registration.push_to_start_token == registration.push_to_start_token
+                    && registration.live_activity_token.is_none())
+                .then(|| {
+                    (
+                        device.activity_start_sent.clone(),
+                        device.activity_start_sent_at_ms,
+                    )
+                })
+            });
         let replay_registration = registration.clone();
         let mut next = state.clone();
         // Registration and activation are separate RPCs. A requested delivery
@@ -396,7 +400,8 @@ impl PushService {
         ensure_principal(principal)?;
         let mut state = self.devices.lock().await;
         let mut next = state.clone();
-        next.devices.retain(|_, device| device.principal != principal);
+        next.devices
+            .retain(|_, device| device.principal != principal);
         if next.devices == state.devices {
             return Ok(());
         }
@@ -454,8 +459,8 @@ impl PushService {
             }
             crate::platform::save_private_bytes(&path, &bytes)
         })
-            .await
-            .map_err(|error| anyhow::anyhow!("push registration write task failed: {error}"))??;
+        .await
+        .map_err(|error| anyhow::anyhow!("push registration write task failed: {error}"))??;
         Ok(())
     }
 
@@ -482,6 +487,8 @@ impl PushService {
         sequence: u64,
         event: PushActivityEvent,
         active: Vec<PushActivityEvent>,
+        previous: Vec<PushActivityEvent>,
+        previous_available: bool,
     ) {
         // Shell updates can arrive faster than a provider round trip. Keep
         // the provider order equal to the semantic event order so a delayed
@@ -493,6 +500,15 @@ impl PushService {
         *last_sequence = sequence;
         let content_state = content_state(&event, &active);
         let activity_expires_at_ms = content_state_expiry_at_ms(&content_state, &event);
+        let delivery_at_ms = current_millis();
+        let previous_records = previous
+            .iter()
+            .map(PushActivityEvent::activity_record)
+            .collect::<Vec<_>>();
+        let next_records = active
+            .iter()
+            .map(PushActivityEvent::activity_record)
+            .collect::<Vec<_>>();
         *self.latest_state.write().await = Some(content_state.clone());
         let records = {
             let state = self.devices.lock().await;
@@ -515,9 +531,18 @@ impl PushService {
             let device_id = device.registration.device_id.clone();
             let should_deliver_activity = device.registration.platform == PushPlatform::Android
                 && device.registration.preferences.live_activities_enabled;
-            let alert_enabled = event.notification_enabled(device.registration.preferences)
-                && notification_is_fresh(&event, current_millis());
-            if (alert_enabled || should_deliver_activity)
+            let alert = activity_alert_for_transition(
+                &previous_records,
+                &next_records,
+                previous_available,
+                delivery_at_ms,
+                device.registration.preferences.notifications_enabled,
+                device.registration.preferences.notify_on_approval,
+                device.registration.preferences.notify_on_input,
+                device.registration.preferences.notify_on_completion,
+                device.registration.preferences.notify_on_failure,
+            );
+            if (alert.is_some() || should_deliver_activity)
                 && let Err(result) = self
                     .send_notification(
                         &config,
@@ -525,7 +550,8 @@ impl PushService {
                         &event,
                         &content_state,
                         activity_expires_at_ms,
-                        alert_enabled,
+                        delivery_at_ms,
+                        alert.as_ref(),
                     )
                     .await
                 && result == DeliveryError::InvalidToken
@@ -617,17 +643,12 @@ impl PushService {
         };
         let config = ProviderConfig::from_environment();
         match self
-            .send_live_activity(
-                &config,
-                &device.registration,
-                &state,
-                token,
-                event,
-            )
+            .send_live_activity(&config, &device.registration, &state, token, event)
             .await
         {
             Ok(()) if event == "start" => {
-                self.mark_activity_start(&device.registration.device_id, token).await;
+                self.mark_activity_start(&device.registration.device_id, token)
+                    .await;
             }
             Err(DeliveryError::InvalidToken) => {
                 let mut activity = Vec::new();
@@ -644,7 +665,8 @@ impl PushService {
                     });
                 }
                 drop(_delivery);
-                self.invalidate(Vec::new(), activity, start, Vec::new()).await;
+                self.invalidate(Vec::new(), activity, start, Vec::new())
+                    .await;
             }
             _ => {}
         }
@@ -738,14 +760,20 @@ impl PushService {
         event: &PushActivityEvent,
         state: &PushContentState,
         activity_expires_at_ms: i64,
-        alert_enabled: bool,
+        delivery_at_ms: i64,
+        alert: Option<&ActivityAlert>,
     ) -> Result<(), DeliveryError> {
         let request = match registration.platform {
             PushPlatform::Ios => {
                 let jwt = self
                     .apns_provider_token(config.apns.as_ref().ok_or(DeliveryError::Unavailable)?)
                     .await?;
-                apns_notification_request(registration, event, jwt)?
+                apns_notification_request(
+                    registration,
+                    event,
+                    alert.ok_or(DeliveryError::Unavailable)?,
+                    jwt,
+                )?
             }
             PushPlatform::Android => {
                 let project_id = config
@@ -755,9 +783,7 @@ impl PushService {
                     .project_id
                     .clone();
                 let access_token = self
-                    .fcm_provider_token(
-                        config.fcm.as_ref().ok_or(DeliveryError::Unavailable)?,
-                    )
+                    .fcm_provider_token(config.fcm.as_ref().ok_or(DeliveryError::Unavailable)?)
                     .await?;
                 fcm_notification_request(
                     &project_id,
@@ -766,7 +792,8 @@ impl PushService {
                     state,
                     activity_expires_at_ms,
                     access_token,
-                    alert_enabled,
+                    delivery_at_ms,
+                    alert,
                 )
             }
         };
@@ -925,9 +952,9 @@ fn live_activity_target_for_device<'a>(
     if device.registration.live_activity_token.is_none()
         && device.activity_start_sent.as_deref()
             == device.registration.push_to_start_token.as_deref()
-        && device
-            .activity_start_sent_at_ms
-            .is_some_and(|sent| current_millis().saturating_sub(sent) < PUSH_TO_START_RETRY_AFTER_MS)
+        && device.activity_start_sent_at_ms.is_some_and(|sent| {
+            current_millis().saturating_sub(sent) < PUSH_TO_START_RETRY_AFTER_MS
+        })
     {
         return None;
     }
@@ -1026,12 +1053,15 @@ async fn run_watcher(service: std::sync::Weak<PushService>, runtime: Arc<agent_r
                 _ = service.stop.cancelled() => return,
                 _ = sweep.tick() => {
                     let now = current_millis();
+                    let previous = current_activity_events(&active, &terminal);
                     let expired = active
                         .iter()
                         .filter(|(_, event)| activity_expired(event, now))
                         .map(|(thread_id, _)| thread_id.clone())
                         .collect::<Vec<_>>();
+                    let terminal_count = terminal.len();
                     terminal.retain(|_, event| !activity_expired(event, now));
+                    let terminal_pruned = terminal.len() != terminal_count;
                     for thread_id in expired {
                         delivery_sequence = delivery_sequence.saturating_add(1);
                         stale_removed_thread(
@@ -1042,6 +1072,19 @@ async fn run_watcher(service: std::sync::Weak<PushService>, runtime: Arc<agent_r
                             &thread_id,
                             delivery_sequence,
                         );
+                    }
+                    if terminal_pruned {
+                        let current = current_activity_events(&active, &terminal);
+                        if let Some(event) = current.first().cloned() {
+                            delivery_sequence = delivery_sequence.saturating_add(1);
+                            let sequence = delivery_sequence;
+                            let service = service.clone();
+                            tokio::spawn(async move {
+                                service
+                                    .deliver(sequence, event, current, previous, true)
+                                    .await
+                            });
+                        }
                     }
                     continue;
                 }
@@ -1150,7 +1193,8 @@ async fn run_watcher(service: std::sync::Weak<PushService>, runtime: Arc<agent_r
                     }
                     last_seen.insert(event.thread_id.clone(), event.clone());
                     let now = current_millis();
-                    let mut current = current_activity_events(&active, &terminal);
+                    let previous = current_activity_events(&active, &terminal);
+                    let mut current = previous.clone();
                     current.retain(|value| value.thread_id != event.thread_id);
                     if !activity_expired(&event, now) {
                         current.push(event.clone());
@@ -1168,7 +1212,11 @@ async fn run_watcher(service: std::sync::Weak<PushService>, runtime: Arc<agent_r
                     delivery_sequence = delivery_sequence.saturating_add(1);
                     let sequence = delivery_sequence;
                     let service = service.clone();
-                    tokio::spawn(async move { service.deliver(sequence, event, current).await });
+                    tokio::spawn(async move {
+                        service
+                            .deliver(sequence, event, current, previous, true)
+                            .await
+                    });
                 }
                 ShellUpdate::Synchronized | ShellUpdate::ThreadUpdated { .. } => {}
             }
@@ -1196,19 +1244,11 @@ fn activity_expired(event: &PushActivityEvent, now_ms: i64) -> bool {
     )
 }
 
-fn notification_is_fresh(event: &PushActivityEvent, now_ms: i64) -> bool {
-    activity_notification_is_fresh(event.phase.wire_name(), event.occurred_at_ms, now_ms)
-}
-
 fn current_activity_events(
     active: &HashMap<String, PushActivityEvent>,
     terminal: &HashMap<String, PushActivityEvent>,
 ) -> Vec<PushActivityEvent> {
-    active
-        .values()
-        .chain(terminal.values())
-        .cloned()
-        .collect()
+    active.values().chain(terminal.values()).cloned().collect()
 }
 
 fn event_changed(previous: &PushActivityEvent, next: &PushActivityEvent) -> bool {
@@ -1219,6 +1259,7 @@ fn event_changed(previous: &PushActivityEvent, next: &PushActivityEvent) -> bool
         || previous.thread_title != next.thread_title
         || previous.model_title != next.model_title
         || previous.deep_link != next.deep_link
+        || previous.occurred_at_ms != next.occurred_at_ms
 }
 
 fn event_from_thread(
@@ -1316,6 +1357,7 @@ fn stale_removed_thread(
     thread_id: &str,
     sequence: u64,
 ) {
+    let previous_events = current_activity_events(active, terminal);
     let was_active = active.remove(thread_id).is_some();
     terminal.remove(thread_id);
     let Some(previous) = last_seen.remove(thread_id) else {
@@ -1334,7 +1376,11 @@ fn stale_removed_thread(
     let mut current = current_activity_events(active, terminal);
     current.push(event.clone());
     let service = Arc::clone(service);
-    tokio::spawn(async move { service.deliver(sequence, event, current).await });
+    tokio::spawn(async move {
+        service
+            .deliver(sequence, event, current, previous_events, true)
+            .await
+    });
 }
 
 fn thread_deep_link(host_id: &str, thread_id: &str) -> String {
@@ -1379,7 +1425,10 @@ fn content_state_expiry_at_ms(state: &PushContentState, event: &PushActivityEven
         .iter()
         .filter_map(|value| {
             let updated_at_ms = agent_domain::activity_timestamp_millis(&value.updated_at)?;
-            Some(activity_expiry_at_ms(value.phase.wire_name(), updated_at_ms))
+            Some(activity_expiry_at_ms(
+                value.phase.wire_name(),
+                updated_at_ms,
+            ))
         })
         .max()
         .unwrap_or_else(|| activity_expiry_at_ms(event.phase.wire_name(), event.occurred_at_ms))
@@ -1398,6 +1447,7 @@ fn current_millis() -> i64 {
 fn apns_notification_request(
     registration: &RegisterPushDevice,
     event: &PushActivityEvent,
+    alert: &ActivityAlert,
     jwt: String,
 ) -> Result<HttpRequest, DeliveryError> {
     let bundle_id = registration
@@ -1415,7 +1465,8 @@ fn apns_notification_request(
         event.detail.as_deref().unwrap_or(&event.thread_title),
         ACTIVITY_SUMMARY_LIMIT,
     );
-    let (alert_title, alert_body) = notification_alert(event);
+    let alert_title = alert.title.clone();
+    let alert_body = alert.body.clone();
     let host_id = event.host_id.clone();
     let project_id = event.project_id.clone();
     let thread_id = event.thread_id.clone();
@@ -1428,7 +1479,7 @@ fn apns_notification_request(
         .trim_matches('"')
         .to_owned();
     let updated_at = timestamp(event.occurred_at_ms);
-    let deep_link = bounded_activity_link(&event.deep_link);
+    let deep_link = bounded_activity_link(&alert.deep_link);
     let body = serde_json::json!({
         "aps": {
             "alert": {
@@ -1604,7 +1655,8 @@ fn fcm_notification_request(
     state: &PushContentState,
     activity_expires_at_ms: i64,
     access_token: String,
-    alert_enabled: bool,
+    delivery_at_ms: i64,
+    alert: Option<&ActivityAlert>,
 ) -> Result<HttpRequest, DeliveryError> {
     let phase = serde_json::to_string(&event.phase)
         .map_err(|_| DeliveryError::Provider)?
@@ -1614,7 +1666,10 @@ fn fcm_notification_request(
         event.detail.as_deref().unwrap_or(&event.thread_title),
         ACTIVITY_SUMMARY_LIMIT,
     );
-    let (alert_title, alert_body) = notification_alert(event);
+    let (alert_title, alert_body) = alert
+        .map(|alert| (alert.title.clone(), alert.body.clone()))
+        .unwrap_or_else(|| notification_alert(event));
+    let alert_enabled = alert.is_some();
     let mut data = BTreeMap::from([
         ("environmentId", event.host_id.clone()),
         ("projectId", event.project_id.clone()),
@@ -1639,10 +1694,22 @@ fn fcm_notification_request(
         ("detail", detail),
         ("alertTitle", alert_title),
         ("alertBody", alert_body),
-        ("alert", if alert_enabled { "1".into() } else { "0".into() }),
+        (
+            "alert",
+            if alert_enabled {
+                "1".into()
+            } else {
+                "0".into()
+            },
+        ),
         ("updatedAt", timestamp(event.occurred_at_ms)),
+        ("updated_at", delivery_at_ms.to_string()),
         ("deepLink", bounded_activity_link(&event.deep_link)),
     ]);
+    if let Some(alert) = alert {
+        data.insert("alertId", alert_identity(alert));
+        data.insert("alertDeepLink", bounded_activity_link(&alert.deep_link));
+    }
     if registration.preferences.live_activities_enabled {
         data.insert("activity", bounded_content_state(state)?);
         data.insert("activity_expires_at", activity_expires_at_ms.to_string());
@@ -1670,6 +1737,10 @@ fn fcm_notification_request(
         ]),
         body: bounded_json_body(body)?,
     })
+}
+
+fn alert_identity(alert: &ActivityAlert) -> String {
+    URL_SAFE_NO_PAD.encode(digest::digest(&digest::SHA256, alert.identity.as_bytes()).as_ref())
 }
 
 fn notification_alert(event: &PushActivityEvent) -> (String, String) {
@@ -1830,8 +1901,7 @@ fn bounded_content_state_value(
         let mut bounded = activity.clone();
         // Identifiers and deep links are routing data. Truncating them creates
         // a different thread target, so an over-budget row is omitted below.
-        if bounded_activity_link(&bounded.deep_link) != bounded.deep_link
-        {
+        if bounded_activity_link(&bounded.deep_link) != bounded.deep_link {
             continue;
         }
         bounded.project_title =
@@ -2021,8 +2091,8 @@ mod tests {
 
     #[test]
     fn activity_expiry_uses_the_visible_canonical_rows() {
-        let make = |thread_id: &str, phase: PushActivityPhase, occurred_at_ms: i64| {
-            PushActivityEvent {
+        let make =
+            |thread_id: &str, phase: PushActivityPhase, occurred_at_ms: i64| PushActivityEvent {
                 host_id: "host".into(),
                 thread_id: thread_id.into(),
                 project_id: "project".into(),
@@ -2034,8 +2104,7 @@ mod tests {
                 detail: None,
                 deep_link: thread_deep_link("host", thread_id),
                 occurred_at_ms,
-            }
-        };
+            };
         let running = make("running", PushActivityPhase::Running, 1_000);
         let waiting = make("waiting", PushActivityPhase::WaitingForInput, 2_000);
         let state = content_state(&waiting, &[running, waiting.clone()]);
@@ -2085,7 +2154,9 @@ mod tests {
             activity_start_sent: Some("start".into()),
             activity_start_sent_at_ms: Some(current_millis()),
         };
-        assert!(live_activity_target_for_device(&device, &state, PushActivityPhase::Running).is_none());
+        assert!(
+            live_activity_target_for_device(&device, &state, PushActivityPhase::Running).is_none()
+        );
         let expired = StoredDevice {
             activity_start_sent_at_ms: Some(current_millis() - PUSH_TO_START_RETRY_AFTER_MS),
             ..device
@@ -2239,13 +2310,15 @@ mod tests {
             &state,
             900_000,
             "access-token".into(),
-            false,
+            1_800_000_000_000,
+            None,
         )
         .unwrap();
         let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
         assert!(body["message"]["data"]["activity"].is_null());
         assert_eq!(body["message"]["data"]["alertTitle"], "Thread");
         assert_eq!(body["message"]["data"]["alert"], "0");
+        assert_eq!(body["message"]["data"]["updated_at"], "1800000000000");
         assert_eq!(body["message"]["android"]["priority"], "HIGH");
         assert_eq!(body["message"]["android"]["collapse_key"], "agent-activity");
     }
@@ -2277,7 +2350,8 @@ mod tests {
             &state,
             7_200_001,
             "access-token".into(),
-            false,
+            1_800_000_000_000,
+            None,
         )
         .unwrap();
         let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
@@ -2299,7 +2373,7 @@ mod tests {
             deep_link: thread_deep_link("host", "thread"),
             occurred_at_ms: 1_000,
         };
-        assert!(activity_expired(&event, 1_000 + RUNNING_ACTIVITY_TTL_MS));
+        assert!(!activity_expired(&event, 1_000 + RUNNING_ACTIVITY_TTL_MS));
         assert!(activity_expired(&event, 1_001 + RUNNING_ACTIVITY_TTL_MS));
         let waiting = PushActivityEvent {
             phase: PushActivityPhase::WaitingForInput,
@@ -2310,7 +2384,34 @@ mod tests {
             phase: PushActivityPhase::Completed,
             ..event
         };
-        assert!(activity_expired(&terminal, 1_001 + TERMINAL_ACTIVITY_TTL_MS));
+        assert!(activity_expired(
+            &terminal,
+            1_001 + TERMINAL_ACTIVITY_TTL_MS
+        ));
+    }
+
+    #[test]
+    fn event_changed_refreshes_expiry_when_only_source_timestamp_moves() {
+        let previous = PushActivityEvent {
+            host_id: "host".into(),
+            thread_id: "thread".into(),
+            project_id: "project".into(),
+            project_title: "Project".into(),
+            thread_title: "Thread".into(),
+            model_title: "Model".into(),
+            phase: PushActivityPhase::Running,
+            headline: "Working".into(),
+            detail: None,
+            deep_link: thread_deep_link("host", "thread"),
+            occurred_at_ms: 100,
+        };
+        let unchanged = previous.clone();
+        let refreshed = PushActivityEvent {
+            occurred_at_ms: 101,
+            ..previous.clone()
+        };
+        assert!(!event_changed(&previous, &unchanged));
+        assert!(event_changed(&previous, &refreshed));
     }
 
     #[test]
@@ -2328,13 +2429,21 @@ mod tests {
             deep_link: thread_deep_link("host", "thread"),
             occurred_at_ms: 1_000,
         };
-        assert!(!notification_is_fresh(&event, 1_000 + TERMINAL_NOTIFICATION_FRESHNESS_MS + 1));
-        assert!(notification_is_fresh(&event, 1_000 + TERMINAL_NOTIFICATION_FRESHNESS_MS));
-        assert!(notification_is_fresh(
-            &PushActivityEvent {
-                phase: PushActivityPhase::Running,
-                ..event
-            },
+        assert!(
+            agent_domain::activity_notification_is_fresh(
+                event.phase.wire_name(),
+                event.occurred_at_ms,
+                1_000 + TERMINAL_NOTIFICATION_FRESHNESS_MS + 1,
+            ) == false
+        );
+        assert!(agent_domain::activity_notification_is_fresh(
+            event.phase.wire_name(),
+            event.occurred_at_ms,
+            1_000 + TERMINAL_NOTIFICATION_FRESHNESS_MS,
+        ));
+        assert!(agent_domain::activity_notification_is_fresh(
+            PushActivityPhase::Running.wire_name(),
+            event.occurred_at_ms,
             i64::MAX,
         ));
     }
@@ -2375,24 +2484,28 @@ mod tests {
         });
         let service = PushService::with_transport(root.clone(), fake).unwrap();
         service.register("principal", registration()).await.unwrap();
-        assert!(service
-            .devices
-            .lock()
-            .await
-            .devices
-            .get("device")
-            .is_some_and(|device| device.active));
+        assert!(
+            service
+                .devices
+                .lock()
+                .await
+                .devices
+                .get("device")
+                .is_some_and(|device| device.active)
+        );
         let mut disabled = registration();
         disabled.preferences.notifications_enabled = false;
         disabled.preferences.live_activities_enabled = false;
         service.register("principal", disabled).await.unwrap();
-        assert!(!service
-            .devices
-            .lock()
-            .await
-            .devices
-            .get("device")
-            .is_some_and(|device| device.active));
+        assert!(
+            !service
+                .devices
+                .lock()
+                .await
+                .devices
+                .get("device")
+                .is_some_and(|device| device.active)
+        );
         let _ = std::fs::remove_file(root);
     }
 
@@ -2425,7 +2538,11 @@ mod tests {
         assert_eq!(devices.len(), 2);
         for device_id in ["device-a", "device-b"] {
             assert_eq!(
-                live_activity_target_for_device(&devices[device_id], &state, PushActivityPhase::Running),
+                live_activity_target_for_device(
+                    &devices[device_id],
+                    &state,
+                    PushActivityPhase::Running
+                ),
                 Some(("shared-start-token", "start")),
             );
         }

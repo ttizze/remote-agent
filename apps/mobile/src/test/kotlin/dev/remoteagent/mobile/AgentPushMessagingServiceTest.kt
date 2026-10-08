@@ -1,6 +1,7 @@
 package dev.remoteagent.mobile
 
 import dev.remoteagent.core.agentActivityDeliveryDecision
+import dev.remoteagent.core.agentActivityMessageIsFresh
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonObject
@@ -124,12 +125,8 @@ class AgentPushMessagingServiceTest {
     @Test
     fun activityFreshnessRejectsFarFutureTimestamps() {
         val now = 1_800_000_000_000L
-        assertFalse(
-            activityStateIsFresh(
-                activityState("2027-01-15T08:10:01Z"),
-                now,
-            )
-        )
+        assertFalse(agentActivityMessageIsFresh(now + 10 * 60 * 1_000 + 1, now))
+        assertTrue(agentActivityMessageIsFresh(now, now))
     }
 
     @Test
@@ -137,10 +134,23 @@ class AgentPushMessagingServiceTest {
         val now = 1_800_000_000_000L
         val expired = activityState("2027-01-15T07:49:59Z")
 
-        assertFalse(activityStateIsFresh(expired, now))
-        assertTrue(retainedActivityStates(mapOf("host-a" to expired), now).isEmpty())
-        val result = mergeActivityStates(emptyMap(), "host-a", expired, now, deliveryAllowed = true)
-        assertEquals(ActivityStateMergeDisposition.Ignored, result.disposition)
+        assertFalse(agentActivityMessageIsFresh(now - 10 * 60 * 1_000 - 1, now))
+        assertTrue(
+            retainedActivityStates(
+                mapOf("host-a" to expired),
+                mapOf("host-a" to now - 1),
+                now,
+            ).isEmpty(),
+        )
+        val result = mergeActivityStates(
+            emptyMap(),
+            "host-a",
+            expired,
+            now,
+            deliveryAllowed = true,
+            incomingExpiryAtMillis = now - 1,
+        )
+        assertEquals(ActivityStateMergeDisposition.Expired, result.disposition)
         assertTrue(result.states.isEmpty())
     }
 
@@ -164,9 +174,17 @@ class AgentPushMessagingServiceTest {
     @Test
     fun oldExpiryAlarmCannotRemoveARearmedNewerRun() {
         val now = 1_800_000_000_000L
+        assertFalse(activityExpiryDue(now, now, now))
         assertTrue(activityExpiryDue(now - 1, now, now - 1))
         assertFalse(activityExpiryDue(now + 1_000, now, now - 1))
         assertTrue(activityExpiryDue(now - 1, now, now + 1_000))
+    }
+
+    @Test
+    fun expiredIdleRunClearsDismissalBeforeTheNextRun() {
+        assertTrue(activityLifecycleNeedsReset(expiredHosts = true, aggregateActive = false))
+        assertFalse(activityLifecycleNeedsReset(expiredHosts = true, aggregateActive = true))
+        assertFalse(activityLifecycleNeedsReset(expiredHosts = false, aggregateActive = false))
     }
 
     @Test
@@ -191,10 +209,11 @@ class AgentPushMessagingServiceTest {
         assertEquals(
             "dismissed",
             agentActivityDeliveryDecision(
-                updatedAtMs = now,
+                deliveryUpdatedAtMs = now,
+                sourceUpdatedAtMs = now,
                 expiryAtMs = now + 1_000,
                 nowMs = now,
-                previousUpdatedAtMs = now - 1,
+                previousSourceUpdatedAtMs = now - 1,
                 dismissed = true,
                 active = false,
                 previousActive = true,
@@ -203,10 +222,11 @@ class AgentPushMessagingServiceTest {
         assertEquals(
             "rearmed",
             agentActivityDeliveryDecision(
-                updatedAtMs = now,
+                deliveryUpdatedAtMs = now,
+                sourceUpdatedAtMs = now,
                 expiryAtMs = now + 1_000,
                 nowMs = now,
-                previousUpdatedAtMs = now - 1,
+                previousSourceUpdatedAtMs = now - 1,
                 dismissed = true,
                 active = true,
                 previousActive = false,

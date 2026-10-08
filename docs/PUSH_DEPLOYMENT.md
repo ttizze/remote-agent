@@ -35,6 +35,14 @@ entry when the aggregate becomes idle. Ordinary per-thread notices use their
 own persisted notification id; ids are allocated rather than derived from a
 deep-link hash.
 
+The FCM envelope carries `updated_at` as the Host delivery clock, while each
+row's `updatedAt` remains its source event time. Android uses the envelope only
+for bounded replay/future rejection and keeps accepted rows until the Host's
+`activity_expires_at`; source timestamps are used for row ordering and display
+expiry. Alert payloads are emitted only for newly entered attention or terminal
+rows using the previous Host aggregate, with grouped rows getting a stable
+transition identity.
+
 Native routing uses `remoteagent://threads/<environmentId>/<threadId>` for a
 thread notification. The usage widget uses
 `remoteagent://settings/usage?tab=limits` on iOS and the `open_usage=true`

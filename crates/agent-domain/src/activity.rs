@@ -54,7 +54,7 @@ pub fn activity_expiry_at_ms(phase: &str, updated_at_ms: i64) -> i64 {
 }
 
 pub fn activity_expiry_is_due(expires_at_ms: i64, now_ms: i64) -> bool {
-    expires_at_ms <= now_ms
+    expires_at_ms < now_ms
 }
 
 /// Bounds one OS notification timeout while retaining the Host's absolute
@@ -72,30 +72,26 @@ pub fn activity_notification_is_fresh(phase: &str, updated_at_ms: i64, now_ms: i
     !matches!(
         canonical_activity_phase(phase),
         "completed" | "failed" | "stale"
-    ) || {
-        let delta = updated_at_ms
-            .checked_sub(now_ms)
-            .or_else(|| now_ms.checked_sub(updated_at_ms))
-            .unwrap_or(i64::MAX);
-        delta <= TERMINAL_NOTIFICATION_FRESHNESS_MS && delta >= -TERMINAL_NOTIFICATION_FRESHNESS_MS
-    }
+    ) || { now_ms.saturating_sub(updated_at_ms) <= TERMINAL_NOTIFICATION_FRESHNESS_MS }
 }
 
 pub fn activity_delivery_decision(
-    updated_at_ms: i64,
+    delivery_updated_at_ms: i64,
+    source_updated_at_ms: i64,
     expiry_at_ms: i64,
     now_ms: i64,
-    previous_updated_at_ms: i64,
+    previous_source_updated_at_ms: i64,
     dismissed: bool,
     active: bool,
     previous_active: bool,
 ) -> ActivityDeliveryDecision {
-    if !activity_message_is_fresh(updated_at_ms, now_ms)
-        || (previous_updated_at_ms >= 0 && updated_at_ms < previous_updated_at_ms)
+    if !activity_message_is_fresh(delivery_updated_at_ms, now_ms)
+        || (previous_source_updated_at_ms >= 0
+            && source_updated_at_ms < previous_source_updated_at_ms)
     {
         return ActivityDeliveryDecision::IgnoreStale;
     }
-    if expiry_at_ms <= now_ms {
+    if expiry_at_ms < now_ms {
         return ActivityDeliveryDecision::Expired;
     }
     if dismissed {
@@ -106,6 +102,183 @@ pub fn activity_delivery_decision(
         };
     }
     ActivityDeliveryDecision::Accept
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActivityAlert {
+    pub title: String,
+    pub body: String,
+    pub identity: String,
+    pub deep_link: String,
+}
+
+/// Resolves only newly entered attention/terminal rows. Presentation updates
+/// to an already waiting or completed row stay silent; the caller may still
+/// deliver the updated activity content state.
+pub fn activity_alert_for_transition(
+    previous: &[ActivityRecord],
+    next: &[ActivityRecord],
+    previous_available: bool,
+    now_ms: i64,
+    notifications_enabled: bool,
+    notify_on_approval: bool,
+    notify_on_input: bool,
+    notify_on_completion: bool,
+    notify_on_failure: bool,
+) -> Option<ActivityAlert> {
+    if !notifications_enabled || !previous_available {
+        return None;
+    }
+    let previous_attention = previous
+        .iter()
+        .filter(|record| is_attention_phase(&record.phase))
+        .map(activity_row_key)
+        .collect::<std::collections::HashSet<_>>();
+    let previous_phases = previous
+        .iter()
+        .map(|record| {
+            (
+                activity_row_key(record),
+                canonical_activity_phase(&record.phase),
+            )
+        })
+        .collect::<std::collections::HashMap<_, _>>();
+    let mut ordered = next
+        .iter()
+        .filter(|record| !record.environment_id.is_empty() && !record.thread_id.is_empty())
+        .cloned()
+        .collect::<Vec<_>>();
+    ordered.sort_by(|left, right| {
+        activity_priority(canonical_activity_phase(&left.phase))
+            .cmp(&activity_priority(canonical_activity_phase(&right.phase)))
+            .then_with(|| right.updated_at_ms.cmp(&left.updated_at_ms))
+            .then_with(|| left.environment_id.cmp(&right.environment_id))
+            .then_with(|| left.thread_id.cmp(&right.thread_id))
+    });
+    ordered.truncate(ACTIVITY_ROWS_LIMIT);
+
+    let attention = ordered
+        .iter()
+        .filter(|record| {
+            is_attention_phase(&record.phase)
+                && !previous_attention.contains(&activity_row_key(record))
+                && alert_allowed_for_phase(
+                    &record.phase,
+                    notify_on_approval,
+                    notify_on_input,
+                    notify_on_completion,
+                    notify_on_failure,
+                )
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let rows = if attention.is_empty() {
+        ordered
+            .iter()
+            .filter(|record| is_alert_terminal_phase(&record.phase))
+            .filter(|record| {
+                let key = activity_row_key(record);
+                let prior = previous_phases.get(&key).copied();
+                (prior.is_some_and(|phase| !is_alert_terminal_phase(phase))
+                    || (prior.is_none() && previous_available))
+                    && alert_allowed_for_phase(
+                        &record.phase,
+                        notify_on_approval,
+                        notify_on_input,
+                        notify_on_completion,
+                        notify_on_failure,
+                    )
+                    && activity_notification_is_fresh(&record.phase, record.updated_at_ms, now_ms)
+            })
+            .cloned()
+            .collect::<Vec<_>>()
+    } else {
+        attention
+    };
+    let first = rows.first()?;
+    let is_attention = is_attention_phase(&first.phase);
+    let (title, body) = if rows.len() == 1 {
+        (
+            bounded_activity_text(&first.thread_title, ACTIVITY_SUMMARY_LIMIT),
+            bounded_activity_text(
+                &format!("{}: {}", activity_status(&first.phase), first.project_title),
+                ACTIVITY_SUMMARY_LIMIT,
+            ),
+        )
+    } else {
+        (
+            format!(
+                "{} agents {}",
+                rows.len(),
+                if is_attention {
+                    "need attention"
+                } else {
+                    "finished"
+                }
+            ),
+            bounded_activity_text(
+                &rows
+                    .iter()
+                    .map(|row| row.thread_title.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                ACTIVITY_SUMMARY_LIMIT * 5,
+            ),
+        )
+    };
+    let identity = rows
+        .iter()
+        .map(|row| {
+            format!(
+                "{}/{}/{}",
+                row.environment_id,
+                row.thread_id,
+                canonical_activity_phase(&row.phase),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("|");
+    Some(ActivityAlert {
+        title,
+        body,
+        identity,
+        deep_link: if rows.len() == 1 {
+            first.deep_link.clone()
+        } else {
+            String::new()
+        },
+    })
+}
+
+fn activity_row_key(record: &ActivityRecord) -> String {
+    format!("{}/{}", record.environment_id, record.thread_id)
+}
+
+fn is_attention_phase(phase: &str) -> bool {
+    matches!(
+        canonical_activity_phase(phase),
+        "waiting_for_approval" | "waiting_for_input"
+    )
+}
+
+fn is_alert_terminal_phase(phase: &str) -> bool {
+    matches!(canonical_activity_phase(phase), "completed" | "failed")
+}
+
+fn alert_allowed_for_phase(
+    phase: &str,
+    notify_on_approval: bool,
+    notify_on_input: bool,
+    notify_on_completion: bool,
+    notify_on_failure: bool,
+) -> bool {
+    match canonical_activity_phase(phase) {
+        "waiting_for_approval" => notify_on_approval,
+        "waiting_for_input" => notify_on_input,
+        "completed" => notify_on_completion,
+        "failed" => notify_on_failure,
+        _ => false,
+    }
 }
 
 /// A provider-neutral awareness row. The Host and native clients use this
@@ -161,32 +334,34 @@ pub fn activity_content_state(records: &[ActivityRecord]) -> ActivityContentStat
 /// Aggregates already projected Host states for Android's single ongoing
 /// notification. The active count is retained from each Host even when its
 /// visible rows were capped before aggregation.
-pub fn aggregate_activity_content_states(
-    states: &[ActivityContentState],
-) -> ActivityContentState {
+pub fn aggregate_activity_content_states(states: &[ActivityContentState]) -> ActivityContentState {
     let mut records = Vec::new();
     let mut active_count = 0u32;
     let mut latest = 0i64;
     for state in states {
         active_count = active_count.saturating_add(state.active_count);
         latest = latest.max(parse_activity_timestamp(&state.updated_at));
-        records.extend(state.activities.iter().enumerate().map(|(index, item)| {
-            ActivityRecord {
-                environment_id: item.environment_id.clone(),
-                thread_id: item.thread_id.clone(),
-                project_title: item.project_title.clone(),
-                thread_title: item.thread_title.clone(),
-                model_title: item.model_title.clone(),
-                phase: item.phase.clone(),
-                headline: if index == 0 {
-                    state.subtitle.clone()
-                } else {
-                    item.status.clone()
-                },
-                updated_at_ms: parse_activity_timestamp(&item.updated_at),
-                deep_link: item.deep_link.clone(),
-            }
-        }));
+        records.extend(
+            state
+                .activities
+                .iter()
+                .enumerate()
+                .map(|(index, item)| ActivityRecord {
+                    environment_id: item.environment_id.clone(),
+                    thread_id: item.thread_id.clone(),
+                    project_title: item.project_title.clone(),
+                    thread_title: item.thread_title.clone(),
+                    model_title: item.model_title.clone(),
+                    phase: item.phase.clone(),
+                    headline: if index == 0 {
+                        state.subtitle.clone()
+                    } else {
+                        item.status.clone()
+                    },
+                    updated_at_ms: parse_activity_timestamp(&item.updated_at),
+                    deep_link: item.deep_link.clone(),
+                }),
+        );
     }
     project_records(&records, Some(active_count), Some(latest))
 }
@@ -262,10 +437,7 @@ fn project_records(
                 ACTIVITY_SUMMARY_LIMIT,
             ),
             phase: record.phase.clone(),
-            status: bounded_activity_text(
-                activity_status(&record.phase),
-                ACTIVITY_STATUS_LIMIT,
-            ),
+            status: bounded_activity_text(activity_status(&record.phase), ACTIVITY_STATUS_LIMIT),
             updated_at: activity_timestamp(record.updated_at_ms),
             deep_link: bounded_activity_link(&record.deep_link),
         })
@@ -367,12 +539,10 @@ pub fn bounded_activity_link(value: &str) -> String {
         && url.port().is_none()
         && url.query().is_none()
         && url.fragment().is_none()
-        && url
-            .path_segments()
-            .is_some_and(|segments| {
-                let segments = segments.collect::<Vec<_>>();
-                segments.len() == 2 && segments.iter().all(|segment| !segment.is_empty())
-            });
+        && url.path_segments().is_some_and(|segments| {
+            let segments = segments.collect::<Vec<_>>();
+            segments.len() == 2 && segments.iter().all(|segment| !segment.is_empty())
+        });
     valid.then(|| value.to_owned()).unwrap_or_default()
 }
 
@@ -438,13 +608,22 @@ mod tests {
         assert_eq!(aggregate.active_count, 4);
         assert_eq!(aggregate.activities.len(), 2);
         assert_eq!(aggregate.activities[0].thread_id, "one");
-        assert_eq!(aggregate.activities[0].deep_link, "remoteagent://threads/host/one");
+        assert_eq!(
+            aggregate.activities[0].deep_link,
+            "remoteagent://threads/host/one"
+        );
     }
 
     #[test]
     fn message_freshness_accepts_small_clock_skew_but_rejects_future_replays() {
-        assert!(activity_message_is_fresh(1_000, 1_000 + ACTIVITY_MESSAGE_MAX_AGE_MS));
-        assert!(activity_message_is_fresh(1_000 + ACTIVITY_MESSAGE_MAX_AGE_MS, 1_000));
+        assert!(activity_message_is_fresh(
+            1_000,
+            1_000 + ACTIVITY_MESSAGE_MAX_AGE_MS
+        ));
+        assert!(activity_message_is_fresh(
+            1_000 + ACTIVITY_MESSAGE_MAX_AGE_MS,
+            1_000
+        ));
         assert!(!activity_message_is_fresh(
             1_000 + ACTIVITY_MESSAGE_MAX_AGE_MS + 1,
             1_000
@@ -460,20 +639,24 @@ mod tests {
         let now = 10_000;
         let expiry = now + TERMINAL_ACTIVITY_TTL_MS;
         assert_eq!(
-            activity_delivery_decision(9_500, expiry, now, -1, false, false, true),
+            activity_delivery_decision(9_500, 9_500, expiry, now, -1, false, false, true),
             ActivityDeliveryDecision::Accept
         );
         assert_eq!(
-            activity_delivery_decision(9_500, now, now, -1, false, true, false),
+            activity_delivery_decision(9_500, 9_500, now - 1, now, -1, false, true, false),
             ActivityDeliveryDecision::Expired
         );
         assert_eq!(
-            activity_delivery_decision(9_500, expiry, now, 9_000, true, true, false),
+            activity_delivery_decision(9_500, 9_500, expiry, now, 9_000, true, true, false),
             ActivityDeliveryDecision::Rearmed
         );
         assert_eq!(
-            activity_delivery_decision(9_500, expiry, now, 9_000, true, false, true),
+            activity_delivery_decision(9_500, 9_500, expiry, now, 9_000, true, false, true),
             ActivityDeliveryDecision::Dismissed
+        );
+        assert_eq!(
+            activity_delivery_decision(9_500, 9_500, now, now, -1, false, true, false),
+            ActivityDeliveryDecision::Accept
         );
     }
 
@@ -482,18 +665,107 @@ mod tests {
         let now = 10_000;
         assert_eq!(activity_display_expiry_at_ms(i64::MAX, now), i64::MAX);
         assert_eq!(
-            activity_display_expiry_at_ms(
-                now + ACTIVITY_MAX_DISPLAY_LIFETIME_MS + 1,
-                now,
-            ),
+            activity_display_expiry_at_ms(now + ACTIVITY_MAX_DISPLAY_LIFETIME_MS + 1, now,),
             now + ACTIVITY_MAX_DISPLAY_LIFETIME_MS
+        );
+    }
+
+    #[test]
+    fn alerts_only_new_attention_and_terminal_transitions() {
+        let previous = vec![record("thread", "running", 100)];
+        let waiting = vec![record("thread", "waiting_for_input", 200)];
+        let alert = activity_alert_for_transition(
+            &previous, &waiting, true, 200, true, true, true, true, true,
+        )
+        .expect("new attention should alert");
+        assert_eq!(alert.title, "thread");
+        assert_eq!(alert.body, "Input: Project");
+        assert!(
+            activity_alert_for_transition(
+                &waiting, &waiting, true, 201, true, true, true, true, true,
+            )
+            .is_none()
+        );
+        let mut waiting_refresh = waiting[0].clone();
+        waiting_refresh.headline = "Updated title".into();
+        waiting_refresh.updated_at_ms = 201;
+        assert!(
+            activity_alert_for_transition(
+                &waiting,
+                &[waiting_refresh],
+                true,
+                201,
+                true,
+                true,
+                true,
+                true,
+                true,
+            )
+            .is_none()
+        );
+
+        let completed = vec![record("thread", "completed", 300)];
+        assert!(
+            activity_alert_for_transition(
+                &waiting, &completed, true, 300, true, true, true, true, true,
+            )
+            .is_some()
+        );
+        let mut renamed = completed[0].clone();
+        renamed.headline = "Different title".into();
+        assert!(
+            activity_alert_for_transition(
+                &completed,
+                &[renamed],
+                true,
+                301,
+                true,
+                true,
+                true,
+                true,
+                true,
+            )
+            .is_none()
+        );
+        assert!(activity_notification_is_fresh(
+            "completed",
+            10_000 + TERMINAL_NOTIFICATION_FRESHNESS_MS + 1,
+            10_000,
+        ));
+    }
+
+    #[test]
+    fn alerts_group_new_attention_rows_with_stable_identity() {
+        let previous = vec![record("one", "running", 100), record("two", "running", 100)];
+        let next = vec![
+            record("one", "waiting_for_approval", 200),
+            record("two", "waiting_for_input", 201),
+        ];
+        let alert = activity_alert_for_transition(
+            &previous, &next, true, 201, true, true, true, true, true,
+        )
+        .expect("new attention rows should group");
+        assert_eq!(alert.title, "2 agents need attention");
+        assert!(alert.deep_link.is_empty());
+        assert!(alert.identity.contains("host/one/waiting_for_approval"));
+        assert!(alert.identity.contains("host/two/waiting_for_input"));
+        assert_eq!(
+            activity_alert_for_transition(&next, &next, true, 202, true, true, true, true, true,),
+            None
+        );
+        assert!(
+            activity_alert_for_transition(&[], &next, false, 201, true, true, true, true, true,)
+                .is_none()
         );
     }
 
     #[test]
     fn single_host_aggregate_preserves_its_attention_headline() {
         let state = activity_content_state(&[record("input", "waitingInput", 1)]);
-        assert_eq!(aggregate_activity_content_states(&[state]).subtitle, "waitingInput headline");
+        assert_eq!(
+            aggregate_activity_content_states(&[state]).subtitle,
+            "waitingInput headline"
+        );
     }
 
     #[test]
