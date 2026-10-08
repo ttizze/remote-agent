@@ -23,7 +23,52 @@ impl Operation for AddProject {
     }
 }
 
+pub use agent_protocol::operations::ListAgents;
 pub use agent_protocol::operations::ListSessions;
+
+pub(crate) fn refresh_agents(
+    connected: bool,
+    thread_id: Option<&crate::session::SessionRef>,
+) -> Vec<Effect> {
+    thread_id
+        .filter(|_| connected)
+        .map(|thread_id| {
+            Effect::execute(ListAgents {
+                thread_id: thread_id.clone(),
+            })
+        })
+        .into_iter()
+        .collect()
+}
+
+impl Operation for ListAgents {
+    rpc_operation!();
+    fn key(&self) -> Option<OperationKey> {
+        Some(OperationKey::Agents {
+            session: self.thread_id.clone(),
+        })
+    }
+    fn scheduling(&self) -> Scheduling {
+        Scheduling::LatestAgents(self.thread_id.clone())
+    }
+    fn apply(self, snapshot: &mut Snapshot, agents: Self::Output) -> Vec<Effect> {
+        if snapshot.observed_agents.as_ref() != Some(&self.thread_id) {
+            return Vec::new();
+        }
+        for agent in agents {
+            let thread = Arc::make_mut(
+                Arc::make_mut(&mut snapshot.conversations)
+                    .entry(agent.id.clone())
+                    .or_default(),
+            );
+            thread.id = Some(agent.id);
+            thread.parent_id = Some(agent.parent_id);
+            thread.name = agent.name;
+            thread.status = agent.status;
+        }
+        Vec::new()
+    }
+}
 
 impl Operation for ListSessions {
     fn key(&self) -> Option<OperationKey> {
@@ -645,12 +690,279 @@ mod tests {
     use super::*;
     use crate::session::{ProviderKind, SessionRef};
 
+    #[allow(dead_code)]
+    mod host_fixture {
+        include!("../../../tests/support/host.rs");
+    }
+
+    #[tokio::test]
+    async fn fleet_reads_coalesce_and_do_not_block_the_root_list_or_publish_after_closing() {
+        async fn read(reader: &mut host_fixture::Reader) -> host_fixture::Request {
+            tokio::time::timeout(std::time::Duration::from_secs(30), reader.read_request())
+                .await
+                .expect("fleet request was not sent")
+                .unwrap()
+                .unwrap()
+        }
+        use serde_json::json;
+        let parent = SessionRef::new(ProviderKind::Codex, "parent".into()).unwrap();
+        let snapshot = Snapshot {
+            navigation: Arc::new(Navigation {
+                thread_id: Some(parent.clone()),
+                ..Default::default()
+            }),
+            conversations: Arc::new(
+                [(
+                    parent.clone(),
+                    Arc::new(Thread {
+                        id: Some(parent.clone()),
+                        ..Default::default()
+                    }),
+                )]
+                .into(),
+            ),
+            ..Default::default()
+        };
+        let (peer, mut reader, writer) = host_fixture::connect(&snapshot).await;
+        let store = crate::store::Store::new(peer, snapshot);
+        let empty_list = json!({"data":[],"projects":[],"moreProjectIds":[],"hasMoreProjects":false,"hasMoreChats":false});
+        for _ in 0..4 {
+            let request = read(&mut reader).await;
+            let result = match request["method"].as_str().unwrap() {
+                "host/session/list" => empty_list.clone(),
+                "host/account/list" => json!({"accounts":[],"selected":{}}),
+                "host/model/list" => json!({"data":[],"nextCursor":null}),
+                "host/session/open" => json!({"thread":{"id":parent}}),
+                method => panic!("unexpected initial request {method}"),
+            };
+            writer
+                .reply(&request, json!({"result":result}))
+                .await
+                .unwrap();
+        }
+        let mut updates = store.subscribe();
+        loop {
+            let ready = {
+                let snapshot = updates.borrow_and_update();
+                snapshot.threads.is_some()
+                    && snapshot.account.accounts.is_some()
+                    && snapshot.subscriptions.contains_key(&parent)
+                    && snapshot.operations.is_empty()
+            };
+            if ready {
+                break;
+            }
+            updates.changed().await.unwrap();
+        }
+        let before = store.snapshot();
+        let first = store.dispatch(Intent::WatchAgents {
+            thread_id: Some(parent.clone()),
+        });
+        let request = read(&mut reader).await;
+        assert_eq!(request["method"], "host/session/agents");
+        assert_eq!(request["params"], json!({"threadId":parent}));
+        let mut receipts = Vec::new();
+        for _ in 0..20 {
+            store
+                .dispatch(Intent::WatchAgents { thread_id: None })
+                .await
+                .unwrap();
+            receipts.push(store.dispatch(Intent::WatchAgents {
+                thread_id: Some(parent.clone()),
+            }));
+        }
+        let listing = store.dispatch(Intent::ListSessions(ListSessions::new(Default::default())));
+        let list_request = read(&mut reader).await;
+        assert_eq!(
+            list_request["method"], "host/session/list",
+            "fleet requests must coalesce while the first response is pending"
+        );
+        writer
+            .reply(&list_request, json!({"result":empty_list}))
+            .await
+            .unwrap();
+        listing.await.unwrap();
+        writer.reply(&request, json!({"result":[{"id":{"provider":"codex","id":"obsolete"},"parentId":parent,"name":"Old","status":"running"}]})).await.unwrap();
+        first.await.unwrap();
+        assert!(
+            store.snapshot().agent_panel().is_empty(),
+            "a superseded fleet response must not publish stale rows"
+        );
+        let latest = read(&mut reader).await;
+        assert_eq!(latest["method"], "host/session/agents");
+        store
+            .dispatch(Intent::WatchAgents { thread_id: None })
+            .await
+            .unwrap();
+        writer.reply(&latest, json!({"result":[{"id":{"provider":"codex","id":"child"},"parentId":parent,"name":"Review","status":"running"}]})).await.unwrap();
+        for receipt in receipts {
+            receipt.await.unwrap();
+        }
+        assert!(
+            store.snapshot().agent_panel().is_empty(),
+            "closing the panel discards an in-flight fleet response"
+        );
+        let watching = store.dispatch(Intent::WatchAgents {
+            thread_id: Some(parent.clone()),
+        });
+        let latest = read(&mut reader).await;
+        writer.reply(&latest, json!({"result":[{"id":{"provider":"codex","id":"child"},"parentId":parent,"name":"Review","status":"running"}]})).await.unwrap();
+        watching.await.unwrap();
+        let after = store.snapshot();
+        assert_eq!(after.agent_panel()[0].title, "Review");
+        assert!(after.agent_panel()[0].active);
+        assert_eq!(after.navigation, before.navigation);
+        assert_eq!(after.drafts, before.drafts);
+        store
+            .dispatch(Intent::WatchAgents { thread_id: None })
+            .await
+            .unwrap();
+        let first = store.dispatch(Intent::WatchAgents {
+            thread_id: Some(parent.clone()),
+        });
+        let request = read(&mut reader).await;
+        store
+            .dispatch(Intent::WatchAgents { thread_id: None })
+            .await
+            .unwrap();
+        let queued = store.dispatch(Intent::WatchAgents {
+            thread_id: Some(parent),
+        });
+        store
+            .dispatch(Intent::WatchAgents { thread_id: None })
+            .await
+            .unwrap();
+        writer.reply(&request, json!({"result":[]})).await.unwrap();
+        first.await.unwrap();
+        queued.await.unwrap();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), reader.read_request())
+                .await
+                .is_err(),
+            "closing the panel must also discard the queued read before sending it"
+        );
+        store.close().await.unwrap();
+    }
+
+    #[test]
+    fn agents_are_loaded_only_while_the_selected_fleet_is_observed() {
+        let parent = SessionRef::new(ProviderKind::Codex, "parent".into()).unwrap();
+        let other = SessionRef::new(ProviderKind::Codex, "other".into()).unwrap();
+        let mut snapshot = Snapshot {
+            connected: true,
+            ..Default::default()
+        };
+        Arc::make_mut(&mut snapshot.navigation).thread_id = Some(parent.clone());
+        Arc::make_mut(&mut snapshot.drafts).insert(
+            parent.clone().into(),
+            Arc::new(Draft {
+                text: "Keep my draft".into(),
+                ..Default::default()
+            }),
+        );
+        let (_, effects) = reduce(&snapshot, Event::Connected);
+        assert_eq!(
+            effects.len(),
+            4,
+            "reconnecting does not fetch an unobserved fleet"
+        );
+        let (ignored, effects) = reduce_intent(
+            &snapshot,
+            Intent::WatchAgents {
+                thread_id: Some(other),
+            },
+        );
+        assert!(effects.is_empty());
+        assert!(ignored.observed_agents.is_none());
+        let (watching, effects) = reduce_intent(
+            &snapshot,
+            Intent::WatchAgents {
+                thread_id: Some(parent.clone()),
+            },
+        );
+        assert_eq!(effects.len(), 1);
+        assert_eq!(watching.observed_agents, Some(parent.clone()));
+        assert_eq!(watching.navigation, snapshot.navigation);
+        assert_eq!(watching.drafts, snapshot.drafts);
+        let (_, effects) = reduce_intent(
+            &watching,
+            Intent::WatchAgents {
+                thread_id: Some(parent.clone()),
+            },
+        );
+        assert!(
+            effects.is_empty(),
+            "rendering the same panel must not refetch"
+        );
+        let (_, effects) = reduce(&watching, Event::Connected);
+        assert_eq!(
+            effects.len(),
+            5,
+            "reconnect refreshes only the observed fleet"
+        );
+        let (closed, effects) = reduce_intent(&watching, Intent::WatchAgents { thread_id: None });
+        assert!(effects.is_empty());
+        assert!(closed.observed_agents.is_none());
+        let mut offline = closed.clone();
+        offline.connected = false;
+        let (offline, effects) = reduce_intent(
+            &offline,
+            Intent::WatchAgents {
+                thread_id: Some(parent),
+            },
+        );
+        assert!(effects.is_empty());
+        assert!(
+            offline.observed_agents.is_some(),
+            "offline observations survive until reconnect"
+        );
+    }
+
+    #[test]
+    fn fleet_metadata_preserves_history_and_ignores_results_after_closing() {
+        let parent = SessionRef::new(ProviderKind::Codex, "parent".into()).unwrap();
+        let child = SessionRef::new(ProviderKind::Codex, "child".into()).unwrap();
+        let history = Arc::new(Thread {
+            id: Some(child.clone()),
+            turns: Some(vec![Arc::new(crate::models::Turn {
+                id: "history".into(),
+                ..Default::default()
+            })]),
+            ..Default::default()
+        });
+        let mut snapshot = Snapshot {
+            observed_agents: Some(parent.clone()),
+            conversations: Arc::new([(child.clone(), history.clone())].into()),
+            ..Default::default()
+        };
+        let observations = vec![agent_protocol::models::AgentObservation {
+            id: child.clone(),
+            parent_id: parent.clone(),
+            name: Some("Review".into()),
+            status: crate::models::SessionStatus::Running,
+        }];
+        ListAgents {
+            thread_id: parent.clone(),
+        }
+        .apply(&mut snapshot, observations.clone());
+        let thread = &snapshot.conversations[&child];
+        assert_eq!(thread.parent_id, Some(parent.clone()));
+        assert_eq!(thread.name.as_deref(), Some("Review"));
+        assert_eq!(thread.status, crate::models::SessionStatus::Running);
+        assert_eq!(thread.turns, history.turns);
+        snapshot.observed_agents = None;
+        let conversations = snapshot.conversations.clone();
+        ListAgents { thread_id: parent }.apply(&mut snapshot, observations);
+        assert!(Arc::ptr_eq(&snapshot.conversations, &conversations));
+    }
+
     #[rstest::rstest]
     #[case::new_draft(false, false)]
     #[case::existing_empty_draft(true, false)]
     #[case::saved_settings(true, true)]
-    fn opening_without_model_metadata_uses_the_provider_catalog(
+    fn opening_restores_model_metadata_or_uses_the_provider_catalog(
         #[values(true, false)] catalog_first: bool,
+        #[values(true, false)] model_metadata: bool,
         #[values(ProviderKind::Codex, ProviderKind::Claude)] provider: ProviderKind,
         #[case] existing_draft: bool,
         #[case] saved_choice: bool,
@@ -699,7 +1011,10 @@ mod tests {
                 id: Some(session),
                 ..Default::default()
             },
-            None,
+            model_metadata.then(|| crate::models::ModelRef {
+                provider,
+                id: "saved".into(),
+            }),
         );
         if !catalog_first {
             LoadModels {}.apply(&mut snapshot, catalog());
@@ -710,7 +1025,12 @@ mod tests {
             draft.model,
             Some(crate::models::ModelRef {
                 provider,
-                id: if saved_choice { "saved" } else { "default" }.into(),
+                id: if saved_choice || model_metadata {
+                    "saved"
+                } else {
+                    "default"
+                }
+                .into(),
             })
         );
         let effort = if saved_choice {
@@ -723,7 +1043,27 @@ mod tests {
         // The composer and the next submission must use the same settings.
         assert_eq!(draft.effort.as_deref(), Some(effort));
         assert_eq!(draft.service_tier.as_deref(), Some("default"));
-        assert_eq!(snapshot.model_quick_controls(key).effort, effort);
+        assert_eq!(snapshot.model_quick_controls(key.clone()).effort, effort);
+        let expected_model = draft.model.clone();
+        let (snapshot, _) = reduce_intent(
+            &snapshot,
+            Intent::SetDraftText {
+                thread_id: key,
+                text: "Next input".into(),
+            },
+        );
+        let (submitted, effects) = reduce_intent(
+            &snapshot,
+            Intent::Submit {
+                thread_id: None,
+                client_user_message_id: "next-input".into(),
+            },
+        );
+        assert_eq!(effects.len(), 1);
+        assert_eq!(
+            submitted.pending_submissions["next-input"].draft.model,
+            expected_model
+        );
     }
 }
 

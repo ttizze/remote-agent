@@ -445,6 +445,11 @@ impl Store {
             };
             let Some((connection, storage_scope)) = prepared else {
                 let snapshot = self.snapshot();
+                if let Some(thread_id) = &snapshot.observed_agents {
+                    drop(self.dispatch(Intent::ListAgents(op::ListAgents {
+                        thread_id: thread_id.clone(),
+                    })));
+                }
                 if let Some(id) = &snapshot.navigation.thread_id {
                     drop(self.dispatch(Intent::ReadThread(op::ReadThread::new(id.clone()))));
                 }
@@ -722,6 +727,7 @@ fn publish_locked(current: &mut Arc<Snapshot>, next: Snapshot) -> bool {
         terminals,
         conversations,
         threads,
+        observed_agents,
         models,
         model_errors,
         drafts,
@@ -756,6 +762,7 @@ fn publish_locked(current: &mut Arc<Snapshot>, next: Snapshot) -> bool {
         && Arc::ptr_eq(&current.account, account)
         && Arc::ptr_eq(&current.conversations, conversations)
         && same_threads
+        && current.observed_agents == *observed_agents
         && Arc::ptr_eq(&current.models, models)
         && Arc::ptr_eq(&current.model_errors, model_errors)
         && Arc::ptr_eq(&current.drafts, drafts)
@@ -1015,6 +1022,23 @@ async fn run(
             subscriptions.remove(&id);
         }
         for mut scheduled in std::mem::take(&mut effects) {
+            let unobserved = match &scheduled.effect.scheduling {
+                op::Scheduling::LatestAgents(session) => {
+                    updates.borrow().observed_agents.as_ref() != Some(session)
+                }
+                _ => false,
+            };
+            if unobserved {
+                updates.send_if_modified(|snapshot| {
+                    let mut next = snapshot.as_ref().clone();
+                    scheduled.scope.finish(&mut next.operations, None);
+                    publish_locked(snapshot, next)
+                });
+                if let Some(complete) = scheduled.complete {
+                    complete.send(Ok(Outcome::Applied));
+                }
+                continue;
+            }
             if let Some(key) = scheduled.effect.scheduling.latest_key()
                 && let Some(pending) = latest_reads.get_mut(&key)
             {
@@ -1045,6 +1069,7 @@ async fn run(
                 op::Scheduling::Control => MAX_RPC_JOBS + CONTROL_RESERVE,
                 op::Scheduling::Concurrent
                 | op::Scheduling::LatestList(_)
+                | op::Scheduling::LatestAgents(_)
                 | op::Scheduling::LatestReview => MAX_RPC_JOBS,
             };
             if jobs.len() >= limit {
@@ -1505,6 +1530,12 @@ mod tests {
             ("terminals", |snapshot| snapshot.terminals = Arc::default()),
             ("conversations", |snapshot| {
                 snapshot.conversations = Arc::default()
+            }),
+            ("observed_agents", |snapshot| {
+                snapshot.observed_agents = Some(crate::session::SessionRef {
+                    provider: crate::session::ProviderKind::Codex,
+                    id: "parent".into(),
+                });
             }),
             ("models", |snapshot| snapshot.models = Arc::default()),
             ("drafts", |snapshot| snapshot.drafts = Arc::default()),

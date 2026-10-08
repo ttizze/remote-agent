@@ -16,6 +16,15 @@ extension BexLaunchUITests {
         let approval = app.buttons["request.accept"]
         let answers = app.textViews.matching(NSPredicate(format: "value == %@", "シミュレータで完了しました。"))
         for attempt in 0 ..< 3 {
+            if attempt > 0 {
+                app.navigationBars.buttons.element(boundBy: 0).tap()
+                XCTAssertTrue(row.waitForExistence(timeout: 10)); row.tap()
+                let reopened = expectation(for: NSPredicate { _, _ in
+                    answers.allElementsBoundByIndex.last?.isHittable == true
+                }, evaluatedWith: app)
+                wait(for: [reopened], timeout: 10)
+                XCTAssertFalse(latestButton.exists, "Reopening must settle at the latest answer")
+            }
             // A multiline draft makes both the keyboard and composer shrink on send.
             let prompt = "[approval] Followup \(attempt)\n" + String(
                 repeating: "Keep the latest message visible.\n",

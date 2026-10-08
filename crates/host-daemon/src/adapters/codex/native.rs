@@ -502,12 +502,13 @@ pub(crate) fn parse_thread(mut value: Value) -> Result<Thread, serde_json::Error
 }
 pub(crate) fn parse_thread_response(mut value: Value) -> Result<ThreadResponse, serde_json::Error> {
     Ok(ThreadResponse {
-        model: field::<Option<String>>(&value, "model")?.map(|id| {
-            agent_protocol::models::ModelRef {
+        // Reads carry the saved model on Thread; start/resume resolve it on the response.
+        model: field::<Option<String>>(&value, "model")?
+            .or(field(&value["thread"], "model")?)
+            .map(|id| agent_protocol::models::ModelRef {
                 provider: ProviderKind::Codex,
                 id,
-            }
-        }),
+            }),
         thread: parse_thread(value["thread"].take())?,
     })
 }
@@ -541,6 +542,34 @@ pub(super) fn encode_input(input: &[agent_protocol::operations::Input]) -> Vec<V
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn thread_reads_restore_the_model_from_native_thread_metadata() {
+        let response = parse_thread_response(json!({
+            "thread":{"id":"saved","model":"previous-model","status":{"type":"notLoaded"}}
+        }))
+        .unwrap();
+        assert_eq!(
+            response.model,
+            Some(agent_protocol::models::ModelRef {
+                provider: ProviderKind::Codex,
+                id: "previous-model".into(),
+            })
+        );
+        let started = parse_thread_response(json!({
+            "model":"configured-model",
+            "thread":{"id":"started","model":null}
+        }))
+        .unwrap();
+        assert_eq!(started.model.unwrap().id, "configured-model");
+        assert!(
+            parse_thread_response(json!({"thread":{"id":"unknown","model":null}}))
+                .unwrap()
+                .model
+                .is_none()
+        );
+    }
+
     #[test]
     fn model_speed_is_normalized_at_the_native_boundary() {
         let model = parse_model(json!({

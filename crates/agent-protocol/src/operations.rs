@@ -292,6 +292,12 @@ pub struct ListSessions {
     pub query: crate::models::ListQuery,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListAgents {
+    pub thread_id: crate::session::SessionRef,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReadItem {

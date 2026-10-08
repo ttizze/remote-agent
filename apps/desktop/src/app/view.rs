@@ -141,6 +141,12 @@ fn conversation_file_path(source: &str, cwd: &str) -> Result<PathBuf, String> {
 impl Render for Desktop {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let active = self.image_gallery.is_none() && self.panel_open && self.tab == Tab::Chat;
+        let thread_id = (active && self.panel == Panel::Agents)
+            .then(|| self.snapshot.navigation.thread_id.clone())
+            .flatten();
+        if self.snapshot.observed_agents != thread_id {
+            self.dispatch(Intent::WatchAgents { thread_id });
+        }
         let composer_visible = self.image_gallery.is_none()
             && self.tab == Tab::Chat
             && (!self.panel_open

@@ -784,7 +784,8 @@ mod tests {
         let host = Endpoint::bind(Identity::generate(), Relays::Disabled)
             .await
             .unwrap();
-        let ticket = host.ticket();
+        // Measure replacement over loopback without depending on LAN routing.
+        let ticket = host.local_ticket();
         let first = Endpoint::bind(Identity::from_bytes(identity.to_bytes()), Relays::Disabled)
             .await
             .unwrap();
