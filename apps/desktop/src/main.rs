@@ -250,7 +250,7 @@ fn main() {
             });
             // Give GPUI's Windows adapter a stable unpackaged identity and a
             // user-facing name before any native notification is posted.
-            cx.set_app_identity("app.remoteagent.desktop", "Remote Agent");
+            cx.set_app_identity(platform::APPLICATION_IDENTITY, platform::APPLICATION_NAME);
             cx.on_app_quit(|cx| {
                 tracing::info!(target: "desktop", operation = "shutdown", "Desktop shutting down");
                 platform::set_notification_badge(0);

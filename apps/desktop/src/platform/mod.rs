@@ -17,6 +17,9 @@ use std::{
 
 const DESKTOP_HANDOFF_TTL_SECS: u64 = 300;
 
+pub(crate) const APPLICATION_IDENTITY: &str = "app.remoteagent.desktop";
+pub(crate) const APPLICATION_NAME: &str = "Remote Agent";
+
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 struct DesktopHandoffAttempt {
     executable: PathBuf,
