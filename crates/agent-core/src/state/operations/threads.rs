@@ -960,8 +960,9 @@ mod tests {
     #[case::new_draft(false, false)]
     #[case::existing_empty_draft(true, false)]
     #[case::saved_settings(true, true)]
-    fn opening_without_model_metadata_uses_the_provider_catalog(
+    fn opening_restores_model_metadata_or_uses_the_provider_catalog(
         #[values(true, false)] catalog_first: bool,
+        #[values(true, false)] model_metadata: bool,
         #[values(ProviderKind::Codex, ProviderKind::Claude)] provider: ProviderKind,
         #[case] existing_draft: bool,
         #[case] saved_choice: bool,
@@ -1010,7 +1011,10 @@ mod tests {
                 id: Some(session),
                 ..Default::default()
             },
-            None,
+            model_metadata.then(|| crate::models::ModelRef {
+                provider,
+                id: "saved".into(),
+            }),
         );
         if !catalog_first {
             LoadModels {}.apply(&mut snapshot, catalog());
@@ -1021,7 +1025,12 @@ mod tests {
             draft.model,
             Some(crate::models::ModelRef {
                 provider,
-                id: if saved_choice { "saved" } else { "default" }.into(),
+                id: if saved_choice || model_metadata {
+                    "saved"
+                } else {
+                    "default"
+                }
+                .into(),
             })
         );
         let effort = if saved_choice {
@@ -1034,7 +1043,27 @@ mod tests {
         // The composer and the next submission must use the same settings.
         assert_eq!(draft.effort.as_deref(), Some(effort));
         assert_eq!(draft.service_tier.as_deref(), Some("default"));
-        assert_eq!(snapshot.model_quick_controls(key).effort, effort);
+        assert_eq!(snapshot.model_quick_controls(key.clone()).effort, effort);
+        let expected_model = draft.model.clone();
+        let (snapshot, _) = reduce_intent(
+            &snapshot,
+            Intent::SetDraftText {
+                thread_id: key,
+                text: "Next input".into(),
+            },
+        );
+        let (submitted, effects) = reduce_intent(
+            &snapshot,
+            Intent::Submit {
+                thread_id: None,
+                client_user_message_id: "next-input".into(),
+            },
+        );
+        assert_eq!(effects.len(), 1);
+        assert_eq!(
+            submitted.pending_submissions["next-input"].draft.model,
+            expected_model
+        );
     }
 }
 
