@@ -5,6 +5,7 @@ import UIKit
 struct BexSwiftUIRoot: View {
     @ObservedObject var model: BexAppViewModel
     @State private var appearanceRevision = 0
+    @State private var showingUsage = false
 
     var body: some View {
         _ = appearanceRevision
@@ -36,6 +37,38 @@ struct BexSwiftUIRoot: View {
         .onReceive(NotificationCenter.default.publisher(for: .mobileAppearanceDidChange)) { _ in
             appearanceRevision += 1
         }
+        .onReceive(NotificationCenter.default.publisher(for: .agentPushDeepLink)) { notification in
+            guard let deepLink = notification.object as? String else { return }
+            openPushDeepLink(deepLink)
+        }
+        .onOpenURL {
+            let value = $0.absoluteString
+            if AgentPushCenter.isActivityOverviewDeepLink(value) {
+                model.openActivityOverviewDeepLink()
+            } else if AgentPushCenter.isUsageDeepLink(value) {
+                model.openUsageDeepLink()
+            } else if let target = AgentPushCenter.threadTarget(from: value) {
+                model.openPushThread(hostId: target.hostId, threadId: target.threadId)
+            } else {
+                model.handleSurfaceURL($0)
+            }
+        }
+        .onChange(of: model.usageDeepLinkRequests) { _, count in
+            if count > 0 {
+                showingUsage = true
+            }
+        }
+        .sheet(isPresented: $showingUsage) {
+            NavigationStack {
+                UsageScreen(model: model, initialTab: .limits)
+                    .onAppear { model.consumeUsageDeepLinkRequest() }
+                    .onChange(of: model.usageDeepLinkRequests) { _, count in
+                        if count > 0 {
+                            model.consumeUsageDeepLinkRequest()
+                        }
+                    }
+            }
+        }
         .sheet(isPresented: $model.isScanning) {
             QRScannerSheet { model.scanned($0) }
                 .interactiveDismissDisabled()
@@ -51,6 +84,19 @@ struct BexSwiftUIRoot: View {
                       transcriptionRecipient: model.pairingInvitation?.transcriptionRecipient,
                       prepare: model.preparePairing, confirm: model.confirmPairing,
                       change: model.openPairing, cancel: model.dismissPairing)
+    }
+
+    private func openPushDeepLink(_ value: String) {
+        if AgentPushCenter.isActivityOverviewDeepLink(value) {
+            model.openActivityOverviewDeepLink()
+            return
+        }
+        if AgentPushCenter.isUsageDeepLink(value) {
+            model.openUsageDeepLink()
+            return
+        }
+        guard let target = AgentPushCenter.threadTarget(from: value) else { return }
+        model.openPushThread(hostId: target.hostId, threadId: target.threadId)
     }
 }
 
@@ -69,6 +115,7 @@ private struct WorkspaceRoot: View {
     @ObservedObject var model: BexAppViewModel
     @State private var routes: [ThreadRoute] = []
     @State private var showingSettings = false
+    @State private var settingsProjectId: String?
     @State private var showingNewTask = false
     /// The new task opens on the draft core already prepared.
     @State private var newTaskDraftOpen = false
@@ -94,7 +141,11 @@ private struct WorkspaceRoot: View {
                 }
             }
         }
-        .sheet(isPresented: $showingSettings) { SettingsScreen(model: model) }
+        .sheet(
+            isPresented: $showingSettings,
+            onDismiss: { settingsProjectId = nil },
+            content: { SettingsScreen(model: model, projectId: settingsProjectId) }
+        )
         .sheet(isPresented: $showingNewTask, onDismiss: restoreThread) {
             NewTaskFlow(model: model, draftOpen: newTaskDraftOpen) { _ in
                 returnThread = nil
@@ -104,14 +155,30 @@ private struct WorkspaceRoot: View {
             .presentationDetents([.fraction(0.92)])
         }
         .onChange(of: model.selectedThreadId) { _, _ in routes = [] }
+        .overlay(alignment: .bottom) {
+            if let notice = model.notice {
+                HStack(spacing: 12) {
+                    Text(notice).lineLimit(2).frame(maxWidth: .infinity, alignment: .leading)
+                    if model.notificationThreadRoute != nil {
+                        Button("Open") { model.openNotificationThread() }
+                    }
+                    Button("Dismiss") { model.notice = nil }
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 12)
+                .background(AppTheme.groupedCard, in: RoundedRectangle(cornerRadius: 16))
+                .padding(12)
+            }
+        }
     }
 
     private func list(sidebar: Bool) -> some View {
         ThreadListScreen(model: model, sidebar: sidebar, openSettings: { projectId in
             _ = model.selectScopedValue(projectId)
+            settingsProjectId = projectId
             showingSettings = true
         }, newTask: newTask,
-                         showNewTaskDraft: showNewTaskDraft)
+        showNewTaskDraft: showNewTaskDraft)
     }
 
     @ViewBuilder
