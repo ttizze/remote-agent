@@ -53,7 +53,7 @@ pub(super) struct Execute<'a> {
     pub timeout: Option<Duration>,
     pub max_output_bytes: usize,
     /// Receives the output lines, and the hooks when `trace_hooks` is set.
-    pub progress: Option<&'a mut dyn FnMut(Progress)>,
+    pub progress: Option<&'a mut (dyn FnMut(Progress) + Send)>,
     pub trace_hooks: bool,
     /// Cancellation owned by the process runner. The runner kills and waits
     /// for the child, then joins its pipe readers before returning.
@@ -135,7 +135,7 @@ impl HookTrace {
         })
     }
 
-    fn read(&mut self, progress: &mut dyn FnMut(Progress)) {
+    fn read(&mut self, progress: &mut (dyn FnMut(Progress) + Send)) {
         let Ok(mut file) = std::fs::File::open(self.file.path()) else {
             return;
         };
@@ -182,7 +182,7 @@ impl HookTrace {
         }
     }
 
-    fn line(&mut self, line: &str, progress: &mut dyn FnMut(Progress)) {
+    fn line(&mut self, line: &str, progress: &mut (dyn FnMut(Progress) + Send)) {
         let line = line.trim();
         if line.is_empty() {
             return;
@@ -391,7 +391,7 @@ async fn run_command(
     timeout: Option<Duration>,
     max_output_bytes: usize,
     mut cancel: Option<CancellationToken>,
-    mut progress: Option<&mut dyn FnMut(Progress)>,
+    mut progress: Option<&mut (dyn FnMut(Progress) + Send)>,
     trace_hooks: bool,
     prefix_git_options: bool,
 ) -> Result<Executed> {
@@ -451,7 +451,9 @@ async fn run_command(
     let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
     let mut stdout_truncated = false;
     let mut status = None;
-    let mut collect = |stream: OutputStream, line: Vec<u8>, progress: &mut Option<&mut dyn FnMut(Progress)>| {
+    let mut collect = |stream: OutputStream,
+                       line: Vec<u8>,
+                       progress: &mut Option<&mut (dyn FnMut(Progress) + Send)>| {
         let buffer = match stream {
             OutputStream::Stdout => &mut stdout,
             OutputStream::Stderr => &mut stderr,
