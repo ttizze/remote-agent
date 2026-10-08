@@ -9,7 +9,10 @@ use agent_core::{
     state::{
         Intent, ScheduledTaskDraft, ScheduledTaskScheduleDraft, ScheduledTaskWorkspaceDraft,
     },
-    view::{composer::controls::runtime_mode_choices, models::ProviderStatus},
+    view::{
+        composer::controls::runtime_mode_choices,
+        models::{ProviderStatus, traits::TraitControl},
+    },
 };
 use agent_domain::RuntimeMode;
 use gpui_kit::{
@@ -416,7 +419,7 @@ impl Desktop {
             })
             .collect::<Vec<_>>();
         let draft_id = self.settings.scheduled_tasks.selected.clone();
-        let editor_rows = vec![
+        let mut editor_rows = vec![
             Row::new("Title").control(Input::new(&self.settings.scheduled_tasks.title).small()).render(),
             Row::new("Prompt").control(Input::new(&self.settings.scheduled_tasks.prompt).small()).render(),
             Row::new("Enabled").control(
@@ -527,6 +530,85 @@ impl Desktop {
                 cx.notify();
             }, cx).into_any_element()).render(),
         ];
+        let scheduled_traits = self.snapshot.scheduled_task_traits(draft.clone());
+        for control in scheduled_traits.controls {
+            match control {
+                TraitControl::Select {
+                    id,
+                    label,
+                    choices,
+                    selected,
+                    disabled,
+                    ..
+                } => {
+                    let descriptor_id = id.clone();
+                    let options = choices
+                        .into_iter()
+                        .map(|choice| {
+                            let is_selected = choice.id == selected;
+                            Choice {
+                                id: choice.id,
+                                label: choice.label,
+                                description: choice.description,
+                                icon: Some("sliders-horizontal"),
+                                selected: is_selected,
+                            }
+                        })
+                        .collect();
+                    editor_rows.push(
+                        Row::new(label)
+                            .control(
+                                select(
+                                    format!("scheduled-option-{descriptor_id}"),
+                                    selected,
+                                    options,
+                                    move |view, choice, _, cx| {
+                                        if !disabled {
+                                            let current = view.settings.scheduled_tasks.draft.clone();
+                                            if let Some(current) = current {
+                                                let next = view.snapshot.select_scheduled_task_trait(
+                                                    current,
+                                                    descriptor_id.clone(),
+                                                    choice,
+                                                );
+                                                view.settings.scheduled_tasks.draft = Some(next);
+                                            }
+                                        }
+                                        cx.notify();
+                                    },
+                                    cx,
+                                )
+                                .into_any_element(),
+                            )
+                            .render(),
+                    );
+                }
+                TraitControl::Toggle { id, label, on } => {
+                    let descriptor_id = id.clone();
+                    editor_rows.push(
+                        Row::new(label)
+                            .control(
+                                Switch::new(format!("scheduled-option-{descriptor_id}"))
+                                    .checked(on)
+                                    .on_click(cx.listener(move |view, value: &bool, _, cx| {
+                                        let current = view.settings.scheduled_tasks.draft.clone();
+                                        if let Some(current) = current {
+                                            let next = view.snapshot.toggle_scheduled_task_trait(
+                                                current,
+                                                descriptor_id.clone(),
+                                                *value,
+                                            );
+                                            view.settings.scheduled_tasks.draft = Some(next);
+                                        }
+                                        cx.notify();
+                                    }))
+                                    .into_any_element(),
+                            )
+                            .render(),
+                    );
+                }
+            }
+        }
         let branch_row = match workspace_kind {
             "worktree" => {
                 let branch_view = self.snapshot.scheduled_task_branches(
