@@ -45,6 +45,70 @@ const MAX_METADATA_BYTES: u64 = 1024 * 1024;
 const COPY_BUFFER_SIZE: usize = 64 * 1024;
 const MAX_REDIRECTS: usize = 5;
 const MAX_ARCHIVE_ENTRIES: usize = 100_000;
+const HANDOFF_REQUEST_FILE: &str = "update-handoff.json";
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+struct UpdateHandoffRequest {
+    target: UpdateTarget,
+}
+
+fn handoff_request_path(state_dir: &Path) -> PathBuf {
+    state_dir.join("transactions").join(HANDOFF_REQUEST_FILE)
+}
+
+/// Ask the running Host to drain before the target executable is selected.
+/// The request is owner-only state and create-once so concurrent Desktop
+/// launches cannot overwrite one another's handoff decision.
+pub fn request_update_handoff(state_dir: &Path, target: UpdateTarget) -> Result<bool> {
+    let path = handoff_request_path(state_dir);
+    let parent = path.parent().context("update handoff path has no parent")?;
+    crate::platform::create_state_directory(parent)?;
+    let bytes = serde_json::to_vec(&UpdateHandoffRequest { target })?;
+    let file = crate::platform::private_file_options().open(&path);
+    let mut file = match file {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => return Ok(false),
+        Err(error) => return Err(error.into()),
+    };
+    if let Err(error) = file.write_all(&bytes).and_then(|_| file.sync_all()) {
+        let _ = std_fs::remove_file(path);
+        return Err(error.into());
+    }
+    Ok(true)
+}
+
+pub fn clear_update_handoff(state_dir: &Path) -> Result<()> {
+    match std_fs::remove_file(handoff_request_path(state_dir)) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn read_update_handoff(state_dir: &Path) -> Result<Option<UpdateTarget>> {
+    let path = handoff_request_path(state_dir);
+    let bytes = match std_fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    match serde_json::from_slice::<UpdateHandoffRequest>(&bytes) {
+        Ok(request) => Ok(Some(request.target)),
+        Err(_) => {
+            // A torn or old request must not pin every later Host startup.
+            clear_update_handoff(state_dir)?;
+            Ok(None)
+        }
+    }
+}
+
+/// The version used by the paired Host and Desktop binaries.
+pub fn current_update_version() -> String {
+    std::env::var(VERSION_ENV)
+        .ok()
+        .or_else(|| option_env!("APP_UPDATE_VERSION").map(str::to_owned))
+        .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_owned())
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ReleaseAsset {
@@ -296,10 +360,33 @@ impl UpdateManager {
     }
 
     fn current_version() -> String {
-        std::env::var(VERSION_ENV)
-            .ok()
-            .or_else(|| option_env!("APP_UPDATE_VERSION").map(str::to_owned))
-            .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_owned())
+        current_update_version()
+    }
+
+    pub(crate) fn acknowledge_current(&self, target: UpdateTarget) -> Result<bool> {
+        let acknowledged =
+            acknowledge_update_target(&self.state_dir, target, &current_update_version())?;
+        if acknowledged {
+            // A target can be acknowledged before this process has loaded its
+            // record. Remove a stale in-memory copy if a caller did load it.
+            if let Ok(mut records) = self.records.try_lock() {
+                records.remove(&target);
+            }
+        }
+        Ok(acknowledged)
+    }
+
+    async fn accept_handoff_if_ready(&self) -> Result<bool> {
+        let Some(target) = read_update_handoff(&self.state_dir)? else {
+            return Ok(false);
+        };
+        let record = self.record(target).await;
+        if !record.state.restart_required || record.state.downloaded_version.is_none() {
+            clear_update_handoff(&self.state_dir)?;
+            return Ok(false);
+        }
+        clear_update_handoff(&self.state_dir)?;
+        Ok(true)
     }
 
     fn platform_name(platform: &str) -> Result<&'static str> {
@@ -1537,6 +1624,53 @@ fn target_name(target: UpdateTarget) -> &'static str {
     }
 }
 
+/// Clear a completed install only when the target process is running the
+/// exact version that was installed. The target calls this after it has
+/// crossed its own launch boundary; the shared Host does not infer Desktop
+/// success from merely observing a transaction.
+pub fn acknowledge_update_target(
+    state_dir: &Path,
+    target: UpdateTarget,
+    current_version: &str,
+) -> Result<bool> {
+    let path = state_dir
+        .join("transactions")
+        .join(format!("{}.json", target_name(target)));
+    let bytes = match std_fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.into()),
+    };
+    let persisted: PersistedUpdateRecord = match serde_json::from_slice(&bytes) {
+        Ok(persisted) => persisted,
+        Err(_) => return Ok(false),
+    };
+    if persisted.state.target != target
+        || !persisted.state.restart_required
+        || persisted.state.downloaded_version.as_deref() != Some(current_version)
+    {
+        return Ok(false);
+    }
+    if let Some(staged) = persisted.staged
+        && staged_path_is_owned(state_dir, target, &staged)
+    {
+        let _ = std_fs::remove_file(staged.path);
+    }
+    match std_fs::remove_file(path) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn staged_path_is_owned(state_dir: &Path, target: UpdateTarget, staged: &StagedArtifact) -> bool {
+    let expected_directory = state_dir.join(target_name(target)).join(&staged.version);
+    staged.path.starts_with(&expected_directory)
+        && staged.path.parent() == Some(expected_directory.as_path())
+        && staged.path.file_name().is_some()
+        && parse_version(&staged.version).is_ok()
+}
+
 fn bounded_release_notes(notes: &[ReleaseNoteGroup]) -> (Vec<ReleaseNoteGroup>, u32) {
     let mut omitted = 0u32;
     let mut bounded = Vec::with_capacity(notes.len().min(RELEASE_NOTE_GROUP_LIMIT));
@@ -1937,5 +2071,78 @@ mod tests {
         let (bounded, omitted) = bounded_release_notes(&notes);
         assert_eq!(bounded[0].items.len(), RELEASE_NOTE_ITEM_LIMIT);
         assert_eq!(omitted, 2);
+    }
+
+    #[test]
+    fn handoff_request_is_single_writer_and_clearable() {
+        let directory = tempfile::tempdir().unwrap();
+        assert!(request_update_handoff(directory.path(), UpdateTarget::Desktop).unwrap());
+        assert!(!request_update_handoff(directory.path(), UpdateTarget::Host).unwrap());
+        let request: UpdateHandoffRequest =
+            serde_json::from_slice(&std::fs::read(handoff_request_path(directory.path())).unwrap())
+                .unwrap();
+        assert_eq!(request.target, UpdateTarget::Desktop);
+        clear_update_handoff(directory.path()).unwrap();
+        assert!(!handoff_request_path(directory.path()).exists());
+    }
+
+    #[tokio::test]
+    async fn handoff_is_consumed_only_for_a_restartable_install() {
+        let directory = tempfile::tempdir().unwrap();
+        let manager = UpdateManager::new(directory.path().to_path_buf());
+        request_update_handoff(directory.path(), UpdateTarget::Desktop).unwrap();
+        assert!(!manager.accept_handoff_if_ready().await.unwrap());
+        assert!(!handoff_request_path(directory.path()).exists());
+
+        let mut state = UpdateState::initial(
+            UpdateTarget::Desktop,
+            "1.0.0".into(),
+            UpdateChannel::Nightly,
+            true,
+        );
+        state.status = UpdateStatus::Downloaded;
+        state.downloaded_version = Some("1.1.0".into());
+        state.restart_required = true;
+        let transaction = PersistedUpdateRecord {
+            state,
+            metadata: None,
+            staged: None,
+            platform: "linux".into(),
+            architecture: "x86_64".into(),
+        };
+        let path = directory.path().join("transactions/desktop.json");
+        std::fs::write(&path, serde_json::to_vec(&transaction).unwrap()).unwrap();
+        let manager = UpdateManager::new(directory.path().to_path_buf());
+        request_update_handoff(directory.path(), UpdateTarget::Desktop).unwrap();
+        assert!(manager.accept_handoff_if_ready().await.unwrap());
+        assert!(!handoff_request_path(directory.path()).exists());
+    }
+
+    #[test]
+    fn target_acknowledgement_requires_the_exact_running_version() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("transactions/host.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut state = UpdateState::initial(
+            UpdateTarget::Host,
+            "1.0.0".into(),
+            UpdateChannel::Nightly,
+            true,
+        );
+        state.status = UpdateStatus::Downloaded;
+        state.downloaded_version = Some("1.1.0".into());
+        state.restart_required = true;
+        let persisted = PersistedUpdateRecord {
+            state,
+            metadata: None,
+            staged: None,
+            platform: "linux".into(),
+            architecture: "x86_64".into(),
+        };
+        std::fs::write(&path, serde_json::to_vec(&persisted).unwrap()).unwrap();
+        assert!(!acknowledge_update_target(directory.path(), UpdateTarget::Host, "1.0.0").unwrap());
+        assert!(path.exists());
+        assert!(acknowledge_update_target(directory.path(), UpdateTarget::Host, "1.1.0").unwrap());
+        assert!(!path.exists());
     }
 }

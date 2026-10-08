@@ -30,7 +30,10 @@ pub use host_identity::{CredentialStore, FileKeyStore, HostCredentials, load_loc
 
 pub use host_rpc::service::ConversationSettings;
 pub use host_rpc::{HostRpcService, HostSession, SessionId};
-pub(crate) use update::UpdateManager;
 pub use projects::ProjectStore;
+pub(crate) use update::UpdateManager;
+pub use update::{
+    acknowledge_update_target, clear_update_handoff, current_update_version, request_update_handoff,
+};
 
 mod visualize;

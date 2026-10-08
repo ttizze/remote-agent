@@ -12,6 +12,7 @@ use crate::conversation::{
 };
 use agent_domain::Driver;
 use agent_protocol::{
+    models::UpdateTarget,
     operations as op,
     protocol::{Body, Call, Response},
     provider::ProviderKind,
@@ -84,6 +85,7 @@ struct ServiceInner {
     connections: Connections,
     updater: crate::UpdateManager,
     started: AtomicBool,
+    handoff_draining: AtomicBool,
 }
 struct HostResources {
     codex: Arc<CodexResources>,
@@ -168,6 +170,7 @@ impl HostRpcService {
                 connections,
                 updater: crate::UpdateManager::new(update_dir),
                 started: AtomicBool::new(false),
+                handoff_draining: AtomicBool::new(false),
             }),
         })
     }
@@ -323,6 +326,13 @@ impl HostRpcService {
         if self.inner.started.swap(true, Ordering::AcqRel) {
             return Ok(());
         }
+        if let Err(error) = self.inner.updater.acknowledge_current(UpdateTarget::Host) {
+            tracing::warn!(
+                target: "bex",
+                operation = "host.update.acknowledge",
+                message = %format_args!("{error:#}")
+            );
+        }
         if let Some(task) = self.inner.resources.codex.auth_requests() {
             let _ = self.inner.resources.auth_task.set(task);
         }
@@ -335,6 +345,71 @@ impl HostRpcService {
             conversation.start().await?;
         }
         Ok(())
+    }
+
+    /// A handoff is safe only after conversation runs and terminal
+    /// subprocesses have settled. The Host owns this decision because a
+    /// Desktop process cannot observe provider work in another process.
+    pub(crate) fn has_active_tasks(&self) -> bool {
+        if let Some(conversation) = self.inner.resources.conversation.get() {
+            let threads = match conversation.runtime.store().thread_shells() {
+                Ok(threads) => threads,
+                Err(error) => {
+                    tracing::warn!(
+                        target: "bex",
+                        operation = "host.update.handoff",
+                        message = %format_args!("cannot inspect active tasks: {error:#}")
+                    );
+                    return true;
+                }
+            };
+            if threads.into_iter().any(|thread| {
+                thread.row.summary.active_run.is_some()
+                    || !thread.row.summary.pending_background_work.is_empty()
+            }) {
+                return true;
+            }
+        }
+        self.inner
+            .resources
+            .shared
+            .terminals
+            .summaries_now()
+            .into_iter()
+            .any(|terminal| {
+                terminal.status == agent_protocol::operations::TerminalStatus::Starting
+                    || terminal.has_running_subprocess
+            })
+    }
+
+    pub(crate) async fn accept_handoff_if_idle(&self) -> anyhow::Result<bool> {
+        if self.has_active_tasks() {
+            return Ok(false);
+        }
+        if self
+            .inner
+            .handoff_draining
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Ok(false);
+        }
+        if self.has_active_tasks() {
+            self.inner.handoff_draining.store(false, Ordering::Release);
+            return Ok(false);
+        }
+        match self.inner.updater.accept_handoff_if_ready().await {
+            Ok(accepted) => {
+                if !accepted {
+                    self.inner.handoff_draining.store(false, Ordering::Release);
+                }
+                Ok(accepted)
+            }
+            Err(error) => {
+                self.inner.handoff_draining.store(false, Ordering::Release);
+                Err(error)
+            }
+        }
     }
     pub fn open_session(&self) -> HostSession {
         self.inner.connections.open_session()
@@ -410,6 +485,9 @@ impl HostRpcService {
         })
     }
     pub async fn dispatch(&self, session: SessionId, call: &Call) -> Result<HostReply, String> {
+        if self.inner.handoff_draining.load(Ordering::Acquire) {
+            return Err("Host is waiting for its installed update to start".into());
+        }
         self.inner.connections.ensure_session(session)?;
         if let Some(conversation) = self.inner.resources.conversation.get() {
             let cancel = self.inner.connections.cancellation(session)?;

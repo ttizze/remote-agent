@@ -53,10 +53,30 @@ impl HostRuntime {
         let maintenance = tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(60));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let mut handoff = tokio::time::interval(Duration::from_millis(250));
+            handoff.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
                 tokio::select! {
                     biased;
                     _ = maintenance_stop.cancelled() => break,
+                    _ = handoff.tick() => {
+                        match service.accept_handoff_if_idle().await {
+                            Ok(true) => {
+                                tracing::info!(
+                                    target: "bex",
+                                    operation = "host.update.handoff",
+                                    message = "accepted update handoff after active work settled"
+                                );
+                                maintenance_stop.cancel();
+                            }
+                            Ok(false) => {}
+                            Err(error) => tracing::warn!(
+                                target: "bex",
+                                operation = "host.update.handoff",
+                                message = %format_args!("{error:#}")
+                            ),
+                        }
+                    }
                     _ = interval.tick() => {
                         if let Err(error) = service.cleanup_merged_worktrees().await {
                             tracing::warn!(target: "bex", operation = "host.worktree.cleanup", message = %error);
