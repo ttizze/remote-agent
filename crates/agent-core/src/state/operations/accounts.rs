@@ -321,6 +321,7 @@ mod account_model_tests {
                 id: "gpt".into(),
             }),
             effort: Some("high".into()),
+            service_tier: Some("default".into()),
             ..Default::default()
         });
         Arc::make_mut(&mut snapshot.drafts).insert(explicit_key.clone(), explicit.clone());
