@@ -8,7 +8,7 @@ use super::{
 use crate::ProjectStore;
 use crate::conversation::{
     ClaudeCredentials, Conversation, ConversationConfig, ProjectCatalog, ProviderPrograms,
-    SharedResources, SupervisedSpawner, tools::ModelCatalog,
+    SharedResources, SupervisedSpawner, TextGenerator, tools::ModelCatalog,
 };
 use agent_domain::Driver;
 use agent_protocol::{
@@ -16,7 +16,10 @@ use agent_protocol::{
     protocol::{Body, Call, Response},
     provider::ProviderKind,
 };
-use agent_runtime::{ImportHome, ImportSettings, OsFs, RuntimeConfig, ScanConfig};
+use agent_runtime::{
+    ImportHome, ImportSettings, OsFs, RuntimeConfig, ScanConfig, SetupProgress, SetupRequest,
+    SetupRun,
+};
 use agent_transport::peer::RpcMessageError;
 use codex_app_server::CodexAppServer;
 use futures_util::future::BoxFuture;
@@ -26,8 +29,9 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, OnceLock, Weak,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
+    time::Duration,
 };
 
 #[derive(Debug, Clone, Serialize, thiserror::Error)]
@@ -90,6 +94,9 @@ struct HostResources {
     startup_errors: std::sync::RwLock<HashMap<ProviderKind, Failure>>,
     browser: OnceLock<Arc<crate::browser::Browser>>,
     conversation: OnceLock<Arc<Conversation>>,
+    text: OnceLock<TextGenerator>,
+    vcs: crate::vcs::VcsStatusBroadcaster,
+    source_control_auto_fetch_interval_seconds: Arc<AtomicU64>,
     shared: SharedResources,
     worktree_access: tokio::sync::RwLock<()>,
     permission_settings_access: tokio::sync::Mutex<()>,
@@ -141,12 +148,22 @@ impl HostRpcService {
                 terminal_history,
             )),
         };
+        let source_control_auto_fetch_interval_seconds = Arc::new(AtomicU64::new(30));
+        let interval = source_control_auto_fetch_interval_seconds.clone();
         let resources = Arc::new(HostResources {
             codex: Arc::new(CodexResources::new(codex.clone())),
             claude: OnceLock::new(),
             startup_errors: Default::default(),
             browser: OnceLock::new(),
             conversation: OnceLock::new(),
+            text: OnceLock::new(),
+            vcs: crate::vcs::VcsStatusBroadcaster::new(
+                crate::github::cli::GitHubCli::locate(),
+                Arc::new(move || {
+                    Duration::from_secs(interval.load(Ordering::Acquire))
+                }),
+            ),
+            source_control_auto_fetch_interval_seconds,
             shared,
             worktree_access: Default::default(),
             permission_settings_access: Default::default(),
@@ -240,6 +257,11 @@ impl HostRpcService {
                 claude.clone() as Arc<dyn ClaudeCredentials>,
             )
         });
+        let text = TextGenerator {
+            codex: codex.clone(),
+            codex_home: settings.codex_home.clone(),
+            claude: claude.clone(),
+        };
         let mut homes = vec![];
         if codex.is_some() {
             homes.push(ImportHome {
@@ -299,7 +321,11 @@ impl HostRpcService {
         resources
             .conversation
             .set(conversation)
-            .map_err(|_| anyhow::anyhow!("the conversation runtime is already open"))
+            .map_err(|_| anyhow::anyhow!("the conversation runtime is already open"))?;
+        resources
+            .text
+            .set(text)
+            .map_err(|_| anyhow::anyhow!("the text generator is already configured"))
     }
 
     #[cfg(test)]
@@ -418,7 +444,93 @@ impl HostRpcService {
             let cancel = self.inner.connections.cancellation(session)?;
             return Ok(self.keybindings(cancel).await);
         }
+        if let Call::SubscribeVcsStatus(params) = call {
+            let cancel = self.inner.connections.cancellation(session)?;
+            return Ok(self.vcs_status(params, cancel).await);
+        }
+        if let Call::RunStackedAction(params) = call {
+            let cancel = self.inner.connections.cancellation(session)?;
+            return Ok(self.stacked_action(params, cancel));
+        }
         Ok(Response::from_result(self.request(session, call).await).into())
+    }
+
+    async fn vcs_status(
+        &self,
+        params: &agent_protocol::vcs::SubscribeVcsStatus,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> HostReply {
+        let broadcaster = self.inner.resources.vcs.clone();
+        let (first, subscription) = match broadcaster.subscribe(&params.cwd).await {
+            Ok(value) => value,
+            Err(error) => return Response::error("vcs_status_failed", &format!("{error:#}")).into(),
+        };
+        let cwd = subscription.cwd().to_owned();
+        let subscription = Arc::new(tokio::sync::Mutex::new(subscription));
+        crate::conversation::stream(
+            std::collections::VecDeque::from([first]),
+            agent_protocol::vcs::VcsStatusStreamEvent::Snapshot {
+                local: agent_protocol::vcs::VcsStatusLocal::not_repository(),
+                remote: None,
+            },
+            move || {
+                let (subscription, broadcaster, cwd) =
+                    (subscription.clone(), broadcaster.clone(), cwd.clone());
+                Box::pin(async move {
+                    loop {
+                        let result = {
+                            let mut subscription = subscription.lock().await;
+                            subscription.receiver.recv().await
+                        };
+                        match result {
+                            Ok(change) if change.cwd == cwd => return Some(vec![change.event]),
+                            Ok(_) => continue,
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                                return broadcaster.snapshot_event(&cwd).await.ok().map(|event| vec![event]);
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
+                        }
+                    }
+                })
+            },
+            cancel,
+        )
+    }
+
+    fn stacked_action(
+        &self,
+        params: &agent_protocol::vcs::RunStackedAction,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> HostReply {
+        let resources = &self.inner.resources;
+        let (first, receiver) = crate::vcs::start_action(
+            params.clone(),
+            resources.vcs.github().cloned(),
+            resources.text.get().cloned(),
+            resources.vcs.clone(),
+        );
+        let receiver = Arc::new(tokio::sync::Mutex::new(receiver));
+        let empty = agent_protocol::vcs::ActionProgressEvent {
+            action_id: params.action_id.clone(),
+            cwd: params.cwd.clone(),
+            action: params.action,
+            kind: agent_protocol::vcs::ActionProgressKind::ActionFailed {
+                phase: None,
+                message: "Git action stream ended.".into(),
+            },
+        };
+        crate::conversation::stream(
+            std::collections::VecDeque::from([first]),
+            empty,
+            move || {
+                let receiver = receiver.clone();
+                Box::pin(async move {
+                    let mut receiver = receiver.lock().await;
+                    receiver.recv().await.map(|event| vec![event])
+                })
+            },
+            cancel,
+        )
     }
     /// The keybindings in effect, then each change; a subscriber that fell
     /// behind gets the latest.
@@ -569,7 +681,9 @@ impl HostRpcService {
                     .await
                     .map_err(|error| Failure::new("search_entries_failed", error))?
                     .into(),
-                Call::VcsStatus(params) => crate::vcs::read_status(params.cwd.clone())
+                Call::VcsStatus(params) => resources
+                    .vcs
+                    .get_status(&params.cwd)
                     .await
                     .map_err(|error| Failure::new("vcs_status_failed", error))?
                     .into(),
@@ -577,18 +691,145 @@ impl HostRpcService {
                     .await
                     .map_err(|error| Failure::new("vcs_refs_failed", error))?
                     .into(),
-                Call::CreateRef(params) => crate::vcs::create_ref(params.clone())
-                    .await
-                    .map_err(|error| Failure::new("vcs_create_ref_failed", error))?
-                    .into(),
-                Call::SwitchRef(params) => crate::vcs::switch_ref(params.clone())
-                    .await
-                    .map_err(|error| Failure::new("vcs_switch_ref_failed", error))?
-                    .into(),
+                Call::CreateRef(params) => {
+                    let result = crate::vcs::create_ref(params.clone())
+                        .await
+                        .map_err(|error| Failure::new("vcs_create_ref_failed", error))?;
+                    resources.vcs.spawn_refresh(&params.cwd);
+                    result.into()
+                }
+                Call::SwitchRef(params) => {
+                    let result = crate::vcs::switch_ref(params.clone())
+                        .await
+                        .map_err(|error| Failure::new("vcs_switch_ref_failed", error))?;
+                    resources.vcs.spawn_refresh(&params.cwd);
+                    result.into()
+                }
                 Call::DiffPreview(params) => crate::vcs::diff_preview(params.clone())
                     .await
                     .map_err(|error| Failure::new("diff_preview_failed", error))?
                     .into(),
+                Call::RefreshVcsStatus(params) => resources
+                    .vcs
+                    .refresh_status(&params.cwd)
+                    .await
+                    .map_err(|error| Failure::new("vcs_status_refresh_failed", error))?
+                    .into(),
+                Call::Pull(params) => {
+                    let result = crate::vcs::pull_current_branch(&params.cwd)
+                        .await
+                        .map_err(|error| Failure::new("vcs_pull_failed", error))?;
+                    resources.vcs.spawn_refresh(&params.cwd);
+                    result.into()
+                }
+                Call::InitRepository(params) => {
+                    crate::vcs::init_repository(&params.cwd)
+                        .await
+                        .map_err(|error| Failure::new("vcs_init_failed", error))?;
+                    resources.vcs.spawn_refresh(&params.cwd);
+                    agent_protocol::models::Empty {}.into()
+                }
+                Call::CreateWorktree(params) => {
+                    let settings = resources
+                        .shared
+                        .worktrees
+                        .settings(None)
+                        .await
+                        .map_err(|error| Failure::new("vcs_worktree_settings_failed", error))?;
+                    let result = crate::vcs::create_worktree(params, &settings.worktree_directory)
+                        .await
+                        .map_err(|error| Failure::new("vcs_worktree_create_failed", error))?;
+                    resources.vcs.spawn_refresh(&params.cwd);
+                    result.into()
+                }
+                Call::RemoveWorktreeCheckout(params) => {
+                    crate::vcs::remove_worktree(&params.cwd, &params.path, params.force)
+                        .await
+                        .map_err(|error| Failure::new("vcs_worktree_remove_failed", error))?;
+                    resources.vcs.spawn_refresh(&params.cwd);
+                    agent_protocol::models::Empty {}.into()
+                }
+                Call::ResolvePullRequest(params) => crate::vcs::resolve_pull_request(
+                    resources.vcs.github(),
+                    params,
+                )
+                .await
+                .map_err(|error| Failure::new("pull_request_resolve_failed", error))?
+                .into(),
+                Call::PreparePullRequestThread(params) => {
+                    let settings = resources
+                        .shared
+                        .worktrees
+                        .settings(None)
+                        .await
+                        .map_err(|error| Failure::new("vcs_worktree_settings_failed", error))?;
+                    let result = crate::vcs::prepare_pull_request_thread(
+                        resources.vcs.github(),
+                        params,
+                        &settings.worktree_directory,
+                    )
+                    .await
+                    .map_err(|error| Failure::new("pull_request_checkout_failed", error))?;
+                    if let Some(thread) = params.thread_id.clone()
+                        && result.worktree_path.is_some()
+                        && result.is_on_pull_request_head
+                    {
+                        let project = resources
+                            .shared
+                            .projects
+                            .list()
+                            .into_iter()
+                            .filter(|project| {
+                                Path::new(&params.cwd).starts_with(Path::new(&project.root))
+                            })
+                            .max_by_key(|project| project.root.len());
+                        if let Some(project) = project {
+                            let cwd = result
+                                .worktree_path
+                                .clone()
+                                .unwrap_or_else(|| params.cwd.clone());
+                            let setup = crate::conversation::run_project_setup(
+                                &resources.shared,
+                                SetupRequest {
+                                    thread,
+                                    project: project.id,
+                                    project_root: project.root,
+                                    cwd,
+                                    observe: SetupProgress::new(|_| {}),
+                                },
+                            )
+                            .await;
+                            match setup {
+                                Ok(SetupRun::Started(started)) => {
+                                    if !started.run_async {
+                                        if let Some(completion) = started.completion {
+                                            if completion.await != Some(0) {
+                                                tracing::warn!(
+                                                    operation = "host.vcs.pull_request_setup",
+                                                    "pull request setup script did not complete successfully"
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                                Ok(SetupRun::NoScript) => {}
+                                Err(error) => tracing::warn!(
+                                    operation = "host.vcs.pull_request_setup",
+                                    message = %error,
+                                ),
+                            }
+                        }
+                    }
+                    resources.vcs.spawn_refresh(&params.cwd);
+                    result.into()
+                }
+                Call::PublishRepository(params) => {
+                    let result = crate::vcs::publish(resources.vcs.github(), params)
+                        .await
+                        .map_err(|error| Failure::new("repository_publish_failed", error))?;
+                    resources.vcs.spawn_refresh(&params.cwd);
+                    result.into()
+                }
                 Call::ReadPermissionSettings(params) => {
                     let _guard = resources.permission_settings_access.lock().await;
                     match params.provider {
@@ -648,6 +889,12 @@ impl HostRpcService {
                     if changed && let Ok(conversation) = self.conversation() {
                         conversation.settings_changed();
                     }
+                    resources
+                        .source_control_auto_fetch_interval_seconds
+                        .store(
+                            settings.source_control_auto_fetch_interval_seconds as u64,
+                            Ordering::Release,
+                        );
                     settings.into()
                 }
                 Call::UpsertKeybinding(params) => (resources
@@ -733,6 +980,12 @@ impl HostRpcService {
                     .request(session, request.clone())
                     .await
                     .map_err(|error| Failure::new("file_operation_failed", error))?,
+                Call::SubscribeVcsStatus(_) | Call::RunStackedAction(_) => {
+                    return Err(Failure::new(
+                        "stream_dispatch_failed",
+                        "Git stream requests must be dispatched as streams.",
+                    ));
+                }
                 _ => {
                     return Err(Failure::new(
                         "method_not_found",

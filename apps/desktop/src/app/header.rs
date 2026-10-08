@@ -272,6 +272,7 @@ impl Desktop {
         let controls = h_flex()
             .flex_shrink_0()
             .gap_1()
+            .child(super::git::render(self, cx))
             .child(self.render_panel_toggle(
                 "toggle-thread-details",
                 "square-menu",

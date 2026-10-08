@@ -111,6 +111,7 @@ internal fun ThreadScreen(model: AndroidAppModel, threadId: String) {
     SideEffect { live = view?.let { it.working?.status != null || it.setup.card != null } ?: true }
     var sheet by remember { mutableStateOf<ThreadSheet?>(null) }
     var contextPreview by remember { mutableStateOf<dev.remoteagent.core.ContextChip?>(null) }
+    var gitCwd by remember { mutableStateOf("") }
     val copy = rememberCopy()
     val current = view
     val header = current?.header
@@ -118,7 +119,14 @@ internal fun ThreadScreen(model: AndroidAppModel, threadId: String) {
         header?.title ?: "",
         subtitle = header?.subtitle,
         onBack = model::back,
-        actions = { current?.let { HeaderActions(model, it) } },
+        actions = {
+            current?.let {
+                HeaderActions(model, it) {
+                    gitCwd = it.header?.cwd ?: model.snapshot.currentDirectory()
+                    sheet = ThreadSheet.Git
+                }
+            }
+        },
     ) {
         if (current == null || current.syncStatus == ThreadStatus.DELETED) {
             Unavailable(current == null)
@@ -228,6 +236,7 @@ internal fun ThreadScreen(model: AndroidAppModel, threadId: String) {
                 Composer(model, current.composer) { sheet = ThreadSheet.Settings }
         }
         when (sheet) {
+            ThreadSheet.Git -> GitOverviewSheet(model, gitCwd.ifEmpty { model.snapshot.currentDirectory() }) { sheet = null }
             ThreadSheet.Queue -> current.queue?.let { QueueSheet(model, it) { sheet = null } }
             ThreadSheet.Agents -> current.agents?.let { AgentsSheet(model, it) { sheet = null } }
             ThreadSheet.Settings -> ThreadSettingsSheet(model, current.composer) { sheet = null }
@@ -255,6 +264,7 @@ internal fun ThreadScreen(model: AndroidAppModel, threadId: String) {
 }
 
 private enum class ThreadSheet {
+    Git,
     Queue,
     Agents,
     Settings,
@@ -263,7 +273,8 @@ private enum class ThreadSheet {
 }
 
 @Composable
-private fun HeaderActions(model: AndroidAppModel, view: ThreadView) {
+private fun HeaderActions(model: AndroidAppModel, view: ThreadView, openGit: () -> Unit) {
+    GitControls(model, view.header?.cwd ?: model.snapshot.currentDirectory(), openGit)
     view.header?.actions?.forEach { action ->
         when (action.kind) {
             HeaderActionKind.FILES ->

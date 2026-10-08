@@ -235,21 +235,13 @@ struct ThreadScreen: View {
             }
         }
         ToolbarItemGroup(placement: .topBarTrailing) {
-            Menu {
-                Button(action: routes.review) {
-                    Label("Review changes", systemImage: "text.bubble")
-                    Text("Turn diffs and worktree changes")
-                }
-                if header?.actions.contains(where: { $0.kind == .mergeBack }) == true {
-                    Button { model.perform(.mergeBack) } label: {
-                        Label("Merge back to source", systemImage: "arrow.triangle.merge")
-                        Text("Bring this thread's latest turn into its source")
-                    }
-                }
-            } label: {
-                Image(systemName: "point.topleft.down.curvedto.point.bottomright.up")
-            }
-            .accessibilityLabel("Git")
+            GitToolbarButton(
+                model: model,
+                cwd: header?.cwd ?? model.cwd,
+                review: routes.review,
+                mergeBack: { model.perform(.mergeBack) },
+                mergeBackAvailable: header?.actions.contains(where: { $0.kind == .mergeBack }) == true
+            )
             Button(action: routes.files) { Image(systemName: "folder") }
                 .accessibilityLabel("Files")
             TerminalMenu(model: model, open: routes.terminal)

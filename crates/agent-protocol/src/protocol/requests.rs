@@ -1,6 +1,6 @@
 //! One contract per native request; provider JSON conversion stays at its boundary.
 use super::*;
-use crate::{conversation as c, models as m, operations as op, workspace as w};
+use crate::{conversation as c, models as m, operations as op, vcs, workspace as w};
 macro_rules! contracts {
     ($($variant:ident, $method:literal => ($params:ty, $result:ty) $([$clone:ident])?),* $(,)?) => {
         // Bind metadata to the operation, not the parameter type: ReadFile and
@@ -111,4 +111,15 @@ contracts! {
     Revoke, "host/revoke" => (op::RevokeDevice, m::Empty) [clone],
     Browser, "host/browser" => (crate::browser::BrowserRequest, crate::browser::BrowserFrame) [clone],
     ConnectionPerformance, "host/diagnostics/connection" => (crate::diagnostics::ConnectionPerformance, m::Empty) [clone],
+    // Git operations
+    SubscribeVcsStatus, "host/vcs/subscribeStatus" => (vcs::SubscribeVcsStatus, vcs::VcsStatusStreamEvent),
+    RefreshVcsStatus, "host/vcs/refreshStatus" => (vcs::RefreshVcsStatus, w::VcsStatus) [clone],
+    Pull, "host/vcs/pull" => (vcs::Pull, vcs::PullResult) [clone],
+    RunStackedAction, "host/vcs/runStackedAction" => (vcs::RunStackedAction, vcs::ActionProgressEvent),
+    InitRepository, "host/vcs/init" => (vcs::InitRepository, m::Empty) [clone],
+    CreateWorktree, "host/vcs/createWorktree" => (vcs::CreateWorktree, vcs::CreatedWorktree) [clone],
+    RemoveWorktreeCheckout, "host/vcs/removeWorktree" => (vcs::RemoveWorktreeCheckout, m::Empty) [clone],
+    ResolvePullRequest, "host/git/resolvePullRequest" => (vcs::ResolvePullRequest, vcs::ResolvedPullRequestResult) [clone],
+    PreparePullRequestThread, "host/git/preparePullRequestThread" => (vcs::PreparePullRequestThread, vcs::PreparedPullRequestThread) [clone],
+    PublishRepository, "host/sourceControl/publishRepository" => (vcs::PublishRepository, vcs::PublishedRepository) [clone],
 }

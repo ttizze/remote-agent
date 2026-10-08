@@ -8,6 +8,7 @@ pub mod attachments;
 pub mod checkpoints;
 pub mod collation;
 pub mod composer;
+pub mod git;
 pub mod header;
 pub mod inbox;
 pub mod keybindings;

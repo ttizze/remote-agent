@@ -4,6 +4,7 @@ mod attachments;
 mod composer;
 mod dialogs;
 mod dictation;
+mod git;
 mod header;
 mod hosts;
 mod keymap;

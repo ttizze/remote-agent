@@ -109,6 +109,7 @@ impl Conversation {
             runtime: runtime.clone(),
             projects: resources.projects.clone(),
             files: resources.files.clone(),
+            resources: resources.clone(),
             models: config.models,
         })));
         Ok(Arc::new(Self {
@@ -245,6 +246,21 @@ pub(crate) async fn project_added(
             tracing::warn!(operation = "conversation.import", message = %error);
         }
     });
+}
+
+/// Runs a project's configured setup script for a checkout prepared outside
+/// the normal conversation launch path, such as a pull request thread.
+pub(crate) async fn run_project_setup(
+    resources: &SharedResources,
+    request: agent_runtime::SetupRequest,
+) -> Result<agent_runtime::SetupRun, String> {
+    let scripts = resources.projects.scripts(&request.project);
+    let Some(script) = setup::setup_script(&scripts) else {
+        return Ok(agent_runtime::SetupRun::NoScript);
+    };
+    setup::run(&resources.terminals, &request, script)
+        .await
+        .map(agent_runtime::SetupRun::Started)
 }
 
 /// Shell subscribers see each project whose repository identity changed.

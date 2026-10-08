@@ -198,7 +198,7 @@ const CLAUDE_TEXT_MODEL: &str = "claude-haiku-4-5";
 const TEXT_TIMEOUT: Duration = Duration::from_secs(180);
 
 impl TextGenerator {
-    async fn generate(&self, request: TextGenerationRequest) -> Result<String, String> {
+    pub(crate) async fn generate(&self, request: TextGenerationRequest) -> Result<String, String> {
         if let Some(codex) = &self.codex {
             return self.codex(codex, request).await;
         }

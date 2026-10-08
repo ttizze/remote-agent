@@ -587,9 +587,54 @@ fn project() -> Vec<Value> {
     ]
 }
 
+fn worktree() -> Vec<Value> {
+    vec![
+        tool(
+            "worktree_handoff",
+            Some("Hand off thread to a Git worktree"),
+            "Move this agent thread into a new Git worktree. Creates the branch, records the thread binding, and optionally runs the project's setup script there. Changing the workspace detaches the current provider session; pass continuationPrompt to queue the remaining work as the next turn inside the worktree. The worktree is not removed automatically when the thread is deleted. Fails when the thread is already attached to a worktree.",
+            json!({
+                "branch": described(text(Some(512)), "Branch name for the new worktree."),
+                "baseRef": described(text(Some(512)), "Branch or ref to start from; defaults to the current branch."),
+                "startFromOrigin": described(json!({"type":"boolean"}), "Fetch the primary remote before creating the worktree; defaults to the Host setting."),
+                "path": described(text(Some(4096)), "Absolute path for the checkout; defaults to the Host-managed worktree directory."),
+                "runSetupScript": described(json!({"type":"boolean"}), "Run the project's configured setup script after binding; defaults to true."),
+                "continuationPrompt": prompt(),
+            }),
+            &["branch"],
+            Hints {
+                open_world: true,
+                ..DEFAULT
+            },
+        ),
+        tool(
+            "worktree_status",
+            Some("Get thread worktree status"),
+            "Report whether this thread is attached to a Git worktree, its path and branch, the project workspace root, and the Host default used by worktree_handoff.",
+            json!({}),
+            &[],
+            READ,
+        ),
+        tool(
+            "worktree_list",
+            Some("List workspace branches"),
+            "List branch refs and their checkout paths for this thread's project workspace. Detached checkouts are not included. Use worktree_status for this thread's binding and worktree_handoff to create a new checkout.",
+            json!({
+                "query": text(Some(256)),
+                "cursor": int(0, None),
+                "limit": int(1, Some(200)),
+                "refKind": literals(&["all", "local", "remote"]),
+                "includeMatchingRemoteRefs": {"type":"boolean"},
+            }),
+            &[],
+            READ,
+        ),
+    ]
+}
+
 /// Every served tool.
 pub(crate) fn tools() -> Vec<Value> {
-    [orchestrator(), thread(), project()].concat()
+    [orchestrator(), thread(), project(), worktree()].concat()
 }
 
 /// The tools annotated read-only, which a read-only Claude sandbox pre-approves.

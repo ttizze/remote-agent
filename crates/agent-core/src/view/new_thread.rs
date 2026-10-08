@@ -191,8 +191,8 @@ pub(crate) fn new_thread_branch(snapshot: &Snapshot) -> Option<String> {
         ThreadWorkspaceMode::Local => None,
     });
     let checkout = snapshot
-        .sources
-        .vcs_status
+        .git
+        .status
         .get(&root)
         .and_then(|status| status.ref_name.as_deref());
     resolve_project_thread_creation_branch(workspace.mode, selected.as_deref(), checkout)

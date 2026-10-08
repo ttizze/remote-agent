@@ -1401,6 +1401,24 @@ impl Owner {
                 self.state.workspace.review = None;
                 Next::call(Call::ReviewWorkspace(op::ReviewWorkspace { cwd }), None)
             }
+            Intent::SubscribeVcsStatus { cwd } => {
+                self.subscribe_vcs_status(cwd);
+                Next::Done
+            }
+            Intent::RefreshVcsStatus { cwd } => self.prepare_vcs_intent(
+                Intent::RefreshVcsStatus { cwd },
+            )?,
+            intent @ Intent::LoadVcsRefs { .. }
+            | intent @ Intent::SwitchVcsRef { .. }
+            | intent @ Intent::CreateVcsRef { .. } => self.prepare_vcs_intent(intent)?,
+            Intent::PullVcs { cwd } => self.prepare_vcs_intent(Intent::PullVcs { cwd })?,
+            intent @ Intent::RunVcsAction { .. } => self.prepare_vcs_intent(intent)?,
+            intent @ Intent::InitRepository { .. }
+            | intent @ Intent::CreateVcsWorktree { .. }
+            | intent @ Intent::RemoveVcsWorktree { .. }
+            | intent @ Intent::ResolvePullRequest { .. }
+            | intent @ Intent::PreparePullRequestThread { .. }
+            | intent @ Intent::PublishRepository { .. } => self.prepare_vcs_intent(intent)?,
             Intent::ReadTurnDiff {
                 from_run_ordinal,
                 to_run_ordinal,

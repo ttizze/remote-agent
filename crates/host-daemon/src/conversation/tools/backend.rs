@@ -3,12 +3,19 @@
 use super::ModelCatalog;
 use crate::conversation::ProjectCatalog;
 use crate::projects::NamedProjectError;
+use crate::conversation::SharedResources;
 use crate::workspace_files::{Claimed, Copies, WorkspaceFiles};
 use agent_domain::{
     Attachment, Command, CommandId, Driver, OptionDescriptor, Reply, State, ThreadId, ThreadShell,
 };
-use agent_protocol::models::{ProjectScript, ProviderStatus};
-use agent_runtime::{HostProject, LaunchThread, Runtime, SearchMatch};
+use agent_protocol::{
+    models::{ProjectScript, ProviderStatus},
+    workspace::{ListRefs, RefList, VcsStatus},
+};
+use agent_runtime::{
+    CreatedWorktree as RuntimeCreatedWorktree, HostProject, LaunchThread, Runtime, SearchMatch,
+    SetupRequest, SetupRun, WorktreeRequest,
+};
 use futures_util::future::BoxFuture;
 use serde_json::{Value, json};
 use std::{path::PathBuf, sync::Arc};
@@ -119,6 +126,54 @@ pub(crate) trait Orchestration: Send + Sync {
         &self,
         title: String,
     ) -> BoxFuture<'_, Result<(HostProject, Option<String>), NamedProjectFailure>>;
+
+    /// Branch refs visible to a thread-scoped worktree picker.
+    fn vcs_refs(&self, request: ListRefs) -> BoxFuture<'_, Result<RefList, String>> {
+        let _ = request;
+        Box::pin(async { Err("Git ref inspection is unavailable.".into()) })
+    }
+
+    /// The local status used to resolve the current branch before a handoff.
+    fn vcs_status(&self, cwd: String) -> BoxFuture<'_, Result<VcsStatus, String>> {
+        let _ = cwd;
+        Box::pin(async { Err("Git status is unavailable.".into()) })
+    }
+
+    /// Creates a checkout for a thread-scoped worktree handoff.
+    fn create_thread_worktree(
+        &self,
+        request: WorktreeRequest,
+        path: Option<String>,
+    ) -> BoxFuture<'_, Result<RuntimeCreatedWorktree, String>> {
+        let _ = (request, path);
+        Box::pin(async { Err("Worktree creation is unavailable.".into()) })
+    }
+
+    /// Removes a checkout created by a handoff, including one at an explicit path.
+    fn remove_thread_worktree(
+        &self,
+        project_root: String,
+        path: String,
+        branch: Option<String>,
+    ) -> BoxFuture<'_, Result<(), String>> {
+        let _ = (project_root, path, branch);
+        Box::pin(async { Err("Worktree removal is unavailable.".into()) })
+    }
+
+    /// Runs the configured project setup script in a newly handed-off checkout.
+    fn run_thread_setup(
+        &self,
+        request: SetupRequest,
+    ) -> BoxFuture<'_, Result<SetupRun, String>> {
+        let _ = request;
+        Box::pin(async { Err("Project setup is unavailable.".into()) })
+    }
+
+    /// The configured default for starting new worktrees from the primary remote.
+    fn worktree_start_from_origin(&self, project: &str) -> bool {
+        let _ = project;
+        true
+    }
 }
 
 /// The runtime, project catalog and model catalog this Host serves.
@@ -126,6 +181,7 @@ pub(crate) struct HostOrchestration {
     pub(crate) runtime: Arc<Runtime>,
     pub(crate) projects: Arc<ProjectCatalog>,
     pub(crate) files: WorkspaceFiles,
+    pub(crate) resources: SharedResources,
     pub(crate) models: Arc<dyn ModelCatalog>,
 }
 
@@ -342,6 +398,120 @@ impl Orchestration for HostOrchestration {
                 .ok_or(NamedProjectFailure::Unavailable)?;
             Ok((project, created.commit_error))
         })
+    }
+
+    fn vcs_refs(&self, request: ListRefs) -> BoxFuture<'_, Result<RefList, String>> {
+        Box::pin(async move { crate::vcs::refs(request).await.map_err(|error| error.to_string()) })
+    }
+
+    fn vcs_status(&self, cwd: String) -> BoxFuture<'_, Result<VcsStatus, String>> {
+        Box::pin(async move {
+            let path = std::path::PathBuf::from(cwd);
+            tokio::task::spawn_blocking(move || crate::vcs::local_status(&path, false))
+                .await
+                .map_err(|error| error.to_string())?
+                .map(|local| VcsStatus::merge(local, None))
+                .map_err(|error| error.to_string())
+        })
+    }
+
+    fn create_thread_worktree(
+        &self,
+        request: WorktreeRequest,
+        path: Option<String>,
+    ) -> BoxFuture<'_, Result<RuntimeCreatedWorktree, String>> {
+        let resources = self.resources.clone();
+        Box::pin(async move {
+            if let Some(path) = path {
+                let ref_name = if request.start_from_origin {
+                    crate::vcs::origin_start(
+                        std::path::Path::new(&request.project_root),
+                        &request.base_ref,
+                    )
+                    .await
+                    .map_err(|error| error.to_string())?
+                } else {
+                    request.base_ref.clone()
+                };
+                let created = crate::vcs::create_worktree(
+                    &agent_protocol::vcs::CreateWorktree {
+                        cwd: request.project_root.clone(),
+                        ref_name,
+                        new_ref_name: request.branch.clone(),
+                        base_ref_name: Some(request.base_ref.clone()),
+                        path: Some(path),
+                    },
+                    "",
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+                return Ok(RuntimeCreatedWorktree {
+                    path: created.worktree.path,
+                    branch: Some(created.worktree.ref_name),
+                });
+            }
+            resources
+                .worktrees
+                .create(
+                    request.thread.as_str(),
+                    &request.project_root,
+                    &request.base_ref,
+                    request.branch,
+                    request.start_from_origin,
+                    request.progress,
+                    request.cancel,
+                )
+                .await
+                .map(|(path, branch)| RuntimeCreatedWorktree {
+                    path: path.to_string_lossy().into_owned(),
+                    branch: Some(branch),
+                })
+                .map_err(|error| format!("{error:#}"))
+        })
+    }
+
+    fn remove_thread_worktree(
+        &self,
+        project_root: String,
+        path: String,
+        branch: Option<String>,
+    ) -> BoxFuture<'_, Result<(), String>> {
+        let resources = self.resources.clone();
+        Box::pin(async move {
+            let removed = match resources.worktrees.abandon(path.clone()).await {
+                Ok(()) => Ok(()),
+                Err(managed_error) => crate::vcs::remove_worktree(&project_root, &path, true)
+                    .await
+                    .map_err(|error| format!("{error:#}; managed checkout: {managed_error:#}")),
+            };
+            removed?;
+            if let Some(branch) = branch {
+                crate::vcs::delete_local_branch(
+                    std::path::Path::new(&project_root),
+                    &branch,
+                    true,
+                )
+                .map_err(|error| format!("Unable to remove created branch '{branch}': {error:#}"))?;
+            }
+            Ok(())
+        })
+    }
+
+    fn run_thread_setup(
+        &self,
+        request: SetupRequest,
+    ) -> BoxFuture<'_, Result<SetupRun, String>> {
+        let resources = self.resources.clone();
+        Box::pin(async move { crate::conversation::run_project_setup(&resources, request).await })
+    }
+
+    fn worktree_start_from_origin(&self, project: &str) -> bool {
+        let settings = self.resources.worktrees.conversation();
+        settings
+            .project_overrides
+            .get(project)
+            .and_then(|override_settings| override_settings.new_worktrees_start_from_origin)
+            .unwrap_or(settings.new_worktrees_start_from_origin)
     }
 }
 
