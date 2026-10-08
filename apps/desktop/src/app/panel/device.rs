@@ -449,12 +449,12 @@ impl Desktop {
                         view.perform(Intent::DeviceAction {
                             host_id: Some(host_id.clone()),
                             device_id: device_id.clone(),
-                            action: DeviceActionIntent::Touch { phase: "begin".into(), x: 0.5, y: 0.5 },
+                            action: DeviceActionIntent::Touch { phase: "begin".into(), x: 0.5, y: 0.5, raw: false },
                         });
                         view.perform(Intent::DeviceAction {
                             host_id: Some(host_id.clone()),
                             device_id: device_id.clone(),
-                            action: DeviceActionIntent::Touch { phase: "end".into(), x: 0.5, y: 0.5 },
+                            action: DeviceActionIntent::Touch { phase: "end".into(), x: 0.5, y: 0.5, raw: false },
                         });
                     }
                 })))

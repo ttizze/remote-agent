@@ -658,7 +658,7 @@ struct DeviceScreen: View {
                 model.perform(.deviceAction(
                     hostId: hostId,
                     deviceId: deviceId,
-                    action: .touch(phase: phase, x: Float(x.clamped(to: 0...1)), y: Float(y.clamped(to: 0...1))),
+                    action: .touch(phase: phase, x: Float(x.clamped(to: 0...1)), y: Float(y.clamped(to: 0...1)), raw: raw),
                 ))
             }
             .onEnded { value in
@@ -668,7 +668,7 @@ struct DeviceScreen: View {
                 model.perform(.deviceAction(
                     hostId: hostId,
                     deviceId: deviceId,
-                    action: .touch(phase: "end", x: Float(x.clamped(to: 0...1)), y: Float(y.clamped(to: 0...1))),
+                    action: .touch(phase: "end", x: Float(x.clamped(to: 0...1)), y: Float(y.clamped(to: 0...1)), raw: raw),
                 ))
             }
     }
