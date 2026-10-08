@@ -474,7 +474,7 @@ impl ProviderInstanceEditor {
         self.error = None;
         cx.notify();
         let editor = cx.entity().downgrade();
-        let _ = desktop.update(cx, |view, _| {
+        desktop.update(cx, |view, _| {
             view.perform_then(
                 Intent::SetProviderInstances {
                     provider_instances_json: serde_json::to_string(&next)
@@ -500,7 +500,7 @@ impl ProviderInstanceEditor {
         };
         let name = self.display_name.read(cx).value().trim().to_owned();
         let editor = cx.entity().downgrade();
-        self.desktop.update(cx, |view, cx| {
+        let _ = self.desktop.update(cx, |view, cx| {
             view.confirm(
                 crate::app::dialogs::Confirm {
                     title: Some(format!("Remove provider instance \"{name}\"?")),
