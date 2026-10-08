@@ -113,7 +113,10 @@ fn npm_prefix(path: &Path, package: &str) -> Option<PathBuf> {
     let marker = format!("/lib/node_modules/{}/", package.to_ascii_lowercase());
     let index = real.rfind(&marker)?;
     let prefix = &original[..index];
-    if real[..index].contains("/node_modules/") {
+    if real[..index]
+        .split('/')
+        .any(|component| component == "node_modules")
+    {
         return None;
     }
     if let Some(rest) = real[..index]
@@ -553,7 +556,9 @@ async fn latest_npm_version(package: &str) -> Result<String, String> {
     let encoded = package.replace('/', "%2F");
     let response = tokio::time::timeout(
         VERSION_LOOKUP_TIMEOUT,
-        reqwest::get(format!("https://registry.npmjs.org/{encoded}/latest")),
+        crate::http::client()
+            .get(format!("https://registry.npmjs.org/{encoded}/latest"))
+            .send(),
     )
     .await
     .map_err(|_| "provider version lookup timed out".to_owned())?

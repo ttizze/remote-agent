@@ -1457,6 +1457,7 @@ fn instructions_and_descriptions_name_only_served_tools() {
     let codex_native = ["request_user_input", "update_plan"];
     let tags = ["runtime_info", "collaboration_mode", "proposed_plan"];
     let values = [
+        "fixed_time",
         "existing_worktree",
         "link_pull_request",
         "unlink_pull_request",

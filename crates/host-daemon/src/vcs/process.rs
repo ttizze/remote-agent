@@ -188,9 +188,6 @@ impl HookTrace {
         let Ok(record) = serde_json::from_str::<TraceRecord>(line) else {
             return;
         };
-        if record.child_class.as_deref() != Some("hook") {
-            return;
-        }
         let key = match &record.child_id {
             Some(serde_json::Value::Number(number)) => number.to_string(),
             Some(serde_json::Value::String(text)) => text.clone(),
@@ -199,6 +196,15 @@ impl HookTrace {
                 _ => return,
             },
         };
+        // Git includes `child_class: "hook"` on child_start, but omits it on
+        // the matching child_exit record. Once a hook is tracked, accept that
+        // exit record so its actual code is preserved instead of synthesizing
+        // an unknown completion at process shutdown.
+        if record.child_class.as_deref() != Some("hook")
+            && !(record.event == "child_exit" && self.started.contains_key(&key))
+        {
+            return;
+        }
         let started = self.started.get(&key).cloned();
         let hook_name = record
             .hook_name
@@ -705,10 +711,14 @@ mod tests {
             timeout: Some(Duration::from_secs(5)),
             ..Execute::new(directory.path(), &[])
         }));
-        tokio::time::timeout(Duration::from_secs(1), ready_rx)
-            .await
-            .expect("fake git did not start")
-            .expect("fake git readiness signal was dropped");
+        tokio::time::timeout(Duration::from_secs(1), async {
+            tokio::select! {
+                ready = ready_rx => ready.expect("fake git readiness signal was dropped"),
+                result = &mut running => panic!("fake git exited before readiness: {result:?}"),
+            }
+        })
+        .await
+        .expect("fake git did not start");
         cancel.cancel();
         let error = tokio::time::timeout(Duration::from_secs(2), &mut running)
             .await

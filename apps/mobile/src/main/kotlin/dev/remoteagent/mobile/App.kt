@@ -148,10 +148,13 @@ internal enum class WorkspaceTab {
 @Suppress("TooManyFunctions", "TooGenericExceptionCaught", "ReturnCount", "LongMethod")
 internal class AndroidAppModel(private val context: Context) : ViewModel() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    var notice by mutableStateOf<String?>(null)
     private val repository = AndroidMobileRepository(context)
-    private val clientPreferencesResult = repository.modelPreferences()
-    private val clientPreferencesLoadError = clientPreferencesResult.exceptionOrNull()?.message
-    private var clientPreferences = clientPreferencesResult.getOrDefault(byteArrayOf())
+    private var clientPreferences =
+        repository.modelPreferences().getOrElse {
+            notice = it.message
+            byteArrayOf()
+        }
     private var clientPreferencesGeneration = 0L
     var snapshot by mutableStateOf(Snapshot.empty(clientPreferences))
         private set
@@ -182,7 +185,6 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
     var busy by mutableStateOf(false)
         private set
 
-    var notice by mutableStateOf<String?>(null)
     var notificationThreadRoute by mutableStateOf<String?>(null)
     var invitation by mutableStateOf<Invitation?>(null)
         private set
@@ -251,9 +253,10 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
             IntentFilter(ACTION_PUSH_TOKEN_UPDATED),
             Context.RECEIVER_NOT_EXPORTED,
         )
+        val startupNotice = notice
         runCatching { profiles = repository.profiles() }.onFailure { notice = it.message }
         val recoveryNotice = snapshot.error()
-        if (clientPreferences.isNotEmpty() || clientPreferencesLoadError != null) {
+        if (clientPreferences.isNotEmpty() || startupNotice != null) {
             runCatching { snapshot.serializeModelPreferences() }
                 .onSuccess { canonical ->
                     if (!clientPreferences.contentEquals(canonical)) {
@@ -267,7 +270,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
         repository.selected?.takeIf { id -> profiles.any { it.id == id } }?.let(::selectProfile)
             ?: startBackgroundProfiles(null)
         if (recoveryNotice != null) notice = recoveryNotice
-        clientPreferencesLoadError?.let { notice = it }
+        startupNotice?.let { notice = it }
     }
 
     fun perform(intent: Intent, complete: (Result<Outcome>) -> Unit = {}) {

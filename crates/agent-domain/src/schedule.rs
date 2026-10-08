@@ -52,17 +52,38 @@ fn at_time<Tz: TimeZone>(
     minute: u32,
 ) -> Option<DateTime<Tz>> {
     let local = date.and_hms_opt(hour, minute, 0)?;
-    timezone.from_local_datetime(&local).earliest().or_else(|| {
-        // A daylight-saving transition can skip a non-hour interval
-        // (Lord Howe skips thirty minutes) or an entire civil day
-        // (Samoa skipped twenty-four hours).  Move through local wall
-        // minutes until the timezone can represent the requested time;
-        // adding one hour silently loses the first valid time in a
-        // shorter gap and still fails for a longer one.
-        (1..=2 * 24 * 60).find_map(|minutes| {
-            let candidate = local.checked_add_signed(Duration::minutes(minutes))?;
-            timezone.from_local_datetime(&candidate).earliest()
-        })
+    if let Some(candidate) = timezone.from_local_datetime(&local).earliest() {
+        return Some(candidate);
+    }
+
+    // A whole civil date can be absent (Samoa skipped 2011-12-30).  In that
+    // case preserve the requested wall-clock time on the next representable
+    // date.  Checking both ends avoids mistaking a short midnight transition
+    // for an absent date.
+    let day_start = date.and_hms_opt(0, 0, 0)?;
+    let day_end = date.and_hms_opt(23, 59, 59)?;
+    let whole_date_missing = timezone
+        .from_local_datetime(&day_start)
+        .earliest()
+        .is_none()
+        && timezone.from_local_datetime(&day_end).earliest().is_none();
+    if whole_date_missing {
+        if let Some(candidate) = (1..=2).find_map(|days| {
+            let candidate_date = date.checked_add_signed(Duration::days(days))?;
+            let candidate_local = candidate_date.and_hms_opt(hour, minute, 0)?;
+            timezone.from_local_datetime(&candidate_local).earliest()
+        }) {
+            return Some(candidate);
+        }
+    }
+
+    // A daylight-saving transition can skip a non-hour interval (Lord Howe
+    // skips thirty minutes).  Move through local wall minutes until the
+    // timezone can represent the requested time; adding one hour silently
+    // loses the first valid time in a shorter gap.
+    (1..=2 * 24 * 60).find_map(|minutes| {
+        let candidate = local.checked_add_signed(Duration::minutes(minutes))?;
+        timezone.from_local_datetime(&candidate).earliest()
     })
 }
 
@@ -175,7 +196,7 @@ pub fn describe_schedule(schedule: &Schedule) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::{FixedOffset, LocalResult, NaiveDateTime, Timelike, Utc};
+    use chrono::{FixedOffset, LocalResult, NaiveDateTime, Offset, Timelike, Utc};
 
     /// Small deterministic timezone used to exercise the calendar gap policy
     /// without making the domain crate depend on a platform tz database.
@@ -184,18 +205,34 @@ mod tests {
         start: NaiveDateTime,
         minutes: i64,
     }
+
+    #[derive(Clone, Copy, Debug)]
+    struct GapOffset {
+        start: NaiveDateTime,
+        minutes: i64,
+    }
+
+    impl Offset for GapOffset {
+        fn fix(&self) -> FixedOffset {
+            FixedOffset::east_opt(0).unwrap()
+        }
+    }
+
     impl TimeZone for GapZone {
-        type Offset = FixedOffset;
+        type Offset = GapOffset;
 
         fn from_offset(offset: &Self::Offset) -> Self {
             Self {
-                start: NaiveDateTime::MIN,
-                minutes: i64::from(offset.local_minus_utc()) / 60,
+                start: offset.start,
+                minutes: offset.minutes,
             }
         }
 
         fn offset_from_local_date(&self, _: &NaiveDate) -> LocalResult<Self::Offset> {
-            LocalResult::Single(FixedOffset::east_opt(0).unwrap())
+            LocalResult::Single(GapOffset {
+                start: self.start,
+                minutes: self.minutes,
+            })
         }
 
         fn offset_from_local_datetime(&self, local: &NaiveDateTime) -> LocalResult<Self::Offset> {
@@ -203,16 +240,25 @@ mod tests {
             if *local >= self.start && *local < end {
                 LocalResult::None
             } else {
-                LocalResult::Single(FixedOffset::east_opt(0).unwrap())
+                LocalResult::Single(GapOffset {
+                    start: self.start,
+                    minutes: self.minutes,
+                })
             }
         }
 
         fn offset_from_utc_date(&self, _: &NaiveDate) -> Self::Offset {
-            FixedOffset::east_opt(0).unwrap()
+            GapOffset {
+                start: self.start,
+                minutes: self.minutes,
+            }
         }
 
         fn offset_from_utc_datetime(&self, _: &NaiveDateTime) -> Self::Offset {
-            FixedOffset::east_opt(0).unwrap()
+            GapOffset {
+                start: self.start,
+                minutes: self.minutes,
+            }
         }
     }
 
@@ -284,7 +330,7 @@ mod tests {
             .from_local_datetime(
                 &NaiveDate::from_ymd_opt(2026, 10, 3)
                     .unwrap()
-                    .and_hms_opt(0, 0, 0)
+                    .and_hms_opt(3, 0, 0)
                     .unwrap(),
             )
             .single()
@@ -307,7 +353,7 @@ mod tests {
             .from_local_datetime(
                 &NaiveDate::from_ymd_opt(2011, 12, 29)
                     .unwrap()
-                    .and_hms_opt(0, 0, 0)
+                    .and_hms_opt(13, 0, 0)
                     .unwrap(),
             )
             .single()

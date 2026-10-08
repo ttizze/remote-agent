@@ -593,7 +593,7 @@ mod tests {
         assert_eq!(renamed[0].name, "Work");
         assert!(rename_browser_profile(&renamed, DEFAULT_BROWSER_PROFILE_ID, "x").is_err());
         let removed = remove_browser_profile(&renamed, &second.id).expect("remove");
-        assert_eq!(removed, vec![first]);
+        assert_eq!(removed, vec![renamed[0].clone()]);
         assert!(remove_browser_profile(&removed, INCOGNITO_BROWSER_PROFILE_ID).is_err());
     }
 

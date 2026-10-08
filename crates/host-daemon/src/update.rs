@@ -325,7 +325,7 @@ impl UpdateManager {
                 _ => None,
             })
             .unwrap_or(UpdateChannel::Stable);
-        let client = reqwest::Client::builder()
+        let client = crate::http::client_builder()
             .timeout(UPDATE_TIMEOUT)
             .redirect(reqwest::redirect::Policy::custom(|attempt| {
                 if should_follow_redirect(attempt.previous().len(), attempt.url()) {
@@ -1874,7 +1874,13 @@ mod tests {
         let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
         let mut builder = tar::Builder::new(encoder);
         let mut header = tar::Header::new_gnu();
-        header.set_path(path).unwrap();
+        if path.split('/').any(|component| component == "..") {
+            let bytes = header.as_mut_bytes();
+            bytes[..100].fill(0);
+            bytes[..path.len()].copy_from_slice(path.as_bytes());
+        } else {
+            header.set_path(path).unwrap();
+        }
         header.set_entry_type(entry_type);
         header.set_size(if entry_type.is_file() {
             data.len() as u64
@@ -1918,6 +1924,7 @@ mod tests {
         assert!(!is_https_url(
             &Url::parse("http://updates.example.test/releases").unwrap()
         ));
+        assert!(Url::parse("https:///releases").is_err());
         let mut no_host = Url::parse("https://updates.example.test/releases").unwrap();
         no_host.set_host(None).unwrap();
         assert!(!is_https_url(&no_host));

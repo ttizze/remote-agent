@@ -421,7 +421,7 @@ pub struct ActivityContentState {
 /// ContentState. Callers supply source facts; they do not choose display
 /// order, phase aliases, status text, or row limits.
 pub fn activity_content_state(records: &[ActivityRecord]) -> ActivityContentState {
-    project_records(records, None, None)
+    project_records(records, None, None, false)
 }
 
 /// Aggregates already projected Host states for Android's single ongoing
@@ -456,7 +456,7 @@ pub fn aggregate_activity_content_states(states: &[ActivityContentState]) -> Act
                 }),
         );
     }
-    project_records(&records, Some(active_count), Some(latest))
+    project_records(&records, Some(active_count), Some(latest), true)
 }
 
 /// JSON entry point used by generated Swift/Kotlin bindings.
@@ -476,6 +476,7 @@ fn project_records(
     records: &[ActivityRecord],
     active_count_override: Option<u32>,
     updated_at_override: Option<i64>,
+    active_rows_first: bool,
 ) -> ActivityContentState {
     let mut records = records
         .iter()
@@ -487,6 +488,20 @@ fn project_records(
         })
         .collect::<Vec<_>>();
     records.sort_by(|left, right| {
+        if active_rows_first {
+            let left_terminal = is_terminal_phase(&left.phase);
+            let right_terminal = is_terminal_phase(&right.phase);
+            if left_terminal != right_terminal {
+                return left_terminal.cmp(&right_terminal);
+            }
+            if left_terminal {
+                return right
+                    .updated_at_ms
+                    .cmp(&left.updated_at_ms)
+                    .then_with(|| left.environment_id.cmp(&right.environment_id))
+                    .then_with(|| left.thread_id.cmp(&right.thread_id));
+            }
+        }
         activity_priority(&left.phase)
             .cmp(&activity_priority(&right.phase))
             .then_with(|| right.updated_at_ms.cmp(&left.updated_at_ms))

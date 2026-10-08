@@ -97,7 +97,10 @@ fn claude_reset_credits(
                 Some(Value::String(value)) => future_timestamp(value, now),
                 _ => None,
             };
-            if grant.get("ends_at").is_some() && expires_at.is_none() {
+            if grant
+                .get("ends_at")
+                .is_some_and(|value| !value.is_null() && expires_at.is_none())
+            {
                 continue;
             }
             let resets_left = grant
@@ -142,7 +145,7 @@ async fn read_claude_reset_credits(
     version: &str,
 ) -> Option<agent_protocol::usage::ResetCredits> {
     let token = claude_access_token(home).await?;
-    let response = reqwest::Client::new()
+    let response = crate::http::client()
         .get(CLAUDE_USAGE_URL)
         .query(&[("cedar_ember", "1"), ("skip_spend", "1")])
         .header("authorization", format!("Bearer {token}"))
@@ -386,7 +389,7 @@ impl Accounts {
             })
             .ok_or("Claude could not read its organization.")?;
         let request_id = uuid::Uuid::new_v4().to_string();
-        let response = reqwest::Client::new()
+        let response = crate::http::client()
             .post(format!(
                 "{CLAUDE_API_BASE}/api/organizations/{organization}/reset_rate_limits"
             ))
@@ -740,7 +743,7 @@ mod tests {
                 "grants": [
                     {"id":"grant_a","resets_left":2,"usable_now":true,"ends_at":"2027-01-01T00:00:00Z"},
                     {"id":"paused","resets_left":9,"usable_now":true,"paused":true},
-                    {"id":"expired","resets_left":9,"usable_now":true,"ends_at":"2025-01-01T00:00:00Z"},
+                    {"id":"expired","resets_left":9,"usable_now":true,"ends_at":"2023-01-01T00:00:00Z"},
                     {"id":"grant_b","resets_left":3,"usable_now":false}
                 ]
             }
@@ -763,6 +766,30 @@ mod tests {
                 SystemTime::now(),
             ),
             None
+        );
+    }
+
+    #[test]
+    fn reset_credits_accept_a_live_grant_without_an_expiry() {
+        let value = serde_json::json!({
+            "cedar_ember": {
+                "eligible": true,
+                "next_grant_id": "grant_a",
+                "grants": [{
+                    "id": "grant_a",
+                    "resets_left": 1,
+                    "usable_now": true,
+                    "ends_at": null
+                }]
+            }
+        });
+        assert_eq!(
+            claude_reset_credits(&value, SystemTime::now()),
+            Some(agent_protocol::usage::ResetCredits {
+                available_count: 1,
+                next_expires_at: None,
+                next_credit_id: Some("grant_a".into()),
+            })
         );
     }
 

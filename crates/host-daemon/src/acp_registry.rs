@@ -553,10 +553,13 @@ async fn install_binary(agent: &AcpRegistryAgent, state_dir: &Path) -> Result<Pa
     if let Some(command) = binary_command_path(&root, &agent.command).await {
         return Ok(command);
     }
-    let response = tokio::time::timeout(PACKAGE_INSTALL_TIMEOUT, reqwest::get(archive))
-        .await
-        .map_err(|_| "ACP binary download timed out".to_owned())?
-        .map_err(|error| format!("ACP binary download failed: {error}"))?;
+    let response = tokio::time::timeout(
+        PACKAGE_INSTALL_TIMEOUT,
+        crate::http::client().get(archive).send(),
+    )
+    .await
+    .map_err(|_| "ACP binary download timed out".to_owned())?
+    .map_err(|error| format!("ACP binary download failed: {error}"))?;
     if !response.status().is_success() {
         return Err(format!(
             "ACP binary download returned {}",
@@ -819,10 +822,13 @@ fn into_agent(raw: RegistryAgent) -> Option<AcpRegistryAgent> {
 }
 
 async fn fetch_agents() -> Result<Vec<AcpRegistryAgent>, String> {
-    let response = tokio::time::timeout(Duration::from_secs(30), reqwest::get(REGISTRY_URL))
-        .await
-        .map_err(|_| "ACP registry request timed out".to_owned())?
-        .map_err(|error| format!("ACP registry request failed: {error}"))?;
+    let response = tokio::time::timeout(
+        Duration::from_secs(30),
+        crate::http::client().get(REGISTRY_URL).send(),
+    )
+    .await
+    .map_err(|_| "ACP registry request timed out".to_owned())?
+    .map_err(|error| format!("ACP registry request failed: {error}"))?;
     if !response.status().is_success() {
         return Err(format!(
             "ACP registry request returned {}",

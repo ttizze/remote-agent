@@ -18,6 +18,7 @@ mod github;
 mod host_identity;
 mod host_rpc;
 mod host_runtime;
+mod http;
 mod keybindings;
 pub mod local_host;
 pub mod platform;

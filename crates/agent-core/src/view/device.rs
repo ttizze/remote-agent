@@ -626,7 +626,7 @@ mod tests {
             Some(DeviceTouchPoint { x: 0.5, y: 0.5 })
         );
         assert_eq!(
-            project_touch_point(0.0, 25.0, 100.0, 100.0, 100.0, 50.0),
+            project_touch_point(0.0, 50.0, 100.0, 100.0, 100.0, 50.0),
             Some(DeviceTouchPoint { x: 0.0, y: 0.5 })
         );
         assert_eq!(

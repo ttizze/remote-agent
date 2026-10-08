@@ -199,26 +199,32 @@ where
 
 impl Conversation {
     /// Answers a conversation call, or `None` for other calls.
-    pub(crate) async fn call(&self, call: &Call, cancel: CancellationToken) -> Option<HostReply> {
-        let reply = match call {
-            Call::SubscribeThread(params) => self.subscribe_thread(params, cancel).await,
-            Call::SubscribeShell(params) => self.subscribe_shell(params, cancel).await,
-            Call::Dispatch(params) => self.dispatch(params).await.map(reply),
-            Call::Launch(params) => self.launch(params).await.map(reply),
-            Call::GetThread(params) => self.get_thread(params).await.map(reply),
-            Call::GetTurnItem(params) => self.turn_item(params).await.map(reply),
-            Call::ReadHistory(params) => self.read_history(params).await.map(reply),
-            Call::Search(params) => self.search(params).map(reply),
-            Call::GetTurnDiff(params) => self.turn_diff(params).await.map(reply),
-            Call::ScanAgentSessions(_) => self.scan().await.map(reply),
-            Call::ImportAgentSessions(params) => self.import(params).await.map(reply),
-            Call::SetupStream(params) => Ok(self.subscribe_setup(params, cancel)),
-            Call::CancelSetup(params) => Ok(reply(wire::SetupCancelled {
-                cancelled: self.runtime.cancel_setup(&params.thread_id).await,
-            })),
-            _ => return None,
-        };
-        Some(reply.unwrap_or_else(|error| Response::from_result::<(), _>(Err(error)).into()))
+    pub(crate) fn call<'a>(
+        &'a self,
+        call: &'a Call,
+        cancel: CancellationToken,
+    ) -> futures_util::future::BoxFuture<'a, Option<HostReply>> {
+        Box::pin(async move {
+            let reply = match call {
+                Call::SubscribeThread(params) => self.subscribe_thread(params, cancel).await,
+                Call::SubscribeShell(params) => self.subscribe_shell(params, cancel).await,
+                Call::Dispatch(params) => self.dispatch(params).await.map(reply),
+                Call::Launch(params) => self.launch(params).await.map(reply),
+                Call::GetThread(params) => self.get_thread(params).await.map(reply),
+                Call::GetTurnItem(params) => self.turn_item(params).await.map(reply),
+                Call::ReadHistory(params) => self.read_history(params).await.map(reply),
+                Call::Search(params) => self.search(params).map(reply),
+                Call::GetTurnDiff(params) => self.turn_diff(params).await.map(reply),
+                Call::ScanAgentSessions(_) => self.scan().await.map(reply),
+                Call::ImportAgentSessions(params) => self.import(params).await.map(reply),
+                Call::SetupStream(params) => Ok(self.subscribe_setup(params, cancel)),
+                Call::CancelSetup(params) => Ok(reply(wire::SetupCancelled {
+                    cancelled: self.runtime.cancel_setup(&params.thread_id).await,
+                })),
+                _ => return None,
+            };
+            Some(reply.unwrap_or_else(|error| Response::from_result::<(), _>(Err(error)).into()))
+        })
     }
 
     /// The thread's committed state; a thread never created is not found.

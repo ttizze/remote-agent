@@ -515,10 +515,7 @@ async fn tcp_listener_exists(port: u16) -> bool {
 }
 
 async fn probe_http(url: &str) -> bool {
-    if rustls::crypto::CryptoProvider::get_default().is_none() {
-        let _ = rustls::crypto::ring::default_provider().install_default();
-    }
-    let client = match reqwest::Client::builder()
+    let client = match crate::http::client_builder()
         .redirect(reqwest::redirect::Policy::none())
         .danger_accept_invalid_certs(true)
         .timeout(PROBE_TIMEOUT)

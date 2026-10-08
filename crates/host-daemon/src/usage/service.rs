@@ -5,7 +5,6 @@ use agent_protocol::usage::{
     self, Pricing, PricingStatus, Provider, Source, SourceFingerprint, SourceStatus, Summary,
     SummaryInput,
 };
-use reqwest::Client;
 use serde_json::Value;
 use std::{
     path::{Path, PathBuf},
@@ -135,7 +134,7 @@ impl UsageService {
                 }
             }
         }
-        let fetched = match Client::new()
+        let fetched = match crate::http::client()
             .get(RATES_URL)
             .timeout(Duration::from_secs(10))
             .send()

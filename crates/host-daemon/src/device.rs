@@ -4845,7 +4845,7 @@ impl DeviceService {
                 {
                     break;
                 }
-                let response = match reqwest::Client::new()
+                let response = match crate::http::client()
                     .get(format!(
                         "http://127.0.0.1:{port}/vendor/serve-sim/api/event-log/events"
                     ))
@@ -6040,7 +6040,11 @@ fn installed_tool_versions(root: &Path, package: &str, entry: &[&str]) -> Vec<St
             {
                 return None;
             }
-            let entry_path = entry.iter().fold(path, |path, part| path.join(part));
+            let entry_path = entry
+                .iter()
+                .fold(path.join("node_modules").join(package), |path, part| {
+                    path.join(part)
+                });
             entry_path.is_file().then_some(version)
         })
         .collect::<Vec<_>>();
@@ -6091,7 +6095,7 @@ fn ios_runtime_label(runtime: &str) -> String {
 }
 
 async fn hub_devices(port: u16, host_id: &str) -> Result<Vec<DeviceSummary>, String> {
-    let response = reqwest::Client::new()
+    let response = crate::http::client()
         .get(format!("http://127.0.0.1:{port}/api/devices"))
         .timeout(std::time::Duration::from_secs(10))
         .send()
@@ -6138,7 +6142,7 @@ async fn hub_screenshot(
         DevicePlatform::Ios => "serve-sim",
         DevicePlatform::Android => "serve-emu",
     };
-    let response = reqwest::Client::new()
+    let response = crate::http::client()
         .post(format!(
             "http://127.0.0.1:{port}/vendor/{vendor}/api/screenshot"
         ))
@@ -6177,7 +6181,7 @@ async fn hub_avcc_frame(
         }
         _ => format!("/vendor/serve-sim/helper/{device}/stream.avcc"),
     };
-    let response = reqwest::Client::new()
+    let response = crate::http::client()
         .get(format!("http://127.0.0.1:{port}{path}"))
         .timeout(std::time::Duration::from_secs(3))
         .send()
@@ -6302,7 +6306,7 @@ async fn persistent_avcc_reader(
         }
         _ => format!("/vendor/serve-sim/helper/{device}/stream.avcc"),
     };
-    let client = reqwest::Client::new();
+    let client = crate::http::client();
     let mut dimensions = (width.max(1), height.max(1));
     loop {
         if cancel.is_cancelled() {
@@ -6401,7 +6405,7 @@ async fn persistent_mjpeg_reader(
     cancel: CancellationToken,
 ) {
     let device = hub_device_component(&device_id);
-    let client = reqwest::Client::new();
+    let client = crate::http::client();
     loop {
         if cancel.is_cancelled() {
             return;
@@ -6627,7 +6631,7 @@ async fn foreground_reader(
 #[cfg(test)]
 async fn hub_mjpeg_frame(port: u16, device_id: &str) -> Result<TransportFrame, String> {
     let device = hub_device_component(device_id);
-    let response = reqwest::Client::new()
+    let response = crate::http::client()
         .get(format!(
             "http://127.0.0.1:{port}/vendor/serve-sim/helper/{device}/stream.mjpeg"
         ))
@@ -6708,7 +6712,7 @@ async fn hub_screen_config(
         DevicePlatform::Ios => ("serve-sim", format!("/helper/{device}/config")),
         DevicePlatform::Android => ("serve-emu", "/api/stream-settings".into()),
     };
-    let response = reqwest::Client::new()
+    let response = crate::http::client()
         .get(format!("http://127.0.0.1:{port}/vendor/{vendor}{path}"))
         .query(&[("device", device_id)])
         .timeout(std::time::Duration::from_secs(10))
@@ -6786,7 +6790,7 @@ async fn hub_json_get(
     path: &str,
     query: &[(&str, &str)],
 ) -> Result<serde_json::Value, String> {
-    let response = reqwest::Client::new()
+    let response = crate::http::client()
         .get(format!("http://127.0.0.1:{port}{path}"))
         .query(query)
         .timeout(std::time::Duration::from_secs(10))
@@ -6808,7 +6812,7 @@ async fn hub_sse_first_json(
     query: &[(&str, &str)],
     label: &str,
 ) -> Result<serde_json::Value, String> {
-    let response = reqwest::Client::new()
+    let response = crate::http::client()
         .get(format!("http://127.0.0.1:{port}{path}"))
         .query(query)
         .timeout(std::time::Duration::from_secs(10))
@@ -7367,7 +7371,7 @@ async fn hub_action(
     path: &str,
     body: serde_json::Value,
 ) -> Result<HubActionResult, String> {
-    let response = reqwest::Client::new()
+    let response = crate::http::client()
         .post(format!("http://127.0.0.1:{port}{path}"))
         .json(&body)
         .timeout(std::time::Duration::from_secs(180))
@@ -8334,16 +8338,19 @@ mod tests {
 
     #[test]
     fn android_sdk_commands_are_resolved_under_the_sdk_root() {
-        let tools = android_tool_paths_at(Path::new("/sdk"));
-        assert_eq!(tools.root.as_deref(), Some(Path::new("/sdk")));
-        assert_eq!(
-            tools.command("adb"),
-            Some(Path::new("/sdk/platform-tools/adb"))
-        );
-        assert_eq!(
-            tools.command("emulator"),
-            Some(Path::new("/sdk/emulator/emulator"))
-        );
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        for relative in ["platform-tools/adb", "emulator/emulator"] {
+            let path = root.join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"fake executable").unwrap();
+        }
+        let tools = android_tool_paths_at(root);
+        let adb = root.join("platform-tools/adb");
+        let emulator = root.join("emulator/emulator");
+        assert_eq!(tools.root.as_deref(), Some(root));
+        assert_eq!(tools.command("adb"), Some(adb.as_path()));
+        assert_eq!(tools.command("emulator"), Some(emulator.as_path()));
         assert!(tools.command("xcrun").is_none());
     }
 
@@ -9052,10 +9059,12 @@ mod tests {
         match message {
             async_tungstenite::tungstenite::Message::Text(text) => {
                 let payload: serde_json::Value = serde_json::from_str(&text.to_string()).unwrap();
-                assert_eq!(
-                    payload,
-                    serde_json::json!({"type": "touch", "action": "up", "x": 0.2, "y": 0.1})
-                );
+                assert_eq!(payload["type"], "touch");
+                assert_eq!(payload["action"], "up");
+                // JSON preserves the exact f32 wire value; compare after the
+                // protocol's f32 conversion rather than rounding the payload.
+                assert_eq!(payload["x"].as_f64().map(|value| value as f32), Some(0.2));
+                assert_eq!(payload["y"].as_f64().map(|value| value as f32), Some(0.1));
             }
             other => panic!("unexpected Android touch frame: {other:?}"),
         }

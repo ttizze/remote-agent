@@ -1633,7 +1633,7 @@ mod tests {
         let mut aggregator = TraceDiagnosticsAggregator::new(10.0);
         for index in 0..30 {
             aggregator.add_line(&serde_json::json!({
-                "name": format!("span-{index}"), "traceId": format!("trace-{index}"), "spanId": format!("span-{index}"),
+                "name": "span", "traceId": format!("trace-{index}"), "spanId": format!("span-{index}"),
                 "startTimeUnixNano": ((index * 1_000) as u64 * 1_000_000).to_string(),
                 "endTimeUnixNano": ((index * 1_000 + index) as u64 * 1_000_000).to_string(),
                 "durationMs": index, "exit": {"_tag":"Failure", "cause":"failed"},
@@ -1670,8 +1670,10 @@ mod tests {
             let mut value = report(|report| { report.ttl_ms = Some(ttl); });
             value.ttl_ms = Some(ttl);
             let lease = value.lease_at("session", 1, &policy, &at(now)).unwrap();
-            let leases = upsert_client_activity_lease(&BTreeMap::new(), lease, &at(now + ttl as i64));
-            let snapshot = compute_background_snapshot(HostPowerSnapshot::unknown(at(now + ttl as i64)), &leases, &at(now + ttl as i64), &policy);
+            let expiry = now
+                + ttl.clamp(MIN_CLIENT_ACTIVITY_TTL_MS, MAX_CLIENT_ACTIVITY_TTL_MS) as i64;
+            let leases = upsert_client_activity_lease(&BTreeMap::new(), lease, &at(expiry));
+            let snapshot = compute_background_snapshot(HostPowerSnapshot::unknown(at(expiry)), &leases, &at(expiry), &policy);
             prop_assert!(snapshot.leases.is_empty());
         }
     }

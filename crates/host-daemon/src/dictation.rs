@@ -220,14 +220,6 @@ async fn transcribe_request(
     Ok(agent_protocol::operations::Transcription { text })
 }
 
-// Both TLS backends are linked on desktop; iroh does not install a global one.
-// Each independent HTTP/WebSocket entry point must work on a cold Host.
-fn install_tls_provider() {
-    if rustls::crypto::CryptoProvider::get_default().is_none() {
-        let _ = rustls::crypto::ring::default_provider().install_default();
-    }
-}
-
 async fn transcribe_authenticated(
     token: &str,
     user_agent: &str,
@@ -279,7 +271,7 @@ async fn connect_stream(
     user_agent: &str,
     url: &str,
 ) -> Result<DictationSocket, String> {
-    install_tls_provider();
+    crate::http::ensure_tls_provider();
     let mut request = url
         .into_client_request()
         .map_err(|_| "音声処理の接続先が無効です。")?;
@@ -334,11 +326,11 @@ async fn transcribe_recording(
     pcm: &[u8],
     url: &str,
 ) -> Result<String, String> {
-    install_tls_provider();
+    crate::http::ensure_tls_provider();
     static CLIENT: OnceLock<Result<reqwest::Client, reqwest::Error>> = OnceLock::new();
     let client = CLIENT
         .get_or_init(|| {
-            reqwest::Client::builder()
+            crate::http::client_builder()
                 .redirect(reqwest::redirect::Policy::none())
                 .timeout(Duration::from_secs(25))
                 .build()

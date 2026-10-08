@@ -334,7 +334,14 @@ fn append_cached(
     modified_ms: i64,
 ) -> std::io::Result<CachedFile> {
     let mut file = fs::File::open(path)?;
-    file.seek(SeekFrom::Start(cached.resume_offset))?;
+    // `cached.tail` starts at `resume_offset` and is the incomplete line
+    // already retained from the previous scan. Read only the bytes appended
+    // after that tail before prepending it for one complete parse.
+    file.seek(SeekFrom::Start(
+        cached
+            .resume_offset
+            .saturating_add(cached.tail.len() as u64),
+    ))?;
     let mut appended = Vec::new();
     file.read_to_end(&mut appended)?;
     let mut bytes = Vec::with_capacity(cached.tail.len() + appended.len());

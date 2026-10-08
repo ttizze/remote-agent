@@ -375,13 +375,25 @@ mod tests {
         assert!(!preferences.selected_sync_blocks(&store, current));
         assert!(preferences.selected_sync_matches(&store, token, current));
         assert!(!preferences.observe_selected_sync(&store, 0, current));
-        assert!(preferences.observe_selected_sync(&store, 1, current));
+        let receipt_revision = store.snapshot().revision.saturating_add(1);
+        assert!(!preferences.observe_selected_sync(&store, receipt_revision - 1, current));
+        assert!(preferences.observe_selected_sync(&store, receipt_revision, current));
         assert!(!preferences.selected_sync_blocks(&store, stale));
         let replacement = Arc::new(Store::offline(Snapshot::default(), Default::default()));
         let replacement_token = preferences.mark_selected_sync(&replacement, current);
         assert!(!preferences.selected_sync_matches(&store, replacement_token, current));
         assert!(!preferences.observe_selected_sync(&replacement, 0, current));
-        assert!(preferences.observe_selected_sync(&replacement, 1, current));
+        let replacement_receipt_revision = replacement.snapshot().revision.saturating_add(1);
+        assert!(!preferences.observe_selected_sync(
+            &replacement,
+            replacement_receipt_revision - 1,
+            current,
+        ));
+        assert!(preferences.observe_selected_sync(
+            &replacement,
+            replacement_receipt_revision,
+            current,
+        ));
         store.close().await.unwrap();
         replacement.close().await.unwrap();
     }

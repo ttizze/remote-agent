@@ -1194,8 +1194,7 @@ impl HostRpcService {
         })
     }
     pub async fn dispatch(&self, session: SessionId, call: &Call) -> Result<HostReply, String> {
-        self.dispatch_with_desktop_publisher(session, call, false)
-            .await
+        Box::pin(self.dispatch_with_desktop_publisher(session, call, false)).await
     }
 
     pub(crate) async fn dispatch_from_peer(
@@ -1204,8 +1203,7 @@ impl HostRpcService {
         call: &Call,
         local_node: bool,
     ) -> Result<HostReply, String> {
-        self.dispatch_with_desktop_publisher(session, call, local_node)
-            .await
+        Box::pin(self.dispatch_with_desktop_publisher(session, call, local_node)).await
     }
 
     async fn dispatch_with_desktop_publisher(
