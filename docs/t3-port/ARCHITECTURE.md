@@ -66,7 +66,7 @@ adapter は通信の翻訳だけをする。ID の採番とエンティティの
 - 入力: `ProviderCommand`（開始、steer、停止、要求への応答、rollback、fork、compact）。モデルと mode は開始の入力にする。
 - 出力: `ProviderEvent`（ターン開始・終了、項目の開始・差分・完了、承認要求、質問、計画、トークン使用量、subagent、エラー）。
 - adapter が持つ状態は、通信の対応付け（JSON-RPC の id、ブロック番号、native の turn id）だけにする。
-- Claude は、T3 と同じ `@anthropic-ai/claude-agent-sdk@0.3.276` を Node の子プロセスから直接呼ぶ。Rust は会話の状態・共通イベントへの翻訳・保存を担当する。SDK 内部の CLI 制御・履歴変換は再実装しない。
+- Claude は `@anthropic-ai/claude-agent-sdk@0.3.293`（T3 が固定する 0.3.276 より新しい版。`crates/host-daemon/src/claude/sdk` の npm lockfile で固定）を Node の子プロセスから直接呼ぶ。Rust は会話の状態・共通イベントへの翻訳・保存を担当する。SDK 内部の CLI 制御・履歴変換は再実装しない。
 
 ## 同期
 
@@ -147,6 +147,7 @@ T3 と同じ契約にする。snapshot、`afterSequence` からの再送、synch
 - 2026-10-06: Codex の turn 終了時に実行中の command は background work として残し、遅れた完了で行を更新して通知付きの wake を作る。Stop は終わった turn を interrupt せず terminal を止め、一覧で終了を確認する。Claude の background roster は置き換えとして扱い、roster から消えた作業の後着の報告も名前を保って通知する。usage limit の通知は待ち時間を入力の時刻から作るため、domain が文面を作る。
 - 2026-10-06: replay harness は、翻訳層が送る frame がないときだけ記録から利用者の操作を作り、生成した frame を T3 の replay.ts と同じ正規化で次の `expect_outbound` と比較する。期待されない frame が残れば失敗にする。Claude は SDK の記録語彙（prompt.offer / query.interrupt / permission.response）に変換して比較し、query.open では thread が持つ session と境界での resume を確認する。fork / rollback / merge / 委任の graph replay も同じ harness で厳密に比較する（2026-10-06 の Codex 共有 app-server の項）。
 - 2026-10-08: 利用者の「Claude との会話部分だけ Node で SDK と会話する」方針を採用。SDK の forkSession にメモリの SessionStore を渡して履歴を作る。SDK が生成した履歴の sessionId を effect から導出した会話 ID に置き換える。Rust はその ID を予約してから mode 0600 で保存する。SDK の内部履歴変換の Rust 実装は削除した。Node/CLI のプロセスツリーは既存の Host supervisor が所有する。
+- 2026-10-08: main に別に入っていた Claude SDK 統合（esbuild の bundle を Host の隣へ install するスクリプト、spawn hook での session state フィルター、`BEX_NODE`）は取り込まず、この port の bridge（lockfile で固定して vendoring した `sdk.mjs` を Host に埋め込み、`bridge.mjs` で動かす）を唯一の実装にする。Node は Host 実行ファイルの隣の `node`、なければ PATH の `node`（macOS の desktop は `~/.local/bin`・Nix profile・システムの PATH を Host に渡す）。SDK の固定版は main が使っていた 0.3.293 に合わせ、Dependabot が `crates/host-daemon/src/claude/sdk` を監視する。SDK のライセンスは Mac bundle の Resources と、単体 Host の隣に置く。main の旧 runtime 向け修正のうち、provider process の異常終了時に stderr を失敗文に含める点だけを新 runtime（`agent-runtime` session task）に移した。
 - 2026-10-06: 段階 3 の Host は2つの前提を守る。attempt と effect の ID の元になる envelope key を thread をまたいで一意にする（`{thread}#{input_seq}`）。継続の effect は実行時に現在の設定で `enabled` を置き換える。
 - 2026-10-06: Host ランタイムは `crates/agent-runtime` に置く。Host の I/O（プロセス起動、Git、worktree、添付）は trait で注入し、`cargo test -p agent-runtime` を Host の重い依存なしで回せるようにする。
 - 2026-10-06: project は fact log の外にあるので、再開した shell 購読は最初に生きている project の完全な一覧（`ShellUpdate::Projects`）を送る。クライアントはそこにない project を消す。切断中の改名・追加・削除はこれで届く。

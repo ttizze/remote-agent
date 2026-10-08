@@ -21,7 +21,7 @@
 | 境界 | この実装の置換 | 保持する意味／検証 |
 |---|---|---|
 | HTTP / WebSocket | iroh、既存の Postcard framing、QR と端末鍵 | RPC の引数・結果、snapshot/replay/synchronized、afterSequence、順序・fallback 条件。QUIC の handshake/stream decode 保護は通信 owner に置く。 |
-| Claude Agent SDK | `@anthropic-ai/claude-agent-sdk@0.3.276` を Node から直接使用 | 公開 query API、canUseTool、interrupt、permission 変更、resume/fork。SDK 内部の制御と履歴変換は再実装しない。Rust は共通イベントへ翻訳する。 |
+| Claude Agent SDK | `@anthropic-ai/claude-agent-sdk@0.3.293`（T3 の固定版 0.3.276 より新しい）を Node から直接使用 | 公開 query API、canUseTool、interrupt、permission 変更、resume/fork。SDK 内部の制御と履歴変換は再実装しない。Rust は共通イベントへ翻訳する。 |
 | browser/ReactNative の描画 | GPUI / SwiftUI / Compose | client-runtime の結果を表示する。UI の条件・ラベル・操作は元コンポーネントに合わせ、Web 専用機能を追加しない。 |
 | T3 Connect / 外部サービス | 対象外 | T3 Connect の HTTP 認証/relay は作らない。iroh の既存接続機能を保持する。 |
 | V1 migration | 対象外 | ユーザー指示により互換性・旧形式移行は不要。 |

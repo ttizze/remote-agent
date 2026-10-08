@@ -48,6 +48,8 @@ Android 17では、LAN接続を開く前に付近のデバイスへのアクセ�
 
 会話にはGitと、利用可能なエージェントが最低1つ必要です。Codexは任意です。macOSではChatGPT Desktop同梱のCodexを優先し、次にPATH上の`codex`を使います。`--codex <path>`で明示した実行ファイルが最優先です。
 
+Claudeとの会話はNode.js 18以降の上で公式Agent SDKが実行します。HostはHost実行ファイルの隣にある`node`を優先し、なければPATH上の`node`を使います。Nixの開発環境はNode.jsを含みます。SDKは`crates/host-daemon/src/claude/sdk`のnpm lockfileで固定し、`sdk.mjs`としてvendorしてHost実行ファイルに埋め込むため、ビルド時にも実行時にもnpmでのインストールは不要です。
+
 ```sh
 scripts/dev-env.sh cargo build --locked -p bex-process --bin bex-provider-supervisor
 scripts/dev-env.sh cargo run -p host-daemon -- --name 'BEX Host'
