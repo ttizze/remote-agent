@@ -69,6 +69,48 @@ pub struct ModelOption {
     pub value: String,
 }
 
+/// Client-owned options captured when a Preview recording starts.  The wire
+/// contract stays in `agent-protocol`; this binding-safe record keeps the
+/// protocol crate independent of UniFFI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct PreviewRecordingOptions {
+    pub frame_rate: u8,
+    pub show_key_presses: bool,
+    pub show_mouse_presses: bool,
+}
+
+impl Default for PreviewRecordingOptions {
+    fn default() -> Self {
+        let options = agent_protocol::preview::PreviewRecordingOptions::default();
+        Self {
+            frame_rate: options.frame_rate,
+            show_key_presses: options.show_key_presses,
+            show_mouse_presses: options.show_mouse_presses,
+        }
+    }
+}
+
+impl From<PreviewRecordingOptions> for agent_protocol::preview::PreviewRecordingOptions {
+    fn from(options: PreviewRecordingOptions) -> Self {
+        Self {
+            frame_rate: options.frame_rate,
+            show_key_presses: options.show_key_presses,
+            show_mouse_presses: options.show_mouse_presses,
+        }
+    }
+}
+
+impl From<agent_protocol::preview::PreviewRecordingOptions> for PreviewRecordingOptions {
+    fn from(options: agent_protocol::preview::PreviewRecordingOptions) -> Self {
+        Self {
+            frame_rate: options.frame_rate,
+            show_key_presses: options.show_key_presses,
+            show_mouse_presses: options.show_mouse_presses,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct Draft {
@@ -527,6 +569,10 @@ pub struct Snapshot {
     pub frozen_open_draft: Option<FrozenDraft>,
     /// The Host's provider instances and their models; `None` until listed.
     pub providers: Option<Vec<crate::models::ProviderInstance>>,
+    /// Host-owned Agent Client Protocol registry state. Search and lifecycle
+    /// operations are asynchronous, so the client keeps the last successful
+    /// result while a newer request is in flight.
+    pub acp_registry: AcpRegistryState,
     pub workspace: Workspace,
     pub terminals: BTreeMap<String, Terminal>,
     /// Provider commands, path search, refs and diff previews.
@@ -588,6 +634,20 @@ pub struct Snapshot {
     pub timelines: Arc<std::sync::Mutex<crate::view::timeline::rows::TimelineCache>>,
     /// Host-owned simulator and emulator state for the Device surface.
     pub device: DeviceState,
+}
+
+/// The client projection of the Host's ACP registry operations.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AcpRegistryState {
+    pub query: String,
+    pub results: Option<agent_protocol::operations::AcpRegistrySearchResult>,
+    pub search_pending: bool,
+    pub prepare_pending: Option<String>,
+    pub prepared: BTreeMap<String, agent_protocol::operations::PreparedAcpAgent>,
+    pub uninstall_pending: Option<String>,
+    pub probe_pending: Option<String>,
+    pub probes: BTreeMap<String, agent_protocol::operations::AcpProbeResult>,
+    pub error: Option<String>,
 }
 
 /// The device's fold of Host preview metadata. Pixels remain in the browser
@@ -1246,14 +1306,18 @@ impl Snapshot {
     /// The new-thread defaults after applying the selected project's overrides.
     /// A draft explicitly saved for that project still wins over this fallback.
     pub fn new_thread_default_draft(&self) -> Draft {
-        let mut draft = self.default_draft.clone();
+        self.new_thread_default_draft_for_project(self.selected_project.as_deref())
+    }
+
+    /// The new-thread defaults for an explicit project selection. Native
+    /// project pickers can evaluate routing before changing the selected
+    /// project on the Store, so the override lookup must use the requested id.
+    pub fn new_thread_default_draft_for_project(&self, project_id: Option<&str>) -> Draft {
+        let mut draft = self.default_draft.user_defaults();
         let Some(host) = &self.host_settings else {
             return draft;
         };
-        let overrides = self
-            .selected_project
-            .as_deref()
-            .and_then(|project| host.project_overrides.get(project));
+        let overrides = project_id.and_then(|project| host.project_overrides.get(project));
         if let Some(mode) = overrides.and_then(|project| project.default_runtime_mode) {
             draft.runtime_mode = mode;
         }
@@ -1274,7 +1338,7 @@ impl Snapshot {
                 })
                 .collect::<Vec<_>>();
             let seed = crate::view::load_balancing::seed(
-                self.selected_project.as_deref().unwrap_or(CHATS_PROJECT),
+                project_id.unwrap_or(CHATS_PROJECT),
             );
             if let Some(instance) = crate::view::load_balancing::select_instance(
                 &candidates,
@@ -2054,7 +2118,7 @@ pub enum Intent {
     },
     PreviewRecordingStart {
         tab_id: String,
-        options: agent_protocol::preview::PreviewRecordingOptions,
+        options: PreviewRecordingOptions,
     },
     PreviewRecordingStop {
         tab_id: String,
@@ -2180,6 +2244,16 @@ pub enum Intent {
     },
 
     // Queue, requests and plans.
+    RegisterPushDevice {
+        registration: PushDeviceRegistration,
+    },
+    UnregisterPushDevice {
+        device_id: String,
+    },
+    SetPushDeviceActive {
+        device_id: String,
+        active: bool,
+    },
     Queue {
         action: QueueAction,
     },
@@ -2708,6 +2782,28 @@ pub enum Intent {
         credit_id: Option<String>,
     },
     LoadProviders,
+    /// Runs the updater owned by a configured provider installation.
+    UpdateProvider {
+        instance: String,
+        target_version: Option<String>,
+    },
+    /// Searches the Host's credential-free ACP registry.
+    SearchAcpRegistry {
+        query: String,
+    },
+    /// Installs or prepares one ACP registry agent on the Host.
+    PrepareAcpAgent {
+        agent_id: String,
+    },
+    /// Removes one Host-managed ACP agent.
+    UninstallAcpAgent {
+        agent_id: String,
+    },
+    /// Probes one prepared ACP agent from a working directory.
+    ProbeAcpAgent {
+        agent_id: String,
+        cwd: String,
+    },
     SelectAccount {
         provider: crate::provider::ProviderKind,
         id: String,
@@ -3071,6 +3167,21 @@ mod tests {
     }
 
     #[test]
+    fn preview_recording_options_convert_without_protocol_binding_requirements() {
+        let options = PreviewRecordingOptions {
+            frame_rate: 60,
+            show_key_presses: true,
+            show_mouse_presses: true,
+        };
+        let wire: agent_protocol::preview::PreviewRecordingOptions = options.into();
+        assert_eq!(wire.frame_rate, 60);
+        assert!(wire.show_key_presses);
+        assert!(wire.show_mouse_presses);
+        let round_trip = PreviewRecordingOptions::from(wire);
+        assert_eq!(round_trip, options);
+    }
+
+    #[test]
     fn load_balancing_routes_a_new_thread_to_the_weighted_ready_instance() {
         let mut snapshot = Snapshot {
             selected_project: Some("project".into()),
@@ -3140,6 +3251,37 @@ mod tests {
         ]);
         let draft = snapshot.new_thread_default_draft();
         assert_eq!(draft.instance_id, "codex-build");
+    }
+
+    #[test]
+    fn load_balancing_preference_does_not_mutate_a_host_default_draft() {
+        let mut snapshot = Snapshot {
+            selected_project: Some("project".into()),
+            host_settings: Some(crate::models::HostSettings::default()),
+            default_draft: Draft {
+                text: "old task text".into(),
+                project_id: Some("old-project".into()),
+                project_selected_at_ms: Some(10),
+                created_at_ms: Some(20),
+                instance_id: "codex".into(),
+                driver: Driver::Codex,
+                model: "shared".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        snapshot.preferences.load_balancing_enabled = true;
+        snapshot
+            .preferences
+            .load_balancing_weights
+            .insert("environment-build".into(), 100);
+        let draft = snapshot.new_thread_default_draft();
+        assert_eq!(draft.instance_id, "codex");
+        assert_eq!(draft.model, "shared");
+        assert!(draft.text.is_empty());
+        assert!(draft.project_id.is_none());
+        assert!(draft.project_selected_at_ms.is_none());
+        assert!(draft.created_at_ms.is_none());
     }
 
     #[test]

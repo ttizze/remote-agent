@@ -192,13 +192,14 @@ fn notification_threads(snapshot: &Snapshot) -> BTreeMap<String, NotificationThr
         let summary = ThreadSummary::from_shell(shell_thread);
         let status = notification_status(&summary);
         let completed_at = completed_run(&summary).and_then(|run| run.completed_at);
+        let attention_key = attention_key(&summary, status);
         rows.insert(
             summary.id.clone(),
             NotificationThread {
                 id: summary.id,
                 title: summary.title,
                 status,
-                attention_key: attention_key(&summary, status),
+                attention_key,
                 completed_at,
             },
         );

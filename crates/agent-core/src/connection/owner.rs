@@ -264,7 +264,7 @@ pub(super) struct Owner {
     pub device_input_queue: Arc<DeviceInputSequencer>,
     /// Ticket admission happens on the owner event loop, so no mutex is
     /// needed around the monotonically increasing cursor.
-    next_device_input_ticket: u64,
+    pub(super) next_device_input_ticket: u64,
     /// The shell, outbox and Working preference the list holds last saw.
     pub observed_list: Option<ObservedList>,
     /// The thread whose setup "Work locally" is cancelling.
@@ -635,6 +635,9 @@ impl Owner {
                 let result = crate::persistence::apply_model_preferences(&mut self.state, &bytes)
                     .map(|()| Outcome::Applied)
                     .map_err(invalid);
+                // Resolve after the normal publication below. Native owners
+                // must observe the preference change in the same snapshot as
+                // the completion receipt.
                 client_preferences_completion = Some((complete, result));
             }
             Event::ReportHostPower(snapshot, complete) => {

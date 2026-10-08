@@ -301,6 +301,7 @@ fn device_action(action: DeviceActionIntent) -> Result<d::DeviceActionKind, Peer
         DeviceActionIntent::Key {
             code,
             key,
+            session_epoch: _,
             down,
             meta,
             ctrl,
@@ -2733,7 +2734,7 @@ impl Owner {
                             meta,
                             ctrl,
                         },
-                    )?;
+                    ).map_err(invalid)?;
                     return Ok(match plan.inputs.len() {
                         0 => Next::Done,
                         _ => Next::DeviceInputs(plan.inputs, plan.target),
@@ -2743,7 +2744,8 @@ impl Owner {
                 let target =
                     self.state
                         .device
-                        .session_target(&thread_id, host_id.as_deref(), &device_id)?;
+                        .session_target(&thread_id, host_id.as_deref(), &device_id)
+                        .map_err(invalid)?;
                 let action = device_action(action)?;
                 match action {
                     d::DeviceActionKind::Input(input) => Next::DeviceInputs(
@@ -2778,7 +2780,7 @@ impl Owner {
                     host_id,
                     device_id,
                     session_epoch,
-                )?;
+                ).map_err(invalid)?;
                 match plan {
                     None => Next::Done,
                     Some(plan) if plan.inputs.is_empty() => Next::Done,
@@ -2960,7 +2962,7 @@ impl Owner {
                     thread_id: self.selected()?,
                     tab_id,
                     recording_id: format!("preview-recording-{}", uuid::Uuid::new_v4().simple()),
-                    options,
+                    options: options.into(),
                 };
                 request.validate().map_err(invalid)?;
                 Next::call(Call::PreviewRecordingStart(request), None)

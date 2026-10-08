@@ -699,6 +699,22 @@ impl DeviceState {
         })
     }
 
+    /// Checks the immutable target captured when a Duo command was admitted.
+    /// The owner repeats this immediately before dispatch so a reconnect
+    /// cannot send a queued command to a replacement session that reused the
+    /// same device id.
+    pub fn accepts_duo_request(&self, request: &DeviceDuoRequest) -> bool {
+        let host_id = request
+            .host_id
+            .as_deref()
+            .unwrap_or(agent_protocol::device::LOCAL_DEVICE_HOST_ID);
+        self.accepts_thread_event(
+            &request.thread_id,
+            host_id,
+            &request.device_id,
+            &request.session_epoch,
+        )
+    }
     pub fn enqueue_duo(
         &mut self,
         thread_id: ThreadId,

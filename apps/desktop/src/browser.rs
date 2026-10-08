@@ -312,7 +312,7 @@ pub(crate) struct PreviewDefaults {
     pub(crate) appearance: PreviewAppearance,
     pub(crate) zoom: PreviewZoom,
     pub(crate) profile_id: Option<String>,
-    pub(crate) recording_options: agent_protocol::preview::PreviewRecordingOptions,
+    pub(crate) recording_options: agent_core::state::PreviewRecordingOptions,
 }
 
 impl Default for PreviewDefaults {
@@ -322,7 +322,7 @@ impl Default for PreviewDefaults {
             appearance: PreviewAppearance::System,
             zoom: PreviewZoom::X100,
             profile_id: None,
-            recording_options: agent_protocol::preview::PreviewRecordingOptions::default(),
+            recording_options: agent_core::state::PreviewRecordingOptions::default(),
         }
     }
 }
@@ -340,7 +340,8 @@ impl PreviewDefaults {
                 frame_rate: defaults.recording_frame_rate as u8,
                 show_key_presses: defaults.recording_show_key_presses,
                 show_mouse_presses: defaults.recording_show_mouse_presses,
-            },
+            }
+            .into(),
         }
     }
 }

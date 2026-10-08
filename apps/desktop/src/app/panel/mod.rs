@@ -830,7 +830,8 @@ impl Desktop {
                                 frame_rate: resolved_browser.recording_frame_rate as u8,
                                 show_key_presses: resolved_browser.recording_show_key_presses,
                                 show_mouse_presses: resolved_browser.recording_show_mouse_presses,
-                            },
+                            }
+                            .into(),
                         },
                         window,
                         cx,
