@@ -166,6 +166,9 @@ pub struct DeviceDetailView {
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct DeviceView {
     pub revision: u64,
+    /// Changes for every accepted screenshot/video frame event. This is
+    /// separate from `revision`, which belongs to the service configuration.
+    pub frame_revision: u64,
     pub status: String,
     pub status_detail: Option<String>,
     pub enabled: bool,
@@ -194,6 +197,7 @@ pub fn device_view(snapshot: &Snapshot) -> DeviceView {
     let service = state.service();
     DeviceView {
         revision: service.revision,
+        frame_revision: state.frame_revision,
         status: status_name(service.host_status).into(),
         status_detail: service.host_status_detail,
         enabled: service.host_status != agent_protocol::device::DeviceHostStatus::Disabled,

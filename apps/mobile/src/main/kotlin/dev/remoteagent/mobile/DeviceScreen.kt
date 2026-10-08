@@ -358,7 +358,16 @@ private fun Modifier.deviceKeyInput(model: AndroidAppModel, hostId: String, devi
             Intent.DeviceAction(
                 hostId,
                 deviceId,
-                DeviceActionIntent.Key(code, event.type == KeyEventType.KeyDown),
+                        DeviceActionIntent.Key(
+                            code,
+                            event.nativeKeyEvent.getUnicodeChar(event.nativeKeyEvent.metaState)
+                                .takeIf { it != 0 }
+                                ?.let { String(Character.toChars(it)) }
+                                ?: code,
+                            event.type == KeyEventType.KeyDown,
+                            event.nativeKeyEvent.isMetaPressed,
+                            event.nativeKeyEvent.isCtrlPressed,
+                        ),
             ),
         )
         true

@@ -1,4 +1,5 @@
 import AVFoundation
+import CoreGraphics
 import CoreImage
 import CoreMedia
 import Foundation
@@ -6,8 +7,10 @@ import UIKit
 import VideoToolbox
 
 /// Decodes one ordered device feed. The Host sends complete AVCC/SEMU access
-/// units; this object retains codec configuration and waits for a keyframe after
-/// a gap or decoder reset instead of presenting a delta as a valid picture.
+/// units; this object retains codec configuration and waits for a keyframe
+/// after a gap or decoder reset instead of presenting a delta as a picture.
+/// It is owned by `DeviceFrameDecoderWorker`, so VideoToolbox and Core Image
+/// work never runs in the SwiftUI main-actor render path.
 final class DeviceVideoDecoder {
     private var formatDescription: CMVideoFormatDescription?
     private var session: VTDecompressionSession?
@@ -21,25 +24,36 @@ final class DeviceVideoDecoder {
         session.map(VTDecompressionSessionInvalidate)
     }
 
+    /// Drops the decoder and its codec description. Used when a stream is
+    /// removed or the Host reports a fatal format error.
     func reset() {
         session.map(VTDecompressionSessionInvalidate)
         session = nil
         formatDescription = nil
         awaitingKeyframe = true
         accessUnitBytes = 0
-        lock.lock()
-        latestPixelBuffer = nil
-        lock.unlock()
+        clearLatestPixelBuffer()
     }
 
-    func consume(_ frame: DeviceVideoFrameView) -> UIImage? {
+    /// Resynchronizes a live stream while preserving SPS/PPS. The next
+    /// keyframe recreates the VideoToolbox session from the retained format.
+    func resync() {
+        session.map(VTDecompressionSessionInvalidate)
+        session = nil
+        awaitingKeyframe = true
+        accessUnitBytes = 0
+        clearLatestPixelBuffer()
+    }
+
+    func consume(_ frame: DeviceVideoFrameView) -> Data? {
         switch frame.encoding {
-        case "jpeg", "mjpeg":
-            return UIImage(data: Data(frame.payload))
-        case "png":
-            return UIImage(data: Data(frame.payload))
+        case "jpeg", "mjpeg", "png":
+            return Data(frame.payload)
         case "avcc-description":
-            guard configure(description: frame.payload) else { return nil }
+            guard configure(description: frame.payload) else {
+                resync()
+                return nil
+            }
             awaitingKeyframe = true
             accessUnitBytes = 0
             return nil
@@ -47,30 +61,40 @@ final class DeviceVideoDecoder {
             guard frame.keyframe || !awaitingKeyframe else { return nil }
             if frame.keyframe {
                 accessUnitBytes = 0
-                if formatDescription == nil {
-                    configureFromAccessUnit(frame.payload)
+                if session == nil {
+                    if let formatDescription {
+                        guard createSession(formatDescription: formatDescription) else { return nil }
+                    } else {
+                        configureFromAccessUnit(frame.payload)
+                    }
                 }
             }
-            guard formatDescription != nil else { return nil }
+            guard session != nil, formatDescription != nil else { return nil }
             let accessUnit = annexBToAvcc(frame.payload)
             guard !accessUnit.isEmpty, accessUnit.count <= 8 * 1024 * 1024 else {
-                reset()
+                resync()
                 return nil
             }
             accessUnitBytes = accessUnitBytes.saturatingAdd(accessUnit.count)
             guard accessUnitBytes <= 8 * 1024 * 1024 else {
-                reset()
+                resync()
                 return nil
             }
-            guard decode(accessUnit, timestampUs: frame.timestampUs ?? frame.sequence &* 16_667) else {
-                reset()
+            guard decode(accessUnit, timestampUs: frame.timestampUs ?? frame.sequence.saturatingMultiply(16_667)) else {
+                resync()
                 return nil
             }
             awaitingKeyframe = false
-            return imageFromLatestPixelBuffer()
+            return imageDataFromLatestPixelBuffer()
         default:
             return nil
         }
+    }
+
+    private func clearLatestPixelBuffer() {
+        lock.lock()
+        latestPixelBuffer = nil
+        lock.unlock()
     }
 
     private func configure(description bytes: [UInt8]) -> Bool {
@@ -80,7 +104,10 @@ final class DeviceVideoDecoder {
 
     private func configureFromAccessUnit(_ bytes: [UInt8]) {
         let nals = annexBNALUnits(bytes)
-        let parameterSets = nals.filter { guard let first = $0.first else { return false }; return first & 0x1f == 7 || first & 0x1f == 8 }
+        let parameterSets = nals.filter {
+            guard let first = $0.first else { return false }
+            return first & 0x1f == 7 || first & 0x1f == 8
+        }
         guard parameterSets.count >= 2 else { return }
         _ = configure(parameterSets: [parameterSets[0], parameterSets[1]])
     }
@@ -112,6 +139,10 @@ final class DeviceVideoDecoder {
             }
         }
         guard status == noErr, let description else { return false }
+        return createSession(formatDescription: description)
+    }
+
+    private func createSession(formatDescription description: CMVideoFormatDescription) -> Bool {
         session.map(VTDecompressionSessionInvalidate)
         var callback = VTDecompressionOutputCallbackRecord(
             decompressionOutputCallback: Self.outputCallback,
@@ -126,7 +157,10 @@ final class DeviceVideoDecoder {
             outputCallback: &callback,
             decompressionSessionOut: &newSession
         )
-        guard sessionStatus == noErr, let newSession else { return false }
+        guard sessionStatus == noErr, let newSession else {
+            session = nil
+            return false
+        }
         formatDescription = description
         session = newSession
         awaitingKeyframe = true
@@ -189,14 +223,25 @@ final class DeviceVideoDecoder {
         return true
     }
 
-    private func imageFromLatestPixelBuffer() -> UIImage? {
+    private func imageDataFromLatestPixelBuffer() -> Data? {
         lock.lock()
         let pixelBuffer = latestPixelBuffer
         lock.unlock()
-        guard let pixelBuffer, let cgImage = context.createCGImage(CIImage(cvPixelBuffer: pixelBuffer), from: CGRect(x: 0, y: 0, width: CVPixelBufferGetWidth(pixelBuffer), height: CVPixelBufferGetHeight(pixelBuffer))) else {
+        guard let pixelBuffer else { return nil }
+        let bounds = CGRect(
+            x: 0,
+            y: 0,
+            width: CVPixelBufferGetWidth(pixelBuffer),
+            height: CVPixelBufferGetHeight(pixelBuffer)
+        )
+        guard let image = context.createCGImage(CIImage(cvPixelBuffer: pixelBuffer), from: bounds) else {
             return nil
         }
-        return UIImage(cgImage: cgImage)
+        return context.jpegRepresentation(
+            of: CIImage(cgImage: image),
+            colorSpace: CGColorSpaceCreateDeviceRGB(),
+            options: [:]
+        )
     }
 
     private static let outputCallback: VTDecompressionOutputCallback = { refCon, _, status, _, imageBuffer, _, _ in
@@ -205,6 +250,78 @@ final class DeviceVideoDecoder {
         decoder.lock.lock()
         decoder.latestPixelBuffer = imageBuffer
         decoder.lock.unlock()
+    }
+}
+
+private struct DecodedDeviceFrame {
+    let key: String
+    let threadId: String
+    let hostId: String
+    let deviceId: String
+    let screenId: Int
+    let width: Int
+    let height: Int
+    let data: Data
+}
+
+/// Serializes decoder state away from SwiftUI. The actor owns VideoToolbox,
+/// Core Image and all sequence checks; the main actor only turns the returned
+/// bounded image data into a view image.
+private actor DeviceFrameDecoderWorker {
+    private var decoders: [String: DeviceVideoDecoder] = [:]
+    private var sequences: [String: UInt64] = [:]
+
+    func consume(_ input: [DeviceVideoFrameView], threadId: String) -> [DecodedDeviceFrame] {
+        var output: [DecodedDeviceFrame] = []
+        let ordered = input
+            .filter { $0.threadId == threadId }
+            .sorted { lhs, rhs in
+                if lhs.hostId != rhs.hostId { return lhs.hostId < rhs.hostId }
+                if lhs.deviceId != rhs.deviceId { return lhs.deviceId < rhs.deviceId }
+                let lhsScreen = lhs.screenId ?? 0
+                let rhsScreen = rhs.screenId ?? 0
+                if lhsScreen != rhsScreen { return lhsScreen < rhsScreen }
+                return lhs.sequence < rhs.sequence
+            }
+        for frame in ordered {
+            if Task.isCancelled { return output }
+            let screenId = Int(frame.screenId ?? 0)
+            let key = "\(threadId):\(frame.hostId):\(frame.deviceId):\(screenId)"
+            if sequences[key].map({ frame.sequence <= $0 }) == true { continue }
+            if let previous = sequences[key], previous < UInt64.max, frame.sequence > previous + 1 {
+                decoders[key]?.resync()
+            }
+            sequences[key] = frame.sequence
+            let decoder = decoders[key] ?? {
+                let decoder = DeviceVideoDecoder()
+                decoders[key] = decoder
+                return decoder
+            }()
+            guard let data = decoder.consume(frame), !data.isEmpty else { continue }
+            output.append(DecodedDeviceFrame(
+                key: key,
+                threadId: threadId,
+                hostId: frame.hostId,
+                deviceId: frame.deviceId,
+                screenId: screenId,
+                width: Int(frame.width),
+                height: Int(frame.height),
+                data: data
+            ))
+        }
+        return output
+    }
+
+    func reset(threadId: String) {
+        let prefix = "\(threadId):"
+        let keys = Set(
+            decoders.keys.filter { $0.hasPrefix(prefix) }
+                + sequences.keys.filter { $0.hasPrefix(prefix) }
+        )
+        for key in keys {
+            decoders.removeValue(forKey: key)
+            sequences.removeValue(forKey: key)
+        }
     }
 }
 
@@ -219,31 +336,34 @@ final class DeviceFrameStore: ObservableObject {
         let screenId: Int
         let hostId: String
         let deviceId: String
+        let width: Int
+        let height: Int
     }
 
     @Published private(set) var frames: [String: RenderedFrame] = [:]
-    private var decoders: [String: DeviceVideoDecoder] = [:]
-    private var sequences: [String: UInt64] = [:]
+    private let worker = DeviceFrameDecoderWorker()
+    private var generation: UInt64 = 0
+    private var consumeTask: Task<Void, Never>?
 
     func consume(_ input: [DeviceVideoFrameView], threadId: String) {
-        for frame in input where frame.threadId == threadId {
-            let screenId = Int(frame.screenId ?? 0)
-            let key = "\(threadId):\(frame.hostId):\(frame.deviceId):\(screenId)"
-            if sequences[key].map({ frame.sequence <= $0 }) == true { continue }
-            sequences[key] = frame.sequence
-            let decoder = decoders[key] ?? {
-                let decoder = DeviceVideoDecoder()
-                decoders[key] = decoder
-                return decoder
-            }()
-            if let image = decoder.consume(frame) {
-                frames[key] = RenderedFrame(
-                    id: key,
-                    threadId: threadId,
+        generation = generation.saturatingAdd(1)
+        let request = generation
+        consumeTask?.cancel()
+        let worker = worker
+        consumeTask = Task { [weak self] in
+            let decoded = await worker.consume(input, threadId: threadId)
+            guard !Task.isCancelled, let self, self.generation == request else { return }
+            for frame in decoded {
+                guard let image = UIImage(data: frame.data) else { continue }
+                self.frames[frame.key] = RenderedFrame(
+                    id: frame.key,
+                    threadId: frame.threadId,
                     image: image,
-                    screenId: screenId,
+                    screenId: frame.screenId,
                     hostId: frame.hostId,
-                    deviceId: frame.deviceId
+                    deviceId: frame.deviceId,
+                    width: frame.width,
+                    height: frame.height
                 )
             }
         }
@@ -254,17 +374,17 @@ final class DeviceFrameStore: ObservableObject {
     }
 
     func reset(threadId: String) {
+        generation = generation.saturatingAdd(1)
+        consumeTask?.cancel()
+        consumeTask = nil
         let prefix = "\(threadId):"
-        let keys = Set(
-            frames.keys.filter { $0.hasPrefix(prefix) }
-                + decoders.keys.filter { $0.hasPrefix(prefix) }
-                + sequences.keys.filter { $0.hasPrefix(prefix) }
-        )
-        for key in keys {
-            frames.removeValue(forKey: key)
-            decoders.removeValue(forKey: key)
-            sequences.removeValue(forKey: key)
-        }
+        frames = frames.filter { !$0.key.hasPrefix(prefix) }
+        let worker = worker
+        Task { await worker.reset(threadId: threadId) }
+    }
+
+    deinit {
+        consumeTask?.cancel()
     }
 }
 
@@ -336,12 +456,19 @@ private func avcParameterSets(from bytes: [UInt8]) -> [[UInt8]]? {
         }
         return sets.count >= 2 ? sets : nil
     }
-    let sets = annexBNALUnits(bytes).filter { guard let first = $0.first else { return false }; return first & 0x1f == 7 || first & 0x1f == 8 }
+    let sets = annexBNALUnits(bytes).filter {
+        guard let first = $0.first else { return false }
+        return first & 0x1f == 7 || first & 0x1f == 8
+    }
     return sets.count >= 2 ? sets : nil
 }
 
 private extension UInt64 {
     func saturatingAdd(_ value: Int) -> UInt64 {
         addingReportingOverflow(UInt64(max(value, 0))).overflow ? UInt64.max : self + UInt64(max(value, 0))
+    }
+
+    func saturatingMultiply(_ value: UInt64) -> UInt64 {
+        multipliedReportingOverflow(by: value).overflow ? UInt64.max : self * value
     }
 }

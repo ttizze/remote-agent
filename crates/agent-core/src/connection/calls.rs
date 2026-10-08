@@ -576,30 +576,8 @@ impl Owner {
             Reply::Invitation(invitation) => self.state.invitation = Some(invitation),
             Reply::PreviewList(result) => self.state.preview.apply_list(result),
             Reply::PreviewSession(session) => self.state.preview.upsert(session),
-            Reply::PreviewRecordingStatus(status) => {
-                self.state
-                    .preview
-                    .last_recordings
-                    .remove(&status.tab_id);
-                self.state
-                    .preview
-                    .recordings
-                    .insert(status.tab_id.clone(), status);
-            }
-            Reply::PreviewRecordingArtifact(artifact) => {
-                self.state.preview.recordings.insert(
-                    artifact.tab_id.clone(),
-                    agent_protocol::preview::PreviewRecordingStatus {
-                        tab_id: artifact.tab_id.clone(),
-                        recording: false,
-                        started_at: None,
-                    },
-                );
-                self.state
-                    .preview
-                    .last_recordings
-                    .insert(artifact.tab_id.clone(), artifact);
-            }
+            Reply::PreviewRecordingStatus(status) => self.state.preview.apply_recording_status(status),
+            Reply::PreviewRecordingArtifact(artifact) => self.state.preview.apply_recording_artifact(artifact),
             Reply::ConversationSettings(settings) => {
                 self.state.conversation_settings = Some(settings)
             }

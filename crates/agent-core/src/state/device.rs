@@ -104,6 +104,10 @@ pub struct SessionImport {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct DeviceState {
     pub service: Option<DeviceServiceState>,
+    /// Monotonic identity for accepted frame/video events. Service revisions
+    /// describe configuration and discovery, so native frame consumers must
+    /// observe this owner-controlled value instead of polling that revision.
+    pub frame_revision: u64,
     pub sessions: Vec<DeviceSession>,
     pub details: BTreeMap<(String, String), DeviceDetail>,
     pub frames: BTreeMap<(String, String, String), DeviceFrame>,
@@ -184,6 +188,7 @@ impl DeviceState {
                     ),
                     frame,
                 );
+                self.frame_revision = self.frame_revision.saturating_add(1);
             }
             DeviceEvent::Video(frame) => {
                 if !self.sessions.iter().any(|session| {
@@ -212,6 +217,7 @@ impl DeviceState {
                 while events.len() > MAX_VIDEO_EVENTS_PER_STREAM {
                     events.pop_front();
                 }
+                self.frame_revision = self.frame_revision.saturating_add(1);
             }
             DeviceEvent::Accessibility(tree) => {
                 if !self.sessions.iter().any(|session| {
@@ -422,8 +428,12 @@ mod tests {
         };
         state.apply_event(DeviceEvent::Video(frame.clone()));
         assert_eq!(state.video_events.values().map(|events| events.len()).sum::<usize>(), 1);
+        assert_eq!(state.frame_revision, 1);
+        state.apply_event(DeviceEvent::Video(frame.clone()));
+        assert_eq!(state.frame_revision, 1);
         state.apply_event(DeviceEvent::State(DeviceServiceState::default()));
         state.apply_event(DeviceEvent::Video(frame));
         assert!(state.video_events.is_empty());
+        assert_eq!(state.frame_revision, 1);
     }
 }

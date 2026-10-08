@@ -576,7 +576,16 @@ pub struct DeviceEventLogEntry {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum DeviceInputKind {
     Touch { phase: DeviceTouchPhase, x: f32, y: f32 },
-    Key { code: String, down: bool },
+    /// Carries the physical code and the platform's actual key value. The
+    /// Host uses `code` for iOS HID and `key` for Android text so shifted and
+    /// non-ASCII input is preserved without guessing from a code name.
+    Key {
+        code: String,
+        key: String,
+        down: bool,
+        meta: bool,
+        ctrl: bool,
+    },
     HardwareButton(DeviceHardwareButton),
     Rotate,
     SetOrientation(DeviceOrientation),
@@ -616,8 +625,10 @@ impl DeviceInput {
             DeviceInputKind::Touch { x, y, .. } if !x.is_finite() || !y.is_finite() || !(0.0..=1.0).contains(x) || !(0.0..=1.0).contains(y) => {
                 Err("device touch coordinates must be finite and normalized".into())
             }
-            DeviceInputKind::Key { code, .. } if code.trim().is_empty() || code.len() > 64 => {
-                Err("device key code is invalid".into())
+            DeviceInputKind::Key { code, key, .. }
+                if code.trim().is_empty() || code.len() > 64 || key.is_empty() || key.len() > 128 =>
+            {
+                Err("device key code or key value is invalid".into())
             }
             DeviceInputKind::Fold { command } | DeviceInputKind::Duo { command }
                 if command.trim().is_empty() || command.len() > 64 => Err("device fold command is invalid".into()),
@@ -840,5 +851,31 @@ mod tests {
         png.extend_from_slice(&640u32.to_be_bytes());
         assert_eq!(png_dimensions(&png), (320, 640));
         assert_eq!(png_dimensions(&[0, 1, 2]), (0, 0));
+    }
+
+    #[test]
+    fn keyboard_input_validates_code_and_actual_key_value() {
+        let valid = DeviceInput {
+            host_id: None,
+            device_id: "emulator-1".into(),
+            input: DeviceInputKind::Key {
+                code: "KeyA".into(),
+                key: "A".into(),
+                down: true,
+                meta: false,
+                ctrl: false,
+            },
+        };
+        assert!(valid.validate().is_ok());
+        let mut empty_key = valid.clone();
+        if let DeviceInputKind::Key { key, .. } = &mut empty_key.input {
+            key.clear();
+        }
+        assert!(empty_key.validate().is_err());
+        let mut oversized_key = valid;
+        if let DeviceInputKind::Key { key, .. } = &mut oversized_key.input {
+            *key = "x".repeat(129);
+        }
+        assert!(oversized_key.validate().is_err());
     }
 }

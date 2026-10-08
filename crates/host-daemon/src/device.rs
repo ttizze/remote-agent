@@ -1312,6 +1312,7 @@ struct Inner {
     state: RwLock<DeviceServiceState>,
     events: broadcast::Sender<DeviceEvent>,
     frame_sequence: AtomicU64,
+    video_sequences: Mutex<BTreeMap<(String, String, String, u8), u64>>,
     control_sequence: AtomicU64,
     operation: Mutex<()>,
     tool_install: Mutex<()>,
@@ -1449,11 +1450,33 @@ impl DeviceService {
             state.agent_access_enabled = settings.agent_access_enabled;
             state.onboarding_completed = settings.onboarding_completed;
         }
-    Arc::new(Self { inner: Arc::new(Inner { config_path: state_root.join("device-hosts.json"), settings_path: state_root.join("settings.json"), hosts: RwLock::new(hosts), state: RwLock::new(state), events, frame_sequence: AtomicU64::new(0), control_sequence: AtomicU64::new(0), operation: Mutex::new(()), tool_install: Mutex::new(()), hub: Mutex::new(None), remote_hubs: Mutex::new(BTreeMap::new()), agents: Mutex::new(BTreeMap::new()), recordings: Mutex::new(BTreeMap::new()), event_log_tasks: Mutex::new(BTreeMap::new()), native_snapshot_at: Mutex::new(BTreeMap::new()), recovery_tasks: Mutex::new(BTreeMap::new()) }) })
+    Arc::new(Self { inner: Arc::new(Inner { config_path: state_root.join("device-hosts.json"), settings_path: state_root.join("settings.json"), hosts: RwLock::new(hosts), state: RwLock::new(state), events, frame_sequence: AtomicU64::new(0), video_sequences: Mutex::new(BTreeMap::new()), control_sequence: AtomicU64::new(0), operation: Mutex::new(()), tool_install: Mutex::new(()), hub: Mutex::new(None), remote_hubs: Mutex::new(BTreeMap::new()), agents: Mutex::new(BTreeMap::new()), recordings: Mutex::new(BTreeMap::new()), event_log_tasks: Mutex::new(BTreeMap::new()), native_snapshot_at: Mutex::new(BTreeMap::new()), recovery_tasks: Mutex::new(BTreeMap::new()) }) })
     }
 
     pub async fn state_async(&self) -> DeviceServiceState {
         self.inner.state.read().await.clone()
+    }
+
+    /// Video sequences are contiguous within one encoded screen stream. The
+    /// service state also contains still screenshots, so sharing its global
+    /// sequence would make an ordinary dual-screen stream look discontinuous
+    /// to native decoders whenever another screen emitted a frame.
+    async fn next_video_sequence(
+        &self,
+        thread_id: &ThreadId,
+        session: &DeviceSession,
+        screen_id: Option<u8>,
+    ) -> u64 {
+        let key = (
+            thread_id.to_string(),
+            session.host_id.clone(),
+            session.device_id.clone(),
+            screen_id.unwrap_or(0),
+        );
+        let mut sequences = self.inner.video_sequences.lock().await;
+        let sequence = sequences.entry(key).or_insert(0);
+        *sequence = sequence.saturating_add(1);
+        *sequence
     }
 
     /// Reports work that must settle before the Host hands its process to an
@@ -2899,6 +2922,22 @@ impl DeviceService {
         let mut native_snapshots = self.inner.native_snapshot_at.lock().await;
         native_snapshots.retain(|key, _| retained_devices.contains(key));
         drop(native_snapshots);
+        let retained_streams = next
+            .sessions
+            .iter()
+            .map(|session| {
+                (
+                    session.thread_id.to_string(),
+                    session.host_id.clone(),
+                    session.device_id.clone(),
+                )
+            })
+            .collect::<BTreeSet<_>>();
+        let mut video_sequences = self.inner.video_sequences.lock().await;
+        video_sequences.retain(|(thread, host, device, _), _| {
+            retained_streams.contains(&(thread.clone(), host.clone(), device.clone()))
+        });
+        drop(video_sequences);
         self.publish_state(next).await;
         for recording in completed_recordings {
             let _ = self.inner.events.send(DeviceEvent::RecordingComplete(recording));
@@ -3111,7 +3150,9 @@ impl DeviceService {
                     && device.platform == DevicePlatform::Android
                     && transport.iter().any(|frame| matches!(frame.encoding, DeviceFrameEncoding::H264 | DeviceFrameEncoding::Semu));
                 for frame in transport {
-                    let sequence = self.inner.frame_sequence.fetch_add(1, Ordering::Relaxed).saturating_add(1);
+                    let sequence = self
+                        .next_video_sequence(thread, &session, frame.screen_id)
+                        .await;
                     self.append_recording(thread, &session, &frame).await;
                     frames.push(DeviceEvent::Video(DeviceVideoFrame {
                         thread_id: thread.clone(),
@@ -4206,26 +4247,6 @@ fn android_keycode(code: &str) -> Option<u16> {
     Some(match code { "ArrowUp" => 19, "ArrowDown" => 20, "ArrowLeft" => 21, "ArrowRight" => 22, "Tab" => 61, "Enter" => 66, "Backspace" => 67, "Delete" => 112, "Home" => 122, "End" => 123, "PageUp" => 92, "PageDown" => 93, _ => return None })
 }
 
-fn key_code_text(code: &str) -> Option<String> {
-    code.strip_prefix("Key").filter(|value| value.len() == 1).map(|value| value.to_ascii_lowercase())
-        .or_else(|| code.strip_prefix("Digit").filter(|value| value.len() == 1).map(str::to_owned))
-        .or_else(|| Some(match code {
-            "Space" => " ",
-            "Minus" => "-",
-            "Equal" => "=",
-            "BracketLeft" => "[",
-            "BracketRight" => "]",
-            "Backslash" => "\\",
-            "Semicolon" => ";",
-            "Quote" => "'",
-            "Backquote" => "`",
-            "Comma" => ",",
-            "Period" => ".",
-            "Slash" => "/",
-            _ => return None,
-        }.to_owned()))
-}
-
 fn button_wire(button: DeviceHardwareButton, ios: bool) -> &'static str {
     match button {
         DeviceHardwareButton::Home => "home",
@@ -4265,7 +4286,7 @@ async fn hub_input(
             let phase = match phase { DeviceTouchPhase::Begin => "begin", DeviceTouchPhase::Move => "move", DeviceTouchPhase::End => "end" };
             async_tungstenite::tungstenite::Message::binary([vec![0x03], serde_json::to_vec(&serde_json::json!({"type": phase, "x": x, "y": y})).map_err(|error| error.to_string())?].concat())
         }
-        (DevicePlatform::Ios, DeviceInputKind::Key { code, down }) => {
+        (DevicePlatform::Ios, DeviceInputKind::Key { code, down, .. }) => {
             let usage = ios_hid_usage(code).ok_or_else(|| format!("unsupported iOS keyboard code {code}"))?;
             async_tungstenite::tungstenite::Message::binary([vec![0x06], serde_json::to_vec(&serde_json::json!({"type": if *down { "down" } else { "up" }, "usage": usage})).map_err(|error| error.to_string())?].concat())
         }
@@ -4273,11 +4294,11 @@ async fn hub_input(
             let action = match phase { DeviceTouchPhase::Begin => "down", DeviceTouchPhase::Move => "move", DeviceTouchPhase::End => "up" };
             async_tungstenite::tungstenite::Message::Text(serde_json::json!({"type":"touch", "action": action, "x": x, "y": y}).to_string().into())
         }
-        (DevicePlatform::Android, DeviceInputKind::Key { code, .. }) => {
-            if code == "Escape" { async_tungstenite::tungstenite::Message::Text(serde_json::json!({"type":"back"}).to_string().into()) }
-            else if let Some(keycode) = android_keycode(code) { async_tungstenite::tungstenite::Message::Text(serde_json::json!({"type":"key", "keycode": keycode}).to_string().into()) }
-            else if let Some(text) = key_code_text(code) { async_tungstenite::tungstenite::Message::Text(serde_json::json!({"type":"text", "text": text}).to_string().into()) }
-            else { return Err(format!("unsupported Android keyboard code {code}")); }
+        (DevicePlatform::Android, DeviceInputKind::Key { key, meta, ctrl, .. }) => {
+            if key == "Escape" { async_tungstenite::tungstenite::Message::Text(serde_json::json!({"type":"back"}).to_string().into()) }
+            else if let Some(keycode) = android_keycode(key) { async_tungstenite::tungstenite::Message::Text(serde_json::json!({"type":"key", "keycode": keycode}).to_string().into()) }
+            else if key.encode_utf16().count() == 1 && !meta && !ctrl { async_tungstenite::tungstenite::Message::Text(serde_json::json!({"type":"text", "text": key}).to_string().into()) }
+            else { return Err(format!("unsupported Android keyboard key {key}")); }
         }
         (DevicePlatform::Ios, DeviceInputKind::HardwareButton(button)) => async_tungstenite::tungstenite::Message::binary([vec![0x04], serde_json::to_vec(&serde_json::json!({"button": button_wire(*button, true)})).map_err(|error| error.to_string())?].concat()),
         (_, DeviceInputKind::HardwareButton(button)) => async_tungstenite::tungstenite::Message::Text(serde_json::json!({"type": button_wire(*button, false)}).to_string().into()),
@@ -5081,6 +5102,85 @@ mod tests {
             port,
             DevicePlatform::Android,
             "emu",
+            &DeviceInputKind::Key {
+                code: "Digit1".into(),
+                key: "!".into(),
+                down: true,
+                meta: false,
+                ctrl: false,
+            },
+            0,
+        )
+        .await
+        .unwrap();
+        let message = tokio::time::timeout(std::time::Duration::from_secs(1), receiver)
+            .await
+            .unwrap()
+            .unwrap();
+        match message {
+            async_tungstenite::tungstenite::Message::Text(text) => {
+                let payload: serde_json::Value = serde_json::from_str(&text.to_string()).unwrap();
+                assert_eq!(payload, serde_json::json!({"type": "text", "text": "!"}));
+            }
+            other => panic!("unexpected Android text frame: {other:?}"),
+        }
+        server.abort();
+
+        let (port, receiver, server) = fake_websocket_server().await;
+        hub_input(
+            port,
+            DevicePlatform::Android,
+            "emu",
+            &DeviceInputKind::Key {
+                code: "KeyE".into(),
+                key: "é".into(),
+                down: true,
+                meta: false,
+                ctrl: false,
+            },
+            0,
+        )
+        .await
+        .unwrap();
+        let message = tokio::time::timeout(std::time::Duration::from_secs(1), receiver)
+            .await
+            .unwrap()
+            .unwrap();
+        match message {
+            async_tungstenite::tungstenite::Message::Text(text) => {
+                let payload: serde_json::Value = serde_json::from_str(&text.to_string()).unwrap();
+                assert_eq!(payload, serde_json::json!({"type": "text", "text": "é"}));
+            }
+            other => panic!("unexpected Android Unicode frame: {other:?}"),
+        }
+        server.abort();
+
+        let (port, receiver, server) = fake_websocket_server().await;
+        let result = hub_input(
+            port,
+            DevicePlatform::Android,
+            "emu",
+            &DeviceInputKind::Key {
+                code: "KeyC".into(),
+                key: "c".into(),
+                down: true,
+                meta: false,
+                ctrl: true,
+            },
+            0,
+        )
+        .await;
+        assert!(result.is_err());
+        assert!(tokio::time::timeout(std::time::Duration::from_millis(100), receiver)
+            .await
+            .is_err());
+        server.abort();
+
+        let (port, receiver, server) = fake_websocket_server().await;
+        hub_input(
+            port,
+            DevicePlatform::Android,
+            "emu",
             &DeviceInputKind::Touch { phase: DeviceTouchPhase::End, x: 0.2, y: 0.1 },
             0,
         )
@@ -5104,7 +5204,7 @@ mod tests {
             port,
             DevicePlatform::Android,
             "emu",
-            &DeviceInputKind::Key { code: "ArrowLeft".into(), down: true },
+            &DeviceInputKind::Key { code: "ArrowLeft".into(), key: "ArrowLeft".into(), down: true, meta: false, ctrl: false },
             0,
         )
         .await

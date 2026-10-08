@@ -450,6 +450,8 @@ pub struct PreviewState {
     pub last_recordings: BTreeMap<String, agent_protocol::preview::PreviewRecordingArtifact>,
     #[serde(skip)]
     closed_tabs: BTreeSet<String>,
+    #[serde(skip)]
+    invalidated_recordings: BTreeSet<String>,
 }
 impl PreviewState {
     pub fn apply_list(&mut self, result: agent_protocol::preview::PreviewListResult) {
@@ -473,6 +475,9 @@ impl PreviewState {
             }
             return;
         }
+        if server_epoch_changed {
+            self.invalidated_recordings.extend(self.sessions.keys().cloned());
+        }
         self.sessions = result
             .sessions
             .into_iter()
@@ -484,7 +489,17 @@ impl PreviewState {
             .map(|status| (status.tab_id.clone(), status))
             .collect();
         for tab_id in result.invalidated_recordings {
+            self.invalidated_recordings.insert(tab_id.clone());
             self.last_recordings.remove(&tab_id);
+        }
+        let active_recording_tabs = self
+            .recordings
+            .values()
+            .filter(|status| status.recording)
+            .map(|status| status.tab_id.clone())
+            .collect::<Vec<_>>();
+        for tab_id in active_recording_tabs {
+            self.invalidated_recordings.remove(&tab_id);
         }
         if server_epoch_changed {
             self.last_recordings.clear();
@@ -551,6 +566,7 @@ impl PreviewState {
     pub fn close(&mut self, tab_id: Option<&str>) {
         if let Some(tab_id) = tab_id {
             self.closed_tabs.insert(tab_id.to_owned());
+            self.invalidated_recordings.insert(tab_id.to_owned());
             self.sessions.remove(tab_id);
             if self.active_tab.as_deref() == Some(tab_id) {
                 self.active_tab = self.sessions.keys().next().cloned();
@@ -559,6 +575,8 @@ impl PreviewState {
             self.last_recordings.remove(tab_id);
         } else {
             self.closed_tabs.extend(self.sessions.keys().cloned());
+            self.invalidated_recordings
+                .extend(self.sessions.keys().cloned());
             self.sessions.clear();
             self.active_tab = None;
             self.recordings.clear();
@@ -571,6 +589,44 @@ impl PreviewState {
 
     pub fn recording_for(&self, tab_id: &str) -> Option<&agent_protocol::preview::PreviewRecordingStatus> {
         self.recordings.get(tab_id)
+    }
+
+    pub fn apply_recording_status(
+        &mut self,
+        status: agent_protocol::preview::PreviewRecordingStatus,
+    ) {
+        if self.closed_tabs.contains(&status.tab_id)
+            || !self.sessions.contains_key(&status.tab_id)
+            || (!status.recording && self.invalidated_recordings.contains(&status.tab_id))
+        {
+            return;
+        }
+        if status.recording {
+            self.invalidated_recordings.remove(&status.tab_id);
+        }
+        self.last_recordings.remove(&status.tab_id);
+        self.recordings.insert(status.tab_id.clone(), status);
+    }
+
+    pub fn apply_recording_artifact(
+        &mut self,
+        artifact: agent_protocol::preview::PreviewRecordingArtifact,
+    ) {
+        if self.closed_tabs.contains(&artifact.tab_id)
+            || !self.sessions.contains_key(&artifact.tab_id)
+            || self.invalidated_recordings.contains(&artifact.tab_id)
+        {
+            return;
+        }
+        self.recordings.insert(
+            artifact.tab_id.clone(),
+            agent_protocol::preview::PreviewRecordingStatus {
+                tab_id: artifact.tab_id.clone(),
+                recording: false,
+                started_at: None,
+            },
+        );
+        self.last_recordings.insert(artifact.tab_id.clone(), artifact);
     }
 
     pub fn last_recording_for(&self, tab_id: &str) -> Option<&agent_protocol::preview::PreviewRecordingArtifact> {
@@ -748,6 +804,29 @@ mod preview_state_tests {
         state.close(Some("tab"));
         assert!(state.recordings.is_empty());
         assert!(state.last_recordings.is_empty());
+    }
+
+    #[test]
+    fn late_recording_artifact_cannot_restore_an_evicted_or_closed_tab() {
+        let mut state = PreviewState::default();
+        state.apply_list(list("epoch", 1, "tab"));
+        let artifact = || agent_protocol::preview::PreviewRecordingArtifact {
+            id: "late-recording".into(),
+            tab_id: "tab".into(),
+            path: "/tmp/late-recording.webm".into(),
+            mime_type: "video/webm".into(),
+            size_bytes: 1,
+            created_at: "0".into(),
+        };
+        let mut evicted = list("epoch", 2, "tab");
+        evicted.invalidated_recordings = vec!["tab".into()];
+        state.apply_list(evicted);
+        state.apply_recording_artifact(artifact());
+        assert!(state.last_recording_for("tab").is_none());
+
+        state.close(Some("tab"));
+        state.apply_recording_artifact(artifact());
+        assert!(state.last_recording_for("tab").is_none());
     }
 }
 
@@ -1228,7 +1307,13 @@ pub enum DeviceActionIntent {
     Shake,
     SendPush { app_id: String, payload: String },
     Touch { phase: String, x: f32, y: f32 },
-    Key { code: String, down: bool },
+    Key {
+        code: String,
+        key: String,
+        down: bool,
+        meta: bool,
+        ctrl: bool,
+    },
     HardwareButton { button: String },
     Rotate,
     Fold { command: String },

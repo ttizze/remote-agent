@@ -25,7 +25,6 @@ struct ThreadScreen: View {
     @State private var showingSettings = false
     @State private var forkingRun: String?
     @State private var openedFile: FileTarget?
-    @State private var touchingDevice: String?
     private let endId = "feed-end"
 
     var body: some View {
@@ -304,6 +303,9 @@ struct DeviceScreen: View {
     @State private var exportingRecording = false
     @State private var recordingFileName = "device-recording"
     @State private var recordingContentType: UTType = .data
+    @State private var touchingHostId: String?
+    @State private var touchingDeviceId: String?
+    @State private var touchingPoint: CGPoint?
 
     var body: some View {
         let view = model.snapshot.device()
@@ -430,12 +432,12 @@ struct DeviceScreen: View {
                                 model.perform(.deviceAction(
                                     hostId: session.hostId,
                                     deviceId: session.deviceId,
-                                    action: .key(code: "Enter", down: true)
+                                    action: .key(code: "Enter", key: "Enter", down: true, meta: false, ctrl: false)
                                 ))
                                 model.perform(.deviceAction(
                                     hostId: session.hostId,
                                     deviceId: session.deviceId,
-                                    action: .key(code: "Enter", down: false)
+                                    action: .key(code: "Enter", key: "Enter", down: false, meta: false, ctrl: false)
                                 ))
                             }
                             Button("Rotate") {
@@ -490,7 +492,7 @@ struct DeviceScreen: View {
                                     GeometryReader { proxy in
                                         Color.clear
                                             .contentShape(Rectangle())
-                                            .gesture(deviceTouchGesture(hostId: frame.hostId, deviceId: frame.deviceId, size: proxy.size))
+                                            .gesture(deviceTouchGesture(hostId: frame.hostId, deviceId: frame.deviceId, size: proxy.size, frameSize: CGSize(width: CGFloat(frame.width), height: CGFloat(frame.height))))
                                     }
                                 }
                             }
@@ -507,7 +509,7 @@ struct DeviceScreen: View {
                             GeometryReader { proxy in
                                 Color.clear
                                     .contentShape(Rectangle())
-                                    .gesture(deviceTouchGesture(hostId: frame.hostId, deviceId: frame.deviceId, size: proxy.size))
+                                    .gesture(deviceTouchGesture(hostId: frame.hostId, deviceId: frame.deviceId, size: proxy.size, frameSize: CGSize(width: CGFloat(frame.width), height: CGFloat(frame.height))))
                             }
                         }
                     } else if let frame = view.videoFrames.filter({ $0.threadId == threadId && ($0.encoding == "jpeg" || $0.encoding == "mjpeg") }).max(by: { $0.sequence < $1.sequence }),
@@ -520,7 +522,7 @@ struct DeviceScreen: View {
                             GeometryReader { proxy in
                                 Color.clear
                                     .contentShape(Rectangle())
-                                    .gesture(deviceTouchGesture(hostId: frame.hostId, deviceId: frame.deviceId, size: proxy.size))
+                                    .gesture(deviceTouchGesture(hostId: frame.hostId, deviceId: frame.deviceId, size: proxy.size, frameSize: CGSize(width: CGFloat(frame.width), height: CGFloat(frame.height))))
                             }
                         }
                     } else {
@@ -590,7 +592,7 @@ struct DeviceScreen: View {
                 model.perform(.loadDeviceEventLog(hostId: session.hostId, deviceId: session.deviceId, limit: 100))
             }
         }
-        .onChange(of: model.snapshot.device().revision) { _, _ in
+        .onChange(of: model.snapshot.device().frameRevision) { _, _ in
             let next = model.snapshot.device()
             deviceFrames.consume(next.videoEvents, threadId: threadId)
         }
@@ -603,6 +605,7 @@ struct DeviceScreen: View {
             }
         }
         .onDisappear {
+            finishActiveTouch()
             deviceFrames.reset(threadId: threadId)
             model.perform(.unsubscribeDevice)
         }
@@ -616,31 +619,64 @@ struct DeviceScreen: View {
         }
     }
 
-    private func deviceTouchGesture(hostId: String, deviceId: String, size: CGSize) -> some Gesture {
+    private func deviceTouchGesture(hostId: String, deviceId: String, size: CGSize, frameSize: CGSize) -> some Gesture {
         DragGesture(minimumDistance: 0)
             .onChanged { value in
-                let key = "\(hostId):\(deviceId)"
-                let phase = touchingDevice == key ? "move" : "begin"
-                touchingDevice = key
-                let x = value.location.x / max(size.width, 1)
-                let y = value.location.y / max(size.height, 1)
+                let phase = touchingHostId == hostId && touchingDeviceId == deviceId ? "move" : "begin"
+                let point = projectDevicePoint(value.location, viewSize: size, frameSize: frameSize)
+                touchingHostId = hostId
+                touchingDeviceId = deviceId
+                touchingPoint = point
                 model.perform(.deviceAction(
                     hostId: hostId,
                     deviceId: deviceId,
-                    action: .touch(phase: phase, x: Float(x.clamped(to: 0...1)), y: Float(y.clamped(to: 0...1))),
+                    action: .touch(phase: phase, x: Float(point.x), y: Float(point.y)),
                 ))
             }
             .onEnded { value in
-                touchingDevice = nil
-                let x = value.location.x / max(size.width, 1)
-                let y = value.location.y / max(size.height, 1)
+                let point = projectDevicePoint(value.location, viewSize: size, frameSize: frameSize)
                 model.perform(.deviceAction(
                     hostId: hostId,
                     deviceId: deviceId,
-                    action: .touch(phase: "end", x: Float(x.clamped(to: 0...1)), y: Float(y.clamped(to: 0...1))),
+                    action: .touch(phase: "end", x: Float(point.x), y: Float(point.y)),
                 ))
+                touchingHostId = nil
+                touchingDeviceId = nil
+                touchingPoint = nil
             }
     }
+
+    private func finishActiveTouch() {
+        guard let hostId = touchingHostId,
+              let deviceId = touchingDeviceId,
+              let point = touchingPoint else { return }
+        model.perform(.deviceAction(
+            hostId: hostId,
+            deviceId: deviceId,
+            action: .touch(phase: "end", x: Float(point.x), y: Float(point.y)),
+        ))
+        touchingHostId = nil
+        touchingDeviceId = nil
+        touchingPoint = nil
+    }
+}
+
+/// Maps a panel point into the resource-owned device frame, preserving the
+/// frame's aspect ratio and letterbox margins before clamping to [0, 1].
+private func projectDevicePoint(_ point: CGPoint, viewSize: CGSize, frameSize: CGSize) -> CGPoint {
+    guard viewSize.width > 0, viewSize.height > 0, frameSize.width > 0, frameSize.height > 0 else {
+        return CGPoint(x: 0.5, y: 0.5)
+    }
+    let scale = min(viewSize.width / frameSize.width, viewSize.height / frameSize.height)
+    let contentSize = CGSize(width: frameSize.width * scale, height: frameSize.height * scale)
+    let origin = CGPoint(
+        x: (viewSize.width - contentSize.width) / 2,
+        y: (viewSize.height - contentSize.height) / 2
+    )
+    return CGPoint(
+        x: ((point.x - origin.x) / contentSize.width).clamped(to: 0...1),
+        y: ((point.y - origin.y) / contentSize.height).clamped(to: 0...1)
+    )
 }
 
 private struct DeviceRecordingDocument: FileDocument {
