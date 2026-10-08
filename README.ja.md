@@ -106,7 +106,7 @@ iPhoneから保存済みPCを削除するには、**タスク一覧 → PC一覧
 ## クライアントのビルド
 
 ```sh
-# Mac（署名証明書が必要。BEX_CODE_SIGN_IDENTITYで選択）
+# Mac（署名証明書が必要。APP_CODE_SIGN_IDENTITYで選択）
 scripts/dev-env.sh just build-desktop-macos && open target/Bex.app
 
 # iPhone（iOS 26）: Simulator用ライブラリをビルドしてXcodeを開く

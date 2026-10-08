@@ -1,0 +1,503 @@
+name: Nightly distribution
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: Release channel
+        required: true
+        type: choice
+        options: [nightly, preview, stable]
+        default: nightly
+      version:
+        description: Stable version override (stable channel only)
+        required: false
+        type: string
+      publish:
+        description: Create or update the GitHub release (main only)
+        required: false
+        type: boolean
+        default: false
+      include_mobile:
+        description: Build signed Android and iOS artifacts
+        required: false
+        type: boolean
+        default: false
+      publish_mobile:
+        description: Upload Android to Play internal and iOS to TestFlight
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly-distribution
+  cancel-in-progress: false
+  queue: max
+
+env:
+  CARGO_INCREMENTAL: 0
+  CARGO_BUILD_JOBS: 4
+
+jobs:
+  resolve:
+    name: Resolve channel metadata
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      channel: ${{ steps.metadata.outputs.channel }}
+      base_version: ${{ steps.metadata.outputs.base_version }}
+      version: ${{ steps.metadata.outputs.version }}
+      tag: ${{ steps.metadata.outputs.tag }}
+      commit: ${{ steps.metadata.outputs.commit }}
+      release_name: ${{ steps.metadata.outputs.release_name }}
+      manifest: ${{ steps.metadata.outputs.manifest }}
+      publish: ${{ steps.flags.outputs.publish }}
+      include_mobile: ${{ steps.flags.outputs.include_mobile }}
+      upload_mobile: ${{ steps.flags.outputs.upload_mobile }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31
+      - id: flags
+        name: Validate trusted release source
+        env:
+          RELEASE_CHANNEL: ${{ inputs.channel || 'nightly' }}
+          RELEASE_VERSION: ${{ inputs.version || '' }}
+          SHOULD_PUBLISH: ${{ github.event_name == 'schedule' || inputs.publish == true }}
+          INCLUDE_MOBILE: ${{ github.event_name == 'schedule' || inputs.include_mobile == true }}
+          UPLOAD_MOBILE: ${{ github.event_name == 'schedule' || inputs.publish_mobile == true }}
+        run: |
+          set -euo pipefail
+          case "$RELEASE_CHANNEL" in nightly|preview|stable) ;; *) echo "unsupported release channel" >&2; exit 1 ;; esac
+          if [[ "$RELEASE_CHANNEL" == stable && -z "$RELEASE_VERSION" ]]; then
+            echo 'The stable channel requires an explicit version.' >&2
+            exit 1
+          fi
+          if [[ "$SHOULD_PUBLISH" == true && "$GITHUB_REF" != refs/heads/main ]]; then
+            echo 'Published releases must be dispatched from main.' >&2
+            exit 1
+          fi
+          if [[ "$INCLUDE_MOBILE" == true && "$GITHUB_REF" != refs/heads/main ]]; then
+            echo 'Signed mobile builds must be requested from main.' >&2
+            exit 1
+          fi
+          if [[ "$UPLOAD_MOBILE" == true && "$INCLUDE_MOBILE" != true ]]; then
+            echo 'publish-mobile requires include-mobile.' >&2
+            exit 1
+          fi
+          {
+            printf 'publish=%s\n' "$SHOULD_PUBLISH"
+            printf 'include_mobile=%s\n' "$INCLUDE_MOBILE"
+            printf 'upload_mobile=%s\n' "$UPLOAD_MOBILE"
+          } >> "$GITHUB_OUTPUT"
+      - id: metadata
+        name: Resolve pure release metadata
+        env:
+          RELEASE_CHANNEL: ${{ inputs.channel || 'nightly' }}
+          RELEASE_VERSION: ${{ inputs.version || '' }}
+          RELEASE_SHA: ${{ github.sha }}
+          RELEASE_RUN_NUMBER: ${{ github.run_number }}
+          RELEASE_PUBLISH: ${{ steps.flags.outputs.publish }}
+        run: |
+          set -euo pipefail
+          args=(
+            --channel "$RELEASE_CHANNEL"
+            --date "$(date -u +%Y%m%d)"
+            --run-number "$RELEASE_RUN_NUMBER"
+            --sha "$RELEASE_SHA"
+            --build-time "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            --output release/metadata.json
+            --github-output
+          )
+          if [[ -n "$RELEASE_VERSION" ]]; then args+=(--version "$RELEASE_VERSION"); fi
+          if [[ "$RELEASE_PUBLISH" == true ]]; then
+            args+=(--repository "$GITHUB_REPOSITORY")
+          else
+            args+=(--repository '')
+          fi
+          scripts/release-metadata.sh "${args[@]}"
+          jq -e --arg sha "$RELEASE_SHA" '.commit == $sha' release/metadata.json >/dev/null
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: release-metadata
+          path: release/metadata.json
+          if-no-files-found: error
+          retention-days: 14
+
+  toolchain:
+    name: Resolve pinned Rust toolchain
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31
+      - id: versions
+        run: |
+          echo "rust=$(nix eval --raw .#devShells.x86_64-linux.native.RUST_TOOLCHAIN_VERSION)" >> "$GITHUB_OUTPUT"
+    outputs:
+      rust: ${{ steps.versions.outputs.rust }}
+
+  host_linux:
+    name: Host Linux
+    needs: resolve
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      APP_RELEASE_CHANNEL: ${{ needs.resolve.outputs.channel }}
+      APP_UPDATE_VERSION: ${{ needs.resolve.outputs.version }}
+      APP_RELEASE_METADATA_URL: ${{ needs.resolve.outputs.publish == 'true' && format('https://github.com/{0}/releases/download/{1}/{2}', github.repository, needs.resolve.outputs.tag, needs.resolve.outputs.manifest) || '' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          ref: ${{ needs.resolve.outputs.commit }}
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          cmd-format: nix develop .#native --command {0}
+          key: release-linux-${{ hashFiles('flake.lock', 'Cargo.lock') }}
+      - name: Build pinned Host binaries
+        run: nix develop .#native --command cargo build --locked --release -p host-daemon -p bex-process -p bex-desktop
+      - name: Stage Host license
+        run: cp crates/host-daemon/src/claude/sdk/SDK-LICENSE.md target/release/Claude-Agent-SDK-LICENSE.md
+      - name: Package Host artifact
+        run: |
+          nix develop .#native --command scripts/package-host.sh linux x86_64 release-assets target
+          nix develop .#native --command scripts/package-native-desktop.sh linux x86_64 release-assets target
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: release-assets-linux
+          path: release-assets/*
+          if-no-files-found: error
+          retention-days: 14
+
+  host_windows:
+    name: Host Windows
+    needs: [resolve, toolchain]
+    runs-on: windows-2025
+    timeout-minutes: 60
+    env:
+      APP_RELEASE_CHANNEL: ${{ needs.resolve.outputs.channel }}
+      APP_UPDATE_VERSION: ${{ needs.resolve.outputs.version }}
+      APP_RELEASE_METADATA_URL: ${{ needs.resolve.outputs.publish == 'true' && format('https://github.com/{0}/releases/download/{1}/{2}', github.repository, needs.resolve.outputs.tag, needs.resolve.outputs.manifest) || '' }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          ref: ${{ needs.resolve.outputs.commit }}
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: ${{ needs.toolchain.outputs.rust }}
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          key: release-windows-${{ hashFiles('Cargo.lock') }}
+      - name: Build pinned Host and desktop binaries
+        run: cargo build --locked --release -p host-daemon -p bex-process -p bex-desktop
+      - name: Stage Host license
+        run: cp crates/host-daemon/src/claude/sdk/SDK-LICENSE.md target/release/Claude-Agent-SDK-LICENSE.md
+      - name: Verify external Node runtime requirement
+        run: node --version
+      - name: Package Host artifact
+        run: |
+          scripts/package-host.sh windows x86_64 release-assets target
+          scripts/package-native-desktop.sh windows x86_64 release-assets target
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: release-assets-windows
+          path: release-assets/*
+          if-no-files-found: error
+          retention-days: 14
+
+  host_macos_desktop:
+    name: Host and desktop macOS
+    needs: resolve
+    if: github.ref == 'refs/heads/main'
+    runs-on: macos-26
+    timeout-minutes: 90
+    env:
+      APP_RELEASE_CHANNEL: ${{ needs.resolve.outputs.channel }}
+      APP_UPDATE_VERSION: ${{ needs.resolve.outputs.version }}
+      APP_RELEASE_METADATA_URL: ${{ needs.resolve.outputs.publish == 'true' && format('https://github.com/{0}/releases/download/{1}/{2}', github.repository, needs.resolve.outputs.tag, needs.resolve.outputs.manifest) || '' }}
+      APP_XCODE_DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+      MACOS_SIGNING_CERTIFICATE_BASE64: ${{ secrets.MACOS_SIGNING_CERTIFICATE_BASE64 }}
+      MACOS_SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_SIGNING_CERTIFICATE_PASSWORD }}
+      APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+      APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+      APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          ref: ${{ needs.resolve.outputs.commit }}
+      - name: Select pinned Xcode
+        run: |
+          export DEVELOPER_DIR="$APP_XCODE_DEVELOPER_DIR"
+          test -d "$DEVELOPER_DIR"
+          xcodebuild -version
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          cmd-format: nix develop . --command {0}
+          key: release-macos-${{ hashFiles('flake.lock', 'Cargo.lock') }}
+      - name: Prepare ephemeral macOS signing keychain
+        run: scripts/prepare-macos-signing.sh
+      - name: Build signed Host and desktop
+        env:
+          APP_RELEASE_VERSION: ${{ needs.resolve.outputs.base_version }}
+          APP_BUILD_NUMBER: ${{ github.run_number }}
+        run: |
+          set -euo pipefail
+          nix develop . --command scripts/build-macos.sh host
+          nix develop . --command scripts/build-macos.sh desktop
+      - name: Package Host and desktop artifacts
+        env:
+          RELEASE_VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          nix develop . --command scripts/package-host.sh macos arm64 release-assets target
+          scripts/package-macos-desktop.sh "$RELEASE_VERSION" release-assets target/Bex.app
+      - name: Require notarization credentials for published builds
+        if: needs.resolve.outputs.publish == 'true'
+        run: |
+          set -euo pipefail
+          : "${APPLE_API_KEY_P8:?APPLE_API_KEY_P8 is required for a published macOS build}"
+          : "${APPLE_API_KEY_ID:?APPLE_API_KEY_ID is required for a published macOS build}"
+          : "${APPLE_API_ISSUER_ID:?APPLE_API_ISSUER_ID is required for a published macOS build}"
+      - name: Notarize desktop when App Store credentials are configured
+        if: ${{ needs.resolve.outputs.publish == 'true' && env.APPLE_API_KEY_P8 != '' && env.APPLE_API_KEY_ID != '' && env.APPLE_API_ISSUER_ID != '' }}
+        run: scripts/notarize-macos.sh release-assets/desktop-macos-arm64.dmg
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: release-assets-macos
+          path: release-assets/*
+          if-no-files-found: error
+          retention-days: 14
+      - name: Remove macOS release credentials and keychain
+        if: always()
+        run: scripts/cleanup-macos-release.sh
+
+  mobile_android:
+    name: Android release artifact
+    needs: resolve
+    if: needs.resolve.outputs.include_mobile == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      ANDROID_SIGNING_KEYSTORE_BASE64: ${{ secrets.ANDROID_SIGNING_KEYSTORE_BASE64 }}
+      ANDROID_RELEASE_KEY_ALIAS: ${{ secrets.ANDROID_RELEASE_KEY_ALIAS }}
+      ANDROID_RELEASE_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEYSTORE_PASSWORD }}
+      ANDROID_RELEASE_KEY_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEY_PASSWORD }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          ref: ${{ needs.resolve.outputs.commit }}
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31
+      - uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6
+        env:
+          GRADLE_USER_HOME: ${{ runner.temp }}/gradle
+        with:
+          cache-provider: basic
+          cache-read-only: ${{ github.event_name == 'pull_request' }}
+      - name: Prepare Android signing
+        run: scripts/prepare-android-signing.sh
+      - name: Build signed Android bundle and APK
+        env:
+          GRADLE_USER_HOME: ${{ runner.temp }}/gradle
+          ANDROID_USER_HOME: ${{ runner.temp }}/android
+          RELEASE_VERSION: ${{ needs.resolve.outputs.version }}
+          RELEASE_CODE: ${{ github.run_number }}
+        run: >-
+          nix develop . --command ./gradlew
+          :apps:mobile:bundleRelease :apps:mobile:assembleRelease
+          "-PreleaseVersion=$RELEASE_VERSION" "-PreleaseCode=$RELEASE_CODE"
+          "-PreleaseChannel=${{ needs.resolve.outputs.channel }}"
+          --no-daemon --parallel --max-workers=4 --build-cache --console=plain
+      - name: Collect Android release artifacts
+        env:
+          RELEASE_VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          cp apps/mobile/build/outputs/bundle/release/mobile-release.aab "release-assets/android-$RELEASE_VERSION.aab"
+          apk=$(find apps/mobile/build/outputs/apk/release -maxdepth 1 -type f -name '*.apk' -print -quit)
+          [[ -n "$apk" ]] && cp "$apk" "release-assets/android-$RELEASE_VERSION.apk"
+          sha256sum release-assets/* > release-assets/SHA256SUMS
+      - name: Upload Android to Play internal track
+        if: needs.resolve.outputs.upload_mobile == 'true'
+        env:
+          PLAY_SERVICE_ACCOUNT_JSON: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
+          RELEASE_VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          : "${PLAY_SERVICE_ACCOUNT_JSON:?PLAY_SERVICE_ACCOUNT_JSON is required for Play upload}"
+          printf '%s' "$PLAY_SERVICE_ACCOUNT_JSON" > "$RUNNER_TEMP/play-service-account.json"
+          chmod 600 "$RUNNER_TEMP/play-service-account.json"
+      - uses: r0adkll/upload-google-play@7f5b759879c088a86faf85d18779f7f14e79a086 # v1.1.4
+        if: needs.resolve.outputs.upload_mobile == 'true'
+        with:
+          serviceAccountJson: ${{ runner.temp }}/play-service-account.json
+          packageName: dev.remoteagent.mobile
+          releaseFiles: release-assets/android-${{ needs.resolve.outputs.version }}.aab
+          releaseName: ${{ needs.resolve.outputs.version }}
+          tracks: internal
+          status: completed
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: release-assets-android
+          path: release-assets/*
+          if-no-files-found: error
+          retention-days: 14
+      - name: Remove Android release credentials
+        if: always()
+        run: scripts/cleanup-android-release.sh
+
+  mobile_ios:
+    name: iOS archive and TestFlight
+    needs: resolve
+    if: needs.resolve.outputs.include_mobile == 'true'
+    runs-on: macos-26
+    timeout-minutes: 120
+    env:
+      APP_XCODE_DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+      IOS_DISTRIBUTION_CERTIFICATE_BASE64: ${{ secrets.IOS_DISTRIBUTION_CERTIFICATE_BASE64 }}
+      IOS_DISTRIBUTION_CERTIFICATE_PASSWORD: ${{ secrets.IOS_DISTRIBUTION_CERTIFICATE_PASSWORD }}
+      IOS_PROVISIONING_PROFILE_BASE64: ${{ secrets.IOS_PROVISIONING_PROFILE_BASE64 }}
+      ASC_API_KEY_P8: ${{ secrets.ASC_API_KEY_P8 }}
+      ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+      ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+      IOS_UPLOAD: ${{ needs.resolve.outputs.upload_mobile == 'true' && '1' || '0' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          ref: ${{ needs.resolve.outputs.commit }}
+      - name: Select pinned Xcode
+        run: |
+          export DEVELOPER_DIR="$APP_XCODE_DEVELOPER_DIR"
+          test -d "$DEVELOPER_DIR"
+          xcodebuild -version
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31
+      - name: Prepare ephemeral iOS signing keychain
+        run: scripts/prepare-ios-signing.sh
+      - name: Prepare App Store Connect API key file
+        if: env.IOS_UPLOAD == '1'
+        run: |
+          set -euo pipefail
+          : "${ASC_API_KEY_P8:?ASC_API_KEY_P8 is required for TestFlight upload}"
+          [[ "$ASC_KEY_ID" =~ ^[A-Za-z0-9._-]+$ ]] || { echo 'ASC_KEY_ID contains unsupported path characters' >&2; exit 1; }
+          key_dir="$HOME/.appstoreconnect/private_keys"
+          mkdir -p "$key_dir"
+          key_path="$key_dir/AuthKey_${ASC_KEY_ID}.p8"
+          printf '%s' "$ASC_API_KEY_P8" > "$key_path"
+          chmod 600 "$key_path"
+          printf 'ASC_API_KEY_PATH=%s\n' "$key_path" >> "$GITHUB_ENV"
+      - name: Archive, export, and optionally upload TestFlight build
+        env:
+          RELEASE_VERSION: ${{ needs.resolve.outputs.base_version }}
+          RELEASE_UPDATE_VERSION: ${{ needs.resolve.outputs.version }}
+          RELEASE_CHANNEL: ${{ needs.resolve.outputs.channel }}
+          RELEASE_BUILD_NUMBER: ${{ github.run_number }}
+        run: |
+          set -euo pipefail
+          scripts/release-ios.sh \
+            "$RUNNER_TEMP/mobile.xcarchive" \
+            "$RUNNER_TEMP/mobile-derived-data" \
+            release-assets \
+            MARKETING_VERSION="$RELEASE_VERSION" \
+            APP_UPDATE_VERSION="$RELEASE_UPDATE_VERSION" \
+            APP_RELEASE_CHANNEL="$RELEASE_CHANNEL" \
+            CURRENT_PROJECT_VERSION="$RELEASE_BUILD_NUMBER"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: release-assets-ios
+          path: release-assets/*
+          if-no-files-found: error
+          retention-days: 14
+      - name: Remove iOS release credentials and keychain
+        if: always()
+        run: scripts/cleanup-ios-release.sh
+
+  publish:
+    name: Publish GitHub channel release
+    needs: [resolve, host_linux, host_windows, host_macos_desktop, mobile_android, mobile_ios]
+    if: >-
+      always() && needs.resolve.outputs.publish == 'true' &&
+      needs.host_linux.result == 'success' &&
+      needs.host_windows.result == 'success' &&
+      needs.host_macos_desktop.result == 'success' &&
+      (needs.mobile_android.result == 'success' || needs.mobile_android.result == 'skipped') &&
+      (needs.mobile_ios.result == 'success' || needs.mobile_ios.result == 'skipped')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          ref: ${{ needs.resolve.outputs.commit }}
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: release-assets-*
+          path: release-assets
+          merge-multiple: true
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: release-metadata
+          path: release
+      - name: Build channel manifest and publish the concrete release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ANDROID_STORE_URL: ${{ vars.ANDROID_STORE_URL || '' }}
+          IOS_STORE_URL: ${{ vars.IOS_STORE_URL || '' }}
+          ANDROID_UPLOAD_SUCCEEDED: ${{ needs.resolve.outputs.upload_mobile == 'true' && needs.mobile_android.result == 'success' }}
+          IOS_UPLOAD_SUCCEEDED: ${{ needs.resolve.outputs.upload_mobile == 'true' && needs.mobile_ios.result == 'success' }}
+        run: |
+          set -euo pipefail
+          metadata=release/metadata.json
+          channel=$(jq -er .channel "$metadata")
+          tag=$(jq -er .tag "$metadata")
+          commit=$(jq -er .commit "$metadata")
+          release_name=$(jq -er .release_name "$metadata")
+          manifest=$(jq -er .manifest "$metadata")
+          mapfile -t assets < <(find release-assets -maxdepth 1 -type f -print | sort)
+          ((${#assets[@]} > 0)) || { echo 'no release artifacts were produced' >&2; exit 1; }
+          native_updates=$(jq -cn \
+            --arg android "$ANDROID_STORE_URL" \
+            --arg ios "$IOS_STORE_URL" \
+            --arg android_ok "$ANDROID_UPLOAD_SUCCEEDED" \
+            --arg ios_ok "$IOS_UPLOAD_SUCCEEDED" \
+            '{}
+             + (if $android_ok == "true" and $android != "" then {android: {url: $android}} else {} end)
+             + (if $ios_ok == "true" and $ios != "" then {ios: {url: $ios}} else {} end)')
+          jq --argjson native_updates "$native_updates" \
+            '.native_updates = $native_updates' "$metadata" > "$metadata.tmp"
+          mv "$metadata.tmp" "$metadata"
+          scripts/release-manifest.sh "$metadata" "release-assets/$manifest" "${assets[@]}"
+          printf 'Channel: %s\nVersion: %s\nCommit: %s\n\nArtifacts were built from this exact commit.\n' \
+            "$channel" "$(jq -er .version "$metadata")" "$commit" > release-notes.md
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$tag" --repo "$GITHUB_REPOSITORY" --clobber release-assets/*
+          elif [[ "$channel" == stable ]]; then
+            gh release create "$tag" --repo "$GITHUB_REPOSITORY" --target "$commit" \
+              --title "$release_name" --notes-file release-notes.md --latest release-assets/*
+          else
+            gh release create "$tag" --repo "$GITHUB_REPOSITORY" --target "$commit" \
+              --title "$release_name" --notes-file release-notes.md --prerelease release-assets/*
+          fi

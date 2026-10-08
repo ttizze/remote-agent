@@ -36,6 +36,340 @@ pub struct HostStatus {
     pub provider_errors: Option<Map<String, Value>>,
 }
 
+/// The release train an updater follows. The Host owns the configured channel;
+/// clients only request a change through the update RPC.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum UpdateChannel {
+    Nightly,
+    Preview,
+    Stable,
+}
+
+/// The process or package an update transaction addresses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum UpdateTarget {
+    Host,
+    Desktop,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum UpdateStatus {
+    Disabled,
+    Idle,
+    Checking,
+    Available,
+    Downloading,
+    Downloaded,
+    Installing,
+    UpToDate,
+    Error,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum UpdateErrorContext {
+    Check,
+    Download,
+    Install,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReleaseNoteGroup {
+    pub title: String,
+    pub items: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateState {
+    pub enabled: bool,
+    pub status: UpdateStatus,
+    pub target: UpdateTarget,
+    pub channel: UpdateChannel,
+    pub current_version: String,
+    pub available_version: Option<String>,
+    pub downloaded_version: Option<String>,
+    pub release_notes: Vec<ReleaseNoteGroup>,
+    pub omitted_release_count: u32,
+    pub download_percent: Option<u8>,
+    pub checked_at: Option<String>,
+    pub message: Option<String>,
+    pub error_context: Option<UpdateErrorContext>,
+    pub can_retry: bool,
+    pub restart_required: bool,
+    pub update_url: Option<String>,
+    pub download_url: Option<String>,
+    pub artifact_name: Option<String>,
+}
+
+impl UpdateState {
+    pub fn initial(
+        target: UpdateTarget,
+        current_version: String,
+        channel: UpdateChannel,
+        enabled: bool,
+    ) -> Self {
+        Self {
+            enabled,
+            status: if enabled {
+                UpdateStatus::Idle
+            } else {
+                UpdateStatus::Disabled
+            },
+            target,
+            channel,
+            current_version,
+            available_version: None,
+            downloaded_version: None,
+            release_notes: Vec::new(),
+            omitted_release_count: 0,
+            download_percent: None,
+            checked_at: None,
+            message: None,
+            error_context: None,
+            can_retry: false,
+            restart_required: false,
+            update_url: None,
+            download_url: None,
+            artifact_name: None,
+        }
+    }
+
+    /// A check starts without discarding a verified download. A downloaded
+    /// package remains installable if the release endpoint is temporarily
+    /// unavailable.
+    pub fn check_started(&self, checked_at: Option<String>) -> Self {
+        Self {
+            status: UpdateStatus::Checking,
+            checked_at: checked_at.or_else(|| self.checked_at.clone()),
+            message: None,
+            error_context: None,
+            download_percent: self.downloaded_version.as_ref().map(|_| 100),
+            can_retry: false,
+            ..self.clone()
+        }
+    }
+
+    pub fn check_failed(&self, message: String, checked_at: Option<String>) -> Self {
+        if self.downloaded_version.is_some() {
+            return Self {
+                status: UpdateStatus::Downloaded,
+                checked_at: checked_at.or_else(|| self.checked_at.clone()),
+                message: None,
+                error_context: None,
+                download_percent: Some(100),
+                can_retry: true,
+                ..self.clone()
+            };
+        }
+        Self {
+            status: UpdateStatus::Error,
+            checked_at: checked_at.or_else(|| self.checked_at.clone()),
+            message: Some(message),
+            error_context: Some(UpdateErrorContext::Check),
+            download_percent: None,
+            can_retry: true,
+            ..self.clone()
+        }
+    }
+
+    pub fn download_started(&self) -> Result<Self, String> {
+        if self.available_version.is_none() {
+            return Err("cannot download without an available update".into());
+        }
+        Ok(Self {
+            status: UpdateStatus::Downloading,
+            download_percent: Some(0),
+            message: None,
+            error_context: None,
+            can_retry: false,
+            ..self.clone()
+        })
+    }
+
+    pub fn download_progress(&self, percent: u8) -> Result<Self, String> {
+        if percent > 100 {
+            return Err("download progress must be between 0 and 100".into());
+        }
+        Ok(Self {
+            status: UpdateStatus::Downloading,
+            download_percent: Some(percent),
+            message: None,
+            error_context: None,
+            ..self.clone()
+        })
+    }
+
+    pub fn download_finished(&self, version: String) -> Self {
+        Self {
+            status: UpdateStatus::Downloaded,
+            available_version: Some(version.clone()),
+            downloaded_version: Some(version),
+            download_percent: Some(100),
+            message: None,
+            error_context: None,
+            can_retry: true,
+            ..self.clone()
+        }
+    }
+
+    pub fn download_failed(&self, message: String) -> Self {
+        Self {
+            status: if self.available_version.is_some() {
+                UpdateStatus::Available
+            } else {
+                UpdateStatus::Error
+            },
+            message: Some(message),
+            error_context: Some(UpdateErrorContext::Download),
+            can_retry: self.available_version.is_some(),
+            download_percent: None,
+            ..self.clone()
+        }
+    }
+
+    pub fn install_started(&self) -> Result<Self, String> {
+        if self.status != UpdateStatus::Downloaded
+            || self.downloaded_version.is_none()
+            || self.restart_required
+        {
+            return Err("cannot install without a downloaded update".into());
+        }
+        Ok(Self {
+            status: UpdateStatus::Installing,
+            message: None,
+            error_context: None,
+            can_retry: false,
+            ..self.clone()
+        })
+    }
+
+    pub fn install_finished(&self) -> Self {
+        Self {
+            status: UpdateStatus::Downloaded,
+            restart_required: true,
+            message: None,
+            error_context: None,
+            can_retry: true,
+            ..self.clone()
+        }
+    }
+
+    pub fn install_failed(&self, message: String) -> Self {
+        Self {
+            status: UpdateStatus::Downloaded,
+            message: Some(message),
+            error_context: Some(UpdateErrorContext::Install),
+            can_retry: true,
+            ..self.clone()
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateStatusRequest {
+    pub target: UpdateTarget,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateCheckRequest {
+    pub target: UpdateTarget,
+    pub current_version: String,
+    pub channel: UpdateChannel,
+    pub platform: String,
+    pub architecture: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateActionRequest {
+    pub target: UpdateTarget,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateChannelRequest {
+    pub target: UpdateTarget,
+    pub channel: UpdateChannel,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NativeUpdatePlatform {
+    Android,
+    Ios,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeUpdateRequest {
+    pub platform: NativeUpdatePlatform,
+    pub current_version: String,
+    pub channel: UpdateChannel,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeUpdateState {
+    pub platform: NativeUpdatePlatform,
+    pub channel: UpdateChannel,
+    pub current_version: String,
+    pub latest_version: Option<String>,
+    pub update_available: bool,
+    pub store_url: Option<String>,
+    pub release_notes: Vec<ReleaseNoteGroup>,
+    pub checked_at: Option<String>,
+    pub message: Option<String>,
+}
+
+#[cfg(test)]
+mod update_tests {
+    use super::*;
+
+    #[test]
+    fn a_download_survives_a_failed_recheck_and_install_requests_restart() {
+        let state = UpdateState::initial(
+            UpdateTarget::Host,
+            "1.0.0-nightly.1".into(),
+            UpdateChannel::Nightly,
+            true,
+        );
+        let available = UpdateState {
+            available_version: Some("1.0.0-nightly.2".into()),
+            status: UpdateStatus::Available,
+            ..state
+        };
+        let downloaded = available.download_finished("1.0.0-nightly.2".into());
+        let retained = downloaded.check_failed("offline".into(), Some("now".into()));
+        assert_eq!(retained.status, UpdateStatus::Downloaded);
+        assert_eq!(
+            retained.downloaded_version.as_deref(),
+            Some("1.0.0-nightly.2")
+        );
+        let installing = retained.install_started().unwrap();
+        assert_eq!(installing.status, UpdateStatus::Installing);
+        assert!(installing.install_finished().restart_required);
+    }
+
+    #[test]
+    fn download_progress_is_bounded() {
+        let state = UpdateState::initial(
+            UpdateTarget::Desktop,
+            "1.0.0".into(),
+            UpdateChannel::Stable,
+            true,
+        );
+        assert!(state.download_progress(101).is_err());
+    }
+}
+
+
 /// The stable identity and capabilities of the Host serving a connection.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

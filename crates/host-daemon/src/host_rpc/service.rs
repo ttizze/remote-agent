@@ -103,6 +103,7 @@ struct ServiceInner {
     resources: Arc<HostResources>,
     connections: Connections,
     awareness: AwarenessRegistry,
+    updater: crate::UpdateManager,
     started: AtomicBool,
 }
 
@@ -297,6 +298,7 @@ impl HostRpcService {
         codex: Result<Arc<CodexAppServer>, String>,
         projects: ProjectStore,
     ) -> anyhow::Result<Self> {
+        let update_dir = projects.path().with_file_name("updates");
         let connections = Connections::new();
         let state_path = projects.path().to_owned();
         let terminal_history = projects.path().with_file_name("terminals");
@@ -362,6 +364,7 @@ impl HostRpcService {
                 resources,
                 connections,
                 awareness: AwarenessRegistry::default(),
+                updater: crate::UpdateManager::new(update_dir),
                 started: AtomicBool::new(false),
             }),
         })
@@ -1203,6 +1206,39 @@ impl HostRpcService {
             environment: descriptor,
             activities,
             updated_at_ms,
+        }
+    }
+
+    pub(crate) async fn update(&self, call: &Call) -> Result<Body, Failure> {
+        let updater = &self.inner.updater;
+        match call {
+            Call::ReadUpdateStatus(request) => Ok(updater.status(request).await.into()),
+            Call::CheckUpdate(request) => updater
+                .check(request)
+                .await
+                .map(Into::into)
+                .map_err(|error| Failure::new("update_check_failed", error)),
+            Call::DownloadUpdate(request) => updater
+                .download(request)
+                .await
+                .map(Into::into)
+                .map_err(|error| Failure::new("update_download_failed", error)),
+            Call::InstallUpdate(request) => updater
+                .install(request)
+                .await
+                .map(Into::into)
+                .map_err(|error| Failure::new("update_install_failed", error)),
+            Call::SetUpdateChannel(request) => updater
+                .set_channel(request)
+                .await
+                .map(Into::into)
+                .map_err(|error| Failure::new("update_channel_failed", error)),
+            Call::ReadNativeUpdate(request) => updater
+                .native(request)
+                .await
+                .map(Into::into)
+                .map_err(|error| Failure::new("native_update_check_failed", error)),
+            _ => Err(Failure::new("invalid_method", "not an update request")),
         }
     }
     /// The keybindings in effect, then each change; a subscriber that fell
@@ -2197,6 +2233,12 @@ impl HostRpcService {
                     .map_err(|error| Failure::new("diagnostic_write_failed", error))?;
                     agent_protocol::models::Empty {}.into()
                 }
+                Call::ReadUpdateStatus(_)
+                | Call::CheckUpdate(_)
+                | Call::DownloadUpdate(_)
+                | Call::InstallUpdate(_)
+                | Call::SetUpdateChannel(_)
+                | Call::ReadNativeUpdate(_) => self.update(request).await?,
                 Call::ReadBackground(_) => resources.background.snapshot().await.into(),
                 Call::ReportClientActivity(params) => resources
                     .background

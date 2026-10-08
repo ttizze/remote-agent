@@ -383,6 +383,12 @@ impl HostRuntime {
             message,
             Call::Pair(_)
                 | Call::HostStatus(_)
+                | Call::ReadUpdateStatus(_)
+                | Call::CheckUpdate(_)
+                | Call::DownloadUpdate(_)
+                | Call::InstallUpdate(_)
+                | Call::SetUpdateChannel(_)
+                | Call::ReadNativeUpdate(_)
                 | Call::Invite(_)
                 | Call::Revoke(_)
                 | Call::ListRemotes(_)
@@ -415,6 +421,14 @@ impl HostRuntime {
     }
     async fn manage(&self, call: &Call) -> Result<Body> {
         match call {
+            Call::ReadUpdateStatus(_)
+            | Call::CheckUpdate(_)
+            | Call::DownloadUpdate(_)
+            | Call::InstallUpdate(_)
+            | Call::SetUpdateChannel(_)
+            | Call::ReadNativeUpdate(_) => {
+                self.service.update(call).await.map_err(anyhow::Error::msg)
+            }
             Call::HostStatus(_) => {
                 let record = self.credentials.record.lock().await;
                 Ok(HostStatus {

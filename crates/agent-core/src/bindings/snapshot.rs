@@ -254,6 +254,12 @@ impl Snapshot {
     pub fn account_login(&self) -> Option<AccountLogin> {
         self.account_login.clone()
     }
+    pub fn updates(&self) -> Vec<agent_protocol::models::UpdateState> {
+        self.updates.values().cloned().collect()
+    }
+    pub fn native_update(&self) -> Option<agent_protocol::models::NativeUpdateState> {
+        self.native_update.clone()
+    }
     pub fn git_status(&self, cwd: String) -> Option<GitStatus> {
         self.git.status.get(&cwd).map(GitStatus::from)
     }

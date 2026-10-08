@@ -7,11 +7,11 @@ case "${1:-desktop}" in
     host|desktop) product=${1:-desktop} ;;
     *) echo "usage: $0 [host|desktop]" >&2; exit 2 ;;
 esac
-identity=${BEX_CODE_SIGN_IDENTITY:-}
+identity=${APP_CODE_SIGN_IDENTITY:-}
 if [[ -z $identity ]]; then
     identities=$(/usr/bin/security find-identity -v -p codesigning | awk '/"Apple Development:|"Developer ID Application:/ {print $2}')
     [[ -n $identities && $identities != *$'\n'* ]] || {
-        echo 'Set BEX_CODE_SIGN_IDENTITY to one Apple Development or Developer ID Application certificate.' >&2
+        echo 'Set APP_CODE_SIGN_IDENTITY to one Apple Development or Developer ID Application certificate.' >&2
         exit 1
     }
     identity=$identities
@@ -61,6 +61,12 @@ cp "$target/release/bex-desktop" "$executables/Bex"
 cp "$target/release/host-daemon" "$executables/host-daemon"
 cp "$target/release/bex-provider-supervisor" "$executables/bex-provider-supervisor"
 cp apps/desktop/macos/Info.plist "$bundle/Contents/Info.plist"
+if [[ -n ${APP_RELEASE_VERSION:-} ]]; then
+    /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $APP_RELEASE_VERSION" "$bundle/Contents/Info.plist"
+fi
+if [[ -n ${APP_BUILD_NUMBER:-} ]]; then
+    /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $APP_BUILD_NUMBER" "$bundle/Contents/Info.plist"
+fi
 sign "$executables/Bex"
 sign --identifier app.bex.provider-supervisor "$executables/bex-provider-supervisor"
 sign --identifier app.bex.host "$executables/host-daemon"

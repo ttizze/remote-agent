@@ -86,6 +86,20 @@ tasks
 
 tasks.matching { it.name.matches(Regex("merge.*JniLibFolders")) }.configureEach { dependsOn(buildAgentAndroid) }
 
+val releaseSigningValues = listOf(
+    providers.environmentVariable("ANDROID_RELEASE_KEYSTORE").orNull,
+    providers.environmentVariable("ANDROID_RELEASE_KEY_ALIAS").orNull,
+    providers.environmentVariable("ANDROID_RELEASE_KEYSTORE_PASSWORD").orNull,
+    providers.environmentVariable("ANDROID_RELEASE_KEY_PASSWORD").orNull,
+)
+val releaseSigningConfigured = releaseSigningValues.all { !it.isNullOrEmpty() }
+val releaseVersion = providers.gradleProperty("releaseVersion").orNull
+val releaseCode = providers.gradleProperty("releaseCode").orNull?.toIntOrNull()
+val releaseChannel = providers.gradleProperty("releaseChannel").orNull ?: "stable"
+require(releaseChannel in setOf("nightly", "preview", "stable")) {
+    "releaseChannel must be nightly, preview, or stable"
+}
+
 android {
     namespace = "dev.remoteagent.mobile"
     compileSdk = 37
@@ -93,14 +107,33 @@ android {
         applicationId = "dev.remoteagent.mobile"
         minSdk = 37
         targetSdk = 37
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = releaseCode ?: 1
+        versionName = releaseVersion ?: "0.1.0"
+        buildConfigField("String", "RELEASE_CHANNEL", "\"$releaseChannel\"")
+    }
+    if (releaseSigningConfigured) {
+        signingConfigs {
+            create("release") {
+                storeFile = file(releaseSigningValues[0]!!)
+                keyAlias = releaseSigningValues[1]
+                storePassword = releaseSigningValues[2]
+                keyPassword = releaseSigningValues[3]
+            }
+        }
+    }
+    buildTypes {
+        getByName("release") {
+            if (releaseSigningConfigured) signingConfig = signingConfigs.getByName("release")
+        }
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
-    buildFeatures { compose = true }
+    buildFeatures {
+        compose = true
+        buildConfig = true
+    }
     testOptions {
         unitTests.all {
             it.systemProperty("jna.library.path", rootProject.file("target/debug").absolutePath)

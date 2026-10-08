@@ -548,6 +548,10 @@ pub struct Snapshot {
     pub host_status: Option<crate::models::HostStatus>,
     /// The Host's current background activity and power policy snapshot.
     pub background_policy: Option<agent_protocol::background::BackgroundPolicySnapshot>,
+    /// The shared Host or desktop update transaction state.
+    pub updates: BTreeMap<crate::models::UpdateTarget, crate::models::UpdateState>,
+    /// The native app's store update surface, when a configured release link exists.
+    pub native_update: Option<crate::models::NativeUpdateState>,
     pub remote_hosts: Vec<crate::models::RemoteHost>,
     pub invitation: Option<crate::models::Invitation>,
     pub preferences: Preferences,
@@ -2174,6 +2178,25 @@ pub enum Intent {
         id: String,
     },
     LoadHostStatus,
+    LoadUpdateStatus {
+        target: crate::models::UpdateTarget,
+    },
+    CheckUpdate {
+        request: crate::models::UpdateCheckRequest,
+    },
+    DownloadUpdate {
+        target: crate::models::UpdateTarget,
+    },
+    InstallUpdate {
+        target: crate::models::UpdateTarget,
+    },
+    SetUpdateChannel {
+        target: crate::models::UpdateTarget,
+        channel: crate::models::UpdateChannel,
+    },
+    LoadNativeUpdate {
+        request: crate::models::NativeUpdateRequest,
+    },
     LoadRemoteHosts,
     LoadHostManagement,
     PairRemoteHost {

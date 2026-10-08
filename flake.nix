@@ -83,7 +83,7 @@
             ANDROID_HOME = "${androidSdk}/libexec/android-sdk";
             ANDROID_SDK_ROOT = "${androidSdk}/libexec/android-sdk";
             shellHook = pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isDarwin ''
-              export DEVELOPER_DIR="''${BEX_XCODE_DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}"
+              export DEVELOPER_DIR="''${APP_XCODE_DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}"
             '';
           };
           kani = pkgs.mkShell {
@@ -142,8 +142,8 @@
               # build scans this host much more slowly under Simulator load.
               export PATH="/usr/sbin:$PATH"
               # The Nix compiler setup overwrites DEVELOPER_DIR with its own SDK.
-              if [ -d "''${BEX_XCODE_DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}" ]; then
-                export DEVELOPER_DIR="''${BEX_XCODE_DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}"
+              if [ -d "''${APP_XCODE_DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}" ]; then
+                export DEVELOPER_DIR="''${APP_XCODE_DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}"
                 unset SDKROOT
                 # Xcode expects to drive clang itself. Nix's LD override makes
                 # xcodebuild invoke ld directly with clang-only -Xlinker flags.

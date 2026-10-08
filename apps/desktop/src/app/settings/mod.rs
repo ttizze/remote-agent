@@ -1,6 +1,7 @@
 //! Settings: the navigation that replaces the sidebar, and its pages
 //! (Project, General, Appearance, Keybindings, Providers, Connections,
 //! Archive).
+mod about;
 mod add_project;
 mod appearance;
 mod archived;
@@ -282,7 +283,7 @@ impl Desktop {
             SettingsPage::Archived => self.render_archived(window, cx),
             SettingsPage::ScheduledTasks => self.render_scheduled_tasks(window, cx),
             SettingsPage::Usage => self.render_usage(window, cx),
-            SettingsPage::About => self.render_about(),
+            SettingsPage::About => self.render_about(cx),
             SettingsPage::Diagnostics => self.render_diagnostics(),
             SettingsPage::Licenses => self.render_licenses(),
         };
@@ -517,30 +518,26 @@ impl Desktop {
             SettingsPage::Usage => self.perform(Intent::LoadUsageSummary {
                 input: usage::summary_input(&self.snapshot),
             }),
-            SettingsPage::About
-            | SettingsPage::Diagnostics
-            | SettingsPage::Licenses => {}
+            SettingsPage::About => {
+                self.perform(Intent::LoadUpdateStatus {
+                    target: agent_protocol::models::UpdateTarget::Host,
+                });
+                self.perform(Intent::LoadUpdateStatus {
+                    target: agent_protocol::models::UpdateTarget::Desktop,
+                });
+                let request = super::about::check_request(
+                    agent_protocol::models::UpdateTarget::Host,
+                    super::about::default_channel(),
+                );
+                self.perform(Intent::CheckUpdate { request });
+                let request = super::about::check_request(
+                    agent_protocol::models::UpdateTarget::Desktop,
+                    super::about::default_channel(),
+                );
+                self.perform(Intent::CheckUpdate { request });
+            }
+            SettingsPage::Diagnostics | SettingsPage::Licenses => {}
         }
-    }
-
-    fn render_about(&self) -> AnyElement {
-        page_container(
-            896.,
-            vec![section(
-                Some("About".into()),
-                None,
-                None,
-                vec![
-                    Row::new("Version")
-                        .description(env!("CARGO_PKG_VERSION"))
-                        .render(),
-                    Row::new("Privacy")
-                        .description("The Host and clients keep conversation data in their local stores.")
-                        .render(),
-                ],
-            )
-            .into_any_element()],
-        )
     }
 
     fn render_diagnostics(&self) -> AnyElement {

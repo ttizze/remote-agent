@@ -9,7 +9,6 @@ mod dictation;
 mod favicon;
 mod github;
 mod git;
-mod github;
 mod host_identity;
 mod host_rpc;
 mod host_runtime;
@@ -22,6 +21,7 @@ mod repository;
 mod terminals;
 mod text_generation;
 mod usage;
+mod update;
 mod vcs;
 mod workspace_files;
 mod workspace_review;
@@ -35,6 +35,7 @@ pub use host_identity::{CredentialStore, FileKeyStore, HostCredentials, load_loc
 
 pub use host_rpc::service::ConversationSettings;
 pub use host_rpc::{HostRpcService, HostSession, SessionId};
+pub(crate) use update::UpdateManager;
 pub use projects::ProjectStore;
 
 mod visualize;

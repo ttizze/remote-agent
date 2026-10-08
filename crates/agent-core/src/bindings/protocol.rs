@@ -10,6 +10,97 @@ use agent_protocol::{
     },
 };
 #[uniffi::remote(Enum)]
+enum UpdateChannel {
+    Nightly,
+    Preview,
+    Stable,
+}
+#[uniffi::remote(Enum)]
+enum UpdateTarget {
+    Host,
+    Desktop,
+}
+#[uniffi::remote(Enum)]
+enum NativeUpdatePlatform {
+    Android,
+    Ios,
+}
+#[uniffi::remote(Enum)]
+enum UpdateStatus {
+    Disabled,
+    Idle,
+    Checking,
+    Available,
+    Downloading,
+    Downloaded,
+    Installing,
+    UpToDate,
+    Error,
+}
+#[uniffi::remote(Enum)]
+enum UpdateErrorContext {
+    Check,
+    Download,
+    Install,
+}
+#[uniffi::remote(Record)]
+struct ReleaseNoteGroup {
+    pub title: String,
+    pub items: Vec<String>,
+}
+#[uniffi::remote(Record)]
+struct UpdateState {
+    pub enabled: bool,
+    pub status: UpdateStatus,
+    pub target: UpdateTarget,
+    pub channel: UpdateChannel,
+    pub current_version: String,
+    pub available_version: Option<String>,
+    pub downloaded_version: Option<String>,
+    pub release_notes: Vec<ReleaseNoteGroup>,
+    pub omitted_release_count: u32,
+    pub download_percent: Option<u8>,
+    pub checked_at: Option<String>,
+    pub message: Option<String>,
+    pub error_context: Option<UpdateErrorContext>,
+    pub can_retry: bool,
+    pub restart_required: bool,
+    pub update_url: Option<String>,
+    pub download_url: Option<String>,
+    pub artifact_name: Option<String>,
+}
+#[uniffi::remote(Record)]
+struct NativeUpdateState {
+    pub platform: NativeUpdatePlatform,
+    pub channel: UpdateChannel,
+    pub current_version: String,
+    pub latest_version: Option<String>,
+    pub update_available: bool,
+    pub store_url: Option<String>,
+    pub release_notes: Vec<ReleaseNoteGroup>,
+    pub checked_at: Option<String>,
+    pub message: Option<String>,
+}
+#[uniffi::remote(Record)]
+struct UpdateCheckRequest {
+    pub target: UpdateTarget,
+    pub current_version: String,
+    pub channel: UpdateChannel,
+    pub platform: String,
+    pub architecture: String,
+}
+#[uniffi::remote(Record)]
+struct UpdateChannelRequest {
+    pub target: UpdateTarget,
+    pub channel: UpdateChannel,
+}
+#[uniffi::remote(Record)]
+struct NativeUpdateRequest {
+    pub platform: NativeUpdatePlatform,
+    pub current_version: String,
+    pub channel: UpdateChannel,
+}
+#[uniffi::remote(Enum)]
 enum WorktreeStatus {
     Unmerged,
     Merged,

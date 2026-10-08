@@ -182,7 +182,7 @@ impl Connections {
                         }
                     }
                     LocalHostState::Stopped if child.is_none() => {
-                        child = Some(start_host(&location.directory, isolated)?);
+                        child = Some(start_host(&location, isolated)?);
                     }
                     _ => {}
                 }
@@ -278,13 +278,22 @@ async fn discover_local_host() -> anyhow::Result<LocalHost> {
     .await?
 }
 
-fn start_host(directory: &std::path::Path, isolated: bool) -> anyhow::Result<std::process::Child> {
+fn start_host(location: &LocalHost, isolated: bool) -> anyhow::Result<std::process::Child> {
+    anyhow::ensure!(
+        matches!(&location.state, LocalHostState::Stopped),
+        "cannot start a Host while it is active"
+    );
+    let directory = &location.directory;
     let executable = std::env::var_os("BEX_HOST_DAEMON")
         .map(PathBuf::from)
         .map(Ok)
         .unwrap_or_else(|| {
             std::env::current_exe().map(|path| {
-                path.with_file_name(format!("host-daemon{}", std::env::consts::EXE_SUFFIX))
+                let bundled =
+                    path.with_file_name(format!("host-daemon{}", std::env::consts::EXE_SUFFIX));
+                resolve_installed_host_executable(directory)
+                    .unwrap_or(None)
+                    .unwrap_or(bundled)
             })
         })?;
     let mut command = Command::new(executable);
@@ -306,6 +315,351 @@ fn start_host(directory: &std::path::Path, isolated: bool) -> anyhow::Result<std
     }
     os::prepare_host(&mut command);
     command.spawn().map_err(Into::into)
+}
+
+/// Resolve a verified executable installed by the Host update owner. A
+/// malformed or unsafe marker is ignored and the caller keeps its bundled
+/// executable.
+fn resolve_installed_executable(
+    directory: &std::path::Path,
+    target: &str,
+    relative_executable: &std::path::Path,
+) -> anyhow::Result<Option<PathBuf>> {
+    let transaction = directory
+        .join("transactions")
+        .join(format!("{target}.json"));
+    let bytes = match std::fs::read(transaction) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let document: serde_json::Value = match serde_json::from_slice(&bytes) {
+        Ok(document) => document,
+        Err(_) => return Ok(None),
+    };
+    let state = document.get("state");
+    let restart_required = state
+        .and_then(|state| state.get("restartRequired"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    if !restart_required {
+        return Ok(None);
+    }
+    let Some(version) = state
+        .and_then(|state| state.get("downloadedVersion"))
+        .and_then(serde_json::Value::as_str)
+    else {
+        return Ok(None);
+    };
+    if version.is_empty()
+        || version == "."
+        || version == ".."
+        || version
+            .chars()
+            .any(|character| matches!(character, '/' | '\\' | '\0'))
+    {
+        return Ok(None);
+    }
+    let installed_root = directory.join("installed");
+    let target_root = installed_root.join(target);
+    let version_root = target_root.join(version);
+    let executable = version_root.join(relative_executable);
+    let installed_metadata = match std::fs::symlink_metadata(&installed_root) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let root_metadata = match std::fs::symlink_metadata(&target_root) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let version_metadata = match std::fs::symlink_metadata(&version_root) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    if !installed_metadata.is_dir()
+        || installed_metadata.file_type().is_symlink()
+        || !root_metadata.is_dir()
+        || root_metadata.file_type().is_symlink()
+        || !version_metadata.is_dir()
+        || version_metadata.file_type().is_symlink()
+    {
+        return Ok(None);
+    }
+    let mut current = version_root;
+    let mut components = relative_executable.components().peekable();
+    #[cfg(unix)]
+    let mut executable_metadata = None;
+    while let Some(component) = components.next() {
+        let std::path::Component::Normal(component) = component else {
+            return Ok(None);
+        };
+        current.push(component);
+        let metadata = match std::fs::symlink_metadata(&current) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        let is_executable = components.peek().is_none();
+        if metadata.file_type().is_symlink()
+            || (!is_executable && !metadata.is_dir())
+            || (is_executable && !metadata.is_file())
+        {
+            return Ok(None);
+        }
+        #[cfg(unix)]
+        if is_executable {
+            executable_metadata = Some(metadata);
+        }
+    }
+    let canonical_root = std::fs::canonicalize(&target_root)?;
+    let canonical_executable = std::fs::canonicalize(&executable)?;
+    if !canonical_executable.starts_with(&canonical_root) {
+        return Ok(None);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if executable_metadata
+            .expect("the executable path was checked above")
+            .permissions()
+            .mode()
+            & 0o111
+            == 0
+        {
+            return Ok(None);
+        }
+    }
+    Ok(Some(executable))
+}
+
+fn resolve_installed_host_executable(
+    directory: &std::path::Path,
+) -> anyhow::Result<Option<PathBuf>> {
+    let Some(executable) = resolve_installed_executable(
+        directory,
+        "host",
+        &PathBuf::from(format!("host-daemon{}", std::env::consts::EXE_SUFFIX)),
+    )?
+    else {
+        return Ok(None);
+    };
+    let supervisor = executable
+        .parent()
+        .expect("installed Host executable has a version directory")
+        .join(format!(
+            "bex-provider-supervisor{}",
+            std::env::consts::EXE_SUFFIX
+        ));
+    let metadata = std::fs::symlink_metadata(&supervisor).ok();
+    if !metadata
+        .as_ref()
+        .is_some_and(|metadata| metadata.is_file() && !metadata.file_type().is_symlink())
+    {
+        return Ok(None);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata
+            .expect("the supervisor path was checked above")
+            .permissions()
+            .mode()
+            & 0o111
+            == 0
+        {
+            return Ok(None);
+        }
+    }
+    Ok(Some(executable))
+}
+
+fn resolve_installed_desktop_executable(
+    directory: &std::path::Path,
+) -> anyhow::Result<Option<PathBuf>> {
+    #[cfg(target_os = "macos")]
+    let relative = PathBuf::from("Bex.app/Contents/MacOS/Bex");
+    #[cfg(not(target_os = "macos"))]
+    let relative = PathBuf::from(format!("desktop{}", std::env::consts::EXE_SUFFIX));
+    resolve_installed_executable(directory, "desktop", &relative)
+}
+
+/// Hand off to an installed Desktop update before the old application starts.
+/// The registry lock makes a running Host a safe stop condition: the bundled
+/// application remains in place until the Host and its active tasks have
+/// stopped. The installed binary receives a marker so it does not hand off to
+/// itself again.
+pub(crate) fn handoff_installed_desktop() -> anyhow::Result<bool> {
+    if std::env::var_os("APP_DESKTOP_UPDATE_HANDOFF").is_some() {
+        return Ok(false);
+    }
+    let preferred = state_dir().map_err(anyhow::Error::msg)?;
+    let isolated = isolated_host()?;
+    let registry = if isolated {
+        LocalHostRegistry::new(preferred.clone())
+    } else {
+        LocalHostRegistry::for_user()?
+    };
+    let location = registry.resolve(&preferred)?;
+    if !matches!(location.state, LocalHostState::Stopped) {
+        return Ok(false);
+    }
+    let Some(installed) = resolve_installed_desktop_executable(&location.directory)? else {
+        return Ok(false);
+    };
+    let current = std::env::current_exe()?;
+    if std::fs::canonicalize(&current).ok() == std::fs::canonicalize(&installed).ok() {
+        return Ok(false);
+    }
+    let arguments: Vec<_> = std::env::args_os().skip(1).collect();
+    let mut command = Command::new(&installed);
+    command
+        .args(arguments)
+        .env("APP_DESKTOP_UPDATE_HANDOFF", "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    command.spawn()?;
+    Ok(true)
+}
+
+#[cfg(test)]
+mod update_handoff_tests {
+    use super::{resolve_installed_desktop_executable, resolve_installed_host_executable};
+    use std::fs;
+
+    #[test]
+    fn selects_verified_installed_host_after_a_completed_install() {
+        let directory = tempfile::tempdir().expect("temporary Host state directory");
+        let version = "0.1.0-nightly.20261008.42";
+        let version_root = directory.path().join("installed/host").join(version);
+        fs::create_dir_all(&version_root).expect("installed version directory");
+        let executable = version_root.join(format!("host-daemon{}", std::env::consts::EXE_SUFFIX));
+        fs::write(&executable, b"verified executable").expect("installed Host executable");
+        let supervisor = version_root.join(format!(
+            "bex-provider-supervisor{}",
+            std::env::consts::EXE_SUFFIX
+        ));
+        fs::write(&supervisor, b"verified supervisor").expect("installed supervisor");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&executable, fs::Permissions::from_mode(0o755))
+                .expect("make test executable runnable");
+            fs::set_permissions(&supervisor, fs::Permissions::from_mode(0o755))
+                .expect("make test supervisor runnable");
+        }
+        let transaction_root = directory.path().join("transactions");
+        fs::create_dir_all(&transaction_root).expect("transaction directory");
+        fs::write(
+            transaction_root.join("host.json"),
+            format!(
+                "{{\"state\":{{\"restartRequired\":true,\"downloadedVersion\":\"{version}\"}}}}"
+            ),
+        )
+        .expect("handoff marker");
+        assert_eq!(
+            resolve_installed_host_executable(directory.path()).expect("handoff read"),
+            Some(executable),
+        );
+    }
+
+    #[test]
+    fn ignores_a_symlinked_installed_host() {
+        let directory = tempfile::tempdir().expect("temporary Host state directory");
+        let version = "0.1.0";
+        let version_root = directory.path().join("installed/host").join(version);
+        fs::create_dir_all(&version_root).expect("installed version directory");
+        let outside = directory.path().join("outside-host");
+        fs::write(&outside, b"outside executable").expect("outside executable");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(
+            &outside,
+            version_root.join(format!("host-daemon{}", std::env::consts::EXE_SUFFIX)),
+        )
+        .expect("symlink fixture");
+        #[cfg(windows)]
+        return;
+        fs::create_dir_all(directory.path().join("transactions")).expect("transaction directory");
+        fs::write(
+            directory.path().join("transactions/host.json"),
+            format!(
+                "{{\"state\":{{\"restartRequired\":true,\"downloadedVersion\":\"{version}\"}}}}"
+            ),
+        )
+        .expect("handoff marker");
+        assert_eq!(
+            resolve_installed_host_executable(directory.path()).expect("handoff read"),
+            None,
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ignores_a_non_executable_installed_host() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().expect("temporary Host state directory");
+        let version = "0.1.0";
+        let version_root = directory.path().join("installed/host").join(version);
+        fs::create_dir_all(&version_root).expect("installed version directory");
+        let executable = version_root.join("host-daemon");
+        fs::write(&executable, b"not executable").expect("installed Host executable");
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o600))
+            .expect("make test executable non-runnable");
+        fs::create_dir_all(directory.path().join("transactions")).expect("transaction directory");
+        fs::write(
+            directory.path().join("transactions/host.json"),
+            format!(
+                "{{\"state\":{{\"restartRequired\":true,\"downloadedVersion\":\"{version}\"}}}}"
+            ),
+        )
+        .expect("handoff marker");
+        assert_eq!(
+            resolve_installed_host_executable(directory.path()).expect("handoff read"),
+            None,
+        );
+    }
+
+    #[test]
+    fn selects_the_installed_desktop_executable_after_a_completed_install() {
+        let directory = tempfile::tempdir().expect("temporary Desktop state directory");
+        let version = "0.1.0";
+        #[cfg(target_os = "macos")]
+        let relative = std::path::PathBuf::from("Bex.app/Contents/MacOS/Bex");
+        #[cfg(not(target_os = "macos"))]
+        let relative = std::path::PathBuf::from(format!("desktop{}", std::env::consts::EXE_SUFFIX));
+        let executable = directory
+            .path()
+            .join("installed/desktop")
+            .join(version)
+            .join(&relative);
+        fs::create_dir_all(executable.parent().expect("desktop executable parent"))
+            .expect("installed Desktop directory");
+        fs::write(&executable, b"verified desktop executable")
+            .expect("installed Desktop executable");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&executable, fs::Permissions::from_mode(0o755))
+                .expect("make test executable runnable");
+        }
+        let transaction_root = directory.path().join("transactions");
+        fs::create_dir_all(&transaction_root).expect("transaction directory");
+        fs::write(
+            transaction_root.join("desktop.json"),
+            format!(
+                "{{\"state\":{{\"restartRequired\":true,\"downloadedVersion\":\"{version}\"}}}}"
+            ),
+        )
+        .expect("handoff marker");
+        assert_eq!(
+            resolve_installed_desktop_executable(directory.path()).expect("handoff read"),
+            Some(executable),
+        );
+    }
 }
 
 pub(crate) fn choose_folder() -> Option<PathBuf> {
