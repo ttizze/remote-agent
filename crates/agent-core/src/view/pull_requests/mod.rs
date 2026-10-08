@@ -1,9 +1,12 @@
 //! Pull-request views shared by desktop and mobile surfaces.
-use crate::state::Snapshot;
+use crate::state::{
+    PullRequestDiffChangeTypeInput, Snapshot, pull_request_diff_context_key,
+};
 use agent_domain::{
     PullRequestBadge, PullRequestDetail, PullRequestKey, PullRequestLink, PullRequestLinkSource,
     PullRequestSearchMatch, PullRequestState, PullRequestSummary, resolve_pull_request_badge,
 };
+use agent_protocol::pull_requests::PullRequestDiffFileContents;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -32,6 +35,29 @@ pub struct PullRequestListView {
 pub struct PullRequestDetailView {
     pub detail: PullRequestDetail,
     pub badge: PullRequestBadge,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PullRequestDiffView {
+    pub files: Vec<PullRequestDiffFileView>,
+    pub patch: String,
+    pub truncated: bool,
+    pub next_cursor: Option<String>,
+    pub omitted_file_stats:
+        Option<Vec<agent_protocol::pull_requests::PullRequestOmittedFileStat>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PullRequestDiffFileView {
+    pub path: String,
+    pub old_path: Option<String>,
+    pub additions: u64,
+    pub deletions: u64,
+    pub status: String,
+    pub patch: Option<String>,
+    pub truncated: bool,
+    pub change_type: PullRequestDiffChangeTypeInput,
+    pub context: Option<PullRequestDiffFileContents>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -104,6 +130,48 @@ pub fn pull_request_detail(snapshot: &Snapshot, key: &PullRequestKey) -> Option<
                 }),
             detail,
         })
+}
+
+pub fn pull_request_diff(snapshot: &Snapshot, key: &PullRequestKey) -> Option<PullRequestDiffView> {
+    let diff = snapshot.pull_requests.diffs.get(&key.canonical())?;
+    let files = diff
+        .files
+        .iter()
+        .map(|file| {
+            let old_path = file.old_path.clone().unwrap_or_else(|| file.path.clone());
+            let context_key = pull_request_diff_context_key(key, &old_path, &file.path);
+            let status = file.status.to_ascii_lowercase();
+            let change_type = match (status.as_str(), file.patch.is_some()) {
+                ("added", _) => PullRequestDiffChangeTypeInput::New,
+                ("removed", _) => PullRequestDiffChangeTypeInput::Deleted,
+                ("renamed", false) => PullRequestDiffChangeTypeInput::RenamePure,
+                ("renamed", true) => PullRequestDiffChangeTypeInput::RenameChanged,
+                _ => PullRequestDiffChangeTypeInput::Change,
+            };
+            PullRequestDiffFileView {
+                path: file.path.clone(),
+                old_path: file.old_path.clone(),
+                additions: file.additions,
+                deletions: file.deletions,
+                status: file.status.clone(),
+                patch: file.patch.clone(),
+                truncated: file.truncated,
+                change_type,
+                context: snapshot
+                    .pull_requests
+                    .diff_file_contents
+                    .get(&context_key)
+                    .cloned(),
+            }
+        })
+        .collect();
+    Some(PullRequestDiffView {
+        files,
+        patch: diff.patch.clone(),
+        truncated: diff.truncated,
+        next_cursor: diff.next_cursor.clone(),
+        omitted_file_stats: diff.omitted_file_stats.clone(),
+    })
 }
 
 /// Matches the already listed project rows for the `#` composer trigger. The
@@ -191,5 +259,51 @@ mod tests {
         let snapshot = Snapshot::default();
         let view = pull_request_list(&snapshot, &PullRequestPanelOptions::default());
         assert!(view.entries.is_empty());
+    }
+
+    #[test]
+    fn diff_view_resolves_context_and_change_kind_in_core() {
+        let key = PullRequestKey::new("github.com", "owner/repository", 7);
+        let mut snapshot = Snapshot::default();
+        snapshot.pull_requests.diffs.insert(
+            key.canonical(),
+            agent_protocol::pull_requests::PullRequestDiff {
+                reference: agent_protocol::pull_requests::PullRequestRef {
+                    project_id: "project".into(),
+                    repository: key.repository.clone(),
+                    number: key.number,
+                    host: Some(key.host.clone()),
+                    allow_stale: false,
+                },
+                files: vec![agent_protocol::pull_requests::PullRequestDiffFile {
+                    path: "src/new.rs".into(),
+                    old_path: Some("src/old.rs".into()),
+                    additions: 1,
+                    deletions: 1,
+                    status: "renamed".into(),
+                    patch: Some("@@".into()),
+                    truncated: false,
+                }],
+                patch: "diff".into(),
+                truncated: false,
+                next_cursor: Some("2".into()),
+                omitted_file_stats: None,
+                stale: false,
+            },
+        );
+        snapshot.pull_requests.diff_file_contents.insert(
+            pull_request_diff_context_key(&key, "src/old.rs", "src/new.rs"),
+            PullRequestDiffFileContents {
+                old_contents: "old".into(),
+                new_contents: "new".into(),
+            },
+        );
+        let view = pull_request_diff(&snapshot, &key).unwrap();
+        assert_eq!(view.next_cursor.as_deref(), Some("2"));
+        assert_eq!(
+            view.files[0].change_type,
+            PullRequestDiffChangeTypeInput::RenameChanged
+        );
+        assert_eq!(view.files[0].context.as_ref().unwrap().new_contents, "new");
     }
 }

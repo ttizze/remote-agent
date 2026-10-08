@@ -225,6 +225,8 @@ impl Owner {
                 host,
                 repository,
                 number,
+                cursor,
+                commit,
             } => Next::call(
                 Call::GetPullRequestDiff(pr::GetPullRequestDiff {
                     reference: pr::PullRequestRef {
@@ -234,9 +236,48 @@ impl Owner {
                         host,
                         allow_stale: false,
                     },
-                    max_files: 200,
-                    max_patch_bytes: 8 * 1024 * 1024,
+                    cursor,
+                    commit,
                     fresh: true,
+                }),
+                None,
+            ),
+            Intent::LoadPullRequestDiffFileContents {
+                project_id,
+                host,
+                repository,
+                number,
+                commit,
+                change_type,
+                old_path,
+                new_path,
+            } => Next::call(
+                Call::GetPullRequestDiffFileContents(pr::GetPullRequestDiffFileContents {
+                    reference: pr::PullRequestRef {
+                        project_id,
+                        repository,
+                        number,
+                        host,
+                        allow_stale: false,
+                    },
+                    commit,
+                    change_type: match change_type {
+                        PullRequestDiffChangeTypeInput::Change => {
+                            pr::PullRequestDiffChangeType::Change
+                        }
+                        PullRequestDiffChangeTypeInput::RenamePure => {
+                            pr::PullRequestDiffChangeType::RenamePure
+                        }
+                        PullRequestDiffChangeTypeInput::RenameChanged => {
+                            pr::PullRequestDiffChangeType::RenameChanged
+                        }
+                        PullRequestDiffChangeTypeInput::New => pr::PullRequestDiffChangeType::New,
+                        PullRequestDiffChangeTypeInput::Deleted => {
+                            pr::PullRequestDiffChangeType::Deleted
+                        }
+                    },
+                    old_path,
+                    new_path,
                 }),
                 None,
             ),

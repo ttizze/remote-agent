@@ -110,6 +110,7 @@ results! {
     PullRequestList(crate::pull_requests::PullRequestList),
     PullRequestDetail(agent_domain::PullRequestDetail),
     PullRequestDiff(crate::pull_requests::PullRequestDiff),
+    PullRequestDiffFileContents(crate::pull_requests::PullRequestDiffFileContents),
     PullRequestFile(crate::pull_requests::PullRequestFile),
     PullRequestViewedFiles(crate::pull_requests::PullRequestViewedFiles),
     PullRequestOperation(crate::pull_requests::PullRequestOperation),

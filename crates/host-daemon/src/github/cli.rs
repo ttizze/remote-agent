@@ -6,10 +6,12 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
+use tokio::io::AsyncReadExt;
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_MAX_OUTPUT_BYTES: usize = 1_000_000;
 const OUTPUT_TRUNCATED_MARKER: &str = "\n\n[truncated]";
+const OUTPUT_READ_CHUNK_BYTES: usize = 16 * 1024;
 
 /// Provider-private values decoded from `gh`. The shared source-control
 /// operation contracts own the public VCS vocabulary; keeping these decode
@@ -73,6 +75,8 @@ pub(crate) enum GhError {
     StackMergePending,
     #[error("You cannot update every branch in this pull request stack.")]
     StackPermission,
+    #[error("GitHub stack rebase stopped at pull request #{layer} after {completed} layers.")]
+    StackRebaseFailed { layer: u64, completed: usize },
     #[error("GitHub CLI command failed.")]
     Command { exit_code: Option<i32> },
     #[error("GitHub CLI timed out after {0:?}.")]
@@ -486,6 +490,115 @@ pub(crate) struct Output {
     pub stdout: String,
     pub stderr: String,
     pub stdout_truncated: bool,
+    pub stdout_invalid_utf8: bool,
+}
+
+#[derive(Debug)]
+struct BoundedOutput {
+    bytes: Vec<u8>,
+    truncated: bool,
+}
+
+/// Drain a child pipe while retaining only the beginning of its output. The
+/// pipe must keep draining after the budget is reached or a verbose command
+/// can block forever when its kernel pipe fills.
+async fn read_bounded<R>(mut reader: R, limit: usize) -> std::io::Result<BoundedOutput>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    let mut bytes = Vec::with_capacity(limit.min(OUTPUT_READ_CHUNK_BYTES));
+    let mut buffer = [0_u8; OUTPUT_READ_CHUNK_BYTES];
+    let mut truncated = false;
+    loop {
+        let read = reader.read(&mut buffer).await?;
+        if read == 0 {
+            break;
+        }
+        let remaining = limit.saturating_sub(bytes.len());
+        let kept = read.min(remaining);
+        bytes.extend_from_slice(&buffer[..kept]);
+        truncated |= kept < read;
+    }
+    Ok(BoundedOutput { bytes, truncated })
+}
+
+async fn run_command(
+    mut command: tokio::process::Command,
+    budget: Budget,
+) -> Result<(std::process::ExitStatus, BoundedOutput, BoundedOutput), GhError> {
+    let mut child = command.spawn().map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            GhError::Unavailable
+        } else {
+            GhError::Command { exit_code: None }
+        }
+    })?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or(GhError::Command { exit_code: None })?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or(GhError::Command { exit_code: None })?;
+    let result = tokio::time::timeout(budget.timeout, async {
+        let status = child.wait();
+        let stdout = read_bounded(stdout, budget.max_output_bytes);
+        let stderr = read_bounded(stderr, budget.max_output_bytes);
+        let (status, stdout, stderr) = tokio::join!(status, stdout, stderr);
+        Ok::<_, std::io::Error>((status?, stdout?, stderr?))
+    })
+    .await;
+    match result {
+        Ok(Ok(output)) => Ok(output),
+        Ok(Err(_)) => Err(GhError::Command { exit_code: None }),
+        Err(_) => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            Err(GhError::Timeout(budget.timeout))
+        }
+    }
+}
+
+fn text_output(output: &BoundedOutput, marker: bool) -> (String, bool, bool) {
+    let invalid_utf8 = std::str::from_utf8(&output.bytes).is_err();
+    let mut text = String::from_utf8_lossy(&output.bytes).into_owned();
+    if marker && output.truncated {
+        let mut end = text.len();
+        while end > 0 && !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        text.truncate(end);
+        text.push_str(OUTPUT_TRUNCATED_MARKER);
+    }
+    (text, output.truncated, invalid_utf8)
+}
+
+pub(crate) async fn run_bounded_command(
+    command: tokio::process::Command,
+    budget: Budget,
+) -> Result<(std::process::ExitStatus, Output), GhError> {
+    let (status, stdout, stderr) = run_command(command, budget).await?;
+    let (stdout, stdout_truncated, stdout_invalid_utf8) = text_output(&stdout, true);
+    let (stderr, _, _) = text_output(&stderr, false);
+    Ok((
+        status,
+        Output {
+            stdout,
+            stderr,
+            stdout_truncated,
+            stdout_invalid_utf8,
+        },
+    ))
+}
+
+pub(crate) fn scoped_repository(host: Option<&str>, repository: &str) -> String {
+    let host = host.map(str::trim).filter(|host| !host.is_empty());
+    if host.is_none_or(|host| host.eq_ignore_ascii_case("github.com")) {
+        repository.to_owned()
+    } else {
+        format!("{}/{repository}", host.expect("checked above"))
+    }
 }
 
 /// The URLs of a repository on GitHub.
@@ -598,33 +711,11 @@ impl GitHubCli {
         if cwd.is_dir() {
             command.current_dir(cwd);
         }
-        let output = match tokio::time::timeout(budget.timeout, command.output()).await {
-            Err(_) => return Err(GhError::Timeout(budget.timeout)),
-            Ok(Err(error)) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Err(GhError::Unavailable);
-            }
-            Ok(Err(_)) => return Err(GhError::Command { exit_code: None }),
-            Ok(Ok(output)) => output,
-        };
-        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-        if !output.status.success() {
-            return Err(classify_failure(&stderr, output.status.code()));
+        let (status, output) = run_bounded_command(command, budget).await?;
+        if !status.success() {
+            return Err(classify_failure(&output.stderr, status.code()));
         }
-        let truncated = output.stdout.len() > budget.max_output_bytes;
-        let mut stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-        if truncated {
-            let mut end = budget.max_output_bytes;
-            while end > 0 && !stdout.is_char_boundary(end) {
-                end -= 1;
-            }
-            stdout.truncate(end);
-            stdout.push_str(OUTPUT_TRUNCATED_MARKER);
-        }
-        Ok(Output {
-            stdout,
-            stderr,
-            stdout_truncated: truncated,
-        })
+        Ok(output)
     }
 
     /// Runs `gh` and parses its stdout as JSON.
@@ -650,17 +741,23 @@ impl GitHubCli {
             .env("GH_PROMPT_DISABLED", "1")
             .env("GH_NO_UPDATE_NOTIFIER", "1")
             .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
             .kill_on_drop(true);
         if cwd.is_dir() {
             command.current_dir(cwd);
         }
-        match tokio::time::timeout(Duration::from_secs(5), command.output()).await {
-            Ok(Ok(output)) => auth_from_probe(
-                &String::from_utf8_lossy(&output.stdout),
-                &String::from_utf8_lossy(&output.stderr),
-                output.status.code(),
-            ),
-            _ => GitHubAuth {
+        match run_bounded_command(
+            command,
+            Budget {
+                timeout: Duration::from_secs(5),
+                max_output_bytes: 256 * 1024,
+            },
+        )
+        .await
+        {
+            Ok((status, output)) => auth_from_probe(&output.stdout, &output.stderr, status.code()),
+            Err(_) => GitHubAuth {
                 status: AuthStatus::Unknown,
                 account: None,
                 host: None,
@@ -669,8 +766,7 @@ impl GitHubCli {
         }
     }
 
-    /// Pull requests whose head is `head_selector` (a branch, or
-    /// `owner:branch`), newest first.
+    /// Pull requests whose head is `head_selector` (a branch), newest first.
     pub(crate) async fn list_pull_requests_by_head(
         &self,
         cwd: &Path,
@@ -678,11 +774,13 @@ impl GitHubCli {
         state: PullRequestListState,
         limit: u32,
         host: Option<&str>,
+        repository: Option<&str>,
     ) -> Result<Vec<PullRequestRecord>, GhError> {
         let limit = limit.clamp(1, 100).to_string();
         let mut args = vec!["pr", "list"];
-        if let Some(host) = host {
-            args.extend(["--hostname", host]);
+        let repository_arg = repository.map(|repository| scoped_repository(host, repository));
+        if let Some(repository) = repository_arg.as_deref() {
+            args.extend(["--repo", repository]);
         }
         args.extend([
             "--head",
@@ -746,12 +844,11 @@ impl GitHubCli {
     pub(crate) async fn default_branch(
         &self,
         cwd: &Path,
+        repository: &str,
         host: Option<&str>,
     ) -> Result<Option<String>, GhError> {
-        let mut args = vec!["repo", "view"];
-        if let Some(host) = host {
-            args.extend(["--hostname", host]);
-        }
+        let repository = scoped_repository(host, repository);
+        let mut args = vec!["repo", "view", &repository];
         args.extend(["--json", "defaultBranchRef", "--jq", ".defaultBranchRef.name"]);
         let output = self.run(cwd, &args, Budget::default()).await?;
         Ok(trimmed(Some(&output.stdout)))
@@ -763,11 +860,8 @@ impl GitHubCli {
         repository: &str,
         host: Option<&str>,
     ) -> Result<CloneUrls, GhError> {
-        let mut args = vec!["repo", "view"];
-        if let Some(host) = host {
-            args.extend(["--hostname", host]);
-        }
-        args.extend([repository, "--json", "nameWithOwner,url,sshUrl"]);
+        let repository = scoped_repository(host, repository);
+        let args = ["repo", "view", &repository, "--json", "nameWithOwner,url,sshUrl"];
         let value = self.run_json(cwd, &args, Budget::default()).await?;
         serde_json::from_value(value)
             .map_err(|_| GhError::Decode("GitHub CLI returned invalid repository JSON."))
@@ -1035,6 +1129,7 @@ mod tests {
                 PullRequestListState::Open,
                 HEAD_BRANCH_PROBE_LIMIT,
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -1043,7 +1138,7 @@ mod tests {
         let missing = GitHubCli::at(gh.directory().join("missing-gh"));
         assert_eq!(
             missing
-                .default_branch(directory.path(), None)
+                .default_branch(directory.path(), "acme/tool", None)
                 .await
                 .unwrap_err(),
             GhError::Unavailable
@@ -1052,7 +1147,7 @@ mod tests {
         assert_eq!(
             failing
                 .cli()
-                .default_branch(directory.path(), None)
+                .default_branch(directory.path(), "acme/tool", None)
                 .await
                 .unwrap_err(),
             GhError::Authentication
@@ -1078,5 +1173,50 @@ mod tests {
         assert!(output.stdout_truncated);
         assert!(output.stdout.ends_with(OUTPUT_TRUNCATED_MARKER));
         assert_eq!(output.stdout.len(), 128 + OUTPUT_TRUNCATED_MARKER.len());
+    }
+
+    #[tokio::test]
+    async fn enterprise_commands_use_repo_scope_without_hostname_flags() {
+        let gh = FakeGh::new(&[(
+            "pr list --repo ghe.example/acme/tool --head feature --state open --limit 100 --json *",
+            "echo '[]'",
+        )]);
+        let directory = cwd();
+        gh.cli()
+            .list_pull_requests_by_head(
+                directory.path(),
+                "feature",
+                PullRequestListState::Open,
+                HEAD_BRANCH_PROBE_LIMIT,
+                Some("ghe.example"),
+                Some("acme/tool"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            gh.calls(),
+            vec!["pr list --repo ghe.example/acme/tool --head feature --state open --limit 100 --json number,title,url,baseRefName,headRefName,headRefOid,state,isDraft,mergedAt,closedAt,updatedAt,isCrossRepository,headRepository,headRepositoryOwner".to_owned()]
+        );
+        assert_eq!(scoped_repository(Some("ghe.example"), "acme/tool"), "ghe.example/acme/tool");
+    }
+
+    #[tokio::test]
+    async fn stderr_is_drained_with_the_same_memory_budget() {
+        let gh = FakeGh::new(&[("api *", "head -c 5000 /dev/zero | tr '\\0' 'e' >&2; echo ok")]);
+        let directory = cwd();
+        let output = gh
+            .cli()
+            .run(
+                directory.path(),
+                &["api", "x"],
+                Budget {
+                    timeout: Duration::from_secs(5),
+                    max_output_bytes: 128,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(output.stdout.trim(), "ok");
+        assert!(output.stderr.len() <= 128);
     }
 }

@@ -39,7 +39,10 @@ use crate::view::{
     thread::{ThreadView, ThreadViewOptions, selected_thread_view, thread_view},
     thread_arrangement::{ArrangementDrop, ArrangementOptions},
     thread_list::{ThreadListHolds, ThreadListOptions, ThreadListView, thread_list},
-    pull_requests::{PullRequestDetailView, PullRequestListView, PullRequestPanelOptions, pull_request_detail, pull_request_list},
+    pull_requests::{
+        PullRequestDetailView, PullRequestDiffView, PullRequestListView,
+        PullRequestPanelOptions, pull_request_detail, pull_request_diff, pull_request_list,
+    },
     thread_menu::{ThreadMenuOptions, ThreadMenuView, thread_menu},
     time::TimestampFormat,
     timeline::mobile_follow::{LiveFollowEvent, StreamHaptic, StreamingMessageMark},
@@ -87,6 +90,13 @@ impl Snapshot {
         key: agent_domain::PullRequestKey,
     ) -> Option<PullRequestDetailView> {
         pull_request_detail(self, &key)
+    }
+
+    pub fn pull_request_diff(
+        &self,
+        key: agent_domain::PullRequestKey,
+    ) -> Option<PullRequestDiffView> {
+        pull_request_diff(self, &key)
     }
 
     fn picker_options(

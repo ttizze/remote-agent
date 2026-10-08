@@ -89,13 +89,12 @@ impl Desktop {
             let key = detail.summary.key.clone();
             let owner = cx.entity().downgrade();
             let project_id = project_id.clone();
-            let diff_files = self
-                .snapshot
-                .pull_requests
-                .diffs
-                .get(&key.canonical())
+            let diff_view = self.snapshot.pull_request_diff(key.clone());
+            let diff_files = diff_view
+                .as_ref()
                 .map(|diff| diff.files.clone())
                 .unwrap_or_default();
+            let diff_next_cursor = diff_view.and_then(|diff| diff.next_cursor);
             let viewed_files = self
                 .snapshot
                 .pull_requests
@@ -263,11 +262,36 @@ impl Desktop {
                                         host: Some(diff_key.host.clone()),
                                         repository: diff_key.repository.clone(),
                                         number: diff_key.number,
+                                        cursor: None,
+                                        commit: None,
                                     });
                                 }))
                             },
                         ),
                 )
+                .when_some(diff_next_cursor, |row, cursor| {
+                    let owner = owner.clone();
+                    let project_id = project_id.clone();
+                    let key = key.clone();
+                    row.child(
+                        Button::new("pull-request-diff-more")
+                            .label("More files")
+                            .ghost()
+                            .xsmall()
+                            .on_click(move |_, _, cx| {
+                                let _ = owner.update(cx, |view, _| {
+                                    view.perform(Intent::LoadPullRequestDiff {
+                                        project_id: project_id.clone(),
+                                        host: Some(key.host.clone()),
+                                        repository: key.repository.clone(),
+                                        number: key.number,
+                                        cursor: Some(cursor.clone()),
+                                        commit: None,
+                                    });
+                                });
+                            }),
+                    )
+                })
                 .when_some(thread_id, |row, thread_id| {
                     let owner = owner.clone();
                     let project_id = project_id.clone();
@@ -353,9 +377,37 @@ impl Desktop {
                 .children(diff_files.into_iter().map(|file| {
                     let path = file.path.clone();
                     let viewed = viewed_files.get(&path).copied().unwrap_or(false);
+                    let old_path = file.old_path.clone().unwrap_or_else(|| path.clone());
+                    let context = file.context.clone();
+                    let has_patch = file.patch.is_some();
+                    let patch_truncated = file.truncated;
                     let owner = owner.clone();
                     let project_id = project_id.clone();
                     let key_for_file = key.clone();
+                    let context_owner = owner.clone();
+                    let context_project_id = project_id.clone();
+                    let context_key_for_file = key.clone();
+                    let context_path = path.clone();
+                    let context_old_path = old_path.clone();
+                    let context_type = file.change_type;
+                    let context_button = Button::new(SharedString::from(format!("diff-context-{}", path)))
+                        .label(if context.is_some() { "Reload context" } else { "Context" })
+                        .ghost()
+                        .xsmall()
+                        .on_click(move |_, _, cx| {
+                            let _ = context_owner.update(cx, |view, _| {
+                                view.perform(Intent::LoadPullRequestDiffFileContents {
+                                    project_id: context_project_id.clone(),
+                                    host: Some(context_key_for_file.host.clone()),
+                                    repository: context_key_for_file.repository.clone(),
+                                    number: context_key_for_file.number,
+                                    commit: None,
+                                    change_type: context_type,
+                                    old_path: context_old_path.clone(),
+                                    new_path: context_path.clone(),
+                                });
+                            });
+                        });
                     v_flex()
                         .gap_0p5()
                         .pt_1()
@@ -364,6 +416,12 @@ impl Desktop {
                                 .gap_1()
                                 .items_center()
                                 .child(div().text_xs().font_weight(FontWeight::MEDIUM).child(path.clone()))
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(color("textMuted"))
+                                        .child(format!("+{} -{}", file.additions, file.deletions)),
+                                )
                                 .child(
                                     Button::new(SharedString::from(format!("viewed-file-{}", path)))
                                         .label(if viewed { "Viewed" } else { "Mark viewed" })
@@ -383,7 +441,8 @@ impl Desktop {
                                                 });
                                             });
                                         }),
-                                ),
+                                )
+                                .child(context_button),
                         )
                         .when_some(file.patch, |row, patch| {
                             row.child(
@@ -391,6 +450,30 @@ impl Desktop {
                                     .text_xs()
                                     .text_color(color("textMuted"))
                                     .child(patch.lines().take(12).collect::<Vec<_>>().join("\n")),
+                            )
+                        })
+                        .when(!has_patch, |row| {
+                            row.child(
+                                div()
+                                    .text_xs()
+                                    .text_color(color("textMuted"))
+                                    .child(if patch_truncated {
+                                        "Textual patch unavailable"
+                                    } else {
+                                        "No textual patch"
+                                    }),
+                            )
+                        })
+                        .when_some(context, |row, context| {
+                            row.child(
+                                div()
+                                    .text_xs()
+                                    .text_color(color("textMuted"))
+                                    .child(format!(
+                                        "Before: {}\nAfter: {}",
+                                        context.old_contents.lines().take(4).collect::<Vec<_>>().join("\n"),
+                                        context.new_contents.lines().take(4).collect::<Vec<_>>().join("\n"),
+                                    )),
                             )
                         })
                 }))

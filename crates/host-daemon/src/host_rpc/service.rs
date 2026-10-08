@@ -871,6 +871,17 @@ impl HostRpcService {
                         .map_err(|error| Failure::new("pull_request_diff_failed", error))?
                         .into()
                 }
+                Call::GetPullRequestDiffFileContents(params) => {
+                    params.validate().map_err(|error| Failure::new("invalid_params", error))?;
+                    ensure_github_host(params.reference.host.as_deref())?;
+                    let root = self.project_root(&params.reference.project_id)?;
+                    resources
+                        .pull_requests
+                        .diff_file_contents(&root, params)
+                        .await
+                        .map_err(|error| Failure::new("pull_request_diff_file_contents_failed", error))?
+                        .into()
+                }
                 Call::GetPullRequestFile(params) => {
                     params.validate().map_err(|error| Failure::new("invalid_params", error))?;
                     ensure_github_host(params.reference.host.as_deref())?;

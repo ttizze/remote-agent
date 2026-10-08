@@ -44,6 +44,7 @@ pub(super) enum Reply {
     PullRequestList(pr::PullRequestList),
     PullRequestDetail(agent_domain::PullRequestDetail),
     PullRequestDiff(pr::PullRequestDiff),
+    PullRequestDiffFileContents(pr::PullRequestDiffFileContents),
     PullRequestFile(pr::PullRequestFile),
     PullRequestViewedFiles(pr::PullRequestViewedFiles),
     PullRequestOperation(pr::PullRequestOperation),
@@ -81,6 +82,9 @@ async fn execute(peer: &Peer, call: &Call) -> Result<Reply, PeerError> {
         Call::ListPullRequests(_) => Reply::PullRequestList(peer.request(call).await?),
         Call::GetPullRequest(_) => Reply::PullRequestDetail(peer.request(call).await?),
         Call::GetPullRequestDiff(_) => Reply::PullRequestDiff(peer.request(call).await?),
+        Call::GetPullRequestDiffFileContents(_) => {
+            Reply::PullRequestDiffFileContents(peer.request(call).await?)
+        }
         Call::GetPullRequestFile(_) => Reply::PullRequestFile(peer.request(call).await?),
         Call::GetPullRequestViewedFiles(_) | Call::SetPullRequestFilesViewed(_) => {
             Reply::PullRequestViewedFiles(peer.request(call).await?)
@@ -586,10 +590,44 @@ impl Owner {
                 }
             }
             Reply::PullRequestDiff(diff) => {
-                self.state
-                    .pull_requests
-                    .diffs
-                    .insert(diff.reference.key().canonical(), diff);
+                let key = diff.reference.key().canonical();
+                let append = matches!(call, Call::GetPullRequestDiff(request) if request.cursor.is_some());
+                if append {
+                    if let Some(previous) = self.state.pull_requests.diffs.get_mut(&key) {
+                        previous.files.extend(diff.files);
+                        previous.patch.push_str(&diff.patch);
+                        previous.truncated |= diff.truncated;
+                        previous.next_cursor = diff.next_cursor;
+                        if let Some(stats) = diff.omitted_file_stats {
+                            previous
+                                .omitted_file_stats
+                                .get_or_insert_with(Vec::new)
+                                .extend(stats);
+                        }
+                    } else {
+                        self.state.pull_requests.diffs.insert(key, diff);
+                    }
+                } else {
+                    let prefix = format!("{key}\0");
+                    self.state
+                        .pull_requests
+                        .diff_file_contents
+                        .retain(|context_key, _| !context_key.starts_with(&prefix));
+                    self.state.pull_requests.diffs.insert(key, diff);
+                }
+            }
+            Reply::PullRequestDiffFileContents(contents) => {
+                if let Call::GetPullRequestDiffFileContents(request) = call {
+                    let key = pull_request_diff_context_key(
+                        &request.reference.key(),
+                        &request.old_path,
+                        &request.new_path,
+                    );
+                    self.state
+                        .pull_requests
+                        .diff_file_contents
+                        .insert(key, contents);
+                }
             }
             Reply::PullRequestFile(file) => {
                 self.state

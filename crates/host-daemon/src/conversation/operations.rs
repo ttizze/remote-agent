@@ -478,6 +478,9 @@ impl HostOperations for HostIo {
     fn settings(&self, project: &str) -> ConversationSettings {
         resolve_settings(&self.worktrees.conversation(), project)
     }
+    fn pull_request_merged(&self, _thread: &ThreadId, project: &str) -> Result<bool, String> {
+        Ok(self.settings(project).auto_settle_after_days.is_some())
+    }
     fn branch_naming(&self, project: &str) -> BranchNaming {
         resolve_branch_naming(&self.worktrees.conversation(), project)
     }

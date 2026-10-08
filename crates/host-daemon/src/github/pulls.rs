@@ -1,7 +1,7 @@
 use super::cli::{
-    Budget, ChangeRequestState, GhError, GitHubCli, PullRequestRecord,
+    run_bounded_command, Budget, ChangeRequestState, GhError, GitHubCli, PullRequestRecord,
     PullRequestListState as CliPullRequestListState, HEAD_BRANCH_PROBE_LIMIT,
-    decode_pull_request, decode_pull_request_entries,
+    decode_pull_request, decode_pull_request_entries, scoped_repository,
 };
 use base64::Engine as _;
 use agent_domain::{
@@ -11,15 +11,19 @@ use agent_domain::{
     PullRequestSummary, Timestamp,
 };
 use agent_protocol::pull_requests::{
-    CloneRepository, GetPullRequestDiff, ListPullRequests, PullRequestDiff, PullRequestDiffFile,
+    CloneRepository, GetPullRequestDiff, GetPullRequestDiffFileContents, ListPullRequests,
+    PullRequestDiff, PullRequestDiffChangeType, PullRequestDiffFile, PullRequestDiffFileContents,
     PullRequestFile, PullRequestList, PullRequestListState, PullRequestRef,
     PullRequestMergeMethod, PullRequestReviewVerdict, PullRequestStackHead, SourceControlAuth,
     SourceControlDiscovery, SourceControlRepository,
 };
 use agent_runtime::PullRequestStore;
+use serde_json::Value;
 use std::{path::Path, time::Duration};
 
 const PR_FIELDS: &str = "number,title,url,baseRefName,headRefName,headRefOid,state,isDraft,mergedAt,closedAt,updatedAt,createdAt,author,additions,deletions,changedFiles,reviewDecision,statusCheckRollup,mergeable,body,labels,comments,reviews,reviewRequests";
+const DIFF_PAGE_SIZE: usize = 100;
+const MAX_DIFF_PAGE_BYTES: usize = 8 * 1024 * 1024;
 const REVIEW_THREADS_QUERY: &str = r#"query($owner:String!, $repo:String!, $number:Int!) {
   repository(owner:$owner, name:$repo) {
     pullRequest(number:$number) {
@@ -44,6 +48,328 @@ const REVIEW_THREADS_QUERY: &str = r#"query($owner:String!, $repo:String!, $numb
     }
   }
 }"#;
+
+/// The permission probe is deliberately separate from the mutation. GitHub reports
+/// `viewerCanUpdateBranch` for the current revision, which is false after an earlier
+/// layer moves. Checking the head repository's write permission and maintainer setting
+/// before touching any layer keeps a later fork from leaving a half-rebased stack.
+fn stack_permission_query(numbers: &[u64]) -> String {
+    let requests = numbers
+        .iter()
+        .map(|number| {
+            format!(
+                "pr{number}:pullRequest(number:{number}){{headRepository{{viewerPermission}} maintainerCanModify}}"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!(
+        "query($owner:String!,$name:String!){{repository(owner:$owner,name:$name){{{requests}}}}}"
+    )
+}
+
+fn encode_node_ids(ids: &[String]) -> String {
+    serde_json::to_string(ids).unwrap_or_else(|_| "[]".into())
+}
+
+fn percent_encode_path_segment(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+            encoded.push(byte as char);
+        } else {
+            encoded.push('%');
+            encoded.push_str(&format!("{byte:02X}"));
+        }
+    }
+    encoded
+}
+
+fn stack_rebase_query(processed: &[String]) -> String {
+    let processed = if processed.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "processed:nodes(ids:{}){{... on PullRequest{{headRefOid}}}} ",
+            encode_node_ids(processed),
+        )
+    };
+    format!(
+        "query($owner:String!,$name:String!,$number:Int!,$sha:String!){{{processed}repository(owner:$owner,name:$name){{pullRequest(number:$number){{id headRefOid baseRef{{compare(headRef:$sha){{behindBy}}}}}}}}}}"
+    )
+}
+
+fn repository_parts(repository: &str) -> Result<(&str, &str), GhError> {
+    let Some((owner, name)) = repository.split_once('/') else {
+        return Err(GhError::Decode("GitHub returned an invalid repository reference."));
+    };
+    if owner.trim().is_empty()
+        || name.trim().is_empty()
+        || name.contains('/')
+        || owner.contains('/')
+    {
+        return Err(GhError::Decode("GitHub returned an invalid repository reference."));
+    }
+    Ok((owner, name))
+}
+
+fn check_stack_permissions(value: &Value, numbers: &[u64]) -> Result<(), GhError> {
+    if value
+        .get("errors")
+        .and_then(Value::as_array)
+        .is_some_and(|errors| !errors.is_empty())
+    {
+        return Err(GhError::StackPermission);
+    }
+    let data = value
+        .get("data")
+        .and_then(Value::as_object)
+        .ok_or(GhError::Decode("GitHub returned an unreadable stack permission response."))?;
+    let repository = data
+        .get("repository")
+        .ok_or(GhError::Decode("GitHub returned an unreadable stack permission response."))?;
+    let Some(repository) = repository.as_object() else {
+        return Err(GhError::StackPermission);
+    };
+    for number in numbers {
+        let key = format!("pr{number}");
+        let pull_request = repository
+            .get(&key)
+            .ok_or(GhError::Decode("GitHub returned an unreadable stack permission response."))?;
+        let Some(pull_request) = pull_request.as_object() else {
+            return Err(GhError::StackPermission);
+        };
+        let maintainer_can_modify = pull_request
+            .get("maintainerCanModify")
+            .and_then(Value::as_bool)
+            .ok_or(GhError::Decode("GitHub returned an unreadable stack permission response."))?;
+        let Some(head_repository) = pull_request
+            .get("headRepository")
+            .and_then(Value::as_object)
+        else {
+            return Err(GhError::StackPermission);
+        };
+        let permission = head_repository
+            .get("viewerPermission")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let can_write = matches!(
+            permission.to_ascii_uppercase().as_str(),
+            "ADMIN" | "MAINTAIN" | "WRITE"
+        );
+        if !maintainer_can_modify && !can_write {
+            return Err(GhError::StackPermission);
+        }
+    }
+    Ok(())
+}
+
+struct RebaseProbe {
+    processed: Option<Vec<Option<String>>>,
+    id: String,
+    head_sha: String,
+    behind_by: i64,
+}
+
+fn reject_graphql_errors(value: &Value, message: &'static str) -> Result<(), GhError> {
+    if value
+        .get("errors")
+        .and_then(Value::as_array)
+        .is_some_and(|errors| !errors.is_empty())
+    {
+        return Err(GhError::Decode(message));
+    }
+    Ok(())
+}
+
+fn decode_rebase_probe(value: &Value) -> Result<RebaseProbe, GhError> {
+    reject_graphql_errors(value, "GitHub returned an unreadable stack rebase response.")?;
+    let data = value
+        .get("data")
+        .and_then(Value::as_object)
+        .ok_or(GhError::Decode("GitHub returned an unreadable stack rebase response."))?;
+    let processed = match data.get("processed") {
+        None => None,
+        Some(Value::Array(values)) => Some(
+            values
+                .iter()
+                .map(|value| {
+                    value
+                        .as_object()
+                        .and_then(|value| value.get("headRefOid"))
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                })
+                .collect(),
+        ),
+        Some(_) => {
+            return Err(GhError::Decode(
+                "GitHub returned an unreadable stack rebase response.",
+            ));
+        }
+    };
+    let repository = data
+        .get("repository")
+        .and_then(Value::as_object)
+        .ok_or(GhError::Decode("GitHub returned an unreadable stack rebase response."))?;
+    let pull_request = repository
+        .get("pullRequest")
+        .and_then(Value::as_object)
+        .ok_or(GhError::Decode("GitHub returned an unreadable stack rebase response."))?;
+    let id = pull_request
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.trim().is_empty())
+        .map(str::to_owned)
+        .ok_or(GhError::Decode("GitHub returned an unreadable stack rebase response."))?;
+    let head_sha = pull_request
+        .get("headRefOid")
+        .and_then(Value::as_str)
+        .filter(|sha| !sha.trim().is_empty())
+        .map(str::to_owned)
+        .ok_or(GhError::Decode("GitHub returned an unreadable stack rebase response."))?;
+    let behind_by = pull_request
+        .get("baseRef")
+        .and_then(Value::as_object)
+        .and_then(|base| base.get("compare"))
+        .and_then(Value::as_object)
+        .and_then(|compare| compare.get("behindBy"))
+        .and_then(Value::as_i64)
+        .ok_or(GhError::Decode("GitHub returned an unreadable stack rebase response."))?;
+    Ok(RebaseProbe {
+        processed,
+        id,
+        head_sha,
+        behind_by,
+    })
+}
+
+fn decode_rebase_mutation(value: &Value) -> Result<String, GhError> {
+    reject_graphql_errors(
+        value,
+        "GitHub returned an unreadable stack rebase mutation response.",
+    )?;
+    value
+        .get("data")
+        .and_then(Value::as_object)
+        .and_then(|data| data.get("updatePullRequestBranch"))
+        .and_then(Value::as_object)
+        .and_then(|update| update.get("pullRequest"))
+        .and_then(Value::as_object)
+        .and_then(|pull_request| pull_request.get("headRefOid"))
+        .and_then(Value::as_str)
+        .filter(|sha| !sha.trim().is_empty())
+        .map(str::to_owned)
+        .ok_or(GhError::Decode(
+            "GitHub returned an unreadable stack rebase mutation response.",
+        ))
+}
+
+fn merge_status(value: &Value) -> Result<(&str, Option<&str>), GhError> {
+    let merge = value
+        .get("status")
+        .and_then(Value::as_str)
+        .zip(value.get("details").and_then(Value::as_object))
+        .ok_or(GhError::Decode("GitHub returned an unreadable stack merge response."))?;
+    let uuid = merge
+        .1
+        .get("uuid")
+        .and_then(Value::as_str)
+        .filter(|uuid| !uuid.trim().is_empty());
+    Ok((merge.0, uuid))
+}
+
+struct DecodedDiffPage {
+    files: Vec<PullRequestDiffFile>,
+    patch: String,
+    truncated: bool,
+    next_cursor: Option<String>,
+    omitted_file_stats: Option<Vec<agent_protocol::pull_requests::PullRequestOmittedFileStat>>,
+}
+
+fn decode_diff_page(value: &Value, page: usize) -> Result<DecodedDiffPage, GhError> {
+    let entries = value
+        .as_array()
+        .ok_or(GhError::Decode("GitHub returned invalid pull request file JSON."))?;
+    let mut truncated = false;
+    let mut remaining_patch_bytes = MAX_DIFF_PAGE_BYTES;
+    let mut files = Vec::new();
+    let mut omitted_file_stats = Vec::new();
+    let mut patch_sections = Vec::new();
+    for entry in entries {
+        let path = entry
+            .get("filename")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default();
+        if path.is_empty() {
+            continue;
+        }
+        let old_path = entry
+            .get("previous_filename")
+            .and_then(|value| value.as_str())
+            .map(str::to_owned);
+        let additions = entry
+            .get("additions")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0);
+        let deletions = entry
+            .get("deletions")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0);
+        let status = entry
+            .get("status")
+            .and_then(|value| value.as_str())
+            .unwrap_or("modified")
+            .trim()
+            .to_ascii_lowercase();
+        let mut file_truncated = false;
+        let patch = entry
+            .get("patch")
+            .and_then(|value| value.as_str())
+            .filter(|patch| !patch.is_empty())
+            .map(|patch| {
+                let allowed = remaining_patch_bytes;
+                if patch.len() > allowed {
+                    truncated = true;
+                    file_truncated = true;
+                    truncate_text(patch, allowed)
+                } else {
+                    patch.to_owned()
+                }
+            });
+        remaining_patch_bytes = remaining_patch_bytes
+            .saturating_sub(patch.as_ref().map_or(0, String::len));
+        if patch
+            .as_deref()
+            .is_none_or(|patch| patch.is_empty())
+            && additions.saturating_add(deletions) > 0
+        {
+            truncated = true;
+            omitted_file_stats.push(agent_protocol::pull_requests::PullRequestOmittedFileStat {
+                path: path.to_owned(),
+                additions,
+                deletions,
+            });
+        }
+        patch_sections.push(diff_file_section(path, old_path.as_deref(), &status, patch.as_deref()));
+        files.push(PullRequestDiffFile {
+            path: path.to_owned(),
+            old_path,
+            additions,
+            deletions,
+            status,
+            patch,
+            truncated: file_truncated,
+        });
+    }
+    Ok(DecodedDiffPage {
+        files,
+        patch: patch_sections.join(""),
+        truncated,
+        next_cursor: (entries.len() == DIFF_PAGE_SIZE).then(|| (page + 1).to_string()),
+        omitted_file_stats: (!omitted_file_stats.is_empty()).then_some(omitted_file_stats),
+    })
+}
 
 #[derive(Clone)]
 pub(crate) struct GitHubPullRequestService {
@@ -87,9 +413,9 @@ impl GitHubPullRequestService {
         let repo = repository.or(request.repository.as_deref());
         let mut args = vec!["pr", "list"];
         let host = host.unwrap_or("github.com");
-        args.extend(["--hostname", host]);
-        if let Some(repo) = repo {
-            args.extend(["--repo", repo]);
+        let repository_selector = repo.map(|repository| scoped_repository(Some(host), repository));
+        if let Some(repository) = repository_selector.as_deref() {
+            args.extend(["--repo", repository]);
         }
         args.extend(["--state", state, "--limit", &limit, "--json", PR_FIELDS]);
         if let Some(query) = request.query.as_deref().filter(|query| !query.trim().is_empty()) {
@@ -142,6 +468,7 @@ impl GitHubPullRequestService {
                 CliPullRequestListState::Open,
                 HEAD_BRANCH_PROBE_LIMIT,
                 host,
+                repository,
             )
             .await?;
         let wanted_repository = repository.map(agent_domain::normalize_repository);
@@ -179,8 +506,9 @@ impl GitHubPullRequestService {
     ) -> Result<PullRequestDetail, GhError> {
         ensure_github_reference(reference)?;
         let repository = reference.repository.clone();
-        let reference_value = format!("{}#{}", repository, reference.number);
         let host = reference.host.as_deref().unwrap_or("github.com");
+        let repository_selector = scoped_repository(Some(host), &repository);
+        let number = reference.number.to_string();
         let value = self
             .cli()?
             .run_json(
@@ -188,9 +516,9 @@ impl GitHubPullRequestService {
                 &[
                     "pr",
                     "view",
-                    &reference_value,
-                    "--hostname",
-                    host,
+                    &number,
+                    "--repo",
+                    &repository_selector,
                     "--json",
                     PR_FIELDS,
                 ],
@@ -380,70 +708,162 @@ impl GitHubPullRequestService {
     ) -> Result<PullRequestDiff, GhError> {
         ensure_github_reference(&request.reference)?;
         let host = request.reference.host.as_deref().unwrap_or("github.com");
-        let endpoint = format!(
-            "repos/{}/pulls/{}/files",
-            request.reference.repository, request.reference.number
-        );
-        const MAX_DIFF_FRAME_BYTES: usize = 8 * 1024 * 1024;
-        let max_output_bytes = (request.max_patch_bytes as usize)
-            .saturating_mul(request.max_files as usize)
-            .min(MAX_DIFF_FRAME_BYTES);
+        if request
+            .commit
+            .as_deref()
+            .is_some_and(|commit| !is_commit_sha(commit))
+        {
+            return Err(GhError::Decode("GitHub returned an invalid diff commit."));
+        }
+        let page = request
+            .cursor
+            .as_deref()
+            .map(parse_diff_cursor)
+            .transpose()?
+            .unwrap_or(1);
+        let paging = format!("per_page={DIFF_PAGE_SIZE}&page={page}");
+        let endpoint = match request.commit.as_deref() {
+            Some(commit) => format!(
+                "repos/{}/commits/{commit}?{paging}",
+                request.reference.repository
+            ),
+            None => format!(
+                "repos/{}/pulls/{}/files?{paging}",
+                request.reference.repository, request.reference.number
+            ),
+        };
+        let mut args = vec!["api", "--hostname", host, endpoint.as_str()];
+        if request.commit.is_some() {
+            args.extend(["--jq", ".files // []"]);
+        }
         let value = self
             .cli()?
             .run_json(
                 cwd,
-                &["api", "--hostname", host, &endpoint, "--paginate"],
+                &args,
                 Budget {
-                    max_output_bytes,
+                    max_output_bytes: MAX_DIFF_PAGE_BYTES,
                     ..Budget::default()
                 },
             )
             .await?;
-        let mut truncated = false;
-        let mut remaining_patch_bytes = (request.max_patch_bytes as usize).min(MAX_DIFF_FRAME_BYTES);
-        let mut files = Vec::new();
-        if let Some(entries) = value.as_array() {
-            for entry in entries.iter().take(request.max_files as usize) {
-                let path = entry.get("filename").and_then(|value| value.as_str()).unwrap_or_default();
-                if path.is_empty() {
-                    continue;
-                }
-                let mut file_truncated = false;
-                let patch = entry.get("patch").and_then(|value| value.as_str()).map(|patch| {
-                    let allowed = request
-                        .max_patch_bytes
-                        .min(u32::try_from(remaining_patch_bytes).unwrap_or(u32::MAX))
-                        as usize;
-                    if patch.len() > allowed {
-                        truncated = true;
-                        file_truncated = true;
-                        truncate_text(patch, allowed)
-                    } else {
-                        patch.to_owned()
-                    }
-                });
-                remaining_patch_bytes = remaining_patch_bytes.saturating_sub(
-                    patch.as_ref().map_or(0, String::len),
-                );
-                files.push(PullRequestDiffFile {
-                    path: path.to_owned(),
-                    old_path: entry.get("previous_filename").and_then(|value| value.as_str()).map(str::to_owned),
-                    additions: entry.get("additions").and_then(|value| value.as_u64()).unwrap_or(0),
-                    deletions: entry.get("deletions").and_then(|value| value.as_u64()).unwrap_or(0),
-                    status: entry.get("status").and_then(|value| value.as_str()).unwrap_or("modified").to_owned(),
-                    patch,
-                    truncated: file_truncated,
-                });
-            }
-            if entries.len() > request.max_files as usize {
-                truncated = true;
-            }
-        }
+        let decoded = decode_diff_page(&value, page)?;
         Ok(PullRequestDiff {
             reference: request.reference.clone(),
-            files,
-            truncated,
+            files: decoded.files,
+            patch: decoded.patch,
+            truncated: decoded.truncated,
+            next_cursor: decoded.next_cursor,
+            omitted_file_stats: decoded.omitted_file_stats,
             stale: false,
+        })
+    }
+
+    pub(crate) async fn diff_file_contents(
+        &self,
+        cwd: &Path,
+        request: &GetPullRequestDiffFileContents,
+    ) -> Result<PullRequestDiffFileContents, GhError> {
+        ensure_github_reference(&request.reference)?;
+        let host = request.reference.host.as_deref().unwrap_or("github.com");
+        if request
+            .commit
+            .as_deref()
+            .is_some_and(|commit| !is_commit_sha(commit))
+        {
+            return Err(GhError::Decode("GitHub returned an invalid diff commit."));
+        }
+        let cli = self.cli()?;
+        let revisions_endpoint = match request.commit.as_deref() {
+            Some(commit) => format!("repos/{}/commits/{commit}", request.reference.repository),
+            None => format!(
+                "repos/{}/pulls/{}",
+                request.reference.repository, request.reference.number
+            ),
+        };
+        let revision_query = if request.commit.is_some() {
+            "[.parents[0].sha, .sha] | @tsv"
+        } else {
+            "[.base.sha, .head.sha] | @tsv"
+        };
+        let revision_output = cli
+            .run(
+                cwd,
+                &[
+                    "api",
+                    "--hostname",
+                    host,
+                    &revisions_endpoint,
+                    "--jq",
+                    revision_query,
+                ],
+                Budget {
+                    max_output_bytes: 1024,
+                    ..Budget::default()
+                },
+            )
+            .await?;
+        let revisions = revision_output.stdout.trim_end().split('\t').collect::<Vec<_>>();
+        let base_ref = revisions.first().copied().unwrap_or_default();
+        let head_ref = revisions.get(1).copied().unwrap_or_default();
+        let root_new_file = matches!(request.change_type, PullRequestDiffChangeType::New)
+            && base_ref.is_empty();
+        if revision_output.stdout_truncated
+            || revision_output.stdout_invalid_utf8
+            || revisions.len() != 2
+            || head_ref.is_empty()
+            || (!root_new_file && !is_commit_sha(base_ref))
+            || !is_commit_sha(head_ref)
+        {
+            return Err(GhError::Decode(
+                "GitHub returned no usable diff file revisions.",
+            ));
+        }
+        let read_file = |revision: &str, path: &str| async move {
+            let encoded_path = path
+                .split('/')
+                .map(percent_encode_path_segment)
+                .collect::<Vec<_>>()
+                .join("/");
+            let endpoint = format!(
+                "repos/{}/contents/{encoded_path}?ref={revision}",
+                request.reference.repository
+            );
+            let output = cli
+                .run(
+                    cwd,
+                    &[
+                        "api",
+                        "--hostname",
+                        host,
+                        "--header",
+                        "Accept: application/vnd.github.raw+json",
+                        &endpoint,
+                    ],
+                    Budget {
+                        max_output_bytes: 1024 * 1024,
+                        ..Budget::default()
+                    },
+                )
+                .await?;
+            if output.stdout_truncated || output.stdout_invalid_utf8 || output.stdout.contains('\0') {
+                return Err(GhError::Decode("GitHub diff file contents are unavailable."));
+            }
+            Ok::<String, GhError>(output.stdout)
+        };
+        let old_contents = if matches!(request.change_type, PullRequestDiffChangeType::New) {
+            String::new()
+        } else {
+            read_file(base_ref, &request.old_path).await?
+        };
+        let new_contents = if matches!(request.change_type, PullRequestDiffChangeType::Deleted) {
+            String::new()
+        } else {
+            read_file(head_ref, &request.new_path).await?
+        };
+        Ok(PullRequestDiffFileContents {
+            old_contents,
+            new_contents,
         })
     }
 
@@ -555,9 +975,14 @@ impl GitHubPullRequestService {
     ) -> Result<PullRequestFile, GhError> {
         ensure_github_reference(reference)?;
         let host = reference.host.as_deref().unwrap_or("github.com");
+        let encoded_path = path
+            .split('/')
+            .map(percent_encode_path_segment)
+            .collect::<Vec<_>>()
+            .join("/");
         let endpoint = format!(
             "repos/{}/contents/{}?ref=pull/{}/head",
-            reference.repository, path, reference.number
+            reference.repository, encoded_path, reference.number
         );
         let value = self
             .cli()?
@@ -593,22 +1018,23 @@ impl GitHubPullRequestService {
     ) -> Result<(), GhError> {
         ensure_github_reference(reference)?;
         let host = reference.host.as_deref().unwrap_or("github.com");
-        let reference = format!("{}#{}", reference.repository, reference.number);
+        let repository = scoped_repository(Some(host), &reference.repository);
+        let number = reference.number.to_string();
         let merge_method = match merge_method.unwrap_or(PullRequestMergeMethod::Merge) {
             PullRequestMergeMethod::Merge => "--merge",
             PullRequestMergeMethod::Squash => "--squash",
             PullRequestMergeMethod::Rebase => "--rebase",
         };
         let args: Vec<&str> = match action {
-            PullRequestAction::Merge => vec!["pr", "merge", &reference, "--hostname", host, merge_method],
-            PullRequestAction::MarkReady => vec!["pr", "ready", &reference, "--hostname", host],
-            PullRequestAction::MarkDraft => vec!["pr", "ready", &reference, "--hostname", host, "--undo"],
-            PullRequestAction::Close => vec!["pr", "close", &reference, "--hostname", host],
-            PullRequestAction::Reopen => vec!["pr", "reopen", &reference, "--hostname", host],
-            PullRequestAction::UpdateBranch => vec!["pr", "update-branch", &reference, "--hostname", host],
-            PullRequestAction::EnableAutoMerge => vec!["pr", "merge", &reference, "--hostname", host, "--auto", merge_method],
-            PullRequestAction::DisableAutoMerge => vec!["pr", "merge", &reference, "--hostname", host, "--disable-auto"],
-            PullRequestAction::Revert => vec!["pr", "revert", &reference, "--hostname", host],
+            PullRequestAction::Merge => vec!["pr", "merge", &number, "--repo", &repository, merge_method],
+            PullRequestAction::MarkReady => vec!["pr", "ready", &number, "--repo", &repository],
+            PullRequestAction::MarkDraft => vec!["pr", "ready", &number, "--repo", &repository, "--undo"],
+            PullRequestAction::Close => vec!["pr", "close", &number, "--repo", &repository],
+            PullRequestAction::Reopen => vec!["pr", "reopen", &number, "--repo", &repository],
+            PullRequestAction::UpdateBranch => vec!["pr", "update-branch", &number, "--repo", &repository],
+            PullRequestAction::EnableAutoMerge => vec!["pr", "merge", &number, "--repo", &repository, "--auto", merge_method],
+            PullRequestAction::DisableAutoMerge => vec!["pr", "merge", &number, "--repo", &repository, "--disable-auto"],
+            PullRequestAction::Revert => vec!["pr", "revert", &number, "--repo", &repository],
         };
         self.cli()?.run(cwd, &args, Budget::default()).await.map(|_| ())
     }
@@ -675,33 +1101,133 @@ impl GitHubPullRequestService {
         }
         let host = reference.host.as_deref().unwrap_or("github.com");
         if action == PullRequestAction::UpdateBranch {
-            for layer in open {
+            let (owner_name, repository_name) = repository_parts(&reference.repository)?;
+            let numbers = open.iter().map(|layer| layer.number).collect::<Vec<_>>();
+            let owner = format!("owner={owner_name}");
+            let name = format!("name={repository_name}");
+            let query = format!("query={}", stack_permission_query(&numbers));
+            let permissions = self
+                .cli()?
+                .run_json(
+                    cwd,
+                    &[
+                        "api",
+                        "--hostname",
+                        host,
+                        "graphql",
+                        "-f",
+                        &owner,
+                        "-f",
+                        &name,
+                        "-f",
+                        &query,
+                    ],
+                    Budget {
+                        max_output_bytes: 512 * 1024,
+                        ..Budget::default()
+                    },
+                )
+                .await?;
+            check_stack_permissions(&permissions, &numbers)?;
+
+            let mut processed = Vec::<(String, String)>::new();
+            for (index, layer) in open.into_iter().enumerate() {
                 let Some(head_sha) = layer.head_sha.as_deref() else {
                     return Err(GhError::StackChanged);
                 };
-                let endpoint = format!(
-                    "repos/{}/pulls/{}/update-branch",
-                    reference.repository, layer.number
-                );
-                let expected = format!("expected_head_sha={head_sha}");
-                self.cli()?
-                    .run(
-                        cwd,
-                        &[
-                            "api",
-                            "--hostname",
-                            host,
-                            "--method",
-                            "PUT",
-                            &endpoint,
-                            "-f",
-                            &expected,
-                            "-f",
-                            "update_method=REBASE",
-                        ],
-                        Budget::default(),
-                    )
-                    .await?;
+                let result = async {
+                    let number = format!("number={}", layer.number);
+                    let sha = format!("sha={head_sha}");
+                    let query = format!("query={}", stack_rebase_query(
+                        &processed
+                            .iter()
+                            .map(|(id, _)| id.clone())
+                            .collect::<Vec<_>>(),
+                    ));
+                    let response = self
+                        .cli()?
+                        .run_json(
+                            cwd,
+                            &[
+                                "api",
+                                "--hostname",
+                                host,
+                                "graphql",
+                                "-f",
+                                &owner,
+                                "-f",
+                                &name,
+                                "-F",
+                                &number,
+                                "-f",
+                                &sha,
+                                "-f",
+                                &query,
+                            ],
+                            Budget {
+                                max_output_bytes: 512 * 1024,
+                                ..Budget::default()
+                            },
+                        )
+                        .await?;
+                    let probe = decode_rebase_probe(&response)?;
+                    for (processed_index, (_, processed_sha)) in processed.iter().enumerate() {
+                        if probe
+                            .processed
+                            .as_ref()
+                            .and_then(|heads| heads.get(processed_index))
+                            .and_then(|sha| sha.as_deref())
+                            != Some(processed_sha.as_str())
+                        {
+                            return Err(GhError::StackChanged);
+                        }
+                    }
+                    if probe.head_sha != head_sha {
+                        return Err(GhError::StackChanged);
+                    }
+                    if probe.behind_by == 0 {
+                        processed.push((probe.id, probe.head_sha));
+                        return Ok::<(), GhError>(());
+                    }
+                    let id = format!("id={}", probe.id);
+                    let expected_sha = format!("sha={head_sha}");
+                    let mutation = "query=mutation($id:ID!,$sha:GitObjectID!){updatePullRequestBranch(input:{pullRequestId:$id,expectedHeadOid:$sha,updateMethod:REBASE}){pullRequest{headRefOid}}}";
+                    let updated = self
+                        .cli()?
+                        .run_json(
+                            cwd,
+                            &[
+                                "api",
+                                "--hostname",
+                                host,
+                                "graphql",
+                                "-f",
+                                &id,
+                                "-f",
+                                &expected_sha,
+                                "-f",
+                                mutation,
+                            ],
+                            Budget {
+                                max_output_bytes: 256 * 1024,
+                                ..Budget::default()
+                            },
+                        )
+                        .await?;
+                    let rebased_sha = decode_rebase_mutation(&updated)?;
+                    processed.push((probe.id, rebased_sha));
+                    Ok(())
+                }
+                .await;
+                if let Err(error) = result {
+                    return Err(match error {
+                        GhError::StackChanged => GhError::StackChanged,
+                        _ => GhError::StackRebaseFailed {
+                            layer: layer.number,
+                            completed: index,
+                        },
+                    });
+                }
             }
             return Ok(());
         }
@@ -743,22 +1269,29 @@ impl GitHubPullRequestService {
                 Budget::default(),
             )
             .await?;
-        for _ in 0..300 {
-            match result.get("status").and_then(|value| value.as_str()) {
-                Some("merged") | Some("enqueued") => return Ok(()),
-                Some("failed") => return Err(GhError::StackMergeRejected),
-                Some("pending") => {}
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5 * 60);
+        let mut attempt = 0u32;
+        loop {
+            let (status, uuid) = merge_status(&result)?;
+            match status {
+                "merged" | "enqueued" => return Ok(()),
+                "failed" => return Err(GhError::StackMergeRejected),
+                "pending" => {}
                 _ => return Err(GhError::Decode("GitHub returned an unreadable stack merge response.")),
             }
-            let Some(uuid) = result
-                .get("details")
-                .and_then(|details| details.get("uuid"))
-                .and_then(|value| value.as_str())
-            else {
+            let Some(uuid) = uuid else {
                 return Err(GhError::Decode("GitHub returned an unreadable stack merge response."));
             };
-            tokio::time::sleep(Duration::from_secs(1)).await;
-            let poll_endpoint = format!("{endpoint}/{uuid}");
+            if tokio::time::Instant::now() >= deadline {
+                return Err(GhError::StackMergePending);
+            }
+            let delay = Duration::from_millis((1_000u64 << attempt.min(3)).min(10_000));
+            tokio::time::sleep(delay).await;
+            if tokio::time::Instant::now() >= deadline {
+                return Err(GhError::StackMergePending);
+            }
+            attempt = attempt.saturating_add(1);
+            let poll_endpoint = format!("{endpoint}/{}", percent_encode_path_segment(uuid));
             result = self
                 .cli()?
                 .run_json(
@@ -768,7 +1301,6 @@ impl GitHubPullRequestService {
                 )
                 .await?;
         }
-        Err(GhError::StackMergePending)
     }
 
     pub(crate) async fn review(
@@ -780,7 +1312,8 @@ impl GitHubPullRequestService {
     ) -> Result<(), GhError> {
         ensure_github_reference(reference)?;
         let host = reference.host.as_deref().unwrap_or("github.com");
-        let reference = format!("{}#{}", reference.repository, reference.number);
+        let repository = scoped_repository(Some(host), &reference.repository);
+        let number = reference.number.to_string();
         let file = tempfile::NamedTempFile::new().map_err(|_| GhError::Command { exit_code: None })?;
         std::fs::write(file.path(), body).map_err(|_| GhError::Command { exit_code: None })?;
         let body_path = file.path().to_string_lossy().into_owned();
@@ -795,9 +1328,9 @@ impl GitHubPullRequestService {
                 &[
                     "pr",
                     "review",
-                    &reference,
-                    "--hostname",
-                    host,
+                    &number,
+                    "--repo",
+                    &repository,
                     verdict,
                     "--body-file",
                     &body_path,
@@ -887,7 +1420,7 @@ impl GitHubPullRequestService {
                     .await
                     .ok();
                 let default_branch = cli
-                    .default_branch(cwd, host.as_deref())
+                    .default_branch(cwd, repository, host.as_deref())
                     .await
                     .ok()
                     .flatten();
@@ -918,19 +1451,28 @@ impl GitHubPullRequestService {
 
     pub(crate) async fn clone_repository(&self, request: &CloneRepository) -> Result<(), GhError> {
         let mut command = tokio::process::Command::new("git");
-        command.arg("clone");
+        command
+            .arg("clone")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true);
         if let Some(branch) = request.branch.as_deref() {
             command.args(["--branch", branch]);
         }
         command.args([request.url.as_str(), request.destination.as_str()]);
-        let output = tokio::time::timeout(std::time::Duration::from_secs(300), command.output())
-            .await
-            .map_err(|_| GhError::Timeout(std::time::Duration::from_secs(300)))?
-            .map_err(|_| GhError::Command { exit_code: None })?;
-        if output.status.success() {
+        let (status, output) = run_bounded_command(
+            command,
+            Budget {
+                timeout: std::time::Duration::from_secs(300),
+                max_output_bytes: 1024 * 1024,
+            },
+        )
+        .await?;
+        if status.success() {
             Ok(())
         } else {
-            Err(super::cli::classify_failure(&String::from_utf8_lossy(&output.stderr), output.status.code()))
+            Err(super::cli::classify_failure(&output.stderr, status.code()))
         }
     }
 
@@ -947,6 +1489,93 @@ fn truncate_text(value: &str, max_bytes: usize) -> String {
         .last()
         .unwrap_or(0);
     value[..end].to_owned()
+}
+
+fn parse_diff_cursor(cursor: &str) -> Result<usize, GhError> {
+    let page = cursor
+        .parse::<usize>()
+        .map_err(|_| GhError::Decode("GitHub returned an invalid diff cursor."))?;
+    (page > 0 && page <= 9_999_999)
+        .then_some(page)
+        .ok_or(GhError::Decode("GitHub returned an invalid diff cursor."))
+}
+
+fn is_commit_sha(value: &str) -> bool {
+    (7..=64).contains(&value.len()) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn quote_git_patch_path(path: &str) -> String {
+    let mut body = String::new();
+    let mut quoted = false;
+    for character in path.chars() {
+        let escape = match character {
+            '"' => Some("\\\""),
+            '\\' => Some("\\\\"),
+            '\u{0007}' => Some("\\a"),
+            '\u{0008}' => Some("\\b"),
+            '\t' => Some("\\t"),
+            '\n' => Some("\\n"),
+            '\u{000b}' => Some("\\v"),
+            '\u{000c}' => Some("\\f"),
+            '\r' => Some("\\r"),
+            _ => None,
+        };
+        if let Some(escape) = escape {
+            body.push_str(escape);
+            quoted = true;
+        } else if character.is_control() || character == '\u{007f}' {
+            body.push('\\');
+            body.push_str(&format!("{:03o}", character as u32));
+            quoted = true;
+        } else {
+            body.push(character);
+        }
+    }
+    if quoted {
+        format!("\"{body}\"")
+    } else {
+        path.to_owned()
+    }
+}
+
+fn diff_file_section(path: &str, old_path: Option<&str>, status: &str, patch: Option<&str>) -> String {
+    let old_path = (status == "renamed")
+        .then_some(old_path.unwrap_or(path))
+        .unwrap_or(path);
+    let old_header = quote_git_patch_path(&format!("a/{old_path}"));
+    let new_header = quote_git_patch_path(&format!("b/{path}"));
+    let mut section = format!("diff --git {old_header} {new_header}\n");
+    if status == "added" {
+        section.push_str("new file mode 100644\n");
+    } else if status == "removed" {
+        section.push_str("deleted file mode 100644\n");
+    } else if status == "renamed" {
+        section.push_str("rename from ");
+        section.push_str(&quote_git_patch_path(old_path));
+        section.push_str("\nrename to ");
+        section.push_str(&quote_git_patch_path(path));
+        section.push('\n');
+    }
+    if status == "added" {
+        section.push_str("--- /dev/null\n+++ ");
+        section.push_str(&new_header);
+        section.push('\n');
+    } else if status == "removed" {
+        section.push_str("--- ");
+        section.push_str(&old_header);
+        section.push_str("\n+++ /dev/null\n");
+    } else {
+        section.push_str("--- ");
+        section.push_str(&old_header);
+        section.push_str("\n+++ ");
+        section.push_str(&new_header);
+        section.push('\n');
+    }
+    if let Some(patch) = patch {
+        section.push_str(patch.trim_end_matches('\n'));
+        section.push('\n');
+    }
+    section
 }
 
 fn summary_from_record(record: PullRequestRecord, project_id: &str, repository: &str, observed_at: Timestamp) -> PullRequestSummary {
@@ -1228,6 +1857,61 @@ mod tests {
     }
 
     #[test]
+    fn diff_pages_keep_whole_files_and_issue_a_cursor_for_the_next_page() {
+        let entries = (0..DIFF_PAGE_SIZE)
+            .map(|index| {
+                serde_json::json!({
+                    "filename": format!("src/file-{index}.rs"),
+                    "status": "modified",
+                    "additions": 1,
+                    "deletions": 1,
+                    "patch": format!("@@ -1 +1 @@\n-old-{index}\n+new-{index}\n")
+                })
+            })
+            .collect::<Vec<_>>();
+        let decoded = decode_diff_page(&Value::Array(entries), 1).unwrap();
+        assert_eq!(decoded.files.len(), DIFF_PAGE_SIZE);
+        assert_eq!(decoded.next_cursor.as_deref(), Some("2"));
+        assert!(!decoded.truncated);
+        assert!(decoded.patch.contains("diff --git a/src/file-0.rs b/src/file-0.rs"));
+
+        let omitted = decode_diff_page(
+            &serde_json::json!([{
+                "filename": "image.bin",
+                "status": "modified",
+                "additions": 2,
+                "deletions": 3
+            }]),
+            2,
+        )
+        .unwrap();
+        assert!(omitted.truncated);
+        assert_eq!(omitted.omitted_file_stats.unwrap()[0].additions, 2);
+        assert_eq!(omitted.next_cursor, None);
+    }
+
+    #[test]
+    fn diff_patch_preserves_file_kinds_renames_and_header_safe_paths() {
+        let decoded = decode_diff_page(
+            &serde_json::json!([
+                {"filename": "src/new.ts", "status": "added", "patch": "@@ -0,0 +1 @@\n+new"},
+                {"filename": "src/gone.ts", "status": "removed", "patch": "@@ -1 +0,0 @@\n-old"},
+                {"filename": "src/new name.ts", "previous_filename": "src/old name.ts", "status": "renamed"},
+                {"filename": "src/pure.ts", "previous_filename": "src/old-pure.ts", "status": "renamed", "patch": ""},
+                {"filename": "tab\tname.ts", "status": "modified", "patch": "@@ -1 +1 @@\n-old\n+new"}
+            ]),
+            1,
+        )
+        .unwrap();
+        assert!(decoded.patch.contains("new file mode 100644\n--- /dev/null\n+++ b/src/new.ts"));
+        assert!(decoded.patch.contains("deleted file mode 100644\n--- a/src/gone.ts\n+++ /dev/null"));
+        assert!(decoded.patch.contains("rename from src/old name.ts\nrename to src/new name.ts"));
+        assert!(decoded.patch.contains("diff --git \"a/tab\\tname.ts\" \"b/tab\\tname.ts\""));
+        assert_eq!(decoded.files[3].patch, None);
+        assert!(!decoded.truncated);
+    }
+
+    #[test]
     fn checks_prioritize_failure_then_pending_then_success() {
         let failure = serde_json::json!([
             {"name": "unit", "conclusion": "SUCCESS"},
@@ -1245,5 +1929,88 @@ mod tests {
         assert_eq!(source_control_provider("github.com"), "github");
         assert_eq!(source_control_provider("gitlab.example"), "gitlab");
         assert_eq!(source_control_provider("code.example"), "unknown");
+    }
+
+    // githubStackActions.test.ts: "refuses the entire rebase before mutation when a later fork
+    // denies write access" and "allows a fork that explicitly permits maintainer updates".
+    #[test]
+    fn stack_permission_preflight_requires_write_or_maintainer_access() {
+        let denied = serde_json::json!({
+            "data": {"repository": {
+                "pr2": {"headRepository": {"viewerPermission": "WRITE"}, "maintainerCanModify": false},
+                "pr3": {"headRepository": {"viewerPermission": "READ"}, "maintainerCanModify": false}
+            }}
+        });
+        assert_eq!(
+            check_stack_permissions(&denied, &[2, 3]),
+            Err(GhError::StackPermission)
+        );
+        let maintainer = serde_json::json!({
+            "data": {"repository": {
+                "pr2": {"headRepository": {"viewerPermission": "WRITE"}, "maintainerCanModify": false},
+                "pr3": {"headRepository": {"viewerPermission": "READ"}, "maintainerCanModify": true}
+            }}
+        });
+        assert_eq!(check_stack_permissions(&maintainer, &[2, 3]), Ok(()));
+    }
+
+    // githubStackActions.test.ts: "rejects a push after preflight without rebasing the new
+    // revision", "skips current layers without submitting a rebase mutation" and the two
+    // processed-head race cases.
+    #[test]
+    fn stack_rebase_probe_detects_processed_head_changes_and_current_layers() {
+        let response = serde_json::json!({
+            "data": {
+                "processed": [{"headRefOid": "new-parent"}],
+                "repository": {"pullRequest": {
+                    "id": "PR_3",
+                    "headRefOid": "ccc",
+                    "baseRef": {"compare": {"behindBy": 0}}
+                }}
+            }
+        });
+        let probe = decode_rebase_probe(&response).unwrap();
+        assert_eq!(probe.processed, Some(vec![Some("new-parent".into())]));
+        assert_eq!(probe.behind_by, 0);
+        assert_eq!(probe.id, "PR_3");
+        let query = stack_rebase_query(&["PR_2".into()]);
+        assert!(query.contains("processed:nodes(ids:[\"PR_2\"]){... on PullRequest{headRefOid}}"));
+        assert!(!query.contains("updatePullRequestBranch"));
+        assert_eq!(
+            decode_rebase_mutation(&serde_json::json!({
+                "data": {"updatePullRequestBranch": {"pullRequest": {"headRefOid": "rebased"}}}
+            }))
+            .unwrap(),
+            "rebased"
+        );
+        assert!(decode_rebase_mutation(&serde_json::json!({
+            "errors": [{"message": "permission denied"}]
+        }))
+        .is_err());
+    }
+
+    // githubStackActions.test.ts: merge queue acceptance, later rejection, malformed responses,
+    // and the five-minute pending bound. The parser is kept pure so command cancellation still
+    // drops the in-flight `gh` process without a durable success result.
+    #[test]
+    fn stack_merge_status_requires_details_and_preserves_pending_uuid() {
+        assert_eq!(
+            merge_status(&serde_json::json!({"status": "enqueued", "details": {}})).unwrap(),
+            ("enqueued", None)
+        );
+        assert_eq!(
+            merge_status(&serde_json::json!({
+                "status": "pending",
+                "details": {"uuid": "operation"}
+            }))
+            .unwrap(),
+            ("pending", Some("operation"))
+        );
+        assert_eq!(
+            merge_status(&serde_json::json!({"status": "merged"})),
+            Err(GhError::Decode("GitHub returned an unreadable stack merge response."))
+        );
+        assert_eq!(percent_encode_path_segment("operation/one"), "operation%2Fone");
+        assert_eq!(percent_encode_path_segment("docs/a?b#c"), "docs%2Fa%3Fb%23c");
     }
 }

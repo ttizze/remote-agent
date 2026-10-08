@@ -121,30 +121,108 @@ pub struct PullRequestDiffFile {
 pub struct PullRequestDiff {
     pub reference: PullRequestRef,
     pub files: Vec<PullRequestDiffFile>,
+    pub patch: String,
     pub truncated: bool,
+    pub next_cursor: Option<String>,
+    pub omitted_file_stats: Option<Vec<PullRequestOmittedFileStat>>,
     pub stale: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PullRequestOmittedFileStat {
+    pub path: String,
+    pub additions: u64,
+    pub deletions: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GetPullRequestDiff {
     pub reference: PullRequestRef,
-    pub max_files: u32,
-    pub max_patch_bytes: u32,
+    pub cursor: Option<String>,
+    pub commit: Option<String>,
     pub fresh: bool,
 }
 
 impl GetPullRequestDiff {
     pub fn validate(&self) -> Result<(), String> {
         self.reference.validate()?;
-        if self.max_files == 0 || self.max_files > 2000 {
-            return Err("diff file limit must be between 1 and 2000".into());
+        if self
+            .cursor
+            .as_deref()
+            .is_some_and(|cursor| !cursor.chars().all(|character| character.is_ascii_digit()))
+        {
+            return Err("diff cursor must be a decimal page number".into());
         }
-        if self.max_patch_bytes == 0 || self.max_patch_bytes > 8 * 1024 * 1024 {
-            return Err("diff patch limit must be between 1 byte and 8 MiB".into());
+        if self.cursor.as_deref().is_some_and(|cursor| {
+            cursor.is_empty() || cursor.len() > 7 || cursor == "0"
+        }) {
+            return Err("diff cursor must be a bounded positive page number".into());
+        }
+        if self.commit.as_deref().is_some_and(|commit| {
+            !(7..=64).contains(&commit.len())
+                || !commit.chars().all(|character| character.is_ascii_hexdigit())
+        }) {
+            return Err("diff commit must be a hexadecimal revision".into());
         }
         Ok(())
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PullRequestDiffChangeType {
+    Change,
+    RenamePure,
+    RenameChanged,
+    New,
+    Deleted,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GetPullRequestDiffFileContents {
+    pub reference: PullRequestRef,
+    pub commit: Option<String>,
+    pub change_type: PullRequestDiffChangeType,
+    pub old_path: String,
+    pub new_path: String,
+}
+
+impl GetPullRequestDiffFileContents {
+    pub fn validate(&self) -> Result<(), String> {
+        self.reference.validate()?;
+        if self.commit.as_deref().is_some_and(|commit| {
+            !(7..=64).contains(&commit.len())
+                || !commit.chars().all(|character| character.is_ascii_hexdigit())
+        }) {
+            return Err("diff commit must be a hexadecimal revision".into());
+        }
+        validate_file_path(&self.old_path)?;
+        validate_file_path(&self.new_path)?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PullRequestDiffFileContents {
+    pub old_contents: String,
+    pub new_contents: String,
+}
+
+fn validate_file_path(path: &str) -> Result<(), String> {
+    if path.trim().is_empty()
+        || path.len() > 4096
+        || path.starts_with('/')
+        || path.contains('\0')
+        || path.contains('\\')
+        || path.split('/').any(|segment| segment == "..")
+    {
+        return Err("file path is required and must be at most 4096 bytes".into());
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -158,14 +236,7 @@ pub struct GetPullRequestFile {
 impl GetPullRequestFile {
     pub fn validate(&self) -> Result<(), String> {
         self.reference.validate()?;
-        if self.path.trim().is_empty()
-            || self.path.len() > 4096
-            || self.path.starts_with('/')
-            || self.path.chars().any(|character| matches!(character, '?' | '#' | '\\'))
-            || self.path.split('/').any(|segment| segment == "..")
-        {
-            return Err("file path is required and must be at most 4096 bytes".into());
-        }
+        validate_file_path(&self.path)?;
         if self.max_bytes == 0 || self.max_bytes > 8 * 1024 * 1024 {
             return Err("file limit must be between 1 byte and 8 MiB".into());
         }
@@ -220,13 +291,7 @@ impl SetPullRequestFilesViewed {
         if self.files.len() > 500 {
             return Err("at most 500 viewed files may be changed at once".into());
         }
-        if self.files.iter().any(|file| {
-            file.path.is_empty()
-                || file.path.len() > 4096
-                || file.path.starts_with('/')
-                || file.path.chars().any(|character| matches!(character, '?' | '#' | '\\'))
-                || file.path.split('/').any(|segment| segment == "..")
-        }) {
+        if self.files.iter().any(|file| validate_file_path(&file.path).is_err()) {
             return Err("viewed-file paths must be relative and at most 4096 bytes".into());
         }
         Ok(())
@@ -529,5 +594,67 @@ mod tests {
         };
         assert!(request.validate().is_ok());
         assert!(ListPullRequests { limit: 101, ..request }.validate().is_err());
+    }
+
+    #[test]
+    fn diff_requests_page_without_dropping_legal_url_delimiters_in_paths() {
+        let reference = PullRequestRef {
+            project_id: "project".into(),
+            repository: "owner/repository".into(),
+            number: 7,
+            host: Some("github.example".into()),
+            allow_stale: false,
+        };
+        let request = GetPullRequestDiff {
+            reference: reference.clone(),
+            cursor: Some("2".into()),
+            commit: Some("abcdef1".into()),
+            fresh: true,
+        };
+        assert!(request.validate().is_ok());
+        assert!(GetPullRequestFile {
+            reference: reference.clone(),
+            path: "docs/a?b#c.txt".into(),
+            max_bytes: 1024,
+        }
+        .validate()
+        .is_ok());
+        assert!(SetPullRequestFilesViewed {
+            reference,
+            files: vec![PullRequestViewedFile {
+                path: "docs/a?b#c.txt".into(),
+                viewed: true,
+            }],
+        }
+        .validate()
+        .is_ok());
+    }
+
+    #[test]
+    fn rejects_unbounded_diff_cursors_and_path_traversal() {
+        let reference = PullRequestRef {
+            project_id: "project".into(),
+            repository: "owner/repository".into(),
+            number: 7,
+            host: None,
+            allow_stale: false,
+        };
+        assert!(GetPullRequestDiff {
+            reference: reference.clone(),
+            cursor: Some("0".into()),
+            commit: None,
+            fresh: false,
+        }
+        .validate()
+        .is_err());
+        assert!(GetPullRequestDiffFileContents {
+            reference,
+            commit: None,
+            change_type: PullRequestDiffChangeType::Change,
+            old_path: "../secret".into(),
+            new_path: "safe".into(),
+        }
+        .validate()
+        .is_err());
     }
 }

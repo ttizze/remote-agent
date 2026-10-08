@@ -162,6 +162,12 @@ pub trait HostOperations: Send + Sync {
     fn settings(&self, _project: &str) -> ConversationSettings {
         ConversationSettings::default()
     }
+    /// Whether a newly observed merged pull request should settle `thread`.
+    /// The Host owns the settings and any provider-backed link state; the
+    /// runtime calls this only after a durable open-to-merged transition.
+    fn pull_request_merged(&self, _thread: &ThreadId, project: &str) -> Result<bool, String> {
+        Ok(self.settings(project).auto_settle_after_days.is_some())
+    }
     /// How launches into `project` name the worktree branches they generate.
     fn branch_naming(&self, _project: &str) -> agent_domain::BranchNaming {
         agent_domain::BranchNaming::default()

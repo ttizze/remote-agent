@@ -367,6 +367,8 @@ pub struct PullRequestClientState {
     pub links_by_thread: BTreeMap<ThreadId, Vec<PullRequestLink>>,
     pub details: BTreeMap<String, PullRequestDetail>,
     pub diffs: BTreeMap<String, agent_protocol::pull_requests::PullRequestDiff>,
+    pub diff_file_contents:
+        BTreeMap<String, agent_protocol::pull_requests::PullRequestDiffFileContents>,
     pub files: BTreeMap<String, agent_protocol::pull_requests::PullRequestFile>,
     pub viewed_files:
         BTreeMap<String, agent_protocol::pull_requests::PullRequestViewedFiles>,
@@ -375,11 +377,38 @@ pub struct PullRequestClientState {
     pub selected_project: Option<String>,
 }
 
+/// A collision-free in-memory key for one file's old/new content within a
+/// pull-request diff. Git paths cannot contain NUL, so it is also a stable
+/// prefix for clearing all cached contexts when a fresh diff replaces it.
+pub(crate) fn pull_request_diff_context_key(
+    reference: &agent_domain::PullRequestKey,
+    old_path: &str,
+    new_path: &str,
+) -> String {
+    let canonical = reference.canonical();
+    format!(
+        "{canonical}\0{}:{old_path}\0{}:{new_path}",
+        old_path.len(),
+        new_path.len()
+    )
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct PullRequestViewedFileInput {
     pub path: String,
     pub viewed: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
+#[serde(rename_all = "kebab-case")]
+pub enum PullRequestDiffChangeTypeInput {
+    Change,
+    RenamePure,
+    RenameChanged,
+    New,
+    Deleted,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -947,6 +976,18 @@ pub enum Intent {
         host: Option<String>,
         repository: String,
         number: u64,
+        cursor: Option<String>,
+        commit: Option<String>,
+    },
+    LoadPullRequestDiffFileContents {
+        project_id: String,
+        host: Option<String>,
+        repository: String,
+        number: u64,
+        commit: Option<String>,
+        change_type: PullRequestDiffChangeTypeInput,
+        old_path: String,
+        new_path: String,
     },
     LoadPullRequestViewedFiles {
         project_id: String,

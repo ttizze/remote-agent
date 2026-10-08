@@ -114,6 +114,7 @@ contracts! {
     ListPullRequests, "host/pullRequests/list" => (pr::ListPullRequests, pr::PullRequestList) [clone],
     GetPullRequest, "host/pullRequests/get" => (pr::GetPullRequest, agent_domain::PullRequestDetail) [clone],
     GetPullRequestDiff, "host/pullRequests/diff" => (pr::GetPullRequestDiff, pr::PullRequestDiff) [clone],
+    GetPullRequestDiffFileContents, "host/pullRequests/diffFileContents" => (pr::GetPullRequestDiffFileContents, pr::PullRequestDiffFileContents) [clone],
     GetPullRequestFile, "host/pullRequests/file" => (pr::GetPullRequestFile, pr::PullRequestFile) [clone],
     GetPullRequestViewedFiles, "host/pullRequests/viewedFiles" => (pr::GetPullRequestViewedFiles, pr::PullRequestViewedFiles) [clone],
     SetPullRequestFilesViewed, "host/pullRequests/setViewedFiles" => (pr::SetPullRequestFilesViewed, pr::PullRequestViewedFiles) [clone],
