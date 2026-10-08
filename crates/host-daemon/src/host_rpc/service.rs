@@ -1321,6 +1321,7 @@ impl HostRpcService {
     ) -> HostReply {
         let devices = self.inner.resources.devices.clone();
         let thread = params.thread_id.clone();
+        let prefer_mjpeg = params.prefer_mjpeg;
         let receiver = Arc::new(tokio::sync::Mutex::new(devices.subscribe()));
         let initial = agent_protocol::device::DeviceEvent::State(devices.state_async().await);
         crate::conversation::stream(
@@ -1352,7 +1353,7 @@ impl HostRpcService {
                                 return None;
                             }
                             Err(_) => {
-                                let frames = devices.frames_for_thread(&thread).await;
+                                let frames = devices.frames_for_thread(&thread, prefer_mjpeg).await;
                                 if !frames.is_empty() {
                                     return Some(frames);
                                 }
@@ -2756,6 +2757,38 @@ impl HostRpcService {
                 .screenshot(params.clone())
                 .await
                 .map_err(|error| Failure::new("device_screenshot_failed", error))?
+                .into(),
+            Call::DeviceInput(params) => {
+                resources
+                    .devices
+                    .input(params.clone())
+                    .await
+                    .map_err(|error| Failure::new("device_input_failed", error))?;
+                agent_protocol::models::Empty {}.into()
+            }
+            Call::DeviceAccessibility(params) => resources
+                .devices
+                .accessibility(params.clone())
+                .await
+                .map_err(|error| Failure::new("device_accessibility_failed", error))?
+                .into(),
+            Call::DeviceEventLog(params) => resources
+                .devices
+                .event_log(params.clone())
+                .await
+                .map_err(|error| Failure::new("device_event_log_failed", error))?
+                .into(),
+            Call::DeviceRecordingStart(params) => resources
+                .devices
+                .start_recording(params.clone())
+                .await
+                .map_err(|error| Failure::new("device_recording_start_failed", error))?
+                .into(),
+            Call::DeviceRecordingStop(params) => resources
+                .devices
+                .stop_recording(params.clone())
+                .await
+                .map_err(|error| Failure::new("device_recording_stop_failed", error))?
                 .into(),
             Call::DeviceSubscribe(_) => unreachable!("device subscription is handled above"),
             Call::ConnectionPerformance(params) => {

@@ -1558,6 +1558,12 @@ pub enum DeviceActionIntent {
     TerminateApp { app_id: String },
     Shake,
     SendPush { app_id: String, payload: String },
+    Touch { phase: String, x: f32, y: f32 },
+    Key { code: String, down: bool },
+    HardwareButton { button: String },
+    Rotate,
+    Fold { command: String },
+    Duo { command: String },
 }
 
 #[derive(Debug, Clone)]
@@ -2413,6 +2419,9 @@ pub enum Intent {
 
     // Device panel and Host-owned simulator/emulator control.
     LoadDevices,
+    InspectDevices { host_id: Option<String> },
+    UpdateDeviceTool { host_id: Option<String>, tool: String },
+    RetryDeviceHost { host_id: String },
     ConfigureDevices {
         enabled: Option<bool>,
         agent_access_enabled: Option<bool>,
@@ -2442,6 +2451,24 @@ pub enum Intent {
         action: DeviceActionIntent,
     },
     CaptureDeviceScreenshot {
+        host_id: Option<String>,
+        device_id: String,
+    },
+    LoadDeviceAccessibility {
+        host_id: Option<String>,
+        device_id: String,
+    },
+    LoadDeviceEventLog {
+        host_id: Option<String>,
+        device_id: String,
+        limit: u16,
+    },
+    StartDeviceRecording {
+        host_id: Option<String>,
+        device_id: String,
+        format: String,
+    },
+    StopDeviceRecording {
         host_id: Option<String>,
         device_id: String,
     },

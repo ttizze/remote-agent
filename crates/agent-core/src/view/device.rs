@@ -52,6 +52,95 @@ pub struct DeviceFrameView {
     pub sequence: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct DeviceVideoFrameView {
+    pub thread_id: String,
+    pub host_id: String,
+    pub device_id: String,
+    pub platform: String,
+    pub payload: Vec<u8>,
+    pub encoding: String,
+    pub width: u32,
+    pub height: u32,
+    pub sequence: u64,
+    pub timestamp_us: Option<u64>,
+    pub keyframe: bool,
+    pub screen_id: Option<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct DeviceAccessibilityView {
+    pub host_id: String,
+    pub device_id: String,
+    pub elements: Vec<DeviceAccessibilityElementView>,
+    pub errors: Vec<String>,
+    pub read_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct DeviceAccessibilityElementView {
+    pub id: String,
+    pub label: String,
+    pub role: String,
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct DeviceForegroundView {
+    pub host_id: String,
+    pub device_id: String,
+    pub app_id: Option<String>,
+    pub received_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct DeviceEventLogView {
+    pub host_id: String,
+    pub device_id: String,
+    pub id: u64,
+    pub timestamp: String,
+    pub kind: String,
+    pub summary: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct DeviceScreenView {
+    pub thread_id: Option<String>,
+    pub host_id: Option<String>,
+    pub device_id: Option<String>,
+    pub width: u32,
+    pub height: u32,
+    pub orientation: String,
+    pub screen_id: Option<u8>,
+    pub hinge_angle: Option<f32>,
+    pub hinge_pose: Option<String>,
+    pub table_mode: bool,
+    pub table_mode_available: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct DeviceRecordingView {
+    pub thread_id: String,
+    pub host_id: String,
+    pub device_id: String,
+    pub format: String,
+    pub started_at: String,
+    pub frame_count: u64,
+    pub byte_count: u64,
+    pub error: Option<String>,
+    pub bytes: Vec<u8>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct DeviceDetailView {
@@ -87,6 +176,13 @@ pub struct DeviceView {
     pub sessions: Vec<DeviceSessionView>,
     pub details: Vec<DeviceDetailView>,
     pub frames: Vec<DeviceFrameView>,
+    pub video_frames: Vec<DeviceVideoFrameView>,
+    pub accessibility: Vec<DeviceAccessibilityView>,
+    pub foreground: Vec<DeviceForegroundView>,
+    pub event_log: Vec<DeviceEventLogView>,
+    pub screens: Vec<DeviceScreenView>,
+    pub recordings: Vec<DeviceRecordingView>,
+    pub last_recording: Option<DeviceRecordingView>,
     pub error: Option<String>,
 }
 
@@ -199,6 +295,113 @@ pub fn device_view(snapshot: &Snapshot) -> DeviceView {
                 sequence: frame.sequence,
             })
             .collect(),
+        video_frames: state
+            .video_frames
+            .values()
+            .map(|frame| DeviceVideoFrameView {
+                thread_id: frame.thread_id.to_string(),
+                host_id: frame.device.host_id.clone(),
+                device_id: frame.device.id.clone(),
+                platform: platform_name(frame.device.platform).into(),
+                payload: frame.payload.clone(),
+                encoding: video_encoding_name(frame.encoding).into(),
+                width: frame.width,
+                height: frame.height,
+                sequence: frame.sequence,
+                timestamp_us: frame.timestamp_us,
+                keyframe: frame.keyframe,
+                screen_id: frame.screen_id,
+            })
+            .collect(),
+        accessibility: state
+            .accessibility
+            .values()
+            .map(|tree| DeviceAccessibilityView {
+                host_id: tree.host_id.clone(),
+                device_id: tree.device_id.clone(),
+                elements: tree
+                    .elements
+                    .iter()
+                    .map(|element| DeviceAccessibilityElementView {
+                        id: element.id.clone(),
+                        label: element.label.clone(),
+                        role: element.role.clone(),
+                        x: element.x,
+                        y: element.y,
+                        width: element.width,
+                        height: element.height,
+                    })
+                    .collect(),
+                errors: tree.errors.clone(),
+                read_at: tree.read_at.clone(),
+            })
+            .collect(),
+        foreground: state
+            .foreground
+            .values()
+            .map(|update| DeviceForegroundView {
+                host_id: update.host_id.clone(),
+                device_id: update.device_id.clone(),
+                app_id: update.app.as_ref().map(|app| app.id.clone()),
+                received_at: update.received_at.clone(),
+            })
+            .collect(),
+        event_log: state
+            .event_log
+            .values()
+            .flat_map(|entries| entries.iter())
+            .map(|entry| DeviceEventLogView {
+                host_id: entry.host_id.clone(),
+                device_id: entry.device_id.clone(),
+                id: entry.id,
+                timestamp: entry.timestamp.clone(),
+                kind: entry.kind.clone(),
+                summary: entry.summary.clone(),
+            })
+            .collect(),
+        screens: state
+            .screens
+            .values()
+            .map(|screen| DeviceScreenView {
+                thread_id: screen.thread_id.as_ref().map(ToString::to_string),
+                host_id: screen.host_id.clone(),
+                device_id: screen.device_id.clone(),
+                width: screen.width,
+                height: screen.height,
+                orientation: orientation_name(screen.orientation).into(),
+                screen_id: screen.screen_id,
+                hinge_angle: screen.hinge_angle,
+                hinge_pose: screen.hinge_pose.clone(),
+                table_mode: screen.table_mode,
+                table_mode_available: screen.table_mode_available,
+            })
+            .collect(),
+        recordings: state
+            .recordings
+            .values()
+            .map(|status| DeviceRecordingView {
+                thread_id: status.thread_id.to_string(),
+                host_id: status.host_id.clone(),
+                device_id: status.device_id.clone(),
+                format: recording_format_name(status.format).into(),
+                started_at: status.started_at.clone(),
+                frame_count: status.frame_count,
+                byte_count: status.byte_count,
+                error: status.error.clone(),
+                bytes: vec![],
+            })
+            .collect(),
+        last_recording: state.last_recording.as_ref().map(|recording| DeviceRecordingView {
+            thread_id: recording.status.thread_id.to_string(),
+            host_id: recording.status.host_id.clone(),
+            device_id: recording.status.device_id.clone(),
+            format: recording_format_name(recording.status.format).into(),
+            started_at: recording.status.started_at.clone(),
+            frame_count: recording.status.frame_count,
+            byte_count: recording.status.byte_count,
+            error: recording.status.error.clone(),
+            bytes: recording.bytes.clone(),
+        }),
         error: state.error.clone(),
     }
 }
@@ -223,6 +426,34 @@ fn status_name(status: agent_protocol::device::DeviceHostStatus) -> &'static str
         agent_protocol::device::DeviceHostStatus::Starting => "starting",
         agent_protocol::device::DeviceHostStatus::Ready => "ready",
         agent_protocol::device::DeviceHostStatus::Failed => "failed",
+    }
+}
+
+fn video_encoding_name(encoding: agent_protocol::device::DeviceFrameEncoding) -> &'static str {
+    match encoding {
+        agent_protocol::device::DeviceFrameEncoding::AvccDescription => "avcc-description",
+        agent_protocol::device::DeviceFrameEncoding::H264 => "h264",
+        agent_protocol::device::DeviceFrameEncoding::Mjpeg => "mjpeg",
+        agent_protocol::device::DeviceFrameEncoding::Jpeg => "jpeg",
+        agent_protocol::device::DeviceFrameEncoding::Png => "png",
+        agent_protocol::device::DeviceFrameEncoding::Semu => "semu",
+    }
+}
+
+fn orientation_name(orientation: agent_protocol::device::DeviceOrientation) -> &'static str {
+    match orientation {
+        agent_protocol::device::DeviceOrientation::Portrait => "portrait",
+        agent_protocol::device::DeviceOrientation::PortraitUpsideDown => "portrait_upside_down",
+        agent_protocol::device::DeviceOrientation::LandscapeLeft => "landscape_left",
+        agent_protocol::device::DeviceOrientation::LandscapeRight => "landscape_right",
+    }
+}
+
+fn recording_format_name(format: agent_protocol::device::DeviceRecordingFormat) -> &'static str {
+    match format {
+        agent_protocol::device::DeviceRecordingFormat::RawFrames => "raw",
+        agent_protocol::device::DeviceRecordingFormat::Mjpeg => "mjpeg",
+        agent_protocol::device::DeviceRecordingFormat::Avcc => "avcc",
     }
 }
 

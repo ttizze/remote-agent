@@ -12,24 +12,24 @@ use agent_protocol::device::{
     DeviceHostsInput, DeviceListInput, DeviceOpenInput, DeviceOrientation, DevicePermission,
     DevicePermissionDecision, DevicePlatform, DevicePlatformAvailability, DeviceScreenshot,
     DeviceScreenshotInput, DeviceServiceState, DeviceSession, DeviceSettings, DeviceShutdownInput,
-    DeviceSummary, DeviceTextSize, DeviceToolVersion, DeviceToolVersions, LOCAL_DEVICE_HOST_ID,
+    DeviceSummary, DeviceTextSize, DeviceToolVersion, DeviceToolVersions, DeviceAccessibilityInput,
+    DeviceAccessibilityTree,
+    DeviceEventLogEntry, DeviceEventLogInput, DeviceFrameEncoding, DeviceInput, DeviceInputKind,
+    DeviceRecording, DeviceRecordingStartInput, DeviceRecordingStatus, DeviceRecordingStopInput,
+    DeviceScreenConfig, DeviceTouchPhase, DeviceVideoFrame, DeviceHardwareButton,
+    DeviceRecordingFormat, LOCAL_DEVICE_HOST_ID,
 };
 use async_trait::async_trait;
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
-    time::{SystemTime, UNIX_EPOCH},
+    sync::{Arc, atomic::{AtomicU64, Ordering}},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
-use tokio::{
-    net::{TcpListener, TcpStream},
-    process::Command,
-    sync::{Mutex, RwLock, broadcast},
-};
+use tokio::{net::{TcpListener, TcpStream}, process::Command, sync::{broadcast, Mutex, RwLock}};
+use crate::device_stream::{jpeg_bounds, parse_semu_packet, AvccChunkKind, AvccDemuxer, RawFrameRecorder, TransportFrame, MAX_STREAM_CHUNK};
 
 const ANDROID_BOOT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 const ANDROID_BOOT_POLL: std::time::Duration = std::time::Duration::from_millis(500);
@@ -194,7 +194,15 @@ const toolState = () => {
         } catch { return false; }
       })
       .sort();
-    return { required_version: version, installed_versions: installedVersions, running_version: null };
+    const stateFile = name === 'expo-device-hub' ? path.join(state, 'hub.json') : path.join(state, 'agent.json');
+    const recorded = read(stateFile);
+    let runningVersion = null;
+    if (recorded?.version && recorded.version === version && recorded.entryPath) {
+      const pid = recorded.pid || read(path.join(state, name === 'expo-device-hub' ? 'hub.json' : 'daemon.json'))?.pid;
+      const command = pid ? run('ps', ['-p', String(pid), '-o', 'command=']).stdout || '' : '';
+      if (command.includes(recorded.entryPath)) runningVersion = recorded.version;
+    }
+    return { required_version: version, installed_versions: installedVersions, running_version: runningVersion };
   };
   return {
     hub: installed('expo-device-hub', hubVersion, ['dist', 'server', 'cli.mjs']),
@@ -747,11 +755,11 @@ async fn run_process(
     android: Option<&AndroidToolPaths>,
 ) -> Result<HostOutput, String> {
     use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
+    use tokio::sync::Notify;
 
-    async fn read_limited<R: AsyncRead + Unpin>(mut reader: R) -> Result<(Vec<u8>, bool), String> {
+    async fn read_limited<R: AsyncRead + Unpin>(mut reader: R, overflow: Arc<Notify>) -> Result<(Vec<u8>, bool), String> {
         let mut output = Vec::new();
         let mut buffer = [0_u8; 16 * 1024];
-        let mut truncated = false;
         loop {
             let size = reader
                 .read(&mut buffer)
@@ -763,9 +771,12 @@ async fn run_process(
             let remaining = HOST_OUTPUT_LIMIT.saturating_sub(output.len());
             let copy = remaining.min(size);
             output.extend_from_slice(&buffer[..copy]);
-            truncated |= copy != size;
+            if copy != size {
+                overflow.notify_one();
+                return Ok((output, true));
+            }
         }
-        Ok((output, truncated))
+        Ok((output, false))
     }
 
     let mut process = Command::new(command);
@@ -791,8 +802,9 @@ async fn run_process(
         .stderr
         .take()
         .ok_or_else(|| format!("{command} did not expose stderr"))?;
-    let stdout_task = tokio::spawn(read_limited(stdout));
-    let stderr_task = tokio::spawn(read_limited(stderr));
+    let overflow = Arc::new(Notify::new());
+    let stdout_task = tokio::spawn(read_limited(stdout, overflow.clone()));
+    let stderr_task = tokio::spawn(read_limited(stderr, overflow.clone()));
 
     if let Some(input) = stdin {
         if let Some(mut writer) = child.stdin.take() {
@@ -806,17 +818,23 @@ async fn run_process(
         }
     }
 
-    let status = match tokio::time::timeout(HOST_COMMAND_TIMEOUT, child.wait()).await {
-        Ok(result) => result.map_err(|error| error.to_string())?,
-        Err(_) => {
+    let status = tokio::select! {
+        result = tokio::time::timeout(HOST_COMMAND_TIMEOUT, child.wait()) => match result {
+            Ok(result) => result.map_err(|error| error.to_string())?,
+            Err(_) => {
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                stdout_task.abort();
+                stderr_task.abort();
+                return Err(format!("{command} did not finish within {} seconds", HOST_COMMAND_TIMEOUT.as_secs()));
+            }
+        },
+        _ = overflow.notified() => {
             let _ = child.kill().await;
             let _ = child.wait().await;
-            let _ = stdout_task.await;
-            let _ = stderr_task.await;
-            return Err(format!(
-                "{command} did not finish within {} seconds",
-                HOST_COMMAND_TIMEOUT.as_secs()
-            ));
+            stdout_task.abort();
+            stderr_task.abort();
+            return Err(format!("{command} produced more than {HOST_OUTPUT_LIMIT} bytes of output"));
         }
     };
     let (stdout, stdout_truncated) = stdout_task.await.map_err(|error| error.to_string())??;
@@ -1492,37 +1510,16 @@ fn action_commands_with_helpers(
                 commands.push(adb_shell(device_id, argv!["pm", verb, app_id, permission]));
             }
         }
-        (DevicePlatform::Android, DeviceActionKind::OpenUrl(url)) => commands.push(adb_shell(
-            device_id,
-            argv!["am", "start", "-a", "android.intent.action.VIEW", "-d", url],
-        )),
-        (DevicePlatform::Android, DeviceActionKind::LaunchApp(app)) => commands.push(adb_shell(
-            device_id,
-            argv![
-                "monkey",
-                "-p",
-                app,
-                "-c",
-                "android.intent.category.LAUNCHER",
-                "1"
-            ],
-        )),
-        (DevicePlatform::Android, DeviceActionKind::TerminateApp(app)) => {
-            commands.push(adb_shell(device_id, argv!["am", "force-stop", app]))
-        }
-        (_, DeviceActionKind::SetToggle { .. }) => {
-            return Err("action setting is unsupported on this platform".into());
-        }
-        (
-            _,
-            DeviceActionKind::SetLiquidGlass(_)
-            | DeviceActionKind::SetColorFilter(_)
-            | DeviceActionKind::Shake
-            | DeviceActionKind::SendPush { .. },
-        ) => return Err("action is unsupported on this platform".into()),
-        (DevicePlatform::Ios, DeviceActionKind::SetOrientation(_)) => {
-            return Err("action is unsupported on this platform".into());
-        }
+        (DevicePlatform::Android, DeviceActionKind::OpenUrl(url)) => commands.push(adb_shell(device_id, argv!["am", "start", "-a", "android.intent.action.VIEW", "-d", url])),
+        (DevicePlatform::Android, DeviceActionKind::LaunchApp(app)) => commands.push(adb_shell(device_id, argv!["monkey", "-p", app, "-c", "android.intent.category.LAUNCHER", "1"])),
+        (DevicePlatform::Android, DeviceActionKind::TerminateApp(app)) => commands.push(adb_shell(device_id, argv!["am", "force-stop", app])),
+        (_, DeviceActionKind::SetToggle { .. }) => return Err("action setting is unsupported on this platform".into()),
+        (_, DeviceActionKind::SetLiquidGlass(_)
+        | DeviceActionKind::SetColorFilter(_)
+        | DeviceActionKind::Shake
+        | DeviceActionKind::SendPush { .. }
+        | DeviceActionKind::Input(_)) => return Err("action is unsupported by the command runner".into()),
+        (DevicePlatform::Ios, DeviceActionKind::SetOrientation(_)) => return Err("action is unsupported on this platform".into()),
     }
     Ok(commands)
 }
@@ -1576,6 +1573,35 @@ fn android_rotation(value: DeviceOrientation) -> &'static str {
         DeviceOrientation::LandscapeLeft => "1",
         DeviceOrientation::PortraitUpsideDown => "2",
         DeviceOrientation::LandscapeRight => "3",
+    }
+}
+
+fn next_orientation(value: DeviceOrientation) -> DeviceOrientation {
+    match value {
+        DeviceOrientation::Portrait => DeviceOrientation::LandscapeLeft,
+        DeviceOrientation::LandscapeLeft => DeviceOrientation::PortraitUpsideDown,
+        DeviceOrientation::PortraitUpsideDown => DeviceOrientation::LandscapeRight,
+        DeviceOrientation::LandscapeRight => DeviceOrientation::Portrait,
+    }
+}
+
+fn orientation_wire(value: DeviceOrientation) -> &'static str {
+    match value {
+        DeviceOrientation::Portrait => "portrait",
+        DeviceOrientation::PortraitUpsideDown => "portrait_upside_down",
+        DeviceOrientation::LandscapeLeft => "landscape_left",
+        DeviceOrientation::LandscapeRight => "landscape_right",
+    }
+}
+
+fn rotate_touch(screen: Option<&DeviceScreenConfig>, x: f32, y: f32) -> (f32, f32) {
+    let Some(screen) = screen else { return (x, y); };
+    if screen.width > screen.height { return (x, y); }
+    match screen.orientation {
+        DeviceOrientation::LandscapeLeft => (y, 1.0 - x),
+        DeviceOrientation::LandscapeRight => (1.0 - y, x),
+        DeviceOrientation::PortraitUpsideDown => (1.0 - x, 1.0 - y),
+        DeviceOrientation::Portrait => (x, y),
     }
 }
 fn android_gravity(value: DeviceOrientation) -> &'static str {
@@ -1687,11 +1713,16 @@ struct Inner {
     state: RwLock<DeviceServiceState>,
     events: broadcast::Sender<DeviceEvent>,
     frame_sequence: AtomicU64,
+    control_sequence: AtomicU64,
     operation: Mutex<()>,
     tool_install: Mutex<()>,
     hub: Mutex<Option<RunningHub>>,
     remote_hubs: Mutex<BTreeMap<String, RemoteHubRuntime>>,
     agents: Mutex<BTreeMap<String, AgentRuntime>>,
+    recordings: Mutex<BTreeMap<(ThreadId, String, String), ActiveDeviceRecording>>,
+    event_log_tasks: Mutex<BTreeMap<(String, String), (u16, tokio::task::JoinHandle<()>)>>,
+    native_snapshot_at: Mutex<BTreeMap<(String, String), Instant>>,
+    recovery_tasks: Mutex<BTreeMap<String, tokio::task::JoinHandle<()>>>,
 }
 
 struct RunningHub {
@@ -1726,6 +1757,32 @@ struct AgentRuntime {
     configured: bool,
 }
 
+struct ActiveDeviceRecording {
+    recorder: RawFrameRecorder,
+    error: Option<String>,
+}
+
+fn finish_recording(
+    thread_id: ThreadId,
+    host_id: String,
+    device_id: String,
+    mut recording: ActiveDeviceRecording,
+) -> DeviceRecording {
+    recording.recorder.finish();
+    let status = DeviceRecordingStatus {
+        thread_id,
+        host_id,
+        device_id,
+        format: recording.recorder.format(),
+        active: false,
+        started_at: recording.recorder.started_at().to_owned(),
+        frame_count: recording.recorder.frame_count(),
+        byte_count: recording.recorder.byte_count(),
+        error: recording.error,
+    };
+    DeviceRecording { status, bytes: recording.recorder.into_bytes() }
+}
+
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 struct PersistedDeviceSettings {
     enabled: bool,
@@ -1733,7 +1790,7 @@ struct PersistedDeviceSettings {
     onboarding_completed: bool,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 struct AgentDaemonState {
     #[serde(rename = "httpPort")]
     http_port: u16,
@@ -1809,11 +1866,16 @@ impl DeviceService {
                 state: RwLock::new(state),
                 events,
                 frame_sequence: AtomicU64::new(0),
+                control_sequence: AtomicU64::new(0),
                 operation: Mutex::new(()),
                 tool_install: Mutex::new(()),
                 hub: Mutex::new(None),
                 remote_hubs: Mutex::new(BTreeMap::new()),
                 agents: Mutex::new(BTreeMap::new()),
+                recordings: Mutex::new(BTreeMap::new()),
+                event_log_tasks: Mutex::new(BTreeMap::new()),
+                native_snapshot_at: Mutex::new(BTreeMap::new()),
+                recovery_tasks: Mutex::new(BTreeMap::new()),
             }),
         })
     }
@@ -1822,21 +1884,25 @@ impl DeviceService {
         self.inner.state.read().await.clone()
     }
 
-    /// Reports live device work that must settle before the Host hands its
-    /// process to an update. Discovery may remain available, but an open
-    /// session, boot transition, or host lifecycle transition owns device
-    /// state that cannot be interrupted by the handoff.
+    /// Reports work that must settle before the Host hands its process to an
+    /// update. Device discovery helpers can stay warm, but an open session,
+    /// boot transition, or active recording owns live device state and cannot
+    /// be interrupted by that handoff.
     pub fn has_active_tasks(&self) -> bool {
         let state = match self.inner.state.try_read() {
             Ok(state) => state,
             Err(_) => return true,
         };
-        !state.sessions.is_empty()
+        if !state.sessions.is_empty()
             || !state.booting_devices.is_empty()
-            || matches!(
-                state.host_status,
-                DeviceHostStatus::Installing | DeviceHostStatus::Starting
-            )
+            || matches!(state.host_status, DeviceHostStatus::Installing | DeviceHostStatus::Starting)
+        {
+            return true;
+        }
+        match self.inner.recordings.try_lock() {
+            Ok(recordings) => !recordings.is_empty(),
+            Err(_) => true,
+        }
     }
 
     /// Starts the pinned agent-device daemon for a host and returns a local
@@ -1906,6 +1972,8 @@ impl DeviceService {
             }
         }
 
+        let state_dir = root.join("agent-device").join("hosts").join(host_id);
+
         let _tool_guard = self.inner.tool_install.lock().await;
         let entry = ensure_pinned_tool(
             local_host.as_ref(),
@@ -1917,46 +1985,79 @@ impl DeviceService {
         .await?;
         drop(_tool_guard);
 
-        let state_dir = root.join("agent-device").join("hosts").join(host_id);
         let (local_port, token, tunnel) = match host.kind() {
             DeviceHostKind::Local => {
                 let daemon = ensure_agent_daemon(local_host.as_ref(), &entry, &state_dir).await?;
                 (daemon.http_port, daemon.token, None)
             }
             DeviceHostKind::Ssh => {
-                let output = host.lifecycle("agent").await?.ok_or_else(|| {
-                    "SSH device host does not support helper lifecycle".to_owned()
-                })?;
-                if output.code != 0 {
-                    return Err(format!(
-                        "remote agent-device startup failed: {}",
-                        String::from_utf8_lossy(&output.stderr).trim()
-                    ));
-                }
-                let daemon: AgentDaemonState = match serde_json::from_slice(&output.stdout) {
-                    Ok(daemon) => daemon,
-                    Err(error) => {
-                        self.cleanup_agent_activation(host.as_ref(), &entry, &state_dir, None)
-                            .await;
+                if let Some((local_port, token, tunnel)) = persisted_remote_agent(host.as_ref(), &state_dir).await {
+                    (local_port, token, Some(tunnel))
+                } else {
+                    let output = host
+                        .lifecycle("agent")
+                        .await?
+                        .ok_or_else(|| "SSH device host does not support helper lifecycle".to_owned())?;
+                    if output.code != 0 {
                         return Err(format!(
-                            "remote agent-device returned invalid state: {error}"
+                            "remote agent-device startup failed: {}",
+                            String::from_utf8_lossy(&output.stderr).trim()
                         ));
                     }
-                };
-                let tunnel = match host.forward(daemon.http_port).await {
-                    Ok(Some(tunnel)) => tunnel,
-                    Ok(None) => {
-                        self.cleanup_agent_activation(host.as_ref(), &entry, &state_dir, None)
-                            .await;
-                        return Err("SSH device host did not create an agent tunnel".to_owned());
-                    }
-                    Err(error) => {
-                        self.cleanup_agent_activation(host.as_ref(), &entry, &state_dir, None)
-                            .await;
+                    let remote: serde_json::Value = match serde_json::from_slice(&output.stdout) {
+                        Ok(remote) => remote,
+                        Err(error) => {
+                            self.cleanup_agent_activation(host.as_ref(), &entry, &state_dir, None).await;
+                            return Err(format!("remote agent-device returned invalid state: {error}"));
+                        }
+                    };
+                    let daemon: AgentDaemonState = match serde_json::from_value(remote.clone()) {
+                        Ok(daemon) if daemon.http_port != 0 && !daemon.token.is_empty() => daemon,
+                        Ok(_) => {
+                            self.cleanup_agent_activation(host.as_ref(), &entry, &state_dir, None).await;
+                            return Err("remote agent-device returned an incomplete endpoint".into());
+                        }
+                        Err(error) => {
+                            self.cleanup_agent_activation(host.as_ref(), &entry, &state_dir, None).await;
+                            return Err(format!("remote agent-device returned invalid endpoint: {error}"));
+                        }
+                    };
+                    if let Err(error) = write_private_json(&state_dir.join("daemon.json"), &daemon).await {
+                        self.cleanup_agent_activation(host.as_ref(), &entry, &state_dir, None).await;
                         return Err(error);
                     }
-                };
-                (tunnel.local_port, daemon.token, Some(tunnel))
+                    if let Err(error) = write_private_json(
+                        &state_dir.join("agent.json"),
+                        &PersistedAgentState {
+                            entry_path: remote
+                                .get("entryPath")
+                                .and_then(serde_json::Value::as_str)
+                                .unwrap_or_default()
+                                .to_owned(),
+                            version: remote
+                                .get("version")
+                                .and_then(serde_json::Value::as_str)
+                                .unwrap_or(AGENT_VERSION)
+                                .to_owned(),
+                        },
+                    )
+                    .await {
+                        self.cleanup_agent_activation(host.as_ref(), &entry, &state_dir, None).await;
+                        return Err(error);
+                    }
+                    let tunnel = match host.forward(daemon.http_port).await {
+                        Ok(Some(tunnel)) => tunnel,
+                        Ok(None) => {
+                            self.cleanup_agent_activation(host.as_ref(), &entry, &state_dir, None).await;
+                            return Err("SSH device host did not create an agent tunnel".to_owned());
+                        }
+                        Err(error) => {
+                            self.cleanup_agent_activation(host.as_ref(), &entry, &state_dir, None).await;
+                            return Err(error);
+                        }
+                    };
+                    (tunnel.local_port, daemon.token, Some(tunnel))
+                }
             }
         };
         if host.kind() == DeviceHostKind::Ssh
@@ -2056,11 +2157,23 @@ impl DeviceService {
         }
         let stale = {
             let mut hubs = self.inner.remote_hubs.lock().await;
-            let live = hubs
-                .get_mut(host.id())
-                .is_some_and(|runtime| runtime.tunnel.child.try_wait().ok().flatten().is_none());
-            if live {
-                return Ok(());
+            let live_port = hubs.get_mut(host.id()).and_then(|runtime| {
+                runtime
+                    .tunnel
+                    .child
+                    .try_wait()
+                    .ok()
+                    .flatten()
+                    .is_none()
+                    .then_some(runtime.local_port)
+            });
+            if let Some(port) = live_port {
+                drop(hubs);
+                if loopback_http_ok(port, "/readyz").await {
+                    self.ensure_remote_recovery_task(host.id()).await;
+                    return Ok(());
+                }
+                hubs = self.inner.remote_hubs.lock().await;
             }
             hubs.remove(host.id())
         };
@@ -2144,14 +2257,43 @@ impl DeviceService {
                 tunnel,
             },
         );
+        drop(hubs);
+        self.ensure_remote_recovery_task(host.id()).await;
         Ok(())
     }
 
-    async fn ensure_hub_tool(
-        &self,
-        host: &Arc<dyn DeviceHostRunner>,
-        start: bool,
-    ) -> Result<(), String> {
+    async fn ensure_remote_recovery_task(&self, host_id: &str) {
+        let mut tasks = self.inner.recovery_tasks.lock().await;
+        if tasks.contains_key(host_id) { return; }
+        let service = self.clone();
+        let id = host_id.to_owned();
+        let task_id = id.clone();
+        tasks.insert(task_id, tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                let Some(host) = service.inner.hosts.read().await.get(&id).cloned() else { break; };
+                let port = service.inner.remote_hubs.lock().await.get(&id).map(|runtime| runtime.local_port);
+                let healthy = match port {
+                    Some(port) => loopback_http_ok(port, "/readyz").await,
+                    None => false,
+                };
+                if healthy { continue; }
+                host.set_probe_error(Some("SSH device hub tunnel is unavailable; reconnecting".into()));
+                let recovered = service.ensure_remote_hub_running(&host).await.is_ok();
+                if recovered {
+                    host.set_probe_error(None);
+                }
+                let mut state = service.state_async().await;
+                if let Some(summary) = state.host_statuses.get_mut(&id) {
+                    summary.status = if recovered { DeviceHostStatus::Ready } else { DeviceHostStatus::Starting };
+                    summary.detail = host.probe_error();
+                }
+                service.publish_state(state).await;
+            }
+        }));
+    }
+
+    async fn ensure_hub_tool(&self, host: &Arc<dyn DeviceHostRunner>, start: bool) -> Result<(), String> {
         if host.kind() != DeviceHostKind::Local {
             let probe = host
                 .lifecycle("probe")
@@ -2225,6 +2367,54 @@ impl DeviceService {
                 ));
             }
             if start {
+                let remote: serde_json::Value = match serde_json::from_slice(&output.stdout) {
+                    Ok(remote) => remote,
+                    Err(error) => {
+                        let _ = host.lifecycle("stop-agent").await;
+                        return Err(format!("remote agent-device returned invalid state: {error}"));
+                    }
+                };
+                let daemon: AgentDaemonState = match serde_json::from_value(remote.clone()) {
+                    Ok(daemon) => daemon,
+                    Err(error) => {
+                        let _ = host.lifecycle("stop-agent").await;
+                        return Err(format!("remote agent-device returned invalid endpoint: {error}"));
+                    }
+                };
+                if daemon.http_port == 0 || daemon.token.is_empty() {
+                    let _ = host.lifecycle("stop-agent").await;
+                    return Err("remote agent-device returned an incomplete endpoint".into());
+                }
+                let root = self
+                    .inner
+                    .config_path
+                    .parent()
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| PathBuf::from("."));
+                let state_dir = root.join("agent-device").join("hosts").join(host.id());
+                if let Err(error) = write_private_json(&state_dir.join("daemon.json"), &daemon).await {
+                    let _ = host.lifecycle("stop-agent").await;
+                    return Err(error);
+                }
+                if let Err(error) = write_private_json(
+                    &state_dir.join("agent.json"),
+                    &PersistedAgentState {
+                        entry_path: remote
+                            .get("entryPath")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or_default()
+                            .to_owned(),
+                        version: remote
+                            .get("version")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or(AGENT_VERSION)
+                            .to_owned(),
+                    },
+                )
+                .await {
+                    let _ = host.lifecycle("stop-agent").await;
+                    return Err(error);
+                }
                 // `agent` returns only the daemon endpoint. Preserve the
                 // inventory/tool probe collected before startup and mark the
                 // pinned agent as running instead of decoding the endpoint
@@ -2469,6 +2659,18 @@ impl DeviceService {
     }
 
     pub async fn shutdown_owned(&self) {
+        let recovery_tasks = {
+            let mut tasks = self.inner.recovery_tasks.lock().await;
+            std::mem::take(&mut *tasks)
+        };
+        for (_, task) in recovery_tasks { task.abort(); }
+        let event_log_tasks = {
+            let mut tasks = self.inner.event_log_tasks.lock().await;
+            std::mem::take(&mut *tasks)
+        };
+        for (_, (_, task)) in event_log_tasks { task.abort(); }
+        self.inner.recordings.lock().await.clear();
+        self.inner.native_snapshot_at.lock().await.clear();
         let root = self
             .inner
             .config_path
@@ -3355,17 +3557,52 @@ impl DeviceService {
         // down.  This keeps the thread contract deterministic when a shutdown
         // command fails, matching the reference service's close semantics.
         let mut next = current;
-        next.sessions
-            .retain(|session| !closing.iter().any(|closing| closing == session));
+        next.sessions.retain(|session| !closing.iter().any(|closing| closing == session));
+        let completed_recordings = {
+            let mut recordings = self.inner.recordings.lock().await;
+            let current = std::mem::take(&mut *recordings);
+            let mut completed = Vec::new();
+            let mut remaining = BTreeMap::new();
+            for ((thread, host_id, device_id), recording) in current {
+                if closing.iter().any(|session| &session.thread_id == &thread && session.host_id == host_id && session.device_id == device_id) {
+                    completed.push(finish_recording(thread, host_id, device_id, recording));
+                } else {
+                    remaining.insert((thread, host_id, device_id), recording);
+                }
+            }
+            *recordings = remaining;
+            completed
+        };
+        let retained_devices = next
+            .sessions
+            .iter()
+            .map(|session| (session.host_id.clone(), session.device_id.clone()))
+            .collect::<BTreeSet<_>>();
+        let mut event_log_tasks = self.inner.event_log_tasks.lock().await;
+        for session in &closing {
+            let key = (session.host_id.clone(), session.device_id.clone());
+            if !retained_devices.contains(&key) && let Some((_, task)) = event_log_tasks.remove(&key) {
+                task.abort();
+            }
+        }
+        drop(event_log_tasks);
+        let mut native_snapshots = self.inner.native_snapshot_at.lock().await;
+        native_snapshots.retain(|key, _| retained_devices.contains(key));
+        drop(native_snapshots);
         self.publish_state(next).await;
+        for recording in completed_recordings {
+            let _ = self.inner.events.send(DeviceEvent::RecordingComplete(recording));
+        }
+        // Closing a session is an accepted state transition even when the
+        // device was already powered off or its helper has just disappeared.
+        // The reference service records the close first and deliberately
+        // discards shutdown failures so a stale helper cannot resurrect the
+        // session in the client.
         if input.shutdown {
             for session in &closing {
-                self.shutdown_device(
-                    session.host_id.clone(),
-                    session.device_id.clone(),
-                    session.platform,
-                )
-                .await?;
+                let _ = self
+                    .shutdown_device(session.host_id.clone(), session.device_id.clone(), session.platform)
+                    .await;
             }
         }
         Ok(())
@@ -3471,6 +3708,12 @@ impl DeviceService {
             .unwrap_or_else(|| LOCAL_DEVICE_HOST_ID.into());
         let host = self.host(&host_id).await?;
         let device = self.find_device(&host_id, &input.device_id).await?;
+        if let DeviceActionKind::Input(device_input) = &input.action {
+            let port = self.hub_port(&host_id).await.ok_or_else(|| "device hub is not running".to_owned())?;
+            let request_id = self.next_control_request_id(device_input);
+            hub_input(port, device.platform, &device.id, device_input, request_id).await?;
+            return self.detail_inner(DeviceDetailInput { host_id: Some(host_id), device_id: device.id }).await;
+        }
         let push_payload = match &input.action {
             DeviceActionKind::SendPush { payload, .. } => {
                 let payload = if let Some(alert) = payload.as_str() {
@@ -3566,44 +3809,338 @@ impl DeviceService {
             .collect()
     }
 
-    pub async fn frames_for_thread(&self, thread: &ThreadId) -> Vec<DeviceEvent> {
+    pub async fn frames_for_thread(&self, thread: &ThreadId, prefer_mjpeg: bool) -> Vec<DeviceEvent> {
         let sessions = self.sessions_for_thread(thread).await;
         let mut frames = Vec::new();
         for session in sessions {
-            if let Ok(screenshot) = self
-                .screenshot(DeviceScreenshotInput {
-                    host_id: Some(session.host_id.clone()),
-                    device_id: session.device_id.clone(),
-                })
-                .await
+            let device = match self.find_device(&session.host_id, &session.device_id).await {
+                Ok(device) => device,
+                Err(_) => continue,
+            };
+            let screen = self.screen_config(&session.host_id, &device).await.ok();
+            if device.platform == DevicePlatform::Ios
+                && let Some(port) = self.hub_port(&session.host_id).await
             {
-                frames.push(DeviceEvent::Frame(agent_protocol::device::DeviceFrame {
-                    thread_id: thread.clone(),
-                    device: screenshot.device,
-                    png: screenshot.png,
-                    width: screenshot.width,
-                    height: screenshot.height,
-                    sequence: self
-                        .inner
-                        .frame_sequence
-                        .fetch_add(1, Ordering::Relaxed)
-                        .saturating_add(1),
-                }));
+                self.ensure_event_log_task(&session.host_id, &device.id, port).await;
+                if let Ok(raw) = hub_sse_first_json(port, "/vendor/serve-sim/appstate", &[("device", device.id.as_str())], "foreground").await {
+                    let app = raw.get("bundleId").and_then(serde_json::Value::as_str).filter(|id| !id.is_empty()).map(|id| DeviceForegroundApp { id: id.into(), name: None, version: None });
+                    frames.push(DeviceEvent::Foreground(agent_protocol::device::DeviceForegroundUpdate { host_id: session.host_id.clone(), device_id: device.id.clone(), app, received_at: now_iso() }));
+                }
+            }
+            let port = match self.hub_port(&session.host_id).await {
+                Some(port) => Some(port),
+                None => {
+                    if let Ok(host) = self.host(&session.host_id).await {
+                        let _ = if host.kind() == DeviceHostKind::Ssh {
+                            self.ensure_remote_hub_running(&host).await
+                        } else {
+                            self.ensure_hub_running(&host).await
+                        };
+                    }
+                    self.hub_port(&session.host_id).await
+                }
+            };
+            let transport = if let Some(port) = port {
+                let panel_ids = if screen.as_ref().is_some_and(|screen| screen.supports_hinge_angle && !screen.supports_physical_orientation) {
+                    vec![Some(1), Some(3)]
+                } else {
+                    vec![None]
+                };
+                let mut live = Vec::new();
+                for panel_id in panel_ids {
+                    let result = if panel_id.is_some() {
+                        hub_avcc_frame(port, &device.id, panel_id).await
+                    } else {
+                        match device.platform {
+                            DevicePlatform::Ios if prefer_mjpeg => match hub_mjpeg_frame(port, &device.id).await {
+                                Ok(frame) => Ok(vec![frame]),
+                                Err(_) => hub_avcc_frame(port, &device.id, None).await,
+                            },
+                            DevicePlatform::Ios => match hub_avcc_frame(port, &device.id, None).await {
+                                Ok(frames) => Ok(frames),
+                                Err(_) => hub_mjpeg_frame(port, &device.id).await.map(|frame| vec![frame]),
+                            },
+                            DevicePlatform::Android => hub_android_frame(port, &device.id).await.map(|frame| vec![frame]),
+                        }
+                    };
+                    if let Ok(mut result) = result {
+                        live.append(&mut result);
+                    }
+                }
+                if live.is_empty() { Err("device live transport is unavailable".into()) } else { Ok(live) }
+            } else {
+                Err("device hub is not running".into())
+            };
+            if let Ok(transport) = transport {
+                let (width, height) = screen.as_ref().map(|screen| (screen.width, screen.height)).unwrap_or((0, 0));
+                let native_snapshot = prefer_mjpeg
+                    && device.platform == DevicePlatform::Android
+                    && transport.iter().any(|frame| matches!(frame.encoding, DeviceFrameEncoding::H264 | DeviceFrameEncoding::Semu));
+                for frame in transport {
+                    let sequence = self.inner.frame_sequence.fetch_add(1, Ordering::Relaxed).saturating_add(1);
+                    self.append_recording(thread, &session, &frame).await;
+                    frames.push(DeviceEvent::Video(DeviceVideoFrame {
+                        thread_id: thread.clone(),
+                        device: device.clone(),
+                        payload: frame.payload,
+                        encoding: frame.encoding,
+                        width,
+                        height,
+                        sequence,
+                        timestamp_us: frame.timestamp_us,
+                        keyframe: frame.keyframe,
+                        screen_id: frame.screen_id,
+                    }));
+                }
+                if let Some(mut screen) = screen {
+                    screen.thread_id = Some(thread.clone());
+                    screen.host_id = Some(session.host_id.clone());
+                    screen.device_id = Some(device.id.clone());
+                    frames.push(DeviceEvent::Screen(screen));
+                }
+                // Android's SEMU/H.264 transport remains available to a native
+                // decoder, while the current native surfaces use a bounded
+                // JPEG snapshot fallback so a live device never renders as a
+                // blank panel.  The raw transport is still delivered above.
+                if native_snapshot && self.native_snapshot_due(&session.host_id, &device.id).await
+                    && let Ok(screenshot) = self.screenshot(DeviceScreenshotInput { host_id: Some(session.host_id.clone()), device_id: session.device_id.clone() }).await
+                {
+                    self.append_recording(&session.thread_id, &session, &TransportFrame { payload: screenshot.png.clone(), encoding: DeviceFrameEncoding::Png, keyframe: true, timestamp_us: None, screen_id: None }).await;
+                    frames.push(DeviceEvent::Frame(agent_protocol::device::DeviceFrame { thread_id: thread.clone(), device: screenshot.device, png: screenshot.png, width: screenshot.width, height: screenshot.height, sequence: self.inner.frame_sequence.fetch_add(1, Ordering::Relaxed).saturating_add(1) }));
+                }
+                continue;
+            }
+            // Stills remain a deliberate recovery path for helpers that have
+            // not attached their live stream yet; they do not replace the
+            // raw transport once a stream is available.
+            if let Ok(screenshot) = self.screenshot(DeviceScreenshotInput { host_id: Some(session.host_id.clone()), device_id: session.device_id.clone() }).await {
+                self.append_recording(&session.thread_id, &session, &TransportFrame { payload: screenshot.png.clone(), encoding: DeviceFrameEncoding::Png, keyframe: true, timestamp_us: None, screen_id: None }).await;
+                frames.push(DeviceEvent::Frame(agent_protocol::device::DeviceFrame { thread_id: thread.clone(), device: screenshot.device, png: screenshot.png, width: screenshot.width, height: screenshot.height, sequence: self.inner.frame_sequence.fetch_add(1, Ordering::Relaxed).saturating_add(1) }));
             }
         }
         frames
     }
 
+    async fn screen_config(&self, host_id: &str, device: &DeviceSummary) -> Result<DeviceScreenConfig, String> {
+        let port = self.hub_port(host_id).await.ok_or_else(|| "device hub is not running".to_owned())?;
+        hub_screen_config(port, device.platform, &device.id).await
+    }
+
+    async fn native_snapshot_due(&self, host_id: &str, device_id: &str) -> bool {
+        let key = (host_id.to_owned(), device_id.to_owned());
+        let now = Instant::now();
+        let mut snapshots = self.inner.native_snapshot_at.lock().await;
+        if snapshots.get(&key).is_some_and(|last| now.duration_since(*last) < Duration::from_secs(1)) {
+            return false;
+        }
+        snapshots.insert(key, now);
+        true
+    }
+
+    async fn ensure_event_log_task(&self, host_id: &str, device_id: &str, port: u16) {
+        let key = (host_id.to_owned(), device_id.to_owned());
+        let events = self.inner.events.clone();
+        let host = host_id.to_owned();
+        let device = device_id.to_owned();
+        let mut tasks = self.inner.event_log_tasks.lock().await;
+        if tasks
+            .get(&key)
+            .is_some_and(|(current_port, _)| *current_port == port)
+        {
+            return;
+        }
+        if let Some((_, task)) = tasks.remove(&key) {
+            task.abort();
+        }
+        let task = tokio::spawn(async move {
+            loop {
+                let Ok(response) = reqwest::Client::new()
+                    .get(format!("http://127.0.0.1:{port}/vendor/serve-sim/api/event-log/events"))
+                    .query(&[("device", device.as_str()), ("limit", "100")])
+                    .send()
+                    .await
+                else {
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    continue;
+                };
+                if !response.status().is_success() {
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    continue;
+                }
+                let mut stream = response.bytes_stream();
+                let mut pending = String::new();
+                while let Some(Ok(chunk)) = stream.next().await {
+                    if pending.len().saturating_add(chunk.len()) > MAX_STREAM_CHUNK {
+                        // Drop this response and reconnect with a fresh
+                        // bounded buffer.  Leaving a completed task in the
+                        // ownership map would silently disable event updates
+                        // until the device session is reopened.
+                        pending.clear();
+                        break;
+                    }
+                    pending.push_str(&String::from_utf8_lossy(&chunk));
+                    while let Some(end) = pending.find('\n') {
+                        let line = pending[..end].trim_end_matches('\r').to_owned();
+                        pending.drain(..=end);
+                        let Some(data) = line.strip_prefix("data:") else { continue; };
+                        let Ok(raw) = serde_json::from_str::<serde_json::Value>(data.trim()) else { continue; };
+                        for entry in normalize_event_log(&host, &device, raw) {
+                            let _ = events.send(DeviceEvent::EventLog(entry));
+                        }
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            }
+        });
+        tasks.insert(key, (port, task));
+    }
+
+    async fn append_recording(&self, thread: &ThreadId, session: &DeviceSession, frame: &TransportFrame) {
+        let key = (thread.clone(), session.host_id.clone(), session.device_id.clone());
+        let mut recordings = self.inner.recordings.lock().await;
+        let status = if let Some(recording) = recordings.get_mut(&key) {
+            let accepted = match recording.recorder.format() {
+                DeviceRecordingFormat::RawFrames => true,
+                DeviceRecordingFormat::Mjpeg => matches!(frame.encoding, DeviceFrameEncoding::Mjpeg | DeviceFrameEncoding::Jpeg),
+                DeviceRecordingFormat::Avcc => matches!(frame.encoding, DeviceFrameEncoding::AvccDescription | DeviceFrameEncoding::H264 | DeviceFrameEncoding::Jpeg | DeviceFrameEncoding::Semu),
+            };
+            if accepted && recording.error.is_none() {
+                if let Err(error) = recording.recorder.push(frame) {
+                    recording.error = Some(error);
+                }
+            }
+            Some(DeviceRecordingStatus {
+                thread_id: thread.clone(),
+                host_id: session.host_id.clone(),
+                device_id: session.device_id.clone(),
+                format: recording.recorder.format(),
+                active: true,
+                started_at: recording.recorder.started_at().to_owned(),
+                frame_count: recording.recorder.frame_count(),
+                byte_count: recording.recorder.byte_count(),
+                error: recording.error.clone(),
+            })
+        } else {
+            None
+        };
+        drop(recordings);
+        if let Some(status) = status {
+            let _ = self.inner.events.send(DeviceEvent::Recording(status));
+        }
+    }
+
+    pub async fn input(&self, input: DeviceInput) -> Result<(), String> {
+        input.validate()?;
+        let host_id = input.host_id.clone().unwrap_or_else(|| LOCAL_DEVICE_HOST_ID.into());
+        let _guard = self.inner.operation.lock().await;
+        let host = self.host(&host_id).await?;
+        let device = self.find_device(&host_id, &input.device_id).await?;
+        if let Some(port) = self.hub_port(&host_id).await {
+            let screen = self.screen_config(&host_id, &device).await.ok();
+            let input = match &input.input {
+                DeviceInputKind::Rotate => DeviceInputKind::SetOrientation(next_orientation(screen.as_ref().map(|screen| screen.orientation).unwrap_or(DeviceOrientation::Portrait))),
+                DeviceInputKind::Touch { phase, x, y } if device.platform == DevicePlatform::Ios => {
+                    let (x, y) = rotate_touch(screen.as_ref(), *x, *y);
+                    DeviceInputKind::Touch { phase: *phase, x, y }
+                }
+                _ => input.input.clone(),
+            };
+            let request_id = self.next_control_request_id(&input);
+            if hub_input(port, device.platform, &device.id, &input, request_id).await.is_ok() {
+                return Ok(());
+            }
+        }
+        Err(format!("live input is unavailable for device {} on host {}", device.id, host.label()))
+    }
+
+    fn next_control_request_id(&self, input: &DeviceInputKind) -> u64 {
+        if matches!(input, DeviceInputKind::Fold { .. } | DeviceInputKind::Duo { .. }) {
+            self.inner.control_sequence.fetch_add(1, Ordering::Relaxed).saturating_add(1)
+        } else {
+            0
+        }
+    }
+
+    pub async fn accessibility(&self, input: DeviceAccessibilityInput) -> Result<DeviceAccessibilityTree, String> {
+        let _guard = self.inner.operation.lock().await;
+        let host_id = input.host_id.unwrap_or_else(|| LOCAL_DEVICE_HOST_ID.into());
+        let device = self.find_device(&host_id, &input.device_id).await?;
+        let port = self.hub_port(&host_id).await.ok_or_else(|| "device hub is not running".to_owned())?;
+        let raw = match device.platform {
+            DevicePlatform::Ios => hub_json_get(port, &format!("/vendor/serve-sim/helper/{}/ax", hub_device_component(&device.id)), &[]).await?,
+            DevicePlatform::Android => hub_json_get(port, "/vendor/serve-emu/api/accessibility", &[("device", device.id.as_str())]).await?,
+        };
+        Ok(normalize_accessibility(&host_id, &device.id, device.platform, raw))
+    }
+
+    pub async fn event_log(&self, input: DeviceEventLogInput) -> Result<Vec<DeviceEventLogEntry>, String> {
+        let _guard = self.inner.operation.lock().await;
+        let host_id = input.host_id.unwrap_or_else(|| LOCAL_DEVICE_HOST_ID.into());
+        let device = self.find_device(&host_id, &input.device_id).await?;
+        let port = self.hub_port(&host_id).await.ok_or_else(|| "device hub is not running".to_owned())?;
+        if device.platform != DevicePlatform::Ios { return Ok(Vec::new()); }
+        self.ensure_event_log_task(&host_id, &device.id, port).await;
+        let limit = input.limit.clamp(1, 100).to_string();
+        let raw = hub_event_log_payload(port, device.id.as_str(), &limit).await?;
+        Ok(normalize_event_log(&host_id, &device.id, raw))
+    }
+
+    pub async fn start_recording(&self, input: DeviceRecordingStartInput) -> Result<DeviceRecordingStatus, String> {
+        let _guard = self.inner.operation.lock().await;
+        let host_id = input.host_id.unwrap_or_else(|| LOCAL_DEVICE_HOST_ID.into());
+        let device = self.find_device(&host_id, &input.device_id).await?;
+        let key = (input.thread_id.clone(), host_id.clone(), device.id.clone());
+        if self.inner.recordings.lock().await.contains_key(&key) {
+            return Err("device recording is already active".into());
+        }
+        let status = DeviceRecordingStatus { thread_id: input.thread_id.clone(), host_id: host_id.clone(), device_id: device.id.clone(), format: input.format, active: true, started_at: now_iso(), frame_count: 0, byte_count: 0, error: None };
+        self.inner.recordings.lock().await.insert(key, ActiveDeviceRecording { recorder: RawFrameRecorder::new(input.format, status.started_at.clone()), error: None });
+        let _ = self.inner.events.send(DeviceEvent::Recording(status.clone()));
+        Ok(status)
+    }
+
+    pub async fn stop_recording(&self, input: DeviceRecordingStopInput) -> Result<DeviceRecording, String> {
+        let _guard = self.inner.operation.lock().await;
+        let host_id = input.host_id.unwrap_or_else(|| LOCAL_DEVICE_HOST_ID.into());
+        let key = (input.thread_id.clone(), host_id.clone(), input.device_id.clone());
+        let recording = self.inner.recordings.lock().await.remove(&key).ok_or_else(|| "device recording is not active".to_owned())?;
+        let result = finish_recording(input.thread_id, host_id, input.device_id, recording);
+        let _ = self.inner.events.send(DeviceEvent::Recording(result.status.clone()));
+        let _ = self.inner.events.send(DeviceEvent::RecordingComplete(result.clone()));
+        Ok(result)
+    }
+
     async fn hub_port(&self, host_id: &str) -> Option<u16> {
         if host_id == LOCAL_DEVICE_HOST_ID {
-            return self.inner.hub.lock().await.as_ref().map(|hub| hub.port);
+            let mut hub = self.inner.hub.lock().await;
+            let port = hub.as_mut().and_then(|current| match current.child.try_wait() {
+                Ok(None) => Some(current.port),
+                Ok(Some(_)) | Err(_) => None,
+            });
+            if let Some(port) = port {
+                return Some(port);
+            }
+            let stale = hub.take();
+            drop(hub);
+            if let Some(mut stale) = stale {
+                let _ = stale.child.wait().await;
+            }
+            return None;
         }
-        self.inner
-            .remote_hubs
-            .lock()
-            .await
-            .get(host_id)
-            .map(|hub| hub.local_port)
+        let mut hubs = self.inner.remote_hubs.lock().await;
+        let port = hubs.get_mut(host_id).and_then(|current| match current.tunnel.try_wait() {
+            Ok(None) => Some(current.local_port),
+            Ok(Some(_)) | Err(_) => None,
+        });
+        if let Some(port) = port {
+            return Some(port);
+        }
+        let stale = hubs.remove(host_id);
+        drop(hubs);
+        if let Some(mut stale) = stale {
+            let _ = stale.tunnel.wait().await;
+        }
+        None
     }
 
     async fn host(&self, id: &str) -> Result<Arc<dyn DeviceHostRunner>, String> {
@@ -3682,6 +4219,32 @@ async fn agent_config_healthy(state_dir: &Path) -> bool {
     loopback_http_ok(port, "/health").await
 }
 
+/// Reattach to the pinned remote agent recorded by the SSH lifecycle.  The
+/// forwarding process belongs to this Host instance, so the persisted remote
+/// endpoint is reused only after a fresh local health probe succeeds.
+async fn persisted_remote_agent(
+    host: &dyn DeviceHostRunner,
+    state_dir: &Path,
+) -> Option<(u16, String, ForwardedPort)> {
+    let _record = tokio::fs::read(state_dir.join("agent.json"))
+        .await
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<PersistedAgentState>(&bytes).ok())
+        .filter(|record| record.version == AGENT_VERSION && !record.entry_path.is_empty())?;
+    let daemon = tokio::fs::read(state_dir.join("daemon.json"))
+        .await
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<AgentDaemonState>(&bytes).ok())
+        .filter(|daemon| daemon.http_port != 0 && !daemon.token.is_empty())?;
+    let mut tunnel = host.forward(daemon.http_port).await.ok().flatten()?;
+    if loopback_http_ok(tunnel.local_port, "/health").await {
+        return Some((tunnel.local_port, daemon.token, tunnel));
+    }
+    let _ = tunnel.child.kill().await;
+    let _ = tunnel.child.wait().await;
+    None
+}
+
 async fn ensure_agent_daemon(
     host: &dyn DeviceHostRunner,
     entry: &Path,
@@ -3754,17 +4317,21 @@ async fn ensure_agent_daemon(
             if let Ok(daemon) = serde_json::from_slice::<AgentDaemonState>(&bytes)
                 && loopback_http_ok(daemon.http_port, "/health").await
             {
-                write_private_json(
+                if let Err(error) = write_private_json(
                     &agent_file,
                     &PersistedAgentState {
                         entry_path: entry_string.clone(),
                         version: AGENT_VERSION.into(),
                     },
                 )
-                .await?;
-                tokio::spawn(async move {
+                .await
+                {
+                    let _ = child.kill().await;
                     let _ = child.wait().await;
-                });
+                    let _ = tokio::fs::remove_file(&daemon_file).await;
+                    return Err(error);
+                }
+                tokio::spawn(async move { let _ = child.wait().await; });
                 return Ok(daemon);
             }
         }
@@ -4114,9 +4681,23 @@ fn inspect_toolchain(state_root: &Path) -> (bool, bool, DeviceToolVersions) {
     let agent_versions =
         installed_tool_versions(&root, AGENT_PACKAGE, &["bin", "agent-device.mjs"]);
     let hub_installed = hub_versions.iter().any(|version| version == HUB_VERSION);
-    let agent_installed = agent_versions
-        .iter()
-        .any(|version| version == AGENT_VERSION);
+    let agent_installed = agent_versions.iter().any(|version| version == AGENT_VERSION);
+    let hub_running = std::fs::read(root.join("hub.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<PersistedHubState>(&bytes).ok())
+        .filter(|state| state.version == HUB_VERSION && process_matches_entry(state.pid, &state.entry_path))
+        .map(|state| state.version);
+    let agent_running = std::fs::read(root.join("agent-device").join("hosts").join(LOCAL_DEVICE_HOST_ID).join("agent.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<PersistedAgentState>(&bytes).ok())
+        .filter(|state| state.version == AGENT_VERSION)
+        .filter(|state| {
+            std::fs::read(root.join("agent-device").join("hosts").join(LOCAL_DEVICE_HOST_ID).join("daemon.json"))
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<AgentDaemonState>(&bytes).ok())
+                .is_some_and(|daemon| process_for_port_is_alive(daemon.http_port, &state.entry_path))
+        })
+        .map(|state| state.version);
     (
         hub_installed,
         agent_installed,
@@ -4124,15 +4705,28 @@ fn inspect_toolchain(state_root: &Path) -> (bool, bool, DeviceToolVersions) {
             hub: DeviceToolVersion {
                 required_version: HUB_VERSION.into(),
                 installed_versions: hub_versions,
-                running_version: None,
+                running_version: hub_running,
             },
             agent: DeviceToolVersion {
                 required_version: AGENT_VERSION.into(),
                 installed_versions: agent_versions,
-                running_version: None,
+                running_version: agent_running,
             },
         },
     )
+}
+
+fn process_matches_entry(pid: u32, entry: &str) -> bool {
+    let Ok(output) = std::process::Command::new("ps").args(["-p", &pid.to_string(), "-o", "command="]).output() else { return false; };
+    output.status.success() && String::from_utf8_lossy(&output.stdout).contains(entry)
+}
+
+fn process_for_port_is_alive(_port: u16, entry: &str) -> bool {
+    // agent-device records the entry path separately from its daemon endpoint;
+    // process scanning is intentionally conservative and never treats a stale
+    // endpoint file as a running version.
+    let Ok(output) = std::process::Command::new("ps").args(["-ax", "-o", "command="]).output() else { return false; };
+    output.status.success() && String::from_utf8_lossy(&output.stdout).contains(entry)
 }
 
 fn installed_tool_versions(root: &Path, package: &str, entry: &[&str]) -> Vec<String> {
@@ -4274,6 +4868,400 @@ async fn hub_screenshot(
         .await
         .map(|bytes| bytes.to_vec())
         .map_err(|error| format!("device hub screenshot body failed: {error}"))
+}
+
+fn hub_device_component(device_id: &str) -> String {
+    url::form_urlencoded::byte_serialize(device_id.as_bytes()).collect()
+}
+
+async fn hub_avcc_frame(
+    port: u16,
+    device_id: &str,
+    panel_id: Option<u8>,
+) -> Result<Vec<TransportFrame>, String> {
+    let device = hub_device_component(device_id);
+    let path = match panel_id {
+        Some(panel @ (1 | 3)) => format!("/vendor/serve-sim/helper/{device}/panel/{panel}/stream.avcc"),
+        _ => format!("/vendor/serve-sim/helper/{device}/stream.avcc"),
+    };
+    let response = reqwest::Client::new()
+        .get(format!("http://127.0.0.1:{port}{path}"))
+        .timeout(std::time::Duration::from_secs(3))
+        .send()
+        .await
+        .map_err(|error| format!("device AVCC stream failed: {error}"))?;
+    if !response.status().is_success() {
+        return Err(format!("device AVCC stream returned {}", response.status()));
+    }
+    let mut demuxer = AvccDemuxer::default();
+    let mut stream = response.bytes_stream();
+    let mut result = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|error| format!("device AVCC stream body failed: {error}"))?;
+        for frame in demuxer.push(&chunk)? {
+            let (encoding, keyframe) = match frame.kind {
+                AvccChunkKind::Description => (DeviceFrameEncoding::AvccDescription, true),
+                AvccChunkKind::Keyframe => (DeviceFrameEncoding::H264, true),
+                AvccChunkKind::Delta => (DeviceFrameEncoding::H264, false),
+                AvccChunkKind::Seed => (DeviceFrameEncoding::Jpeg, true),
+            };
+            result.push(TransportFrame {
+                payload: frame.payload,
+                encoding,
+                keyframe,
+                timestamp_us: None,
+                screen_id: panel_id,
+            });
+            if result.len() >= 4 {
+                return Ok(result);
+            }
+        }
+        if result.iter().any(|frame| frame.encoding != DeviceFrameEncoding::AvccDescription) {
+            return Ok(result);
+        }
+    }
+    if result.is_empty() { Err("device AVCC stream ended without a complete frame".into()) } else { Ok(result) }
+}
+
+async fn hub_mjpeg_frame(port: u16, device_id: &str) -> Result<TransportFrame, String> {
+    let device = hub_device_component(device_id);
+    let response = reqwest::Client::new()
+        .get(format!("http://127.0.0.1:{port}/vendor/serve-sim/helper/{device}/stream.mjpeg"))
+        .timeout(std::time::Duration::from_secs(3))
+        .send()
+        .await
+        .map_err(|error| format!("device MJPEG stream failed: {error}"))?;
+    if !response.status().is_success() { return Err(format!("device MJPEG stream returned {}", response.status())); }
+    let mut stream = response.bytes_stream();
+    let mut bytes = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|error| format!("device MJPEG stream body failed: {error}"))?;
+        if bytes.len().saturating_add(chunk.len()) > MAX_STREAM_CHUNK { return Err("device MJPEG frame exceeded the Host limit".into()); }
+        bytes.extend_from_slice(&chunk);
+        if let Some((start, end)) = jpeg_bounds(&bytes) {
+            return Ok(TransportFrame { payload: bytes[start..end].to_vec(), encoding: DeviceFrameEncoding::Mjpeg, keyframe: true, timestamp_us: None, screen_id: None });
+        }
+    }
+    Err("device MJPEG stream ended without a complete frame".into())
+}
+
+async fn hub_android_frame(port: u16, device_id: &str) -> Result<TransportFrame, String> {
+    use futures_util::SinkExt;
+    let device = hub_device_component(device_id);
+    let url = format!("ws://127.0.0.1:{port}/vendor/serve-emu/ws?device={device}&frame-meta=1");
+    let (mut socket, _) = async_tungstenite::tokio::connect_async(url)
+        .await
+        .map_err(|error| format!("device SEMU stream failed: {error}"))?;
+    while let Some(message) = socket.next().await {
+        let message = message.map_err(|error| format!("device SEMU frame failed: {error}"))?;
+        if let async_tungstenite::tungstenite::Message::Binary(bytes) = message {
+            if bytes.len() > MAX_STREAM_CHUNK { return Err("device SEMU frame exceeded the Host limit".into()); }
+            let frame = parse_semu_packet(&bytes);
+            let _ = socket.close(None).await;
+            return Ok(frame);
+        }
+    }
+    Err("device SEMU stream closed without a frame".into())
+}
+
+async fn hub_screen_config(port: u16, platform: DevicePlatform, device_id: &str) -> Result<DeviceScreenConfig, String> {
+    let device = hub_device_component(device_id);
+    let (vendor, path) = match platform {
+        DevicePlatform::Ios => ("serve-sim", format!("/helper/{device}/config")),
+        DevicePlatform::Android => ("serve-emu", "/api/stream-settings".into()),
+    };
+    let response = reqwest::Client::new()
+        .get(format!("http://127.0.0.1:{port}/vendor/{vendor}{path}"))
+        .query(&[("device", device_id)])
+        .timeout(std::time::Duration::from_secs(10))
+        .send().await.map_err(|error| format!("device screen config failed: {error}"))?;
+    if !response.status().is_success() { return Err(format!("device screen config returned {}", response.status())); }
+    let raw = response.json::<serde_json::Value>().await.map_err(|error| format!("device screen config was invalid: {error}"))?;
+    let source = raw.get("screen").unwrap_or(&raw);
+    let number = |key: &str, default| source.get(key).and_then(serde_json::Value::as_u64).unwrap_or(default) as u32;
+    let orientation = match source.get("orientation").and_then(serde_json::Value::as_str).unwrap_or("portrait") {
+        "portrait_upside_down" => DeviceOrientation::PortraitUpsideDown,
+        "landscape_left" => DeviceOrientation::LandscapeLeft,
+        "landscape_right" => DeviceOrientation::LandscapeRight,
+        _ => DeviceOrientation::Portrait,
+    };
+    Ok(DeviceScreenConfig {
+        thread_id: None,
+        host_id: None,
+        device_id: None,
+        width: number("width", 1).max(1), height: number("height", 1).max(1), orientation,
+        screen_id: source.get("screenId").and_then(serde_json::Value::as_u64).and_then(|value| u8::try_from(value).ok()),
+        supports_hinge_angle: source.get("supportsHingeAngle").and_then(serde_json::Value::as_bool).unwrap_or(false),
+        supports_physical_orientation: source.get("supportsPhysicalOrientation").and_then(serde_json::Value::as_bool).unwrap_or(false),
+        hinge_angle: source.get("hingeAngle").and_then(serde_json::Value::as_f64).map(|value| value as f32),
+        hinge_pose: source.get("hingePose").and_then(serde_json::Value::as_str).map(str::to_owned),
+        table_mode: source.get("tableMode").and_then(serde_json::Value::as_bool).unwrap_or(false),
+        table_mode_available: source.get("tableModeAvailable").and_then(serde_json::Value::as_bool).unwrap_or(false),
+    })
+}
+
+async fn hub_json_get(port: u16, path: &str, query: &[(&str, &str)]) -> Result<serde_json::Value, String> {
+    let response = reqwest::Client::new()
+        .get(format!("http://127.0.0.1:{port}{path}"))
+        .query(query)
+        .timeout(std::time::Duration::from_secs(10))
+        .send().await.map_err(|error| format!("device hub request failed: {error}"))?;
+    if !response.status().is_success() { return Err(format!("device hub request returned {}", response.status())); }
+    response.json().await.map_err(|error| format!("device hub returned invalid JSON: {error}"))
+}
+
+async fn hub_sse_first_json(
+    port: u16,
+    path: &str,
+    query: &[(&str, &str)],
+    label: &str,
+) -> Result<serde_json::Value, String> {
+    let response = reqwest::Client::new()
+        .get(format!("http://127.0.0.1:{port}{path}"))
+        .query(query)
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await
+        .map_err(|error| format!("device {label} stream failed: {error}"))?;
+    if !response.status().is_success() {
+        return Err(format!("device {label} stream returned {}", response.status()));
+    }
+    let mut stream = response.bytes_stream();
+    let mut pending = String::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|error| format!("device {label} stream body failed: {error}"))?;
+        if pending.len().saturating_add(chunk.len()) > MAX_STREAM_CHUNK {
+            return Err(format!("device {label} stream exceeded the Host limit"));
+        }
+        pending.push_str(&String::from_utf8_lossy(&chunk));
+        while let Some(end) = pending.find('\n') {
+            let line = pending[..end].trim_end_matches('\r').to_owned();
+            pending.drain(..=end);
+            if let Some(data) = line.strip_prefix("data:") {
+                return serde_json::from_str(data.trim()).map_err(|error| format!("device {label} event was invalid: {error}"));
+            }
+        }
+    }
+    if let Some(data) = pending.trim().strip_prefix("data:") {
+        return serde_json::from_str(data.trim()).map_err(|error| format!("device {label} event was invalid: {error}"));
+    }
+    Err(format!("device {label} stream ended without an event"))
+}
+
+async fn hub_event_log_payload(port: u16, device_id: &str, limit: &str) -> Result<serde_json::Value, String> {
+    hub_sse_first_json(
+        port,
+        "/vendor/serve-sim/api/event-log/events",
+        &[("device", device_id), ("limit", limit)],
+        "event log",
+    )
+    .await
+}
+
+fn ios_hid_usage(code: &str) -> Option<u8> {
+    if let Some(letter) = code.strip_prefix("Key").and_then(|value| value.as_bytes().first()).copied().filter(|value| value.is_ascii_uppercase()) { return Some(0x04 + letter - b'A'); }
+    if let Some(digit) = code.strip_prefix("Digit").and_then(|value| value.as_bytes().first()).copied() { return if digit == b'0' { Some(0x27) } else if (b'1'..=b'9').contains(&digit) { Some(0x1e + digit - b'1') } else { None }; }
+    Some(match code {
+        "Enter" => 0x28,
+        "Escape" => 0x29,
+        "Backspace" => 0x2a,
+        "Tab" => 0x2b,
+        "Space" => 0x2c,
+        "Minus" => 0x2d,
+        "Equal" => 0x2e,
+        "BracketLeft" => 0x2f,
+        "BracketRight" => 0x30,
+        "Backslash" => 0x31,
+        "Semicolon" => 0x33,
+        "Quote" => 0x34,
+        "Backquote" => 0x35,
+        "Comma" => 0x36,
+        "Period" => 0x37,
+        "Slash" => 0x38,
+        "Delete" => 0x4c,
+        "ArrowRight" => 0x4f,
+        "ArrowLeft" => 0x50,
+        "ArrowDown" => 0x51,
+        "ArrowUp" => 0x52,
+        "ControlLeft" => 0xe0,
+        "ShiftLeft" => 0xe1,
+        "AltLeft" => 0xe2,
+        "MetaLeft" => 0xe3,
+        "ControlRight" => 0xe4,
+        "ShiftRight" => 0xe5,
+        "AltRight" => 0xe6,
+        "MetaRight" => 0xe7,
+        _ => return None,
+    })
+}
+
+fn android_keycode(code: &str) -> Option<u16> {
+    Some(match code { "ArrowUp" => 19, "ArrowDown" => 20, "ArrowLeft" => 21, "ArrowRight" => 22, "Tab" => 61, "Enter" => 66, "Backspace" => 67, "Delete" => 112, "Home" => 122, "End" => 123, "PageUp" => 92, "PageDown" => 93, _ => return None })
+}
+
+fn key_code_text(code: &str) -> Option<String> {
+    code.strip_prefix("Key").filter(|value| value.len() == 1).map(|value| value.to_ascii_lowercase())
+        .or_else(|| code.strip_prefix("Digit").filter(|value| value.len() == 1).map(str::to_owned))
+        .or_else(|| Some(match code {
+            "Space" => " ",
+            "Minus" => "-",
+            "Equal" => "=",
+            "BracketLeft" => "[",
+            "BracketRight" => "]",
+            "Backslash" => "\\",
+            "Semicolon" => ";",
+            "Quote" => "'",
+            "Backquote" => "`",
+            "Comma" => ",",
+            "Period" => ".",
+            "Slash" => "/",
+            _ => return None,
+        }.to_owned()))
+}
+
+fn button_wire(button: DeviceHardwareButton, ios: bool) -> &'static str {
+    match button {
+        DeviceHardwareButton::Home => "home",
+        DeviceHardwareButton::Back => "back",
+        DeviceHardwareButton::Recents => "recents",
+        DeviceHardwareButton::Power => if ios { "lock" } else { "power" },
+        DeviceHardwareButton::AppSwitcher => "app_switcher",
+    }
+}
+
+async fn hub_input(
+    port: u16,
+    platform: DevicePlatform,
+    device_id: &str,
+    input: &DeviceInputKind,
+    request_id: u64,
+) -> Result<(), String> {
+    if platform == DevicePlatform::Android
+        && matches!(input, DeviceInputKind::Key { down: false, .. })
+    {
+        return Ok(());
+    }
+    if platform == DevicePlatform::Android {
+        if let DeviceInputKind::Fold { command } = input {
+            let posture = match command.as_str() { "closed" => "closed", "opened" | "open" | "book" | "table" => "opened", _ => return Err("unsupported Android fold posture".into()) };
+            let result = hub_action(port, &format!("/vendor/serve-emu/api/fold?device={}", hub_device_component(device_id)), serde_json::json!({"posture": posture})).await?;
+            if !result.ok { return Err(result.error.unwrap_or_else(|| "Android fold command failed".into())); }
+            return Ok(());
+        }
+    }
+    let device = hub_device_component(device_id);
+    let path = match platform { DevicePlatform::Ios => format!("/vendor/serve-sim/helper/ws?device={device}"), DevicePlatform::Android => format!("/vendor/serve-emu/ws?device={device}&frame-meta=1") };
+    let url = format!("ws://127.0.0.1:{port}{path}");
+    let (mut socket, _) = async_tungstenite::tokio::connect_async(url).await.map_err(|error| format!("device input stream failed: {error}"))?;
+    let message = match (platform, input) {
+        (DevicePlatform::Ios, DeviceInputKind::Touch { phase, x, y }) => {
+            let phase = match phase { DeviceTouchPhase::Begin => "begin", DeviceTouchPhase::Move => "move", DeviceTouchPhase::End => "end" };
+            async_tungstenite::tungstenite::Message::binary([vec![0x03], serde_json::to_vec(&serde_json::json!({"type": phase, "x": x, "y": y})).map_err(|error| error.to_string())?].concat())
+        }
+        (DevicePlatform::Ios, DeviceInputKind::Key { code, down }) => {
+            let usage = ios_hid_usage(code).ok_or_else(|| format!("unsupported iOS keyboard code {code}"))?;
+            async_tungstenite::tungstenite::Message::binary([vec![0x06], serde_json::to_vec(&serde_json::json!({"type": if *down { "down" } else { "up" }, "usage": usage})).map_err(|error| error.to_string())?].concat())
+        }
+        (_, DeviceInputKind::Touch { phase, x, y }) => {
+            let action = match phase { DeviceTouchPhase::Begin => "down", DeviceTouchPhase::Move => "move", DeviceTouchPhase::End => "up" };
+            async_tungstenite::tungstenite::Message::Text(serde_json::json!({"type":"touch", "action": action, "x": x, "y": y}).to_string().into())
+        }
+        (DevicePlatform::Android, DeviceInputKind::Key { code, .. }) => {
+            if code == "Escape" { async_tungstenite::tungstenite::Message::Text(serde_json::json!({"type":"back"}).to_string().into()) }
+            else if let Some(keycode) = android_keycode(code) { async_tungstenite::tungstenite::Message::Text(serde_json::json!({"type":"key", "keycode": keycode}).to_string().into()) }
+            else if let Some(text) = key_code_text(code) { async_tungstenite::tungstenite::Message::Text(serde_json::json!({"type":"text", "text": text}).to_string().into()) }
+            else { return Err(format!("unsupported Android keyboard code {code}")); }
+        }
+        (DevicePlatform::Ios, DeviceInputKind::HardwareButton(button)) => async_tungstenite::tungstenite::Message::binary([vec![0x04], serde_json::to_vec(&serde_json::json!({"button": button_wire(*button, true)})).map_err(|error| error.to_string())?].concat()),
+        (_, DeviceInputKind::HardwareButton(button)) => async_tungstenite::tungstenite::Message::Text(serde_json::json!({"type": button_wire(*button, false)}).to_string().into()),
+        (DevicePlatform::Ios, DeviceInputKind::Rotate) => async_tungstenite::tungstenite::Message::binary([vec![0x07], serde_json::to_vec(&serde_json::json!({"orientation": "rotate"})).map_err(|error| error.to_string())?].concat()),
+        (DevicePlatform::Ios, DeviceInputKind::SetOrientation(orientation)) => async_tungstenite::tungstenite::Message::binary([vec![0x07], serde_json::to_vec(&serde_json::json!({"orientation": orientation_wire(*orientation)})).map_err(|error| error.to_string())?].concat()),
+        (_, DeviceInputKind::Rotate) => async_tungstenite::tungstenite::Message::Text(serde_json::json!({"type":"rotate"}).to_string().into()),
+        (_, DeviceInputKind::SetOrientation(orientation)) => async_tungstenite::tungstenite::Message::Text(serde_json::json!({"type":"orientation", "orientation": orientation_wire(*orientation)}).to_string().into()),
+        (DevicePlatform::Ios, DeviceInputKind::Fold { command }) => async_tungstenite::tungstenite::Message::binary([vec![0x10], serde_json::to_vec(&serde_json::json!({"requestId": request_id, "command": {"control": "pose", "value": command}})).map_err(|error| error.to_string())?].concat()),
+        (DevicePlatform::Ios, DeviceInputKind::Duo { command }) => async_tungstenite::tungstenite::Message::binary([vec![0x10], serde_json::to_vec(&serde_json::json!({"requestId": request_id, "command": {"control": if command == "table" { "table" } else { "pose" }, "value": if command == "table" { serde_json::Value::Bool(true) } else { serde_json::Value::String(command.clone()) }}})).map_err(|error| error.to_string())?].concat()),
+        (_, DeviceInputKind::Fold { command } | DeviceInputKind::Duo { command }) => async_tungstenite::tungstenite::Message::Text(serde_json::json!({"type":"control", "command": command}).to_string().into()),
+    };
+    use futures_util::SinkExt;
+    socket.send(message).await.map_err(|error| format!("device input failed: {error}"))?;
+    if platform == DevicePlatform::Ios && matches!(input, DeviceInputKind::Fold { .. } | DeviceInputKind::Duo { .. }) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err("device control acknowledgement timed out".into());
+            }
+            let message = tokio::time::timeout(remaining, socket.next())
+                .await
+                .map_err(|_| "device control acknowledgement timed out".to_owned())?
+                .ok_or_else(|| "device control stream closed before acknowledgement".to_owned())?
+                .map_err(|error| format!("device control acknowledgement failed: {error}"))?;
+            let async_tungstenite::tungstenite::Message::Binary(bytes) = message else { continue };
+            if bytes.first() != Some(&0x90) {
+                continue;
+            }
+            let reply: serde_json::Value = serde_json::from_slice(&bytes[1..]).map_err(|error| format!("device control reply was invalid: {error}"))?;
+            if reply.get("requestId").and_then(serde_json::Value::as_u64) != Some(request_id) {
+                continue;
+            }
+            if reply.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
+                return Err(reply.get("error").and_then(serde_json::Value::as_str).unwrap_or("device control failed").into());
+            }
+            break;
+        }
+    }
+    let _ = socket.close(None).await;
+    Ok(())
+}
+
+fn json_number(value: Option<&serde_json::Value>, fallback: f32) -> f32 {
+    value.and_then(serde_json::Value::as_f64).filter(|value| value.is_finite()).map(|value| value as f32).unwrap_or(fallback)
+}
+
+fn normalize_accessibility(host_id: &str, device_id: &str, platform: DevicePlatform, raw: serde_json::Value) -> DeviceAccessibilityTree {
+    let mut elements = Vec::new();
+    let mut errors = Vec::new();
+    match platform {
+        DevicePlatform::Ios => {
+            let screen_width = raw.as_array().and_then(|nodes| nodes.first()).and_then(|node| node.get("frame")).map(|frame| json_number(frame.get("width"), 1.0)).unwrap_or(1.0).max(1.0);
+            let screen_height = raw.as_array().and_then(|nodes| nodes.first()).and_then(|node| node.get("frame")).map(|frame| json_number(frame.get("height"), 1.0)).unwrap_or(1.0).max(1.0);
+            fn visit(node: &serde_json::Value, path: &str, width: f32, height: f32, elements: &mut Vec<agent_protocol::device::DeviceAccessibilityElement>) {
+                if elements.len() >= 500 { return; }
+                let Some(frame) = node.get("frame") else { return; };
+                let node_width = json_number(frame.get("width"), 0.0);
+                let node_height = json_number(frame.get("height"), 0.0);
+                let covers_screen = (node_width - width).abs() < 0.5 && (node_height - height).abs() < 0.5;
+                if !covers_screen && node_width > 0.0 && node_height > 0.0 {
+                    elements.push(agent_protocol::device::DeviceAccessibilityElement { id: node.get("AXUniqueId").and_then(serde_json::Value::as_str).unwrap_or(path).into(), label: node.get("AXLabel").and_then(serde_json::Value::as_str).unwrap_or_default().into(), role: node.get("type").and_then(serde_json::Value::as_str).unwrap_or_default().into(), x: json_number(frame.get("x"), 0.0) / width, y: json_number(frame.get("y"), 0.0) / height, width: node_width / width, height: node_height / height });
+                }
+                if let Some(children) = node.get("children").and_then(serde_json::Value::as_array) { for (index, child) in children.iter().enumerate() { visit(child, &format!("{path}.{index}"), width, height, elements); } }
+            }
+            if let Some(nodes) = raw.as_array() { for (index, node) in nodes.iter().enumerate() { visit(node, &index.to_string(), screen_width, screen_height, &mut elements); } } else { errors.push("unexpected iOS accessibility payload".into()); }
+        }
+        DevicePlatform::Android => {
+            let Some(nodes) = raw.get("nodes").and_then(serde_json::Value::as_array) else { errors.push(raw.get("error").and_then(serde_json::Value::as_str).unwrap_or("unexpected Android accessibility payload").into()); return DeviceAccessibilityTree { host_id: host_id.into(), device_id: device_id.into(), elements, errors, read_at: now_iso() }; };
+            let (screen_width, screen_height) = nodes.first().and_then(|node| node.get("bounds")).map(|bounds| (json_number(bounds.get("right"), 1.0).max(1.0), json_number(bounds.get("bottom"), 1.0).max(1.0))).unwrap_or((1.0, 1.0));
+            for node in nodes.iter().skip(1) {
+                let Some(bounds) = node.get("bounds") else { continue; };
+                let left = json_number(bounds.get("left"), 0.0); let top = json_number(bounds.get("top"), 0.0); let right = json_number(bounds.get("right"), left); let bottom = json_number(bounds.get("bottom"), top);
+                let width = (right - left) / screen_width; let height = (bottom - top) / screen_height;
+                let label = node.get("text").and_then(serde_json::Value::as_str).filter(|value| !value.is_empty()).or_else(|| node.get("contentDescription").and_then(serde_json::Value::as_str)).unwrap_or_default();
+                if width >= 0.95 && height >= 0.9 || (label.is_empty() && node.get("clickable").and_then(serde_json::Value::as_bool) != Some(true)) { continue; }
+                let role = node.get("className").and_then(serde_json::Value::as_str).and_then(|value| value.rsplit('.').next()).unwrap_or_default();
+                elements.push(agent_protocol::device::DeviceAccessibilityElement { id: node.get("id").map(ToString::to_string).unwrap_or_default(), label: label.into(), role: role.into(), x: left / screen_width, y: top / screen_height, width, height });
+                if elements.len() >= 500 { break; }
+            }
+        }
+    }
+    DeviceAccessibilityTree { host_id: host_id.into(), device_id: device_id.into(), elements, errors, read_at: now_iso() }
+}
+
+fn normalize_event_log(host_id: &str, device_id: &str, raw: serde_json::Value) -> Vec<DeviceEventLogEntry> {
+    let entries = raw.get("events").and_then(serde_json::Value::as_array).or_else(|| raw.as_array()).cloned().or_else(|| raw.get("event").map(|event| vec![event.clone()])).unwrap_or_default();
+    entries.into_iter().filter_map(|entry| {
+        let entry = entry.get("event").unwrap_or(&entry);
+        Some(DeviceEventLogEntry { host_id: host_id.into(), device_id: device_id.into(), id: entry.get("id")?.as_u64()?, timestamp: entry.get("timestamp").and_then(serde_json::Value::as_str).unwrap_or_default().into(), kind: entry.get("kind").and_then(serde_json::Value::as_str).unwrap_or_default().into(), summary: entry.get("summary").and_then(serde_json::Value::as_str).or_else(|| entry.get("msg").and_then(serde_json::Value::as_str)).unwrap_or_default().into() })
+    }).collect()
 }
 
 async fn hub_action(
@@ -4859,6 +5847,166 @@ fn device_host_owner(root: &Path, host_id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
+    use std::sync::{Arc as StdArc, Mutex as StdMutex};
+    use futures_util::{SinkExt, StreamExt};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+    use tokio::sync::oneshot;
+
+    struct FixtureHost {
+        id: String,
+        commands: StdArc<StdMutex<Vec<(String, HostOutput)>>>,
+    }
+
+    impl FixtureHost {
+        fn new(commands: Vec<(&str, HostOutput)>) -> Self {
+            Self {
+                id: "fixture".into(),
+                commands: StdArc::new(StdMutex::new(
+                    commands
+                        .into_iter()
+                        .map(|(command, output)| (command.into(), output))
+                        .collect(),
+                )),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl DeviceHostRunner for FixtureHost {
+        fn id(&self) -> &str { &self.id }
+        fn kind(&self) -> DeviceHostKind { DeviceHostKind::Local }
+        fn label(&self) -> &str { "Fixture host" }
+        fn helper_path(&self, _helper: DeviceHelper) -> Option<String> { None }
+
+        async fn run(&self, command: &str, _args: &[String], _stdin: Option<&[u8]>) -> Result<HostOutput, String> {
+            let mut commands = self.commands.lock().unwrap();
+            if let Some(index) = commands.iter().position(|(expected, _)| expected == command) {
+                Ok(commands.remove(index).1)
+            } else {
+                Err(format!("fixture command {command} was not queued"))
+            }
+        }
+
+        async fn start(&self, _command: &str, _args: &[String]) -> Result<(), String> { Ok(()) }
+        async fn forward(&self, _remote_port: u16) -> Result<Option<ForwardedPort>, String> { Ok(None) }
+        async fn lifecycle(&self, _mode: &str) -> Result<Option<HostOutput>, String> { Ok(None) }
+    }
+
+    async fn fake_http_server(
+        expected_path: &'static str,
+        body: Vec<u8>,
+        split_at: Option<usize>,
+        keep_open: bool,
+    ) -> (u16, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let task = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 1024];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let size = socket.read(&mut buffer).await.unwrap();
+                assert!(size > 0, "fake device hub request ended before headers");
+                request.extend_from_slice(&buffer[..size]);
+            }
+            let request = String::from_utf8_lossy(&request);
+            assert!(request.starts_with(&format!("GET {expected_path} HTTP/1.1")), "unexpected request: {request}");
+            if keep_open {
+                let headers = "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nTransfer-Encoding: chunked\r\nConnection: keep-alive\r\n\r\n";
+                socket.write_all(headers.as_bytes()).await.unwrap();
+                if let Some(split_at) = split_at.filter(|split_at| *split_at < body.len()) {
+                    let size = format!("{:X}\r\n", split_at);
+                    socket.write_all(size.as_bytes()).await.unwrap();
+                    socket.write_all(&body[..split_at]).await.unwrap();
+                    socket.write_all(b"\r\n").await.unwrap();
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    let remainder = body.len() - split_at;
+                    socket.write_all(format!("{:X}\r\n", remainder).as_bytes()).await.unwrap();
+                    socket.write_all(&body[split_at..]).await.unwrap();
+                    socket.write_all(b"\r\n").await.unwrap();
+                } else {
+                    socket.write_all(format!("{:X}\r\n", body.len()).as_bytes()).await.unwrap();
+                    socket.write_all(&body).await.unwrap();
+                    socket.write_all(b"\r\n").await.unwrap();
+                }
+            } else {
+                let headers = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                socket.write_all(headers.as_bytes()).await.unwrap();
+                if let Some(split_at) = split_at.filter(|split_at| *split_at < body.len()) {
+                    socket.write_all(&body[..split_at]).await.unwrap();
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    socket.write_all(&body[split_at..]).await.unwrap();
+                } else {
+                    socket.write_all(&body).await.unwrap();
+                }
+            }
+            if keep_open {
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            }
+        });
+        (port, task)
+    }
+
+    async fn fake_websocket_server() -> (
+        u16,
+        oneshot::Receiver<async_tungstenite::tungstenite::Message>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (sender, receiver) = oneshot::channel();
+        let task = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (mut socket, _) = async_tungstenite::tokio::accept_async(stream).await.unwrap();
+            if let Some(Ok(message)) = socket.next().await {
+                let acknowledgement = match &message {
+                    async_tungstenite::tungstenite::Message::Binary(bytes) if bytes.first() == Some(&0x10) => {
+                        serde_json::from_slice::<serde_json::Value>(&bytes[1..])
+                            .ok()
+                            .and_then(|payload| payload.get("requestId").and_then(serde_json::Value::as_u64))
+                            .map(|request_id| [vec![0x90], serde_json::to_vec(&serde_json::json!({"requestId": request_id, "ok": true})).unwrap()].concat())
+                    }
+                    _ => None,
+                };
+                let _ = sender.send(message);
+                if let Some(acknowledgement) = acknowledgement {
+                    socket
+                        .send(async_tungstenite::tungstenite::Message::binary(acknowledgement))
+                        .await
+                        .unwrap();
+                }
+            }
+        });
+        (port, receiver, task)
+    }
+
+    async fn fake_frame_websocket_server(
+        frame: Vec<u8>,
+    ) -> (u16, oneshot::Receiver<()>, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (closed_sender, closed_receiver) = oneshot::channel();
+        let task = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (mut socket, _) = async_tungstenite::tokio::accept_async(stream).await.unwrap();
+            socket
+                .send(async_tungstenite::tungstenite::Message::binary(frame))
+                .await
+                .unwrap();
+            while let Some(Ok(message)) = socket.next().await {
+                if matches!(message, async_tungstenite::tungstenite::Message::Close(_)) {
+                    let _ = closed_sender.send(());
+                    return;
+                }
+            }
+        });
+        (port, closed_receiver, task)
+    }
 
     #[test]
     fn action_commands_are_typed_and_platform_specific() {
@@ -5077,5 +6225,636 @@ mod tests {
         });
 
         assert!(service.has_active_tasks());
+    }
+
+    #[test]
+    fn keyboard_codes_are_mapped_to_reference_hid_and_android_values() {
+        assert_eq!(ios_hid_usage("KeyA"), Some(0x04));
+        assert_eq!(ios_hid_usage("Digit0"), Some(0x27));
+        assert_eq!(ios_hid_usage("Unknown"), None);
+        assert_eq!(android_keycode("ArrowLeft"), Some(21));
+        assert_eq!(android_keycode("Unknown"), None);
+        assert_eq!(button_wire(DeviceHardwareButton::Power, true), "lock");
+        assert_eq!(button_wire(DeviceHardwareButton::AppSwitcher, true), "app_switcher");
+    }
+
+    #[test]
+    fn accessibility_normalization_skips_full_window_containers() {
+        let tree = normalize_accessibility("local", "sim", DevicePlatform::Android, serde_json::json!({
+            "nodes": [
+                {"bounds": {"left": 0, "top": 0, "right": 100, "bottom": 200}},
+                {"id": 1, "bounds": {"left": 10, "top": 20, "right": 90, "bottom": 50}, "text": "Continue", "className": "android.widget.Button"},
+                {"id": 2, "bounds": {"left": 0, "top": 0, "right": 100, "bottom": 200}, "text": ""}
+            ]
+        }));
+        assert_eq!(tree.elements.len(), 1);
+        assert_eq!(tree.elements[0].label, "Continue");
+        assert_eq!(tree.elements[0].role, "Button");
+    }
+
+    #[test]
+    fn ios_accessibility_normalization_flattens_nested_frames_and_caps_the_root() {
+        let tree = normalize_accessibility("local", "sim", DevicePlatform::Ios, serde_json::json!([
+            {
+                "frame": {"x": 0, "y": 0, "width": 100, "height": 200},
+                "type": "Application",
+                "children": [{
+                    "AXUniqueId": "continue",
+                    "AXLabel": "Continue",
+                    "type": "Button",
+                    "frame": {"x": 10, "y": 20, "width": 80, "height": 40}
+                }]
+            }
+        ]));
+        assert_eq!(tree.elements.len(), 1);
+        assert_eq!(tree.elements[0].id, "continue");
+        assert_eq!(tree.elements[0].label, "Continue");
+        assert!((tree.elements[0].x - 0.1).abs() < 0.001);
+        assert!((tree.elements[0].height - 0.2).abs() < 0.001);
+    }
+
+    #[test]
+    fn orientation_and_touch_transforms_match_the_reference_rotation_order() {
+        assert_eq!(next_orientation(DeviceOrientation::Portrait), DeviceOrientation::LandscapeLeft);
+        assert_eq!(next_orientation(DeviceOrientation::LandscapeLeft), DeviceOrientation::PortraitUpsideDown);
+        assert_eq!(orientation_wire(DeviceOrientation::LandscapeRight), "landscape_right");
+        let screen = DeviceScreenConfig {
+            thread_id: None,
+            host_id: None,
+            device_id: None,
+            width: 400,
+            height: 800,
+            orientation: DeviceOrientation::LandscapeLeft,
+            screen_id: None,
+            supports_hinge_angle: false,
+            supports_physical_orientation: false,
+            hinge_angle: None,
+            hinge_pose: None,
+            table_mode: false,
+            table_mode_available: false,
+        };
+        assert_eq!(rotate_touch(Some(&screen), 0.25, 0.75), (0.75, 0.75));
+    }
+
+    #[tokio::test]
+    async fn avcc_transport_reads_a_fragmented_fake_stream_and_returns_without_waiting_for_close() {
+        let body = [4_u32.to_be_bytes().as_slice(), &[2, 1, 2, 3]].concat();
+        let (port, server) = fake_http_server(
+            "/vendor/serve-sim/helper/sim/stream.avcc",
+            body,
+            Some(3),
+            true,
+        )
+        .await;
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            hub_avcc_frame(port, "sim", None),
+        )
+        .await
+        .expect("AVCC reader waited for the helper stream to close")
+        .unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].payload, [1, 2, 3]);
+        assert_eq!(result[0].encoding, DeviceFrameEncoding::H264);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn mjpeg_transport_extracts_one_fake_frame_and_cancels_the_stream() {
+        let body = vec![0, 1, 0xff, 0xd8, 9, 8, 0xff, 0xd9, 7, 6];
+        let (port, server) = fake_http_server(
+            "/vendor/serve-sim/helper/sim/stream.mjpeg",
+            body,
+            Some(4),
+            true,
+        )
+        .await;
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            hub_mjpeg_frame(port, "sim"),
+        )
+        .await
+        .expect("MJPEG reader waited for the helper stream to close")
+        .unwrap();
+        assert_eq!(result.payload, [0xff, 0xd8, 9, 8, 0xff, 0xd9]);
+        assert_eq!(result.encoding, DeviceFrameEncoding::Mjpeg);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn semu_transport_closes_the_socket_after_transferring_frame_ownership() {
+        let mut body = b"SEMU".to_vec();
+        body.extend_from_slice(&[1, 1, 0, 0]);
+        body.extend_from_slice(&99_u64.to_be_bytes());
+        body.extend_from_slice(&[0, 0, 0, 1, 0x65]);
+        let (port, closed, server) = fake_frame_websocket_server(body).await;
+        let frame = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            hub_android_frame(port, "emulator"),
+        )
+        .await
+        .expect("SEMU reader waited for the helper socket to close")
+        .unwrap();
+        assert_eq!(frame.encoding, DeviceFrameEncoding::Semu);
+        assert_eq!(frame.timestamp_us, Some(99));
+        assert!(frame.keyframe);
+        tokio::time::timeout(std::time::Duration::from_secs(1), closed)
+            .await
+            .expect("Host did not finish the helper close handshake")
+            .unwrap();
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn input_transport_preserves_ios_touch_android_keys_and_duo_controls() {
+        let (port, receiver, server) = fake_websocket_server().await;
+        hub_input(
+            port,
+            DevicePlatform::Ios,
+            "sim",
+            &DeviceInputKind::Touch { phase: DeviceTouchPhase::Begin, x: 0.25, y: 0.75 },
+            0,
+        )
+        .await
+        .unwrap();
+        let message = tokio::time::timeout(std::time::Duration::from_secs(1), receiver)
+            .await
+            .unwrap()
+            .unwrap();
+        match message {
+            async_tungstenite::tungstenite::Message::Binary(bytes) => {
+                assert_eq!(bytes[0], 0x03);
+                let payload: serde_json::Value = serde_json::from_slice(&bytes[1..]).unwrap();
+                assert_eq!(payload["type"], "begin");
+                assert_eq!(payload["x"], 0.25);
+            }
+            other => panic!("unexpected iOS input frame: {other:?}"),
+        }
+        server.abort();
+
+        let (port, receiver, server) = fake_websocket_server().await;
+        hub_input(
+            port,
+            DevicePlatform::Android,
+            "emu",
+            &DeviceInputKind::Touch { phase: DeviceTouchPhase::End, x: 0.2, y: 0.1 },
+            0,
+        )
+        .await
+        .unwrap();
+        let message = tokio::time::timeout(std::time::Duration::from_secs(1), receiver)
+            .await
+            .unwrap()
+            .unwrap();
+        match message {
+            async_tungstenite::tungstenite::Message::Text(text) => {
+                let payload: serde_json::Value = serde_json::from_str(&text.to_string()).unwrap();
+                assert_eq!(payload, serde_json::json!({"type": "touch", "action": "up", "x": 0.2, "y": 0.1}));
+            }
+            other => panic!("unexpected Android touch frame: {other:?}"),
+        }
+        server.abort();
+
+        let (port, receiver, server) = fake_websocket_server().await;
+        hub_input(
+            port,
+            DevicePlatform::Android,
+            "emu",
+            &DeviceInputKind::Key { code: "ArrowLeft".into(), down: true },
+            0,
+        )
+        .await
+        .unwrap();
+        let message = tokio::time::timeout(std::time::Duration::from_secs(1), receiver)
+            .await
+            .unwrap()
+            .unwrap();
+        match message {
+            async_tungstenite::tungstenite::Message::Text(text) => {
+                let payload: serde_json::Value = serde_json::from_str(&text.to_string()).unwrap();
+                assert_eq!(payload["type"], "key");
+                assert_eq!(payload["keycode"], 21);
+            }
+            other => panic!("unexpected Android input frame: {other:?}"),
+        }
+        server.abort();
+
+        let (port, receiver, server) = fake_websocket_server().await;
+        hub_input(
+            port,
+            DevicePlatform::Ios,
+            "duo",
+            &DeviceInputKind::Duo { command: "table".into() },
+            1,
+        )
+        .await
+        .unwrap();
+        let message = tokio::time::timeout(std::time::Duration::from_secs(1), receiver)
+            .await
+            .unwrap()
+            .unwrap();
+        match message {
+            async_tungstenite::tungstenite::Message::Binary(bytes) => {
+                assert_eq!(bytes[0], 0x10);
+                let payload: serde_json::Value = serde_json::from_slice(&bytes[1..]).unwrap();
+                assert_eq!(payload["requestId"], 1);
+                assert_eq!(payload["command"]["control"], "table");
+                assert_eq!(payload["command"]["value"], true);
+            }
+            other => panic!("unexpected Duo input frame: {other:?}"),
+        }
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn android_fold_uses_the_typed_http_control_route() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 1024];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let size = socket.read(&mut buffer).await.unwrap();
+                assert!(size > 0);
+                request.extend_from_slice(&buffer[..size]);
+            }
+            assert!(String::from_utf8_lossy(&request).starts_with("POST /vendor/serve-emu/api/fold?device=fold HTTP/1.1"));
+            let body = br#"{"ok":true}"#;
+            let response = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+            socket.write_all(response.as_bytes()).await.unwrap();
+            socket.write_all(body).await.unwrap();
+        });
+        hub_input(port, DevicePlatform::Android, "fold", &DeviceInputKind::Fold { command: "table".into() }, 0).await.unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn event_log_fixture_accepts_the_reference_sse_route_and_normalizes_entries() {
+        let body = br#"data: {"events":[{"id":6,"timestamp":"2026-10-08T00:00:00Z","kind":"seed","summary":"history"},{"id":7,"timestamp":"2026-10-08T00:00:01Z","kind":"touch","summary":"button"}]}
+
+"#
+        .to_vec();
+        let (port, server) = fake_http_server(
+            "/vendor/serve-sim/api/event-log/events?device=sim&limit=20",
+            body,
+            None,
+            false,
+        )
+        .await;
+        let payload = hub_event_log_payload(port, "sim", "20").await.unwrap();
+        let entries = normalize_event_log("local", "sim", payload);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].id, 6);
+        assert_eq!(entries[1].id, 7);
+        assert_eq!(entries[1].summary, "button");
+        assert_eq!(normalize_event_log("local", "sim", serde_json::json!({"event": {"id": 8, "timestamp": "", "kind": "tap", "summary": "live" }}))[0].id, 8);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn foreground_sse_fixture_returns_the_first_update_without_waiting_for_close() {
+        let body = br#"data: {"bundleId":"com.example.fixture"}
+
+"#
+        .to_vec();
+        let (port, server) = fake_http_server(
+            "/vendor/serve-sim/appstate?device=sim",
+            body,
+            None,
+            true,
+        )
+        .await;
+        let payload = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            hub_sse_first_json(port, "/vendor/serve-sim/appstate", &[("device", "sim")], "foreground"),
+        )
+        .await
+        .expect("foreground SSE reader waited for the helper stream to close")
+        .unwrap();
+        assert_eq!(payload["bundleId"], "com.example.fixture");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn disabled_consent_does_not_start_a_hub_or_agent_before_enable() {
+        let directory = tempfile::tempdir().unwrap();
+        let service = DeviceService::new(directory.path().to_path_buf());
+        let state = service.list(DeviceListInput::default()).await.unwrap();
+        assert_eq!(state.host_status, DeviceHostStatus::Disabled);
+        assert!(service.hub_port(LOCAL_DEVICE_HOST_ID).await.is_none());
+        let thread_id = ThreadId::new("disabled-device-test").unwrap();
+        let error = service
+            .agent_device_target(LOCAL_DEVICE_HOST_ID, &thread_id, "sim")
+            .await
+            .unwrap_err();
+        assert!(error.contains("Device support is off"));
+    }
+
+    #[tokio::test]
+    async fn handoff_activity_comes_from_open_sessions_and_recordings() {
+        let directory = tempfile::tempdir().unwrap();
+        let service = DeviceService::new(directory.path().to_path_buf());
+        assert!(!service.has_active_tasks());
+        let thread_id = ThreadId::new("device-handoff").unwrap();
+        let session = DeviceSession {
+            thread_id: thread_id.clone(),
+            host_id: LOCAL_DEVICE_HOST_ID.into(),
+            device_id: "sim".into(),
+            platform: DevicePlatform::Ios,
+            opened_at: "0".into(),
+        };
+        service.inner.state.write().await.sessions.push(session.clone());
+        assert!(service.has_active_tasks());
+        service.inner.state.write().await.sessions.clear();
+        service.inner.recordings.lock().await.insert(
+            (thread_id, LOCAL_DEVICE_HOST_ID.into(), session.device_id),
+            ActiveDeviceRecording {
+                recorder: RawFrameRecorder::new(DeviceRecordingFormat::Mjpeg, "0".into()),
+                error: None,
+            },
+        );
+        assert!(service.has_active_tasks());
+    }
+
+    #[tokio::test]
+    async fn concurrent_close_of_an_absent_session_is_idempotent() {
+        let directory = tempfile::tempdir().unwrap();
+        let service = DeviceService::new(directory.path().to_path_buf());
+        let input = agent_protocol::device::DeviceCloseInput {
+            thread_id: ThreadId::new("close-race").unwrap(),
+            host_id: Some(LOCAL_DEVICE_HOST_ID.into()),
+            device_id: Some("sim".into()),
+            shutdown: true,
+        };
+        let (first, second) = tokio::join!(service.close(input.clone()), service.close(input));
+        assert!(first.is_ok());
+        assert!(second.is_ok());
+        assert!(service.state_async().await.sessions.is_empty());
+    }
+
+    #[tokio::test]
+    async fn concurrent_close_of_an_open_session_releases_recording_once() {
+        let directory = tempfile::tempdir().unwrap();
+        let service = DeviceService::new(directory.path().to_path_buf());
+        let mut events = service.subscribe();
+        let thread_id = ThreadId::new("close-open-race").unwrap();
+        let session = DeviceSession {
+            thread_id: thread_id.clone(),
+            host_id: LOCAL_DEVICE_HOST_ID.into(),
+            device_id: "sim".into(),
+            platform: DevicePlatform::Ios,
+            opened_at: "0".into(),
+        };
+        let mut state = service.state_async().await;
+        state.sessions.push(session.clone());
+        *service.inner.state.write().await = state;
+        service.inner.recordings.lock().await.insert(
+            (thread_id.clone(), LOCAL_DEVICE_HOST_ID.into(), "sim".into()),
+            ActiveDeviceRecording {
+                recorder: RawFrameRecorder::new(DeviceRecordingFormat::Mjpeg, "0".into()),
+                error: None,
+            },
+        );
+        let input = agent_protocol::device::DeviceCloseInput {
+            thread_id,
+            host_id: Some(LOCAL_DEVICE_HOST_ID.into()),
+            device_id: Some("sim".into()),
+            shutdown: false,
+        };
+        let (first, second) = tokio::join!(service.close(input.clone()), service.close(input));
+        assert!(first.is_ok());
+        assert!(second.is_ok());
+        assert!(service.state_async().await.sessions.is_empty());
+        assert!(service.inner.recordings.lock().await.is_empty());
+        let mut completed = false;
+        for _ in 0..3 {
+            if let Ok(DeviceEvent::RecordingComplete(recording)) = events.recv().await {
+                completed = !recording.status.active;
+                break;
+            }
+        }
+        assert!(completed);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn fake_process_fixture_captures_success_and_startup_failure() {
+        let success = run_process(
+            "sh",
+            &["-c".into(), "printf fake-device".into()],
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(success.code, 0);
+        assert_eq!(success.stdout, b"fake-device");
+
+        let failure = run_process(
+            "sh",
+            &["-c".into(), "printf startup-failed >&2; exit 23".into()],
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(failure.code, 23);
+        assert_eq!(failure.stderr, b"startup-failed");
+
+        let oversized = run_process(
+            "sh",
+            &["-c".into(), "head -c 8388609 /dev/zero".into()],
+            None,
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(oversized.contains("more than 8388608 bytes"));
+    }
+
+    #[tokio::test]
+    async fn recording_error_is_returned_when_a_fixture_frame_exceeds_the_bound() {
+        let directory = tempfile::tempdir().unwrap();
+        let service = DeviceService::new(directory.path().to_path_buf());
+        let thread_id = ThreadId::new("recording-error").unwrap();
+        let session = DeviceSession {
+            thread_id: thread_id.clone(),
+            host_id: LOCAL_DEVICE_HOST_ID.into(),
+            device_id: "sim".into(),
+            platform: DevicePlatform::Ios,
+            opened_at: "0".into(),
+        };
+        service.inner.recordings.lock().await.insert(
+            (thread_id.clone(), LOCAL_DEVICE_HOST_ID.into(), "sim".into()),
+            ActiveDeviceRecording {
+                recorder: RawFrameRecorder::new(DeviceRecordingFormat::RawFrames, "0".into()),
+                error: None,
+            },
+        );
+        service
+            .append_recording(
+                &thread_id,
+                &session,
+                &TransportFrame {
+                    payload: vec![0; MAX_STREAM_CHUNK - 4],
+                    encoding: DeviceFrameEncoding::Png,
+                    keyframe: true,
+                    timestamp_us: None,
+                    screen_id: None,
+                },
+            )
+            .await;
+        let recording = service
+            .stop_recording(DeviceRecordingStopInput {
+                thread_id,
+                host_id: Some(LOCAL_DEVICE_HOST_ID.into()),
+                device_id: "sim".into(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(recording.status.active, false);
+        assert!(recording.status.error.unwrap().contains("byte limit"));
+        assert!(recording.bytes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn recording_status_reports_frames_before_finalization() {
+        let directory = tempfile::tempdir().unwrap();
+        let service = DeviceService::new(directory.path().to_path_buf());
+        let mut events = service.subscribe();
+        let thread_id = ThreadId::new("recording-status").unwrap();
+        let session = DeviceSession {
+            thread_id: thread_id.clone(),
+            host_id: LOCAL_DEVICE_HOST_ID.into(),
+            device_id: "sim".into(),
+            platform: DevicePlatform::Ios,
+            opened_at: "0".into(),
+        };
+        service.inner.recordings.lock().await.insert(
+            (thread_id.clone(), LOCAL_DEVICE_HOST_ID.into(), "sim".into()),
+            ActiveDeviceRecording {
+                recorder: RawFrameRecorder::new(DeviceRecordingFormat::Mjpeg, "0".into()),
+                error: None,
+            },
+        );
+        service
+            .append_recording(
+                &thread_id,
+                &session,
+                &TransportFrame {
+                    payload: vec![0xff, 0xd8, 1, 0xff, 0xd9],
+                    encoding: DeviceFrameEncoding::Mjpeg,
+                    keyframe: true,
+                    timestamp_us: None,
+                    screen_id: None,
+                },
+            )
+            .await;
+        let status = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                if let DeviceEvent::Recording(status) = events.recv().await.unwrap() {
+                    break status;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(status.frame_count, 1);
+        assert!(status.byte_count > 5);
+        assert!(status.active);
+    }
+
+    #[test]
+    fn tool_inspection_reports_only_complete_pinned_fixture_versions() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let hub_root = root
+            .join("tools")
+            .join(HUB_PACKAGE)
+            .join(HUB_VERSION)
+            .join("node_modules")
+            .join(HUB_PACKAGE);
+        std::fs::create_dir_all(hub_root.join("dist/server")).unwrap();
+        std::fs::write(hub_root.join("dist/server/cli.mjs"), "fake hub").unwrap();
+        std::fs::write(
+            root.join("tools").join(HUB_PACKAGE).join(HUB_VERSION).join(".install-complete"),
+            HUB_VERSION,
+        )
+        .unwrap();
+        let agent_root = root
+            .join("tools")
+            .join(AGENT_PACKAGE)
+            .join(AGENT_VERSION)
+            .join("node_modules")
+            .join(AGENT_PACKAGE);
+        std::fs::create_dir_all(agent_root.join("bin")).unwrap();
+        std::fs::write(agent_root.join("bin/agent-device.mjs"), "fake agent").unwrap();
+        std::fs::write(
+            root.join("tools").join(AGENT_PACKAGE).join(AGENT_VERSION).join(".install-complete"),
+            AGENT_VERSION,
+        )
+        .unwrap();
+
+        let (hub_installed, agent_installed, versions) = inspect_toolchain(root);
+        assert!(hub_installed);
+        assert!(agent_installed);
+        assert_eq!(versions.hub.installed_versions, vec![HUB_VERSION.to_owned()]);
+        assert_eq!(versions.agent.installed_versions, vec![AGENT_VERSION.to_owned()]);
+        assert_eq!(versions.hub.running_version, None);
+        assert_eq!(versions.agent.running_version, None);
+    }
+
+    #[tokio::test]
+    async fn discovery_uses_fixture_cli_outputs_and_drops_stale_avd_duplicates() {
+        let host = Arc::new(FixtureHost::new(vec![
+            (
+                "xcrun",
+                HostOutput {
+                    stdout: serde_json::to_vec(&serde_json::json!({
+                        "devices": {
+                            "com.apple.CoreSimulator.SimRuntime.iOS-18-0": [{
+                                "udid": "ios-sim",
+                                "name": "iPhone Fixture",
+                                "state": "Booted",
+                                "isAvailable": true
+                            }]
+                        }
+                    }))
+                    .unwrap(),
+                    stderr: vec![],
+                    code: 0,
+                },
+            ),
+            (
+                "adb",
+                HostOutput {
+                    stdout: b"List of devices attached\nemulator-5554 device model:pixel_8\n".to_vec(),
+                    stderr: vec![],
+                    code: 0,
+                },
+            ),
+            (
+                "adb",
+                HostOutput {
+                    stdout: b"OK\nPixel_8\n".to_vec(),
+                    stderr: vec![],
+                    code: 0,
+                },
+            ),
+            (
+                "emulator",
+                HostOutput {
+                    stdout: b"Pixel_8\nPixel_Pro\n".to_vec(),
+                    stderr: vec![],
+                    code: 0,
+                },
+            ),
+        ]));
+        let devices = discover_host(host, None).await.unwrap();
+        assert!(devices.iter().any(|device| device.id == "ios-sim" && device.platform == DevicePlatform::Ios));
+        assert!(devices.iter().any(|device| device.id == "emulator-5554" && device.booted));
+        assert!(devices.iter().any(|device| device.id == "Pixel_Pro" && !device.booted));
+        assert!(!devices.iter().any(|device| device.id == "Pixel_8" && !device.booted));
     }
 }

@@ -11,6 +11,7 @@ pub mod conversation;
 mod dictation;
 pub mod device;
 pub mod ffmpeg;
+mod device_stream;
 mod favicon;
 mod github;
 mod git;
