@@ -28,20 +28,55 @@ fn input_requires_the_displayed_tab_but_reads_and_selection_can_refresh_it() {
     }
 }
 
+#[test]
+fn owner_frame_selection_does_not_follow_another_preview_owner() {
+    let mut page = Page {
+        tabs: vec!["shared".into(), "owner-a".into(), "owner-b".into()],
+        active: "owner-b".into(),
+        viewports: HashMap::new(),
+        preview_tabs: HashSet::from(["owner-a".into(), "owner-b".into()]),
+        preview_profiles: HashMap::new(),
+        preview_profile_owners: HashMap::from([
+            ("owner-a".into(), "client-a".into()),
+            ("owner-b".into(), "client-b".into()),
+        ]),
+        preview_settings: HashMap::new(),
+    };
+    assert_eq!(
+        Browser::activate_tab_for_owner(&mut page, Some("client-a"), None).unwrap(),
+        "owner-a"
+    );
+    assert_eq!(
+        Browser::activate_tab_for_owner(&mut page, Some("client-b"), Some("owner-b")).unwrap(),
+        "owner-b"
+    );
+    page.active = "shared".into();
+    assert_eq!(
+        Browser::activate_tab_for_owner(&mut page, Some("client-a"), None).unwrap(),
+        "owner-a"
+    );
+    assert_eq!(
+        Browser::activate_tab_for_owner(&mut page, Some("mcp:thread"), None).unwrap(),
+        "shared"
+    );
+}
+
 #[tokio::test]
 async fn recording_completion_is_replayable_after_startup_receiver_drops() {
     let (done, startup_receiver) = tokio::sync::watch::channel::<
         Option<Result<agent_protocol::preview::PreviewRecordingArtifact, String>>,
     >(None);
     drop(startup_receiver);
-    done.send_replace(Some(Ok(agent_protocol::preview::PreviewRecordingArtifact {
-        id: "browser-recording-test".into(),
-        tab_id: "tab".into(),
-        path: "/tmp/browser-recording-test.webm".into(),
-        mime_type: "video/webm;codecs=vp9".into(),
-        size_bytes: 1,
-        created_at: "2026-01-01T00:00:00Z".into(),
-    })));
+    done.send_replace(Some(Ok(
+        agent_protocol::preview::PreviewRecordingArtifact {
+            id: "browser-recording-test".into(),
+            tab_id: "tab".into(),
+            path: "/tmp/browser-recording-test.webm".into(),
+            mime_type: "video/webm;codecs=vp9".into(),
+            size_bytes: 1,
+            created_at: "2026-01-01T00:00:00Z".into(),
+        },
+    )));
     let mut late_receiver = done.subscribe();
 
     let result = wait_for_recording_completion(&mut late_receiver)
@@ -59,7 +94,10 @@ async fn stop_waits_for_startup_before_cancelling_capture() {
     assert!(!waiting.is_finished());
 
     startup.send_replace(RecordingStartupState::Started);
-    assert_eq!(waiting.await.unwrap().unwrap(), RecordingStartupState::Started);
+    assert_eq!(
+        waiting.await.unwrap().unwrap(),
+        RecordingStartupState::Started
+    );
 }
 
 #[tokio::test]
@@ -97,7 +135,10 @@ async fn cancelled_start_discards_an_artifact_already_offered_by_the_monitor() {
 
     assert!(!path.exists());
     assert!(previous.exists());
-    assert_eq!(browser.completed_recording(&key).await.unwrap().id, "previous");
+    assert_eq!(
+        browser.completed_recording(&key).await.unwrap().id,
+        "previous"
+    );
     let _ = std::fs::remove_file(previous);
     browser.shutdown().await;
 }
@@ -124,8 +165,14 @@ fn completed_recording_retention_is_global_across_open_preview_tabs() {
 
     assert_eq!(artifacts.len(), MAX_RETAINED_RECORDINGS);
     assert_eq!(removed.len(), 2);
-    assert_eq!(removed[0].1, std::path::PathBuf::from("/tmp/recording-0.webm"));
-    assert_eq!(removed[1].1, std::path::PathBuf::from("/tmp/recording-1.webm"));
+    assert_eq!(
+        removed[0].1,
+        std::path::PathBuf::from("/tmp/recording-0.webm")
+    );
+    assert_eq!(
+        removed[1].1,
+        std::path::PathBuf::from("/tmp/recording-1.webm")
+    );
     assert_eq!(removed[0].0, ("thread".into(), "tab-0".into()));
     assert_eq!(removed[1].0, ("thread".into(), "tab-1".into()));
 }
@@ -140,12 +187,11 @@ fn detached_preview_target_cleanup_removes_host_page_metadata() {
             active: "tab".into(),
             viewports: [("tab".into(), (800, 600))].into_iter().collect(),
             preview_tabs: ["tab".into()].into_iter().collect(),
-            preview_settings: [("tab".into(), (
-                PreviewAppearance::System,
-                PreviewZoom::X100,
-            ))]
-            .into_iter()
-            .collect(),
+            preview_profiles: HashMap::new(),
+            preview_profile_owners: HashMap::new(),
+            preview_settings: [("tab".into(), (PreviewAppearance::System, PreviewZoom::X100))]
+                .into_iter()
+                .collect(),
         },
     );
 
@@ -361,4 +407,13 @@ async fn shared_browser_live() {
     );
     browser.shutdown().await;
     server.abort();
+}
+
+#[test]
+fn preview_profile_storage_is_partitioned_by_authenticated_owner() {
+    let first = Browser::preview_profile_suffix("device-a", "work");
+    let second = Browser::preview_profile_suffix("device-b", "work");
+    let same_owner = Browser::preview_profile_suffix("device-a", "work");
+    assert_ne!(first, second);
+    assert_eq!(first, same_owner);
 }

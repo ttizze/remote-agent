@@ -140,11 +140,29 @@ impl Desktop {
     fn open_markdown_link(&mut self, href: &str, window: &mut Window, cx: &mut Context<Self>) {
         match markdown_link_presentation(href) {
             MarkdownLinkPresentation::External { href, .. }
-            | MarkdownLinkPresentation::Link { href: Some(href) } => cx.open_url(&href),
+            | MarkdownLinkPresentation::Link { href: Some(href) } => {
+                self.open_external_url(&href, window, cx)
+            }
             MarkdownLinkPresentation::File { link } => {
                 self.open_workspace_file(link.path, link.line, window, cx)
             }
             MarkdownLinkPresentation::Link { href: None } => {}
+        }
+    }
+
+    fn open_external_url(&mut self, href: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let browser = self.snapshot.preferences.browser.resolved();
+        if browser.link_target == agent_protocol::preview::BrowserLinkTarget::App {
+            self.open_right_panel(PanelTab::Browser, window, cx);
+            self.perform(Intent::PreviewOpen {
+                url: Some(href.to_owned()),
+                viewport: browser.viewport,
+                appearance: browser.appearance,
+                zoom: browser.zoom,
+                profile_id: Some(browser.profile_id),
+            });
+        } else {
+            cx.open_url(href);
         }
     }
 
@@ -201,7 +219,7 @@ impl Desktop {
             }
             _ => {
                 if let Some(url) = &chip.url {
-                    cx.open_url(url);
+                    self.open_external_url(url, window, cx);
                 }
             }
         }

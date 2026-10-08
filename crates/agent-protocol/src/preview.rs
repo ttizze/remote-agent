@@ -35,6 +35,16 @@ impl Default for PreviewAppearance {
     }
 }
 
+/// Where links open when a client offers an in-app Preview surface.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
+#[serde(rename_all = "lowercase")]
+pub enum BrowserLinkTarget {
+    #[default]
+    System,
+    App,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum PreviewViewportPreset {

@@ -19,13 +19,13 @@ use crate::view::{
         traits::{TraitsView, traits},
     },
     new_thread::{NewThreadView, new_thread_view},
+    preview::PreviewView,
     projects::{
         add::{AddProjectTarget, FolderBrowserView, add_project_target, folder_browser},
         import::{ImportToast, SessionImportView, session_import_view},
         picker::{ProjectPickerView, project_picker},
         scripts::{ProjectScriptsView, project_scripts},
     },
-    preview::PreviewView,
     search::{SearchOptions, SearchView, search_view},
     settings::{
         SettingId, SettingValue, SettingsRow, SettingsScope, SettingsView, default_model_picker,
@@ -69,6 +69,7 @@ pub struct ModelOrder {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct PreferencesView {
+    pub browser: crate::view::browser::BrowserDefaults,
     pub timestamp_format: TimestampFormat,
     pub favorite_models: Vec<FavoriteModel>,
     pub model_order: Vec<ModelOrder>,
@@ -358,6 +359,7 @@ impl Snapshot {
     pub fn preferences(&self) -> PreferencesView {
         let preferences = &self.preferences;
         PreferencesView {
+            browser: preferences.browser.resolved(),
             timestamp_format: preferences.timestamp_format,
             favorite_models: preferences.favorite_models.clone(),
             model_order: preferences

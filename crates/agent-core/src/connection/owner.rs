@@ -216,6 +216,10 @@ pub(super) struct Owner {
     pub visited: BTreeMap<ThreadId, Timestamp>,
     pub waiters: BTreeMap<CommandId, Waiter>,
     pub dictations: BTreeMap<String, CancellationToken>,
+    /// Serializes the existing DeviceInput wire calls so a modifier sequence,
+    /// ordinary key, and release cannot overtake one another across separate
+    /// UI events.
+    pub device_input_serial: Arc<tokio::sync::Mutex<()>>,
     /// The shell, outbox and Working preference the list holds last saw.
     pub observed_list: Option<ObservedList>,
     /// The thread whose setup "Work locally" is cancelling.
@@ -275,6 +279,7 @@ impl Owner {
             visited: BTreeMap::new(),
             waiters: BTreeMap::new(),
             dictations: BTreeMap::new(),
+            device_input_serial: Arc::new(tokio::sync::Mutex::new(())),
             observed_list: None,
             work_locally: None,
         };
@@ -709,6 +714,8 @@ impl Owner {
         self.interrupt_uploads();
         self.state.connected = false;
         self.state.error = Some(error);
+        self.state.device.clear_duo_on_disconnect();
+        self.state.device.clear_input_state_on_disconnect();
         Arc::make_mut(&mut self.state.shell).disconnected();
         if let Some(archived) = self.state.archived.as_mut() {
             Arc::make_mut(archived).disconnected();

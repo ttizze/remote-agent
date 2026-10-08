@@ -116,15 +116,16 @@ impl Owner {
             format!("{}\r", script.command).into_bytes(),
         )?;
         if let Some(url) = preview_url {
+            let defaults = self.state.preferences.browser.resolved();
             self.job(
                 Call::PreviewOpen(agent_protocol::preview::PreviewOpen {
                     thread_id: thread,
                     url: Some(url),
-                    viewport: agent_protocol::preview::PreviewViewportSetting::Fill,
-                    appearance: agent_protocol::preview::PreviewAppearance::System,
-                    zoom: agent_protocol::preview::PreviewZoom::X100,
+                    viewport: defaults.viewport,
+                    appearance: defaults.appearance,
+                    zoom: defaults.zoom,
                     rendered_size: None,
-                    profile_id: None,
+                    profile_id: Some(defaults.profile_id),
                 }),
                 None,
                 None,

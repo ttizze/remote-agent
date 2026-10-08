@@ -11,9 +11,9 @@ use host_daemon::device_stream::jpeg_bounds;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io::{Read, Write};
 use std::process::{ChildStdin, ChildStdout, Command, Stdio};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError};
-use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -269,8 +269,7 @@ impl DeviceVideoDecoder {
                 if frame.payload.len() > MAX_DECODED_IMAGE_BYTES {
                     self.error = Some("Device stream returned an oversized JPEG frame".into());
                 } else if let Some((start, end)) = jpeg_bounds(&frame.payload) {
-                    self.decoded_sequence
-                        .insert(stream_key, frame.sequence);
+                    self.decoded_sequence.insert(stream_key, frame.sequence);
                     decoded.push(DecodedDeviceImage {
                         host_id: frame.host_id,
                         session_epoch: frame.session_epoch,
@@ -287,8 +286,7 @@ impl DeviceVideoDecoder {
             }
             "png" => {
                 if !frame.payload.is_empty() && frame.payload.len() <= MAX_DECODED_IMAGE_BYTES {
-                    self.decoded_sequence
-                        .insert(stream_key, frame.sequence);
+                    self.decoded_sequence.insert(stream_key, frame.sequence);
                     decoded.push(DecodedDeviceImage {
                         host_id: frame.host_id,
                         session_epoch: frame.session_epoch,
@@ -324,7 +322,8 @@ impl DeviceVideoDecoder {
                     return;
                 }
                 if frame.payload.len() > MAX_ACCESS_UNIT_BYTES {
-                    self.error = Some("Device video decoder dropped an oversized access unit".into());
+                    self.error =
+                        Some("Device video decoder dropped an oversized access unit".into());
                     self.resync_stream(&stream_key);
                     return;
                 }
@@ -338,7 +337,8 @@ impl DeviceVideoDecoder {
                     self.awaiting_keyframe.remove(&stream_key);
                 }
                 if access_unit.len() > MAX_ACCESS_UNIT_BYTES {
-                    self.error = Some("Device video decoder dropped an oversized access unit".into());
+                    self.error =
+                        Some("Device video decoder dropped an oversized access unit".into());
                     self.resync_stream(&stream_key);
                     return;
                 }
@@ -399,14 +399,17 @@ impl DeviceVideoDecoder {
 
     fn drain_worker(&mut self, key: &StreamKey, decoded: &mut Vec<DecodedDeviceImage>) {
         let mut output = Vec::new();
-        let Some(worker) = self.workers.get(key) else { return };
+        let Some(worker) = self.workers.get(key) else {
+            return;
+        };
         worker.drain(&mut output);
         let mut failed = false;
         for item in output {
             match item {
                 WorkerOutput::Image { sequence, bytes } => {
                     if bytes.len() > MAX_DECODED_IMAGE_BYTES {
-                        self.error = Some("Device video decoder returned an oversized image".into());
+                        self.error =
+                            Some("Device video decoder returned an oversized image".into());
                         failed = true;
                         continue;
                     }
@@ -455,7 +458,6 @@ impl DeviceVideoDecoder {
         self.awaiting_keyframe.insert(key.clone());
         self.restart_worker(key);
     }
-
 }
 
 impl Drop for DeviceVideoDecoder {
@@ -551,21 +553,22 @@ fn run_decoder_worker(
         None => None,
     };
     let (writer_tx, writer_rx) = mpsc::sync_channel(MAX_WORKER_QUEUE);
-    let writer_join = match spawn_decoder_writer(stdin, writer_rx, Arc::clone(&cancelled), output_tx.clone()) {
-        Ok(join) => join,
-        Err(error) => {
-            let _ = output_tx.try_send(WorkerOutput::Error(format!(
-                "Device video decoder input worker could not start: {error}"
-            )));
-            let _ = child.kill();
-            let _ = child.wait();
-            let _ = reader_join.join();
-            if let Some(join) = stderr_join {
-                let _ = join.join();
+    let writer_join =
+        match spawn_decoder_writer(stdin, writer_rx, Arc::clone(&cancelled), output_tx.clone()) {
+            Ok(join) => join,
+            Err(error) => {
+                let _ = output_tx.try_send(WorkerOutput::Error(format!(
+                    "Device video decoder input worker could not start: {error}"
+                )));
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = reader_join.join();
+                if let Some(join) = stderr_join {
+                    let _ = join.join();
+                }
+                return;
             }
-            return;
-        }
-    };
+        };
     let mut pending = VecDeque::new();
     let mut stopping = false;
     let mut stop_started = None;
@@ -665,7 +668,6 @@ fn spawn_decoder_writer(
                 }
             }
         })
-
 }
 
 fn spawn_jpeg_reader(
@@ -720,12 +722,14 @@ fn spawn_jpeg_reader(
                     }
                 }
             }
-        })
-        ?;
+        })?;
     Ok((receiver, join))
 }
 
-fn spawn_stderr_drainer(stderr: std::process::ChildStderr, cancelled: Arc<AtomicBool>) -> std::io::Result<JoinHandle<()>> {
+fn spawn_stderr_drainer(
+    stderr: std::process::ChildStderr,
+    cancelled: Arc<AtomicBool>,
+) -> std::io::Result<JoinHandle<()>> {
     thread::Builder::new()
         .name("device-video-decoder-stderr".into())
         .spawn(move || {
@@ -738,7 +742,6 @@ fn spawn_stderr_drainer(stderr: std::process::ChildStderr, cancelled: Arc<Atomic
                 }
             }
         })
-
 }
 
 fn drain_reader(
@@ -817,21 +820,31 @@ fn description_to_annex_b(bytes: &[u8]) -> Vec<u8> {
     offset += 1;
     let mut result = Vec::new();
     for _ in 0..sps_count {
-        let Some(length_bytes) = bytes.get(offset..offset + 2) else { return Vec::new() };
+        let Some(length_bytes) = bytes.get(offset..offset + 2) else {
+            return Vec::new();
+        };
         let length = u16::from_be_bytes([length_bytes[0], length_bytes[1]]) as usize;
         offset += 2;
-        let Some(sps) = bytes.get(offset..offset + length) else { return Vec::new() };
+        let Some(sps) = bytes.get(offset..offset + length) else {
+            return Vec::new();
+        };
         result.extend_from_slice(&[0, 0, 0, 1]);
         result.extend_from_slice(sps);
         offset += length;
     }
-    let Some(&pps_count) = bytes.get(offset) else { return result };
+    let Some(&pps_count) = bytes.get(offset) else {
+        return result;
+    };
     offset += 1;
     for _ in 0..pps_count as usize {
-        let Some(length_bytes) = bytes.get(offset..offset + 2) else { return Vec::new() };
+        let Some(length_bytes) = bytes.get(offset..offset + 2) else {
+            return Vec::new();
+        };
         let length = u16::from_be_bytes([length_bytes[0], length_bytes[1]]) as usize;
         offset += 2;
-        let Some(pps) = bytes.get(offset..offset + length) else { return Vec::new() };
+        let Some(pps) = bytes.get(offset..offset + length) else {
+            return Vec::new();
+        };
         result.extend_from_slice(&[0, 0, 0, 1]);
         result.extend_from_slice(pps);
         offset += length;
@@ -845,18 +858,30 @@ mod tests {
 
     #[test]
     fn sequence_admission_rejects_duplicates_and_marks_gaps() {
-        assert_eq!(sequence_disposition(None, 1), SequenceDisposition::FirstOrContiguous);
-        assert_eq!(sequence_disposition(Some(1), 2), SequenceDisposition::FirstOrContiguous);
-        assert_eq!(sequence_disposition(Some(1), 1), SequenceDisposition::Duplicate);
+        assert_eq!(
+            sequence_disposition(None, 1),
+            SequenceDisposition::FirstOrContiguous
+        );
+        assert_eq!(
+            sequence_disposition(Some(1), 2),
+            SequenceDisposition::FirstOrContiguous
+        );
+        assert_eq!(
+            sequence_disposition(Some(1), 1),
+            SequenceDisposition::Duplicate
+        );
         assert_eq!(sequence_disposition(Some(1), 4), SequenceDisposition::Gap);
     }
 
     #[test]
     fn avcc_description_is_retained_as_annex_b_configuration() {
-        let description = [1, 0x64, 0, 0x1f, 0xff, 0xe1, 0, 2, 0x67, 1, 1, 0, 2, 0x68, 2];
-        assert_eq!(description_to_annex_b(&description), vec![
-            0, 0, 0, 1, 0x67, 1, 0, 0, 0, 1, 0x68, 2,
-        ]);
+        let description = [
+            1, 0x64, 0, 0x1f, 0xff, 0xe1, 0, 2, 0x67, 1, 1, 0, 2, 0x68, 2,
+        ];
+        assert_eq!(
+            description_to_annex_b(&description),
+            vec![0, 0, 0, 1, 0x67, 1, 0, 0, 0, 1, 0x68, 2,]
+        );
         assert!(description_to_annex_b(&description).starts_with(&[0, 0, 0, 1, 0x67, 1]));
     }
 
@@ -871,6 +896,9 @@ mod tests {
     #[test]
     fn annex_b_conversion_preserves_complete_access_units() {
         let bytes = [0, 0, 0, 2, 0x65, 1, 0, 0, 0, 2, 0x41, 2];
-        assert_eq!(to_annex_b(&bytes), vec![0, 0, 0, 1, 0x65, 1, 0, 0, 0, 1, 0x41, 2]);
+        assert_eq!(
+            to_annex_b(&bytes),
+            vec![0, 0, 0, 1, 0x65, 1, 0, 0, 0, 1, 0x41, 2]
+        );
     }
 }

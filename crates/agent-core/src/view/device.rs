@@ -399,11 +399,7 @@ pub fn device_view(snapshot: &Snapshot) -> DeviceView {
                 sequence: frame.sequence,
             })
             .collect(),
-        video_frames: state
-            .video_frames
-            .values()
-            .map(video_frame_view)
-            .collect(),
+        video_frames: state.video_frames.values().map(video_frame_view).collect(),
         video_events: state
             .video_events
             .values()
@@ -495,33 +491,38 @@ pub fn device_view(snapshot: &Snapshot) -> DeviceView {
                 bytes: vec![],
             })
             .collect(),
-        last_recording: state.last_recording.as_ref().map(|recording| DeviceRecordingView {
-            thread_id: recording.status.thread_id.to_string(),
-            host_id: recording.status.host_id.clone(),
-            device_id: recording.status.device_id.clone(),
-            recording_id: recording.status.recording_id,
-            session_epoch: recording.status.session_epoch.clone(),
-            format: recording_format_name(recording.status.format).into(),
-            file_name: recording.status.file_name.clone(),
-            mime_type: recording.status.mime_type.clone(),
-            started_at: recording.status.started_at.clone(),
-            frame_count: recording.status.frame_count,
-            byte_count: recording.status.byte_count,
-            error: recording.status.error.clone(),
-            bytes: recording.bytes.clone(),
-        }),
+        last_recording: state
+            .last_recording
+            .as_ref()
+            .map(|recording| DeviceRecordingView {
+                thread_id: recording.status.thread_id.to_string(),
+                host_id: recording.status.host_id.clone(),
+                device_id: recording.status.device_id.clone(),
+                recording_id: recording.status.recording_id,
+                session_epoch: recording.status.session_epoch.clone(),
+                format: recording_format_name(recording.status.format).into(),
+                file_name: recording.status.file_name.clone(),
+                mime_type: recording.status.mime_type.clone(),
+                started_at: recording.status.started_at.clone(),
+                frame_count: recording.status.frame_count,
+                byte_count: recording.status.byte_count,
+                error: recording.status.error.clone(),
+                bytes: recording.bytes.clone(),
+            }),
         duo_controls: state
             .duo_controls
             .iter()
-            .map(|((thread_id, host_id, device_id, session_epoch), control)| DeviceDuoControlView {
-                thread_id: thread_id.clone(),
-                host_id: host_id.clone(),
-                device_id: device_id.clone(),
-                session_epoch: session_epoch.clone(),
-                pending: control.pending,
-                requested: control.requested.as_ref().map(device_duo_command_name),
-                error: control.error.clone(),
-            })
+            .map(
+                |((thread_id, host_id, device_id, session_epoch), control)| DeviceDuoControlView {
+                    thread_id: thread_id.clone(),
+                    host_id: host_id.clone(),
+                    device_id: device_id.clone(),
+                    session_epoch: session_epoch.clone(),
+                    pending: control.pending,
+                    requested: control.requested.as_ref().map(device_duo_command_name),
+                    error: control.error.clone(),
+                },
+            )
             .collect(),
         error: state.error.clone(),
     }
@@ -551,7 +552,9 @@ fn device_duo_command_name(command: &crate::state::DeviceDuoCommandIntent) -> St
         crate::state::DeviceDuoCommandIntent::Pose { value } => format!("pose:{value:?}"),
         crate::state::DeviceDuoCommandIntent::Table { value } => format!("table:{value}"),
         crate::state::DeviceDuoCommandIntent::Physical { value } => format!("physical:{value:?}"),
-        crate::state::DeviceDuoCommandIntent::Orientation { value } => format!("orientation:{value:?}"),
+        crate::state::DeviceDuoCommandIntent::Orientation { value } => {
+            format!("orientation:{value:?}")
+        }
     }
 }
 

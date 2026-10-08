@@ -122,6 +122,22 @@ impl ClaudeCredentials for ClaudeResources {
     }
 }
 
+fn owner_preview_fallback(
+    _thread_id: &agent_domain::ThreadId,
+) -> agent_protocol::preview::PreviewListResult {
+    agent_protocol::preview::PreviewListResult {
+        sessions: Vec::new(),
+        recordings: Vec::new(),
+        invalidated_recordings: Vec::new(),
+        local_servers: Vec::new(),
+        scanned_at: String::new(),
+        server_epoch: String::new(),
+        revision: 0,
+        scanner_epoch: String::new(),
+        scanner_revision: 0,
+    }
+}
+
 impl HostRpcService {
     pub fn new(
         codex: Result<Arc<CodexAppServer>, String>,
@@ -132,9 +148,7 @@ impl HostRpcService {
         let keybindings = Arc::new(crate::keybindings::Keybindings::new(
             projects.path().with_file_name("keybindings.json"),
         ));
-        let devices = crate::device::DeviceService::new(
-            projects.path().with_file_name("device"),
-        );
+        let devices = crate::device::DeviceService::new(projects.path().with_file_name("device"));
         let shared = SharedResources {
             files: crate::workspace_files::WorkspaceFiles::new(
                 projects.path().with_file_name("attachments"),
@@ -438,7 +452,8 @@ impl HostRpcService {
         }
         if let Call::PreviewSubscribe(params) = call {
             let cancel = self.inner.connections.cancellation(session)?;
-            return Ok(self.preview_subscribe(params, cancel).await);
+            let owner = self.inner.connections.principal(session)?;
+            return Ok(self.preview_subscribe(params, owner, cancel).await);
         }
         if let Call::DeviceSubscribe(params) = call {
             let cancel = self.inner.connections.cancellation(session)?;
@@ -460,9 +475,16 @@ impl HostRpcService {
         let initial = agent_protocol::device::DeviceEvent::State(devices.state_async().await);
         crate::conversation::stream(
             std::collections::VecDeque::from([initial]),
-            agent_protocol::device::DeviceEvent::State(agent_protocol::device::DeviceServiceState::default()),
+            agent_protocol::device::DeviceEvent::State(
+                agent_protocol::device::DeviceServiceState::default(),
+            ),
             move || {
-                let (receiver, devices, thread, lease) = (receiver.clone(), devices.clone(), thread.clone(), lease.clone());
+                let (receiver, devices, thread, lease) = (
+                    receiver.clone(),
+                    devices.clone(),
+                    thread.clone(),
+                    lease.clone(),
+                );
                 Box::pin(async move {
                     let _lease = lease;
                     loop {
@@ -475,14 +497,22 @@ impl HostRpcService {
                             .await
                         };
                         match result {
-                            Ok(Ok(event)) if crate::device::DeviceService::event_belongs_to_thread(&event, &thread) => return Some(vec![event]),
+                            Ok(Ok(event))
+                                if crate::device::DeviceService::event_belongs_to_thread(
+                                    &event, &thread,
+                                ) =>
+                            {
+                                return Some(vec![event]);
+                            }
                             Ok(Ok(_)) => continue,
                             Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {
                                 return Some(vec![agent_protocol::device::DeviceEvent::State(
                                     devices.state_async().await,
                                 )]);
                             }
-                            Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => return None,
+                            Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => {
+                                return None;
+                            }
                             Err(_) => {}
                         }
                     }
@@ -559,6 +589,7 @@ impl HostRpcService {
     async fn preview_subscribe(
         &self,
         params: &agent_protocol::preview::PreviewSubscribe,
+        owner: String,
         cancel: tokio_util::sync::CancellationToken,
     ) -> HostReply {
         if let Err(error) = params.validate() {
@@ -581,7 +612,15 @@ impl HostRpcService {
                 epoch: String::new(),
                 revision: 0,
             });
-        let mut initial = resources.preview.list(&params.thread_id);
+        let browser = resources.browser.get().cloned();
+        let mut initial = if let Some(browser) = browser.as_ref() {
+            browser
+                .preview_list_for_owner(&owner, &params.thread_id.to_string())
+                .await
+                .unwrap_or_else(|_| owner_preview_fallback(&params.thread_id))
+        } else {
+            owner_preview_fallback(&params.thread_id)
+        };
         initial.local_servers = initial_scan.servers.clone();
         initial.scanned_at = initial_scan.scanned_at.clone();
         initial.scanner_epoch = initial_scan.epoch.clone();
@@ -590,6 +629,7 @@ impl HostRpcService {
             .preview_ports
             .subscribe(configured_urls, resources.shared.terminals.clone());
         let thread_id = params.thread_id.clone();
+        let owner_id = owner;
         let (sender, receiver) = tokio::sync::mpsc::channel(8);
         let forward_cancel = cancel.clone();
         tokio::spawn(async move {
@@ -602,7 +642,14 @@ impl HostRpcService {
                     servers = scanner.recv() => {
                         let Some(next_scan) = servers else { break };
                         scan = next_scan;
-                        let mut snapshot = resources.preview.list(&thread_id);
+                        let mut snapshot = if let Some(browser) = browser.as_ref() {
+                            browser
+                                .preview_list_for_owner(&owner_id, &thread_id.to_string())
+                                .await
+                                .unwrap_or_else(|_| owner_preview_fallback(&thread_id))
+                        } else {
+                            owner_preview_fallback(&thread_id)
+                        };
                         snapshot.local_servers = scan.servers.clone();
                         snapshot.scanned_at = scan.scanned_at.clone();
                         snapshot.scanner_epoch = scan.epoch.clone();
@@ -619,7 +666,14 @@ impl HostRpcService {
                             Ok(event) => event,
                             Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
                                 metadata = resources.preview.subscribe();
-                                let mut snapshot = resources.preview.list(&thread_id);
+                                let mut snapshot = if let Some(browser) = browser.as_ref() {
+                                    browser
+                                        .preview_list_for_owner(&owner_id, &thread_id.to_string())
+                                        .await
+                                        .unwrap_or_else(|_| owner_preview_fallback(&thread_id))
+                                } else {
+                                    owner_preview_fallback(&thread_id)
+                                };
                                 snapshot.local_servers = scan.servers.clone();
                                 snapshot.scanned_at = scan.scanned_at.clone();
                                 snapshot.scanner_epoch = scan.epoch.clone();
@@ -635,7 +689,14 @@ impl HostRpcService {
                             Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                         };
                         if preview_event_thread(&event) != &thread_id { continue; }
-                        let mut snapshot = resources.preview.list(&thread_id);
+                        let mut snapshot = if let Some(browser) = browser.as_ref() {
+                            browser
+                                .preview_list_for_owner(&owner_id, &thread_id.to_string())
+                                .await
+                                .unwrap_or_else(|_| owner_preview_fallback(&thread_id))
+                        } else {
+                            owner_preview_fallback(&thread_id)
+                        };
                         snapshot.local_servers = scan.servers.clone();
                         snapshot.scanned_at = scan.scanned_at.clone();
                         snapshot.scanner_epoch = scan.epoch.clone();
@@ -657,7 +718,12 @@ impl HostRpcService {
             move || {
                 let receiver = receiver.clone();
                 Box::pin(async move {
-                    receiver.lock().await.recv().await.map(|snapshot| vec![snapshot])
+                    receiver
+                        .lock()
+                        .await
+                        .recv()
+                        .await
+                        .map(|snapshot| vec![snapshot])
                 })
             },
             cancel,
@@ -665,6 +731,11 @@ impl HostRpcService {
     }
     async fn request(&self, session: SessionId, request: &Call) -> Result<Body, Failure> {
         let resources = &self.inner.resources;
+        let browser_owner = self
+            .inner
+            .connections
+            .principal(session)
+            .map_err(|error| Failure::new("connection_closed", error))?;
         let _workspace = if matches!(
             request,
             Call::StartTerminal(_)
@@ -804,12 +875,11 @@ impl HostRpcService {
                     .into()
                 }
                 Call::Browser(params) => {
-                    let browser = resources
-                        .browser
-                        .get()
-                        .ok_or_else(|| Failure::new("browser_unavailable", "browser unavailable"))?;
+                    let browser = resources.browser.get().ok_or_else(|| {
+                        Failure::new("browser_unavailable", "browser unavailable")
+                    })?;
                     let frame = browser
-                        .request(params)
+                        .request_for_owner(&browser_owner, params)
                         .await
                         .map_err(|error| Failure::new("browser_failed", error))?;
                     frame.into()
@@ -818,15 +888,14 @@ impl HostRpcService {
                     params
                         .validate()
                         .map_err(|error| Failure::new("invalid_params", error))?;
-                    let browser = resources
-                        .browser
-                        .get()
-                        .ok_or_else(|| Failure::new("browser_unavailable", "browser unavailable"))?;
+                    let browser = resources.browser.get().ok_or_else(|| {
+                        Failure::new("browser_unavailable", "browser unavailable")
+                    })?;
                     // Reconcile the browser target set before returning the
                     // metadata owner’s snapshot. This closes sessions whose
                     // targets disappeared outside the Preview UI.
-                    let _ = browser
-                        .preview_list(&params.thread_id.to_string())
+                    let mut result = browser
+                        .preview_list_for_owner(&browser_owner, &params.thread_id.to_string())
                         .await
                         .map_err(|error| Failure::new("preview_list_failed", error))?;
                     resources
@@ -838,7 +907,6 @@ impl HostRpcService {
                         .scan_snapshot(&params.configured_urls, &terminals)
                         .await
                         .map_err(|error| Failure::new("preview_scan_failed", error))?;
-                    let mut result = resources.preview.list(&params.thread_id);
                     result.local_servers = scan.servers;
                     result.scanned_at = scan.scanned_at;
                     result.scanner_epoch = scan.epoch;
@@ -849,10 +917,9 @@ impl HostRpcService {
                     params
                         .validate()
                         .map_err(|error| Failure::new("invalid_params", error))?;
-                    let browser = resources
-                        .browser
-                        .get()
-                        .ok_or_else(|| Failure::new("browser_unavailable", "browser unavailable"))?;
+                    let browser = resources.browser.get().ok_or_else(|| {
+                        Failure::new("browser_unavailable", "browser unavailable")
+                    })?;
                     let url = params
                         .url
                         .as_deref()
@@ -860,7 +927,8 @@ impl HostRpcService {
                         .transpose()
                         .map_err(|error| Failure::new("invalid_params", error))?;
                     let frame = browser
-                        .open_preview_tab(
+                        .open_preview_tab_for_owner(
+                            &browser_owner,
                             &params.thread_id.to_string(),
                             url.as_deref(),
                             params.viewport,
@@ -894,12 +962,11 @@ impl HostRpcService {
                     params
                         .validate()
                         .map_err(|error| Failure::new("invalid_params", error))?;
-                    let browser = resources
-                        .browser
-                        .get()
-                        .ok_or_else(|| Failure::new("browser_unavailable", "browser unavailable"))?;
+                    let browser = resources.browser.get().ok_or_else(|| {
+                        Failure::new("browser_unavailable", "browser unavailable")
+                    })?;
                     browser
-                        .clear_preview_profile(&params.profile_id)
+                        .clear_preview_profile_for_owner(&browser_owner, &params.profile_id)
                         .await
                         .map_err(|error| Failure::new("preview_profile_clear_failed", error))?;
                     agent_protocol::models::Empty {}.into()
@@ -910,28 +977,35 @@ impl HostRpcService {
                         .map_err(|error| Failure::new("invalid_params", error))?;
                     let url = agent_protocol::preview::normalize_preview_url(&params.url)
                         .map_err(|error| Failure::new("invalid_params", error))?;
-                    let browser = resources
-                        .browser
-                        .get()
-                        .ok_or_else(|| Failure::new("browser_unavailable", "browser unavailable"))?;
+                    let browser = resources.browser.get().ok_or_else(|| {
+                        Failure::new("browser_unavailable", "browser unavailable")
+                    })?;
                     browser
-                        .request(&agent_protocol::browser::BrowserRequest {
-                            thread_id: params.thread_id.clone(),
-                            tab_id: params.tab_id.clone(),
-                            image_id: String::new(),
-                            action: agent_protocol::browser::BrowserAction::SelectTab {
-                                id: params.tab_id.clone(),
+                        .request_for_owner(
+                            &browser_owner,
+                            &agent_protocol::browser::BrowserRequest {
+                                thread_id: params.thread_id.clone(),
+                                tab_id: params.tab_id.clone(),
+                                image_id: String::new(),
+                                action: agent_protocol::browser::BrowserAction::SelectTab {
+                                    id: params.tab_id.clone(),
+                                },
                             },
-                        })
+                        )
                         .await
                         .map_err(|error| Failure::new("preview_navigation_failed", error))?;
                     browser
-                        .request(&agent_protocol::browser::BrowserRequest {
-                            thread_id: params.thread_id.clone(),
-                            tab_id: params.tab_id.clone(),
-                            image_id: String::new(),
-                            action: agent_protocol::browser::BrowserAction::Navigate { url: url.clone() },
-                        })
+                        .request_for_owner(
+                            &browser_owner,
+                            &agent_protocol::browser::BrowserRequest {
+                                thread_id: params.thread_id.clone(),
+                                tab_id: params.tab_id.clone(),
+                                image_id: String::new(),
+                                action: agent_protocol::browser::BrowserAction::Navigate {
+                                    url: url.clone(),
+                                },
+                            },
+                        )
                         .await
                         .map_err(|error| Failure::new("preview_navigation_failed", error))?;
                     resources
@@ -944,12 +1018,12 @@ impl HostRpcService {
                     params
                         .validate()
                         .map_err(|error| Failure::new("invalid_params", error))?;
-                    let browser = resources
-                        .browser
-                        .get()
-                        .ok_or_else(|| Failure::new("browser_unavailable", "browser unavailable"))?;
+                    let browser = resources.browser.get().ok_or_else(|| {
+                        Failure::new("browser_unavailable", "browser unavailable")
+                    })?;
                     browser
-                        .resize_preview_tab(
+                        .resize_preview_tab_for_owner(
+                            &browser_owner,
                             &params.thread_id.to_string(),
                             &params.tab_id,
                             params.viewport,
@@ -967,12 +1041,12 @@ impl HostRpcService {
                     params
                         .validate()
                         .map_err(|error| Failure::new("invalid_params", error))?;
-                    let browser = resources
-                        .browser
-                        .get()
-                        .ok_or_else(|| Failure::new("browser_unavailable", "browser unavailable"))?;
+                    let browser = resources.browser.get().ok_or_else(|| {
+                        Failure::new("browser_unavailable", "browser unavailable")
+                    })?;
                     browser
-                        .set_preview_appearance(
+                        .set_preview_appearance_for_owner(
+                            &browser_owner,
                             &params.thread_id.to_string(),
                             &params.tab_id,
                             params.appearance,
@@ -989,12 +1063,12 @@ impl HostRpcService {
                     params
                         .validate()
                         .map_err(|error| Failure::new("invalid_params", error))?;
-                    let browser = resources
-                        .browser
-                        .get()
-                        .ok_or_else(|| Failure::new("browser_unavailable", "browser unavailable"))?;
+                    let browser = resources.browser.get().ok_or_else(|| {
+                        Failure::new("browser_unavailable", "browser unavailable")
+                    })?;
                     browser
-                        .set_preview_zoom(
+                        .set_preview_zoom_for_owner(
+                            &browser_owner,
                             &params.thread_id.to_string(),
                             &params.tab_id,
                             params.zoom,
@@ -1011,6 +1085,17 @@ impl HostRpcService {
                     params
                         .validate()
                         .map_err(|error| Failure::new("invalid_params", error))?;
+                    let browser = resources.browser.get().ok_or_else(|| {
+                        Failure::new("browser_unavailable", "browser unavailable")
+                    })?;
+                    browser
+                        .validate_preview_tab_owner(
+                            &browser_owner,
+                            &params.thread_id.to_string(),
+                            &params.tab_id,
+                        )
+                        .await
+                        .map_err(|error| Failure::new("preview_status_failed", error))?;
                     resources
                         .preview
                         .report_status(
@@ -1027,15 +1112,14 @@ impl HostRpcService {
                     params
                         .validate()
                         .map_err(|error| Failure::new("invalid_params", error))?;
-                    let browser = resources
-                        .browser
-                        .get()
-                        .ok_or_else(|| Failure::new("browser_unavailable", "browser unavailable"))?;
+                    let browser = resources.browser.get().ok_or_else(|| {
+                        Failure::new("browser_unavailable", "browser unavailable")
+                    })?;
                     // Reconcile Chrome targets first. A tab closed from the
                     // browser UI must not remain in the metadata owner and
                     // cause this close request to target a dead session.
                     let live = browser
-                        .preview_list(&params.thread_id.to_string())
+                        .preview_list_for_owner(&browser_owner, &params.thread_id.to_string())
                         .await
                         .map_err(|error| Failure::new("preview_close_failed", error))?;
                     let ids: Vec<String> = live
@@ -1051,7 +1135,11 @@ impl HostRpcService {
                         .collect();
                     for id in ids {
                         browser
-                            .close_preview_tab(&params.thread_id.to_string(), &id)
+                            .close_preview_tab_for_owner(
+                                &browser_owner,
+                                &params.thread_id.to_string(),
+                                &id,
+                            )
                             .await
                             .map_err(|error| Failure::new("preview_close_failed", error))?;
                     }
@@ -1061,32 +1149,37 @@ impl HostRpcService {
                     params
                         .validate()
                         .map_err(|error| Failure::new("invalid_params", error))?;
+                    let browser = resources.browser.get().ok_or_else(|| {
+                        Failure::new("browser_unavailable", "browser unavailable")
+                    })?;
+                    browser
+                        .request_for_owner(
+                            &browser_owner,
+                            &agent_protocol::browser::BrowserRequest {
+                                thread_id: params.thread_id.clone(),
+                                tab_id: params.tab_id.clone(),
+                                image_id: String::new(),
+                                action: agent_protocol::browser::BrowserAction::SelectTab {
+                                    id: params.tab_id.clone(),
+                                },
+                            },
+                        )
+                        .await
+                        .map_err(|error| Failure::new("preview_refresh_failed", error))?;
                     resources
                         .preview
                         .refresh(&params.thread_id, &params.tab_id)
                         .map_err(|error| Failure::new("preview_refresh_failed", error))?;
-                    let browser = resources
-                        .browser
-                        .get()
-                        .ok_or_else(|| Failure::new("browser_unavailable", "browser unavailable"))?;
                     browser
-                        .request(&agent_protocol::browser::BrowserRequest {
-                            thread_id: params.thread_id.clone(),
-                            tab_id: params.tab_id.clone(),
-                            image_id: String::new(),
-                            action: agent_protocol::browser::BrowserAction::SelectTab {
-                                id: params.tab_id.clone(),
+                        .request_for_owner(
+                            &browser_owner,
+                            &agent_protocol::browser::BrowserRequest {
+                                thread_id: params.thread_id.clone(),
+                                tab_id: params.tab_id.clone(),
+                                image_id: String::new(),
+                                action: agent_protocol::browser::BrowserAction::Reload,
                             },
-                        })
-                        .await
-                        .map_err(|error| Failure::new("preview_refresh_failed", error))?;
-                    browser
-                        .request(&agent_protocol::browser::BrowserRequest {
-                            thread_id: params.thread_id.clone(),
-                            tab_id: params.tab_id.clone(),
-                            image_id: String::new(),
-                            action: agent_protocol::browser::BrowserAction::Reload,
-                        })
+                        )
                         .await
                         .map_err(|error| Failure::new("preview_refresh_failed", error))?;
                     agent_protocol::models::Empty {}.into()
@@ -1095,12 +1188,12 @@ impl HostRpcService {
                     params
                         .validate()
                         .map_err(|error| Failure::new("invalid_params", error))?;
-                    let browser = resources
-                        .browser
-                        .get()
-                        .ok_or_else(|| Failure::new("browser_unavailable", "browser unavailable"))?;
+                    let browser = resources.browser.get().ok_or_else(|| {
+                        Failure::new("browser_unavailable", "browser unavailable")
+                    })?;
                     browser
-                        .start_preview_recording(
+                        .start_preview_recording_for_owner(
+                            &browser_owner,
                             &params.thread_id.to_string(),
                             &params.tab_id,
                             params.options,
@@ -1113,12 +1206,15 @@ impl HostRpcService {
                     params
                         .validate()
                         .map_err(|error| Failure::new("invalid_params", error))?;
-                    let browser = resources
-                        .browser
-                        .get()
-                        .ok_or_else(|| Failure::new("browser_unavailable", "browser unavailable"))?;
+                    let browser = resources.browser.get().ok_or_else(|| {
+                        Failure::new("browser_unavailable", "browser unavailable")
+                    })?;
                     browser
-                        .stop_preview_recording(&params.thread_id.to_string(), &params.tab_id)
+                        .stop_preview_recording_for_owner(
+                            &browser_owner,
+                            &params.thread_id.to_string(),
+                            &params.tab_id,
+                        )
                         .await
                         .map_err(|error| Failure::new("preview_recording_stop_failed", error))?
                         .into()
@@ -1181,14 +1277,12 @@ impl HostRpcService {
                     .await
                     .map_err(|error| Failure::new("device_screenshot_failed", error))?
                     .into(),
-                Call::DeviceInput(params) => {
-                    resources
-                        .devices
-                        .input(params.clone())
-                        .await
-                        .map_err(|error| Failure::new("device_input_failed", error))?
-                        .into()
-                }
+                Call::DeviceInput(params) => resources
+                    .devices
+                    .input(params.clone())
+                    .await
+                    .map_err(|error| Failure::new("device_input_failed", error))?
+                    .into(),
                 Call::DeviceAccessibility(params) => resources
                     .devices
                     .accessibility(params.clone())
@@ -1673,8 +1767,10 @@ fn preview_event_thread(event: &agent_protocol::preview::PreviewEvent) -> &agent
         | agent_protocol::preview::PreviewEvent::Failed { thread_id, .. }
         | agent_protocol::preview::PreviewEvent::Closed { thread_id, .. }
         | agent_protocol::preview::PreviewEvent::RecordingChanged { thread_id, .. }
-        | agent_protocol::preview::PreviewEvent::RecordingArtifactRemoved { thread_id, .. } => thread_id,
-}
+        | agent_protocol::preview::PreviewEvent::RecordingArtifactRemoved { thread_id, .. } => {
+            thread_id
+        }
+    }
 }
 
 fn provider_key(provider: ProviderKind) -> String {

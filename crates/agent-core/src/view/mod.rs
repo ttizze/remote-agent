@@ -5,6 +5,7 @@ pub mod api;
 pub mod appearance;
 pub mod archived;
 pub mod attachments;
+pub mod browser;
 pub mod checkpoints;
 pub mod collation;
 pub mod composer;

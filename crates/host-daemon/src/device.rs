@@ -6507,6 +6507,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ios_modifier_sequence_uses_existing_hid_key_codes() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (sender, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let server = tokio::spawn(async move {
+            for _ in 0..3 {
+                let (stream, _) = listener.accept().await.unwrap();
+                let (mut socket, _) = async_tungstenite::tokio::accept_async(stream).await.unwrap();
+                if let Some(Ok(message)) = socket.next().await {
+                    sender.send(message).unwrap();
+                }
+            }
+        });
+        for (code, down) in [("ShiftLeft", true), ("KeyA", true), ("ShiftLeft", false)] {
+            hub_input(
+                port,
+                DevicePlatform::Ios,
+                "sim",
+                &DeviceInputKind::Key {
+                    code: code.into(),
+                    key: code.into(),
+                    down,
+                    meta: false,
+                    ctrl: false,
+                },
+                0,
+            )
+            .await
+            .unwrap();
+        }
+        let mut usages = Vec::new();
+        for _ in 0..3 {
+            let message = tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                received.recv(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            let async_tungstenite::tungstenite::Message::Binary(bytes) = message else {
+                panic!("expected iOS HID binary input");
+            };
+            assert_eq!(bytes[0], 0x06);
+            let payload: serde_json::Value = serde_json::from_slice(&bytes[1..]).unwrap();
+            usages.push((
+                payload["type"].as_str().unwrap().to_owned(),
+                payload["usage"].as_u64().unwrap(),
+            ));
+        }
+        assert_eq!(
+            usages,
+            vec![
+                ("down".into(), 0xe1),
+                ("down".into(), 0x04),
+                ("up".into(), 0xe1),
+            ]
+        );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn android_fold_uses_the_typed_http_control_route() {
         let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let port = listener.local_addr().unwrap().port();

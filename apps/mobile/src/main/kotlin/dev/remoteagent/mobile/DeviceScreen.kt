@@ -70,6 +70,13 @@ internal fun DeviceScreen(model: AndroidAppModel, threadId: String) {
     DisposableEffect(threadId) {
         onDispose { model.perform(Intent.UnsubscribeDevice) }
     }
+    DisposableEffect(threadId, sessionKey) {
+        onDispose {
+            threadSessions.forEach { session ->
+                model.perform(Intent.ReleaseDeviceInput(session.hostId, session.deviceId, session.sessionEpoch))
+            }
+        }
+    }
     ScreenScaffold("Device", onBack = model::back) {
         if (!view.enabled) {
             Column(Modifier.fillMaxSize().padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -118,6 +125,15 @@ internal fun DeviceScreen(model: AndroidAppModel, threadId: String) {
                         }
                         Button(onClick = {
                             if (opened) {
+                                model.perform(
+                                    Intent.ReleaseDeviceInput(
+                                        device.hostId,
+                                        device.id,
+                                        threadSessions.firstOrNull {
+                                            it.hostId == device.hostId && it.deviceId == device.id
+                                        }?.sessionEpoch,
+                                    )
+                                )
                                 model.perform(Intent.CloseDevice(device.hostId, device.id, false))
                             } else {
                                 model.perform(Intent.OpenDevice(device.hostId, device.id, device.platform, true))
@@ -225,6 +241,7 @@ internal fun DeviceScreen(model: AndroidAppModel, threadId: String) {
                         model.perform(Intent.StopDeviceRecording(session.hostId, session.deviceId))
                     }) { Text("Stop record") }
                     Button(onClick = {
+                        model.perform(Intent.ReleaseDeviceInput(session.hostId, session.deviceId, session.sessionEpoch))
                         model.perform(Intent.CloseDevice(session.hostId, session.deviceId, true))
                     }) { Text("Power off") }
                 }
@@ -455,16 +472,18 @@ private fun Modifier.deviceKeyInput(model: AndroidAppModel, hostId: String, devi
             Intent.DeviceAction(
                 hostId,
                 deviceId,
-                        DeviceActionIntent.Key(
-                            code,
-                            event.nativeKeyEvent.getUnicodeChar(event.nativeKeyEvent.metaState)
-                                .takeIf { it != 0 }
-                                ?.let { String(Character.toChars(it)) }
-                                ?: code,
-                            event.type == KeyEventType.KeyDown,
-                            event.nativeKeyEvent.isMetaPressed,
-                            event.nativeKeyEvent.isCtrlPressed,
-                        ),
+                DeviceActionIntent.Key(
+                    code,
+                    event.nativeKeyEvent.getUnicodeChar(event.nativeKeyEvent.metaState)
+                        .takeIf { it != 0 }
+                        ?.let { String(Character.toChars(it)) }
+                        ?: code,
+                    event.type == KeyEventType.KeyDown,
+                    event.nativeKeyEvent.isMetaPressed,
+                    event.nativeKeyEvent.isCtrlPressed,
+                    event.nativeKeyEvent.isShiftPressed,
+                    event.nativeKeyEvent.isAltPressed,
+                ),
             ),
         )
         true

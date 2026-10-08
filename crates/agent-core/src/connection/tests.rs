@@ -933,6 +933,7 @@ fn job(
         complete: None,
         sent,
         duo_request: None,
+        device_input_target: None,
     }
 }
 
@@ -1004,6 +1005,7 @@ fn a_remote_pairing_receipt_observes_the_registered_host() {
         complete: Some(complete),
         sent: None,
         duo_request: None,
+        device_input_target: None,
     });
     assert_eq!(
         receipt.try_recv().unwrap().unwrap(),
@@ -1054,6 +1056,7 @@ fn duo_completion_uses_the_request_epoch_after_thread_selection_changes() {
         complete: None,
         sent: None,
         duo_request: Some(request),
+        device_input_target: None,
     });
     assert!(owner.state.device.duo_controls.is_empty());
 }

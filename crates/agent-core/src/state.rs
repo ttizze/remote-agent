@@ -476,7 +476,8 @@ impl PreviewState {
             return;
         }
         if server_epoch_changed {
-            self.invalidated_recordings.extend(self.sessions.keys().cloned());
+            self.invalidated_recordings
+                .extend(self.sessions.keys().cloned());
         }
         self.sessions = result
             .sessions
@@ -583,11 +584,17 @@ impl PreviewState {
             self.last_recordings.clear();
         }
     }
-    pub fn session(&self, tab_id: &str) -> Option<&agent_protocol::preview::PreviewSessionSnapshot> {
+    pub fn session(
+        &self,
+        tab_id: &str,
+    ) -> Option<&agent_protocol::preview::PreviewSessionSnapshot> {
         self.sessions.get(tab_id)
     }
 
-    pub fn recording_for(&self, tab_id: &str) -> Option<&agent_protocol::preview::PreviewRecordingStatus> {
+    pub fn recording_for(
+        &self,
+        tab_id: &str,
+    ) -> Option<&agent_protocol::preview::PreviewRecordingStatus> {
         self.recordings.get(tab_id)
     }
 
@@ -626,10 +633,28 @@ impl PreviewState {
                 started_at: None,
             },
         );
-        self.last_recordings.insert(artifact.tab_id.clone(), artifact);
+        self.last_recordings
+            .insert(artifact.tab_id.clone(), artifact);
     }
 
-    pub fn last_recording_for(&self, tab_id: &str) -> Option<&agent_protocol::preview::PreviewRecordingArtifact> {
+    /// A failed start has no recording lifetime to expose. A failed stop is
+    /// deliberately left active so the client can retry while the Host still
+    /// owns the capture task; a transport error must not turn a live recorder
+    /// into a false idle snapshot.
+    pub fn recording_failed(&mut self, tab_id: &str, starting: bool) {
+        if self.closed_tabs.contains(tab_id) || !self.sessions.contains_key(tab_id) {
+            return;
+        }
+        if starting {
+            self.recordings.remove(tab_id);
+            self.last_recordings.remove(tab_id);
+        }
+    }
+
+    pub fn last_recording_for(
+        &self,
+        tab_id: &str,
+    ) -> Option<&agent_protocol::preview::PreviewRecordingArtifact> {
         self.last_recordings.get(tab_id)
     }
 }
@@ -748,18 +773,20 @@ mod preview_state_tests {
     fn applies_independent_recording_slots_for_each_preview_tab() {
         let mut state = PreviewState::default();
         let mut result = list("epoch", 1, "tab-a");
-        result.sessions.push(agent_protocol::preview::PreviewSessionSnapshot {
-            thread_id: ThreadId::new("thread").unwrap(),
-            tab_id: "tab-b".into(),
-            nav_status: agent_protocol::preview::PreviewNavStatus::Idle,
-            can_go_back: false,
-            can_go_forward: false,
-            viewport: PreviewViewportSetting::Fill,
-            zoom: agent_protocol::preview::PreviewZoom::X100,
-            appearance: agent_protocol::preview::PreviewAppearance::System,
-            profile_id: None,
-            updated_at: String::new(),
-        });
+        result
+            .sessions
+            .push(agent_protocol::preview::PreviewSessionSnapshot {
+                thread_id: ThreadId::new("thread").unwrap(),
+                tab_id: "tab-b".into(),
+                nav_status: agent_protocol::preview::PreviewNavStatus::Idle,
+                can_go_back: false,
+                can_go_forward: false,
+                viewport: PreviewViewportSetting::Fill,
+                zoom: agent_protocol::preview::PreviewZoom::X100,
+                appearance: agent_protocol::preview::PreviewAppearance::System,
+                profile_id: None,
+                updated_at: String::new(),
+            });
         result.recordings = vec![
             agent_protocol::preview::PreviewRecordingStatus {
                 tab_id: "tab-a".into(),
@@ -773,8 +800,16 @@ mod preview_state_tests {
             },
         ];
         state.apply_list(result);
-        assert!(state.recording_for("tab-a").is_some_and(|status| status.recording));
-        assert!(state.recording_for("tab-b").is_some_and(|status| status.recording));
+        assert!(
+            state
+                .recording_for("tab-a")
+                .is_some_and(|status| status.recording)
+        );
+        assert!(
+            state
+                .recording_for("tab-b")
+                .is_some_and(|status| status.recording)
+        );
     }
 
     #[test]
@@ -790,19 +825,25 @@ mod preview_state_tests {
     #[test]
     fn closing_the_recorded_tab_discards_ephemeral_recording_state() {
         let mut state = PreviewState::default();
-        state.recordings.insert("tab".into(), agent_protocol::preview::PreviewRecordingStatus {
-            tab_id: "tab".into(),
-            recording: true,
-            started_at: Some("2026-01-01T00:00:00Z".into()),
-        });
-        state.last_recordings.insert("tab".into(), agent_protocol::preview::PreviewRecordingArtifact {
-            id: "browser-recording-test".into(),
-            tab_id: "tab".into(),
-            path: "/tmp/browser-recording-test.webm".into(),
-            mime_type: "video/webm".into(),
-            size_bytes: 1,
-            created_at: "2026-01-01T00:00:01Z".into(),
-        });
+        state.recordings.insert(
+            "tab".into(),
+            agent_protocol::preview::PreviewRecordingStatus {
+                tab_id: "tab".into(),
+                recording: true,
+                started_at: Some("2026-01-01T00:00:00Z".into()),
+            },
+        );
+        state.last_recordings.insert(
+            "tab".into(),
+            agent_protocol::preview::PreviewRecordingArtifact {
+                id: "browser-recording-test".into(),
+                tab_id: "tab".into(),
+                path: "/tmp/browser-recording-test.webm".into(),
+                mime_type: "video/webm".into(),
+                size_bytes: 1,
+                created_at: "2026-01-01T00:00:01Z".into(),
+            },
+        );
         state.close(Some("tab"));
         assert!(state.recordings.is_empty());
         assert!(state.last_recordings.is_empty());
@@ -829,6 +870,24 @@ mod preview_state_tests {
         state.close(Some("tab"));
         state.apply_recording_artifact(artifact());
         assert!(state.last_recording_for("tab").is_none());
+    }
+
+    #[test]
+    fn recording_failures_clear_failed_starts_but_keep_a_live_stop_retryable() {
+        let mut state = PreviewState::default();
+        state.apply_list(list("epoch", 1, "tab"));
+        state.recordings.insert(
+            "tab".into(),
+            agent_protocol::preview::PreviewRecordingStatus {
+                tab_id: "tab".into(),
+                recording: true,
+                started_at: Some("0".into()),
+            },
+        );
+        state.recording_failed("tab", false);
+        assert!(state.recording_for("tab").is_some_and(|status| status.recording));
+        state.recording_failed("tab", true);
+        assert!(state.recording_for("tab").is_none());
     }
 }
 
@@ -1339,32 +1398,73 @@ pub enum DeviceDuoCommandIntent {
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum DeviceActionIntent {
-    SetAppearance { dark: bool },
-    SetTextSize { size: String },
-    SetToggle { setting: String, value: bool },
-    SetLiquidGlass { value: String },
-    SetColorFilter { filter: String },
-    SetOrientation { orientation: String },
-    SetLocation { latitude: f64, longitude: f64 },
+    SetAppearance {
+        dark: bool,
+    },
+    SetTextSize {
+        size: String,
+    },
+    SetToggle {
+        setting: String,
+        value: bool,
+    },
+    SetLiquidGlass {
+        value: String,
+    },
+    SetColorFilter {
+        filter: String,
+    },
+    SetOrientation {
+        orientation: String,
+    },
+    SetLocation {
+        latitude: f64,
+        longitude: f64,
+    },
     ClearLocation,
-    SetPermission { app_id: String, permission: String, decision: String },
-    OpenUrl { url: String },
-    LaunchApp { app_id: String },
-    TerminateApp { app_id: String },
+    SetPermission {
+        app_id: String,
+        permission: String,
+        decision: String,
+    },
+    OpenUrl {
+        url: String,
+    },
+    LaunchApp {
+        app_id: String,
+    },
+    TerminateApp {
+        app_id: String,
+    },
     Shake,
-    SendPush { app_id: String, payload: String },
-    Touch { phase: String, x: f32, y: f32 },
+    SendPush {
+        app_id: String,
+        payload: String,
+    },
+    Touch {
+        phase: String,
+        x: f32,
+        y: f32,
+    },
     Key {
         code: String,
         key: String,
         down: bool,
         meta: bool,
         ctrl: bool,
+        shift: bool,
+        alt: bool,
     },
-    HardwareButton { button: String },
+    HardwareButton {
+        button: String,
+    },
     Rotate,
-    Fold { command: DeviceFoldPostureIntent },
-    Duo { command: DeviceDuoCommandIntent },
+    Fold {
+        command: DeviceFoldPostureIntent,
+    },
+    Duo {
+        command: DeviceDuoCommandIntent,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -1787,6 +1887,36 @@ pub enum Intent {
     SetWorkingSection {
         enabled: bool,
     },
+    SetBrowserViewport {
+        viewport: agent_protocol::preview::PreviewViewportSetting,
+    },
+    SetBrowserZoom {
+        zoom: agent_protocol::preview::PreviewZoom,
+    },
+    SetBrowserAppearance {
+        appearance: agent_protocol::preview::PreviewAppearance,
+    },
+    SetBrowserLinkTarget {
+        target: agent_protocol::preview::BrowserLinkTarget,
+    },
+    SetBrowserAutoShowFloatingPreview {
+        enabled: bool,
+    },
+    SetBrowserRecordingFrameRate {
+        frame_rate: u32,
+    },
+    SetBrowserRecordingShowKeyPresses {
+        enabled: bool,
+    },
+    SetBrowserRecordingShowMousePresses {
+        enabled: bool,
+    },
+    SetBrowserProfiles {
+        profiles: Vec<crate::view::browser::BrowserProfile>,
+    },
+    SetBrowserDefaultProfile {
+        profile_id: String,
+    },
     /// The model new threads start with; an open thread keeps its own.
     SetDefaultModel {
         instance_id: String,
@@ -1905,9 +2035,16 @@ pub enum Intent {
 
     // Device panel and Host-owned simulator/emulator control.
     LoadDevices,
-    InspectDevices { host_id: Option<String> },
-    UpdateDeviceTool { host_id: Option<String>, tool: String },
-    RetryDeviceHost { host_id: String },
+    InspectDevices {
+        host_id: Option<String>,
+    },
+    UpdateDeviceTool {
+        host_id: Option<String>,
+        tool: String,
+    },
+    RetryDeviceHost {
+        host_id: String,
+    },
     ConfigureDevices {
         enabled: Option<bool>,
         agent_access_enabled: Option<bool>,
@@ -1935,6 +2072,13 @@ pub enum Intent {
         host_id: Option<String>,
         device_id: String,
         action: DeviceActionIntent,
+    },
+    /// Releases the key state owned by one native surface before focus,
+    /// subscription, or device-session ownership changes.
+    ReleaseDeviceInput {
+        host_id: Option<String>,
+        device_id: String,
+        session_epoch: Option<String>,
     },
     CaptureDeviceScreenshot {
         host_id: Option<String>,

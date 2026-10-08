@@ -407,6 +407,9 @@ impl Desktop {
         &self,
         cx: &mut Context<Desktop>,
     ) -> Option<AnyElement> {
+        if !self.snapshot.preferences.browser.auto_show_floating_preview {
+            return None;
+        }
         let right = self.right();
         if right.open {
             return None;
@@ -436,19 +439,15 @@ impl Desktop {
     /// A surface's tab title.
     fn surface_title(&self, surface: &Surface, cx: &App) -> String {
         match surface {
-            Surface::Browser { id } => self
-                .panels
-                .preview_browsers
-                .get(id)
-                .map_or_else(
-                    || {
-                        self.panels
-                            .browsers
-                            .get(id)
-                            .map_or_else(|| "Browser".into(), |browser| browser.read(cx).title(cx))
-                    },
-                    |browser| browser.read(cx).title(cx),
-                ),
+            Surface::Browser { id } => self.panels.preview_browsers.get(id).map_or_else(
+                || {
+                    self.panels
+                        .browsers
+                        .get(id)
+                        .map_or_else(|| "Browser".into(), |browser| browser.read(cx).title(cx))
+                },
+                |browser| browser.read(cx).title(cx),
+            ),
             Surface::Terminal { active, .. } => {
                 let thread = self.panel_thread();
                 self.snapshot
@@ -753,13 +752,11 @@ impl Desktop {
                 self.panels.next_browser += 1;
                 let id = self.panels.next_browser;
                 if let (Some(store), Some(thread)) = (self.store(), self.thread_id()) {
-                    let browser = crate::browser::HostBrowser::new(
-                        store,
-                        thread,
-                        crate::browser::PreviewDefaults::default(),
-                        window,
-                        cx,
+                    let defaults = crate::browser::PreviewDefaults::from_browser_defaults(
+                        store.snapshot().preferences.browser.resolved(),
                     );
+                    let browser =
+                        crate::browser::HostBrowser::new(store, thread, defaults, window, cx);
                     self.panels.preview_browsers.insert(id, browser);
                 } else {
                     match crate::browser::Browser::new(

@@ -305,8 +305,12 @@ struct DeviceScreen: View {
     @State private var recordingContentType: UTType = .data
     @State private var touchingHostId: String?
     @State private var touchingDeviceId: String?
+    @State private var touchingSessionEpoch: String?
     @State private var touchingPoint: CGPoint?
     @State private var focusedDeviceKey: String?
+    @State private var keyboardHostId: String?
+    @State private var keyboardDeviceId: String?
+    @State private var keyboardSessionEpoch: String?
 
     var body: some View {
         let view = model.snapshot.device()
@@ -359,6 +363,11 @@ struct DeviceScreen: View {
                             Spacer()
                             Button(opened ? "Close" : "Open") {
                                 if opened {
+                                    releaseDeviceInput(
+                                        sessions: threadSessions,
+                                        hostId: device.hostId,
+                                        deviceId: device.id
+                                    )
                                     model.perform(.closeDevice(hostId: device.hostId, deviceId: device.id, shutdown: false))
                                 } else {
                                     model.perform(.openDevice(hostId: device.hostId, deviceId: device.id, platform: device.platform, boot: true))
@@ -477,12 +486,12 @@ struct DeviceScreen: View {
                                 model.perform(.deviceAction(
                                     hostId: session.hostId,
                                     deviceId: session.deviceId,
-                                    action: .key(code: "Enter", key: "Enter", down: true, meta: false, ctrl: false)
+                                    action: .key(code: "Enter", key: "Enter", down: true, meta: false, ctrl: false, shift: false, alt: false)
                                 ))
                                 model.perform(.deviceAction(
                                     hostId: session.hostId,
                                     deviceId: session.deviceId,
-                                    action: .key(code: "Enter", key: "Enter", down: false, meta: false, ctrl: false)
+                                    action: .key(code: "Enter", key: "Enter", down: false, meta: false, ctrl: false, shift: false, alt: false)
                                 ))
                             }
                             Button("Rotate") {
@@ -524,6 +533,11 @@ struct DeviceScreen: View {
                                 }
                             }
                             Button("Power off") {
+                                releaseDeviceInput(
+                                    sessions: threadSessions,
+                                    hostId: session.hostId,
+                                    deviceId: session.deviceId
+                                )
                                 model.perform(.closeDevice(hostId: session.hostId, deviceId: session.deviceId, shutdown: true))
                             }
                         }
@@ -555,7 +569,7 @@ struct DeviceScreen: View {
                                     GeometryReader { proxy in
                                         Color.clear
                                             .contentShape(Rectangle())
-                                            .gesture(deviceTouchGesture(hostId: frame.hostId, deviceId: frame.deviceId, size: proxy.size, frameSize: CGSize(width: CGFloat(frame.width), height: CGFloat(frame.height))))
+                                            .gesture(deviceTouchGesture(hostId: frame.hostId, deviceId: frame.deviceId, sessionEpoch: frame.sessionEpoch, size: proxy.size, frameSize: CGSize(width: CGFloat(frame.width), height: CGFloat(frame.height))))
                                     }
                                 }
                             }
@@ -572,7 +586,7 @@ struct DeviceScreen: View {
                             GeometryReader { proxy in
                                 Color.clear
                                     .contentShape(Rectangle())
-                                    .gesture(deviceTouchGesture(hostId: frame.hostId, deviceId: frame.deviceId, size: proxy.size, frameSize: CGSize(width: CGFloat(frame.width), height: CGFloat(frame.height))))
+                                    .gesture(deviceTouchGesture(hostId: frame.hostId, deviceId: frame.deviceId, sessionEpoch: frame.sessionEpoch, size: proxy.size, frameSize: CGSize(width: CGFloat(frame.width), height: CGFloat(frame.height))))
                             }
                         }
                     } else {
@@ -654,6 +668,11 @@ struct DeviceScreen: View {
             deviceFrames.consume(next.videoEvents, threadId: threadId)
         }
         .onChange(of: threadSessionKey) { _, _ in
+            finishActiveTouch()
+            releaseDeviceInput(sessions: threadSessions)
+            keyboardHostId = nil
+            keyboardDeviceId = nil
+            keyboardSessionEpoch = nil
             focusedDeviceKey = nil
             deviceFrames.reset(threadId: threadId)
             let next = model.snapshot.device()
@@ -667,6 +686,10 @@ struct DeviceScreen: View {
         }
         .onDisappear {
             finishActiveTouch()
+            releaseDeviceInput(sessions: threadSessions)
+            keyboardHostId = nil
+            keyboardDeviceId = nil
+            keyboardSessionEpoch = nil
             focusedDeviceKey = nil
             deviceFrames.reset(threadId: threadId)
             model.perform(.unsubscribeDevice)
@@ -681,20 +704,23 @@ struct DeviceScreen: View {
         }
     }
 
-    private func deviceTouchGesture(hostId: String, deviceId: String, size: CGSize, frameSize: CGSize) -> some Gesture {
+    private func deviceTouchGesture(hostId: String, deviceId: String, sessionEpoch: String, size: CGSize, frameSize: CGSize) -> some Gesture {
         DragGesture(minimumDistance: 0)
             .onChanged { value in
-                let ownsGesture = touchingHostId == hostId && touchingDeviceId == deviceId
-                guard let point = projectTouchPoint(value.location, viewSize: size, frameSize: frameSize) else {
-                    return
-                }
+                let ownsGesture = touchingHostId == hostId
+                    && touchingDeviceId == deviceId
+                    && touchingSessionEpoch == sessionEpoch
                 if !ownsGesture {
                     finishActiveTouch()
+                }
+                guard let point = projectTouchPoint(value.location, viewSize: size, frameSize: frameSize) else {
+                    return
                 }
                 let phase = ownsGesture ? "move" : "begin"
                 focusedDeviceKey = "\(hostId):\(deviceId)"
                 touchingHostId = hostId
                 touchingDeviceId = deviceId
+                touchingSessionEpoch = sessionEpoch
                 touchingPoint = point
                 model.perform(.deviceAction(
                     hostId: hostId,
@@ -703,7 +729,12 @@ struct DeviceScreen: View {
                 ))
             }
             .onEnded { value in
-                guard touchingHostId == hostId, touchingDeviceId == deviceId else {
+                guard touchingHostId == hostId,
+                      touchingDeviceId == deviceId,
+                      touchingSessionEpoch == sessionEpoch else {
+                    if touchingHostId == hostId, touchingDeviceId == deviceId {
+                        finishActiveTouch()
+                    }
                     return
                 }
                 guard let point = projectTouchPoint(value.location, viewSize: size, frameSize: frameSize) else {
@@ -717,6 +748,7 @@ struct DeviceScreen: View {
                 ))
                 touchingHostId = nil
                 touchingDeviceId = nil
+                touchingSessionEpoch = nil
                 touchingPoint = nil
             }
     }
@@ -724,32 +756,93 @@ struct DeviceScreen: View {
     private func finishActiveTouch() {
         guard let hostId = touchingHostId,
               let deviceId = touchingDeviceId,
+              let sessionEpoch = touchingSessionEpoch,
               let point = touchingPoint else { return }
-        model.perform(.deviceAction(
-            hostId: hostId,
-            deviceId: deviceId,
-            action: .touch(phase: "end", x: Float(point.x), y: Float(point.y)),
-        ))
+        let currentEpoch = model.snapshot.device().sessions.first {
+            $0.threadId == threadId && $0.hostId == hostId && $0.deviceId == deviceId
+        }?.sessionEpoch
+        if currentEpoch == sessionEpoch {
+            model.perform(.deviceAction(
+                hostId: hostId,
+                deviceId: deviceId,
+                action: .touch(phase: "end", x: Float(point.x), y: Float(point.y)),
+            ))
+        }
         touchingHostId = nil
         touchingDeviceId = nil
+        touchingSessionEpoch = nil
         touchingPoint = nil
     }
 
     private func sendDeviceKey(_ press: KeyPress, down: Bool, sessions: [DeviceSessionView]) -> KeyPress.Result {
         let target = sessions.first { "\($0.hostId):\($0.deviceId)" == focusedDeviceKey } ?? sessions.first
-        guard let target, let facts = deviceKeyFacts(press) else { return .ignored }
-        model.perform(.deviceAction(
-            hostId: target.hostId,
-            deviceId: target.deviceId,
-            action: .key(
-                code: facts.code,
-                key: facts.key,
-                down: down,
-                meta: press.modifiers.contains(.command),
-                ctrl: press.modifiers.contains(.control)
-            )
-        ))
+        guard let target else { return .ignored }
+        if let facts = deviceKeyFacts(press) {
+            if keyboardHostId != target.hostId
+                || keyboardDeviceId != target.deviceId
+                || keyboardSessionEpoch != target.sessionEpoch {
+                if let previousHostId = keyboardHostId,
+                   let previousDeviceId = keyboardDeviceId {
+                    model.perform(.releaseDeviceInput(
+                        hostId: previousHostId,
+                        deviceId: previousDeviceId,
+                        sessionEpoch: keyboardSessionEpoch
+                    ))
+                }
+                keyboardHostId = target.hostId
+                keyboardDeviceId = target.deviceId
+                keyboardSessionEpoch = target.sessionEpoch
+            }
+            model.perform(.deviceAction(
+                hostId: target.hostId,
+                deviceId: target.deviceId,
+                action: .key(
+                    code: facts.code,
+                    key: facts.key,
+                    down: down,
+                    meta: press.modifiers.contains(.command),
+                    ctrl: press.modifiers.contains(.control),
+                    shift: press.modifiers.contains(.shift),
+                    alt: press.modifiers.contains(.option)
+                )
+            ))
+        }
         return .handled
+    }
+
+    private func releaseDeviceInput(
+        sessions: [DeviceSessionView],
+        hostId: String? = nil,
+        deviceId: String? = nil,
+        sessionEpoch: String? = nil
+    ) {
+        let identity: (hostId: String, deviceId: String, sessionEpoch: String?)
+        if let hostId, let deviceId {
+            identity = (hostId, deviceId, sessionEpoch)
+        } else if let keyboardHostId, let keyboardDeviceId {
+            identity = (keyboardHostId, keyboardDeviceId, keyboardSessionEpoch)
+        } else {
+            guard let target = sessions.first(where: { "\($0.hostId):\($0.deviceId)" == focusedDeviceKey }) ?? sessions.first else {
+                return
+            }
+            identity = (target.hostId, target.deviceId, target.sessionEpoch)
+        }
+        let epoch = identity.sessionEpoch ?? sessions.first {
+            $0.hostId == identity.hostId && $0.deviceId == identity.deviceId
+        }?.sessionEpoch
+        guard let epoch else { return }
+        model.perform(.releaseDeviceInput(
+            hostId: identity.hostId,
+            deviceId: identity.deviceId,
+            sessionEpoch: epoch
+        ))
+        if keyboardHostId == identity.hostId,
+           keyboardDeviceId == identity.deviceId,
+           keyboardSessionEpoch == epoch {
+            keyboardHostId = nil
+            keyboardDeviceId = nil
+            keyboardSessionEpoch = nil
+        }
     }
 
     private func deviceKeyFacts(_ press: KeyPress) -> DeviceKeyFacts? {

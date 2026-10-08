@@ -1,8 +1,9 @@
-use agent_core::{connection::Store, state::{Intent, LocalFile}};
-use agent_protocol::browser::{browser_url, BrowserAction, BrowserFrame, BrowserRequest};
-use agent_protocol::preview::{
-    PreviewAppearance, PreviewViewportSetting, PreviewZoom,
+use agent_core::{
+    connection::Store,
+    state::{Intent, LocalFile},
 };
+use agent_protocol::browser::{BrowserAction, BrowserFrame, BrowserRequest, browser_url};
+use agent_protocol::preview::{PreviewAppearance, PreviewViewportSetting, PreviewZoom};
 #[cfg(target_os = "macos")]
 use gpui_kit::component::{
     Disableable,
@@ -326,6 +327,24 @@ impl Default for PreviewDefaults {
     }
 }
 
+impl PreviewDefaults {
+    pub(crate) fn from_browser_defaults(
+        defaults: agent_core::view::browser::BrowserDefaults,
+    ) -> Self {
+        Self {
+            viewport: defaults.viewport,
+            appearance: defaults.appearance,
+            zoom: defaults.zoom,
+            profile_id: Some(defaults.profile_id),
+            recording_options: agent_protocol::preview::PreviewRecordingOptions {
+                frame_rate: defaults.recording_frame_rate as u8,
+                show_key_presses: defaults.recording_show_key_presses,
+                show_mouse_presses: defaults.recording_show_mouse_presses,
+            },
+        }
+    }
+}
+
 /// Renders frames from the Host-owned Preview browser. The image and every
 /// input action share the Host tab identity, so a panel switch never creates a
 /// second local page behind the user's visible Preview.
@@ -358,8 +377,12 @@ impl HostBrowser {
         let freeform_width = cx.new(|cx| InputState::new(window, cx).placeholder("Width"));
         let freeform_height = cx.new(|cx| InputState::new(window, cx).placeholder("Height"));
         if let Some((width, height)) = defaults.viewport.dimensions() {
-            freeform_width.update(cx, |input, cx| input.set_value(width.to_string(), window, cx));
-            freeform_height.update(cx, |input, cx| input.set_value(height.to_string(), window, cx));
+            freeform_width.update(cx, |input, cx| {
+                input.set_value(width.to_string(), window, cx)
+            });
+            freeform_height.update(cx, |input, cx| {
+                input.set_value(height.to_string(), window, cx)
+            });
         }
         cx.new(|cx: &mut Context<Self>| {
             let subscription = cx.subscribe_in(&address, window, |view, _, event, window, cx| {
@@ -507,7 +530,12 @@ impl HostBrowser {
         let Some(artifact) = self
             .frame
             .as_ref()
-            .and_then(|frame| self.store.snapshot().preview.last_recording_for(&frame.tab_id))
+            .and_then(|frame| {
+                self.store
+                    .snapshot()
+                    .preview
+                    .last_recording_for(&frame.tab_id)
+            })
             .cloned()
         else {
             self.error = "No finished Preview recording is available.".into();
@@ -548,7 +576,12 @@ impl HostBrowser {
         let Some(artifact) = self
             .frame
             .as_ref()
-            .and_then(|frame| self.store.snapshot().preview.last_recording_for(&frame.tab_id))
+            .and_then(|frame| {
+                self.store
+                    .snapshot()
+                    .preview
+                    .last_recording_for(&frame.tab_id)
+            })
             .cloned()
         else {
             self.error = "No finished Preview recording is available.".into();
@@ -592,7 +625,8 @@ impl HostBrowser {
             }
             .await;
             if result.is_ok() {
-                wait_for_attachment_release(store.clone(), cleanup_draft_key, local_path.clone()).await;
+                wait_for_attachment_release(store.clone(), cleanup_draft_key, local_path.clone())
+                    .await;
             } else {
                 let _ = tokio::fs::remove_file(&local_path).await;
             }
@@ -703,7 +737,10 @@ async fn host_browser_request(
     defaults: PreviewDefaults,
     request: HostBrowserRequest,
 ) -> Result<BrowserFrame, String> {
-    let tab_id = frame.as_ref().map(|frame| frame.tab_id.clone()).unwrap_or_default();
+    let tab_id = frame
+        .as_ref()
+        .map(|frame| frame.tab_id.clone())
+        .unwrap_or_default();
     let image_id = frame
         .as_ref()
         .map(|frame| frame.image_id.clone())
@@ -779,7 +816,11 @@ async fn dispatch_preview(store: &Store, intent: Intent) -> Result<(), String> {
     Ok(())
 }
 
-async fn wait_for_attachment_release(store: Arc<Store>, draft_key: String, path: std::path::PathBuf) {
+async fn wait_for_attachment_release(
+    store: Arc<Store>,
+    draft_key: String,
+    path: std::path::PathBuf,
+) {
     let mut updates = store.subscribe();
     let path_string = path.to_string_lossy().into_owned();
     let _ = tokio::time::timeout(std::time::Duration::from_secs(120), async {
@@ -789,7 +830,12 @@ async fn wait_for_attachment_release(store: Arc<Store>, draft_key: String, path:
             let status = snapshot
                 .drafts
                 .get(&draft_key)
-                .and_then(|draft| draft.attachments.iter().find(|attachment| attachment.local_path == path_string.as_str()))
+                .and_then(|draft| {
+                    draft
+                        .attachments
+                        .iter()
+                        .find(|attachment| attachment.local_path == path_string.as_str())
+                })
                 .map(|attachment| attachment.status.as_str());
             match status {
                 Some("ready") | Some("failed") => break,
@@ -910,7 +956,11 @@ impl Render for HostBrowser {
                             .tooltip("Zoom out")
                             .accessibility_label("Zoom out")
                             .on_click(cx.listener(|s, _, window, cx| {
-                                let Some(tab_id) = s.frame.as_ref().map(|frame| frame.tab_id.clone()) else { return };
+                                let Some(tab_id) =
+                                    s.frame.as_ref().map(|frame| frame.tab_id.clone())
+                                else {
+                                    return;
+                                };
                                 let zoom = s
                                     .store
                                     .snapshot()
@@ -936,7 +986,11 @@ impl Render for HostBrowser {
                             .tooltip("Zoom in")
                             .accessibility_label("Zoom in")
                             .on_click(cx.listener(|s, _, window, cx| {
-                                let Some(tab_id) = s.frame.as_ref().map(|frame| frame.tab_id.clone()) else { return };
+                                let Some(tab_id) =
+                                    s.frame.as_ref().map(|frame| frame.tab_id.clone())
+                                else {
+                                    return;
+                                };
                                 let zoom = s
                                     .store
                                     .snapshot()
@@ -962,13 +1016,19 @@ impl Render for HostBrowser {
                             .tooltip("Cycle viewport")
                             .accessibility_label("Cycle viewport")
                             .on_click(cx.listener(|s, _, window, cx| {
-                                let Some(tab_id) = s.frame.as_ref().map(|frame| frame.tab_id.clone()) else { return };
+                                let Some(tab_id) =
+                                    s.frame.as_ref().map(|frame| frame.tab_id.clone())
+                                else {
+                                    return;
+                                };
                                 let viewport = s
                                     .store
                                     .snapshot()
                                     .preview
                                     .session(&tab_id)
-                                    .map_or(PreviewViewportSetting::Fill, |session| session.viewport);
+                                    .map_or(PreviewViewportSetting::Fill, |session| {
+                                        session.viewport
+                                    });
                                 s.request(
                                     HostBrowserRequest::Intent(Intent::PreviewResize {
                                         tab_id,
@@ -989,13 +1049,19 @@ impl Render for HostBrowser {
                             .tooltip("Cycle appearance")
                             .accessibility_label("Cycle appearance")
                             .on_click(cx.listener(|s, _, window, cx| {
-                                let Some(tab_id) = s.frame.as_ref().map(|frame| frame.tab_id.clone()) else { return };
+                                let Some(tab_id) =
+                                    s.frame.as_ref().map(|frame| frame.tab_id.clone())
+                                else {
+                                    return;
+                                };
                                 let appearance = s
                                     .store
                                     .snapshot()
                                     .preview
                                     .session(&tab_id)
-                                    .map_or(PreviewAppearance::System, |session| session.appearance);
+                                    .map_or(PreviewAppearance::System, |session| {
+                                        session.appearance
+                                    });
                                 s.request(
                                     HostBrowserRequest::Intent(Intent::PreviewSetAppearance {
                                         tab_id,
@@ -1007,8 +1073,18 @@ impl Render for HostBrowser {
                             })),
                     )
                     .child(Input::new(&self.address).small().aria_label("Preview URL"))
-                    .child(Input::new(&self.freeform_width).small().w(px(64.)).aria_label("Viewport width"))
-                    .child(Input::new(&self.freeform_height).small().w(px(64.)).aria_label("Viewport height"))
+                    .child(
+                        Input::new(&self.freeform_width)
+                            .small()
+                            .w(px(64.))
+                            .aria_label("Viewport width"),
+                    )
+                    .child(
+                        Input::new(&self.freeform_height)
+                            .small()
+                            .w(px(64.))
+                            .aria_label("Viewport height"),
+                    )
                     .child(
                         Button::new("preview-freeform")
                             .label("Resize")
@@ -1016,7 +1092,9 @@ impl Render for HostBrowser {
                             .ghost()
                             .tooltip("Apply numeric freeform viewport")
                             .accessibility_label("Apply numeric freeform viewport")
-                            .on_click(cx.listener(|s, _, window, cx| s.resize_freeform(window, cx))),
+                            .on_click(
+                                cx.listener(|s, _, window, cx| s.resize_freeform(window, cx)),
+                            ),
                     )
                     .child(
                         Button::new("preview-go")
@@ -1025,18 +1103,34 @@ impl Render for HostBrowser {
                             .ghost()
                             .tooltip("Open")
                             .accessibility_label("Open")
-                            .on_click(cx.listener(|s, _, window, cx| s.navigate(window, cx)))
+                            .on_click(cx.listener(|s, _, window, cx| s.navigate(window, cx))),
                     )
                     .child(
                         Button::new("preview-recording")
-                            .label(if recording { "Stop recording" } else { "Record" })
+                            .label(if recording {
+                                "Stop recording"
+                            } else {
+                                "Record"
+                            })
                             .small()
                             .ghost()
                             .disabled(frame.is_none())
-                            .tooltip(if recording { "Stop Preview recording" } else { "Start Preview recording" })
-                            .accessibility_label(if recording { "Stop Preview recording" } else { "Start Preview recording" })
+                            .tooltip(if recording {
+                                "Stop Preview recording"
+                            } else {
+                                "Start Preview recording"
+                            })
+                            .accessibility_label(if recording {
+                                "Stop Preview recording"
+                            } else {
+                                "Start Preview recording"
+                            })
                             .on_click(cx.listener(move |s, _, window, cx| {
-                                let Some(tab_id) = s.frame.as_ref().map(|frame| frame.tab_id.clone()) else { return };
+                                let Some(tab_id) =
+                                    s.frame.as_ref().map(|frame| frame.tab_id.clone())
+                                else {
+                                    return;
+                                };
                                 s.request(
                                     HostBrowserRequest::Intent(if recording {
                                         Intent::PreviewRecordingStop { tab_id }
@@ -1069,8 +1163,10 @@ impl Render for HostBrowser {
                             .disabled(!recording_artifact)
                             .tooltip("Attach Preview recording to chat")
                             .accessibility_label("Attach Preview recording to chat")
-                            .on_click(cx.listener(|s, _, window, cx| s.attach_recording(window, cx))),
-                    )
+                            .on_click(
+                                cx.listener(|s, _, window, cx| s.attach_recording(window, cx)),
+                            ),
+                    ),
             )
             .when(!self.error.is_empty(), |body| {
                 body.child(
@@ -1108,7 +1204,10 @@ impl Render for HostBrowser {
                                 .children(local_servers.iter().map(|server| {
                                     let url = server.url.clone();
                                     h_flex()
-                                        .id(SharedString::from(format!("preview-local-{}", server.port)))
+                                        .id(SharedString::from(format!(
+                                            "preview-local-{}",
+                                            server.port
+                                        )))
                                         .w_full()
                                         .gap_2()
                                         .p_2()
@@ -1118,20 +1217,22 @@ impl Render for HostBrowser {
                                         .child(server.url.clone())
                                         .on_click(cx.listener(move |s, _, window, cx| {
                                             s.request(
-                                                HostBrowserRequest::Action(BrowserAction::Navigate {
-                                                    url: url.clone(),
-                                                }),
+                                                HostBrowserRequest::Action(
+                                                    BrowserAction::Navigate { url: url.clone() },
+                                                ),
                                                 window,
                                                 cx,
                                             )
                                         }))
                                 }))
                                 .when(!recent_urls.is_empty(), |body| {
-                                    body.child(div().pt_2().text_xs().child("Recent"))
-                                        .children(recent_urls.iter().map(|url| {
+                                    body.child(div().pt_2().text_xs().child("Recent")).children(
+                                        recent_urls.iter().map(|url| {
                                             let url = url.clone();
                                             div()
-                                                .id(SharedString::from(format!("preview-recent-{url}")))
+                                                .id(SharedString::from(format!(
+                                                    "preview-recent-{url}"
+                                                )))
                                                 .w_full()
                                                 .p_1()
                                                 .cursor_pointer()
@@ -1140,13 +1241,16 @@ impl Render for HostBrowser {
                                                 .on_click(cx.listener(move |s, _, window, cx| {
                                                     s.request(
                                                         HostBrowserRequest::Action(
-                                                            BrowserAction::Navigate { url: url.clone() },
+                                                            BrowserAction::Navigate {
+                                                                url: url.clone(),
+                                                            },
                                                         ),
                                                         window,
                                                         cx,
                                                     )
                                                 }))
-                                        }))
+                                        }),
+                                    )
                                 }),
                         )
                     })
@@ -1157,7 +1261,8 @@ impl Render for HostBrowser {
                         body.on_key_down(cx.listener(|s, event: &KeyDownEvent, window, cx| {
                             let key = event.keystroke.key.as_str();
                             let modifiers = event.keystroke.modifiers;
-                            let action = if (modifiers.platform || modifiers.control) && key == "a" {
+                            let action = if (modifiers.platform || modifiers.control) && key == "a"
+                            {
                                 Some(BrowserAction::Key {
                                     key: agent_protocol::browser::BrowserKey::SelectAll,
                                 })
@@ -1191,10 +1296,12 @@ impl Render for HostBrowser {
                                     "right" => Some(BrowserAction::Key {
                                         key: agent_protocol::browser::BrowserKey::ArrowRight,
                                     }),
-                                    value if !modifiers.control
-                                        && !modifiers.alt
-                                        && !modifiers.platform
-                                        && value.chars().count() == 1 => {
+                                    value
+                                        if !modifiers.control
+                                            && !modifiers.alt
+                                            && !modifiers.platform
+                                            && value.chars().count() == 1 =>
+                                    {
                                         Some(BrowserAction::Type {
                                             text: value.to_owned(),
                                         })
@@ -1213,29 +1320,28 @@ impl Render for HostBrowser {
                                 s.focus.focus(window, cx);
                                 let (x, y) = s.frame_point(event.position);
                                 s.request(
-                                    HostBrowserRequest::Action(BrowserAction::Click {
+                                    HostBrowserRequest::Action(BrowserAction::Click { x, y }),
+                                    window,
+                                    cx,
+                                )
+                            }),
+                        )
+                        .on_scroll_wheel(cx.listener(
+                            |s, event: &ScrollWheelEvent, window, cx| {
+                                let delta = event.delta.pixel_delta(px(1.));
+                                let (x, y) = s.frame_point(event.position);
+                                s.request(
+                                    HostBrowserRequest::Action(BrowserAction::Scroll {
                                         x,
                                         y,
+                                        delta_x: delta.x.as_f32() as f64,
+                                        delta_y: delta.y.as_f32() as f64,
                                     }),
                                     window,
                                     cx,
                                 )
-                            })
-                        )
-                        .on_scroll_wheel(cx.listener(|s, event: &ScrollWheelEvent, window, cx| {
-                            let delta = event.delta.pixel_delta(px(1.));
-                            let (x, y) = s.frame_point(event.position);
-                            s.request(
-                                HostBrowserRequest::Action(BrowserAction::Scroll {
-                                    x,
-                                    y,
-                                    delta_x: delta.x.as_f32() as f64,
-                                    delta_y: delta.y.as_f32() as f64,
-                                }),
-                                window,
-                                cx,
-                            )
-                        }))
+                            },
+                        ))
                     }),
             )
     }

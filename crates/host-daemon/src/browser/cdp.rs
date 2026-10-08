@@ -206,14 +206,18 @@ impl Chrome {
     }
     pub async fn create(&mut self) -> Result<String, String> {
         let params = json!({"url":"about:blank"});
-        self.call(None, "Target.createTarget", params)
-            .await?["targetId"]
+        self.call(None, "Target.createTarget", params).await?["targetId"]
             .as_str()
             .map(str::to_owned)
             .ok_or_else(|| "ブラウザのタブを作成できません。".into())
     }
 
-    pub async fn attach(&mut self, target: &str, width: u32, height: u32) -> Result<String, String> {
+    pub async fn attach(
+        &mut self,
+        target: &str,
+        width: u32,
+        height: u32,
+    ) -> Result<String, String> {
         if let Some(session) = self.sessions.get(target).cloned() {
             self.set_viewport(&session, width, height).await?;
             return Ok(session);
@@ -262,9 +266,7 @@ impl Chrome {
             .targets()
             .await?
             .into_iter()
-            .filter(|target| {
-                target.kind == "page"
-            })
+            .filter(|target| target.kind == "page")
             .map(|target| (target.target_id, origin_for_storage_clear(&target.url)))
             .collect::<Vec<_>>();
         let temporary_target = if targets.is_empty() {
@@ -344,7 +346,11 @@ impl Chrome {
         .await
         .map(|_| ())
     }
-    pub async fn set_zoom(&mut self, session: &str, zoom: agent_protocol::preview::PreviewZoom) -> Result<(), String> {
+    pub async fn set_zoom(
+        &mut self,
+        session: &str,
+        zoom: agent_protocol::preview::PreviewZoom,
+    ) -> Result<(), String> {
         self.call(
             Some(session),
             "Emulation.setPageScaleFactor",

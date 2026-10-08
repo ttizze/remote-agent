@@ -17,6 +17,7 @@ pub(super) struct JobResult {
     pub complete: Option<Waiter>,
     pub sent: Option<(String, Draft)>,
     pub duo_request: Option<DeviceDuoRequest>,
+    pub device_input_target: Option<DeviceInputTarget>,
 }
 
 pub(super) enum Reply {
@@ -243,6 +244,63 @@ impl Owner {
                         complete,
                         sent,
                         duo_request,
+                        device_input_target: None,
+                    }),
+                ))
+                .await;
+        });
+    }
+
+    /// Executes core-planned key transitions on one serialized peer task.
+    /// Keeping the existing `DeviceInput` wire calls in this task preserves
+    /// modifier-before-key and release ordering without exposing a new Host
+    /// batch protocol.
+    pub(super) fn job_device_inputs(
+        &mut self,
+        inputs: Vec<d::DeviceInput>,
+        target: DeviceInputTarget,
+        complete: Option<Waiter>,
+    ) {
+        let Some(last_input) = inputs.last().cloned() else {
+            if let Some(complete) = complete {
+                let _ = complete.send(Ok(Outcome::Applied));
+            }
+            return;
+        };
+        let sender = self.sender.clone();
+        let network = match self.network() {
+            Ok(network) => network,
+            Err(error) => {
+                self.state.device.clear_input_state(&target);
+                if let Some(complete) = complete {
+                    self.state.error = Some(error.to_string());
+                    let _ = complete.send(Err(error));
+                }
+                return;
+            }
+        };
+        let (peer, epoch) = (network.peer.clone(), network.epoch);
+        let serial = self.device_input_serial.clone();
+        network.spawn(async move {
+            let _serial_guard = serial.lock().await;
+            let mut result = Ok(Reply::Done);
+            for input in inputs {
+                let call = Call::DeviceInput(input);
+                result = execute(&peer, &call).await;
+                if result.is_err() {
+                    break;
+                }
+            }
+            let _ = sender
+                .send(Event::Finished(
+                    epoch,
+                    Box::new(JobResult {
+                        call: Call::DeviceInput(last_input),
+                        result,
+                        complete,
+                        sent: None,
+                        duo_request: None,
+                        device_input_target: Some(target),
                     }),
                 ))
                 .await;
@@ -286,6 +344,7 @@ impl Owner {
                         complete: Some(complete),
                         sent: None,
                         duo_request: None,
+                        device_input_target: None,
                     }),
                 ))
                 .await;
@@ -386,6 +445,7 @@ impl Owner {
             complete,
             sent,
             duo_request,
+            device_input_target,
         } = result;
         let cancelled = match &call {
             Call::Transcribe(params) => params
@@ -418,6 +478,9 @@ impl Owner {
         };
         let outcome = match result {
             Err(error) => {
+                if let Some(target) = device_input_target.as_ref() {
+                    self.state.device.clear_input_state(target);
+                }
                 self.preview_recording_failed(&call);
                 if !cancelled
                     && (complete.is_some()
@@ -525,22 +588,12 @@ impl Owner {
     }
 
     fn preview_recording_failed(&mut self, call: &Call) {
-        let (tab_id, clear_artifact) = match call {
+        let (tab_id, starting) = match call {
             Call::PreviewRecordingStart(request) => (&request.tab_id, true),
             Call::PreviewRecordingStop(request) => (&request.tab_id, false),
             _ => return,
         };
-        self.state.preview.recordings.insert(
-            tab_id.clone(),
-            agent_protocol::preview::PreviewRecordingStatus {
-                tab_id: tab_id.clone(),
-                recording: false,
-                started_at: None,
-            },
-        );
-        if clear_artifact {
-            self.state.preview.last_recordings.remove(tab_id);
-        }
+        self.state.preview.recording_failed(tab_id, starting);
     }
 
     fn reply(&mut self, call: &Call, reply: Reply, sent: Option<(String, Draft)>) {

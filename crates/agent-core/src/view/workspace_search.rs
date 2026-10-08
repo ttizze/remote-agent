@@ -1,7 +1,5 @@
 //! Pure presentation of project content search results.
-use crate::{
-    state::{ContentSearchQuery, Snapshot},
-};
+use crate::state::{ContentSearchQuery, Snapshot};
 use agent_protocol::workspace::ContentSearch;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

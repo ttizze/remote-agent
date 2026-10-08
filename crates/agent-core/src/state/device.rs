@@ -7,7 +7,11 @@ use crate::view::{
 };
 use agent_domain::{CommandId, ThreadId};
 use agent_protocol::conversation::SessionScan;
-use agent_protocol::device::{DeviceAccessibilityTree, DeviceDetail, DeviceEvent, DeviceEventLogEntry, DeviceForegroundUpdate, DeviceFrame, DeviceRecording, DeviceScreenshot, DeviceScreenConfig, DeviceServiceState, DeviceSession, DeviceVideoFrame};
+use agent_protocol::device::{
+    DeviceAccessibilityTree, DeviceDetail, DeviceEvent, DeviceEventLogEntry,
+    DeviceForegroundUpdate, DeviceFrame, DeviceRecording, DeviceScreenConfig, DeviceScreenshot,
+    DeviceServiceState, DeviceSession, DeviceVideoFrame,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -25,6 +29,107 @@ pub struct DeviceKeyFacts {
     pub key: String,
 }
 
+/// Modifier facts reported by a native keyboard surface for one event.
+///
+/// The Host wire protocol already represents modifier keys as ordinary
+/// physical key codes.  These facts stay in the core intent so each native
+/// surface can reconcile its current modifier set with the previous one
+/// without reimplementing platform-specific ordering or cleanup rules.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct DeviceModifierFacts {
+    pub shift: bool,
+    pub alt: bool,
+    pub meta: bool,
+    pub ctrl: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DeviceModifierTransition {
+    pub code: String,
+    pub down: bool,
+}
+
+/// Immutable ownership for a native input stream.  A reconnect gets a new
+/// session epoch, so a delayed key reply can never clear or advance the new
+/// session's pressed-key state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DeviceInputTarget {
+    pub thread_id: ThreadId,
+    pub host_id: String,
+    pub device_id: String,
+    pub session_epoch: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DeviceInputPlan {
+    pub inputs: Vec<agent_protocol::device::DeviceInput>,
+    pub target: DeviceInputTarget,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct DeviceInputState {
+    modifiers: DeviceModifierFacts,
+    pressed: BTreeSet<String>,
+}
+
+/// Returns the physical modifier key transitions needed to move between two
+/// native surface snapshots.  Presses use a stable left-side code and release
+/// in reverse order, which also makes a blur/disconnect reset deterministic.
+fn device_modifier_transitions(
+    previous: DeviceModifierFacts,
+    current: DeviceModifierFacts,
+) -> Vec<DeviceModifierTransition> {
+    let modifiers = [
+        ("ControlLeft", previous.ctrl, current.ctrl),
+        ("ShiftLeft", previous.shift, current.shift),
+        ("AltLeft", previous.alt, current.alt),
+        ("MetaLeft", previous.meta, current.meta),
+    ];
+    let mut transitions = modifiers
+        .iter()
+        .filter(|(_, was_down, is_down)| !*was_down && *is_down)
+        .map(|(code, _, _)| DeviceModifierTransition {
+            code: (*code).to_owned(),
+            down: true,
+        })
+        .collect::<Vec<_>>();
+    transitions.extend(
+        modifiers
+            .iter()
+            .rev()
+            .filter(|(_, was_down, is_down)| *was_down && !*is_down)
+            .map(|(code, _, _)| DeviceModifierTransition {
+                code: (*code).to_owned(),
+                down: false,
+            }),
+    );
+    transitions
+}
+
+fn is_modifier_code(code: &str) -> bool {
+    matches!(
+        code,
+        "ShiftLeft"
+            | "ShiftRight"
+            | "AltLeft"
+            | "AltRight"
+            | "ControlLeft"
+            | "ControlRight"
+            | "MetaLeft"
+            | "MetaRight"
+    )
+}
+
+fn set_modifier_code(facts: &mut DeviceModifierFacts, code: &str, down: bool) {
+    match code {
+        "ShiftLeft" | "ShiftRight" => facts.shift = down,
+        "AltLeft" | "AltRight" => facts.alt = down,
+        "ControlLeft" | "ControlRight" => facts.ctrl = down,
+        "MetaLeft" | "MetaRight" => facts.meta = down,
+        _ => {}
+    }
+}
+
 #[cfg_attr(feature = "bindings", uniffi::export)]
 pub fn canonical_device_key(code: &str, key: &str) -> DeviceKeyFacts {
     let key = match key.to_ascii_lowercase().as_str() {
@@ -33,6 +138,10 @@ pub fn canonical_device_key(code: &str, key: &str) -> DeviceKeyFacts {
         "backspace" => "Backspace".into(),
         "delete" | "forwarddelete" => "Delete".into(),
         "escape" | "esc" => "Escape".into(),
+        "shift" | "shiftleft" => "ShiftLeft".into(),
+        "control" | "ctrl" | "controlleft" => "ControlLeft".into(),
+        "alt" | "option" | "altleft" => "AltLeft".into(),
+        "meta" | "command" | "cmd" | "metaleft" => "MetaLeft".into(),
         "up" | "arrowup" => "ArrowUp".into(),
         "down" | "arrowdown" => "ArrowDown".into(),
         "left" | "arrowleft" => "ArrowLeft".into(),
@@ -52,6 +161,29 @@ fn canonical_device_code(code: &str, key: &str) -> String {
     let code = code.trim();
     if !code.is_empty() {
         let lower_code = code.to_ascii_lowercase();
+        if let Some(canonical) = match lower_code.as_str() {
+            "enter" | "return" => Some("Enter"),
+            "tab" => Some("Tab"),
+            "backspace" => Some("Backspace"),
+            "delete" | "forwarddelete" => Some("Delete"),
+            "escape" | "esc" => Some("Escape"),
+            "shift" | "shiftleft" => Some("ShiftLeft"),
+            "control" | "ctrl" | "controlleft" => Some("ControlLeft"),
+            "alt" | "option" | "altleft" => Some("AltLeft"),
+            "meta" | "command" | "cmd" | "metaleft" => Some("MetaLeft"),
+            "up" | "arrowup" => Some("ArrowUp"),
+            "down" | "arrowdown" => Some("ArrowDown"),
+            "left" | "arrowleft" => Some("ArrowLeft"),
+            "right" | "arrowright" => Some("ArrowRight"),
+            "home" => Some("Home"),
+            "end" => Some("End"),
+            "pageup" => Some("PageUp"),
+            "pagedown" => Some("PageDown"),
+            "space" => Some("Space"),
+            _ => None,
+        } {
+            return canonical.to_owned();
+        }
         let looks_like_key_alias = lower_code.len() == 1
             || matches!(
                 lower_code.as_str(),
@@ -118,6 +250,10 @@ fn canonical_device_code(code: &str, key: &str) -> String {
         "backspace" => "Backspace",
         "delete" => "Delete",
         "escape" => "Escape",
+        "shift" | "shiftleft" => "ShiftLeft",
+        "control" | "ctrl" | "controlleft" => "ControlLeft",
+        "alt" | "option" | "altleft" => "AltLeft",
+        "meta" | "command" | "cmd" | "metaleft" => "MetaLeft",
         "arrowup" => "ArrowUp",
         "arrowdown" => "ArrowDown",
         "arrowleft" => "ArrowLeft",
@@ -128,7 +264,11 @@ fn canonical_device_code(code: &str, key: &str) -> String {
         "pagedown" => "PageDown",
         " " => "Space",
         _ => {
-            if code.is_empty() { "Unidentified" } else { code }
+            if code.is_empty() {
+                "Unidentified"
+            } else {
+                code
+            }
         }
     }
     .into()
@@ -156,6 +296,8 @@ pub struct DeviceDuoRequest {
 /// Settings this device keeps across launches.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Preferences {
+    /// Device-local Preview browser defaults, recording options, and profiles.
+    pub browser: crate::view::browser::BrowserSettings,
     pub timestamp_format: TimestampFormat,
     pub favorite_models: Vec<FavoriteModel>,
     /// The user's model order per provider instance, by slug.
@@ -175,6 +317,7 @@ pub struct Preferences {
 impl Default for Preferences {
     fn default() -> Self {
         Self {
+            browser: crate::view::browser::BrowserSettings::default(),
             timestamp_format: TimestampFormat::default(),
             favorite_models: vec![],
             model_order: BTreeMap::new(),
@@ -258,8 +401,10 @@ pub struct DeviceState {
     pub event_log: BTreeMap<(String, String), Vec<DeviceEventLogEntry>>,
     pub foreground: BTreeMap<(String, String), DeviceForegroundUpdate>,
     pub screens: BTreeMap<(String, String, String, u8), DeviceScreenConfig>,
-    pub recordings: BTreeMap<(String, String, String), agent_protocol::device::DeviceRecordingStatus>,
+    pub recordings:
+        BTreeMap<(String, String, String), agent_protocol::device::DeviceRecordingStatus>,
     pub duo_controls: BTreeMap<(String, String, String, String), DeviceDuoControlState>,
+    input_state: BTreeMap<(String, String, String, String), DeviceInputState>,
     duo_request_sequence: u64,
     pub last_recording: Option<DeviceRecording>,
     pub last_screenshot: Option<DeviceScreenshot>,
@@ -267,6 +412,187 @@ pub struct DeviceState {
 }
 
 impl DeviceState {
+    fn input_target(
+        &self,
+        thread_id: &ThreadId,
+        host_id: Option<&str>,
+        device_id: &str,
+        session_epoch: Option<&str>,
+    ) -> Result<(DeviceInputTarget, agent_protocol::device::DevicePlatform), String> {
+        let effective_host = host_id.unwrap_or(agent_protocol::device::LOCAL_DEVICE_HOST_ID);
+        let session = self
+            .sessions
+            .iter()
+            .find(|session| {
+                &session.thread_id == thread_id
+                    && session.host_id == effective_host
+                    && session.device_id == device_id
+                    && session_epoch.is_none_or(|epoch| session.session_epoch == epoch)
+            })
+            .ok_or_else(|| "device session is not open".to_owned())?;
+        Ok((
+            DeviceInputTarget {
+                thread_id: thread_id.clone(),
+                host_id: session.host_id.clone(),
+                device_id: session.device_id.clone(),
+                session_epoch: session.session_epoch.clone(),
+            },
+            session.platform,
+        ))
+    }
+
+    fn input_key(target: &DeviceInputTarget) -> (String, String, String, String) {
+        (
+            target.thread_id.to_string(),
+            target.host_id.clone(),
+            target.device_id.clone(),
+            target.session_epoch.clone(),
+        )
+    }
+
+    fn key_input(
+        host_id: Option<String>,
+        device_id: &str,
+        code: String,
+        key: String,
+        down: bool,
+        meta: bool,
+        ctrl: bool,
+    ) -> agent_protocol::device::DeviceInput {
+        agent_protocol::device::DeviceInput {
+            host_id,
+            device_id: device_id.to_owned(),
+            input: agent_protocol::device::DeviceInputKind::Key {
+                code,
+                key,
+                down,
+                meta,
+                ctrl,
+            },
+        }
+    }
+
+    /// Builds the ordered wire events for one native key observation and
+    /// records the resulting pressed-key state under the current session
+    /// epoch. iOS receives physical modifier transitions; Android keeps its
+    /// source semantic key path and does not receive unsupported modifier
+    /// pseudo-characters.
+    pub fn key_input_plan(
+        &mut self,
+        thread_id: ThreadId,
+        host_id: Option<String>,
+        device_id: String,
+        code: String,
+        key: String,
+        down: bool,
+        modifiers: DeviceModifierFacts,
+    ) -> Result<DeviceInputPlan, String> {
+        let (target, platform) =
+            self.input_target(&thread_id, host_id.as_deref(), &device_id, None)?;
+        let facts = canonical_device_key(&code, &key);
+        let mut current_modifiers = modifiers;
+        if is_modifier_code(&facts.code) {
+            set_modifier_code(&mut current_modifiers, &facts.code, down);
+        }
+        let state_key = Self::input_key(&target);
+        let previous = self.input_state.get(&state_key).cloned().unwrap_or_default();
+        let mut inputs = Vec::new();
+        if platform == agent_protocol::device::DevicePlatform::Ios {
+            for transition in device_modifier_transitions(previous.modifiers, current_modifiers) {
+                inputs.push(Self::key_input(
+                    host_id.clone(),
+                    &device_id,
+                    transition.code.clone(),
+                    transition.code,
+                    transition.down,
+                    false,
+                    false,
+                ));
+            }
+        }
+        if !is_modifier_code(&facts.code) {
+            inputs.push(Self::key_input(
+                host_id,
+                &device_id,
+                facts.code.clone(),
+                facts.key,
+                down,
+                current_modifiers.meta,
+                current_modifiers.ctrl,
+            ));
+        }
+        let mut next = previous;
+        next.modifiers = current_modifiers;
+        if !is_modifier_code(&facts.code) {
+            if down {
+                next.pressed.insert(facts.code);
+            } else {
+                next.pressed.remove(&facts.code);
+            }
+        }
+        self.input_state.insert(state_key, next);
+        Ok(DeviceInputPlan { inputs, target })
+    }
+
+    /// Releases every key owned by a native surface, including ordinary keys
+    /// that were held when focus moved. The target is resolved before the
+    /// state is removed so a close/reconnect cannot redirect releases.
+    pub fn release_input_plan(
+        &mut self,
+        thread_id: ThreadId,
+        host_id: Option<String>,
+        device_id: String,
+        session_epoch: Option<String>,
+    ) -> Result<Option<DeviceInputPlan>, String> {
+        let (target, platform) = self.input_target(
+            &thread_id,
+            host_id.as_deref(),
+            &device_id,
+            session_epoch.as_deref(),
+        )?;
+        let Some(previous) = self.input_state.remove(&Self::input_key(&target)) else {
+            return Ok(None);
+        };
+        let mut inputs = if platform == agent_protocol::device::DevicePlatform::Ios {
+            device_modifier_transitions(previous.modifiers, DeviceModifierFacts::default())
+                .into_iter()
+                .map(|transition| {
+                    Self::key_input(
+                        host_id.clone(),
+                        &device_id,
+                        transition.code.clone(),
+                        transition.code,
+                        false,
+                        false,
+                        false,
+                    )
+                })
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        for code in previous.pressed {
+            inputs.push(Self::key_input(
+                host_id.clone(),
+                &device_id,
+                code.clone(),
+                code,
+                false,
+                false,
+                false,
+            ));
+        }
+        Ok(Some(DeviceInputPlan { inputs, target }))
+    }
+
+    pub fn clear_input_state(&mut self, target: &DeviceInputTarget) {
+        self.input_state.remove(&Self::input_key(target));
+    }
+
+    pub fn clear_input_state_on_disconnect(&mut self) {
+        self.input_state.clear();
+    }
+
     pub fn enqueue_duo(
         &mut self,
         thread_id: ThreadId,
@@ -293,7 +619,11 @@ impl DeviceState {
             device_id.clone(),
             session.session_epoch.clone(),
         );
-        if self.duo_controls.get(&key).is_some_and(|control| control.pending) {
+        if self
+            .duo_controls
+            .get(&key)
+            .is_some_and(|control| control.pending)
+        {
             self.duo_controls
                 .get_mut(&key)
                 .expect("Duo control state exists")
@@ -302,13 +632,16 @@ impl DeviceState {
         }
         self.duo_request_sequence = self.duo_request_sequence.saturating_add(1).max(1);
         let request_id = self.duo_request_sequence;
-        let control = self.duo_controls.entry(key).or_insert_with(|| DeviceDuoControlState {
-            pending: false,
-            requested: None,
-            error: None,
-            queued: None,
-            active_request_id: None,
-        });
+        let control = self
+            .duo_controls
+            .entry(key)
+            .or_insert_with(|| DeviceDuoControlState {
+                pending: false,
+                requested: None,
+                error: None,
+                queued: None,
+                active_request_id: None,
+            });
         control.error = None;
         control.pending = true;
         control.requested = Some(command.clone());
@@ -357,7 +690,10 @@ impl DeviceState {
         if let Some(command) = queued {
             self.duo_request_sequence = self.duo_request_sequence.saturating_add(1).max(1);
             let request_id = self.duo_request_sequence;
-            let control = self.duo_controls.get_mut(&key).expect("Duo control state exists");
+            let control = self
+                .duo_controls
+                .get_mut(&key)
+                .expect("Duo control state exists");
             control.requested = Some(command.clone());
             control.active_request_id = Some(request_id);
             return Some(DeviceDuoRequest {
@@ -379,17 +715,32 @@ impl DeviceState {
 
     pub fn clear_duo_for_closed_sessions(&mut self) {
         let sessions = self.sessions.clone();
-        self.duo_controls.retain(|(thread, host, device, epoch), _| {
-            sessions.iter().any(|session| {
-                session.thread_id.to_string() == *thread
-                    && session.host_id == *host
-                    && session.device_id == *device
-                    && session.session_epoch == *epoch
-            })
-        });
+        self.duo_controls
+            .retain(|(thread, host, device, epoch), _| {
+                sessions.iter().any(|session| {
+                    session.thread_id.to_string() == *thread
+                        && session.host_id == *host
+                        && session.device_id == *device
+                        && session.session_epoch == *epoch
+                })
+            });
     }
 
-    fn accepts_thread_event(&self, thread_id: &agent_domain::ThreadId, host_id: &str, device_id: &str, epoch: &str) -> bool {
+    /// A Host connection epoch owns every in-flight Duo request. Once that
+    /// connection is gone, the request receipts cannot be completed by a
+    /// later connection and must not leave a pending control or promote a
+    /// stale queued command after reconnect.
+    pub fn clear_duo_on_disconnect(&mut self) {
+        self.duo_controls.clear();
+    }
+
+    fn accepts_thread_event(
+        &self,
+        thread_id: &agent_domain::ThreadId,
+        host_id: &str,
+        device_id: &str,
+        epoch: &str,
+    ) -> bool {
         self.sessions.iter().any(|session| {
             &session.thread_id == thread_id
                 && session.host_id == host_id
@@ -400,7 +751,9 @@ impl DeviceState {
 
     fn accepts_device_event(&self, host_id: &str, device_id: &str, epoch: &str) -> bool {
         self.sessions.iter().any(|session| {
-            session.host_id == host_id && session.device_id == device_id && session.session_epoch == epoch
+            session.host_id == host_id
+                && session.device_id == device_id
+                && session.session_epoch == epoch
         })
     }
 
@@ -408,7 +761,10 @@ impl DeviceState {
     /// the attachment surface in that case. Once the same device is reopened,
     /// however, an event from the prior epoch is stale and must not mutate the
     /// new recording lifetime.
-    fn accepts_recording_completion(&self, status: &agent_protocol::device::DeviceRecordingStatus) -> bool {
+    fn accepts_recording_completion(
+        &self,
+        status: &agent_protocol::device::DeviceRecordingStatus,
+    ) -> bool {
         self.sessions
             .iter()
             .find(|session| {
@@ -472,6 +828,7 @@ impl DeviceState {
                     frame_stream_changed |= !keep;
                     keep
                 });
+                self.input_state.retain(|key, _| active.contains(key));
                 let active_devices = self
                     .sessions
                     .iter()
@@ -487,8 +844,7 @@ impl DeviceState {
                         epochs
                     },
                 );
-                self.details
-                    .retain(|key, _| active_devices.contains(key));
+                self.details.retain(|key, _| active_devices.contains(key));
                 self.accessibility.retain(|key, tree| {
                     active_devices.contains(key)
                         && active_epochs
@@ -521,18 +877,21 @@ impl DeviceState {
                     ))
                 });
                 self.recordings.retain(|(thread, host, device), status| {
-                    active.iter().any(|(active_thread, active_host, active_device, active_epoch)| {
-                        active_thread == thread
-                            && active_host == host
-                            && active_device == device
-                            && active_epoch == &status.session_epoch
-                    })
+                    active.iter().any(
+                        |(active_thread, active_host, active_device, active_epoch)| {
+                            active_thread == thread
+                                && active_host == host
+                                && active_device == device
+                                && active_epoch == &status.session_epoch
+                        },
+                    )
                 });
                 if self.last_recording.as_ref().is_some_and(|recording| {
-                    !active.iter().any(|(thread, host, device, _)| {
+                    !active.iter().any(|(thread, host, device, epoch)| {
                         thread == &recording.status.thread_id.to_string()
                             && host == &recording.status.host_id
                             && device == &recording.status.device_id
+                            && epoch == &recording.status.session_epoch
                     })
                 }) {
                     self.last_recording = None;
@@ -544,7 +903,12 @@ impl DeviceState {
                 self.error = None;
             }
             DeviceEvent::Frame(frame) => {
-                if !self.accepts_thread_event(&frame.thread_id, &frame.device.host_id, &frame.device.id, &frame.session_epoch) {
+                if !self.accepts_thread_event(
+                    &frame.thread_id,
+                    &frame.device.host_id,
+                    &frame.device.id,
+                    &frame.session_epoch,
+                ) {
                     return;
                 }
                 self.frames.insert(
@@ -558,7 +922,12 @@ impl DeviceState {
                 self.frame_revision = self.frame_revision.saturating_add(1);
             }
             DeviceEvent::Video(frame) => {
-                if !self.accepts_thread_event(&frame.thread_id, &frame.device.host_id, &frame.device.id, &frame.session_epoch) {
+                if !self.accepts_thread_event(
+                    &frame.thread_id,
+                    &frame.device.host_id,
+                    &frame.device.id,
+                    &frame.session_epoch,
+                ) {
                     return;
                 }
                 let key = (
@@ -572,6 +941,7 @@ impl DeviceState {
                     .get(&key)
                     .is_some_and(|latest| latest.session_epoch != frame.session_epoch)
                 {
+                    self.video_frames.remove(&key);
                     self.video_events.remove(&key);
                 }
                 if self
@@ -597,7 +967,11 @@ impl DeviceState {
                     .insert((tree.host_id.clone(), tree.device_id.clone()), tree);
             }
             DeviceEvent::EventLog(entry) => {
-                if !self.accepts_device_event(&entry.host_id, &entry.device_id, &entry.session_epoch) {
+                if !self.accepts_device_event(
+                    &entry.host_id,
+                    &entry.device_id,
+                    &entry.session_epoch,
+                ) {
                     return;
                 }
                 let log = self
@@ -620,20 +994,38 @@ impl DeviceState {
                 }
             }
             DeviceEvent::Foreground(update) => {
-                if !self.accepts_device_event(&update.host_id, &update.device_id, &update.session_epoch) {
+                if !self.accepts_device_event(
+                    &update.host_id,
+                    &update.device_id,
+                    &update.session_epoch,
+                ) {
                     return;
                 }
-                self.foreground.insert((update.host_id.clone(), update.device_id.clone()), update);
+                self.foreground
+                    .insert((update.host_id.clone(), update.device_id.clone()), update);
             }
             DeviceEvent::Screen(screen) => {
-                if let (Some(thread), Some(host), Some(device)) = (&screen.thread_id, &screen.host_id, &screen.device_id)
+                if let (Some(thread), Some(host), Some(device)) =
+                    (&screen.thread_id, &screen.host_id, &screen.device_id)
                     && self.accepts_thread_event(thread, host, device, &screen.session_epoch)
                 {
-                    self.screens.insert((thread.to_string(), host.clone(), device.clone(), screen.screen_id.unwrap_or(0)), screen);
+                    self.screens.insert(
+                        (
+                            thread.to_string(),
+                            host.clone(),
+                            device.clone(),
+                            screen.screen_id.unwrap_or(0),
+                        ),
+                        screen,
+                    );
                 }
             }
             DeviceEvent::Recording(status) => {
-                let key = (status.thread_id.to_string(), status.host_id.clone(), status.device_id.clone());
+                let key = (
+                    status.thread_id.to_string(),
+                    status.host_id.clone(),
+                    status.device_id.clone(),
+                );
                 if status.active {
                     if !self.sessions.iter().any(|session| {
                         session.thread_id == status.thread_id
@@ -651,10 +1043,7 @@ impl DeviceState {
                         self.recordings.insert(key, status);
                     }
                 } else if self.accepts_recording_completion(&status)
-                    && self
-                    .recordings
-                    .get(&key)
-                    .is_some_and(|current| {
+                    && self.recordings.get(&key).is_some_and(|current| {
                         current.recording_id == status.recording_id
                             && current.session_epoch == status.session_epoch
                     })
@@ -678,17 +1067,14 @@ impl DeviceState {
                 {
                     self.recordings.remove(&key);
                 }
-                if self
-                    .last_recording
-                    .as_ref()
-                    .is_none_or(|current| {
-                        let same_lifetime_key = current.status.thread_id == recording.status.thread_id
-                            && current.status.host_id == recording.status.host_id
-                            && current.status.device_id == recording.status.device_id
-                            && current.status.session_epoch == recording.status.session_epoch;
-                        !same_lifetime_key || recording.status.recording_id >= current.status.recording_id
-                    })
-                {
+                if self.last_recording.as_ref().is_none_or(|current| {
+                    let same_lifetime_key = current.status.thread_id == recording.status.thread_id
+                        && current.status.host_id == recording.status.host_id
+                        && current.status.device_id == recording.status.device_id
+                        && current.status.session_epoch == recording.status.session_epoch;
+                    !same_lifetime_key
+                        || recording.status.recording_id >= current.status.recording_id
+                }) {
                     self.last_recording = Some(recording);
                 }
             }
@@ -710,7 +1096,11 @@ impl DeviceState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_protocol::device::{DeviceAccessibilityTree, DeviceEventLogEntry, DeviceForegroundUpdate, DeviceFrame, DeviceFrameEncoding, DevicePlatform, DeviceRecording, DeviceRecordingFormat, DeviceRecordingStatus, DeviceScreenConfig, DeviceSummary, DeviceVideoFrame};
+    use agent_protocol::device::{
+        DeviceAccessibilityTree, DeviceEventLogEntry, DeviceForegroundUpdate, DeviceFrame,
+        DeviceFrameEncoding, DevicePlatform, DeviceRecording, DeviceRecordingFormat,
+        DeviceRecordingStatus, DeviceScreenConfig, DeviceSummary, DeviceVideoFrame,
+    };
 
     fn session(thread: &str, host: &str, device: &str) -> DeviceSession {
         DeviceSession {
@@ -803,29 +1193,190 @@ mod tests {
         state.apply_event(DeviceEvent::Video(frame("0", 3)));
         assert!(state.video_events.is_empty());
         assert_eq!(state.frame_revision, 3);
+
+        let mut reopened = current.clone();
+        reopened.session_epoch = "new".into();
+        state.apply_event(DeviceEvent::State(DeviceServiceState {
+            sessions: vec![reopened],
+            ..DeviceServiceState::default()
+        }));
+        state.apply_event(DeviceEvent::Video(frame("new", 1)));
+        assert_eq!(
+            state.video_frames.values().next().unwrap().session_epoch,
+            "new"
+        );
+        assert_eq!(state.video_events.values().next().unwrap().len(), 1);
     }
 
     #[test]
     fn canonical_keyboard_facts_preserve_source_semantics_and_physical_code() {
         assert_eq!(
             canonical_device_key("", "a"),
-            DeviceKeyFacts { code: "KeyA".into(), key: "a".into() }
+            DeviceKeyFacts {
+                code: "KeyA".into(),
+                key: "a".into()
+            }
         );
         assert_eq!(
             canonical_device_key("", "!"),
-            DeviceKeyFacts { code: "Digit1".into(), key: "!".into() }
+            DeviceKeyFacts {
+                code: "Digit1".into(),
+                key: "!".into()
+            }
         );
         assert_eq!(
             canonical_device_key("KeyA", "ä"),
-            DeviceKeyFacts { code: "KeyA".into(), key: "ä".into() }
+            DeviceKeyFacts {
+                code: "KeyA".into(),
+                key: "ä".into()
+            }
         );
         assert_eq!(
             canonical_device_key("", "up"),
-            DeviceKeyFacts { code: "ArrowUp".into(), key: "ArrowUp".into() }
+            DeviceKeyFacts {
+                code: "ArrowUp".into(),
+                key: "ArrowUp".into()
+            }
         );
         assert_eq!(
             canonical_device_key("", "Space"),
-            DeviceKeyFacts { code: "Space".into(), key: " ".into() }
+            DeviceKeyFacts {
+                code: "Space".into(),
+                key: " ".into()
+            }
+        );
+        assert_eq!(
+            canonical_device_key("shift", ""),
+            DeviceKeyFacts {
+                code: "ShiftLeft".into(),
+                key: "".into()
+            }
+        );
+        assert_eq!(
+            canonical_device_key("ArrowUp", "up"),
+            DeviceKeyFacts {
+                code: "ArrowUp".into(),
+                key: "ArrowUp".into()
+            }
+        );
+    }
+
+    #[test]
+    fn modifier_transitions_cover_shifted_key_and_release_cleanup() {
+        let empty = DeviceModifierFacts::default();
+        let shifted = DeviceModifierFacts {
+            shift: true,
+            ..empty
+        };
+        assert_eq!(
+            device_modifier_transitions(empty, shifted),
+            vec![DeviceModifierTransition {
+                code: "ShiftLeft".into(),
+                down: true,
+            }]
+        );
+        assert_eq!(
+            device_modifier_transitions(shifted, empty),
+            vec![DeviceModifierTransition {
+                code: "ShiftLeft".into(),
+                down: false,
+            }]
+        );
+    }
+
+    #[test]
+    fn modifier_transitions_release_in_reverse_order_for_surface_reset() {
+        let all = DeviceModifierFacts {
+            shift: true,
+            alt: true,
+            meta: true,
+            ctrl: true,
+        };
+        let transitions = device_modifier_transitions(all, DeviceModifierFacts::default());
+        assert_eq!(
+            transitions
+                .into_iter()
+                .map(|transition| (transition.code, transition.down))
+                .collect::<Vec<_>>(),
+            vec![
+                ("MetaLeft".into(), false),
+                ("AltLeft".into(), false),
+                ("ShiftLeft".into(), false),
+                ("ControlLeft".into(), false),
+            ]
+        );
+    }
+
+    #[test]
+    fn native_input_plan_serializes_modifiers_and_releases_all_pressed_keys() {
+        let mut current = session("thread", "host", "device");
+        current.platform = DevicePlatform::Ios;
+        let mut state = DeviceState::default();
+        state.apply_event(DeviceEvent::State(DeviceServiceState {
+            sessions: vec![current.clone()],
+            ..DeviceServiceState::default()
+        }));
+        let shifted = DeviceModifierFacts {
+            shift: true,
+            ..DeviceModifierFacts::default()
+        };
+        let plan = state
+            .key_input_plan(
+                current.thread_id.clone(),
+                Some(current.host_id.clone()),
+                current.device_id.clone(),
+                "KeyA".into(),
+                "A".into(),
+                true,
+                shifted,
+            )
+            .unwrap();
+        let codes = plan
+            .inputs
+            .iter()
+            .map(|input| match &input.input {
+                agent_protocol::device::DeviceInputKind::Key { code, down, .. } => {
+                    (code.clone(), *down)
+                }
+                _ => panic!("key plan contains a non-key input"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(codes, vec![("ShiftLeft".into(), true), ("KeyA".into(), true)]);
+
+        assert_eq!(
+            state
+                .release_input_plan(
+                    current.thread_id.clone(),
+                    Some(current.host_id.clone()),
+                    current.device_id.clone(),
+                    Some("stale-epoch".into()),
+                )
+                .unwrap_err(),
+            "device session is not open"
+        );
+
+        let cleanup = state
+            .release_input_plan(
+                current.thread_id,
+                Some(current.host_id),
+                current.device_id,
+                Some(current.session_epoch),
+            )
+            .unwrap()
+            .unwrap();
+        let cleanup_codes = cleanup
+            .inputs
+            .iter()
+            .map(|input| match &input.input {
+                agent_protocol::device::DeviceInputKind::Key { code, down, .. } => {
+                    (code.clone(), *down)
+                }
+                _ => panic!("cleanup plan contains a non-key input"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            cleanup_codes,
+            vec![("ShiftLeft".into(), false), ("KeyA".into(), false)]
         );
     }
 
@@ -846,22 +1397,34 @@ mod tests {
             )
             .unwrap()
             .unwrap();
-        assert!(state
-            .enqueue_duo(
-                current.thread_id.clone(),
-                Some(current.host_id.clone()),
-                current.device_id.clone(),
-                crate::state::DeviceDuoCommandIntent::Angle { value: 60.0 },
-            )
-            .unwrap()
-            .is_none());
+        assert!(
+            state
+                .enqueue_duo(
+                    current.thread_id.clone(),
+                    Some(current.host_id.clone()),
+                    current.device_id.clone(),
+                    crate::state::DeviceDuoCommandIntent::Angle { value: 60.0 },
+                )
+                .unwrap()
+                .is_none()
+        );
         let next = state.complete_duo(&first, true, None).unwrap();
-        assert_eq!(next.command, crate::state::DeviceDuoCommandIntent::Angle { value: 60.0 });
+        assert_eq!(
+            next.command,
+            crate::state::DeviceDuoCommandIntent::Angle { value: 60.0 }
+        );
         // A late completion for the first request cannot settle the promoted
         // request, even though both commands target the same device.
         assert!(state.complete_duo(&first, true, None).is_none());
         state.fail_duo(&next, "Duo control failed");
-        assert_eq!(state.duo_controls.values().next().and_then(|control| control.error.as_deref()), Some("Duo control failed"));
+        assert_eq!(
+            state
+                .duo_controls
+                .values()
+                .next()
+                .and_then(|control| control.error.as_deref()),
+            Some("Duo control failed")
+        );
         state.apply_event(DeviceEvent::State(DeviceServiceState::default()));
         assert!(state.duo_controls.is_empty());
     }
@@ -891,9 +1454,24 @@ mod tests {
         };
         state.apply_event(DeviceEvent::Recording(status.clone()));
         assert_eq!(state.recordings.len(), 1);
-        state.apply_event(DeviceEvent::RecordingComplete(DeviceRecording { status: DeviceRecordingStatus { active: false, ..status }, bytes: vec![1, 2] }));
+        state.apply_event(DeviceEvent::RecordingComplete(DeviceRecording {
+            status: DeviceRecordingStatus {
+                active: false,
+                ..status
+            },
+            bytes: vec![1, 2],
+        }));
         assert!(state.recordings.is_empty());
         assert_eq!(state.last_recording.as_ref().unwrap().bytes, vec![1, 2]);
+        let reopened = DeviceSession {
+            session_epoch: "new".into(),
+            ..current
+        };
+        state.apply_event(DeviceEvent::State(DeviceServiceState {
+            sessions: vec![reopened],
+            ..DeviceServiceState::default()
+        }));
+        assert!(state.last_recording.is_none());
         state.apply_event(DeviceEvent::State(DeviceServiceState::default()));
         assert!(state.recordings.is_empty());
         assert!(state.last_recording.is_none());
@@ -948,7 +1526,10 @@ mod tests {
             table_mode_available: false,
         }));
 
-        let reopened = DeviceSession { session_epoch: "new".into(), ..current.clone() };
+        let reopened = DeviceSession {
+            session_epoch: "new".into(),
+            ..current.clone()
+        };
         state.apply_event(DeviceEvent::State(DeviceServiceState {
             sessions: vec![reopened.clone()],
             ..DeviceServiceState::default()
@@ -977,7 +1558,11 @@ mod tests {
         }));
         assert!(state.accessibility.is_empty());
         assert!(state.event_log.is_empty());
-        assert!(state.accepts_device_event(&reopened.host_id, &reopened.device_id, &reopened.session_epoch));
+        assert!(state.accepts_device_event(
+            &reopened.host_id,
+            &reopened.device_id,
+            &reopened.session_epoch
+        ));
     }
 
     #[test]
@@ -1006,7 +1591,10 @@ mod tests {
         state.apply_event(DeviceEvent::Recording(status.clone()));
         state.apply_event(DeviceEvent::State(DeviceServiceState::default()));
         state.apply_event(DeviceEvent::RecordingComplete(DeviceRecording {
-            status: DeviceRecordingStatus { active: false, ..status },
+            status: DeviceRecordingStatus {
+                active: false,
+                ..status
+            },
             bytes: vec![1, 2],
         }));
         assert_eq!(state.last_recording.as_ref().unwrap().bytes, vec![1, 2]);
@@ -1037,7 +1625,10 @@ mod tests {
         };
         state.apply_event(DeviceEvent::Recording(old_status.clone()));
 
-        let current = DeviceSession { session_epoch: "new".into(), ..old.clone() };
+        let current = DeviceSession {
+            session_epoch: "new".into(),
+            ..old.clone()
+        };
         state.apply_event(DeviceEvent::State(DeviceServiceState {
             sessions: vec![current.clone()],
             ..DeviceServiceState::default()
@@ -1052,17 +1643,35 @@ mod tests {
         };
         state.apply_event(DeviceEvent::Recording(new_status.clone()));
         state.apply_event(DeviceEvent::RecordingComplete(DeviceRecording {
-            status: DeviceRecordingStatus { active: false, ..old_status },
+            status: DeviceRecordingStatus {
+                active: false,
+                ..old_status
+            },
             bytes: vec![1],
         }));
-        assert_eq!(state.recordings.get(&("thread".into(), "host".into(), "device".into())).map(|status| status.recording_id), Some(2));
+        assert_eq!(
+            state
+                .recordings
+                .get(&("thread".into(), "host".into(), "device".into()))
+                .map(|status| status.recording_id),
+            Some(2)
+        );
         assert!(state.last_recording.is_none());
 
         state.apply_event(DeviceEvent::RecordingComplete(DeviceRecording {
-            status: DeviceRecordingStatus { active: false, ..new_status },
+            status: DeviceRecordingStatus {
+                active: false,
+                ..new_status
+            },
             bytes: vec![2],
         }));
         assert!(state.recordings.is_empty());
-        assert_eq!(state.last_recording.as_ref().map(|recording| recording.bytes.clone()), Some(vec![2]));
+        assert_eq!(
+            state
+                .last_recording
+                .as_ref()
+                .map(|recording| recording.bytes.clone()),
+            Some(vec![2])
+        );
     }
 }
