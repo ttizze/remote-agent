@@ -1188,10 +1188,17 @@ fn reconcile_pending(snapshot: &mut Snapshot, thread_id: &crate::session::Sessio
     }
 }
 
-fn set_model_defaults(snapshot: &mut Snapshot, scope: ModelDefaultsScope, defaults: ModelDefaults) {
+fn set_model_defaults(
+    snapshot: &mut Snapshot,
+    scope: ModelDefaultsScope,
+    mut defaults: ModelDefaults,
+) {
+    defaults
+        .providers
+        .retain(|_, settings| *settings != ProviderModelDefaults::default());
     if scope == ModelDefaultsScope::Global {
         snapshot.model_defaults = defaults;
-    } else {
+    } else if snapshot.scoped_model_defaults.get(&scope) != Some(&defaults) {
         Arc::make_mut(&mut snapshot.scoped_model_defaults).insert(scope, defaults);
     }
 }
