@@ -887,28 +887,6 @@ impl GitHubCli {
         Ok(trimmed(Some(&output.stdout)))
     }
 
-    /// The repository selected by GitHub CLI's current checkout context.
-    pub(crate) async fn default_branch_for_cwd(
-        &self,
-        cwd: &Path,
-    ) -> Result<Option<String>, GhError> {
-        let output = self
-            .run(
-                cwd,
-                &[
-                    "repo",
-                    "view",
-                    "--json",
-                    "defaultBranchRef",
-                    "--jq",
-                    ".defaultBranchRef.name",
-                ],
-                Budget::default(),
-            )
-            .await?;
-        Ok(trimmed(Some(&output.stdout)))
-    }
-
     pub(crate) async fn repository_clone_urls(
         &self,
         cwd: &Path,

@@ -189,6 +189,22 @@ pub(super) fn primary_remote(cwd: &Path) -> Option<String> {
     names.into_iter().next()
 }
 
+/// The repository and GitHub host selected by the checkout's primary remote.
+/// Provider calls that accept a repository scope use this instead of relying
+/// on `gh`'s implicit working-directory discovery, which is ambiguous for
+/// enterprise hosts and fork checkouts.
+pub(super) fn github_scope(cwd: &Path) -> (Option<String>, Option<String>) {
+    let remote = primary_remote(cwd)
+        .and_then(|name| config_value(cwd, &format!("remote.{name}.url")));
+    let repository = remote
+        .as_deref()
+        .and_then(pull_requests::repository_name_with_owner);
+    let host = remote
+        .as_deref()
+        .and_then(crate::repository::remote_host);
+    (repository, host)
+}
+
 /// The remote's default branch as `refs/remotes/<remote>/HEAD` records it.
 pub(super) fn default_branch(cwd: &Path, remote: &str) -> Option<String> {
     let reference = stdout(
