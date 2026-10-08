@@ -54,11 +54,11 @@ impl Registry {
         content.connected = content.summary.unknown == 0;
         let mut ongoing = content.summary.ongoing();
         let key = (owner.to_owned(), params.activity_id.clone());
-        if let Some(entry) = self.entries.get(&key) {
-            if !entry.ongoing {
-                content = entry.content.clone();
-                ongoing = false;
-            }
+        if let Some(entry) = self.entries.get(&key)
+            && !entry.ongoing
+        {
+            content = entry.content.clone();
+            ongoing = false;
         }
         if !self.entries.contains_key(&key)
             && (self.entries.len() >= 256
