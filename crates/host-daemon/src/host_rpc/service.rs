@@ -1002,10 +1002,7 @@ impl HostRpcService {
         if self.has_active_tasks() {
             return Ok(false);
         }
-        let accepted = match self.inner.updater.accept_handoff_if_ready().await {
-            Ok(accepted) => accepted,
-            Err(error) => return Err(error),
-        };
+        let accepted = self.inner.updater.accept_handoff_if_ready().await?;
         drop(gate);
         if accepted {
             drain.keep();
