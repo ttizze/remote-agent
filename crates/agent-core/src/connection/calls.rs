@@ -613,8 +613,7 @@ impl Owner {
                 self.state.device.apply_event(d::DeviceEvent::Recording(status));
             }
             Reply::DeviceRecording(recording) => {
-                self.state.device.apply_event(d::DeviceEvent::Recording(recording.status.clone()));
-                self.state.device.last_recording = Some(recording);
+                self.state.device.apply_event(d::DeviceEvent::RecordingComplete(recording));
             }
             Reply::SwitchedRef(switched) => match call {
                 Call::SwitchRef(request) => self.switched_ref(request, switched),
