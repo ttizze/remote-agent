@@ -27,7 +27,7 @@ use crate::{
     store_session::{ClientPreferences, StoreSession},
 };
 use agent_core::{
-    connection::{Outcome, StoreOptions},
+    connection::{Outcome, Store, StoreOptions},
     environment::{
         EnvironmentInboxView, EnvironmentRegistry, EnvironmentSettingsView, EnvironmentSidebarView,
     },
@@ -554,6 +554,11 @@ impl Desktop {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let previous_environment_id = self
+            .snapshot
+            .environment
+            .as_ref()
+            .map(|environment| environment.environment_id.clone());
         self.attachments.clear();
         self.external_snapshot_ids.clear();
         self.dictation = None;
@@ -578,6 +583,9 @@ impl Desktop {
         }
         self.snapshot = Arc::default();
         self.notification_snapshot = self.snapshot.clone();
+        if let Some(environment_id) = previous_environment_id {
+            self.dismiss_environment_notifications(&environment_id, cx);
+        }
         self.disconnected(window, cx);
         let updates = self.updates.clone();
         let epoch = self.epoch;
@@ -626,6 +634,7 @@ impl Desktop {
                             )
                         },
                         Update::Snapshot,
+                        Some(client_preferences.clone()),
                     )
                     .await;
                     let _ = forward.await;
@@ -761,19 +770,6 @@ impl Desktop {
                     return;
                 }
             };
-            if updates
-                .send((
-                    epoch,
-                    Update::EnvironmentSnapshot {
-                        profile_id: profile_id.clone(),
-                        snapshot: Arc::new(snapshot.clone()),
-                    },
-                ))
-                .await
-                .is_err()
-            {
-                return;
-            }
             let (tx, rx) = async_channel::bounded(8);
             let relay = updates.clone();
             let forward = tokio::spawn(async move {
@@ -799,6 +795,7 @@ impl Desktop {
                     profile_id: snapshot_profile,
                     snapshot,
                 },
+                Some(client_preferences.clone()),
             )
             .await;
             let _ = forward.await;
@@ -1204,6 +1201,19 @@ impl Desktop {
                 return;
             }
             Update::Connected(Ok((mut session, path, local_host_supervised))) => {
+                if !self.selected_store_has_current_client_preferences(&session.store) {
+                    let updates = self.updates.clone();
+                    let client_preferences = self.client_preferences.clone();
+                    let epoch = self.epoch;
+                    self.runtime.handle.spawn(async move {
+                        let update = match client_preferences.apply_to(&session.store).await {
+                            Ok(()) => Update::Connected(Ok((session, path, local_host_supervised))),
+                            Err(error) => Update::Connected(Err(format!("{error:#}"))),
+                        };
+                        let _ = updates.send((epoch, update)).await;
+                    });
+                    return;
+                }
                 let (tx, rx) = async_channel::bounded(4);
                 let updates = self.updates.clone();
                 let epoch = self.epoch;
@@ -1382,6 +1392,9 @@ impl Desktop {
                 self.schedule_views(cx);
             }
             Update::Snapshot(snapshot) => {
+                if self.session.is_none() {
+                    return;
+                }
                 if !snapshot.accepts_after(&self.snapshot) {
                     return;
                 }
@@ -1617,6 +1630,13 @@ impl Desktop {
         }
     }
 
+    fn selected_store_has_current_client_preferences(&self, store: &Store) -> bool {
+        let current = self.client_preferences.current();
+        current.is_empty()
+            || agent_core::persistence::encode_model_preferences(&store.snapshot())
+                .is_ok_and(|bytes| bytes == current)
+    }
+
     fn deliver_snapshot_notifications(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let previous = std::mem::replace(&mut self.notification_snapshot, self.snapshot.clone());
         if let Some(environment_id) = self.environment_registry.update(self.snapshot.clone()) {
@@ -1717,7 +1737,6 @@ impl Desktop {
 
     /// The connection went away; screens drop what belonged to it.
     fn disconnected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.dismiss_active_notifications(cx);
         self.timeline.reset();
         self.panels.reset(window, cx);
         self.sidebar_animation.reset();

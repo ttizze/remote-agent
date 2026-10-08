@@ -1352,28 +1352,30 @@ impl HostRpcService {
         let lease = std::sync::Arc::new(devices.acquire_stream(&thread, prefer_mjpeg).await);
         let receiver = Arc::new(tokio::sync::Mutex::new(devices.subscribe()));
         let initial = agent_protocol::device::DeviceEvent::State(devices.state_async().await);
+        let next_cancel = cancel.clone();
         crate::conversation::stream(
             std::collections::VecDeque::from([initial]),
             agent_protocol::device::DeviceEvent::State(
                 agent_protocol::device::DeviceServiceState::default(),
             ),
             move || {
-                let (receiver, devices, thread, lease) = (
+                let (receiver, devices, thread, lease, cancel) = (
                     receiver.clone(),
                     devices.clone(),
                     thread.clone(),
                     lease.clone(),
+                    next_cancel.clone(),
                 );
                 Box::pin(async move {
                     let _lease = lease;
                     loop {
-                        let result = {
-                            let mut receiver = receiver.lock().await;
-                            tokio::time::timeout(
-                                std::time::Duration::from_millis(500),
-                                receiver.recv(),
-                            )
-                            .await
+                        let result = tokio::select! {
+                            biased;
+                            _ = cancel.cancelled() => return None,
+                            result = async {
+                                let mut receiver = receiver.lock().await;
+                                receiver.recv().await
+                            } => result,
                         };
                         match result {
                             Ok(Ok(event))
@@ -1391,12 +1393,6 @@ impl HostRpcService {
                             }
                             Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => {
                                 return None;
-                            }
-                            Err(_) => {
-                                let frames = devices.frames_for_thread(&thread, prefer_mjpeg).await;
-                                if !frames.is_empty() {
-                                    return Some(frames);
-                                }
                             }
                         }
                     }
@@ -2821,7 +2817,7 @@ impl HostRpcService {
                         &browser_owner,
                         &params.thread_id.to_string(),
                         &params.tab_id,
-                        params.recording_id,
+                        params.recording_id.clone(),
                         params.options,
                     )
                     .await
@@ -3545,11 +3541,11 @@ impl HostRpcService {
         let logs_days = storage.logs_after_days;
         let removed_files = tokio::task::spawn_blocking(move || {
             let browser = match (browser_root, browser_days) {
-                (Some(root), Some(days)) => cleanup_old_files(&root, days),
+                (Some(root), Some(days)) => cleanup_old_files(root.as_path(), days),
                 _ => 0,
             };
             let logs = match (logs_root, logs_days) {
-                (Some(root), Some(days)) => cleanup_old_files(&root, days),
+                (Some(root), Some(days)) => cleanup_old_files(root.as_path(), days),
                 _ => 0,
             };
             browser + logs

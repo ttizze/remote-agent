@@ -368,9 +368,9 @@ pub(crate) fn update_command(
     // performs the provider-specific ownership check itself. A path that
     // contains node_modules remains manual-only because it may belong to a
     // project or another package.
-    if ((driver == Driver::Codex && real.ends_with("/.local/bin/codex"))
+    if (driver == Driver::Codex && real.ends_with("/.local/bin/codex"))
         || (driver == Driver::Claude
-            && (real.ends_with("/.local/bin/claude") || real.contains("/.local/share/claude/"))))
+            && (real.ends_with("/.local/bin/claude") || real.contains("/.local/share/claude/")))
     {
         if target_version.is_some() {
             return Err("the native provider updater does not accept a target version".into());

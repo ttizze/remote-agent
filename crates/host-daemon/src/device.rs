@@ -13,16 +13,15 @@ use agent_protocol::device::{
     self, DeviceAccessibilityInput, DeviceAccessibilityTree, DeviceActionInput, DeviceActionKind,
     DeviceAppearance, DeviceColorFilter, DeviceConfigureInput, DeviceDetail, DeviceDetailInput,
     DeviceDuoCommand, DeviceDuoPhysical, DeviceDuoPose, DeviceEvent, DeviceEventLogEntry,
-    DeviceEventLogInput, DeviceFoldPosture, DeviceForegroundApp, DeviceFrameEncoding,
-    DeviceHardwareButton, DeviceHostConfig, DeviceHostKind, DeviceHostStatus,
+    DeviceEventLogInput, DeviceFoldPosture, DeviceForegroundApp, DeviceForegroundUpdate,
+    DeviceFrameEncoding, DeviceHardwareButton, DeviceHostConfig, DeviceHostKind, DeviceHostStatus,
     DeviceHostStatusRecord, DeviceHostSummary, DeviceHostsInput, DeviceInput, DeviceInputKind,
-    DeviceListInput, DeviceOpenInput, DeviceOrientation, DevicePermission,
-    DevicePermissionDecision, DevicePlatform, DevicePlatformAvailability, DeviceRecording,
-    DeviceRecordingFormat, DeviceRecordingStartInput, DeviceRecordingStatus,
-    DeviceRecordingStopInput, DeviceScreenConfig, DeviceScreenshot, DeviceScreenshotInput,
-    DeviceServiceState, DeviceSession, DeviceSettings, DeviceShutdownInput, DeviceSummary,
-    DeviceTextSize, DeviceToolVersion, DeviceToolVersions, DeviceTouchPhase, DeviceVideoFrame,
-    LOCAL_DEVICE_HOST_ID,
+    DeviceListInput, DeviceOpenInput, DeviceOrientation, DevicePlatform,
+    DevicePlatformAvailability, DeviceRecording, DeviceRecordingFormat, DeviceRecordingStartInput,
+    DeviceRecordingStatus, DeviceRecordingStopInput, DeviceScreenConfig, DeviceScreenshot,
+    DeviceScreenshotInput, DeviceServiceState, DeviceSession, DeviceSettings, DeviceShutdownInput,
+    DeviceSummary, DeviceTextSize, DeviceToolVersion, DeviceToolVersions, DeviceTouchPhase,
+    DeviceVideoFrame, LOCAL_DEVICE_HOST_ID,
 };
 use async_trait::async_trait;
 use futures_util::StreamExt;
@@ -4126,13 +4125,6 @@ impl DeviceService {
             .host_id
             .clone()
             .unwrap_or_else(|| LOCAL_DEVICE_HOST_ID.into());
-        self.require_session_target(
-            &input.thread_id,
-            &host_id,
-            &input.device_id,
-            &input.session_epoch,
-        )
-        .await?;
         if let DeviceActionKind::Input(device_input) = &input.action {
             self.input_inner(DeviceInput {
                 thread_id: input.thread_id.clone(),
@@ -4149,6 +4141,13 @@ impl DeviceService {
                 })
                 .await;
         }
+        self.require_session_target(
+            &input.thread_id,
+            &host_id,
+            &input.device_id,
+            &input.session_epoch,
+        )
+        .await?;
         let host = self.host(&host_id).await?;
         let device = self.find_device(&host_id, &input.device_id).await?;
         let push_payload = match &input.action {
@@ -5385,6 +5384,27 @@ impl DeviceService {
             let _ = stale.tunnel.child.wait().await;
         }
         None
+    }
+
+    async fn require_session_target(
+        &self,
+        thread_id: &ThreadId,
+        host_id: &str,
+        device_id: &str,
+        session_epoch: &str,
+    ) -> Result<(), String> {
+        let state = self.inner.state.read().await;
+        if session_matches_target(
+            &state.sessions,
+            thread_id,
+            host_id,
+            device_id,
+            session_epoch,
+        ) {
+            Ok(())
+        } else {
+            Err("device session changed before dispatch".into())
+        }
     }
 
     async fn host(&self, id: &str) -> Result<Arc<dyn DeviceHostRunner>, String> {
@@ -6644,7 +6664,6 @@ async fn hub_mjpeg_frame(port: u16, device_id: &str) -> Result<TransportFrame, S
 
 #[cfg(test)]
 async fn hub_android_frame(port: u16, device_id: &str) -> Result<TransportFrame, String> {
-    use futures_util::SinkExt;
     let device = hub_device_component(device_id);
     let url = format!("ws://127.0.0.1:{port}/vendor/serve-emu/ws?device={device}&frame-meta=1");
     let (mut socket, _) = tokio::time::timeout(
@@ -7042,7 +7061,6 @@ async fn hub_input(
             return Err("Android fold controls must use the typed fold route".into());
         }
     };
-    use futures_util::SinkExt;
     tokio::time::timeout(Duration::from_secs(5), socket.send(message))
         .await
         .map_err(|_| "device input send timed out".to_owned())?
@@ -7928,7 +7946,7 @@ fn device_host_owner(root: &Path, host_id: &str) -> String {
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use futures_util::{SinkExt, StreamExt};
+    use futures_util::StreamExt;
     use std::sync::{Arc as StdArc, Mutex as StdMutex};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
@@ -8256,8 +8274,8 @@ mod tests {
             "emulator-5554",
             &DeviceActionKind::SetPermission {
                 app_id: "app.example".into(),
-                permission: DevicePermission::Photos,
-                decision: DevicePermissionDecision::Grant,
+                permission: device::DevicePermission::Photos,
+                decision: device::DevicePermissionDecision::Grant,
             },
         )
         .unwrap();

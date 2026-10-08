@@ -1,8 +1,6 @@
 //! Path search for `@` mentions: an index of a directory's files and folders
 //! that honors ignore files, ranked by how closely each path matches.
-use agent_protocol::workspace::{
-    ContentMatchRange, EntryKind, EntrySearch, SearchContents, SearchEntries, WorkspaceEntry,
-};
+use agent_protocol::workspace::{EntryKind, EntrySearch, SearchEntries, WorkspaceEntry};
 use anyhow::{Result, anyhow};
 use std::{
     collections::HashMap,

@@ -1,4 +1,4 @@
-use agent_protocol::browser::{BrowserAction, BrowserDialog, BrowserKey, HEIGHT, WIDTH};
+use agent_protocol::browser::{BrowserAction, BrowserDialog, BrowserKey};
 use async_tungstenite::{WebSocketStream, tokio::ConnectStream, tungstenite::Message};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use futures_util::StreamExt;

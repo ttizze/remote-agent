@@ -335,15 +335,16 @@ fn run_macos_power_watcher(mailbox: Arc<LifecycleMailbox>, stop: CancellationTok
         message_type: u32,
         message_argument: *mut c_void,
     ) {
-        let context = &mut *(refcon.cast::<CallbackContext>());
+        let context = unsafe { &mut *(refcon.cast::<CallbackContext>()) };
         match message_type {
             MAC_MESSAGE_CAN_SLEEP | MAC_MESSAGE_WILL_SLEEP => {
                 if message_type == MAC_MESSAGE_WILL_SLEEP {
                     let event = SuspendLifecycleEvent::Suspended;
                     let _ = context.mailbox.publish(event);
                 }
-                let _ =
-                    IOAllowPowerChange(context.root_port, mac_notification_id(message_argument));
+                let _ = unsafe {
+                    IOAllowPowerChange(context.root_port, mac_notification_id(message_argument))
+                };
             }
             MAC_MESSAGE_HAS_POWERED_ON => {
                 let event = SuspendLifecycleEvent::Resumed;

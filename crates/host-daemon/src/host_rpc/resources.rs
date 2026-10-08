@@ -8,10 +8,7 @@ use agent_protocol::{
 use codex_app_server::CodexAppServer;
 use serde::Serialize;
 use serde_json::Value;
-use std::{
-    path::PathBuf,
-    sync::{Arc, OnceLock},
-};
+use std::{path::PathBuf, sync::Arc};
 pub(super) struct CodexResources {
     accounts: tokio::sync::Mutex<Option<crate::codex_accounts::Accounts>>,
     restoration_error: tokio::sync::watch::Sender<Option<String>>,

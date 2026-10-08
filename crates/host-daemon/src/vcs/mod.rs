@@ -21,7 +21,7 @@ pub(crate) use pr_checkout::{
 };
 pub(crate) use pull::pull_current_branch;
 pub(crate) use refs::{create_ref, refs, switch_ref};
-pub(crate) use status::{BranchHead, branch_head, local_status};
+pub(crate) use status::local_status;
 pub(crate) use worktree_ops::{
     create_worktree, delete_local_branch, init_repository, origin_start, remove_worktree,
 };

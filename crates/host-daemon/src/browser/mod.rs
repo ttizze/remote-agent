@@ -12,7 +12,7 @@ use agent_protocol::preview::{
 use base64::Engine;
 use std::{
     collections::{HashMap, HashSet},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, OnceLock},
     time::Duration,
 };
@@ -1260,65 +1260,81 @@ impl Browser {
         } else {
             None
         };
-        let page = state.pages.entry(thread.into()).or_default();
-        // Include transitive popups only from this conversation's known targets.
-        loop {
-            let added: Vec<_> = targets
-                .iter()
-                .filter(|target| {
-                    target.kind == "page"
-                        && !page.tabs.contains(&target.target_id)
-                        && target
+        let needs_default_tab = {
+            let page = state.pages.entry(thread.into()).or_default();
+            // Include transitive popups only from this conversation's known targets.
+            loop {
+                let added: Vec<_> = targets
+                    .iter()
+                    .filter(|target| {
+                        target.kind == "page"
+                            && !page.tabs.contains(&target.target_id)
+                            && target
+                                .opener_id
+                                .as_ref()
+                                .is_some_and(|id| page.tabs.contains(id))
+                    })
+                    .map(|target| {
+                        let profile = target
                             .opener_id
                             .as_ref()
-                            .is_some_and(|id| page.tabs.contains(id))
-                })
-                .map(|target| {
-                    let profile = target
-                        .opener_id
-                        .as_ref()
-                        .and_then(|opener| page.preview_profiles.get(opener).cloned())
-                        .flatten();
-                    let owner = target
-                        .opener_id
-                        .as_ref()
-                        .and_then(|opener| page.preview_profile_owners.get(opener).cloned());
-                    (target.target_id.clone(), profile, owner)
-                })
-                .collect();
-            if added.is_empty() {
-                break;
-            }
-            page.active = added.last().unwrap().0.clone();
-            for (tab_id, profile, owner) in added {
-                page.preview_profiles.insert(tab_id.clone(), profile);
-                if let Some(owner) = owner {
-                    page.preview_profile_owners.insert(tab_id.clone(), owner);
+                            .and_then(|opener| page.preview_profiles.get(opener).cloned())
+                            .flatten();
+                        let owner = target
+                            .opener_id
+                            .as_ref()
+                            .and_then(|opener| page.preview_profile_owners.get(opener).cloned());
+                        (target.target_id.clone(), profile, owner)
+                    })
+                    .collect();
+                if added.is_empty() {
+                    break;
                 }
-                page.tabs.push(tab_id);
+                page.active = added.last().unwrap().0.clone();
+                for (tab_id, profile, owner) in added {
+                    page.preview_profiles.insert(tab_id.clone(), profile);
+                    if let Some(owner) = owner {
+                        page.preview_profile_owners.insert(tab_id.clone(), owner);
+                    }
+                    page.tabs.push(tab_id);
+                }
             }
-        }
-        page.tabs
-            .retain(|id| targets.iter().any(|target| &target.target_id == id));
-        page.viewports
-            .retain(|id, _| targets.iter().any(|target| &target.target_id == id));
-        page.preview_tabs
-            .retain(|id| targets.iter().any(|target| &target.target_id == id));
-        page.preview_profiles
-            .retain(|id, _| targets.iter().any(|target| &target.target_id == id));
-        page.preview_profile_owners
-            .retain(|id, _| targets.iter().any(|target| &target.target_id == id));
-        page.preview_settings
-            .retain(|id, _| targets.iter().any(|target| &target.target_id == id));
-        if let Some(id) = default_tab {
-            page.tabs.push(id.clone());
-            page.active = id;
-            page.viewports.insert(page.active.clone(), (WIDTH, HEIGHT));
-        } else if page.tabs.is_empty() {
+            page.tabs
+                .retain(|id| targets.iter().any(|target| &target.target_id == id));
+            page.viewports
+                .retain(|id, _| targets.iter().any(|target| &target.target_id == id));
+            page.preview_tabs
+                .retain(|id| targets.iter().any(|target| &target.target_id == id));
+            page.preview_profiles
+                .retain(|id, _| targets.iter().any(|target| &target.target_id == id));
+            page.preview_profile_owners
+                .retain(|id, _| targets.iter().any(|target| &target.target_id == id));
+            page.preview_settings
+                .retain(|id, _| targets.iter().any(|target| &target.target_id == id));
+            let needs_default_tab = match default_tab {
+                Some(id) => {
+                    page.tabs.push(id.clone());
+                    page.active = id;
+                    page.viewports.insert(page.active.clone(), (WIDTH, HEIGHT));
+                    false
+                }
+                None if page.tabs.is_empty() => true,
+                None => {
+                    if !page.tabs.contains(&page.active) {
+                        page.active = page.tabs.last().unwrap().clone();
+                    }
+                    false
+                }
+            };
+            if !needs_default_tab {
+                page.retain_valid_selections();
+            }
+            needs_default_tab
+        };
+        if needs_default_tab {
             // A conversation can retain metadata after every tab was closed
             // externally. Reconcile first, then create the one default page
             // needed to keep the browser operation usable.
-            drop(page);
             let id = state
                 .chrome
                 .as_mut()
@@ -1329,10 +1345,8 @@ impl Browser {
             page.tabs.push(id.clone());
             page.active = id.clone();
             page.viewports.insert(id, (WIDTH, HEIGHT));
-        } else if !page.tabs.contains(&page.active) {
-            page.active = page.tabs.last().unwrap().clone();
+            page.retain_valid_selections();
         }
-        page.retain_valid_selections();
         Ok(())
     }
 

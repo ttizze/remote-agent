@@ -628,13 +628,14 @@ impl Owner {
 
     pub async fn handle(&mut self, event: Event) {
         self.stream_publish_deferred = false;
+        let mut client_preferences_completion: Option<(Waiter, Result<Outcome, PeerError>)> = None;
         match event {
             Event::Intent(intent, complete) => self.intent(intent, complete),
             Event::ClientPreferences(bytes, complete) => {
                 let result = crate::persistence::apply_model_preferences(&mut self.state, &bytes)
                     .map(|()| Outcome::Applied)
                     .map_err(invalid);
-                let _ = complete.send(result);
+                client_preferences_completion = Some((complete, result));
             }
             Event::ReportHostPower(snapshot, complete) => {
                 self.job(Call::ReportHostPowerState(snapshot), Some(complete), None)
@@ -735,6 +736,9 @@ impl Owner {
         }
         self.stream_publish_pending = false;
         self.publish();
+        if let Some((complete, result)) = client_preferences_completion {
+            let _ = complete.send(result);
+        }
     }
 
     pub fn state_outbox(&mut self) -> &mut crate::commands::outbox::Outbox {

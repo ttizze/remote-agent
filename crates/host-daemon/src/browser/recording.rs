@@ -11,7 +11,7 @@ use agent_protocol::preview::{
 };
 use async_tungstenite::{WebSocketStream, tokio::ConnectStream, tungstenite::Message};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use futures_util::{SinkExt, StreamExt};
+use futures_util::StreamExt;
 use serde_json::{Value, json};
 use std::{
     path::{Path, PathBuf},

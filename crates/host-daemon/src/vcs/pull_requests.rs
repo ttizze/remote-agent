@@ -2,7 +2,7 @@
 //! on its own cadence: open answers for a minute, settled ones for five, and
 //! failures with a backoff, keeping the last known answer when a lookup
 //! fails.
-use super::{config_value, remote_names, split_remote_ref, stdout};
+use super::{config_value, remote_names, stdout};
 use crate::github::cli::{
     GhError, GitHubCli, HEAD_BRANCH_PROBE_LIMIT, PullRequestListState, PullRequestRecord,
 };

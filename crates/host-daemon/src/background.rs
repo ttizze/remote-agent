@@ -3,15 +3,15 @@
 use crate::power_events::SuspendLifecycleSource;
 use agent_domain::{
     BackgroundActivityPolicy, BackgroundBooleanState, BackgroundPolicySnapshot, BackgroundScope,
-    ClientActivityLease, ClientActivityReport, HostPowerSnapshot, HostPowerSource,
-    ResourceAggregate, ResourceAttributionSnapshot, ResourceHealth, ResourceHistoryBucket,
-    ResourceProcess, ResourceProcessCategory, ResourceProcessIdentity, ResourceProcessSummary,
-    ResourceSourceHealth, ResourceSourceStatus, ResourceTelemetryHistory,
-    ResourceTelemetryIoSemantics, ResourceTelemetrySnapshot, Timestamp, TraceDiagnosticsAggregator,
-    TraceDiagnosticsError, TraceDiagnosticsErrorKind, TraceDiagnosticsResult,
-    compute_background_snapshot, host_power_constrained, lease_may_run_scoped_work,
-    normalize_resource_history_window, process_diagnostics, project_process_resource_history,
-    remove_rpc_client, upsert_client_activity_lease,
+    ClientActivityLease, HostPowerSnapshot, HostPowerSource, ResourceAggregate,
+    ResourceAttributionSnapshot, ResourceHealth, ResourceHistoryBucket, ResourceProcess,
+    ResourceProcessCategory, ResourceProcessIdentity, ResourceProcessSummary, ResourceSourceHealth,
+    ResourceSourceStatus, ResourceTelemetryHistory, ResourceTelemetryIoSemantics,
+    ResourceTelemetrySnapshot, Timestamp, TraceDiagnosticsAggregator, TraceDiagnosticsError,
+    TraceDiagnosticsErrorKind, TraceDiagnosticsResult, compute_background_snapshot,
+    host_power_constrained, lease_may_run_scoped_work, normalize_resource_history_window,
+    process_diagnostics, project_process_resource_history, remove_rpc_client,
+    upsert_client_activity_lease,
 };
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
@@ -537,13 +537,18 @@ fn sample_host_resources(
 ) -> agent_domain::HostResourcesSnapshot {
     state.system.refresh_memory();
     let total_memory_bytes = state.system.total_memory();
-    let mut available_memory_bytes = state.system.available_memory();
     #[cfg(target_os = "linux")]
-    if let Ok(meminfo) = std::fs::read_to_string("/proc/meminfo") {
-        if let Some(available) = parse_meminfo_bytes(&meminfo, "MemAvailable:") {
-            available_memory_bytes = available;
+    let available_memory_bytes = {
+        let mut available = state.system.available_memory();
+        if let Ok(meminfo) = std::fs::read_to_string("/proc/meminfo") {
+            if let Some(value) = parse_meminfo_bytes(&meminfo, "MemAvailable:") {
+                available = value;
+            }
         }
-    }
+        available
+    };
+    #[cfg(not(target_os = "linux"))]
+    let available_memory_bytes = state.system.available_memory();
     let previous_cpu_at = state.host_cpu_refreshed_at.replace(Instant::now());
     state.system.refresh_cpu_usage();
     let cpu_utilization = previous_cpu_at
@@ -2482,7 +2487,7 @@ fn parse_windows_input_desktop_name(name: &[u16]) -> BackgroundBooleanState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_domain::{BackgroundActivityProfile, BackgroundScope};
+    use agent_domain::{BackgroundActivityProfile, BackgroundScope, ClientActivityReport};
 
     #[tokio::test]
     async fn power_monitor_drops_heartbeats_and_rejects_old_reports() {

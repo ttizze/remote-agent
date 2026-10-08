@@ -6,15 +6,13 @@
 //! bounded HTTP, retry policy and token invalidation.
 
 use agent_domain::{
-    ACTIVITY_LINK_LIMIT, ACTIVITY_ROWS_LIMIT, ACTIVITY_STATUS_LIMIT, ACTIVITY_SUMMARY_LIMIT,
-    ActivityAlert, BackgroundKind, RUNNING_ACTIVITY_TTL_MS, RunStatus, TERMINAL_ACTIVITY_TTL_MS,
-    TERMINAL_NOTIFICATION_FRESHNESS_MS, ThreadRelationship, WAITING_ACTIVITY_TTL_MS,
-    activity_alert_for_transition, activity_expiry_at_ms, activity_expiry_is_due,
-    bounded_activity_link, bounded_activity_text,
+    ACTIVITY_ROWS_LIMIT, ACTIVITY_STATUS_LIMIT, ACTIVITY_SUMMARY_LIMIT, ActivityAlert,
+    BackgroundKind, RunStatus, ThreadRelationship, activity_alert_for_transition,
+    activity_expiry_at_ms, activity_expiry_is_due, bounded_activity_link, bounded_activity_text,
 };
 use agent_protocol::push::{
-    ApnsEnvironment, PushActivityEvent, PushActivityItem, PushActivityPhase, PushContentState,
-    PushPlatform, RegisterPushDevice, SetPushDeviceActive,
+    ApnsEnvironment, PushActivityEvent, PushActivityPhase, PushContentState, PushPlatform,
+    RegisterPushDevice, SetPushDeviceActive,
 };
 use agent_runtime::{HostProject, ShellSubscribe, ShellThread, ShellUpdate};
 use async_trait::async_trait;
@@ -1828,7 +1826,7 @@ async fn fcm_access_token(
     );
     let signing_input = format!("{header}.{payload}");
     let key = signature::RsaKeyPair::from_pkcs8(&key).map_err(|_| DeliveryError::Unavailable)?;
-    let mut output = vec![0; key.public_modulus_len()];
+    let mut output = vec![0; key.public().modulus_len()];
     key.sign(
         &signature::RSA_PKCS1_SHA256,
         &SystemRandom::new(),
@@ -2035,7 +2033,11 @@ fn now_seconds() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_protocol::push::PushPreferences;
+    use agent_domain::{
+        ACTIVITY_LINK_LIMIT, RUNNING_ACTIVITY_TTL_MS, TERMINAL_ACTIVITY_TTL_MS,
+        TERMINAL_NOTIFICATION_FRESHNESS_MS, WAITING_ACTIVITY_TTL_MS,
+    };
+    use agent_protocol::push::{PushActivityItem, PushPreferences};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct FakeTransport {

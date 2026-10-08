@@ -50,6 +50,27 @@ impl ClientPreferences {
         true
     }
 
+    /// Seeds a newly exposed Host store with the latest client-global values.
+    /// A replacement arriving while the receipt is in flight is applied again
+    /// before the store is handed to a native owner.
+    pub(crate) async fn apply_to(&self, store: &Store) -> anyhow::Result<()> {
+        loop {
+            let bytes = self.current();
+            if bytes.is_empty() {
+                return Ok(());
+            }
+            let payload = bytes.clone();
+            store
+                .apply_client_preferences(payload)
+                .await
+                .map_err(|error| anyhow::anyhow!("client preferences receipt dropped: {error}"))?
+                .map_err(|error| anyhow::anyhow!("client preferences rejected: {error}"))?;
+            if self.current() == bytes {
+                return Ok(());
+            }
+        }
+    }
+
     async fn write_current(&self, path: &PathBuf, bytes: &[u8]) -> anyhow::Result<bool> {
         let shared = self.bytes.clone();
         let path = path.clone();
@@ -102,6 +123,7 @@ impl StoreSession {
         updates: async_channel::Sender<E>,
         connected: impl FnOnce(Result<Self, String>) -> E,
         snapshot: impl Fn(Arc<Snapshot>) -> E,
+        client_preferences: Option<ClientPreferences>,
     ) {
         let store = match result {
             Ok(store) => store,
@@ -110,6 +132,12 @@ impl StoreSession {
                 return;
             }
         };
+        if let Some(client_preferences) = client_preferences {
+            if let Err(error) = client_preferences.apply_to(&store).await {
+                let _ = updates.send(connected(Err(format!("{error:#}")))).await;
+                return;
+            }
+        }
         let mut snapshots = store.subscribe();
         let session = Self {
             store,
@@ -250,6 +278,7 @@ mod tests {
                 updates.clone(),
                 Update::Connected,
                 |_| Update::Snapshot,
+                None,
             ));
             let Update::Connected(Ok(mut session)) = incoming.recv().await.unwrap() else {
                 panic!("missing session")
@@ -315,6 +344,7 @@ mod tests {
                 updates.clone(),
                 Update::Connected,
                 |_| Update::Snapshot,
+                None,
             ));
             let Update::Connected(Ok(mut session)) = incoming.recv().await.unwrap() else {
                 panic!("missing session")
@@ -392,6 +422,7 @@ mod tests {
                 updates.clone(),
                 Update::Connected,
                 |_| Update::Snapshot,
+                None,
             ));
             let Update::Connected(Ok(mut session)) = incoming.recv().await.unwrap() else {
                 panic!("missing session")
@@ -412,6 +443,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_new_session_exposes_the_current_client_preferences_before_connected() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("model-preferences.json");
+        let mut current = Snapshot::default();
+        current.default_draft.model = "current-model".into();
+        let client_preferences = ClientPreferences::from_path(path);
+        client_preferences
+            .replace(agent_core::persistence::encode_model_preferences(&current).unwrap());
+        let runtime = runtime();
+        let store = Arc::new(Store::offline(Snapshot::default(), Default::default()));
+        let (updates, incoming) = async_channel::unbounded();
+        let publish = tokio::spawn(StoreSession::publish(
+            Ok(store.clone()),
+            runtime.clone(),
+            updates,
+            Update::Connected,
+            |_| Update::Snapshot,
+            Some(client_preferences),
+        ));
+        let Update::Connected(Ok(session)) = incoming.recv().await.unwrap() else {
+            panic!("missing session")
+        };
+        assert_eq!(
+            session.store.snapshot().default_draft.model,
+            "current-model"
+        );
+        drop(session);
+        runtime.closing.close();
+        runtime.closing.wait().await;
+        publish.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn failed_connection_is_delivered_and_undelivered_session_closes_its_store() {
         tokio::time::timeout(Duration::from_secs(5), async {
             let runtime = runtime();
@@ -419,7 +483,7 @@ mod tests {
             let (updates, incoming) = async_channel::unbounded();
             StoreSession::publish(
                 Err(anyhow::anyhow!("connection failed").context("cannot open session")), runtime.clone(), updates.clone(),
-                Update::Connected, |_| Update::Snapshot,
+                Update::Connected, |_| Update::Snapshot, None,
             ).await;
             assert!(matches!(incoming.recv().await.unwrap(), Update::Connected(Err(error)) if error == "cannot open session: connection failed"));
             assert!(incoming.try_recv().is_err());
@@ -430,6 +494,7 @@ mod tests {
                 updates,
                 Update::Connected,
                 |_| Update::Snapshot,
+                None,
             )
             .await;
             runtime.closing.close();

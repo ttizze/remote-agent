@@ -112,6 +112,7 @@ impl Hosts {
                 updates,
                 Update::Connected,
                 |_| Update::Snapshot,
+                None,
             )
             .await;
         });

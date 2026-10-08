@@ -4,7 +4,7 @@ use agent_protocol::usage::Provider;
 use std::{
     collections::{BTreeSet, HashMap},
     fs,
-    io::{Read, Seek, SeekFrom, Write},
+    io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     time::SystemTime,
 };
