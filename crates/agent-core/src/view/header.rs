@@ -312,7 +312,7 @@ pub fn snapshot_thread_header(
                 .find(|candidate| &candidate.id == project),
             workspace,
             is_server_thread: true,
-            environment_label: snapshot.host_name.as_deref(),
+            environment_label: snapshot.environment_display_label(),
             environment_unavailable: !snapshot.connected,
             merge_back_available,
         },

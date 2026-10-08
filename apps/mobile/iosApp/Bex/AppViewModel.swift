@@ -13,6 +13,7 @@ final class BexAppViewModel: ObservableObject {
     @Published var pairingInvitation: Invitation?
     @Published var notice: String?
     @Published var profiles: [HostProfile] = []
+    @Published private(set) var environments: [EnvironmentRow] = []
     @Published private(set) var selectedProfileId: String?
     @Published var composerText = ""
     var draftEdits = DraftRevision()
@@ -39,6 +40,8 @@ final class BexAppViewModel: ObservableObject {
     var presentationTick: Task<Void, Never>?
 
     private(set) var store: AgentStore?
+    private var backgroundOwners: [String: AgentStore] = [:]
+    private var backgroundTasks: [String: Task<Void, Never>] = [:]
     private var initialization: Task<Void, Never>?
     private var observation: Task<Void, Never>?
     private var persistence: Task<Void, Never>?
@@ -53,6 +56,8 @@ final class BexAppViewModel: ObservableObject {
         if let id = UserDefaults.standard.string(forKey: "bex.selected-host"),
            profiles.contains(where: { $0.id == id }) {
             selectProfile(id)
+        } else {
+            startBackgroundProfiles(nil)
         }
     }
 
@@ -64,6 +69,9 @@ final class BexAppViewModel: ObservableObject {
         }
         connection?.cancel()
         isConnecting = false
+        let background = backgroundOwners.removeValue(forKey: id)
+        backgroundTasks.removeValue(forKey: id)?.cancel()
+        Task { try? await background?.shutdown() }
         let old = detachStore()
         selectedProfileId = id
         UserDefaults.standard.set(id, forKey: "bex.selected-host")
@@ -79,6 +87,9 @@ final class BexAppViewModel: ObservableObject {
         guard profiles.contains(where: { $0.id == id }) else { return }
         do {
             let remaining = profiles.filter { $0.id != id }
+            let background = backgroundOwners.removeValue(forKey: id)
+            backgroundTasks.removeValue(forKey: id)?.cancel()
+            environments.removeAll { $0.profileId == id }
             try DeviceIdentity.remove(id)
             if selectedProfileId == id {
                 connection?.cancel()
@@ -92,8 +103,12 @@ final class BexAppViewModel: ObservableObject {
                     do { try await old?.shutdown() } catch { self?.notice = error.localizedDescription }
                 }
             }
+            Task { [weak self] in
+                do { try await background?.shutdown() } catch { self?.notice = error.localizedDescription }
+            }
             profiles = remaining
             try HostProfile.save(profiles)
+            startBackgroundProfiles(selectedProfileId)
             screen = .profiles
         } catch { notice = error.localizedDescription }
     }
@@ -152,6 +167,7 @@ final class BexAppViewModel: ObservableObject {
             }
             observe(owner, host: id)
             connect()
+            startBackgroundProfiles(id)
         } catch {
             guard !Task.isCancelled, selectedProfileId == id else { return }
             initialization = nil
@@ -163,6 +179,99 @@ final class BexAppViewModel: ObservableObject {
             }
         }
         _ = await previousClosed
+    }
+
+    /// Keeps each saved Host's cached snapshot and transport supervised while
+    /// another environment is selected in the foreground.
+    private func startBackgroundProfiles(_ selected: String?) {
+        for profile in profiles where profile.id != selected && backgroundTasks[profile.id] == nil {
+            superviseBackground(profile)
+        }
+    }
+
+    private func superviseBackground(_ profile: HostProfile) {
+        let task = Task { [weak self] in
+            var delayNanoseconds: UInt64 = 250_000_000
+            defer { self?.backgroundTasks[profile.id] = nil }
+            while !Task.isCancelled {
+                guard let self,
+                      self.profiles.contains(where: { $0.id == profile.id }),
+                      self.selectedProfileId != profile.id
+                else { return }
+                do {
+                    let owner: AgentStore
+                    if let existing = self.backgroundOwners[profile.id] {
+                        owner = existing
+                    } else {
+                        let created = try await AgentStore.offline(
+                            stateFile: SnapshotFiles.stateFile(profile.id),
+                            modelDefaults: SnapshotFiles.modelDefaults(),
+                            cacheDirectory: SnapshotFiles.cacheDirectory(profile.id),
+                            diagnosticsDirectory: SnapshotFiles.diagnosticsDirectory(profile.id)
+                        )
+                        guard !Task.isCancelled else {
+                            try? await created.shutdown()
+                            return
+                        }
+                        self.backgroundOwners[profile.id] = created
+                        owner = created
+                    }
+                    self.publishEnvironment(profile, owner.snapshot())
+                    let identity = try DeviceIdentity.loadOrGenerate(profile.id)
+                    try await owner.resume(connection: Connection(
+                        ticket: profile.ticket,
+                        identity: identity,
+                        invitation: nil,
+                        useRelays: true
+                    ))
+                    self.publishEnvironment(profile, owner.snapshot())
+                    var previous = owner.snapshot()
+                    while !Task.isCancelled && self.selectedProfileId != profile.id {
+                        _ = try await owner.nextSnapshot(previous: previous)
+                        let latest = owner.snapshot()
+                        self.publishEnvironment(profile, latest)
+                        if !latest.connected() { break }
+                        previous = latest
+                    }
+                    delayNanoseconds = 250_000_000
+                } catch is CancellationError {
+                    return
+                } catch {
+                    if self.notice == nil { self.notice = "\(profile.name): \(error.localizedDescription)" }
+                }
+                guard !Task.isCancelled, self.selectedProfileId != profile.id else { return }
+                try? await Task.sleep(nanoseconds: delayNanoseconds)
+                delayNanoseconds = delayNanoseconds >= 150_000_000_000
+                    ? 300_000_000_000
+                    : delayNanoseconds * 2
+            }
+        }
+        backgroundTasks[profile.id] = task
+    }
+
+    private func publishEnvironment(_ profile: HostProfile, _ next: AgentCore.Snapshot) {
+        let row = EnvironmentRow(
+            profileId: profile.id,
+            label: next.environmentLabel() ?? profile.name,
+            state: next.environmentConnectionState() ?? "connecting",
+            platform: next.environmentPlatform(),
+            machine: next.environmentMachine(),
+            capabilities: next.environmentCapabilities(),
+            reconnectReason: next.environmentReconnectReason(),
+            activities: next.awarenessActivities().map { activity in
+                EnvironmentActivityRow(
+                    environmentId: activity.environmentId,
+                    threadId: next.scopedThreadId(threadId: activity.threadId) ?? activity.threadId,
+                    title: activity.threadTitle,
+                    headline: activity.headline,
+                    detail: activity.detail,
+                    phase: activity.phase,
+                    updatedAtMs: activity.updatedAtMs
+                )
+            }
+        )
+        environments = (environments.filter { $0.profileId != profile.id } + [row])
+            .sorted { $0.label.localizedCaseInsensitiveCompare($1.label) == .orderedAscending }
     }
 
     func preparePairing(_ contents: String) {
@@ -214,6 +323,7 @@ final class BexAppViewModel: ObservableObject {
                     pairingInvitation = nil
                     isConnecting = false
                     observe(owner, host: id)
+                    startBackgroundProfiles(id)
                     try? await old?.shutdown()
                 } catch {
                     guard !Task.isCancelled else { return }
@@ -264,6 +374,7 @@ extension BexAppViewModel {
         if afterForeground {
             owner.appBecameActive()
         }
+        startBackgroundProfiles(selectedProfileId)
         connection?.cancel()
         isConnecting = true
         notice = nil
@@ -336,6 +447,9 @@ extension BexAppViewModel {
         }
         let threadChanged = snapshot.selectedThreadId() != next.selectedThreadId()
         snapshot = next
+        if let id = selectedProfileId, let profile = profiles.first(where: { $0.id == id }) {
+            publishEnvironment(profile, next)
+        }
         do { try usageWidget.publish(next.subscriptionUsageWidgetJson(nowMs: 0, maxWindows: 6)) }
         catch { notice = error.localizedDescription }
         if threadChanged {

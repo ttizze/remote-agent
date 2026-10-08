@@ -36,6 +36,138 @@ pub struct HostStatus {
     pub provider_errors: Option<Map<String, Value>>,
 }
 
+/// The stable identity and capabilities of the Host serving a connection.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EnvironmentPlatform {
+    pub os: String,
+    pub arch: String,
+    pub machine: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EnvironmentFileAttachments {
+    pub max_upload_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum EnvironmentInstallation {
+    Npx,
+    PnpmDlx,
+    Bunx,
+    NpmGlobal { prefix: String },
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EnvironmentCapabilities {
+    pub repository_identity: bool,
+    pub connection_probe: bool,
+    pub attachment_uploads: bool,
+    pub question_attachments: bool,
+    pub file_attachments: Option<EnvironmentFileAttachments>,
+    pub pull_requests: bool,
+    pub pull_request_checks: bool,
+    pub inline_message_context: bool,
+    pub required_worktree_bootstrap: bool,
+    pub thread_settlement: bool,
+    pub thread_auto_settlement: bool,
+    pub thread_snooze: bool,
+    pub storage_cleanup: bool,
+    pub project_worktree_cleanup: bool,
+    pub thread_restart_continuation: bool,
+    pub project_settings_overrides: bool,
+    pub environment_themes: bool,
+    pub usage_limit_sources: bool,
+    pub usage_price_overrides: bool,
+    pub usage_model_aliases: bool,
+    pub thread_pinning: bool,
+    pub thread_pin_reorder: bool,
+    pub thread_active_reorder: bool,
+    pub thread_auto_settle_opt_out: bool,
+    pub thread_title_regeneration: bool,
+    pub thread_visited_tracking: bool,
+    pub thread_pull_request_linking: bool,
+    pub server_resolved_command_context: bool,
+    pub thread_pull_requests: bool,
+    pub thread_pull_request_watch: bool,
+    pub pull_request_stack_actions: bool,
+    pub server_self_update: Option<String>,
+    pub server_installation: Option<EnvironmentInstallation>,
+    pub server_self_update_progress: bool,
+    pub server_update_thread_continuation: bool,
+    pub project_clone_tracking: bool,
+    pub environment_icon: bool,
+    pub desktop_app_update: bool,
+    pub agent_activity_publishing: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EnvironmentDescriptor {
+    pub environment_id: String,
+    pub label: String,
+    /// The Host process' configured working directory. Diff previews can use
+    /// this when a stale client checkout path is rejected by the VCS service.
+    pub cwd: String,
+    pub platform: EnvironmentPlatform,
+    pub server_version: String,
+    pub orchestration_protocol_version: Option<u32>,
+    pub capabilities: EnvironmentCapabilities,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AwarenessRegistration {
+    pub device_id: String,
+    pub label: String,
+    pub platform: String,
+    pub app_version: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AwarenessRegistrationResult {
+    pub accepted: bool,
+    pub registered_at_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AgentActivityPhase {
+    Starting,
+    Running,
+    WaitingApproval,
+    WaitingInput,
+    Completed,
+    Failed,
+    Stale,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AwarenessActivity {
+    pub environment_id: String,
+    pub thread_id: String,
+    pub project_title: String,
+    pub thread_title: String,
+    pub phase: AgentActivityPhase,
+    pub headline: String,
+    pub detail: Option<String>,
+    pub model_title: Option<String>,
+    pub updated_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AwarenessSnapshot {
+    pub environment: EnvironmentDescriptor,
+    pub activities: Vec<AwarenessActivity>,
+    pub updated_at_ms: i64,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Project {

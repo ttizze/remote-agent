@@ -3,7 +3,7 @@ use crate::*;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
-pub const CLAUDE_SDK_VERSION: &str = "0.3.276";
+pub const CLAUDE_SDK_VERSION: &str = "0.3.293";
 #[derive(Debug, Default)]
 pub struct ClaudeControl {
     next_request: u64,

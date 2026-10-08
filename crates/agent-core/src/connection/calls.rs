@@ -35,6 +35,8 @@ pub(super) enum Reply {
     Remotes(Vec<m::RemoteHost>),
     Remote(m::RemoteHost),
     Invitation(m::Invitation),
+    Environment(m::EnvironmentDescriptor),
+    AwarenessRegistration(m::AwarenessRegistrationResult),
     Transcription(String),
     ConversationSettings(m::ConversationSettings),
     SessionScan(c::SessionScan),
@@ -85,6 +87,8 @@ async fn execute(peer: &Peer, call: &Call) -> Result<Reply, PeerError> {
         Call::ListRemotes(_) => Reply::Remotes(peer.request(call).await?),
         Call::RegisterRemote(_) => Reply::Remote(peer.request(call).await?),
         Call::Invite(_) => Reply::Invitation(peer.request(call).await?),
+        Call::Environment(_) => Reply::Environment(peer.request(call).await?),
+        Call::RegisterAwareness(_) => Reply::AwarenessRegistration(peer.request(call).await?),
         Call::Transcribe(_) => {
             Reply::Transcription(peer.request::<op::Transcription>(call).await?.text)
         }
@@ -358,7 +362,10 @@ impl Owner {
                     Call::DiffPreview(request) if request.file.is_some() => {
                         self.diff_file_finished(request, Err(&error))
                     }
-                    Call::DiffPreview(request) => self.diff_preview_finished(request, Err(&error)),
+                    Call::DiffPreview(request) => {
+                        self.diff_preview_finished(request, Err(&error));
+                        self.retry_diff_preview_at_environment_cwd(request, &error);
+                    }
                     Call::Search(params) => self.search_finished(&params.query, None),
                     Call::CancelSetup(_) => self.work_locally = None,
                     Call::ProjectFavicon(request) => self.project_icon_read(request, Err(())),
@@ -501,6 +508,11 @@ impl Owner {
                 self.state.remote_hosts.push(host);
             }
             Reply::Invitation(invitation) => self.state.invitation = Some(invitation),
+            Reply::Environment(environment) => {
+                self.state.host_name = Some(environment.label.clone());
+                self.state.environment = Some(environment);
+            }
+            Reply::AwarenessRegistration(_) => {}
             Reply::ConversationSettings(settings) => {
                 self.state.conversation_settings = Some(settings)
             }

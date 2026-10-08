@@ -33,6 +33,25 @@ import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
+internal data class EnvironmentActivityRow(
+    val threadId: String,
+    val title: String,
+    val headline: String,
+    val detail: String?,
+    val phase: String,
+)
+
+internal data class EnvironmentRow(
+    val profileId: String,
+    val label: String,
+    val state: String,
+    val platform: String?,
+    val machine: String?,
+    val capabilities: List<String>,
+    val reconnectReason: String?,
+    val activities: List<EnvironmentActivityRow>,
+)
+
 private const val PERSISTENCE_QUEUE_CAPACITY = 8
 private const val MILLIS_PER_SECOND = 1000L
 private const val PERSISTENCE_DEBOUNCE_MILLIS = 250L
@@ -94,6 +113,9 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
     var profiles by mutableStateOf(emptyList<HostProfile>())
         private set
 
+    var environments by mutableStateOf(emptyList<EnvironmentRow>())
+        private set
+
     var profileId by mutableStateOf<String?>(null)
         private set
 
@@ -115,6 +137,8 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
 
     private var followingFrom: String? = null
     private var owner: AgentStore? = null
+    private val backgroundOwners = mutableMapOf<String, AgentStore>()
+    private val backgroundJobs = mutableMapOf<String, Job>()
     private var initialization: Job? = null
     private var connection: Job? = null
     private var observation: Job? = null
@@ -134,6 +158,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
         runCatching { profiles = repository.profiles() }.onFailure { notice = it.message }
         if (profiles.isEmpty()) stack = listOf(Route.Pairing)
         repository.selected?.takeIf { id -> profiles.any { it.id == id } }?.let(::selectProfile)
+            ?: startBackgroundProfiles(null)
     }
 
     fun perform(intent: Intent, complete: (Result<Outcome>) -> Unit = {}) {
@@ -270,14 +295,17 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
         if (profiles.none { it.id == id }) return
         stack = listOf(Route.Home)
         if (profileId == id && owner != null) {
+            startBackgroundProfiles(id)
             connect()
             return
         }
         val old = detach()
+        val background = backgroundOwners.remove(id)
+        backgroundJobs.remove(id)?.cancel()
         profileId = id
         repository.selected = id
         publish(Snapshot.empty())
-        scope.launch { runCatching { old?.shutdown() } }
+        scope.launch { runCatching { old?.shutdown(); background?.shutdown() } }
         initialization = scope.launch {
             try {
                 val store =
@@ -300,6 +328,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
                 }
                 observe(store, id)
                 connect()
+                startBackgroundProfiles(id)
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Exception) {
@@ -326,8 +355,95 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
         return old
     }
 
+    /** Starts one independent cached Store and retry loop for every saved Host. */
+    private fun startBackgroundProfiles(selected: String?) {
+        profiles
+            .filterNot { it.id == selected }
+            .filterNot { backgroundJobs.containsKey(it.id) }
+            .forEach { profile -> superviseBackground(profile) }
+    }
+
+    private fun superviseBackground(profile: HostProfile) {
+        lateinit var job: Job
+        job = scope.launch {
+            var delayMillis = 250L
+            try {
+                while (isActive && profiles.any { it.id == profile.id } && profile.id != profileId) {
+                    try {
+                        val store =
+                            backgroundOwners.getOrPut(profile.id) {
+                                AgentStore.offline(
+                                    repository.stateFile(profile.id),
+                                    repository.modelPreferences(),
+                                    repository.cacheDirectory(profile.id),
+                                    repository.diagnosticsDirectory(profile.id),
+                                )
+                            }
+                        val identity =
+                            withContext(Dispatchers.IO) {
+                                AndroidCredentialStore(context, profile.id).loadOrCreate(::generateIdentity)
+                            }
+                        publishEnvironment(profile, store.snapshot())
+                        try {
+                            store.resume(Connection(profile.ticket, identity, null, true))
+                        } finally {
+                            identity.fill(0)
+                        }
+                        publishEnvironment(profile, store.snapshot())
+                        var previous = store.snapshot()
+                        while (isActive && profile.id != profileId) {
+                            store.nextSnapshot(previous)
+                            val latest = store.snapshot()
+                            publishEnvironment(profile, latest)
+                            if (!latest.connected()) break
+                            previous = latest
+                        }
+                        delayMillis = 250L
+                    } catch (error: CancellationException) {
+                        throw error
+                    } catch (error: Exception) {
+                        notice = notice ?: "${profile.name}: ${error.message}"
+                    }
+                    if (isActive && profile.id != profileId) {
+                        delay(delayMillis)
+                        delayMillis = (delayMillis * 2).coerceAtMost(300_000L)
+                    }
+                }
+            } finally {
+                backgroundJobs.remove(profile.id)
+            }
+        }
+        backgroundJobs[profile.id] = job
+    }
+
+    private fun publishEnvironment(profile: HostProfile, next: Snapshot) {
+        val row = EnvironmentRow(
+            profileId = profile.id,
+            label = next.environmentLabel() ?: profile.name,
+            state = next.environmentConnectionState() ?: "connecting",
+            platform = next.environmentPlatform(),
+            machine = next.environmentMachine(),
+            capabilities = next.environmentCapabilities(),
+            reconnectReason = next.environmentReconnectReason(),
+            activities = next.awarenessActivities().map { activity ->
+                EnvironmentActivityRow(
+                    threadId = next.scopedThreadId(activity.threadId) ?: activity.threadId,
+                    title = activity.threadTitle,
+                    headline = activity.headline,
+                    detail = activity.detail,
+                    phase = activity.phase,
+                )
+            },
+        )
+        environments = (environments.filterNot { it.profileId == profile.id } + row)
+            .sortedBy { it.label.lowercase() }
+    }
+
     fun removeProfile(id: String) {
         runCatching {
+                val background = backgroundOwners.remove(id)
+                backgroundJobs.remove(id)?.cancel()
+                scope.launch { runCatching { background?.shutdown() } }
                 AndroidCredentialStore(context, id).remove()
                 if (profileId == id) {
                     val old = detach()
@@ -337,6 +453,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
                     scope.launch { old?.shutdown() }
                 }
                 profiles = profiles.filterNot { it.id == id }
+                environments = environments.filterNot { it.profileId == id }
                 repository.saveProfiles(profiles)
                 File(repository.cacheDirectory(id)).deleteRecursively()
                 if (profiles.isEmpty()) stack = listOf(Route.Pairing)
@@ -422,6 +539,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
     fun foreground() {
         owner?.appBecameActive()
         connect()
+        startBackgroundProfiles(profileId)
     }
 
     fun connect() {
@@ -485,6 +603,9 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
             repository.saveProfiles(profiles)
         }
         snapshot = next
+        profileId?.let { id ->
+            profiles.firstOrNull { it.id == id }?.let { profile -> publishEnvironment(profile, next) }
+        }
         usageWidget.publish(next.subscriptionUsageWidgetJson(0, UInt.MAX_VALUE))
         val selected = next.selectedThreadId()
         val from = followingFrom
@@ -564,8 +685,12 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
         connection?.cancel()
         initialization?.cancel()
         persistence?.cancel()
+        backgroundJobs.values.forEach { it.cancel() }
+        val backgroundStores = backgroundOwners.values.toList()
+        backgroundOwners.clear()
         scope.launch {
             operations.toList().joinAll()
+            backgroundStores.forEach { store -> runCatching { store.shutdown() } }
             owner?.let { store ->
                 runCatching { store.shutdown() }
                 writes.send(store.snapshot())

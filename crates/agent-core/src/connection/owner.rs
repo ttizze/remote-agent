@@ -75,6 +75,7 @@ pub(super) enum StreamKey {
     Setup(ThreadId),
     TerminalMetadata,
     Keybindings,
+    Awareness,
 }
 impl StreamKey {
     pub fn location(&self) -> Option<ShellLocation> {
@@ -100,6 +101,8 @@ pub(super) enum Event {
     Attach {
         peer: Peer,
         host_name: String,
+        environment: m::EnvironmentDescriptor,
+        awareness_registration: m::AwarenessRegistration,
         ticket: transport::Ticket,
         session: transport::Session,
         events: Box<Updates>,
@@ -536,12 +539,22 @@ impl Owner {
             Event::Attach {
                 peer,
                 host_name,
+                environment,
+                awareness_registration,
                 ticket,
                 session,
                 events,
                 complete,
             } => {
-                self.attach(peer, host_name, ticket, session, *events);
+                self.attach(
+                    peer,
+                    host_name,
+                    environment,
+                    awareness_registration,
+                    ticket,
+                    session,
+                    *events,
+                );
                 let _ = complete.send(());
             }
             Event::Stream {
@@ -624,6 +637,8 @@ impl Owner {
         &mut self,
         peer: Peer,
         host_name: String,
+        environment: m::EnvironmentDescriptor,
+        awareness_registration: m::AwarenessRegistration,
         ticket: transport::Ticket,
         session: transport::Session,
         events: Updates,
@@ -639,6 +654,8 @@ impl Owner {
         self.epoch += 1;
         self.state.connected = true;
         self.state.host_name = Some(host_name);
+        self.state.environment = Some(environment);
+        self.state.awareness = None;
         self.state.error = None;
         let epoch = self.epoch;
         let mut network = Network {
@@ -668,6 +685,15 @@ impl Owner {
         }
         self.subscribe_terminal_metadata();
         self.subscribe_keybindings();
+        if self
+            .state
+            .environment
+            .as_ref()
+            .is_some_and(|environment| environment.capabilities.agent_activity_publishing)
+        {
+            self.subscribe_awareness();
+            self.job(Call::RegisterAwareness(awareness_registration), None, None);
+        }
         self.refresh();
         self.state_outbox().reconnected();
         self.drain();
@@ -706,6 +732,7 @@ impl Owner {
     fn disconnected(&mut self, error: String) {
         self.interrupt_uploads();
         self.state.connected = false;
+        self.state.awareness = None;
         self.state.error = Some(error);
         Arc::make_mut(&mut self.state.shell).disconnected();
         if let Some(archived) = self.state.archived.as_mut() {

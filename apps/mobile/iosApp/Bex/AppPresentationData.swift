@@ -17,3 +17,28 @@ struct HostProfile: Codable, Identifiable {
         try UserDefaults.standard.set(JSONEncoder().encode(profiles), forKey: "bex.hosts.iroh")
     }
 }
+
+struct EnvironmentActivityRow: Identifiable {
+    let environmentId: String
+    let threadId: String
+    let title: String
+    let headline: String
+    let detail: String?
+    let phase: String
+    let updatedAtMs: Int64
+
+    var id: String { "\(environmentId):\(threadId):\(updatedAtMs)" }
+}
+
+struct EnvironmentRow: Identifiable {
+    let profileId: String
+    let label: String
+    let state: String
+    let platform: String?
+    let machine: String?
+    let capabilities: [String]
+    let reconnectReason: String?
+    let activities: [EnvironmentActivityRow]
+
+    var id: String { profileId }
+}

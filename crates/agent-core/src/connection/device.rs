@@ -106,7 +106,11 @@ impl Owner {
                 .map_err(invalid)?;
         draft.text = selection.text;
         if let Some(attachment) = selection.attach_thread {
-            let environment = self.state.host_name.clone().unwrap_or_default();
+            let environment = self
+                .state
+                .context_environment_id()
+                .unwrap_or_default()
+                .to_owned();
             push_context_record(&mut draft, attachment.record(&environment));
         }
         if let Some(mode) = selection.interaction_mode {
@@ -163,7 +167,11 @@ impl Owner {
             .iter()
             .filter_map(|record| context_id(record).map(str::to_owned))
             .collect();
-        let environment = self.state.host_name.clone().unwrap_or_default();
+        let environment = self
+            .state
+            .context_environment_id()
+            .unwrap_or_default()
+            .to_owned();
         let mut references = vec![];
         for thread_id in thread_ids {
             let Some(title) = ThreadId::new(thread_id.clone())

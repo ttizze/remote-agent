@@ -2704,6 +2704,7 @@ fn a_truncated_diff_with_its_file_list_is_read_file_by_file() {
     let preview = |owner: &mut Owner, millis: i64, source: w::DiffSource| {
         owner.state.sources.diff_preview = Some(DiffPreviewEntry {
             request: request.clone(),
+            active_cwd: request.cwd.clone(),
             result: None,
             error: None,
         });
