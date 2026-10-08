@@ -2266,8 +2266,8 @@ impl Owner {
                 Call::DeviceRecordingStart(d::DeviceRecordingStartInput { thread_id: self.selected()?, host_id, device_id, format: device_recording_format(&format)? }),
                 None,
             ),
-            Intent::StopDeviceRecording { host_id, device_id } => Next::call(
-                Call::DeviceRecordingStop(d::DeviceRecordingStopInput { thread_id: self.selected()?, host_id, device_id }),
+            Intent::StopDeviceRecording { host_id, device_id, recording_id, session_epoch } => Next::call(
+                Call::DeviceRecordingStop(d::DeviceRecordingStopInput { thread_id: self.selected()?, host_id, device_id, recording_id, session_epoch }),
                 None,
             ),
             Intent::SubscribeDevice => {

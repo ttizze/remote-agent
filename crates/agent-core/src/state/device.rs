@@ -250,7 +250,15 @@ impl DeviceState {
                                 && session.session_epoch == screen.session_epoch
                         })
                 });
-                self.recordings.retain(|(thread, host, device), _| active.contains(&(thread.clone(), host.clone(), device.clone())));
+                self.recordings.retain(|(thread, host, device), status| {
+                    active.contains(&(thread.clone(), host.clone(), device.clone()))
+                        && self.sessions.iter().any(|session| {
+                            session.thread_id.to_string() == thread.as_str()
+                                && session.host_id == host.as_str()
+                                && session.device_id == device.as_str()
+                                && session.session_epoch == status.session_epoch
+                        })
+                });
                 if self.last_recording.as_ref().is_some_and(|recording| {
                     !active.contains(&(
                         recording.status.thread_id.to_string(),
@@ -337,8 +345,30 @@ impl DeviceState {
             DeviceEvent::Recording(status) => {
                 let key = (status.thread_id.to_string(), status.host_id.clone(), status.device_id.clone());
                 if status.active {
-                    self.recordings.insert(key, status);
-                } else {
+                    if self
+                        .sessions
+                        .iter()
+                        .find(|session| {
+                            session.thread_id == status.thread_id
+                                && session.host_id.as_str() == status.host_id.as_str()
+                                && session.device_id.as_str() == status.device_id.as_str()
+                        })
+                        .is_some_and(|session| session.session_epoch != status.session_epoch)
+                    {
+                        return;
+                    }
+                    if self
+                        .recordings
+                        .get(&key)
+                        .is_none_or(|current| status.recording_id >= current.recording_id)
+                    {
+                        self.recordings.insert(key, status);
+                    }
+                } else if self
+                    .recordings
+                    .get(&key)
+                    .is_some_and(|current| current.recording_id == status.recording_id)
+                {
                     self.recordings.remove(&key);
                 }
             }
@@ -348,8 +378,25 @@ impl DeviceState {
                     recording.status.host_id.clone(),
                     recording.status.device_id.clone(),
                 );
-                self.recordings.remove(&key);
-                self.last_recording = Some(recording);
+                if self
+                    .recordings
+                    .get(&key)
+                    .is_some_and(|current| current.recording_id == recording.status.recording_id)
+                {
+                    self.recordings.remove(&key);
+                }
+                if self
+                    .last_recording
+                    .as_ref()
+                    .is_none_or(|current| {
+                        let same_lifetime_key = current.status.thread_id == recording.status.thread_id
+                            && current.status.host_id == recording.status.host_id
+                            && current.status.device_id == recording.status.device_id;
+                        !same_lifetime_key || recording.status.recording_id >= current.status.recording_id
+                    })
+                {
+                    self.last_recording = Some(recording);
+                }
             }
         }
     }
@@ -455,6 +502,8 @@ mod tests {
             thread_id: current.thread_id.clone(),
             host_id: current.host_id.clone(),
             device_id: current.device_id.clone(),
+            recording_id: 1,
+            session_epoch: current.session_epoch.clone(),
             format: DeviceRecordingFormat::Mp4,
             file_name: "device.mp4".into(),
             mime_type: "video/mp4".into(),
@@ -619,7 +668,7 @@ mod tests {
             screen_id: Some(0),
         };
         state.apply_event(DeviceEvent::Video(frame));
-        let mut reopened = current;
+        let mut reopened = current.clone();
         reopened.opened_at = "1".into();
         reopened.session_epoch = "1".into();
         state.apply_event(DeviceEvent::State(DeviceServiceState {
@@ -629,6 +678,26 @@ mod tests {
         assert!(state.video_events.is_empty());
         assert!(state.video_frames.is_empty());
 
+        state.apply_event(DeviceEvent::Accessibility(DeviceAccessibilityTree {
+            host_id: current.host_id.clone(),
+            device_id: current.device_id.clone(),
+            session_epoch: current.session_epoch.clone(),
+            elements: vec![],
+            errors: vec![],
+            read_at: "stale".into(),
+        }));
+        state.apply_event(DeviceEvent::EventLog(DeviceEventLogEntry {
+            host_id: current.host_id.clone(),
+            device_id: current.device_id.clone(),
+            session_epoch: current.session_epoch,
+            id: 2,
+            timestamp: "stale".into(),
+            kind: "stale".into(),
+            summary: "stale".into(),
+        }));
+        assert!(state.accessibility.is_empty());
+        assert!(state.event_log.is_empty());
+        assert!(state.accepts_device_event(&reopened.host_id, &reopened.device_id, &reopened.session_epoch));
         let next = DeviceVideoFrame {
             thread_id: reopened.thread_id,
             session_epoch: reopened.session_epoch,
@@ -652,5 +721,89 @@ mod tests {
         };
         state.apply_event(DeviceEvent::Video(next));
         assert_eq!(state.video_events.values().next().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn recording_completion_survives_session_removal() {
+        let current = session("thread", "host", "device");
+        let mut state = DeviceState::default();
+        state.apply_event(DeviceEvent::State(DeviceServiceState {
+            sessions: vec![current.clone()],
+            ..DeviceServiceState::default()
+        }));
+        let status = DeviceRecordingStatus {
+            thread_id: current.thread_id.clone(),
+            host_id: current.host_id.clone(),
+            device_id: current.device_id.clone(),
+            recording_id: 1,
+            session_epoch: current.session_epoch.clone(),
+            format: DeviceRecordingFormat::Mp4,
+            file_name: "device.mp4".into(),
+            mime_type: "video/mp4".into(),
+            active: true,
+            started_at: "0".into(),
+            frame_count: 1,
+            byte_count: 2,
+            error: None,
+        };
+        state.apply_event(DeviceEvent::Recording(status.clone()));
+        state.apply_event(DeviceEvent::State(DeviceServiceState::default()));
+        state.apply_event(DeviceEvent::RecordingComplete(DeviceRecording {
+            status: DeviceRecordingStatus { active: false, ..status },
+            bytes: vec![1, 2],
+        }));
+        assert_eq!(state.last_recording.as_ref().unwrap().bytes, vec![1, 2]);
+    }
+
+    #[test]
+    fn late_completion_cannot_remove_a_new_recording_lifetime() {
+        let old = session("thread", "host", "device");
+        let mut state = DeviceState::default();
+        state.apply_event(DeviceEvent::State(DeviceServiceState {
+            sessions: vec![old.clone()],
+            ..DeviceServiceState::default()
+        }));
+        let old_status = DeviceRecordingStatus {
+            thread_id: old.thread_id.clone(),
+            host_id: old.host_id.clone(),
+            device_id: old.device_id.clone(),
+            recording_id: 1,
+            session_epoch: old.session_epoch.clone(),
+            format: DeviceRecordingFormat::Mp4,
+            file_name: "old.mp4".into(),
+            mime_type: "video/mp4".into(),
+            active: true,
+            started_at: "old".into(),
+            frame_count: 1,
+            byte_count: 1,
+            error: None,
+        };
+        state.apply_event(DeviceEvent::Recording(old_status.clone()));
+
+        let current = DeviceSession { session_epoch: "new".into(), ..old.clone() };
+        state.apply_event(DeviceEvent::State(DeviceServiceState {
+            sessions: vec![current.clone()],
+            ..DeviceServiceState::default()
+        }));
+        let new_status = DeviceRecordingStatus {
+            recording_id: 2,
+            session_epoch: current.session_epoch.clone(),
+            file_name: "new.mp4".into(),
+            ..old_status.clone()
+        };
+        state.apply_event(DeviceEvent::Recording(new_status.clone()));
+        state.apply_event(DeviceEvent::RecordingComplete(DeviceRecording {
+            status: DeviceRecordingStatus { active: false, ..old_status },
+            bytes: vec![1],
+        }));
+        assert_eq!(state.recordings.get(&("thread".into(), "host".into(), "device".into())).map(|status| status.recording_id), Some(2));
+        assert_eq!(state.last_recording.as_ref().map(|recording| recording.bytes.clone()), Some(vec![1]));
+
+        state.apply_event(DeviceEvent::RecordingComplete(DeviceRecording {
+            status: DeviceRecordingStatus { active: false, ..new_status },
+            bytes: vec![2],
+        }));
+        assert!(state.recordings.is_empty());
+        assert_eq!(state.last_recording.as_ref().map(|recording| recording.bytes.clone()), Some(vec![2]));
     }
 }

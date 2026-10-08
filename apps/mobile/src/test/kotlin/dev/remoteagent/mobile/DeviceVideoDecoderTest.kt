@@ -9,6 +9,47 @@ import org.junit.Test
 
 class DeviceVideoDecoderTest {
     @Test
+    fun resetGateBoundsWorkerCommandsWhileLatestDimensionsWin() {
+        val gate = DeviceVideoResetGate()
+        val first = DeviceResetRequest("host/device/0", 1080, 1920)
+        val resized = DeviceResetRequest("host/device/0", 1920, 1080)
+        val fakeWorker = mutableListOf<() -> Unit>()
+        val applied = mutableListOf<DeviceResetRequest>()
+        var posted = 0
+
+        fun request(value: DeviceResetRequest) {
+            if (gate.request(value)) {
+                posted += 1
+                fakeWorker += {
+                    while (true) {
+                        val current = gate.next() ?: break
+                        applied += current
+                        if (current == first) repeat(100) { request(resized) }
+                        if (!gate.finish(current)) break
+                    }
+                }
+            }
+        }
+
+        repeat(100) { request(first) }
+        assertEquals(1, posted)
+        assertEquals(1, fakeWorker.size)
+        assertEquals(first, gate.next())
+
+        // A resize arrives while the one queued worker command is applying. It updates
+        // the pending request and is consumed by that same command.
+        val worker = fakeWorker.removeFirst()
+        assertEquals(1, posted)
+        worker()
+        assertEquals(listOf(first, resized), applied)
+        assertTrue(fakeWorker.isEmpty())
+        assertEquals(1, posted)
+
+        repeat(100) { request(resized) }
+        assertEquals(1, posted)
+    }
+
+    @Test
     fun ingressGateDeduplicatesAndResyncsAfterBoundedOverflow() {
         val gate = DeviceVideoIngressGate(maxFrames = 2, maxBytes = 8)
         gate.reset("host/device/screen")
