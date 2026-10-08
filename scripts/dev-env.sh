@@ -21,8 +21,21 @@ if [[ -n $bex_build_root ]]; then
             [[ -L $bex_root/target && $(readlink "$bex_root/target") == "$bex_build_root/$bex_build_key" ]]
     fi
 fi
+# A dangling target link means the configured build volume is unavailable.
+# Fail before Cargo or Nix can create state through a broken path. When no
+# build root is configured, keep the conventional target directory usable.
+if [[ -L $bex_root/target && ! -e $bex_root/target ]]; then
+    printf 'Build target is unavailable: %s\n' "$bex_root/target" >&2
+    exit 1
+fi
+if [[ ! -e $bex_root/target ]]; then
+    mkdir -p "$bex_root/target"
+fi
+if [[ ! -d $bex_root/target ]]; then
+    printf 'Build target is not a directory: %s\n' "$bex_root/target" >&2
+    exit 1
+fi
 bex_seed_cargo=${CARGO_HOME:-$HOME/.cargo}
-export XDG_CACHE_HOME="$bex_root/target/tool-cache"
 bex_env_key=$({ git hash-object flake.nix flake.lock tools/kache/package.nix; uname -sm; } | git hash-object --stdin)
 bex_env_dir="$(git rev-parse --git-common-dir)/bex-dev-env/$bex_env_key"
 mkdir -p "$bex_env_dir"
@@ -64,8 +77,17 @@ if [[ -n $bex_original_build_top ]]; then
 else
     unset NIX_BUILD_TOP
 fi
-export CARGO_TARGET_DIR="$bex_root/target"
-export CARGO_HOME="$bex_root/target/cargo-home"
+if ! bex_target_dir=$(realpath "$bex_root/target"); then
+    printf 'Build target cannot be canonicalized: %s\n' "$bex_root/target" >&2
+    exit 1
+fi
+if [[ $bex_target_dir != /* || ! -d $bex_target_dir ]]; then
+    printf 'Canonical build target is unavailable: %s\n' "$bex_target_dir" >&2
+    exit 1
+fi
+export XDG_CACHE_HOME="$bex_target_dir/tool-cache"
+export CARGO_TARGET_DIR="$bex_target_dir"
+export CARGO_HOME="$bex_target_dir/cargo-home"
 bex_seed_key=$(git hash-object Cargo.lock tools/agent-peer/Cargo.lock | git hash-object --stdin)
 if [[ ! -f $CARGO_HOME/.seeded || $(< "$CARGO_HOME/.seeded") != "$bex_seed_key" ]]; then
     mkdir -p "$CARGO_HOME/registry" "$CARGO_HOME/git/db" "$CARGO_HOME/git/checkouts"
