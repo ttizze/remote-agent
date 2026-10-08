@@ -220,10 +220,11 @@ internal fun Composer(model: AndroidAppModel, composer: ComposerView, onOpenSett
                             AttachmentButton(model, composer.draftKey, enabled = !composer.editor.disabled)
                             ModelControl(composer, onOpenSettings)
                             composer.controls.model?.driver?.let { driver ->
-                                val provider = when (driver) {
-                                    Driver.CODEX -> ProviderKind.CODEX
-                                    Driver.CLAUDE -> ProviderKind.CLAUDE
-                                }
+                                val provider =
+                                    when (driver) {
+                                        Driver.CODEX -> ProviderKind.CODEX
+                                        Driver.CLAUDE -> ProviderKind.CLAUDE
+                                    }
                                 model.snapshot.composerUsageLimits(provider)?.let { limits ->
                                     UsageLimitsRow(limits) { model.navigate(Route.Usage) }
                                 }

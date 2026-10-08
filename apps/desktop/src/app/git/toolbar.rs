@@ -3,9 +3,8 @@ use crate::app::{Desktop, color, icon};
 use agent_core::{
     state::{Intent, RefScope},
     view::git::{
-        GitQuickActionKind, branch_label, change_request_terminology,
-        default_branch_action_copy, pull_label, requires_default_branch_confirmation,
-        resolve_quick_action,
+        GitQuickActionKind, branch_label, change_request_terminology, default_branch_action_copy,
+        pull_label, requires_default_branch_confirmation, resolve_quick_action,
     },
 };
 use gpui_kit::{
@@ -21,16 +20,14 @@ use gpui_kit::{
 pub(super) fn render(view: &Desktop, cx: &mut Context<Desktop>) -> AnyElement {
     let cwd = view.snapshot.cwd();
     let status = view.snapshot.git.status.get(&cwd);
-    let busy = view
-        .snapshot
-        .git
-        .actions
-        .values()
-        .any(|event| event.cwd == cwd && !matches!(
-            &event.kind,
-            agent_protocol::vcs::ActionProgressKind::ActionFinished { .. }
-                | agent_protocol::vcs::ActionProgressKind::ActionFailed { .. }
-        ));
+    let busy = view.snapshot.git.actions.values().any(|event| {
+        event.cwd == cwd
+            && !matches!(
+                &event.kind,
+                agent_protocol::vcs::ActionProgressKind::ActionFinished { .. }
+                    | agent_protocol::vcs::ActionProgressKind::ActionFailed { .. }
+            )
+    });
     let quick = resolve_quick_action(
         status,
         busy,
@@ -51,7 +48,11 @@ pub(super) fn render(view: &Desktop, cx: &mut Context<Desktop>) -> AnyElement {
             default_branch_action_copy(
                 action,
                 branch,
-                matches!(action, agent_core::view::git::GitAction::CommitPush | agent_core::view::git::GitAction::CommitPushPr),
+                matches!(
+                    action,
+                    agent_core::view::git::GitAction::CommitPush
+                        | agent_core::view::git::GitAction::CommitPushPr
+                ),
                 Some(change_request_terminology(
                     status
                         .source_control_provider
@@ -94,7 +95,10 @@ pub(super) fn render(view: &Desktop, cx: &mut Context<Desktop>) -> AnyElement {
                         move |_, _, cx| {
                             let cwd = refresh_cwd.clone();
                             let _ = refresh_owner.update(cx, |view, _| {
-                                view.perform(Intent::LoadVcsRefs { cwd, query: String::new() });
+                                view.perform(Intent::LoadVcsRefs {
+                                    cwd,
+                                    query: String::new(),
+                                });
                             });
                         },
                     ));
@@ -139,12 +143,22 @@ pub(super) fn render(view: &Desktop, cx: &mut Context<Desktop>) -> AnyElement {
                 .label(quick_label)
                 .ghost()
                 .small()
-                .text_color(if disabled { color("textMuted") } else { color("text") })
+                .text_color(if disabled {
+                    color("textMuted")
+                } else {
+                    color("text")
+                })
                 .disabled(disabled)
                 .on_click(cx.listener(move |view, _, window, cx| {
                     let intent = match quick_kind {
-                        GitQuickActionKind::RunAction => quick_action
-                            .map(|action| action_intent(action_cwd.clone(), action, project_id.clone(), thread_id.clone())),
+                        GitQuickActionKind::RunAction => quick_action.map(|action| {
+                            action_intent(
+                                action_cwd.clone(),
+                                action,
+                                project_id.clone(),
+                                thread_id.clone(),
+                            )
+                        }),
                         GitQuickActionKind::Pull => Some(pull_intent(action_cwd.clone())),
                         GitQuickActionKind::OpenPr
                         | GitQuickActionKind::OpenPublish

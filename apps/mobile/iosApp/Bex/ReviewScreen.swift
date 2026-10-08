@@ -288,7 +288,11 @@ private struct DiffFileView: View {
                                 .frame(maxWidth: wrapping ? .infinity : nil, alignment: .leading)
                         }
                         .foregroundStyle(row.kind == "@" ? AppTheme.muted : AppTheme.text)
-                        .frame(maxWidth: wrapping ? .infinity : nil, minHeight: AppTheme.codeLineHeight, alignment: .leading)
+                        .frame(
+                            maxWidth: wrapping ? .infinity : nil,
+                            minHeight: AppTheme.codeLineHeight,
+                            alignment: .leading
+                        )
                         .background(background(row.kind))
                     }
                 }

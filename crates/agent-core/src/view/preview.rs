@@ -1,8 +1,8 @@
 //! Pure Preview presentation and viewport decisions.
 use crate::state::{PreviewState, Snapshot};
 use agent_protocol::preview::{
-    validate_viewport_dimensions, DiscoveredLocalServer, PreviewSessionSnapshot,
-    PreviewViewportPreset, PreviewViewportSetting, PreviewZoom, PREVIEW_VIEWPORT_PRESETS,
+    DiscoveredLocalServer, PREVIEW_VIEWPORT_PRESETS, PreviewSessionSnapshot, PreviewViewportPreset,
+    PreviewViewportSetting, PreviewZoom, validate_viewport_dimensions,
 };
 
 /// Resolves the device-local browser defaults for a Preview opener. The Host
@@ -120,15 +120,29 @@ mod tests {
 
     #[test]
     fn fill_uses_resource_dimensions_and_freeform_uses_its_own_dimensions() {
-        assert_eq!(resolve_viewport(PreviewViewportSetting::Fill, 732, 611).unwrap(), (732, 611));
         assert_eq!(
-            resolve_viewport(PreviewViewportSetting::Freeform { width: 390, height: 844 }, 1, 1).unwrap(),
+            resolve_viewport(PreviewViewportSetting::Fill, 732, 611).unwrap(),
+            (732, 611)
+        );
+        assert_eq!(
+            resolve_viewport(
+                PreviewViewportSetting::Freeform {
+                    width: 390,
+                    height: 844
+                },
+                1,
+                1
+            )
+            .unwrap(),
             (390, 844)
         );
     }
 
     #[test]
     fn preview_empty_state_distinguishes_server_cards_from_no_results() {
-        assert_eq!(preview_state(&PreviewState::default()).empty_state, PreviewEmptyState::NoTab);
+        assert_eq!(
+            preview_state(&PreviewState::default()).empty_state,
+            PreviewEmptyState::NoTab
+        );
     }
 }

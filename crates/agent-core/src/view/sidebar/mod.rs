@@ -769,9 +769,7 @@ fn draft_rows(
         };
         let project_name = project_names.get(project).cloned();
         rows.push((
-            draft
-                .project_selected_at_ms
-                .or(draft.created_at_ms),
+            draft.project_selected_at_ms.or(draft.created_at_ms),
             SidebarDraftRow {
                 draft_key: key.clone(),
                 project_id: project.into(),

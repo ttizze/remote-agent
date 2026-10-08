@@ -3,9 +3,9 @@
 //! subscribe. Local reads are cheap and happen on every refresh; remote reads
 //! fetch and ask the host, so they follow the fetch interval, run once per
 //! checkout at a time, and back off when they fail.
+use super::canonical;
 use super::pull_requests::{BranchDetails, PullRequestLookup};
 use super::status::{UpstreamFetches, local_status, remote_status};
-use super::canonical;
 use crate::github::cli::GitHubCli;
 use agent_protocol::vcs::{VcsStatusLocal, VcsStatusRemote, VcsStatusStreamEvent};
 use agent_protocol::workspace::VcsStatus;
@@ -16,10 +16,10 @@ use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 use std::time::{Duration, Instant};
-use tokio::sync::broadcast;
 use tokio::sync::Notify;
-use tokio_util::task::AbortOnDropHandle;
+use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
+use tokio_util::task::AbortOnDropHandle;
 
 pub(crate) const DEFAULT_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 const REFRESH_FAILURE_BASE_DELAY: Duration = Duration::from_secs(30);
@@ -246,7 +246,10 @@ impl VcsStatusBroadcaster {
     }
 
     fn cached(&self, cwd: &str) -> Cached {
-        lock(&self.inner.cache).get(cwd).cloned().unwrap_or_default()
+        lock(&self.inner.cache)
+            .get(cwd)
+            .cloned()
+            .unwrap_or_default()
     }
 
     fn publish(&self, cwd: &str, event: VcsStatusStreamEvent) {
@@ -345,8 +348,12 @@ impl VcsStatusBroadcaster {
         {
             return Ok(recent.value.clone());
         }
-        let details =
-            remote_status(std::path::Path::new(cwd), &self.inner.fetches, refresh_upstream).await?;
+        let details = remote_status(
+            std::path::Path::new(cwd),
+            &self.inner.fetches,
+            refresh_upstream,
+        )
+        .await?;
         let remote = match details {
             None => None,
             Some(details) => {
@@ -622,14 +629,26 @@ mod tests {
     #[test]
     fn remote_refresh_failures_back_off_and_honor_larger_intervals() {
         let second = Duration::from_secs(1);
-        assert_eq!(remote_refresh_failure_delay(1, second), Duration::from_secs(30));
-        assert_eq!(remote_refresh_failure_delay(2, second), Duration::from_secs(60));
-        assert_eq!(remote_refresh_failure_delay(3, second), Duration::from_secs(120));
+        assert_eq!(
+            remote_refresh_failure_delay(1, second),
+            Duration::from_secs(30)
+        );
+        assert_eq!(
+            remote_refresh_failure_delay(2, second),
+            Duration::from_secs(60)
+        );
+        assert_eq!(
+            remote_refresh_failure_delay(3, second),
+            Duration::from_secs(120)
+        );
         assert_eq!(
             remote_refresh_failure_delay(1, Duration::from_secs(300)),
             Duration::from_secs(300)
         );
-        assert_eq!(remote_refresh_failure_delay(20, second), Duration::from_secs(900));
+        assert_eq!(
+            remote_refresh_failure_delay(20, second),
+            Duration::from_secs(900)
+        );
     }
 
     #[tokio::test]

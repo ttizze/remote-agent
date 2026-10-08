@@ -610,8 +610,11 @@ mod tests {
         assert!(model.blocks.iter().any(|block| {
             block.label == "Prompt" && block.value == "Review the complete output"
         }));
-        assert!(model.blocks.iter().any(|block| {
-            block.label == "Progress" && block.value == "Still reading"
-        }));
+        assert!(
+            model
+                .blocks
+                .iter()
+                .any(|block| { block.label == "Progress" && block.value == "Still reading" })
+        );
     }
 }

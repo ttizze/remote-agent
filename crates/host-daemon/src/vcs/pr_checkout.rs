@@ -247,11 +247,8 @@ pub(crate) async fn prepare(
                 // the checkout helper fast-forward or safely reset it.
                 let target = fetch_pull_request_head_commit(cwd, resolved.number).await?;
                 let head_before = resolve_commit(&existing, "HEAD")?;
-                let refreshed = refresh_checked_out_branch(
-                    &existing,
-                    &target,
-                    Some(head_before.as_str()),
-                )?;
+                let refreshed =
+                    refresh_checked_out_branch(&existing, &target, Some(head_before.as_str()))?;
                 if refreshed.on_target {
                     restore_pull_request_upstream(github, &existing, &record, &branch).await;
                 }
@@ -269,7 +266,9 @@ pub(crate) async fn prepare(
                 } else {
                     PathBuf::from(worktree_directory)
                 };
-                parent.join("pull-request").join(resolved.number.to_string())
+                parent
+                    .join("pull-request")
+                    .join(resolved.number.to_string())
             });
             let path = canonical_path(&path);
             if !path.is_dir() {
@@ -306,7 +305,9 @@ pub(crate) async fn publish(
     github: Option<&GitHubCli>,
     request: &agent_protocol::vcs::PublishRepository,
 ) -> Result<agent_protocol::vcs::PublishedRepository> {
-    use agent_protocol::vcs::{CloneProtocol, PublishStatus, RepositoryInfo, SourceControlProviderKind};
+    use agent_protocol::vcs::{
+        CloneProtocol, PublishStatus, RepositoryInfo, SourceControlProviderKind,
+    };
     if request.provider != SourceControlProviderKind::Github {
         return Err(anyhow!("Only GitHub repositories can be published."));
     }
@@ -314,7 +315,12 @@ pub(crate) async fn publish(
     let cwd = Path::new(&request.cwd);
     let (_, host) = super::github_scope(cwd);
     let urls = github
-        .create_repository(cwd, &request.repository, request.visibility, host.as_deref())
+        .create_repository(
+            cwd,
+            &request.repository,
+            request.visibility,
+            host.as_deref(),
+        )
         .await
         .map_err(|error| provider_error("publishRepository", error))?;
     let remote_name = request.remote_name.as_deref().unwrap_or("origin");
@@ -341,7 +347,12 @@ pub(crate) async fn publish(
             status: PublishStatus::RemoteAdded,
         });
     }
-    let args = ["push", "--set-upstream", remote_name.as_str(), branch.as_str()];
+    let args = [
+        "push",
+        "--set-upstream",
+        remote_name.as_str(),
+        branch.as_str(),
+    ];
     let pushed = execute(Execute {
         env: &NON_INTERACTIVE_ENV,
         timeout: Some(Duration::from_secs(5 * 60)),
@@ -393,8 +404,14 @@ mod tests {
 
     #[test]
     fn same_repository_checkout_keeps_the_head_branch() {
-        assert_eq!(checkout_branch(&record("feature/page", Some(false))), "feature/page");
-        assert_eq!(checkout_branch(&record("feature/page", None)), "feature/page");
+        assert_eq!(
+            checkout_branch(&record("feature/page", Some(false))),
+            "feature/page"
+        );
+        assert_eq!(
+            checkout_branch(&record("feature/page", None)),
+            "feature/page"
+        );
     }
 
     #[test]

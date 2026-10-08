@@ -285,7 +285,10 @@ fn terminal_message_chips_keep_the_target_and_selected_output() {
     let chip = &context_chips(text, Some(&context), &[], &[], ContextChipSurface::Message)[0];
     assert_eq!(chip.kind, ContextChipKind::Terminal);
     assert_eq!(chip.terminal_id.as_deref(), Some("term-2"));
-    assert_eq!(chip.preview_text.as_deref(), Some("$ pwd\n/workspace\n$ git status"));
+    assert_eq!(
+        chip.preview_text.as_deref(),
+        Some("$ pwd\n/workspace\n$ git status")
+    );
     assert_eq!(chip.details, ContextChipDetails::Popover);
 }
 

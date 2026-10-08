@@ -150,9 +150,7 @@ impl HookTrace {
             self.started.clear();
         }
         if length <= self.processed as u64
-            || file
-                .seek(SeekFrom::Start(self.processed as u64))
-                .is_err()
+            || file.seek(SeekFrom::Start(self.processed as u64)).is_err()
         {
             return;
         }
@@ -427,50 +425,49 @@ async fn run_command(
     let process_cancel = cancel.take().unwrap_or_else(CancellationToken::new);
     let reader_cancel = CancellationToken::new();
     let (sender, mut lines) = tokio::sync::mpsc::channel(OUTPUT_CHANNEL_CAPACITY);
-    let stdout_task = child
-        .stdout
-        .take()
-        .map(|pipe| tokio::spawn(read_lines(
+    let stdout_task = child.stdout.take().map(|pipe| {
+        tokio::spawn(read_lines(
             pipe,
             OutputStream::Stdout,
             sender.clone(),
             reader_cancel.clone(),
-        )));
-    let stderr_task = child
-        .stderr
-        .take()
-        .map(|pipe| tokio::spawn(read_lines(
+        ))
+    });
+    let stderr_task = child.stderr.take().map(|pipe| {
+        tokio::spawn(read_lines(
             pipe,
             OutputStream::Stderr,
             sender,
             reader_cancel.clone(),
-        )));
+        ))
+    });
     let mut stdout_task = stdout_task;
     let mut stderr_task = stderr_task;
     let deadline = timeout.map(|timeout| tokio::time::Instant::now() + timeout);
     let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
     let mut stdout_truncated = false;
     let mut status = None;
-    let mut collect = |stream: OutputStream,
-                       line: Vec<u8>,
-                       progress: &mut Option<&mut (dyn FnMut(Progress) + Send)>| {
-        let buffer = match stream {
-            OutputStream::Stdout => &mut stdout,
-            OutputStream::Stderr => &mut stderr,
-        };
-        let remaining = max_output_bytes.saturating_sub(buffer.len());
-        let retained = remaining.min(line.len());
-        buffer.extend_from_slice(&line[..retained]);
-        if retained < line.len() && stream == OutputStream::Stdout {
-            stdout_truncated = true;
-        }
-        if let Some(progress) = progress.as_mut() {
-            let text = String::from_utf8_lossy(&line).trim_end().to_owned();
-            if !text.trim().is_empty() {
-                progress(Progress::Output { stream, line: text });
+    let mut collect =
+        |stream: OutputStream,
+         line: Vec<u8>,
+         progress: &mut Option<&mut (dyn FnMut(Progress) + Send)>| {
+            let buffer = match stream {
+                OutputStream::Stdout => &mut stdout,
+                OutputStream::Stderr => &mut stderr,
+            };
+            let remaining = max_output_bytes.saturating_sub(buffer.len());
+            let retained = remaining.min(line.len());
+            buffer.extend_from_slice(&line[..retained]);
+            if retained < line.len() && stream == OutputStream::Stdout {
+                stdout_truncated = true;
             }
-        }
-    };
+            if let Some(progress) = progress.as_mut() {
+                let text = String::from_utf8_lossy(&line).trim_end().to_owned();
+                if !text.trim().is_empty() {
+                    progress(Progress::Output { stream, line: text });
+                }
+            }
+        };
     let mut ticker = tokio::time::interval(TRACE_POLL);
     // Reads until both pipes close; the exit status may arrive first.
     loop {
@@ -613,8 +610,11 @@ mod tests {
         let hooks = cwd.join(".git").join("hooks");
         std::fs::create_dir_all(&hooks).unwrap();
         let hook = hooks.join("pre-commit");
-        std::fs::write(&hook, "#!/bin/sh\necho checking formatting\necho lint >&2\nexit 0\n")
-            .unwrap();
+        std::fs::write(
+            &hook,
+            "#!/bin/sh\necho checking formatting\necho lint >&2\nexit 0\n",
+        )
+        .unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -645,9 +645,15 @@ mod tests {
             })
             .collect();
         assert!(kinds.contains(&"start:pre-commit".to_owned()), "{kinds:?}");
-        assert!(kinds.contains(&"Stdout:checking formatting".to_owned()), "{kinds:?}");
+        assert!(
+            kinds.contains(&"Stdout:checking formatting".to_owned()),
+            "{kinds:?}"
+        );
         assert!(kinds.contains(&"Stderr:lint".to_owned()), "{kinds:?}");
-        assert!(kinds.contains(&"finish:pre-commit:Some(0)".to_owned()), "{kinds:?}");
+        assert!(
+            kinds.contains(&"finish:pre-commit:Some(0)".to_owned()),
+            "{kinds:?}"
+        );
     }
 
     #[tokio::test]
@@ -708,7 +714,10 @@ mod tests {
             .await
             .expect("cancellation left the process owned forever")
             .expect_err("a cancelled process must return an error");
-        assert!(error.downcast_ref::<CommandCancelled>().is_some(), "{error}");
+        assert!(
+            error.downcast_ref::<CommandCancelled>().is_some(),
+            "{error}"
+        );
     }
 
     #[cfg(unix)]

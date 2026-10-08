@@ -207,8 +207,12 @@ pub enum BackgroundScope {
         #[serde(rename = "instanceId", skip_serializing_if = "Option::is_none")]
         instance_id: Option<String>,
     },
-    VcsStatus { cwd: String },
-    GitRefs { cwd: String },
+    VcsStatus {
+        cwd: String,
+    },
+    GitRefs {
+        cwd: String,
+    },
     Diagnostics,
     Thread {
         #[serde(rename = "threadId")]
@@ -412,14 +416,15 @@ pub fn remove_rpc_client(
 ) -> BTreeMap<String, ClientActivityLease> {
     leases
         .iter()
-        .filter(|(_, lease)| {
-            lease.session_id != session_id || lease.rpc_client_id != rpc_client_id
-        })
+        .filter(|(_, lease)| lease.session_id != session_id || lease.rpc_client_id != rpc_client_id)
         .map(|(key, lease)| (key.clone(), lease.clone()))
         .collect()
 }
 
-pub fn host_power_constrained(power: &HostPowerSnapshot, policy: &BackgroundActivityPolicy) -> bool {
+pub fn host_power_constrained(
+    power: &HostPowerSnapshot,
+    policy: &BackgroundActivityPolicy,
+) -> bool {
     if power.stale {
         return false;
     }
@@ -444,7 +449,9 @@ pub fn client_power_constrained(
 }
 
 pub fn lease_foreground(lease: &ClientActivityLease, now: &Timestamp) -> bool {
-    lease_active(lease, now.millis()) && lease.visible && (lease.focused || lease.recently_interacted)
+    lease_active(lease, now.millis())
+        && lease.visible
+        && (lease.focused || lease.recently_interacted)
 }
 
 pub fn lease_may_run_scoped_work(
@@ -454,7 +461,10 @@ pub fn lease_may_run_scoped_work(
     policy: &BackgroundActivityPolicy,
 ) -> bool {
     lease_active(lease, now.millis())
-        && lease.scopes.iter().any(|candidate| scope_key(candidate) == scope_key(scope))
+        && lease
+            .scopes
+            .iter()
+            .any(|candidate| scope_key(candidate) == scope_key(scope))
         && !client_power_constrained(lease, policy)
         && (matches!(policy.profile, BackgroundActivityProfile::Performance)
             || lease_foreground(lease, now))
@@ -512,14 +522,20 @@ pub struct BackgroundPolicySnapshot {
     pub updated_at: Timestamp,
 }
 
-pub fn background_work_due(last_run: Option<&Timestamp>, now: &Timestamp, interval_ms: u64) -> bool {
+pub fn background_work_due(
+    last_run: Option<&Timestamp>,
+    now: &Timestamp,
+    interval_ms: u64,
+) -> bool {
     if interval_ms == 0 {
         return false;
     }
     match last_run {
         None => true,
-        Some(last) => now.millis() < last.millis()
-            || now.millis().saturating_sub(last.millis()) >= interval_ms as i64,
+        Some(last) => {
+            now.millis() < last.millis()
+                || now.millis().saturating_sub(last.millis()) >= interval_ms as i64
+        }
     }
 }
 
@@ -662,7 +678,9 @@ impl HostResourcesSnapshot {
         self.cpu_count > 0
             && self.total_memory_bytes > 0
             && self.available_memory_bytes <= self.total_memory_bytes
-            && self.cpu_utilization.is_none_or(|value| value.is_finite() && (0.0..=1.0).contains(&value))
+            && self
+                .cpu_utilization
+                .is_none_or(|value| value.is_finite() && (0.0..=1.0).contains(&value))
     }
 }
 
@@ -1152,10 +1170,15 @@ pub struct TraceDiagnosticsResult {
 }
 
 fn json_string(value: Option<&Value>) -> Option<String> {
-    value.and_then(Value::as_str).map(str::to_owned).filter(|s| !s.trim().is_empty())
+    value
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .filter(|s| !s.trim().is_empty())
 }
 fn json_number(value: Option<&Value>) -> Option<f64> {
-    value.and_then(Value::as_f64).filter(|value| value.is_finite())
+    value
+        .and_then(Value::as_f64)
+        .filter(|value| value.is_finite())
 }
 fn nanos_timestamp(value: Option<&Value>) -> Option<Timestamp> {
     let text = json_string(value)?;
@@ -1231,8 +1254,7 @@ impl TraceDiagnosticsAggregator {
             self.parse_error_count += 1;
             return;
         };
-        let Some(name) = json_string(object.get("name"))
-        else {
+        let Some(name) = json_string(object.get("name")) else {
             self.parse_error_count += 1;
             return;
         };
@@ -1261,7 +1283,11 @@ impl TraceDiagnosticsAggregator {
         }) {
             self.first_span_at = started_at;
         }
-        if self.last_span_at.as_ref().map_or(true, |old| &ended_at > old) {
+        if self
+            .last_span_at
+            .as_ref()
+            .map_or(true, |old| &ended_at > old)
+        {
             self.last_span_at = Some(ended_at.clone());
         }
         let exit = object.get("exit").and_then(Value::as_object);
@@ -1273,21 +1299,58 @@ impl TraceDiagnosticsAggregator {
         if duration_ms >= self.slow_span_threshold_ms {
             self.slow_span_count += 1;
         }
-        let summary = self.spans_by_name.entry(name.clone()).or_insert(TraceSpanSummary {
-            name: name.clone(), count: 0, failure_count: 0, total_duration_ms: 0.0, average_duration_ms: 0.0, max_duration_ms: 0.0,
-        });
+        let summary = self
+            .spans_by_name
+            .entry(name.clone())
+            .or_insert(TraceSpanSummary {
+                name: name.clone(),
+                count: 0,
+                failure_count: 0,
+                total_duration_ms: 0.0,
+                average_duration_ms: 0.0,
+                max_duration_ms: 0.0,
+            });
         summary.count += 1;
         summary.failure_count += u64::from(is_failure);
         summary.total_duration_ms += duration_ms;
         summary.average_duration_ms = summary.total_duration_ms / summary.count as f64;
         summary.max_duration_ms = summary.max_duration_ms.max(duration_ms);
-        let occurrence = TraceSpanOccurrence { name: name.clone(), duration_ms, ended_at: ended_at.clone(), trace_id: trace_id.clone(), span_id: span_id.clone() };
+        let occurrence = TraceSpanOccurrence {
+            name: name.clone(),
+            duration_ms,
+            ended_at: ended_at.clone(),
+            trace_id: trace_id.clone(),
+            span_id: span_id.clone(),
+        };
         insert_slowest(&mut self.slowest_spans, occurrence.clone());
         if is_failure {
-            let cause = exit.and_then(|value| json_string(value.get("cause"))).unwrap_or_else(|| "Failure".into());
-            insert_latest(&mut self.latest_failures, TraceRecentFailure { name: name.clone(), duration_ms, ended_at: ended_at.clone(), trace_id: trace_id.clone(), span_id: span_id.clone(), cause: cause.clone() }, |left, right| right.ended_at.cmp(&left.ended_at));
+            let cause = exit
+                .and_then(|value| json_string(value.get("cause")))
+                .unwrap_or_else(|| "Failure".into());
+            insert_latest(
+                &mut self.latest_failures,
+                TraceRecentFailure {
+                    name: name.clone(),
+                    duration_ms,
+                    ended_at: ended_at.clone(),
+                    trace_id: trace_id.clone(),
+                    span_id: span_id.clone(),
+                    cause: cause.clone(),
+                },
+                |left, right| right.ended_at.cmp(&left.ended_at),
+            );
             let key = format!("{name}\u{0}{cause}");
-            let existing = self.failures_by_key.entry(key).or_insert(TraceFailureSummary { name: name.clone(), cause: cause.clone(), count: 0, last_seen_at: ended_at.clone(), trace_id: trace_id.clone(), span_id: span_id.clone() });
+            let existing = self
+                .failures_by_key
+                .entry(key)
+                .or_insert(TraceFailureSummary {
+                    name: name.clone(),
+                    cause: cause.clone(),
+                    count: 0,
+                    last_seen_at: ended_at.clone(),
+                    trace_id: trace_id.clone(),
+                    span_id: span_id.clone(),
+                });
             existing.count += 1;
             if ended_at > existing.last_seen_at {
                 existing.last_seen_at = ended_at.clone();
@@ -1297,14 +1360,37 @@ impl TraceDiagnosticsAggregator {
         }
         if let Some(events) = object.get("events").and_then(Value::as_array) {
             for event in events {
-                let Some(event) = event.as_object() else { continue; };
-                let Some(attributes) = event.get("attributes").and_then(Value::as_object) else { continue; };
-                let Some(level) = json_string(attributes.get("effect.logLevel")) else { continue; };
+                let Some(event) = event.as_object() else {
+                    continue;
+                };
+                let Some(attributes) = event.get("attributes").and_then(Value::as_object) else {
+                    continue;
+                };
+                let Some(level) = json_string(attributes.get("effect.logLevel")) else {
+                    continue;
+                };
                 *self.log_level_counts.entry(level.clone()).or_default() += 1;
-                if !matches!(level.to_ascii_lowercase().as_str(), "warning" | "warn" | "error" | "fatal") { continue; }
-                let seen_at = nanos_timestamp(event.get("timeUnixNano")).unwrap_or_else(|| ended_at.clone());
+                if !matches!(
+                    level.to_ascii_lowercase().as_str(),
+                    "warning" | "warn" | "error" | "fatal"
+                ) {
+                    continue;
+                }
+                let seen_at =
+                    nanos_timestamp(event.get("timeUnixNano")).unwrap_or_else(|| ended_at.clone());
                 let message = json_string(event.get("name")).unwrap_or_else(|| "Log event".into());
-                insert_latest(&mut self.latest_warning_and_error_logs, TraceLogEvent { span_name: name.clone(), level, message, seen_at, trace_id: trace_id.clone(), span_id: span_id.clone() }, |left, right| right.seen_at.cmp(&left.seen_at));
+                insert_latest(
+                    &mut self.latest_warning_and_error_logs,
+                    TraceLogEvent {
+                        span_name: name.clone(),
+                        level,
+                        message,
+                        seen_at,
+                        trace_id: trace_id.clone(),
+                        span_id: span_id.clone(),
+                    },
+                    |left, right| right.seen_at.cmp(&left.seen_at),
+                );
             }
         }
     }
@@ -1318,21 +1404,41 @@ impl TraceDiagnosticsAggregator {
         partial_failure: Option<bool>,
     ) -> TraceDiagnosticsResult {
         let mut top_spans_by_count: Vec<_> = self.spans_by_name.into_values().collect();
-        top_spans_by_count.sort_by(|left, right| right.count.cmp(&left.count).then_with(|| right.max_duration_ms.total_cmp(&left.max_duration_ms)));
+        top_spans_by_count.sort_by(|left, right| {
+            right
+                .count
+                .cmp(&left.count)
+                .then_with(|| right.max_duration_ms.total_cmp(&left.max_duration_ms))
+        });
         top_spans_by_count.truncate(TRACE_TOP_LIMIT);
         let mut common_failures: Vec<_> = self.failures_by_key.into_values().collect();
-        common_failures.sort_by(|left, right| right.count.cmp(&left.count).then_with(|| right.last_seen_at.cmp(&left.last_seen_at)));
+        common_failures.sort_by(|left, right| {
+            right
+                .count
+                .cmp(&left.count)
+                .then_with(|| right.last_seen_at.cmp(&left.last_seen_at))
+        });
         common_failures.truncate(TRACE_TOP_LIMIT);
         TraceDiagnosticsResult {
-            trace_file_path: trace_file_path.into(), scanned_file_paths, read_at,
-            record_count: self.record_count, parse_error_count: self.parse_error_count,
-            first_span_at: self.first_span_at, last_span_at: self.last_span_at,
-            failure_count: self.failure_count, interruption_count: self.interruption_count,
-            slow_span_threshold_ms: self.slow_span_threshold_ms, slow_span_count: self.slow_span_count,
-            log_level_counts: self.log_level_counts, top_spans_by_count, slowest_spans: self.slowest_spans,
-            common_failures, latest_failures: self.latest_failures,
+            trace_file_path: trace_file_path.into(),
+            scanned_file_paths,
+            read_at,
+            record_count: self.record_count,
+            parse_error_count: self.parse_error_count,
+            first_span_at: self.first_span_at,
+            last_span_at: self.last_span_at,
+            failure_count: self.failure_count,
+            interruption_count: self.interruption_count,
+            slow_span_threshold_ms: self.slow_span_threshold_ms,
+            slow_span_count: self.slow_span_count,
+            log_level_counts: self.log_level_counts,
+            top_spans_by_count,
+            slowest_spans: self.slowest_spans,
+            common_failures,
+            latest_failures: self.latest_failures,
             latest_warning_and_error_logs: self.latest_warning_and_error_logs,
-            partial_failure, error,
+            partial_failure,
+            error,
         }
     }
 }
@@ -1373,7 +1479,9 @@ mod tests {
             low_power_mode: Some(BackgroundBooleanState::Unknown),
             battery_state: Some(BackgroundBatteryState::Unknown),
             network_type: None,
-            scopes: vec![BackgroundScope::VcsStatus { cwd: "/repo".into() }],
+            scopes: vec![BackgroundScope::VcsStatus {
+                cwd: "/repo".into(),
+            }],
             ttl_ms: Some(45_000),
             observed_at: at(1_000),
         };
@@ -1383,15 +1491,33 @@ mod tests {
 
     #[test]
     fn policy_presets_match_background_activity_defaults() {
-        assert_eq!(BackgroundActivityPolicy::preset(BackgroundActivityProfile::Balanced).automatic_git_fetch_interval_ms, 30_000);
-        assert_eq!(BackgroundActivityPolicy::preset(BackgroundActivityProfile::Performance).provider_health_refresh_interval_ms, 60_000);
-        assert_eq!(BackgroundActivityPolicy::preset(BackgroundActivityProfile::BatterySaver).automatic_git_fetch_interval_ms, 0);
+        assert_eq!(
+            BackgroundActivityPolicy::preset(BackgroundActivityProfile::Balanced)
+                .automatic_git_fetch_interval_ms,
+            30_000
+        );
+        assert_eq!(
+            BackgroundActivityPolicy::preset(BackgroundActivityProfile::Performance)
+                .provider_health_refresh_interval_ms,
+            60_000
+        );
+        assert_eq!(
+            BackgroundActivityPolicy::preset(BackgroundActivityProfile::BatterySaver)
+                .automatic_git_fetch_interval_ms,
+            0
+        );
     }
 
     #[test]
     fn stale_host_values_do_not_gate_work() {
         let policy = BackgroundActivityPolicy::preset(BackgroundActivityProfile::BatterySaver);
-        let power = HostPowerSnapshot { locked: BackgroundBooleanState::True, on_battery: BackgroundBooleanState::True, low_power_mode: BackgroundBooleanState::True, thermal_state: HostPowerThermalState::Critical, ..HostPowerSnapshot::unknown(at(1_000)) };
+        let power = HostPowerSnapshot {
+            locked: BackgroundBooleanState::True,
+            on_battery: BackgroundBooleanState::True,
+            low_power_mode: BackgroundBooleanState::True,
+            thermal_state: HostPowerThermalState::Critical,
+            ..HostPowerSnapshot::unknown(at(1_000))
+        };
         assert!(!host_power_constrained(&power, &policy));
     }
 
@@ -1417,20 +1543,46 @@ mod tests {
     #[test]
     fn scoped_work_requires_matching_foreground_demand_except_performance() {
         let balanced = BackgroundActivityPolicy::preset(BackgroundActivityProfile::Balanced);
-        let lease = report(|report| { report.focused = false; report.visible = false; })
-            .lease_at("session", 1, &balanced, &at(1_000))
-            .unwrap();
-        let scope = BackgroundScope::VcsStatus { cwd: "/repo".into() };
-        assert!(!lease_may_run_scoped_work(&lease, &scope, &at(2_000), &balanced));
+        let lease = report(|report| {
+            report.focused = false;
+            report.visible = false;
+        })
+        .lease_at("session", 1, &balanced, &at(1_000))
+        .unwrap();
+        let scope = BackgroundScope::VcsStatus {
+            cwd: "/repo".into(),
+        };
+        assert!(!lease_may_run_scoped_work(
+            &lease,
+            &scope,
+            &at(2_000),
+            &balanced
+        ));
         let performance = BackgroundActivityPolicy::preset(BackgroundActivityProfile::Performance);
-        assert!(lease_may_run_scoped_work(&lease, &scope, &at(2_000), &performance));
+        assert!(lease_may_run_scoped_work(
+            &lease,
+            &scope,
+            &at(2_000),
+            &performance
+        ));
     }
 
     #[test]
     fn semantic_power_changes_ignore_idle_heartbeat() {
-        let initial = HostPowerSnapshot { stale: false, ..HostPowerSnapshot::unknown(at(1_000)) };
-        let heartbeat = HostPowerSnapshot { idle_seconds: Some(10), updated_at: at(2_000), ..initial.clone() };
-        let changed = HostPowerSnapshot { locked: BackgroundBooleanState::True, updated_at: at(3_000), ..initial.clone() };
+        let initial = HostPowerSnapshot {
+            stale: false,
+            ..HostPowerSnapshot::unknown(at(1_000))
+        };
+        let heartbeat = HostPowerSnapshot {
+            idle_seconds: Some(10),
+            updated_at: at(2_000),
+            ..initial.clone()
+        };
+        let changed = HostPowerSnapshot {
+            locked: BackgroundBooleanState::True,
+            updated_at: at(3_000),
+            ..initial.clone()
+        };
         assert!(initial.same_state(&heartbeat));
         assert!(!initial.same_state(&changed));
     }

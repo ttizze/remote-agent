@@ -14,10 +14,10 @@ import android.widget.ImageView
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -89,8 +89,8 @@ import dev.remoteagent.core.ReviewFilesView
 import dev.remoteagent.core.WorkspaceDiffFile
 import java.io.File
 import java.util.UUID
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
@@ -130,9 +130,10 @@ internal fun PdfScreen(model: AndroidAppModel, path: String) {
     ScreenScaffold(File(path).name, onBack = model::back) {
         when {
             error != null -> Text(error!!, Modifier.padding(20.dp), color = AppTheme.colors.dangerForeground)
-            local == null -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                CircularProgressIndicator(color = AppTheme.colors.iconMuted)
-            }
+            local == null ->
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    CircularProgressIndicator(color = AppTheme.colors.iconMuted)
+                }
             else -> PdfPages(local!!)
         }
     }
@@ -141,24 +142,24 @@ internal fun PdfScreen(model: AndroidAppModel, path: String) {
 @Composable
 private fun PdfPages(file: File) {
     val cache = remember(file.path) { LruCache<Int, Bitmap>(PDF_PAGE_CACHE_SIZE) }
-    DisposableEffect(cache) {
-        onDispose { cache.evictAll() }
-    }
-    val pageCount by produceState<Result<Int>?>(null, file.path) {
-        value = try {
-            Result.success(
-                withContext(Dispatchers.IO) {
-                    ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY).use { descriptor ->
-                        PdfRenderer(descriptor).use { renderer -> renderer.pageCount }
-                    }
+    DisposableEffect(cache) { onDispose { cache.evictAll() } }
+    val pageCount by
+        produceState<Result<Int>?>(null, file.path) {
+            value =
+                try {
+                    Result.success(
+                        withContext(Dispatchers.IO) {
+                            ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY).use { descriptor ->
+                                PdfRenderer(descriptor).use { renderer -> renderer.pageCount }
+                            }
+                        }
+                    )
+                } catch (cancellation: CancellationException) {
+                    throw cancellation
+                } catch (failure: Exception) {
+                    Result.failure(failure)
                 }
-            )
-        } catch (cancellation: CancellationException) {
-            throw cancellation
-        } catch (failure: Exception) {
-            Result.failure(failure)
         }
-    }
     if (pageCount == null) {
         CircularProgressIndicator(Modifier.padding(20.dp), color = AppTheme.colors.iconMuted)
     } else if (pageCount!!.isFailure) {
@@ -170,24 +171,24 @@ private fun PdfPages(file: File) {
     } else {
         val count = pageCount!!.getOrThrow()
         LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(12.dp)) {
-            items(count, key = { it }) { index ->
-                PdfPage(file, index, cache)
-            }
+            items(count, key = { it }) { index -> PdfPage(file, index, cache) }
         }
     }
 }
 
 @Composable
 private fun PdfPage(file: File, index: Int, cache: LruCache<Int, Bitmap>) {
-    val rendered by produceState<Result<Bitmap>?>(null, file.path, index) {
-        value = try {
-            Result.success(renderPdfPage(file, index, cache))
-        } catch (cancellation: CancellationException) {
-            throw cancellation
-        } catch (failure: Exception) {
-            Result.failure(failure)
+    val rendered by
+        produceState<Result<Bitmap>?>(null, file.path, index) {
+            value =
+                try {
+                    Result.success(renderPdfPage(file, index, cache))
+                } catch (cancellation: CancellationException) {
+                    throw cancellation
+                } catch (failure: Exception) {
+                    Result.failure(failure)
+                }
         }
-    }
     when {
         rendered == null ->
             Box(Modifier.fillMaxWidth().height(180.dp), contentAlignment = Alignment.Center) {
@@ -210,36 +211,45 @@ private fun PdfPage(file: File, index: Int, cache: LruCache<Int, Bitmap>) {
 }
 
 private suspend fun renderPdfPage(file: File, index: Int, cache: LruCache<Int, Bitmap>): Bitmap {
-    cache.get(index)?.let { return it }
+    cache.get(index)?.let {
+        return it
+    }
     currentCoroutineContext().ensureActive()
     // Keep ownership outside withContext: its prompt cancellation can discard
     // a successfully rendered result before control returns to the UI thread.
     var pending: Bitmap? = null
     try {
-        val bitmap = withContext(Dispatchers.IO) {
-            ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY).use { descriptor ->
-                PdfRenderer(descriptor).use { renderer ->
-                    require(index in 0 until renderer.pageCount) { "PDF page is unavailable" }
-                    renderer.openPage(index).use { page ->
-                        val size = requireNotNull(
-                            dev.remoteagent.core.fitImageDisplaySize(
-                                page.width.toDouble(), page.height.toDouble(),
-                                PDF_PAGE_WIDTH.toDouble(), PDF_PAGE_HEIGHT.toDouble(),
-                            )
-                        ) { "PDF page dimensions are invalid" }
-                        Bitmap.createBitmap(
-                            size.width.toInt().coerceAtLeast(1),
-                            size.height.toInt().coerceAtLeast(1),
-                            Bitmap.Config.ARGB_8888,
-                        ).also { candidate ->
-                            pending = candidate
-                            page.render(candidate, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
-                            currentCoroutineContext().ensureActive()
+        val bitmap =
+            withContext(Dispatchers.IO) {
+                ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY).use { descriptor ->
+                    PdfRenderer(descriptor).use { renderer ->
+                        require(index in 0 until renderer.pageCount) { "PDF page is unavailable" }
+                        renderer.openPage(index).use { page ->
+                            val size =
+                                requireNotNull(
+                                    dev.remoteagent.core.fitImageDisplaySize(
+                                        page.width.toDouble(),
+                                        page.height.toDouble(),
+                                        PDF_PAGE_WIDTH.toDouble(),
+                                        PDF_PAGE_HEIGHT.toDouble(),
+                                    )
+                                ) {
+                                    "PDF page dimensions are invalid"
+                                }
+                            Bitmap.createBitmap(
+                                    size.width.toInt().coerceAtLeast(1),
+                                    size.height.toInt().coerceAtLeast(1),
+                                    Bitmap.Config.ARGB_8888,
+                                )
+                                .also { candidate ->
+                                    pending = candidate
+                                    page.render(candidate, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+                                    currentCoroutineContext().ensureActive()
+                                }
                         }
                     }
                 }
             }
-        }
         currentCoroutineContext().ensureActive()
         cache.put(index, bitmap)
         pending = null
@@ -428,11 +438,13 @@ private fun WorkspaceFiles(model: AndroidAppModel, linkedFile: String?, line: UL
                         ) {
                             LazyColumn(
                                 state = scroll,
-                                modifier = if (wrap) Modifier.fillMaxWidth() else Modifier.wrapContentWidth(unbounded = true),
+                                modifier =
+                                    if (wrap) Modifier.fillMaxWidth() else Modifier.wrapContentWidth(unbounded = true),
                             ) {
                                 items(lines.size) { index ->
                                     Row(
-                                        (if (wrap) Modifier.fillMaxWidth() else Modifier.wrapContentWidth(unbounded = true))
+                                        (if (wrap) Modifier.fillMaxWidth()
+                                            else Modifier.wrapContentWidth(unbounded = true))
                                             .padding(horizontal = 4.dp, vertical = 2.dp),
                                         verticalAlignment = Alignment.Top,
                                     ) {
@@ -451,8 +463,8 @@ private fun WorkspaceFiles(model: AndroidAppModel, linkedFile: String?, line: UL
                                             fontSize = AppTheme.codeFontSize.sp,
                                             lineHeight = AppTheme.codeLineHeight.sp,
                                             softWrap = wrap,
-                                            modifier = (if (wrap) Modifier.weight(1f) else Modifier)
-                                                .padding(start = 8.dp),
+                                            modifier =
+                                                (if (wrap) Modifier.weight(1f) else Modifier).padding(start = 8.dp),
                                         )
                                     }
                                 }
@@ -470,18 +482,20 @@ private fun WorkspaceFiles(model: AndroidAppModel, linkedFile: String?, line: UL
                                     if (pending == current) pending = null
                                 }
                             },
-                            Modifier.weight(1f).then(
-                                if (AppTheme.codeWordWrap) Modifier.fillMaxWidth()
-                                else Modifier.wrapContentWidth(unbounded = true)
-                            )
+                            Modifier.weight(1f)
+                                .then(
+                                    if (AppTheme.codeWordWrap) Modifier.fillMaxWidth()
+                                    else Modifier.wrapContentWidth(unbounded = true)
+                                )
                                 .border(1.dp, AppTheme.colors.border, RoundedCornerShape(4.dp))
                                 .horizontalScroll(horizontal, enabled = !AppTheme.codeWordWrap)
                                 .padding(12.dp),
-                            textStyle = AppTheme.footnote.copy(
-                                fontFamily = AppTheme.mono,
-                                fontSize = AppTheme.codeFontSize.sp,
-                                lineHeight = AppTheme.codeLineHeight.sp,
-                            ),
+                            textStyle =
+                                AppTheme.footnote.copy(
+                                    fontFamily = AppTheme.mono,
+                                    fontSize = AppTheme.codeFontSize.sp,
+                                    lineHeight = AppTheme.codeLineHeight.sp,
+                                ),
                             maxLines = Int.MAX_VALUE,
                         )
                         Button(onClick = { model.perform(Intent.SaveFile(entry.path)) }) { Text("Save") }
@@ -551,7 +565,10 @@ private fun ReviewScreen(model: AndroidAppModel) {
                     TextButton(
                         onClick = {
                             context.startActivity(
-                                android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(pullRequestUrl))
+                                android.content.Intent(
+                                    android.content.Intent.ACTION_VIEW,
+                                    android.net.Uri.parse(pullRequestUrl),
+                                )
                             )
                         },
                         modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp),

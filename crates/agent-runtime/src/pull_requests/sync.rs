@@ -1,6 +1,6 @@
-use agent_domain::{PullRequestDetail, PullRequestLink, PullRequestSummary, Timestamp};
 use super::watch::update_watch;
-use super::watch::{update_watch_detail, PullRequestWatchWake};
+use super::watch::{PullRequestWatchWake, update_watch_detail};
+use agent_domain::{PullRequestDetail, PullRequestLink, PullRequestSummary, Timestamp};
 
 /// A provider refresh result is merged by this pure helper before it is
 /// committed to the durable store and thread facts.

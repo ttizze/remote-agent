@@ -98,8 +98,13 @@ pub struct Draft {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum ScheduledTaskScheduleDraft {
-    Interval { every_ms: u64 },
-    FixedTime { time_of_day: String, weekdays: Vec<u8> },
+    Interval {
+        every_ms: u64,
+    },
+    FixedTime {
+        time_of_day: String,
+        weekdays: Vec<u8>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -440,8 +445,7 @@ pub struct PullRequestClientState {
     pub diff_file_contents:
         BTreeMap<String, agent_protocol::pull_requests::PullRequestDiffFileContents>,
     pub files: BTreeMap<String, agent_protocol::pull_requests::PullRequestFile>,
-    pub viewed_files:
-        BTreeMap<String, agent_protocol::pull_requests::PullRequestViewedFiles>,
+    pub viewed_files: BTreeMap<String, agent_protocol::pull_requests::PullRequestViewedFiles>,
     pub auth: Option<agent_protocol::pull_requests::SourceControlAuth>,
     pub discovery: Option<agent_protocol::pull_requests::SourceControlDiscovery>,
     pub selected_project: Option<String>,
@@ -554,8 +558,7 @@ pub struct Snapshot {
     pub native_update: Option<crate::models::NativeUpdateState>,
     pub host_resources: Option<agent_protocol::background::HostResourcesSnapshot>,
     pub process_diagnostics: Option<agent_protocol::background::ProcessDiagnosticsResult>,
-    pub process_resource_history:
-        Option<agent_protocol::background::ProcessResourceHistoryResult>,
+    pub process_resource_history: Option<agent_protocol::background::ProcessResourceHistoryResult>,
     pub trace_diagnostics: Option<agent_protocol::background::TraceDiagnosticsResult>,
     pub remote_hosts: Vec<crate::models::RemoteHost>,
     pub invitation: Option<crate::models::Invitation>,
@@ -638,7 +641,8 @@ impl PreviewState {
             return;
         }
         if server_epoch_changed {
-            self.invalidated_recordings.extend(self.sessions.keys().cloned());
+            self.invalidated_recordings
+                .extend(self.sessions.keys().cloned());
             self.recording_lifetimes.clear();
         }
         self.sessions = result
@@ -662,7 +666,8 @@ impl PreviewState {
             .map(|status| (status.tab_id.clone(), status.recording_id.clone()))
             .collect::<Vec<_>>();
         for (tab_id, recording_id) in active_recording_tabs {
-            self.recording_lifetimes.insert(tab_id.clone(), recording_id);
+            self.recording_lifetimes
+                .insert(tab_id.clone(), recording_id);
             if self
                 .recordings
                 .get(&tab_id)
@@ -757,11 +762,17 @@ impl PreviewState {
             self.recording_lifetimes.clear();
         }
     }
-    pub fn session(&self, tab_id: &str) -> Option<&agent_protocol::preview::PreviewSessionSnapshot> {
+    pub fn session(
+        &self,
+        tab_id: &str,
+    ) -> Option<&agent_protocol::preview::PreviewSessionSnapshot> {
         self.sessions.get(tab_id)
     }
 
-    pub fn recording_for(&self, tab_id: &str) -> Option<&agent_protocol::preview::PreviewRecordingStatus> {
+    pub fn recording_for(
+        &self,
+        tab_id: &str,
+    ) -> Option<&agent_protocol::preview::PreviewRecordingStatus> {
         self.recordings.get(tab_id)
     }
 
@@ -828,7 +839,8 @@ impl PreviewState {
                 started_at: None,
             },
         );
-        self.last_recordings.insert(artifact.tab_id.clone(), artifact);
+        self.last_recordings
+            .insert(artifact.tab_id.clone(), artifact);
     }
 
     /// A failed start has no recording lifetime to expose. A failed stop is
@@ -853,7 +865,10 @@ impl PreviewState {
         }
     }
 
-    pub fn last_recording_for(&self, tab_id: &str) -> Option<&agent_protocol::preview::PreviewRecordingArtifact> {
+    pub fn last_recording_for(
+        &self,
+        tab_id: &str,
+    ) -> Option<&agent_protocol::preview::PreviewRecordingArtifact> {
         self.last_recordings.get(tab_id)
     }
 }
@@ -974,18 +989,20 @@ mod preview_state_tests {
     fn applies_independent_recording_slots_for_each_preview_tab() {
         let mut state = PreviewState::default();
         let mut result = list("epoch", 1, "tab-a");
-        result.sessions.push(agent_protocol::preview::PreviewSessionSnapshot {
-            thread_id: ThreadId::new("thread").unwrap(),
-            tab_id: "tab-b".into(),
-            nav_status: agent_protocol::preview::PreviewNavStatus::Idle,
-            can_go_back: false,
-            can_go_forward: false,
-            viewport: PreviewViewportSetting::Fill,
-            zoom: agent_protocol::preview::PreviewZoom::X100,
-            appearance: agent_protocol::preview::PreviewAppearance::System,
-            profile_id: None,
-            updated_at: String::new(),
-        });
+        result
+            .sessions
+            .push(agent_protocol::preview::PreviewSessionSnapshot {
+                thread_id: ThreadId::new("thread").unwrap(),
+                tab_id: "tab-b".into(),
+                nav_status: agent_protocol::preview::PreviewNavStatus::Idle,
+                can_go_back: false,
+                can_go_forward: false,
+                viewport: PreviewViewportSetting::Fill,
+                zoom: agent_protocol::preview::PreviewZoom::X100,
+                appearance: agent_protocol::preview::PreviewAppearance::System,
+                profile_id: None,
+                updated_at: String::new(),
+            });
         result.recordings = vec![
             agent_protocol::preview::PreviewRecordingStatus {
                 tab_id: "tab-a".into(),
@@ -1001,8 +1018,16 @@ mod preview_state_tests {
             },
         ];
         state.apply_list(result);
-        assert!(state.recording_for("tab-a").is_some_and(|status| status.recording));
-        assert!(state.recording_for("tab-b").is_some_and(|status| status.recording));
+        assert!(
+            state
+                .recording_for("tab-a")
+                .is_some_and(|status| status.recording)
+        );
+        assert!(
+            state
+                .recording_for("tab-b")
+                .is_some_and(|status| status.recording)
+        );
     }
 
     #[test]
@@ -1018,21 +1043,27 @@ mod preview_state_tests {
     #[test]
     fn closing_the_recorded_tab_discards_ephemeral_recording_state() {
         let mut state = PreviewState::default();
-        state.recordings.insert("tab".into(), agent_protocol::preview::PreviewRecordingStatus {
-            tab_id: "tab".into(),
-            recording_id: "recording".into(),
-            recording: true,
-            started_at: Some("2026-01-01T00:00:00Z".into()),
-        });
-        state.last_recordings.insert("tab".into(), agent_protocol::preview::PreviewRecordingArtifact {
-            id: "browser-recording-test".into(),
-            recording_id: "browser-recording-test".into(),
-            tab_id: "tab".into(),
-            path: "/tmp/browser-recording-test.webm".into(),
-            mime_type: "video/webm".into(),
-            size_bytes: 1,
-            created_at: "2026-01-01T00:00:01Z".into(),
-        });
+        state.recordings.insert(
+            "tab".into(),
+            agent_protocol::preview::PreviewRecordingStatus {
+                tab_id: "tab".into(),
+                recording_id: "recording".into(),
+                recording: true,
+                started_at: Some("2026-01-01T00:00:00Z".into()),
+            },
+        );
+        state.last_recordings.insert(
+            "tab".into(),
+            agent_protocol::preview::PreviewRecordingArtifact {
+                id: "browser-recording-test".into(),
+                recording_id: "browser-recording-test".into(),
+                tab_id: "tab".into(),
+                path: "/tmp/browser-recording-test.webm".into(),
+                mime_type: "video/webm".into(),
+                size_bytes: 1,
+                created_at: "2026-01-01T00:00:01Z".into(),
+            },
+        );
         state.close(Some("tab"));
         assert!(state.recordings.is_empty());
         assert!(state.last_recordings.is_empty());
@@ -1378,8 +1409,7 @@ impl Snapshot {
             .and_then(|draft| draft.workspace.clone())
         {
             if workspace.start_from_origin_choice.is_none() {
-                workspace.start_from_origin = workspace.mode
-                    == ThreadWorkspaceMode::Worktree
+                workspace.start_from_origin = workspace.mode == ThreadWorkspaceMode::Worktree
                     && self.new_worktree_starts_from_origin(workspace.mode);
             }
             return workspace;
@@ -1788,21 +1818,54 @@ pub enum DeviceDuoCommandIntent {
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum DeviceActionIntent {
-    SetAppearance { dark: bool },
-    SetTextSize { size: String },
-    SetToggle { setting: String, value: bool },
-    SetLiquidGlass { value: String },
-    SetColorFilter { filter: String },
-    SetOrientation { orientation: String },
-    SetLocation { latitude: f64, longitude: f64 },
+    SetAppearance {
+        dark: bool,
+    },
+    SetTextSize {
+        size: String,
+    },
+    SetToggle {
+        setting: String,
+        value: bool,
+    },
+    SetLiquidGlass {
+        value: String,
+    },
+    SetColorFilter {
+        filter: String,
+    },
+    SetOrientation {
+        orientation: String,
+    },
+    SetLocation {
+        latitude: f64,
+        longitude: f64,
+    },
     ClearLocation,
-    SetPermission { app_id: String, permission: String, decision: String },
-    OpenUrl { url: String },
-    LaunchApp { app_id: String },
-    TerminateApp { app_id: String },
+    SetPermission {
+        app_id: String,
+        permission: String,
+        decision: String,
+    },
+    OpenUrl {
+        url: String,
+    },
+    LaunchApp {
+        app_id: String,
+    },
+    TerminateApp {
+        app_id: String,
+    },
     Shake,
-    SendPush { app_id: String, payload: String },
-    Touch { phase: String, x: f32, y: f32 },
+    SendPush {
+        app_id: String,
+        payload: String,
+    },
+    Touch {
+        phase: String,
+        x: f32,
+        y: f32,
+    },
     Key {
         code: String,
         key: String,
@@ -1813,10 +1876,16 @@ pub enum DeviceActionIntent {
         shift: bool,
         alt: bool,
     },
-    HardwareButton { button: String },
+    HardwareButton {
+        button: String,
+    },
     Rotate,
-    Fold { command: DeviceFoldPostureIntent },
-    Duo { command: DeviceDuoCommandIntent },
+    Fold {
+        command: DeviceFoldPostureIntent,
+    },
+    Duo {
+        command: DeviceDuoCommandIntent,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -2695,9 +2764,16 @@ pub enum Intent {
 
     // Device panel and Host-owned simulator/emulator control.
     LoadDevices,
-    InspectDevices { host_id: Option<String> },
-    UpdateDeviceTool { host_id: Option<String>, tool: String },
-    RetryDeviceHost { host_id: String },
+    InspectDevices {
+        host_id: Option<String>,
+    },
+    UpdateDeviceTool {
+        host_id: Option<String>,
+        tool: String,
+    },
+    RetryDeviceHost {
+        host_id: String,
+    },
     ConfigureDevices {
         enabled: Option<bool>,
         agent_access_enabled: Option<bool>,
@@ -2837,8 +2913,14 @@ mod tests {
         assert_eq!(defaults.driver, agent_domain::Driver::Claude);
         assert_eq!(defaults.model, "sonnet");
         assert_eq!(defaults.options, source.options);
-        assert_eq!(defaults.runtime_mode, agent_domain::RuntimeMode::ApprovalRequired);
-        assert_eq!(defaults.interaction_mode, agent_domain::InteractionMode::Plan);
+        assert_eq!(
+            defaults.runtime_mode,
+            agent_domain::RuntimeMode::ApprovalRequired
+        );
+        assert_eq!(
+            defaults.interaction_mode,
+            agent_domain::InteractionMode::Plan
+        );
         assert!(defaults.text.is_empty());
         assert!(defaults.attachments.is_empty());
         assert!(defaults.context.is_none());

@@ -165,7 +165,7 @@ struct UserBubble: View {
                     ConversationMarkdown(source: source, openContext: { href in
                         openContext(href, chips: chips, actions: actions)
                     })
-                        .foregroundStyle(AppTheme.text)
+                    .foregroundStyle(AppTheme.text)
                 }
             }
             .padding(.horizontal, 12.25).padding(.vertical, 8.75)
@@ -194,7 +194,9 @@ struct UserBubble: View {
               let chip = chips.first(where: { $0.contextId == id }) else { return }
         switch chip.kind {
         case .thread:
-            if let thread = chip.threadId { actions.openThread(thread) }
+            if let thread = chip.threadId {
+                actions.openThread(thread)
+            }
         case .terminal:
             if let preview = chip.previewText, !preview.isEmpty {
                 actions.showContextPreview(chip)

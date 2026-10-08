@@ -40,7 +40,12 @@ pub(crate) fn pr_content_prompt(
     let diff_stat = limit_section(diff_stat, 12_000);
     let diff_patch = limit_section(diff_patch, 40_000);
     let template_section = template
-        .map(|template| format!("Repository change request template:\n{}", limit_section(template, 8_000)))
+        .map(|template| {
+            format!(
+                "Repository change request template:\n{}",
+                limit_section(template, 8_000)
+            )
+        })
         .unwrap_or_default();
     format!(
         "You write source control change request content.\nReturn a JSON object with keys: title, body.\nRules:\n- title should be concise and specific\n{structure}\n{}\nBase branch: {base_branch}\nHead branch: {head_branch}\n\nCommits:\n{commits}\n\nDiff stat:\n{diff_stat}\n\nDiff patch:\n{diff_patch}",

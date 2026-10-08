@@ -122,7 +122,10 @@ pub fn catalog_sheet(snapshot: &Snapshot, options: &CatalogSheetOptions) -> Cata
             instance.enabled
                 && instance.installed
                 && instance.available
-                && !matches!(instance.status, ProviderStatus::Error | ProviderStatus::Disabled)
+                && !matches!(
+                    instance.status,
+                    ProviderStatus::Error | ProviderStatus::Disabled
+                )
         })
         .collect();
     let query = options.query.trim().to_lowercase();

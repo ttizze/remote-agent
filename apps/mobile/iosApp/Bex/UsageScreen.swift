@@ -69,7 +69,7 @@ struct UsageScreen: View {
                         nowMs: Int64(Date().timeIntervalSince1970 * 1000)
                     )
                     let accounts = model.snapshot.usageLimits()
-                    let pooledIds = Set(pools.flatMap { $0.accounts }.map(\.id))
+                    let pooledIds = Set(pools.flatMap(\.accounts).map(\.id))
                     ForEach(pools, id: \.provider) { pool in
                         UsageLimitPoolView(pool: pool) { account in
                             let sourceId = account.resetCreditAccountId ?? account.id
@@ -96,7 +96,7 @@ struct UsageScreen: View {
                             }
                         }
                     }
-                    if pools.isEmpty && accounts.isEmpty {
+                    if pools.isEmpty, accounts.isEmpty {
                         Text("Provider limits are unavailable until accounts are loaded.")
                             .foregroundStyle(AppTheme.muted)
                     }
@@ -141,7 +141,7 @@ struct UsageScreen: View {
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.dateFormat = "yyyy-MM-dd"
         let preferences = model.snapshot.usagePreferences()
-        let input = UsageSummaryInput(
+        return UsageSummaryInput(
             sinceDay: formatter.string(from: start),
             untilDay: formatter.string(from: now),
             timeZone: TimeZone.current.identifier,
@@ -151,7 +151,6 @@ struct UsageScreen: View {
             modelAliases: preferences.modelAliases,
             priceOverrides: preferences.priceOverrides
         )
-        return input
     }
 }
 
@@ -292,7 +291,9 @@ private struct UsageLimitPoolView: View {
                             Text("Reset \(reset.label)")
                                 .font(.caption)
                             Spacer()
-                            Text("+\(reset.restoresPercent)% at \(Date(timeIntervalSince1970: Double(reset.at) / 1000).formatted(date: .abbreviated, time: .shortened))")
+                            let resetDate = Date(timeIntervalSince1970: Double(reset.at) / 1000)
+                                .formatted(date: .abbreviated, time: .shortened)
+                            Text("+\(reset.restoresPercent)% at \(resetDate)")
                                 .font(.caption)
                                 .foregroundStyle(AppTheme.muted)
                         }
@@ -349,7 +350,9 @@ private struct UsageLimitAccountView: View {
                         }
                         ProgressView(value: Double(window.remainingPercent), total: 100)
                         if let reset = window.resetsAt {
-                            Text("Resets \(Date(timeIntervalSince1970: Double(reset)).formatted(date: .abbreviated, time: .shortened))")
+                            let resetDate = Date(timeIntervalSince1970: Double(reset))
+                                .formatted(date: .abbreviated, time: .shortened)
+                            Text("Resets \(resetDate)")
                                 .font(.caption).foregroundStyle(AppTheme.muted)
                         }
                     }

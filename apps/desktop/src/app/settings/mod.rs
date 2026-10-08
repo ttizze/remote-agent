@@ -2,8 +2,8 @@
 //! (Project, General, Appearance, Keybindings, Providers, Connections,
 //! Archive).
 mod about;
-mod add_project;
 mod acp_registry;
+mod add_project;
 mod appearance;
 mod archived;
 mod general;
@@ -505,7 +505,9 @@ impl Desktop {
                 self.perform(Intent::LoadSettings);
                 self.perform(Intent::LoadWorktreeSettings);
                 self.perform(Intent::ListWorktrees);
-                self.perform(Intent::LoadDiagnostics { trace_file_path: String::new() });
+                self.perform(Intent::LoadDiagnostics {
+                    trace_file_path: String::new(),
+                });
             }
             SettingsPage::Projects { .. } => self.perform(Intent::LoadSettings),
             SettingsPage::Providers => {

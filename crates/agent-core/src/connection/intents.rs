@@ -208,10 +208,16 @@ fn device_duo_orientation(value: DeviceDuoOrientationIntent) -> d::DeviceOrienta
 pub(super) fn device_duo_command(value: DeviceDuoCommandIntent) -> d::DeviceDuoCommand {
     match value {
         DeviceDuoCommandIntent::Angle { value } => d::DeviceDuoCommand::Angle { value },
-        DeviceDuoCommandIntent::Pose { value } => d::DeviceDuoCommand::Pose { value: device_duo_pose(value) },
+        DeviceDuoCommandIntent::Pose { value } => d::DeviceDuoCommand::Pose {
+            value: device_duo_pose(value),
+        },
         DeviceDuoCommandIntent::Table { value } => d::DeviceDuoCommand::Table { value },
-        DeviceDuoCommandIntent::Physical { value } => d::DeviceDuoCommand::Physical { value: device_duo_physical(value) },
-        DeviceDuoCommandIntent::Orientation { value } => d::DeviceDuoCommand::Orientation { value: device_duo_orientation(value) },
+        DeviceDuoCommandIntent::Physical { value } => d::DeviceDuoCommand::Physical {
+            value: device_duo_physical(value),
+        },
+        DeviceDuoCommandIntent::Orientation { value } => d::DeviceDuoCommand::Orientation {
+            value: device_duo_orientation(value),
+        },
     }
 }
 fn device_permission(value: &str) -> Result<d::DevicePermission, PeerError> {
@@ -284,24 +290,68 @@ fn device_action(action: DeviceActionIntent) -> Result<d::DeviceActionKind, Peer
             payload: serde_json::from_str(&payload)
                 .map_err(|_| invalid("Push payload must be JSON"))?,
         },
-        DeviceActionIntent::Touch { phase, x, y } => d::DeviceActionKind::Input(d::DeviceInputKind::Touch { phase: device_touch_phase(&phase)?, x, y, raw: false }),
-        DeviceActionIntent::Key { code, key, down, meta, ctrl, shift: _, alt: _ } => {
-            d::DeviceActionKind::Input(d::DeviceInputKind::Key { code, key, down, meta, ctrl })
+        DeviceActionIntent::Touch { phase, x, y } => {
+            d::DeviceActionKind::Input(d::DeviceInputKind::Touch {
+                phase: device_touch_phase(&phase)?,
+                x,
+                y,
+                raw: false,
+            })
         }
-        DeviceActionIntent::HardwareButton { button } => d::DeviceActionKind::Input(d::DeviceInputKind::HardwareButton(device_hardware_button(&button)?)),
+        DeviceActionIntent::Key {
+            code,
+            key,
+            down,
+            meta,
+            ctrl,
+            shift: _,
+            alt: _,
+        } => d::DeviceActionKind::Input(d::DeviceInputKind::Key {
+            code,
+            key,
+            down,
+            meta,
+            ctrl,
+        }),
+        DeviceActionIntent::HardwareButton { button } => d::DeviceActionKind::Input(
+            d::DeviceInputKind::HardwareButton(device_hardware_button(&button)?),
+        ),
         DeviceActionIntent::Rotate => d::DeviceActionKind::Input(d::DeviceInputKind::Rotate),
-        DeviceActionIntent::Fold { command } => d::DeviceActionKind::Input(d::DeviceInputKind::Fold { command: device_fold_posture(command) }),
-        DeviceActionIntent::Duo { command } => d::DeviceActionKind::Input(d::DeviceInputKind::Duo { command: device_duo_command(command) }),
+        DeviceActionIntent::Fold { command } => {
+            d::DeviceActionKind::Input(d::DeviceInputKind::Fold {
+                command: device_fold_posture(command),
+            })
+        }
+        DeviceActionIntent::Duo { command } => {
+            d::DeviceActionKind::Input(d::DeviceInputKind::Duo {
+                command: device_duo_command(command),
+            })
+        }
     })
 }
 fn device_touch_phase(value: &str) -> Result<d::DeviceTouchPhase, PeerError> {
-    match value { "begin" => Ok(d::DeviceTouchPhase::Begin), "move" => Ok(d::DeviceTouchPhase::Move), "end" => Ok(d::DeviceTouchPhase::End), _ => Err(invalid("Unknown device touch phase")) }
+    match value {
+        "begin" => Ok(d::DeviceTouchPhase::Begin),
+        "move" => Ok(d::DeviceTouchPhase::Move),
+        "end" => Ok(d::DeviceTouchPhase::End),
+        _ => Err(invalid("Unknown device touch phase")),
+    }
 }
 fn device_hardware_button(value: &str) -> Result<d::DeviceHardwareButton, PeerError> {
-    match value { "home" => Ok(d::DeviceHardwareButton::Home), "back" => Ok(d::DeviceHardwareButton::Back), "recents" => Ok(d::DeviceHardwareButton::Recents), "power" => Ok(d::DeviceHardwareButton::Power), "appSwitcher" => Ok(d::DeviceHardwareButton::AppSwitcher), _ => Err(invalid("Unknown device hardware button")) }
+    match value {
+        "home" => Ok(d::DeviceHardwareButton::Home),
+        "back" => Ok(d::DeviceHardwareButton::Back),
+        "recents" => Ok(d::DeviceHardwareButton::Recents),
+        "power" => Ok(d::DeviceHardwareButton::Power),
+        "appSwitcher" => Ok(d::DeviceHardwareButton::AppSwitcher),
+        _ => Err(invalid("Unknown device hardware button")),
+    }
 }
 fn device_recording_format(value: &str) -> Result<d::DeviceRecordingFormat, PeerError> {
-    match value { "mp4" => Ok(d::DeviceRecordingFormat::Mp4), _ => Err(invalid("Unknown device recording format")) }
+    match value {
+        "mp4" => Ok(d::DeviceRecordingFormat::Mp4),
+        _ => Err(invalid("Unknown device recording format")),
+    }
 }
 fn approval_decision(value: &str) -> Result<ApprovalDecision, PeerError> {
     Ok(match value {
@@ -444,12 +494,9 @@ impl Owner {
                 }
             }
             Ok(Next::Call(call, sent)) => self.job(*call, Some(complete), sent.map(|sent| *sent)),
-            Ok(Next::DuoCall(call, request, sent)) => self.job_with_duo(
-                *call,
-                Some(complete),
-                sent.map(|sent| *sent),
-                Some(request),
-            ),
+            Ok(Next::DuoCall(call, request, sent)) => {
+                self.job_with_duo(*call, Some(complete), sent.map(|sent| *sent), Some(request))
+            }
             Ok(Next::DeviceInputs(inputs, target)) => {
                 self.job_device_inputs(inputs, target, Some(complete))
             }
@@ -1250,11 +1297,9 @@ impl Owner {
             }
             Intent::RemoveBrowserProfile { profile_id } => {
                 let browser = &mut self.state.preferences.browser;
-                browser.profiles = crate::view::browser::remove_browser_profile(
-                    &browser.profiles,
-                    &profile_id,
-                )
-                .map_err(invalid)?;
+                browser.profiles =
+                    crate::view::browser::remove_browser_profile(&browser.profiles, &profile_id)
+                        .map_err(invalid)?;
                 if browser.default_profile_id == profile_id {
                     browser.default_profile_id =
                         crate::view::browser::DEFAULT_BROWSER_PROFILE_ID.into();
@@ -2546,9 +2591,31 @@ impl Owner {
             Intent::LoadDevices => {
                 Next::call(Call::DeviceList(d::DeviceListInput::default()), None)
             }
-            Intent::InspectDevices { host_id: _ } => Next::call(Call::DeviceList(d::DeviceListInput { inspect_only: true, ..Default::default() }), None),
-            Intent::UpdateDeviceTool { host_id: _, tool } => Next::call(Call::DeviceList(d::DeviceListInput { update_tool: Some(match tool.as_str() { "hub" => d::DeviceTool::Hub, "agent" => d::DeviceTool::Agent, _ => return Err(invalid("Unknown device tool")), }), ..Default::default() }), None),
-            Intent::RetryDeviceHost { host_id } => Next::call(Call::DeviceList(d::DeviceListInput { retry_host_id: Some(host_id), ..Default::default() }), None),
+            Intent::InspectDevices { host_id: _ } => Next::call(
+                Call::DeviceList(d::DeviceListInput {
+                    inspect_only: true,
+                    ..Default::default()
+                }),
+                None,
+            ),
+            Intent::UpdateDeviceTool { host_id: _, tool } => Next::call(
+                Call::DeviceList(d::DeviceListInput {
+                    update_tool: Some(match tool.as_str() {
+                        "hub" => d::DeviceTool::Hub,
+                        "agent" => d::DeviceTool::Agent,
+                        _ => return Err(invalid("Unknown device tool")),
+                    }),
+                    ..Default::default()
+                }),
+                None,
+            ),
+            Intent::RetryDeviceHost { host_id } => Next::call(
+                Call::DeviceList(d::DeviceListInput {
+                    retry_host_id: Some(host_id),
+                    ..Default::default()
+                }),
+                None,
+            ),
             Intent::ConfigureDevices {
                 enabled,
                 agent_access_enabled,
@@ -2618,7 +2685,12 @@ impl Owner {
                     let request = self
                         .state
                         .device
-                        .enqueue_duo(thread_id.clone(), host_id.clone(), device_id.clone(), command.clone())
+                        .enqueue_duo(
+                            thread_id.clone(),
+                            host_id.clone(),
+                            device_id.clone(),
+                            command.clone(),
+                        )
                         .map_err(invalid)?;
                     let Some(request) = request else {
                         return Ok(Next::Done);
@@ -2668,11 +2740,10 @@ impl Owner {
                     });
                 }
                 let thread_id = self.selected()?;
-                let target = self.state.device.session_target(
-                    &thread_id,
-                    host_id.as_deref(),
-                    &device_id,
-                )?;
+                let target =
+                    self.state
+                        .device
+                        .session_target(&thread_id, host_id.as_deref(), &device_id)?;
                 let action = device_action(action)?;
                 match action {
                     d::DeviceActionKind::Input(input) => Next::DeviceInputs(
@@ -2722,16 +2793,44 @@ impl Owner {
                 Call::DeviceAccessibility(d::DeviceAccessibilityInput { host_id, device_id }),
                 None,
             ),
-            Intent::LoadDeviceEventLog { host_id, device_id, limit } => Next::call(
-                Call::DeviceEventLog(d::DeviceEventLogInput { host_id, device_id, limit }),
+            Intent::LoadDeviceEventLog {
+                host_id,
+                device_id,
+                limit,
+            } => Next::call(
+                Call::DeviceEventLog(d::DeviceEventLogInput {
+                    host_id,
+                    device_id,
+                    limit,
+                }),
                 None,
             ),
-            Intent::StartDeviceRecording { host_id, device_id, format } => Next::call(
-                Call::DeviceRecordingStart(d::DeviceRecordingStartInput { thread_id: self.selected()?, host_id, device_id, format: device_recording_format(&format)? }),
+            Intent::StartDeviceRecording {
+                host_id,
+                device_id,
+                format,
+            } => Next::call(
+                Call::DeviceRecordingStart(d::DeviceRecordingStartInput {
+                    thread_id: self.selected()?,
+                    host_id,
+                    device_id,
+                    format: device_recording_format(&format)?,
+                }),
                 None,
             ),
-            Intent::StopDeviceRecording { host_id, device_id, recording_id, session_epoch } => Next::call(
-                Call::DeviceRecordingStop(d::DeviceRecordingStopInput { thread_id: self.selected()?, host_id, device_id, recording_id, session_epoch }),
+            Intent::StopDeviceRecording {
+                host_id,
+                device_id,
+                recording_id,
+                session_epoch,
+            } => Next::call(
+                Call::DeviceRecordingStop(d::DeviceRecordingStopInput {
+                    thread_id: self.selected()?,
+                    host_id,
+                    device_id,
+                    recording_id,
+                    session_epoch,
+                }),
                 None,
             ),
             Intent::SubscribeDevice => {

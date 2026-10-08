@@ -34,27 +34,28 @@ internal enum class PushCapability {
 }
 
 /**
- * Firebase app identifiers are public build configuration. The service
- * account used by the Host never enters this app. An absent configuration is
- * reported as an unsupported capability instead of a swallowed SDK error.
+ * Firebase app identifiers are public build configuration. The service account used by the Host never enters this app.
+ * An absent configuration is reported as an unsupported capability instead of a swallowed SDK error.
  */
 internal object FirebasePushBootstrap {
     fun ensure(context: Context): Boolean {
         if (FirebaseApp.getApps(context).any { it.name == FirebaseApp.DEFAULT_APP_NAME }) {
             return true
         }
-        if (BuildConfig.FIREBASE_API_KEY.isBlank() ||
-            BuildConfig.FIREBASE_APPLICATION_ID.isBlank() ||
-            BuildConfig.FIREBASE_PROJECT_ID.isBlank() ||
-            BuildConfig.FIREBASE_SENDER_ID.isBlank()
+        if (
+            BuildConfig.FIREBASE_API_KEY.isBlank() ||
+                BuildConfig.FIREBASE_APPLICATION_ID.isBlank() ||
+                BuildConfig.FIREBASE_PROJECT_ID.isBlank() ||
+                BuildConfig.FIREBASE_SENDER_ID.isBlank()
         ) {
             return false
         }
-        val builder = FirebaseOptions.Builder()
-            .setApiKey(BuildConfig.FIREBASE_API_KEY)
-            .setApplicationId(BuildConfig.FIREBASE_APPLICATION_ID)
-            .setProjectId(BuildConfig.FIREBASE_PROJECT_ID)
-            .setGcmSenderId(BuildConfig.FIREBASE_SENDER_ID)
+        val builder =
+            FirebaseOptions.Builder()
+                .setApiKey(BuildConfig.FIREBASE_API_KEY)
+                .setApplicationId(BuildConfig.FIREBASE_APPLICATION_ID)
+                .setProjectId(BuildConfig.FIREBASE_PROJECT_ID)
+                .setGcmSenderId(BuildConfig.FIREBASE_SENDER_ID)
         if (BuildConfig.FIREBASE_STORAGE_BUCKET.isNotBlank()) {
             builder.setStorageBucket(BuildConfig.FIREBASE_STORAGE_BUCKET)
         }
@@ -75,16 +76,18 @@ internal const val LOCAL_ATTENTION_TAG = "local-attention"
 internal const val EXTRA_ACTIVITY_EXPIRY_AT = "activity_expiry_at"
 private const val ACTIVITY_EXPIRY_REQUEST_CODE = AWARENESS_NOTIFICATION_ID + 1
 
-/** NotificationManager tags provide the event identity; the integer slot is
- * deliberately fixed so we do not persist an unbounded key-to-id table. */
+/**
+ * NotificationManager tags provide the event identity; the integer slot is deliberately fixed so we do not persist an
+ * unbounded key-to-id table.
+ */
 internal fun notificationTag(key: String, ongoing: Boolean): String =
     if (ongoing) ONGOING_ACTIVITY_TAG else "agent-event:$key"
 
-/** PendingIntent identity includes Intent.data, so each event gets a stable
- * unique identity even though the request code is fixed. The actual route is
- * carried separately in EXTRA_PUSH_DEEP_LINK and is validated by the model. */
-internal fun notificationIntentData(key: String): Uri =
-    Uri.parse("remoteagent://notifications/${Uri.encode(key)}")
+/**
+ * PendingIntent identity includes Intent.data, so each event gets a stable unique identity even though the request code
+ * is fixed. The actual route is carried separately in EXTRA_PUSH_DEEP_LINK and is validated by the model.
+ */
+internal fun notificationIntentData(key: String): Uri = Uri.parse("remoteagent://notifications/${Uri.encode(key)}")
 
 internal fun notificationsAllowed(
     permissionGranted: Boolean,
@@ -99,9 +102,8 @@ internal object PushRegistrationStore {
 
     fun baseDeviceId(context: Context): String {
         val preferences = context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE)
-        return preferences.getString(DEVICE_ID, null)?.takeIf(String::isNotBlank) ?: UUID.randomUUID().toString().also {
-            preferences.edit().putString(DEVICE_ID, it).apply()
-        }
+        return preferences.getString(DEVICE_ID, null)?.takeIf(String::isNotBlank)
+            ?: UUID.randomUUID().toString().also { preferences.edit().putString(DEVICE_ID, it).apply() }
     }
 
     /** Each Host gets a stable principal so its registration cannot overwrite another Host. */
@@ -113,9 +115,10 @@ internal object PushRegistrationStore {
     internal fun scopedDeviceId(base: String, hostId: String): String {
         val candidate = "$base:$hostId"
         if (candidate.toByteArray(Charsets.UTF_8).size <= 128) return candidate
-        val digest = MessageDigest.getInstance("SHA-256")
-            .digest(hostId.toByteArray(Charsets.UTF_8))
-            .joinToString("") { byte -> "%02x".format(byte) }
+        val digest =
+            MessageDigest.getInstance("SHA-256").digest(hostId.toByteArray(Charsets.UTF_8)).joinToString("") { byte ->
+                "%02x".format(byte)
+            }
         return "$base:$digest"
     }
 
@@ -125,7 +128,6 @@ internal object PushRegistrationStore {
     fun saveToken(context: Context, token: String) {
         context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE).edit().putString(TOKEN, token).apply()
     }
-
 }
 
 internal object PushNotificationCenter {
@@ -136,14 +138,17 @@ internal object PushNotificationCenter {
     }
 
     fun notificationsEnabled(context: Context): Boolean {
-        val permissionGranted = Build.VERSION.SDK_INT < 33 ||
-            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) ==
-                PackageManager.PERMISSION_GRANTED
+        val permissionGranted =
+            Build.VERSION.SDK_INT < 33 ||
+                ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) ==
+                    PackageManager.PERMISSION_GRANTED
         val packageEnabled = NotificationManagerCompat.from(context).areNotificationsEnabled()
-        val channelBlocked = Build.VERSION.SDK_INT >= 26 &&
-            context.getSystemService(NotificationManager::class.java)
-                ?.getNotificationChannel(CHANNEL_ID)
-                ?.importance == NotificationManager.IMPORTANCE_NONE
+        val channelBlocked =
+            Build.VERSION.SDK_INT >= 26 &&
+                context
+                    .getSystemService(NotificationManager::class.java)
+                    ?.getNotificationChannel(CHANNEL_ID)
+                    ?.importance == NotificationManager.IMPORTANCE_NONE
         return notificationsAllowed(permissionGranted, packageEnabled, channelBlocked)
     }
 
@@ -165,15 +170,7 @@ internal object PushNotificationCenter {
         deduplicate: Boolean = false,
     ) {
         if (deduplicate && (!notificationsEnabled(context) || !rememberAlert(context, key))) return
-        post(
-            context,
-            title,
-            body,
-            deepLink,
-            ongoing = false,
-            key = key,
-            suppressVisible = true,
-        )
+        post(context, title, body, deepLink, ongoing = false, key = key, suppressVisible = true)
     }
 
     private fun rememberAlert(context: Context, key: String): Boolean {
@@ -181,9 +178,7 @@ internal object PushNotificationCenter {
             val preferences = context.getSharedPreferences(ALERT_HISTORY_PREFERENCES, Context.MODE_PRIVATE)
             val seen = preferences.getString(ALERT_HISTORY_KEY, null)?.split('\n').orEmpty()
             if (key in seen) return false
-            preferences.edit()
-                .putString(ALERT_HISTORY_KEY, (seen.takeLast(63) + key).joinToString("\n"))
-                .apply()
+            preferences.edit().putString(ALERT_HISTORY_KEY, (seen.takeLast(63) + key).joinToString("\n")).apply()
             return true
         }
     }
@@ -202,14 +197,18 @@ internal object PushNotificationCenter {
             cancelActivity(context)
             return
         }
-        val timeoutAfterMillis = if (displayExpiryAtMillis == Long.MAX_VALUE) {
-            0L
-        } else {
-            (displayExpiryAtMillis - now).coerceAtLeast(1L)
-        }
+        val timeoutAfterMillis =
+            if (displayExpiryAtMillis == Long.MAX_VALUE) {
+                0L
+            } else {
+                (displayExpiryAtMillis - now).coerceAtLeast(1L)
+            }
         if (timeoutAfterMillis > 0L && Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
-            context.getSharedPreferences(ACTIVITY_DISPLAY_PREFERENCES, Context.MODE_PRIVATE)
-                .edit().putLong(ACTIVITY_DISPLAY_EXPIRY_KEY, displayExpiryAtMillis).apply()
+            context
+                .getSharedPreferences(ACTIVITY_DISPLAY_PREFERENCES, Context.MODE_PRIVATE)
+                .edit()
+                .putLong(ACTIVITY_DISPLAY_EXPIRY_KEY, displayExpiryAtMillis)
+                .apply()
         }
         post(
             context,
@@ -224,19 +223,25 @@ internal object PushNotificationCenter {
             tag = ONGOING_ACTIVITY_TAG,
         )
         if (timeoutAfterMillis > 0L && Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
-            context.getSystemService(AlarmManager::class.java)?.setAndAllowWhileIdle(
-                AlarmManager.RTC_WAKEUP,
-                now + timeoutAfterMillis,
-                activityExpiryIntent(context, displayExpiryAtMillis),
-            )
+            context
+                .getSystemService(AlarmManager::class.java)
+                ?.setAndAllowWhileIdle(
+                    AlarmManager.RTC_WAKEUP,
+                    now + timeoutAfterMillis,
+                    activityExpiryIntent(context, displayExpiryAtMillis),
+                )
         }
     }
 
     fun cancelActivity(context: Context) {
-        context.getSystemService(NotificationManager::class.java)
+        context
+            .getSystemService(NotificationManager::class.java)
             ?.cancel(ONGOING_ACTIVITY_TAG, AWARENESS_NOTIFICATION_ID)
-        context.getSharedPreferences(ACTIVITY_DISPLAY_PREFERENCES, Context.MODE_PRIVATE)
-            .edit().remove(ACTIVITY_DISPLAY_EXPIRY_KEY).apply()
+        context
+            .getSharedPreferences(ACTIVITY_DISPLAY_PREFERENCES, Context.MODE_PRIVATE)
+            .edit()
+            .remove(ACTIVITY_DISPLAY_EXPIRY_KEY)
+            .apply()
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
             context.getSystemService(AlarmManager::class.java)?.cancel(activityExpiryIntent(context, null))
         }
@@ -261,51 +266,57 @@ internal object PushNotificationCenter {
         deleteIntent: PendingIntent? = null,
         tag: String? = null,
     ) {
-        if (suppressVisible &&
-            deepLink != null &&
-            deepLink == visibleThread &&
-            ProcessLifecycleOwner.get().lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)
-        ) return
+        if (
+            suppressVisible &&
+                deepLink != null &&
+                deepLink == visibleThread &&
+                ProcessLifecycleOwner.get().lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)
+        )
+            return
         if (!notificationsEnabled(context)) return
         val manager = context.getSystemService(NotificationManager::class.java) ?: return
         ensureChannel(manager)
-        val intent = Intent(context, MainActivity::class.java).apply {
-            action = ACTION_OPEN_PUSH
-            putExtra(EXTRA_PUSH_DEEP_LINK, deepLink)
-            data = notificationIntentData(key)
-            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
-        }
-        val pending = PendingIntent.getActivity(
-            context,
-            AWARENESS_NOTIFICATION_ID,
-            intent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-        )
-        val notification = NotificationCompat.Builder(context, CHANNEL_ID)
-            .setSmallIcon(R.drawable.bex_icon)
-            .setContentTitle(title)
-            .setContentText(body)
-            .setStyle(NotificationCompat.BigTextStyle().bigText(body))
-            .setAutoCancel(!ongoing)
-            .setOngoing(ongoing)
-            .setOnlyAlertOnce(ongoing)
-            .setContentIntent(pending)
-            .setPriority(NotificationCompat.PRIORITY_HIGH)
-            .apply {
-                if (timeoutAfterMillis > 0L) setTimeoutAfter(timeoutAfterMillis)
-                if (deleteIntent != null) setDeleteIntent(deleteIntent)
-                if (ongoing && deleteIntent != null) addAction(0, "Dismiss", deleteIntent)
+        val intent =
+            Intent(context, MainActivity::class.java).apply {
+                action = ACTION_OPEN_PUSH
+                putExtra(EXTRA_PUSH_DEEP_LINK, deepLink)
+                data = notificationIntentData(key)
+                flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
             }
-            .build()
+        val pending =
+            PendingIntent.getActivity(
+                context,
+                AWARENESS_NOTIFICATION_ID,
+                intent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+            )
+        val notification =
+            NotificationCompat.Builder(context, CHANNEL_ID)
+                .setSmallIcon(R.drawable.bex_icon)
+                .setContentTitle(title)
+                .setContentText(body)
+                .setStyle(NotificationCompat.BigTextStyle().bigText(body))
+                .setAutoCancel(!ongoing)
+                .setOngoing(ongoing)
+                .setOnlyAlertOnce(ongoing)
+                .setContentIntent(pending)
+                .setPriority(NotificationCompat.PRIORITY_HIGH)
+                .apply {
+                    if (timeoutAfterMillis > 0L) setTimeoutAfter(timeoutAfterMillis)
+                    if (deleteIntent != null) setDeleteIntent(deleteIntent)
+                    if (ongoing && deleteIntent != null) addAction(0, "Dismiss", deleteIntent)
+                }
+                .build()
         manager.notify(tag ?: notificationTag(key, ongoing), AWARENESS_NOTIFICATION_ID, notification)
     }
 
-    private fun activityDismissIntent(context: Context): PendingIntent = PendingIntent.getBroadcast(
-        context,
-        AWARENESS_NOTIFICATION_ID,
-        Intent(context, AgentActivityDismissReceiver::class.java),
-        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-    )
+    private fun activityDismissIntent(context: Context): PendingIntent =
+        PendingIntent.getBroadcast(
+            context,
+            AWARENESS_NOTIFICATION_ID,
+            Intent(context, AgentActivityDismissReceiver::class.java),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
 
     private fun activityExpiryIntent(context: Context, expiresAtMillis: Long?): PendingIntent =
         PendingIntent.getBroadcast(

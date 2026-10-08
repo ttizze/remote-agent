@@ -59,10 +59,7 @@ pub struct ProviderInstance {
 impl ProviderInstance {
     /// Can contribute models to an interactive picker.
     pub fn picker_ready(&self) -> bool {
-        self.enabled
-            && self.installed
-            && self.available
-            && self.status == ProviderStatus::Ready
+        self.enabled && self.installed && self.available && self.status == ProviderStatus::Ready
     }
 }
 

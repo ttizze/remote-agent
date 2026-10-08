@@ -1,8 +1,6 @@
 //! The Git action owner. It performs the commands and emits the protocol's
 //! progress records; clients only render those records.
-use super::process::{
-    CommandCancelled, Execute, Executed, NON_INTERACTIVE_ENV, Progress, execute,
-};
+use super::process::{CommandCancelled, Execute, Executed, NON_INTERACTIVE_ENV, Progress, execute};
 use super::pull_requests::{branch_head_context, find_open_pr_with_cancel};
 use super::{
     VcsStatusBroadcaster, default_branch, git, github_scope, primary_remote, remote_names,
@@ -15,9 +13,9 @@ use crate::text_generation::{
     pull_request_template, sanitize_commit_message, sanitize_pr_content,
 };
 use agent_protocol::vcs::{
-    ActionPhase, ActionProgressEvent, ActionProgressKind, ActionToast, ActionToastCta,
-    BranchStep, BranchStepStatus, CommitStep, CommitStepStatus, PrStep, PrStepStatus,
-    PushStep, PushStepStatus, RunStackedAction, StackedAction, StackedActionResult,
+    ActionPhase, ActionProgressEvent, ActionProgressKind, ActionToast, ActionToastCta, BranchStep,
+    BranchStepStatus, CommitStep, CommitStepStatus, PrStep, PrStepStatus, PushStep, PushStepStatus,
+    RunStackedAction, StackedAction, StackedActionResult,
 };
 use agent_runtime::TextGenerationRequest;
 use anyhow::anyhow;
@@ -69,13 +67,17 @@ fn phases(request: &RunStackedAction) -> Vec<ActionPhase> {
     if action.commits() {
         phases.push(ActionPhase::Commit);
     }
-    if matches!(action, StackedAction::Push | StackedAction::CommitPush | StackedAction::CommitPushPr)
-        || (action == StackedAction::CreatePr
-            && should_push_before_pr(Path::new(&request.cwd)))
+    if matches!(
+        action,
+        StackedAction::Push | StackedAction::CommitPush | StackedAction::CommitPushPr
+    ) || (action == StackedAction::CreatePr && should_push_before_pr(Path::new(&request.cwd)))
     {
         phases.push(ActionPhase::Push);
     }
-    if matches!(action, StackedAction::CreatePr | StackedAction::CommitPushPr) {
+    if matches!(
+        action,
+        StackedAction::CreatePr | StackedAction::CommitPushPr
+    ) {
         phases.push(ActionPhase::Pr);
     }
     phases
@@ -131,10 +133,7 @@ pub(crate) fn start(
             Ok(result) => {
                 send_terminal(
                     &sender,
-                    event(
-                        &task_request,
-                        ActionProgressKind::ActionFinished { result },
-                    ),
+                    event(&task_request, ActionProgressKind::ActionFinished { result }),
                     &action_cancel,
                 )
                 .await;
@@ -209,8 +208,7 @@ async fn run(
         ));
     }
     if request.action == StackedAction::CreatePr
-        && stdout(cwd, &["status", "--porcelain"])
-            .is_some_and(|output| !output.is_empty())
+        && stdout(cwd, &["status", "--porcelain"]).is_some_and(|output| !output.is_empty())
     {
         return Err(ActionError::at(
             ActionPhase::Pr,
@@ -266,8 +264,8 @@ async fn run(
                 .or_else(|| generated.as_ref().map(|m| m.subject.as_str())),
             &cancel,
         )
-            .await
-            .map_err(|error| ActionError::at(ActionPhase::Branch, error))?;
+        .await
+        .map_err(|error| ActionError::at(ActionPhase::Branch, error))?;
         BranchStep {
             status: BranchStepStatus::Created,
             name: Some(name),
@@ -288,12 +286,10 @@ async fn run(
         )
         .await;
         ensure_active(&cancel)?;
-        let message = generated
-            .take()
-            .unwrap_or_else(|| GeneratedCommitMessage {
-                subject: "Update project files".into(),
-                ..Default::default()
-            });
+        let message = generated.take().unwrap_or_else(|| GeneratedCommitMessage {
+            subject: "Update project files".into(),
+            ..Default::default()
+        });
         commit(cwd, &request, &message, &sender, &cancel).await?
     } else {
         CommitStep {
@@ -305,7 +301,8 @@ async fn run(
     let push_requested = matches!(
         request.action,
         StackedAction::Push | StackedAction::CommitPush | StackedAction::CommitPushPr
-    ) || (request.action == StackedAction::CreatePr && should_push_before_pr(cwd));
+    ) || (request.action == StackedAction::CreatePr
+        && should_push_before_pr(cwd));
     let push = if push_requested {
         phase(
             &request,
@@ -325,7 +322,10 @@ async fn run(
             set_upstream: None,
         }
     };
-    let pr = if matches!(request.action, StackedAction::CreatePr | StackedAction::CommitPushPr) {
+    let pr = if matches!(
+        request.action,
+        StackedAction::CreatePr | StackedAction::CommitPushPr
+    ) {
         phase(
             &request,
             &sender,
@@ -374,14 +374,24 @@ async fn run(
 fn should_push_before_pr(cwd: &Path) -> bool {
     let upstream = stdout(
         cwd,
-        &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"],
+        &[
+            "rev-parse",
+            "--abbrev-ref",
+            "--symbolic-full-name",
+            "@{upstream}",
+        ],
     );
     let Some(upstream) = upstream else {
         return true;
     };
     stdout(
         cwd,
-        &["rev-list", "--left-right", "--count", &format!("{upstream}...HEAD")],
+        &[
+            "rev-list",
+            "--left-right",
+            "--count",
+            &format!("{upstream}...HEAD"),
+        ],
     )
     .and_then(|counts| counts.split_whitespace().nth(1)?.parse::<u64>().ok())
     .is_some_and(|ahead| ahead > 0)
@@ -393,16 +403,23 @@ async fn stage_selected_files(
     cancel: &CancellationToken,
 ) -> anyhow::Result<()> {
     let mut add_args = vec!["add".to_owned(), "--".to_owned()];
-    match request.file_paths.as_ref().filter(|paths| !paths.is_empty()) {
+    match request
+        .file_paths
+        .as_ref()
+        .filter(|paths| !paths.is_empty())
+    {
         Some(paths) => add_args.extend(paths.iter().cloned()),
         None => add_args.push(".".into()),
     }
     let add_refs: Vec<&str> = add_args.iter().map(String::as_str).collect();
-    let staged = execute_with_cancel(cancel, Execute {
-        env: &NON_INTERACTIVE_ENV,
-        timeout: Some(Duration::from_secs(60)),
-        ..Execute::new(cwd, &add_refs)
-    })
+    let staged = execute_with_cancel(
+        cancel,
+        Execute {
+            env: &NON_INTERACTIVE_ENV,
+            timeout: Some(Duration::from_secs(60)),
+            ..Execute::new(cwd, &add_refs)
+        },
+    )
     .await?;
     staged
         .ok()
@@ -475,10 +492,10 @@ async fn commit_message(
     let Some(text) = text else {
         return Ok(fallback);
     };
-    let summary = stdout(Path::new(&request.cwd), &["diff", "--cached", "--stat"])
-        .unwrap_or_default();
-    let patch = stdout(Path::new(&request.cwd), &["diff", "--cached", "--no-color"])
-        .unwrap_or_default();
+    let summary =
+        stdout(Path::new(&request.cwd), &["diff", "--cached", "--stat"]).unwrap_or_default();
+    let patch =
+        stdout(Path::new(&request.cwd), &["diff", "--cached", "--no-color"]).unwrap_or_default();
     let generation = text.generation_settings(
         request.project_id.as_deref().unwrap_or_default(),
         "generateCommitMessage",
@@ -522,17 +539,25 @@ async fn create_feature_branch(
         }
         let exists = git(
             cwd,
-            &["show-ref", "--verify", "--quiet", &format!("refs/heads/{branch}")],
+            &[
+                "show-ref",
+                "--verify",
+                "--quiet",
+                &format!("refs/heads/{branch}"),
+            ],
             super::Options::default(),
         )
         .is_ok_and(|result| result.ok());
         if !exists {
             let args = ["switch", "-c", branch.as_str()];
-            let created = execute_with_cancel(cancel, Execute {
-                env: &NON_INTERACTIVE_ENV,
-                timeout: Some(Duration::from_secs(30)),
-                ..Execute::new(cwd, &args)
-            })
+            let created = execute_with_cancel(
+                cancel,
+                Execute {
+                    env: &NON_INTERACTIVE_ENV,
+                    timeout: Some(Duration::from_secs(30)),
+                    ..Execute::new(cwd, &args)
+                },
+            )
             .await?;
             if created.ok() {
                 return Ok(branch);
@@ -599,13 +624,16 @@ async fn commit(
         };
         let _ = sender.try_send(event(request, kind));
     };
-    let committed = execute_with_cancel(cancel, Execute {
-        env: &NON_INTERACTIVE_ENV,
-        timeout: Some(COMMIT_TIMEOUT),
-        progress: Some(&mut report),
-        trace_hooks: true,
-        ..Execute::new(cwd, &refs)
-    })
+    let committed = execute_with_cancel(
+        cancel,
+        Execute {
+            env: &NON_INTERACTIVE_ENV,
+            timeout: Some(COMMIT_TIMEOUT),
+            progress: Some(&mut report),
+            trace_hooks: true,
+            ..Execute::new(cwd, &refs)
+        },
+    )
     .await
     .map_err(|error| ActionError::at(ActionPhase::Commit, error))?;
     if !committed.ok() {
@@ -762,10 +790,8 @@ mod tests {
         std::fs::write(directory.path().join("file.txt"), "change\n").unwrap();
         git(&["add", "file.txt"]);
 
-        let broadcaster = super::VcsStatusBroadcaster::new(
-            None,
-            Arc::new(|| Duration::from_secs(3600)),
-        );
+        let broadcaster =
+            super::VcsStatusBroadcaster::new(None, Arc::new(|| Duration::from_secs(3600)));
         let session_cancel = CancellationToken::new();
         let request = RunStackedAction {
             action_id: "action:active-hook".into(),
@@ -787,7 +813,10 @@ mod tests {
             handoff_gate,
         )
         .unwrap();
-        assert!(matches!(first.kind, ActionProgressKind::ActionStarted { .. }));
+        assert!(matches!(
+            first.kind,
+            ActionProgressKind::ActionStarted { .. }
+        ));
         for _ in 0..200 {
             if ready.exists() {
                 break;
@@ -842,16 +871,29 @@ async fn push(
     let branch = stdout(cwd, &["branch", "--show-current"])
         .filter(|branch| !branch.is_empty())
         .ok_or_else(|| ActionError::at(ActionPhase::Push, "Cannot push a detached HEAD."))?;
-    let upstream = stdout(cwd, &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"]);
+    let upstream = stdout(
+        cwd,
+        &[
+            "rev-parse",
+            "--abbrev-ref",
+            "--symbolic-full-name",
+            "@{upstream}",
+        ],
+    );
     let upstream_branch = upstream
         .as_deref()
         .and_then(|value| split_remote_ref(value, &remote_names(cwd)))
         .map(|(_, branch)| branch)
         .or_else(|| upstream.clone());
     if upstream.is_some() {
-        let counts = stdout(cwd, &["rev-list", "--left-right", "--count", "@{upstream}...HEAD"])
-            .unwrap_or_default();
-        let mut numbers = counts.split_whitespace().filter_map(|part| part.parse::<u64>().ok());
+        let counts = stdout(
+            cwd,
+            &["rev-list", "--left-right", "--count", "@{upstream}...HEAD"],
+        )
+        .unwrap_or_default();
+        let mut numbers = counts
+            .split_whitespace()
+            .filter_map(|part| part.parse::<u64>().ok());
         let _behind = numbers.next().unwrap_or(0);
         let ahead = numbers.next().unwrap_or(1);
         if ahead == 0 {
@@ -882,18 +924,29 @@ async fn push(
             ));
         }
     };
-    let pushed = execute_with_cancel(cancel, Execute {
-        env: &NON_INTERACTIVE_ENV,
-        timeout: Some(PUSH_TIMEOUT),
-        progress: Some(&mut report),
-        ..Execute::new(cwd, &refs)
-    })
+    let pushed = execute_with_cancel(
+        cancel,
+        Execute {
+            env: &NON_INTERACTIVE_ENV,
+            timeout: Some(PUSH_TIMEOUT),
+            progress: Some(&mut report),
+            ..Execute::new(cwd, &refs)
+        },
+    )
     .await
     .map_err(|error| ActionError::at(ActionPhase::Push, error))?;
     if !pushed.ok() {
         return Err(ActionError::at(ActionPhase::Push, "Git push failed."));
     }
-    let current_upstream = stdout(cwd, &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"]);
+    let current_upstream = stdout(
+        cwd,
+        &[
+            "rev-parse",
+            "--abbrev-ref",
+            "--symbolic-full-name",
+            "@{upstream}",
+        ],
+    );
     Ok(PushStep {
         status: PushStepStatus::Pushed,
         branch: Some(branch),
@@ -918,7 +971,12 @@ async fn pull_request(
         github.ok_or_else(|| ActionError::at(ActionPhase::Pr, "GitHub CLI is unavailable."))?;
     let branch = stdout(cwd, &["branch", "--show-current"])
         .filter(|branch| !branch.is_empty())
-        .ok_or_else(|| ActionError::at(ActionPhase::Pr, "Cannot create a pull request from a detached HEAD."))?;
+        .ok_or_else(|| {
+            ActionError::at(
+                ActionPhase::Pr,
+                "Cannot create a pull request from a detached HEAD.",
+            )
+        })?;
     let upstream = stdout(
         cwd,
         &[
@@ -943,17 +1001,11 @@ async fn pull_request(
             .map_err(|error| ActionError::at(ActionPhase::Pr, error))?,
         None => None,
     }
-        .or_else(|| default_branch(cwd, &primary_remote(cwd).unwrap_or_else(|| "origin".into())))
-        .unwrap_or_else(|| "main".into());
-    let existing = find_open_pr_with_cancel(
-        github,
-        cwd,
-        &context,
-        host.as_deref(),
-        Some(cancel),
-    )
-    .await
-    .map_err(|error| ActionError::at(ActionPhase::Pr, error))?;
+    .or_else(|| default_branch(cwd, &primary_remote(cwd).unwrap_or_else(|| "origin".into())))
+    .unwrap_or_else(|| "main".into());
+    let existing = find_open_pr_with_cancel(github, cwd, &context, host.as_deref(), Some(cancel))
+        .await
+        .map_err(|error| ActionError::at(ActionPhase::Pr, error))?;
     if let Some(existing) = existing {
         return Ok(PrStep {
             status: PrStepStatus::OpenedExisting,
@@ -964,15 +1016,14 @@ async fn pull_request(
             title: Some(existing.title),
         });
     }
-    let commit_subject = stdout(cwd, &["log", "-1", "--format=%s"])
-        .unwrap_or_else(|| "Update project files".into());
+    let commit_subject =
+        stdout(cwd, &["log", "-1", "--format=%s"]).unwrap_or_else(|| "Update project files".into());
     let template = pull_request_template(cwd, &default).ok().flatten();
-    let commits = stdout(cwd, &["log", "--format=%s", &format!("{default}..HEAD")])
-        .unwrap_or_default();
-    let stat = stdout(cwd, &["diff", "--stat", &format!("{default}...HEAD")])
-        .unwrap_or_default();
-    let patch = stdout(cwd, &["diff", "--no-color", &format!("{default}...HEAD")])
-        .unwrap_or_default();
+    let commits =
+        stdout(cwd, &["log", "--format=%s", &format!("{default}..HEAD")]).unwrap_or_default();
+    let stat = stdout(cwd, &["diff", "--stat", &format!("{default}...HEAD")]).unwrap_or_default();
+    let patch =
+        stdout(cwd, &["diff", "--no-color", &format!("{default}...HEAD")]).unwrap_or_default();
     let generation = text
         .map(|text| {
             text.generation_settings(
@@ -1032,15 +1083,9 @@ async fn pull_request(
         )
         .await
         .map_err(|error| ActionError::at(ActionPhase::Pr, error))?;
-    let created = find_open_pr_with_cancel(
-        github,
-        cwd,
-        &context,
-        host.as_deref(),
-        Some(cancel),
-    )
-    .await
-    .map_err(|error| ActionError::at(ActionPhase::Pr, error))?
+    let created = find_open_pr_with_cancel(github, cwd, &context, host.as_deref(), Some(cancel))
+        .await
+        .map_err(|error| ActionError::at(ActionPhase::Pr, error))?
         .ok_or_else(|| {
             ActionError::at(
                 ActionPhase::Pr,

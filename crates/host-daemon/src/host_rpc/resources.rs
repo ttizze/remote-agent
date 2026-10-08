@@ -59,12 +59,9 @@ impl CodexResources {
     /// Keeping this beside the process owner means provider advisories and
     /// model capability consumers use the same executable that serves turns.
     pub fn version(&self) -> Option<String> {
-        self.process
-            .as_ref()
-            .ok()
-            .and_then(|server| {
-                agent_providers::cli_version(&server.initialize_response().user_agent)
-            })
+        self.process.as_ref().ok().and_then(|server| {
+            agent_providers::cli_version(&server.initialize_response().user_agent)
+        })
     }
     pub(super) async fn request<P: Serialize, T: serde::de::DeserializeOwned>(
         &self,

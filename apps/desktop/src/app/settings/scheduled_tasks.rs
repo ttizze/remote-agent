@@ -6,9 +6,7 @@ use crate::app::{
     ui::{color, icon, tint},
 };
 use agent_core::{
-    state::{
-        Intent, ScheduledTaskDraft, ScheduledTaskScheduleDraft, ScheduledTaskWorkspaceDraft,
-    },
+    state::{Intent, ScheduledTaskDraft, ScheduledTaskScheduleDraft, ScheduledTaskWorkspaceDraft},
     view::{
         composer::controls::runtime_mode_choices,
         models::{ProviderStatus, traits::TraitControl},
@@ -95,16 +93,20 @@ impl ScheduledTasksState {
                     *time_of_day = input.read(cx).value();
                 }
             }),
-            cx.subscribe_in(&interval, window, |view, input, event: &InputEvent, _, cx| {
-                if matches!(event, InputEvent::Change)
-                    && let Some(draft) = view.settings.scheduled_tasks.draft.as_mut()
-                    && let Ok(minutes) = input.read(cx).value().trim().parse::<u64>()
-                {
-                    draft.schedule = ScheduledTaskScheduleDraft::Interval {
-                        every_ms: minutes.saturating_mul(60_000),
-                    };
-                }
-            }),
+            cx.subscribe_in(
+                &interval,
+                window,
+                |view, input, event: &InputEvent, _, cx| {
+                    if matches!(event, InputEvent::Change)
+                        && let Some(draft) = view.settings.scheduled_tasks.draft.as_mut()
+                        && let Ok(minutes) = input.read(cx).value().trim().parse::<u64>()
+                    {
+                        draft.schedule = ScheduledTaskScheduleDraft::Interval {
+                            every_ms: minutes.saturating_mul(60_000),
+                        };
+                    }
+                },
+            ),
             cx.subscribe_in(&branch, window, |view, input, event: &InputEvent, _, cx| {
                 if matches!(event, InputEvent::Change)
                     && let Some(draft) = view.settings.scheduled_tasks.draft.as_mut()
@@ -117,18 +119,23 @@ impl ScheduledTasksState {
                     }
                 }
             }),
-            cx.subscribe_in(&worktree, window, |view, input, event: &InputEvent, _, cx| {
-                if matches!(event, InputEvent::Change)
-                    && let Some(draft) = view.settings.scheduled_tasks.draft.as_mut()
-                {
-                    let value = input.read(cx).value();
-                    if let ScheduledTaskWorkspaceDraft::ExistingWorktree { worktree_path, .. } =
-                        &mut draft.workspace
+            cx.subscribe_in(
+                &worktree,
+                window,
+                |view, input, event: &InputEvent, _, cx| {
+                    if matches!(event, InputEvent::Change)
+                        && let Some(draft) = view.settings.scheduled_tasks.draft.as_mut()
                     {
-                        *worktree_path = value;
+                        let value = input.read(cx).value();
+                        if let ScheduledTaskWorkspaceDraft::ExistingWorktree {
+                            worktree_path, ..
+                        } = &mut draft.workspace
+                        {
+                            *worktree_path = value;
+                        }
                     }
-                }
-            }),
+                },
+            ),
         ];
         Self {
             title,
@@ -169,7 +176,10 @@ impl Desktop {
         let search_project = {
             let state = &mut self.settings.scheduled_tasks;
             if let Some(selected) = state.selected.as_deref()
-                && state.draft.as_ref().is_some_and(|draft| draft.id.as_deref() == Some(selected))
+                && state
+                    .draft
+                    .as_ref()
+                    .is_some_and(|draft| draft.id.as_deref() == Some(selected))
                 && !scheduled_ids.contains(selected)
             {
                 state.stale = true;
@@ -205,20 +215,35 @@ impl Desktop {
                 ScheduledTaskWorkspaceDraft::Root { branch } => {
                     (branch.clone().unwrap_or_default(), String::new())
                 }
-                ScheduledTaskWorkspaceDraft::Worktree { base_ref, branch, .. } => {
-                    (branch.clone().unwrap_or_else(|| base_ref.clone()), String::new())
-                }
+                ScheduledTaskWorkspaceDraft::Worktree {
+                    base_ref, branch, ..
+                } => (
+                    branch.clone().unwrap_or_else(|| base_ref.clone()),
+                    String::new(),
+                ),
                 ScheduledTaskWorkspaceDraft::ExistingWorktree {
                     worktree_path,
                     branch,
                 } => (branch.clone().unwrap_or_default(), worktree_path.clone()),
             };
-            state.title.update(cx, |input, cx| input.set_value(draft.title.clone(), window, cx));
-            state.prompt.update(cx, |input, cx| input.set_value(draft.prompt.clone(), window, cx));
-            state.time.update(cx, |input, cx| input.set_value(time, window, cx));
-            state.interval.update(cx, |input, cx| input.set_value(interval, window, cx));
-            state.branch.update(cx, |input, cx| input.set_value(branch, window, cx));
-            state.worktree.update(cx, |input, cx| input.set_value(worktree, window, cx));
+            state.title.update(cx, |input, cx| {
+                input.set_value(draft.title.clone(), window, cx)
+            });
+            state.prompt.update(cx, |input, cx| {
+                input.set_value(draft.prompt.clone(), window, cx)
+            });
+            state
+                .time
+                .update(cx, |input, cx| input.set_value(time, window, cx));
+            state
+                .interval
+                .update(cx, |input, cx| input.set_value(interval, window, cx));
+            state
+                .branch
+                .update(cx, |input, cx| input.set_value(branch, window, cx));
+            state
+                .worktree
+                .update(cx, |input, cx| input.set_value(worktree, window, cx));
             state.seeded = true;
             search_project
         };
@@ -237,18 +262,22 @@ impl Desktop {
         let Some(draft) = self.settings.scheduled_tasks.draft.clone() else {
             return;
         };
-        self.perform_then(Intent::SaveScheduledTask { draft }, |view, result, _, cx| {
-            if result.is_ok() {
-                view.settings.scheduled_tasks.draft = None;
-                view.settings.scheduled_tasks.selected = None;
-                view.settings.scheduled_tasks.branches_project = None;
-                view.settings.scheduled_tasks.seeded = false;
-                view.settings.scheduled_tasks.error = None;
-            } else {
-                view.settings.scheduled_tasks.error = result.err().map(|error| error.to_string());
-            }
-            cx.notify();
-        });
+        self.perform_then(
+            Intent::SaveScheduledTask { draft },
+            |view, result, _, cx| {
+                if result.is_ok() {
+                    view.settings.scheduled_tasks.draft = None;
+                    view.settings.scheduled_tasks.selected = None;
+                    view.settings.scheduled_tasks.branches_project = None;
+                    view.settings.scheduled_tasks.seeded = false;
+                    view.settings.scheduled_tasks.error = None;
+                } else {
+                    view.settings.scheduled_tasks.error =
+                        result.err().map(|error| error.to_string());
+                }
+                cx.notify();
+            },
+        );
         cx.notify();
     }
 
@@ -267,7 +296,8 @@ impl Desktop {
             .map(|(index, task)| {
                 let id = task.id.clone();
                 let enabled_id = id.clone();
-                let selected = self.settings.scheduled_tasks.selected.as_deref() == Some(id.as_str());
+                let selected =
+                    self.settings.scheduled_tasks.selected.as_deref() == Some(id.as_str());
                 let enabled = task.enabled;
                 h_flex()
                     .id(("scheduled-task", index))
@@ -325,17 +355,27 @@ impl Desktop {
             .icon(icon("plus"))
             .label("New task")
             .on_click(cx.listener(|view, _, _, _| view.select_scheduled_task(None)));
-        let mut sections = vec![section(
-            Some("Scheduled tasks".into()),
-            Some(icon("calendar-clock").size_4().into_any_element()),
-            Some(new_button.into_any_element()),
-            if rows.is_empty() {
-                vec![div().px_4().py_4().text_sm().text_color(color("textMuted")).child("No scheduled tasks yet").into_any_element()]
-            } else {
-                rows
-            },
-        )
-        .into_any_element()];
+        let mut sections = vec![
+            section(
+                Some("Scheduled tasks".into()),
+                Some(icon("calendar-clock").size_4().into_any_element()),
+                Some(new_button.into_any_element()),
+                if rows.is_empty() {
+                    vec![
+                        div()
+                            .px_4()
+                            .py_4()
+                            .text_sm()
+                            .text_color(color("textMuted"))
+                            .child("No scheduled tasks yet")
+                            .into_any_element(),
+                    ]
+                } else {
+                    rows
+                },
+            )
+            .into_any_element(),
+        ];
         if self.settings.scheduled_tasks.draft.is_some() {
             sections.push(self.render_scheduled_task_editor(window, cx));
         }
@@ -347,7 +387,12 @@ impl Desktop {
         _window: &mut Window,
         cx: &mut Context<Desktop>,
     ) -> AnyElement {
-        let draft = self.settings.scheduled_tasks.draft.clone().expect("editor draft");
+        let draft = self
+            .settings
+            .scheduled_tasks
+            .draft
+            .clone()
+            .expect("editor draft");
         let schedule_kind = match &draft.schedule {
             ScheduledTaskScheduleDraft::Interval { .. } => "interval",
             ScheduledTaskScheduleDraft::FixedTime { .. } => "fixed",
@@ -358,13 +403,43 @@ impl Desktop {
             ScheduledTaskWorkspaceDraft::Worktree { .. } => "worktree",
         };
         let schedule_choices = vec![
-            Choice { id: "fixed".into(), label: "Fixed local time".into(), description: None, icon: Some("clock-3"), selected: schedule_kind == "fixed" },
-            Choice { id: "interval".into(), label: "Interval".into(), description: None, icon: Some("timer"), selected: schedule_kind == "interval" },
+            Choice {
+                id: "fixed".into(),
+                label: "Fixed local time".into(),
+                description: None,
+                icon: Some("clock-3"),
+                selected: schedule_kind == "fixed",
+            },
+            Choice {
+                id: "interval".into(),
+                label: "Interval".into(),
+                description: None,
+                icon: Some("timer"),
+                selected: schedule_kind == "interval",
+            },
         ];
         let workspace_choices = vec![
-            Choice { id: "root".into(), label: "Project checkout".into(), description: None, icon: Some("folder"), selected: workspace_kind == "root" },
-            Choice { id: "worktree".into(), label: "New worktree".into(), description: None, icon: Some("git-branch"), selected: workspace_kind == "worktree" },
-            Choice { id: "existing_worktree".into(), label: "Existing worktree".into(), description: None, icon: Some("folder-tree"), selected: workspace_kind == "existing_worktree" },
+            Choice {
+                id: "root".into(),
+                label: "Project checkout".into(),
+                description: None,
+                icon: Some("folder"),
+                selected: workspace_kind == "root",
+            },
+            Choice {
+                id: "worktree".into(),
+                label: "New worktree".into(),
+                description: None,
+                icon: Some("git-branch"),
+                selected: workspace_kind == "worktree",
+            },
+            Choice {
+                id: "existing_worktree".into(),
+                label: "Existing worktree".into(),
+                description: None,
+                icon: Some("folder-tree"),
+                selected: workspace_kind == "existing_worktree",
+            },
         ];
         let projects = self.snapshot.shell_projects().to_vec();
         let project_choices = projects
@@ -387,7 +462,10 @@ impl Desktop {
                 provider.enabled
                     && provider.installed
                     && provider.available
-                    && !matches!(provider.status, ProviderStatus::Error | ProviderStatus::Disabled)
+                    && !matches!(
+                        provider.status,
+                        ProviderStatus::Error | ProviderStatus::Disabled
+                    )
             })
             .flat_map(|provider| provider.models.iter().map(move |model| (provider, model)))
             .map(|(provider, model)| Choice {
@@ -420,115 +498,216 @@ impl Desktop {
             .collect::<Vec<_>>();
         let draft_id = self.settings.scheduled_tasks.selected.clone();
         let mut editor_rows = vec![
-            Row::new("Title").control(Input::new(&self.settings.scheduled_tasks.title).small()).render(),
-            Row::new("Prompt").control(Input::new(&self.settings.scheduled_tasks.prompt).small()).render(),
-            Row::new("Enabled").control(
-                Switch::new("scheduled-task-editor-enabled")
-                    .checked(draft.enabled)
-                    .accessibility_label("Enable scheduled task")
-                    .on_click(cx.listener(|view, enabled: &bool, _, cx| {
-                        if let Some(draft) = view.settings.scheduled_tasks.draft.as_mut() {
-                            draft.enabled = *enabled;
-                        }
-                        cx.notify();
-                    }))
+            Row::new("Title")
+                .control(Input::new(&self.settings.scheduled_tasks.title).small())
+                .render(),
+            Row::new("Prompt")
+                .control(Input::new(&self.settings.scheduled_tasks.prompt).small())
+                .render(),
+            Row::new("Enabled")
+                .control(
+                    Switch::new("scheduled-task-editor-enabled")
+                        .checked(draft.enabled)
+                        .accessibility_label("Enable scheduled task")
+                        .on_click(cx.listener(|view, enabled: &bool, _, cx| {
+                            if let Some(draft) = view.settings.scheduled_tasks.draft.as_mut() {
+                                draft.enabled = *enabled;
+                            }
+                            cx.notify();
+                        }))
+                        .into_any_element(),
+                )
+                .render(),
+            Row::new("Project")
+                .control(
+                    select(
+                        "scheduled-project",
+                        draft.project_id.clone(),
+                        project_choices,
+                        move |view, choice, _, cx| {
+                            if let Some(draft) = view.settings.scheduled_tasks.draft.as_mut() {
+                                draft.project_id = choice;
+                            }
+                            view.settings.scheduled_tasks.branches_project = None;
+                            view.settings.scheduled_tasks.seeded = false;
+                            cx.notify();
+                        },
+                        cx,
+                    )
                     .into_any_element(),
-            ).render(),
-            Row::new("Project").control(select("scheduled-project", draft.project_id.clone(), project_choices, move |view, choice, _, cx| {
-                if let Some(draft) = view.settings.scheduled_tasks.draft.as_mut() { draft.project_id = choice; }
-                view.settings.scheduled_tasks.branches_project = None;
-                view.settings.scheduled_tasks.seeded = false;
-                cx.notify();
-            }, cx).into_any_element()).render(),
-            Row::new("Model").control(select_sized("scheduled-model", format!("{} · {}", draft.instance_id, draft.model), models, 260., move |view, choice, _, cx| {
-                if let Some((instance, model)) = choice.split_once('\n')
-                    && let Some(driver) = view.snapshot.providers
-                        .as_ref()
-                        .into_iter()
-                        .flat_map(|providers| providers.iter())
-                        .find(|provider| provider.instance == instance)
-                        .map(|provider| provider.driver)
-                    && let Some(draft) = view.settings.scheduled_tasks.draft.as_mut()
-                {
-                    let same_model = draft.instance_id == instance && draft.model == model;
-                    draft.instance_id = instance.into();
-                    draft.model = model.into();
-                    draft.driver = driver;
-                    if !same_model {
-                        draft.options.clear();
-                    }
-                }
-                cx.notify();
-            }, cx).into_any_element()).render(),
-            Row::new("Runtime").control(select("scheduled-runtime", runtime_mode_id(draft.runtime_mode), runtime_choices, |view, choice, _, cx| {
-                if let Some(mode) = runtime_mode_from_id(&choice)
-                    && let Some(draft) = view.settings.scheduled_tasks.draft.as_mut()
-                {
-                    draft.runtime_mode = mode;
-                }
-                cx.notify();
-            }, cx).into_any_element()).render(),
-            Row::new("Schedule").control(select("scheduled-schedule", schedule_kind, schedule_choices, |view, choice, _, cx| {
-                if let Some(draft) = view.settings.scheduled_tasks.draft.as_mut() {
-                    draft.schedule = if choice == "interval" {
-                        ScheduledTaskScheduleDraft::Interval { every_ms: 15 * 60_000 }
-                    } else {
-                        ScheduledTaskScheduleDraft::FixedTime { time_of_day: "09:00".into(), weekdays: vec![1,2,3,4,5] }
-                    };
-                    view.settings.scheduled_tasks.seeded = false;
-                }
-                cx.notify();
-            }, cx).into_any_element()).render(),
+                )
+                .render(),
+            Row::new("Model")
+                .control(
+                    select_sized(
+                        "scheduled-model",
+                        format!("{} · {}", draft.instance_id, draft.model),
+                        models,
+                        260.,
+                        move |view, choice, _, cx| {
+                            if let Some((instance, model)) = choice.split_once('\n')
+                                && let Some(driver) = view
+                                    .snapshot
+                                    .providers
+                                    .as_ref()
+                                    .into_iter()
+                                    .flat_map(|providers| providers.iter())
+                                    .find(|provider| provider.instance == instance)
+                                    .map(|provider| provider.driver)
+                                && let Some(draft) = view.settings.scheduled_tasks.draft.as_mut()
+                            {
+                                let same_model =
+                                    draft.instance_id == instance && draft.model == model;
+                                draft.instance_id = instance.into();
+                                draft.model = model.into();
+                                draft.driver = driver;
+                                if !same_model {
+                                    draft.options.clear();
+                                }
+                            }
+                            cx.notify();
+                        },
+                        cx,
+                    )
+                    .into_any_element(),
+                )
+                .render(),
+            Row::new("Runtime")
+                .control(
+                    select(
+                        "scheduled-runtime",
+                        runtime_mode_id(draft.runtime_mode),
+                        runtime_choices,
+                        |view, choice, _, cx| {
+                            if let Some(mode) = runtime_mode_from_id(&choice)
+                                && let Some(draft) = view.settings.scheduled_tasks.draft.as_mut()
+                            {
+                                draft.runtime_mode = mode;
+                            }
+                            cx.notify();
+                        },
+                        cx,
+                    )
+                    .into_any_element(),
+                )
+                .render(),
+            Row::new("Schedule")
+                .control(
+                    select(
+                        "scheduled-schedule",
+                        schedule_kind,
+                        schedule_choices,
+                        |view, choice, _, cx| {
+                            if let Some(draft) = view.settings.scheduled_tasks.draft.as_mut() {
+                                draft.schedule = if choice == "interval" {
+                                    ScheduledTaskScheduleDraft::Interval {
+                                        every_ms: 15 * 60_000,
+                                    }
+                                } else {
+                                    ScheduledTaskScheduleDraft::FixedTime {
+                                        time_of_day: "09:00".into(),
+                                        weekdays: vec![1, 2, 3, 4, 5],
+                                    }
+                                };
+                                view.settings.scheduled_tasks.seeded = false;
+                            }
+                            cx.notify();
+                        },
+                        cx,
+                    )
+                    .into_any_element(),
+                )
+                .render(),
             if schedule_kind == "interval" {
-                Row::new("Interval (minutes)").control(Input::new(&self.settings.scheduled_tasks.interval).small()).render()
+                Row::new("Interval (minutes)")
+                    .control(Input::new(&self.settings.scheduled_tasks.interval).small())
+                    .render()
             } else {
                 let weekdays = match &draft.schedule {
                     ScheduledTaskScheduleDraft::FixedTime { weekdays, .. } => weekdays.clone(),
                     ScheduledTaskScheduleDraft::Interval { .. } => vec![],
                 };
-                let labels = [("S", 0u8), ("M", 1), ("T", 2), ("W", 3), ("T", 4), ("F", 5), ("S", 6)];
-                let day_buttons = labels.into_iter().enumerate().map(|(index, (label, day))| {
-                    let selected = weekdays.contains(&day);
-                    Button::new(("scheduled-task-day", index))
-                        .small()
-                        .when(selected, |button| button.primary())
-                        .ghost()
-                        .label(label)
-                        .on_click(cx.listener(move |view, _, _, cx| {
-                            if let Some(draft) = view.settings.scheduled_tasks.draft.as_mut()
-                                && let ScheduledTaskScheduleDraft::FixedTime { weekdays, .. } = &mut draft.schedule
-                            {
-                                if let Some(position) = weekdays.iter().position(|current| *current == day) {
-                                    weekdays.remove(position);
-                                } else {
-                                    weekdays.push(day);
-                                    weekdays.sort_unstable();
+                let labels = [
+                    ("S", 0u8),
+                    ("M", 1),
+                    ("T", 2),
+                    ("W", 3),
+                    ("T", 4),
+                    ("F", 5),
+                    ("S", 6),
+                ];
+                let day_buttons = labels
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, (label, day))| {
+                        let selected = weekdays.contains(&day);
+                        Button::new(("scheduled-task-day", index))
+                            .small()
+                            .when(selected, |button| button.primary())
+                            .ghost()
+                            .label(label)
+                            .on_click(cx.listener(move |view, _, _, cx| {
+                                if let Some(draft) = view.settings.scheduled_tasks.draft.as_mut()
+                                    && let ScheduledTaskScheduleDraft::FixedTime {
+                                        weekdays, ..
+                                    } = &mut draft.schedule
+                                {
+                                    if let Some(position) =
+                                        weekdays.iter().position(|current| *current == day)
+                                    {
+                                        weekdays.remove(position);
+                                    } else {
+                                        weekdays.push(day);
+                                        weekdays.sort_unstable();
+                                    }
                                 }
+                                cx.notify();
+                            }))
+                            .into_any_element()
+                    })
+                    .collect::<Vec<_>>();
+                Row::new("Local time")
+                    .control(
+                        v_flex()
+                            .gap_1()
+                            .child(Input::new(&self.settings.scheduled_tasks.time).small())
+                            .child(h_flex().gap_1().children(day_buttons))
+                            .into_any_element(),
+                    )
+                    .render()
+            },
+            Row::new("Workspace")
+                .control(
+                    select(
+                        "scheduled-workspace",
+                        workspace_kind,
+                        workspace_choices,
+                        |view, choice, _, cx| {
+                            if let Some(draft) = view.settings.scheduled_tasks.draft.as_mut() {
+                                draft.workspace = match choice.as_str() {
+                                    "worktree" => ScheduledTaskWorkspaceDraft::Worktree {
+                                        base_ref: "main".into(),
+                                        branch: None,
+                                        start_from_origin: true,
+                                    },
+                                    "existing_worktree" => {
+                                        ScheduledTaskWorkspaceDraft::ExistingWorktree {
+                                            worktree_path: String::new(),
+                                            branch: None,
+                                        }
+                                    }
+                                    _ => ScheduledTaskWorkspaceDraft::Root { branch: None },
+                                };
+                                view.settings.scheduled_tasks.branches_project = None;
+                                view.settings.scheduled_tasks.seeded = false;
                             }
                             cx.notify();
-                        }))
-                        .into_any_element()
-                }).collect::<Vec<_>>();
-                Row::new("Local time").control(
-                    v_flex()
-                        .gap_1()
-                        .child(Input::new(&self.settings.scheduled_tasks.time).small())
-                        .child(h_flex().gap_1().children(day_buttons))
-                        .into_any_element(),
-                ).render()
-            },
-            Row::new("Workspace").control(select("scheduled-workspace", workspace_kind, workspace_choices, |view, choice, _, cx| {
-                if let Some(draft) = view.settings.scheduled_tasks.draft.as_mut() {
-                    draft.workspace = match choice.as_str() {
-                        "worktree" => ScheduledTaskWorkspaceDraft::Worktree { base_ref: "main".into(), branch: None, start_from_origin: true },
-                        "existing_worktree" => ScheduledTaskWorkspaceDraft::ExistingWorktree { worktree_path: String::new(), branch: None },
-                        _ => ScheduledTaskWorkspaceDraft::Root { branch: None },
-                    };
-                    view.settings.scheduled_tasks.branches_project = None;
-                    view.settings.scheduled_tasks.seeded = false;
-                }
-                cx.notify();
-            }, cx).into_any_element()).render(),
+                        },
+                        cx,
+                    )
+                    .into_any_element(),
+                )
+                .render(),
         ];
         let scheduled_traits = self.snapshot.scheduled_task_traits(draft.clone());
         for control in scheduled_traits.controls {
@@ -564,13 +743,15 @@ impl Desktop {
                                     options,
                                     move |view, choice, _, cx| {
                                         if !disabled {
-                                            let current = view.settings.scheduled_tasks.draft.clone();
+                                            let current =
+                                                view.settings.scheduled_tasks.draft.clone();
                                             if let Some(current) = current {
-                                                let next = view.snapshot.select_scheduled_task_trait(
-                                                    current,
-                                                    descriptor_id.clone(),
-                                                    choice,
-                                                );
+                                                let next =
+                                                    view.snapshot.select_scheduled_task_trait(
+                                                        current,
+                                                        descriptor_id.clone(),
+                                                        choice,
+                                                    );
                                                 view.settings.scheduled_tasks.draft = Some(next);
                                             }
                                         }
@@ -630,7 +811,11 @@ impl Desktop {
                     })
                     .collect::<Vec<_>>();
                 if choices.is_empty() {
-                    Some(Row::new("Base branch").control(Input::new(&self.settings.scheduled_tasks.branch).small()).render())
+                    Some(
+                        Row::new("Base branch")
+                            .control(Input::new(&self.settings.scheduled_tasks.branch).small())
+                            .render(),
+                    )
                 } else {
                     Some(
                         Row::new("Base branch")
@@ -638,14 +823,23 @@ impl Desktop {
                                 select_sized(
                                     "scheduled-base-branch",
                                     match &draft.workspace {
-                                        ScheduledTaskWorkspaceDraft::Worktree { base_ref, .. } => base_ref.clone(),
+                                        ScheduledTaskWorkspaceDraft::Worktree {
+                                            base_ref, ..
+                                        } => base_ref.clone(),
                                         _ => String::new(),
                                     },
                                     choices,
                                     260.,
                                     |view, choice, _, cx| {
-                                        if let Some(ScheduledTaskWorkspaceDraft::Worktree { base_ref, .. }) =
-                                            view.settings.scheduled_tasks.draft.as_mut().map(|draft| &mut draft.workspace)
+                                        if let Some(ScheduledTaskWorkspaceDraft::Worktree {
+                                            base_ref,
+                                            ..
+                                        }) = view
+                                            .settings
+                                            .scheduled_tasks
+                                            .draft
+                                            .as_mut()
+                                            .map(|draft| &mut draft.workspace)
                                         {
                                             *base_ref = choice;
                                         }
@@ -659,7 +853,11 @@ impl Desktop {
                     )
                 }
             }
-            "existing_worktree" => Some(Row::new("Worktree path").control(Input::new(&self.settings.scheduled_tasks.worktree).small()).render()),
+            "existing_worktree" => Some(
+                Row::new("Worktree path")
+                    .control(Input::new(&self.settings.scheduled_tasks.worktree).small())
+                    .render(),
+            ),
             _ => None,
         };
         let selected = draft_id;
@@ -700,12 +898,24 @@ impl Desktop {
         if let Some(error) = self.settings.scheduled_tasks.error.clone() {
             rows.push(
                 Row::new("Error")
-                    .control(div().text_color(color("error")).child(error).into_any_element())
+                    .control(
+                        div()
+                            .text_color(color("error"))
+                            .child(error)
+                            .into_any_element(),
+                    )
                     .render(),
             );
         }
         section(
-            Some(if selected.is_some() { "Edit scheduled task" } else { "New scheduled task" }.into()),
+            Some(
+                if selected.is_some() {
+                    "Edit scheduled task"
+                } else {
+                    "New scheduled task"
+                }
+                .into(),
+            ),
             None,
             Some(
                 h_flex()

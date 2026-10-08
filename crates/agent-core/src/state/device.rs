@@ -532,20 +532,23 @@ impl DeviceState {
         down: bool,
         modifiers: DeviceModifierFacts,
     ) -> Result<DeviceInputPlan, String> {
-        let (target, platform) =
-            self.input_target(
-                &thread_id,
-                host_id.as_deref(),
-                &device_id,
-                Some(session_epoch.as_str()),
-            )?;
+        let (target, platform) = self.input_target(
+            &thread_id,
+            host_id.as_deref(),
+            &device_id,
+            Some(session_epoch.as_str()),
+        )?;
         let facts = canonical_device_key(&code, &key);
         let mut current_modifiers = modifiers;
         if is_modifier_code(&facts.code) {
             set_modifier_code(&mut current_modifiers, &facts.code, down);
         }
         let state_key = Self::input_key(&target);
-        let previous = self.input_state.get(&state_key).cloned().unwrap_or_default();
+        let previous = self
+            .input_state
+            .get(&state_key)
+            .cloned()
+            .unwrap_or_default();
         let mut inputs = Vec::new();
         if platform == agent_protocol::device::DevicePlatform::Ios {
             for transition in device_modifier_transitions(previous.modifiers, current_modifiers) {
@@ -639,10 +642,7 @@ impl DeviceState {
     /// device subscription or thread view is torn down.  Session identity is
     /// kept from the owned key, so a reconnect cannot redirect the cleanup to
     /// a replacement session.
-    pub fn release_input_plans_for_thread(
-        &mut self,
-        thread_id: &ThreadId,
-    ) -> Vec<DeviceInputPlan> {
+    pub fn release_input_plans_for_thread(&mut self, thread_id: &ThreadId) -> Vec<DeviceInputPlan> {
         let thread_key = thread_id.to_string();
         let targets = self
             .input_state
@@ -980,7 +980,12 @@ impl DeviceState {
                                     && active_epoch == &status.session_epoch
                             },
                         );
-                        (!keep).then(|| (key.clone(), (status.recording_id, status.session_epoch.clone())))
+                        (!keep).then(|| {
+                            (
+                                key.clone(),
+                                (status.recording_id, status.session_epoch.clone()),
+                            )
+                        })
                     })
                     .collect::<Vec<_>>();
                 self.recordings.retain(|(thread, host, device), status| {
@@ -1154,10 +1159,9 @@ impl DeviceState {
                         self.recordings.insert(key, status);
                     }
                 } else if self.recordings.get(&key).is_some_and(|current| {
-                        current.recording_id == status.recording_id
-                            && current.session_epoch == status.session_epoch
-                    })
-                {
+                    current.recording_id == status.recording_id
+                        && current.session_epoch == status.session_epoch
+                }) {
                     self.recordings.remove(&key);
                     self.closed_recordings
                         .insert(key, (status.recording_id, status.session_epoch));
@@ -1477,7 +1481,10 @@ mod tests {
                 _ => panic!("key plan contains a non-key input"),
             })
             .collect::<Vec<_>>();
-        assert_eq!(codes, vec![("ShiftLeft".into(), true), ("KeyA".into(), true)]);
+        assert_eq!(
+            codes,
+            vec![("ShiftLeft".into(), true), ("KeyA".into(), true)]
+        );
 
         assert_eq!(
             state
@@ -1753,8 +1760,17 @@ mod tests {
             }));
         }
         assert_eq!(state.screens.len(), 2);
-        let view = crate::view::device::device_view(&Snapshot { device: state, ..Snapshot::default() });
-        assert_eq!(view.screens.iter().map(|screen| screen.screen_id).collect::<Vec<_>>(), vec![Some(1), Some(3)]);
+        let view = crate::view::device::device_view(&Snapshot {
+            device: state,
+            ..Snapshot::default()
+        });
+        assert_eq!(
+            view.screens
+                .iter()
+                .map(|screen| screen.screen_id)
+                .collect::<Vec<_>>(),
+            vec![Some(1), Some(3)]
+        );
     }
 
     #[test]
@@ -1883,15 +1899,17 @@ mod tests {
             )
             .unwrap()
             .expect("first Duo request is sent immediately");
-        assert!(state
-            .enqueue_duo(
-                current.thread_id.clone(),
-                Some(current.host_id.clone()),
-                current.device_id.clone(),
-                crate::state::DeviceDuoCommandIntent::Angle { value: 30.0 },
-            )
-            .unwrap()
-            .is_none());
+        assert!(
+            state
+                .enqueue_duo(
+                    current.thread_id.clone(),
+                    Some(current.host_id.clone()),
+                    current.device_id.clone(),
+                    crate::state::DeviceDuoCommandIntent::Angle { value: 30.0 },
+                )
+                .unwrap()
+                .is_none()
+        );
 
         let next = state
             .complete_duo(&first, true, None)
@@ -1917,15 +1935,8 @@ mod tests {
     #[test]
     fn touch_projection_keeps_extreme_finite_dimensions_valid() {
         let tiny = f32::from_bits(1);
-        let projected = project_device_point(
-            tiny,
-            tiny,
-            f32::MAX,
-            f32::MAX,
-            tiny,
-            tiny,
-        )
-        .expect("finite dimensions should produce a finite fit");
+        let projected = project_device_point(tiny, tiny, f32::MAX, f32::MAX, tiny, tiny)
+            .expect("finite dimensions should produce a finite fit");
         assert!(projected.x.is_finite() && projected.y.is_finite());
         assert!((0.0..=1.0).contains(&projected.x));
         assert!((0.0..=1.0).contains(&projected.y));

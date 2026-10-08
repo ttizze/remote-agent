@@ -153,13 +153,10 @@ impl Sweeps {
         interval.tick().await;
         loop {
             interval.tick().await;
-            if let Err(error) = tokio::time::timeout(
-                LIMIT_RECOVERY_INTERVAL,
-                self.recover_limits(),
-            )
-            .await
-            .map_err(|_| StoreError::Corrupt("usage-limit sweep timed out".into()))
-            .and_then(|result| result)
+            if let Err(error) = tokio::time::timeout(LIMIT_RECOVERY_INTERVAL, self.recover_limits())
+                .await
+                .map_err(|_| StoreError::Corrupt("usage-limit sweep timed out".into()))
+                .and_then(|result| result)
             {
                 tracing::warn!(%error, "the usage-limit sweep failed");
             }

@@ -66,7 +66,10 @@ fn profile_choices() -> Vec<SettingChoice> {
 
 fn streaming_row(mode: ResponseStreamingMode, source: Option<SettingSource>) -> SettingsRow {
     SettingsRow {
-        resettable: resettable_for(source, mode != HostSettings::default().response_streaming_mode),
+        resettable: resettable_for(
+            source,
+            mode != HostSettings::default().response_streaming_mode,
+        ),
         source,
         ..row(
             SettingId::ResponseStreaming,

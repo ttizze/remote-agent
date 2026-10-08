@@ -2004,11 +2004,7 @@ mod snapshot {
         );
     }
 
-    fn new_task_draft(
-        project_id: &str,
-        text: &str,
-        created_at_ms: i64,
-    ) -> crate::state::Draft {
+    fn new_task_draft(project_id: &str, text: &str, created_at_ms: i64) -> crate::state::Draft {
         crate::state::Draft {
             text: text.into(),
             project_id: Some(project_id.into()),

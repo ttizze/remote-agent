@@ -109,14 +109,17 @@ impl Conversation {
         });
         let runtime = Arc::new(Runtime::open(config.runtime, io, host.clone()).await?);
         let _ = host.runtime.set(Arc::downgrade(&runtime));
-        let tools = Arc::new(AgentTools::new(Arc::new(HostOrchestration {
-            runtime: runtime.clone(),
-            projects: resources.projects.clone(),
-            files: resources.files.clone(),
-            resources: resources.clone(),
-            models: config.models,
-            background: config.background,
-        })).with_devices(resources.devices.clone()));
+        let tools = Arc::new(
+            AgentTools::new(Arc::new(HostOrchestration {
+                runtime: runtime.clone(),
+                projects: resources.projects.clone(),
+                files: resources.files.clone(),
+                resources: resources.clone(),
+                models: config.models,
+                background: config.background,
+            }))
+            .with_devices(resources.devices.clone()),
+        );
         Ok(Arc::new(Self {
             runtime,
             resources,

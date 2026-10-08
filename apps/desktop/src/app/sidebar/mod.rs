@@ -237,11 +237,7 @@ impl Desktop {
                 .text_sm()
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(color("text"))
-                .child(
-                    h_flex()
-                        .gap_1()
-                        .child("Bex"),
-                )
+                .child(h_flex().gap_1().child("Bex"))
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_click(cx.listener(|view, _, _, cx| {
                     view.route = Route::Chat;

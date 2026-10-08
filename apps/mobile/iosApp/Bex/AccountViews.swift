@@ -16,8 +16,7 @@ struct AccountUsageView: View {
         VStack(alignment: .leading, spacing: 12) {
             if let limits,
                limits.fetchedAt > 0 || !limits.windows.isEmpty || limits.resetCreditCount > 0
-                   || limits.error != nil
-            {
+               || limits.error != nil {
                 if let error = limits.error {
                     Label(accountErrorMessage(message: error), systemImage: "exclamationmark.circle")
                         .font(.caption).foregroundStyle(AppTheme.warningForeground)
@@ -35,8 +34,7 @@ struct AccountUsageView: View {
                     }
                 }
                 if let label = limits.externalLabel,
-                   let url = URL(string: limits.externalUrl ?? "")
-                {
+                   let url = URL(string: limits.externalUrl ?? "") {
                     Link(label, destination: url).font(.caption)
                 }
                 if limits.error == nil {

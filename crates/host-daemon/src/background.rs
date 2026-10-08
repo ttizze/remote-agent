@@ -2731,7 +2731,11 @@ mod tests {
         assert!(monitor.report(initial).await);
 
         let suspended_at = Timestamp::from_millis(at.millis() + 1).unwrap();
-        assert!(monitor.report_lifecycle_at(true, suspended_at.clone()).await);
+        assert!(
+            monitor
+                .report_lifecycle_at(true, suspended_at.clone())
+                .await
+        );
         let suspended = monitor.snapshot().await;
         assert!(suspended.suspended);
         assert!(!suspended.stale);
@@ -2750,12 +2754,14 @@ mod tests {
         assert!(!monitor.report(awake_sample).await);
         assert!(monitor.snapshot().await.suspended);
 
-        assert!(monitor
-            .report_lifecycle_at(
-                false,
-                Timestamp::from_millis(suspended_at.millis() + 2).unwrap(),
-            )
-            .await);
+        assert!(
+            monitor
+                .report_lifecycle_at(
+                    false,
+                    Timestamp::from_millis(suspended_at.millis() + 2).unwrap(),
+                )
+                .await
+        );
         let resumed = monitor.snapshot().await;
         assert!(!resumed.suspended);
         assert!(!resumed.stale);
@@ -2789,7 +2795,10 @@ mod tests {
         };
         owner.report_power(snapshot, true).await;
         let telemetry = owner.resources.snapshot(owner.power.snapshot().await);
-        assert_eq!(telemetry.health.desktop.status, ResourceSourceStatus::Healthy);
+        assert_eq!(
+            telemetry.health.desktop.status,
+            ResourceSourceStatus::Healthy
+        );
         assert_eq!(telemetry.health.desktop.last_error, None);
     }
 
@@ -2805,14 +2814,20 @@ mod tests {
         };
         owner.power.report(host).await;
         owner
-            .report_power(HostPowerSnapshot {
-                source: HostPowerSource::DesktopMain,
-                stale: true,
-                updated_at: Timestamp::from_millis(at.millis() + 1).unwrap(),
-                ..unknown_power(at)
-            }, true)
+            .report_power(
+                HostPowerSnapshot {
+                    source: HostPowerSource::DesktopMain,
+                    stale: true,
+                    updated_at: Timestamp::from_millis(at.millis() + 1).unwrap(),
+                    ..unknown_power(at)
+                },
+                true,
+            )
             .await;
-        assert_eq!(owner.power.snapshot().await.source, HostPowerSource::NodeLinux);
+        assert_eq!(
+            owner.power.snapshot().await.source,
+            HostPowerSource::NodeLinux
+        );
         assert!(!owner.power.snapshot().await.stale);
     }
 
@@ -2876,7 +2891,10 @@ mod tests {
         let stored = owner.power.snapshot().await;
         assert!(stored.updated_at.millis() >= now_before);
         assert!(stored.updated_at.millis() < now_before + 10_000);
-        assert_eq!(owner.resources.snapshot(stored).health.desktop.status, ResourceSourceStatus::Unavailable);
+        assert_eq!(
+            owner.resources.snapshot(stored).health.desktop.status,
+            ResourceSourceStatus::Unavailable
+        );
     }
 
     #[tokio::test]

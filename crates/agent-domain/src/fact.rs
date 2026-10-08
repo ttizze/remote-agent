@@ -809,7 +809,9 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
         }
         PullRequestLinkSynced { link } => {
             let key = normalize_pull_request_key(&link.key());
-            state.pull_requests.retain(|candidate| candidate.key() != key);
+            state
+                .pull_requests
+                .retain(|candidate| candidate.key() != key);
             state.pull_requests.push(link.clone());
         }
         PullRequestWatchSet { key, watch } | PullRequestWatchSynced { key, watch } => {

@@ -96,9 +96,9 @@ import dev.remoteagent.core.WorkIconTone
 import dev.remoteagent.core.WorkLabelTone
 import dev.remoteagent.core.WorkLogRow
 import dev.remoteagent.core.WorkRowIcon
-import dev.remoteagent.core.workingTimerLabel
 import dev.remoteagent.core.mobileMessageContextChips
 import dev.remoteagent.core.mobileMessageMarkdown
+import dev.remoteagent.core.workingTimerLabel
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -240,11 +240,7 @@ private fun UserBubble(model: AndroidAppModel, row: UserMessageRow, actions: Fee
             {
                 Row(Modifier.padding(bottom = 3.5.dp), horizontalArrangement = Arrangement.spacedBy(7.dp)) {
                     row.decorations.automation?.let { automation ->
-                        Text(
-                            automation.label,
-                            style = AppTheme.caption,
-                            color = AppTheme.colors.foregroundMuted,
-                        )
+                        Text(automation.label, style = AppTheme.caption, color = AppTheme.colors.foregroundMuted)
                     }
                     row.decorations.attribution?.let { attribution ->
                         Text(
@@ -535,9 +531,9 @@ private fun WorkRow(model: AndroidAppModel, row: WorkLogRow, actions: FeedAction
 
 @Composable
 private fun WorkDetail(model: AndroidAppModel, detail: dev.remoteagent.core.WorkActivityDetail) {
-    detail.reasoning?.takeIf { it.isNotBlank() }?.let {
-        MarkdownText(it, onUseArtifactTemplate = model::useArtifactTemplate)
-    }
+    detail.reasoning
+        ?.takeIf { it.isNotBlank() }
+        ?.let { MarkdownText(it, onUseArtifactTemplate = model::useArtifactTemplate) }
     val text =
         listOfNotNull(
                 detail.call?.command,
@@ -560,9 +556,7 @@ private fun WorkDetail(model: AndroidAppModel, detail: dev.remoteagent.core.Work
             if (AppTheme.codeWordWrap)
                 Text(
                     text,
-                    Modifier.fillMaxWidth().heightIn(max = 256.dp)
-                        .verticalScroll(rememberScrollState())
-                        .padding(10.dp),
+                    Modifier.fillMaxWidth().heightIn(max = 256.dp).verticalScroll(rememberScrollState()).padding(10.dp),
                     fontFamily = AppTheme.mono,
                     fontSize = AppTheme.codeFontSize.sp,
                     lineHeight = AppTheme.codeLineHeight.sp,

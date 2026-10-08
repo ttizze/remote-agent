@@ -126,19 +126,12 @@ internal fun QueueSheet(model: AndroidAppModel, queue: QueueView, onDismiss: () 
 }
 
 @Composable
-internal fun ContextPreviewSheet(
-    chip: ContextChip,
-    onClose: () -> Unit,
-    onOpenTerminal: (String?) -> Unit,
-) {
+internal fun ContextPreviewSheet(chip: ContextChip, onClose: () -> Unit, onOpenTerminal: (String?) -> Unit) {
     BottomSheet(onClose, chip.label, skipPartiallyExpanded = true) {
         Text(
             chip.previewText ?: "Context unavailable",
             Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 12.dp),
-            style = AppTheme.body.copy(
-                fontFamily = AppTheme.mono,
-                fontSize = AppTheme.terminalFontSize.sp,
-            ),
+            style = AppTheme.body.copy(fontFamily = AppTheme.mono, fontSize = AppTheme.terminalFontSize.sp),
             color = AppTheme.colors.foreground,
         )
         TextButton(

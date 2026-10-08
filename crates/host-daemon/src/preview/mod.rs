@@ -1,12 +1,12 @@
 //! Host owned Preview sessions and local development server discovery.
 pub(crate) mod ports;
 
+use agent_domain::ThreadId;
 use agent_protocol::preview::{
-    normalize_preview_url, PreviewAppearance, PreviewEvent, PreviewListResult, PreviewNavStatus,
-    PreviewRecordingStatus, PreviewSessionSnapshot, PreviewViewportSetting, PreviewZoom,
+    PreviewAppearance, PreviewEvent, PreviewListResult, PreviewNavStatus, PreviewRecordingStatus,
+    PreviewSessionSnapshot, PreviewViewportSetting, PreviewZoom, normalize_preview_url,
     validate_profile_id,
 };
-use agent_domain::ThreadId;
 use std::{collections::BTreeMap, sync::Mutex};
 
 pub(crate) use ports::PortScanner;
@@ -84,7 +84,9 @@ impl PreviewManager {
         snapshot.validate()?;
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         state.revision = state.revision.saturating_add(1);
-        state.sessions.insert((thread_id.clone(), tab_id.clone()), snapshot.clone());
+        state
+            .sessions
+            .insert((thread_id.clone(), tab_id.clone()), snapshot.clone());
         let _ = self.events.send(PreviewEvent::Opened {
             thread_id,
             tab_id,
@@ -99,11 +101,11 @@ impl PreviewManager {
     pub fn list(&self, thread_id: &ThreadId) -> PreviewListResult {
         let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         let mut sessions: Vec<_> = state
-                .sessions
-                .iter()
-                .filter(|((thread, _), _)| thread == thread_id)
-                .map(|(_, snapshot)| snapshot.clone())
-                .collect();
+            .sessions
+            .iter()
+            .filter(|((thread, _), _)| thread == thread_id)
+            .map(|(_, snapshot)| snapshot.clone())
+            .collect();
         sessions.sort_by(|left, right| left.updated_at.cmp(&right.updated_at));
         PreviewListResult {
             sessions,
@@ -128,7 +130,11 @@ impl PreviewManager {
         }
     }
 
-    pub fn get(&self, thread_id: &ThreadId, tab_id: &str) -> Result<PreviewSessionSnapshot, String> {
+    pub fn get(
+        &self,
+        thread_id: &ThreadId,
+        tab_id: &str,
+    ) -> Result<PreviewSessionSnapshot, String> {
         self.state
             .lock()
             .unwrap_or_else(|error| error.into_inner())
@@ -138,7 +144,12 @@ impl PreviewManager {
             .ok_or_else(|| "preview session was not found".into())
     }
 
-    pub fn navigate(&self, thread_id: &ThreadId, tab_id: &str, url: &str) -> Result<PreviewSessionSnapshot, String> {
+    pub fn navigate(
+        &self,
+        thread_id: &ThreadId,
+        tab_id: &str,
+        url: &str,
+    ) -> Result<PreviewSessionSnapshot, String> {
         let url = normalize_preview_url(url)?;
         self.update(thread_id, tab_id, false, |snapshot| {
             let title = match &snapshot.nav_status {
@@ -219,16 +230,35 @@ impl PreviewManager {
         self.get(thread_id, tab_id).map(|_| ())
     }
 
-    pub fn resize(&self, thread_id: &ThreadId, tab_id: &str, viewport: PreviewViewportSetting) -> Result<PreviewSessionSnapshot, String> {
+    pub fn resize(
+        &self,
+        thread_id: &ThreadId,
+        tab_id: &str,
+        viewport: PreviewViewportSetting,
+    ) -> Result<PreviewSessionSnapshot, String> {
         viewport.validate()?;
-        self.update(thread_id, tab_id, true, |snapshot| snapshot.viewport = viewport)
+        self.update(thread_id, tab_id, true, |snapshot| {
+            snapshot.viewport = viewport
+        })
     }
 
-    pub fn appearance(&self, thread_id: &ThreadId, tab_id: &str, appearance: PreviewAppearance) -> Result<PreviewSessionSnapshot, String> {
-        self.update(thread_id, tab_id, false, |snapshot| snapshot.appearance = appearance)
+    pub fn appearance(
+        &self,
+        thread_id: &ThreadId,
+        tab_id: &str,
+        appearance: PreviewAppearance,
+    ) -> Result<PreviewSessionSnapshot, String> {
+        self.update(thread_id, tab_id, false, |snapshot| {
+            snapshot.appearance = appearance
+        })
     }
 
-    pub fn zoom(&self, thread_id: &ThreadId, tab_id: &str, zoom: PreviewZoom) -> Result<PreviewSessionSnapshot, String> {
+    pub fn zoom(
+        &self,
+        thread_id: &ThreadId,
+        tab_id: &str,
+        zoom: PreviewZoom,
+    ) -> Result<PreviewSessionSnapshot, String> {
         self.update(thread_id, tab_id, false, |snapshot| snapshot.zoom = zoom)
     }
 
@@ -402,16 +432,47 @@ fn now() -> String {
 mod tests {
     use super::*;
 
-    fn thread(value: &str) -> ThreadId { ThreadId::new(value).unwrap() }
+    fn thread(value: &str) -> ThreadId {
+        ThreadId::new(value).unwrap()
+    }
 
     #[test]
     fn revisions_are_monotonic_and_list_is_thread_scoped() {
         let manager = PreviewManager::new();
-        let first = manager.open(thread("one"), "tab-a".into(), None, PreviewViewportSetting::Fill, PreviewAppearance::System, PreviewZoom::X100, None).unwrap();
-        manager.open(thread("two"), "tab-b".into(), None, PreviewViewportSetting::Fill, PreviewAppearance::System, PreviewZoom::X100, None).unwrap();
+        let first = manager
+            .open(
+                thread("one"),
+                "tab-a".into(),
+                None,
+                PreviewViewportSetting::Fill,
+                PreviewAppearance::System,
+                PreviewZoom::X100,
+                None,
+            )
+            .unwrap();
+        manager
+            .open(
+                thread("two"),
+                "tab-b".into(),
+                None,
+                PreviewViewportSetting::Fill,
+                PreviewAppearance::System,
+                PreviewZoom::X100,
+                None,
+            )
+            .unwrap();
         assert_eq!(manager.list(&thread("one")).sessions, vec![first.clone()]);
         let before = manager.list(&thread("one")).revision;
-        manager.resize(&thread("one"), "tab-a", PreviewViewportSetting::Freeform { width: 390, height: 844 }).unwrap();
+        manager
+            .resize(
+                &thread("one"),
+                "tab-a",
+                PreviewViewportSetting::Freeform {
+                    width: 390,
+                    height: 844,
+                },
+            )
+            .unwrap();
         assert!(manager.list(&thread("one")).revision > before);
     }
 
@@ -428,10 +489,38 @@ mod tests {
     fn closing_one_tab_keeps_the_other_tab() {
         let manager = PreviewManager::new();
         let id = thread("one");
-        manager.open(id.clone(), "a".into(), None, PreviewViewportSetting::Fill, PreviewAppearance::System, PreviewZoom::X100, None).unwrap();
-        manager.open(id.clone(), "b".into(), None, PreviewViewportSetting::Fill, PreviewAppearance::System, PreviewZoom::X100, None).unwrap();
+        manager
+            .open(
+                id.clone(),
+                "a".into(),
+                None,
+                PreviewViewportSetting::Fill,
+                PreviewAppearance::System,
+                PreviewZoom::X100,
+                None,
+            )
+            .unwrap();
+        manager
+            .open(
+                id.clone(),
+                "b".into(),
+                None,
+                PreviewViewportSetting::Fill,
+                PreviewAppearance::System,
+                PreviewZoom::X100,
+                None,
+            )
+            .unwrap();
         assert_eq!(manager.close(&id, Some("a")), vec!["a"]);
-        assert_eq!(manager.list(&id).sessions.iter().map(|s| s.tab_id.as_str()).collect::<Vec<_>>(), vec!["b"]);
+        assert_eq!(
+            manager
+                .list(&id)
+                .sessions
+                .iter()
+                .map(|s| s.tab_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["b"]
+        );
     }
 
     #[test]
@@ -548,17 +637,22 @@ mod tests {
         manager.recording_artifact_removed(&id, "tab");
         assert_eq!(manager.list(&id).invalidated_recordings, vec!["tab"]);
         let mut events = manager.subscribe();
-        manager.recording_started(
-            id.clone(),
-            PreviewRecordingStatus {
-                tab_id: "tab".into(),
-                recording_id: "recording".into(),
-                recording: true,
-                started_at: Some("2026-01-01T00:00:00Z".into()),
-            },
-        ).unwrap();
+        manager
+            .recording_started(
+                id.clone(),
+                PreviewRecordingStatus {
+                    tab_id: "tab".into(),
+                    recording_id: "recording".into(),
+                    recording: true,
+                    started_at: Some("2026-01-01T00:00:00Z".into()),
+                },
+            )
+            .unwrap();
         assert!(manager.list(&id).invalidated_recordings.is_empty());
-        assert!(matches!(events.try_recv().unwrap(), PreviewEvent::RecordingChanged { .. }));
+        assert!(matches!(
+            events.try_recv().unwrap(),
+            PreviewEvent::RecordingChanged { .. }
+        ));
     }
 
     #[test]

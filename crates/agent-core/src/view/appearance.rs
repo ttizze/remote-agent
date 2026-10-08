@@ -210,8 +210,9 @@ pub fn mobile_typography(appearance: MobileAppearance) -> MobileTypography {
             MOBILE_CODE_FONT_SIZES.1 as f64,
         ) as u32
     }));
-    let code_line_number_font_size =
-        (11.0 * code_font_size / MOBILE_DEFAULT_CODE_FONT_SIZE).round().max(8.0);
+    let code_line_number_font_size = (11.0 * code_font_size / MOBILE_DEFAULT_CODE_FONT_SIZE)
+        .round()
+        .max(8.0);
     MobileTypography {
         base_font_size: f64::from(appearance.base_font_size),
         micro_font_size,

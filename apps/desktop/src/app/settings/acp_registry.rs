@@ -4,10 +4,19 @@
 //! surface only owns the input widgets and dispatches those typed operations.
 
 use super::{Row, notice, section};
-use crate::app::{Desktop, ui::{color, icon, tint}};
+use crate::app::{
+    Desktop,
+    ui::{color, icon, tint},
+};
 use agent_core::state::Intent;
 use gpui_kit::{
-    component::{Sizable, StyledExt, button::{Button, ButtonVariants}, h_flex, input::Input, v_flex},
+    component::{
+        Sizable, StyledExt,
+        button::{Button, ButtonVariants},
+        h_flex,
+        input::Input,
+        v_flex,
+    },
     prelude::FluentBuilder,
     *,
 };
@@ -25,7 +34,11 @@ impl Desktop {
         let search = Button::new("acp-registry-search")
             .primary()
             .small()
-            .label(if search_pending { "Searching…" } else { "Search" })
+            .label(if search_pending {
+                "Searching…"
+            } else {
+                "Search"
+            })
             .disabled(search_pending)
             .on_click(cx.listener(|view, _, _, cx| {
                 let query = view
@@ -54,7 +67,11 @@ impl Desktop {
             rows.push(
                 Row::new("Registry error")
                     .description(error)
-                    .status(div().text_color(color("errorForeground")).child(icon("circle-alert")))
+                    .status(
+                        div()
+                            .text_color(color("errorForeground"))
+                            .child(icon("circle-alert")),
+                    )
                     .render(),
             );
         }
@@ -103,7 +120,11 @@ impl Desktop {
                 let uninstall = Button::new(("acp-uninstall", index))
                     .ghost()
                     .xsmall()
-                    .label(if uninstalling { "Removing…" } else { "Remove" })
+                    .label(if uninstalling {
+                        "Removing…"
+                    } else {
+                        "Remove"
+                    })
                     .disabled(uninstalling || prepared.is_none())
                     .on_click(cx.listener(move |view, _, _, _| {
                         view.perform(Intent::UninstallAcpAgent {
@@ -127,7 +148,11 @@ impl Desktop {
                         probe.models.len(),
                         if probe.models.len() == 1 { "" } else { "s" },
                         probe.auth_methods.len(),
-                        if probe.auth_methods.len() == 1 { "" } else { "s" },
+                        if probe.auth_methods.len() == 1 {
+                            ""
+                        } else {
+                            "s"
+                        },
                     )
                 });
                 let description = if agent.description.trim().is_empty() {
@@ -176,19 +201,21 @@ impl Desktop {
             let uninstall = Button::new(("acp-prepared-uninstall", index))
                 .ghost()
                 .xsmall()
-                .label(if uninstalling { "Removing…" } else { "Remove" })
+                .label(if uninstalling {
+                    "Removing…"
+                } else {
+                    "Remove"
+                })
                 .disabled(uninstalling)
                 .on_click(cx.listener(move |view, _, _, _| {
                     view.perform(Intent::UninstallAcpAgent {
                         agent_id: uninstall_id.clone(),
                     });
                 }));
-            let probe_detail = registry.probes.get(agent_id).map(|probe| {
-                format!(
-                    " · {}",
-                    if probe.ready { "ready" } else { "not ready" }
-                )
-            });
+            let probe_detail = registry
+                .probes
+                .get(agent_id)
+                .map(|probe| format!(" · {}", if probe.ready { "ready" } else { "not ready" }));
             rows.push(
                 Row::new(agent_id.clone())
                     .description(format!(
@@ -204,12 +231,9 @@ impl Desktop {
 
         section(
             Some("ACP registry".into()),
-            Some(
-                div()
-                    .text_xs()
-                    .text_color(tint("textMuted", 0.8))
-                    .child("Install and verify Agent Client Protocol providers from the connected Host."),
-            ),
+            Some(div().text_xs().text_color(tint("textMuted", 0.8)).child(
+                "Install and verify Agent Client Protocol providers from the connected Host.",
+            )),
             None,
             rows,
         )

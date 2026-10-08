@@ -130,7 +130,9 @@ fn notification_status(thread: &ThreadSummary) -> ThreadNotificationStatus {
         ThreadListStatus::Approval => ThreadNotificationStatus::Approval,
         ThreadListStatus::Failed => ThreadNotificationStatus::Failed,
         ThreadListStatus::Limited => ThreadNotificationStatus::Limited,
-        ThreadListStatus::Ready if completed_run(thread).is_some() => ThreadNotificationStatus::Completed,
+        ThreadListStatus::Ready if completed_run(thread).is_some() => {
+            ThreadNotificationStatus::Completed
+        }
         ThreadListStatus::Working | ThreadListStatus::Waiting | ThreadListStatus::Ready => {
             ThreadNotificationStatus::Idle
         }
@@ -571,15 +573,17 @@ mod tests {
         assert_eq!(events[0].kind, NotificationEventKind::Completion);
         assert_eq!(events[0].sound_kind, NotificationSoundKind::Completion);
         assert!(events[0].operating_system && events[0].sound);
-        assert!(fold(
-            &current,
-            &current,
-            NotificationMode::NotificationsAndSound,
-            false,
-            false,
-            None,
-        )
-        .is_empty());
+        assert!(
+            fold(
+                &current,
+                &current,
+                NotificationMode::NotificationsAndSound,
+                false,
+                false,
+                None,
+            )
+            .is_empty()
+        );
     }
 
     #[test]
@@ -610,18 +614,20 @@ mod tests {
     fn a_new_run_with_the_same_attention_status_is_a_new_event() {
         let old = Some("run-1:input");
         let new = Some("run-2:input");
-        assert!(decide(
-            NotificationMode::Notifications,
-            true,
-            false,
-            false,
-            false,
-            old,
-            new,
-            ThreadNotificationStatus::Input,
-            false,
-        )
-        .is_some());
+        assert!(
+            decide(
+                NotificationMode::Notifications,
+                true,
+                false,
+                false,
+                false,
+                old,
+                new,
+                ThreadNotificationStatus::Input,
+                false,
+            )
+            .is_some()
+        );
     }
 
     #[test]

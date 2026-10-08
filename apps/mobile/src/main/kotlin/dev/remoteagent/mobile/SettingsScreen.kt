@@ -21,8 +21,8 @@ import androidx.compose.material.icons.outlined.Archive
 import androidx.compose.material.icons.outlined.ChevronRight
 import androidx.compose.material.icons.outlined.Computer
 import androidx.compose.material.icons.outlined.Schedule
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.OutlinedTextField
@@ -65,11 +65,12 @@ import java.util.UUID
 
 private const val PERCENT = 100f
 
-private fun releaseUpdateChannel(): UpdateChannel = when (BuildConfig.RELEASE_CHANNEL) {
-    "nightly" -> UpdateChannel.Nightly
-    "preview" -> UpdateChannel.Preview
-    else -> UpdateChannel.Stable
-}
+private fun releaseUpdateChannel(): UpdateChannel =
+    when (BuildConfig.RELEASE_CHANNEL) {
+        "nightly" -> UpdateChannel.Nightly
+        "preview" -> UpdateChannel.Preview
+        else -> UpdateChannel.Stable
+    }
 
 @Composable
 internal fun SettingsScreen(model: AndroidAppModel, projectId: String?) {
@@ -82,11 +83,7 @@ internal fun SettingsScreen(model: AndroidAppModel, projectId: String?) {
             model.perform(Intent.LoadWorktreeSettings)
             model.perform(
                 Intent.LoadNativeUpdate(
-                    NativeUpdateRequest(
-                        NativeUpdatePlatform.Android,
-                        BuildConfig.VERSION_NAME,
-                        releaseUpdateChannel(),
-                    )
+                    NativeUpdateRequest(NativeUpdatePlatform.Android, BuildConfig.VERSION_NAME, releaseUpdateChannel())
                 )
             )
             model.perform(Intent.LoadBackgroundPolicy)
@@ -98,10 +95,9 @@ internal fun SettingsScreen(model: AndroidAppModel, projectId: String?) {
             if (projectId == null)
                 item {
                     SectionCard("Connections") {
-                        NavigationRow(
-                            Icons.Outlined.Computer,
-                            "Environments (${model.environmentSettings().size})",
-                        ) { model.showHosts() }
+                        NavigationRow(Icons.Outlined.Computer, "Environments (${model.environmentSettings().size})") {
+                            model.showHosts()
+                        }
                     }
                 }
             if (projectId == null)
@@ -114,7 +110,9 @@ internal fun SettingsScreen(model: AndroidAppModel, projectId: String?) {
                 item {
                     SectionCard("Projects & threads") {
                         NavigationRow(Icons.Outlined.Archive, "Archived Threads") { model.navigate(Route.Archived) }
-                        NavigationRow(Icons.Outlined.Schedule, "Scheduled tasks") { model.navigate(Route.ScheduledTasks) }
+                        NavigationRow(Icons.Outlined.Schedule, "Scheduled tasks") {
+                            model.navigate(Route.ScheduledTasks)
+                        }
                     }
                 }
             if (projectId == null)
@@ -226,15 +224,17 @@ private fun LoadBalancingSettings(model: AndroidAppModel) {
                         Modifier.fillMaxWidth().padding(top = 6.dp),
                         horizontalArrangement = Arrangement.spacedBy(4.dp),
                     ) {
-                        listOf(100u to "Prefer", 50u to "Normal", 25u to "Less often", 0u to "Manual only").forEach { (weight, label) ->
+                        listOf(100u to "Prefer", 50u to "Normal", 25u to "Less often", 0u to "Manual only").forEach {
+                            (weight, label) ->
                             TextButton(
                                 enabled = model.snapshot.preferences().loadBalancingEnabled,
                                 onClick = { model.setLoadBalancingWeight(row.environmentId, weight.toUByte()) },
                             ) {
                                 Text(
                                     label,
-                                    color = if (row.weight.toUInt() == weight) AppTheme.colors.primaryText
-                                    else AppTheme.colors.foregroundMuted,
+                                    color =
+                                        if (row.weight.toUInt() == weight) AppTheme.colors.primaryText
+                                        else AppTheme.colors.foregroundMuted,
                                 )
                             }
                         }
@@ -261,10 +261,15 @@ internal fun AppearanceScreen(model: AndroidAppModel) {
                 SectionCard("Color scheme") {
                     MobileColorScheme.entries.forEach { scheme ->
                         Row(
-                            Modifier.fillMaxWidth().clickable { update(appearance.copy(colorScheme = scheme)) }.padding(16.dp),
+                            Modifier.fillMaxWidth()
+                                .clickable { update(appearance.copy(colorScheme = scheme)) }
+                                .padding(16.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            RadioButton(appearance.colorScheme == scheme, { update(appearance.copy(colorScheme = scheme)) })
+                            RadioButton(
+                                appearance.colorScheme == scheme,
+                                { update(appearance.copy(colorScheme = scheme)) },
+                            )
                             Text(scheme.name.lowercase().replaceFirstChar { it.uppercase() }, style = AppTheme.body)
                         }
                     }
@@ -272,45 +277,64 @@ internal fun AppearanceScreen(model: AndroidAppModel) {
             }
             item {
                 SectionCard("Themes") {
-                    Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Row(
+                        Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
                         listOf("both" to "Both", "light" to "Light", "dark" to "Dark").forEach { (id, label) ->
                             TextButton(onClick = { themeTarget = id }) {
-                                Text(label, color = if (themeTarget == id) AppTheme.colors.primaryText else AppTheme.colors.foregroundMuted)
+                                Text(
+                                    label,
+                                    color =
+                                        if (themeTarget == id) AppTheme.colors.primaryText
+                                        else AppTheme.colors.foregroundMuted,
+                                )
                             }
                         }
                     }
-                    listOf(null to "Bex", "chat" to "Chat", "grove" to "Grove", "ocean" to "Ocean",
-                        "ember" to "Ember", "iris" to "Iris", "material-you" to "Material You").forEach { (id, label) ->
-                        val selected = when (themeTarget) {
-                            "light" -> appearance.lightTheme == id
-                            "dark" -> appearance.darkTheme == id
-                            else -> appearance.theme == id && appearance.lightTheme == null && appearance.darkTheme == null
-                        }
-                        val pick = {
-                            update(
+                    listOf(
+                            null to "Bex",
+                            "chat" to "Chat",
+                            "grove" to "Grove",
+                            "ocean" to "Ocean",
+                            "ember" to "Ember",
+                            "iris" to "Iris",
+                            "material-you" to "Material You",
+                        )
+                        .forEach { (id, label) ->
+                            val selected =
                                 when (themeTarget) {
-                                    "light" -> appearance.assigningTheme(false, id)
-                                    "dark" -> appearance.assigningTheme(true, id)
-                                    else -> appearance.copy(theme = id, lightTheme = null, darkTheme = null)
+                                    "light" -> appearance.lightTheme == id
+                                    "dark" -> appearance.darkTheme == id
+                                    else ->
+                                        appearance.theme == id &&
+                                            appearance.lightTheme == null &&
+                                            appearance.darkTheme == null
                                 }
-                            )
+                            val pick = {
+                                update(
+                                    when (themeTarget) {
+                                        "light" -> appearance.assigningTheme(false, id)
+                                        "dark" -> appearance.assigningTheme(true, id)
+                                        else -> appearance.copy(theme = id, lightTheme = null, darkTheme = null)
+                                    }
+                                )
+                            }
+                            Row(
+                                Modifier.fillMaxWidth()
+                                    .clickable(onClick = pick)
+                                    .padding(horizontal = 16.dp, vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                RadioButton(selected, pick)
+                                Text(label, style = AppTheme.body)
+                            }
                         }
-                        Row(
-                            Modifier.fillMaxWidth().clickable(onClick = pick)
-                                .padding(horizontal = 16.dp, vertical = 10.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            RadioButton(selected, pick)
-                            Text(label, style = AppTheme.body)
-                        }
-                    }
                 }
             }
             item {
                 SectionCard("Text") {
-                    SizeRow("Base size", appearance.baseFontSize, 11, 22) {
-                        update(appearance.copy(baseFontSize = it))
-                    }
+                    SizeRow("Base size", appearance.baseFontSize, 11, 22) { update(appearance.copy(baseFontSize = it)) }
                 }
             }
             item {
@@ -321,15 +345,15 @@ internal fun AppearanceScreen(model: AndroidAppModel) {
                     appearance.codeFontSize?.let { size ->
                         SizeRow("Code size", size, 8, 18) { update(appearance.copy(codeFontSize = it)) }
                     }
-                    ToggleRow("Wrap long lines", appearance.codeWordWrap) {
-                        update(appearance.copy(codeWordWrap = it))
-                    }
+                    ToggleRow("Wrap long lines", appearance.codeWordWrap) { update(appearance.copy(codeWordWrap = it)) }
                 }
             }
             item {
                 SectionCard("Terminal") {
                     ToggleRow("Custom size", appearance.terminalFontSize != null) {
-                        update(appearance.copy(terminalFontSize = if (it) appearance.terminalFontSize ?: 10.5 else null))
+                        update(
+                            appearance.copy(terminalFontSize = if (it) appearance.terminalFontSize ?: 10.5 else null)
+                        )
                     }
                     appearance.terminalFontSize?.let { size ->
                         SizeRow("Terminal size", size, 6.0, 14.0, 0.5) {
@@ -357,10 +381,12 @@ private fun BackgroundDiagnosticsSection(model: AndroidAppModel) {
             }
         }
         rows.forEachIndexed { index, row ->
-            if (row.key == "profile" ||
-                row.key == "automaticGitFetchIntervalMs" ||
-                row.key == "providerHealthRefreshIntervalMs"
-            ) return@forEachIndexed
+            if (
+                row.key == "profile" ||
+                    row.key == "automaticGitFetchIntervalMs" ||
+                    row.key == "providerHealthRefreshIntervalMs"
+            )
+                return@forEachIndexed
             if (index > 0) HorizontalDivider(color = colors.border)
             Row(
                 Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp),
@@ -394,16 +420,36 @@ private fun BackgroundDiagnosticsSection(model: AndroidAppModel) {
             model.perform(Intent.SetProviderHealthRefreshInterval(seconds))
         }
         model.snapshot.hostResourceRows().forEach { row ->
-            Text("${row.key}: ${row.value}", Modifier.padding(horizontal = 16.dp, vertical = 4.dp), style = AppTheme.caption, color = colors.foregroundMuted)
+            Text(
+                "${row.key}: ${row.value}",
+                Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+                style = AppTheme.caption,
+                color = colors.foregroundMuted,
+            )
         }
         model.snapshot.processRows().take(8).forEach { row ->
-            Text("${row.key}: ${row.value}", Modifier.padding(horizontal = 16.dp, vertical = 4.dp), style = AppTheme.caption, color = colors.foregroundMuted)
+            Text(
+                "${row.key}: ${row.value}",
+                Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+                style = AppTheme.caption,
+                color = colors.foregroundMuted,
+            )
         }
         model.snapshot.processHistoryRows().take(8).forEach { row ->
-            Text("${row.key}: ${row.value}", Modifier.padding(horizontal = 16.dp, vertical = 4.dp), style = AppTheme.caption, color = colors.foregroundMuted)
+            Text(
+                "${row.key}: ${row.value}",
+                Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+                style = AppTheme.caption,
+                color = colors.foregroundMuted,
+            )
         }
         model.snapshot.traceRows().forEach { row ->
-            Text("${row.key}: ${row.value}", Modifier.padding(horizontal = 16.dp, vertical = 4.dp), style = AppTheme.caption, color = colors.foregroundMuted)
+            Text(
+                "${row.key}: ${row.value}",
+                Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+                style = AppTheme.caption,
+                color = colors.foregroundMuted,
+            )
         }
     }
 }
@@ -424,27 +470,27 @@ private fun NativeUpdateSection(model: AndroidAppModel) {
                 style = AppTheme.body,
                 color = AppTheme.colors.foreground,
             )
-            update?.takeIf { it.updateAvailable }?.storeUrl?.let { url ->
-                TextButton(onClick = {
-                    val uri = Uri.parse(url)
-                    if (uri.scheme == "https") {
-                        context.startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW, uri))
+            update
+                ?.takeIf { it.updateAvailable }
+                ?.storeUrl
+                ?.let { url ->
+                    TextButton(
+                        onClick = {
+                            val uri = Uri.parse(url)
+                            if (uri.scheme == "https") {
+                                context.startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW, uri))
+                            }
+                        }
+                    ) {
+                        Text("Open Play Store", color = AppTheme.colors.primaryText)
                     }
-                }) {
-                    Text("Open Play Store", color = AppTheme.colors.primaryText)
                 }
-            }
         }
     }
 }
 
 @Composable
-private fun BackgroundIntervalPicker(
-    title: String,
-    selectedSeconds: Int,
-    values: List<Int>,
-    onChange: (Int) -> Unit,
-) {
+private fun BackgroundIntervalPicker(title: String, selectedSeconds: Int, values: List<Int>, onChange: (Int) -> Unit) {
     val options = (values + selectedSeconds).distinct().sorted()
     val index = options.indexOf(selectedSeconds)
     Row(
@@ -488,14 +534,24 @@ private fun SizeRow(label: String, value: Int, min: Int, max: Int, onChange: (In
 private fun SizeRow(label: String, value: Double, min: Double, max: Double, step: Double, onChange: (Double) -> Unit) {
     Row(Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
         Text(label, Modifier.weight(1f), style = AppTheme.body)
-        TextButton(onClick = { if (value > min) onChange((value - step).coerceAtLeast(min)) }, enabled = value > min) { Text("−") }
+        TextButton(onClick = { if (value > min) onChange((value - step).coerceAtLeast(min)) }, enabled = value > min) {
+            Text("−")
+        }
         Text(String.format("%.1f", value), style = AppTheme.body.copy(fontFamily = AppTheme.mono))
-        TextButton(onClick = { if (value < max) onChange((value + step).coerceAtMost(max)) }, enabled = value < max) { Text("+") }
+        TextButton(onClick = { if (value < max) onChange((value + step).coerceAtMost(max)) }, enabled = value < max) {
+            Text("+")
+        }
     }
 }
 
 private fun backgroundIntervalSeconds(rows: List<DiagnosticRow>, key: String): Int =
-    rows.firstOrNull { it.key == key }?.value?.toLongOrNull()?.div(1_000L)?.coerceAtMost(Int.MAX_VALUE.toLong())?.toInt() ?: 0
+    rows
+        .firstOrNull { it.key == key }
+        ?.value
+        ?.toLongOrNull()
+        ?.div(1_000L)
+        ?.coerceAtMost(Int.MAX_VALUE.toLong())
+        ?.toInt() ?: 0
 
 @Composable
 private fun NavigationRow(icon: ImageVector, label: String, onClick: () -> Unit) {
@@ -596,7 +652,7 @@ private fun SettingRow(
                     onEdit(SettingValue.Choice(option.id))
                 }
             }
-            if (row.resettable)
+        if (row.resettable)
             Text("Reset", Modifier.clickable(onClick = onReset), style = AppTheme.caption, color = colors.primaryText)
         row.source?.let { source ->
             Text(
@@ -628,9 +684,7 @@ private fun BrowserProfilesControl(
             ) {
                 Text(profile.name, Modifier.weight(1f), style = AppTheme.body, color = colors.foreground)
                 if (profile.id != "incognito") {
-                    TextButton(onClick = {
-                        onDefault(SettingValue.Choice(profile.id))
-                    }) {
+                    TextButton(onClick = { onDefault(SettingValue.Choice(profile.id)) }) {
                         Text(
                             if (profile.id == control.defaultProfileId) "Default" else "Use",
                             color = colors.primaryText,
@@ -638,17 +692,15 @@ private fun BrowserProfilesControl(
                     }
                 }
                 if (!builtIn) {
-                    TextButton(onClick = {
-                        editingId = profile.id
-                        editingName = profile.name
-                    }) {
+                    TextButton(
+                        onClick = {
+                            editingId = profile.id
+                            editingName = profile.name
+                        }
+                    ) {
                         Text("Rename", color = colors.primaryText)
                     }
-                    TextButton(onClick = {
-                        onRemove(profile.id)
-                    }) {
-                        Text("Remove", color = colors.dangerForeground)
-                    }
+                    TextButton(onClick = { onRemove(profile.id) }) { Text("Remove", color = colors.dangerForeground) }
                 }
             }
             if (editingId == profile.id) {
@@ -660,25 +712,21 @@ private fun BrowserProfilesControl(
                     label = { Text("Profile name") },
                 )
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    TextButton(onClick = {
-                        onIntent(Intent.RenameBrowserProfile(profile.id, editingName))
-                        editingId = null
-                    }) {
+                    TextButton(
+                        onClick = {
+                            onIntent(Intent.RenameBrowserProfile(profile.id, editingName))
+                            editingId = null
+                        }
+                    ) {
                         Text("Save", color = colors.primaryText)
                     }
-                    TextButton(onClick = { editingId = null }) {
-                        Text("Cancel", color = colors.foregroundMuted)
-                    }
+                    TextButton(onClick = { editingId = null }) { Text("Cancel", color = colors.foregroundMuted) }
                 }
             }
         }
         TextButton(
-            enabled = control.profiles.count {
-                it.id != "default" && it.id != "incognito"
-            } < 24,
-            onClick = {
-                onIntent(Intent.CreateBrowserProfile(UUID.randomUUID().toString(), null))
-            },
+            enabled = control.profiles.count { it.id != "default" && it.id != "incognito" } < 24,
+            onClick = { onIntent(Intent.CreateBrowserProfile(UUID.randomUUID().toString(), null)) },
         ) {
             Text("New profile", color = colors.primaryText)
         }
@@ -724,21 +772,30 @@ private fun AccountsSection(model: AndroidAppModel) {
                 }
                 if ((limits?.resetCreditCount ?: 0) > 0) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text("Reset credits: ${limits?.resetCreditCount}", style = AppTheme.caption, color = colors.foregroundMuted, modifier = Modifier.weight(1f))
+                        Text(
+                            "Reset credits: ${limits?.resetCreditCount}",
+                            style = AppTheme.caption,
+                            color = colors.foregroundMuted,
+                            modifier = Modifier.weight(1f),
+                        )
                         TextButton(onClick = { confirmingReset = true }) {
                             Text("Use reset", color = colors.primaryText)
                         }
                     }
                 }
                 limits?.externalLabel?.let {
-                    TextButton(onClick = {
-                        limits.externalUrl?.let { url ->
-                            val uri = Uri.parse(url)
-                            if (uri.scheme == "https") {
-                                context.startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW, uri))
+                    TextButton(
+                        onClick = {
+                            limits.externalUrl?.let { url ->
+                                val uri = Uri.parse(url)
+                                if (uri.scheme == "https") {
+                                    context.startActivity(
+                                        android.content.Intent(android.content.Intent.ACTION_VIEW, uri)
+                                    )
+                                }
                             }
                         }
-                    }) {
+                    ) {
                         Text(it, style = AppTheme.caption, color = colors.primaryText)
                     }
                 }
@@ -752,19 +809,23 @@ private fun AccountsSection(model: AndroidAppModel) {
                     title = { Text("Use a reset credit?") },
                     text = { Text("This redeems one credit and clears the current rate-limit windows.") },
                     confirmButton = {
-                        TextButton(onClick = {
-                            confirmingReset = false
-                            val sourceId = limits?.resetCreditAccountId ?: account.id
-                            val source = model.snapshot.accounts()?.accounts?.firstOrNull { it.id == sourceId }
-                            model.perform(
-                                Intent.ConsumeResetCredit(
-                                    source?.provider ?: account.provider,
-                                    sourceId,
-                                    limits?.nextCreditId,
+                        TextButton(
+                            onClick = {
+                                confirmingReset = false
+                                val sourceId = limits?.resetCreditAccountId ?: account.id
+                                val source = model.snapshot.accounts()?.accounts?.firstOrNull { it.id == sourceId }
+                                model.perform(
+                                    Intent.ConsumeResetCredit(
+                                        source?.provider ?: account.provider,
+                                        sourceId,
+                                        limits?.nextCreditId,
+                                    )
                                 )
-                            )
-                            model.perform(Intent.LoadAccounts)
-                        }) { Text("Use credit") }
+                                model.perform(Intent.LoadAccounts)
+                            }
+                        ) {
+                            Text("Use credit")
+                        }
                     },
                     dismissButton = { TextButton(onClick = { confirmingReset = false }) { Text("Cancel") } },
                 )
@@ -772,17 +833,9 @@ private fun AccountsSection(model: AndroidAppModel) {
             HorizontalDivider(color = colors.border)
         }
         model.snapshot.providerAdvisories().forEach { advisory ->
-            Column(
-                Modifier.fillMaxWidth().padding(16.dp),
-                verticalArrangement = Arrangement.spacedBy(6.dp),
-            ) {
+            Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        advisory.displayName,
-                        Modifier.weight(1f),
-                        style = AppTheme.body,
-                        color = colors.foreground,
-                    )
+                    Text(advisory.displayName, Modifier.weight(1f), style = AppTheme.body, color = colors.foreground)
                     Text(advisory.status, style = AppTheme.caption, color = colors.foregroundMuted)
                 }
                 if (advisory.currentVersion != null && advisory.latestVersion != null) {
@@ -792,15 +845,15 @@ private fun AccountsSection(model: AndroidAppModel) {
                         color = colors.foregroundMuted,
                     )
                 }
-                advisory.message?.let {
-                    Text(it, style = AppTheme.caption, color = colors.foregroundMuted)
-                }
+                advisory.message?.let { Text(it, style = AppTheme.caption, color = colors.foregroundMuted) }
                 if (advisory.canUpdate) {
-                    TextButton(onClick = {
-                        model.perform(Intent.UpdateProvider(advisory.instanceId, null)) { result ->
-                            if (result.isSuccess) model.perform(Intent.LoadProviders)
+                    TextButton(
+                        onClick = {
+                            model.perform(Intent.UpdateProvider(advisory.instanceId, null)) { result ->
+                                if (result.isSuccess) model.perform(Intent.LoadProviders)
+                            }
                         }
-                    }) {
+                    ) {
                         Text("Update provider", color = colors.primaryText)
                     }
                 }

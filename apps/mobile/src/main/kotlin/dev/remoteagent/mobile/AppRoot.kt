@@ -59,9 +59,7 @@ internal fun RemoteAgentApp(
     LaunchedEffect(model.usageDeepLinkRequests) {
         if (model.usageDeepLinkRequests > 0) model.openUsageRouteFromDeepLink()
     }
-    LaunchedEffect(model.snapshot, model.profileId) {
-        model.requestPushPermissionIfNeeded(requestNotifications)
-    }
+    LaunchedEffect(model.snapshot, model.profileId) { model.requestPushPermissionIfNeeded(requestNotifications) }
     AppMaterialTheme {
         val context = LocalContext.current
         val root = model.snapshot.currentDirectory()
@@ -75,7 +73,11 @@ internal fun RemoteAgentApp(
                                 model.navigate(Route.Pdf(java.io.File(root, target.path).path))
                             else
                                 model.navigate(
-                                    Route.Workspace(WorkspaceTab.Files, java.io.File(root, target.path).path, target.line)
+                                    Route.Workspace(
+                                        WorkspaceTab.Files,
+                                        java.io.File(root, target.path).path,
+                                        target.line,
+                                    )
                                 )
                         is dev.remoteagent.core.MarkdownLinkAction.HostFile ->
                             if (dev.remoteagent.core.isPdfFile(target.path)) model.navigate(Route.Pdf(target.path))
@@ -125,10 +127,11 @@ private fun AppSurface(model: AndroidAppModel, requestQrScan: (onContents: (Stri
 
                     Route.ScheduledTasks -> ScheduledTasksScreen(model)
 
-                    Route.Usage -> UsageScreen(
-                        model,
-                        initialTab = if (model.usageDeepLinkRequests > 0) UsageTab.LIMITS else UsageTab.USAGE,
-                    )
+                    Route.Usage ->
+                        UsageScreen(
+                            model,
+                            initialTab = if (model.usageDeepLinkRequests > 0) UsageTab.LIMITS else UsageTab.USAGE,
+                        )
                     Route.Archived -> ArchivedScreen(model)
                 }
             }
@@ -194,18 +197,24 @@ private fun HostsScreen(model: AndroidAppModel) {
                             Text(
                                 environment?.let { current ->
                                     listOfNotNull(
-                                        current.state,
-                                        current.platform,
-                                        current.machine,
-                                        current.capabilities.takeIf { it.isNotEmpty() }?.let { "${it.size} capabilities" },
-                                    ).joinToString(" · ")
+                                            current.state,
+                                            current.platform,
+                                            current.machine,
+                                            current.capabilities
+                                                .takeIf { it.isNotEmpty() }
+                                                ?.let { "${it.size} capabilities" },
+                                        )
+                                        .joinToString(" · ")
                                 } ?: if (profile.id == model.profileId) "Connected device" else "Paired",
                                 style = AppTheme.caption,
                                 color = AppTheme.colors.foregroundSecondary,
                             )
-                            environment?.reconnectReason?.takeIf { it.isNotBlank() }?.let { reason ->
-                                Text(reason, style = AppTheme.caption, color = AppTheme.colors.foregroundSecondary)
-                            }
+                            environment
+                                ?.reconnectReason
+                                ?.takeIf { it.isNotBlank() }
+                                ?.let { reason ->
+                                    Text(reason, style = AppTheme.caption, color = AppTheme.colors.foregroundSecondary)
+                                }
                         }
                         IconButton(onClick = { model.removeProfile(profile.id) }) {
                             Icon(Icons.Outlined.Delete, "Remove ${profile.name}", tint = AppTheme.colors.iconMuted)
@@ -213,9 +222,10 @@ private fun HostsScreen(model: AndroidAppModel) {
                     }
                 }
             }
-            val activities = model.environments.flatMap { environment ->
-                environment.activities.map { activity -> environment to activity }
-            }
+            val activities =
+                model.environments.flatMap { environment ->
+                    environment.activities.map { activity -> environment to activity }
+                }
             if (activities.isNotEmpty()) {
                 item {
                     Surface(color = AppTheme.colors.groupedCard, shape = RoundedCornerShape(28.dp)) {
@@ -236,9 +246,15 @@ private fun HostsScreen(model: AndroidAppModel) {
                                         style = AppTheme.caption,
                                         color = AppTheme.colors.foregroundSecondary,
                                     )
-                                    activity.detail?.takeIf { it.isNotBlank() }?.let { detail ->
-                                        Text(detail, style = AppTheme.caption, color = AppTheme.colors.foregroundSecondary)
-                                    }
+                                    activity.detail
+                                        ?.takeIf { it.isNotBlank() }
+                                        ?.let { detail ->
+                                            Text(
+                                                detail,
+                                                style = AppTheme.caption,
+                                                color = AppTheme.colors.foregroundSecondary,
+                                            )
+                                        }
                                 }
                             }
                         }

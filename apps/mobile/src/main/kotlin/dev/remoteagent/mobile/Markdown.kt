@@ -283,9 +283,7 @@ private fun MarkdownTable(
     val actions = LocalMarkdownActions.current
     BoxWithConstraints(Modifier.fillMaxWidth()) {
         val wrapping = AppTheme.codeWordWrap
-        val cellWidth =
-            if (wrapping) maxWidth / table.columns.size.coerceAtLeast(1).toFloat()
-            else width
+        val cellWidth = if (wrapping) maxWidth / table.columns.size.coerceAtLeast(1).toFloat() else width
         val tableWidth = if (wrapping) maxWidth else width * table.columns.size
         SelectionContainer {
             Column(
@@ -304,8 +302,7 @@ private fun MarkdownTable(
                                         if (chip != null) onOpenContext(chip) else actions.open(href)
                                     },
                                 ),
-                                Modifier.width(cellWidth).padding(10.dp)
-                                    .testTag("markdown.cell.$index.$row.$column"),
+                                Modifier.width(cellWidth).padding(10.dp).testTag("markdown.cell.$index.$row.$column"),
                                 style = AppTheme.caption,
                                 color = AppTheme.colors.foreground,
                                 softWrap = wrapping,
@@ -346,7 +343,8 @@ private fun markdownText(
                 fontWeight = if (header || run.strong) FontWeight.Bold else null,
                 fontStyle = if (run.emphasis) FontStyle.Italic else null,
                 fontFamily = if (run.code) AppTheme.mono else null,
-                fontSize = if (run.code) AppTheme.markdownCodeFontSize.sp else androidx.compose.ui.unit.TextUnit.Unspecified,
+                fontSize =
+                    if (run.code) AppTheme.markdownCodeFontSize.sp else androidx.compose.ui.unit.TextUnit.Unspecified,
                 textDecoration = if (run.strikethrough) TextDecoration.LineThrough else TextDecoration.None,
             )
         ) {

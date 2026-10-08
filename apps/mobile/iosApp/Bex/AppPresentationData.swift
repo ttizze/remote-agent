@@ -27,7 +27,9 @@ struct EnvironmentActivityRow: Identifiable {
     let phase: String
     let updatedAtMs: Int64
 
-    var id: String { "\(environmentId):\(threadId):\(updatedAtMs)" }
+    var id: String {
+        "\(environmentId):\(threadId):\(updatedAtMs)"
+    }
 }
 
 struct EnvironmentRow: Identifiable {
@@ -41,5 +43,7 @@ struct EnvironmentRow: Identifiable {
     let reconnectReason: String?
     let activities: [EnvironmentActivityRow]
 
-    var id: String { profileId }
+    var id: String {
+        profileId
+    }
 }

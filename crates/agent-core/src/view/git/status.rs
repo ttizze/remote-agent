@@ -63,6 +63,9 @@ mod tests {
             ahead_of_default_count: None,
             pr: None,
         };
-        assert_eq!(status_view(Some(&status)).unwrap().ahead_of_default_count, 2);
+        assert_eq!(
+            status_view(Some(&status)).unwrap().ahead_of_default_count,
+            2
+        );
     }
 }

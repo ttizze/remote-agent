@@ -1671,5 +1671,4 @@ mod tests {
         writer.await.unwrap();
         assert_eq!(output.len(), SNAPSHOT_MAX_OUTPUT_BYTES);
     }
-
 }

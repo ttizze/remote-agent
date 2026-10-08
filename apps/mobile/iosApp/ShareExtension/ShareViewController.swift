@@ -32,13 +32,12 @@ final class RemoteAgentShareViewController: UIViewController {
         var textByProvider = Array(repeating: "", count: providers.count)
         var urlsByProvider = Array(repeating: "", count: providers.count)
         for (index, provider) in providers.enumerated() {
-            let type: UTType?
-            if provider.hasItemConformingToTypeIdentifier(UTType.url.identifier) {
-                type = .url
+            let type: UTType? = if provider.hasItemConformingToTypeIdentifier(UTType.url.identifier) {
+                .url
             } else if provider.hasItemConformingToTypeIdentifier(UTType.plainText.identifier) {
-                type = .plainText
+                .plainText
             } else {
-                type = nil
+                nil
             }
             guard let type else { continue }
             group.enter()
@@ -58,7 +57,7 @@ final class RemoteAgentShareViewController: UIViewController {
             guard let self else { return }
             let text = textByProvider.filter { !$0.isEmpty }.joined(separator: "\n")
             let urls = urlsByProvider.filter { !$0.isEmpty }
-            self.write(RemoteAgentSharePayload(text: text, urls: urls))
+            write(RemoteAgentSharePayload(text: text, urls: urls))
         }
     }
 
@@ -90,16 +89,28 @@ final class RemoteAgentShareViewController: UIViewController {
     }
 
     private static func urlString(_ item: NSSecureCoding) -> String? {
-        if let url = item as? URL { return url.absoluteString }
-        if let url = item as? NSURL { return url.absoluteString }
+        if let url = item as? URL {
+            return url.absoluteString
+        }
+        if let url = item as? NSURL {
+            return url.absoluteString
+        }
         return textValue(item)
     }
 
     private static func textValue(_ item: NSSecureCoding) -> String? {
-        if let value = item as? String { return value }
-        if let value = item as? NSString { return value as String }
-        if let data = item as? Data { return String(data: data, encoding: .utf8) }
-        if let data = item as? NSData { return String(data: data as Data, encoding: .utf8) }
+        if let value = item as? String {
+            return value
+        }
+        if let value = item as? NSString {
+            return value as String
+        }
+        if let data = item as? Data {
+            return String(data: data, encoding: .utf8)
+        }
+        if let data = item as? NSData {
+            return String(data: data as Data, encoding: .utf8)
+        }
         return nil
     }
 }

@@ -1154,10 +1154,8 @@ fn merged_pull_request_transition_is_single_shot() {
         head_sha: Some("head".into()),
         base_branch: "main".into(),
         opened_at: Some(at.clone()),
-        closed_at: (state == agent_domain::PullRequestState::Closed)
-            .then_some(at.clone()),
-        merged_at: (state == agent_domain::PullRequestState::Merged)
-            .then_some(at.clone()),
+        closed_at: (state == agent_domain::PullRequestState::Closed).then_some(at.clone()),
+        merged_at: (state == agent_domain::PullRequestState::Merged).then_some(at.clone()),
         updated_at: at.clone(),
         observed_at: at.clone(),
         author: None,

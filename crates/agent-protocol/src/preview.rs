@@ -18,8 +18,7 @@ pub const DEFAULT_PREVIEW_PROFILE_ID: &str = "default";
 pub const INCOGNITO_PREVIEW_PROFILE_ID: &str = "incognito";
 
 pub const COMMON_DEV_PORTS: &[u16] = &[
-    3000, 3001, 3333, 4173, 4200, 4321, 5000, 5173, 5174, 5175, 5500, 8000, 8080, 8081, 8888,
-    9000,
+    3000, 3001, 3333, 4173, 4200, 4321, 5000, 5173, 5174, 5175, 5500, 8000, 8080, 8081, 8888, 9000,
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -91,19 +90,59 @@ pub struct PreviewViewportPresetDefinition {
 pub const PREVIEW_VIEWPORT_PRESETS: &[PreviewViewportPresetDefinition] = &[
     p(PreviewViewportPreset::IphoneSe, "iPhone SE", 375, 667),
     p(PreviewViewportPreset::IphoneXr, "iPhone XR", 414, 896),
-    p(PreviewViewportPreset::Iphone12Pro, "iPhone 12 Pro", 390, 844),
-    p(PreviewViewportPreset::Iphone14ProMax, "iPhone 14 Pro Max", 430, 932),
+    p(
+        PreviewViewportPreset::Iphone12Pro,
+        "iPhone 12 Pro",
+        390,
+        844,
+    ),
+    p(
+        PreviewViewportPreset::Iphone14ProMax,
+        "iPhone 14 Pro Max",
+        430,
+        932,
+    ),
     p(PreviewViewportPreset::Pixel7, "Pixel 7", 412, 915),
-    p(PreviewViewportPreset::SamsungGalaxyS8Plus, "Samsung Galaxy S8+", 360, 740),
-    p(PreviewViewportPreset::SamsungGalaxyS20Ultra, "Samsung Galaxy S20 Ultra", 412, 915),
+    p(
+        PreviewViewportPreset::SamsungGalaxyS8Plus,
+        "Samsung Galaxy S8+",
+        360,
+        740,
+    ),
+    p(
+        PreviewViewportPreset::SamsungGalaxyS20Ultra,
+        "Samsung Galaxy S20 Ultra",
+        412,
+        915,
+    ),
     p(PreviewViewportPreset::IpadMini, "iPad Mini", 768, 1024),
     p(PreviewViewportPreset::IpadAir, "iPad Air", 820, 1180),
     p(PreviewViewportPreset::IpadPro, "iPad Pro", 1024, 1366),
-    p(PreviewViewportPreset::SurfacePro7, "Surface Pro 7", 912, 1368),
+    p(
+        PreviewViewportPreset::SurfacePro7,
+        "Surface Pro 7",
+        912,
+        1368,
+    ),
     p(PreviewViewportPreset::SurfaceDuo, "Surface Duo", 540, 720),
-    p(PreviewViewportPreset::GalaxyZFold5, "Galaxy Z Fold 5", 344, 882),
-    p(PreviewViewportPreset::AsusZenbookFold, "Asus Zenbook Fold", 853, 1280),
-    p(PreviewViewportPreset::SamsungGalaxyA5171, "Samsung Galaxy A51/71", 412, 914),
+    p(
+        PreviewViewportPreset::GalaxyZFold5,
+        "Galaxy Z Fold 5",
+        344,
+        882,
+    ),
+    p(
+        PreviewViewportPreset::AsusZenbookFold,
+        "Asus Zenbook Fold",
+        853,
+        1280,
+    ),
+    p(
+        PreviewViewportPreset::SamsungGalaxyA5171,
+        "Samsung Galaxy A51/71",
+        412,
+        914,
+    ),
     p(PreviewViewportPreset::NestHub, "Nest Hub", 1024, 600),
     p(PreviewViewportPreset::NestHubMax, "Nest Hub Max", 1280, 800),
 ];
@@ -126,7 +165,10 @@ const fn p(
 #[serde(tag = "_tag", rename_all = "lowercase")]
 pub enum PreviewViewportSetting {
     Fill,
-    Freeform { width: u32, height: u32 },
+    Freeform {
+        width: u32,
+        height: u32,
+    },
     Preset {
         #[serde(rename = "presetId")]
         preset: PreviewViewportPreset,
@@ -255,7 +297,10 @@ impl PreviewZoom {
         }
     }
     pub fn stepped(self, direction: i8) -> Self {
-        let index = Self::LEVELS.iter().position(|value| *value == self).unwrap_or(7);
+        let index = Self::LEVELS
+            .iter()
+            .position(|value| *value == self)
+            .unwrap_or(7);
         let next = if direction < 0 {
             index.saturating_sub(1)
         } else if direction > 0 {
@@ -276,8 +321,14 @@ impl Default for PreviewZoom {
 #[serde(tag = "_tag", rename_all = "PascalCase")]
 pub enum PreviewNavStatus {
     Idle,
-    Loading { url: String, title: String },
-    Success { url: String, title: String },
+    Loading {
+        url: String,
+        title: String,
+    },
+    Success {
+        url: String,
+        title: String,
+    },
     LoadFailed {
         url: String,
         title: String,
@@ -783,7 +834,10 @@ pub fn normalize_preview_url(input: &str) -> Result<String, String> {
 
 fn bare_preview_host_is_loopback(input: &str) -> bool {
     let authority = input.split(['/', '?', '#']).next().unwrap_or(input);
-    let host = if let Some(end) = authority.strip_prefix('[').and_then(|value| value.find(']')) {
+    let host = if let Some(end) = authority
+        .strip_prefix('[')
+        .and_then(|value| value.find(']'))
+    {
         &authority[1..=end]
     } else {
         authority
@@ -803,42 +857,122 @@ mod tests {
 
     #[test]
     fn validates_viewports_against_the_resource_owned_limits() {
-        assert!(PreviewViewportSetting::Freeform { width: 390, height: 844 }.validate().is_ok());
-        assert!(PreviewViewportSetting::Freeform { width: 239, height: 844 }.validate().is_err());
-        assert!(PreviewViewportSetting::Freeform { width: 3840, height: 2161 }.validate().is_err());
+        assert!(
+            PreviewViewportSetting::Freeform {
+                width: 390,
+                height: 844
+            }
+            .validate()
+            .is_ok()
+        );
+        assert!(
+            PreviewViewportSetting::Freeform {
+                width: 239,
+                height: 844
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            PreviewViewportSetting::Freeform {
+                width: 3840,
+                height: 2161
+            }
+            .validate()
+            .is_err()
+        );
         assert!(PreviewViewportSetting::Fill.validate().is_ok());
     }
 
     #[test]
     fn measured_fill_dimensions_are_positive_without_using_selectable_preset_bounds() {
-        assert!(PreviewRenderedViewportSize { width: 1, height: 1 }.validate().is_ok());
-        assert!(PreviewRenderedViewportSize { width: 0, height: 1 }.validate().is_err());
+        assert!(
+            PreviewRenderedViewportSize {
+                width: 1,
+                height: 1
+            }
+            .validate()
+            .is_ok()
+        );
+        assert!(
+            PreviewRenderedViewportSize {
+                width: 0,
+                height: 1
+            }
+            .validate()
+            .is_err()
+        );
     }
 
     #[test]
     fn recording_requests_require_a_tab_id() {
         let thread_id = agent_domain::ThreadId::new("thread").unwrap();
-        assert!(PreviewRecordingStart { thread_id: thread_id.clone(), tab_id: "tab".into(), recording_id: "recording".into(), options: PreviewRecordingOptions::default() }
+        assert!(
+            PreviewRecordingStart {
+                thread_id: thread_id.clone(),
+                tab_id: "tab".into(),
+                recording_id: "recording".into(),
+                options: PreviewRecordingOptions::default()
+            }
             .validate()
-            .is_ok());
-        assert!(PreviewRecordingStop { thread_id, tab_id: String::new(), recording_id: "recording".into() }
+            .is_ok()
+        );
+        assert!(
+            PreviewRecordingStop {
+                thread_id,
+                tab_id: String::new(),
+                recording_id: "recording".into()
+            }
             .validate()
-            .is_err());
+            .is_err()
+        );
     }
 
     #[test]
     fn profile_data_clear_requires_a_scoped_profile_id() {
-        assert!(PreviewClearProfileData { profile_id: "profile-a".into() }.validate().is_ok());
-        assert!(PreviewClearProfileData { profile_id: String::new() }.validate().is_err());
-        assert!(PreviewClearProfileData { profile_id: "bad\nprofile".into() }.validate().is_err());
+        assert!(
+            PreviewClearProfileData {
+                profile_id: "profile-a".into()
+            }
+            .validate()
+            .is_ok()
+        );
+        assert!(
+            PreviewClearProfileData {
+                profile_id: String::new()
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            PreviewClearProfileData {
+                profile_id: "bad\nprofile".into()
+            }
+            .validate()
+            .is_err()
+        );
     }
 
     #[test]
     fn normalizes_preview_urls_without_accepting_privileged_or_credential_urls() {
-        assert_eq!(normalize_preview_url("localhost:5173/docs").unwrap(), "http://localhost:5173/docs");
-        assert_eq!(normalize_preview_url("example.com/docs").unwrap(), "https://example.com/docs");
-        assert_eq!(normalize_preview_url("http://localhost:5173/docs#old").unwrap(), "http://localhost:5173/docs#old");
-        for url in ["", "file:///tmp/a", "javascript:alert(1)", "https://user:pass@example.com"] {
+        assert_eq!(
+            normalize_preview_url("localhost:5173/docs").unwrap(),
+            "http://localhost:5173/docs"
+        );
+        assert_eq!(
+            normalize_preview_url("example.com/docs").unwrap(),
+            "https://example.com/docs"
+        );
+        assert_eq!(
+            normalize_preview_url("http://localhost:5173/docs#old").unwrap(),
+            "http://localhost:5173/docs#old"
+        );
+        for url in [
+            "",
+            "file:///tmp/a",
+            "javascript:alert(1)",
+            "https://user:pass@example.com",
+        ] {
             assert!(normalize_preview_url(url).is_err(), "{url}");
         }
     }

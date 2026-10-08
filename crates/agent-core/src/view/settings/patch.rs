@@ -774,10 +774,8 @@ mod tests {
             (Some(ThreadEnvMode::Worktree), SettingSource::Host)
         );
 
-        host.project_overrides.insert(
-            "p".into(),
-            ProjectSettingsOverrides::default(),
-        );
+        host.project_overrides
+            .insert("p".into(), ProjectSettingsOverrides::default());
         assert_eq!(
             resolve_project_settings(&host, Some("p")).default_thread_env_mode,
             (Some(ThreadEnvMode::Worktree), SettingSource::Host)

@@ -129,10 +129,7 @@ fn merged_link_transition(before: Option<&State>, link: &agent_domain::PullReque
         .is_none_or(|summary| summary.state != PullRequestState::Merged)
 }
 
-fn merged_pull_request_transition(
-    before: &Option<Arc<State>>,
-    command: &Command,
-) -> bool {
+fn merged_pull_request_transition(before: &Option<Arc<State>>, command: &Command) -> bool {
     let before = before.as_deref();
     match command {
         Command::SyncPullRequests { links } => links
@@ -420,10 +417,8 @@ impl Runtime {
     ) -> Result<Committed, RuntimeError> {
         let _admitted = self.admit().await?;
         let merge_command_id = id.clone();
-        let merge_transition = merged_pull_request_transition(
-            &self.registry().state(&thread).await.ok(),
-            &command,
-        );
+        let merge_transition =
+            merged_pull_request_transition(&self.registry().state(&thread).await.ok(), &command);
         let committed = self
             .registry()
             .dispatch(&thread, id, command, CommandOrigin::Internal)
@@ -438,18 +433,17 @@ impl Runtime {
             if let Some(project) = project {
                 match self.executors.ops.pull_request_merged(&thread, &project) {
                     Ok(true) => {
-                        let snapshot_at = self
-                            .registry()
-                            .state(&thread)
-                            .await
-                            .ok()
-                            .and_then(|state| state.thread.as_ref().map(|thread| thread.updated_at.clone()));
+                        let snapshot_at =
+                            self.registry().state(&thread).await.ok().and_then(|state| {
+                                state
+                                    .thread
+                                    .as_ref()
+                                    .map(|thread| thread.updated_at.clone())
+                            });
                         if let Some(snapshot_at) = snapshot_at {
-                            let settle_id = CommandId::new(format!(
-                                "{}:merged-settle",
-                                merge_command_id
-                            ))
-                            .expect("merged settlement command ids are nonempty");
+                            let settle_id =
+                                CommandId::new(format!("{}:merged-settle", merge_command_id))
+                                    .expect("merged settlement command ids are nonempty");
                             if let Err(error) = self
                                 .registry()
                                 .dispatch(

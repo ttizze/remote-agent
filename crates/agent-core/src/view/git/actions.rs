@@ -136,9 +136,10 @@ pub fn build_menu_items(
     let terminology = terminology(status);
     let has_branch = status.ref_name.is_some();
     let has_changes = status.has_working_tree_changes;
-    let has_open_pr = status.pr.as_ref().is_some_and(|pr| {
-        matches!(pr.state, agent_protocol::vcs::ChangeRequestState::Open)
-    });
+    let has_open_pr = status
+        .pr
+        .as_ref()
+        .is_some_and(|pr| matches!(pr.state, agent_protocol::vcs::ChangeRequestState::Open));
     let can_commit = !busy && has_changes;
     let can_push_without_upstream = has_primary_remote && !status.has_upstream;
     let can_push = !busy
@@ -213,14 +214,12 @@ pub fn resolve_quick_action(
         );
     };
     let has_changes = status.has_working_tree_changes;
-    let has_open_pr = status.pr.as_ref().is_some_and(|pr| {
-        matches!(pr.state, agent_protocol::vcs::ChangeRequestState::Open)
-    });
+    let has_open_pr = status
+        .pr
+        .as_ref()
+        .is_some_and(|pr| matches!(pr.state, agent_protocol::vcs::ChangeRequestState::Open));
     let is_ahead = status.ahead_count > 0;
-    let has_default_delta = status
-        .ahead_of_default_count
-        .unwrap_or(status.ahead_count)
-        > 0;
+    let has_default_delta = status.ahead_of_default_count.unwrap_or(status.ahead_count) > 0;
     let is_behind = status.behind_count > 0;
     if has_changes {
         if !status.has_upstream && !has_primary_remote {
@@ -260,7 +259,10 @@ pub fn resolve_quick_action(
         );
     }
     if is_ahead && is_behind {
-        return hint("Sync ref", "Branch has diverged from upstream. Rebase/merge first.");
+        return hint(
+            "Sync ref",
+            "Branch has diverged from upstream. Rebase/merge first.",
+        );
     }
     if is_behind {
         return GitQuickAction {
@@ -343,10 +345,7 @@ pub fn requires_default_branch_confirmation(action: GitAction, is_default_ref: b
     is_default_ref
         && matches!(
             action,
-            GitAction::Push
-                | GitAction::CreatePr
-                | GitAction::CommitPush
-                | GitAction::CommitPushPr
+            GitAction::Push | GitAction::CreatePr | GitAction::CommitPush | GitAction::CommitPushPr
         )
 }
 
@@ -572,6 +571,9 @@ mod tests {
     #[test]
     fn elapsed_time_does_not_go_negative() {
         assert_eq!(format_elapsed(Some(10_000), 9_000).as_deref(), Some("0s"));
-        assert_eq!(format_elapsed(Some(10_000), 75_000).as_deref(), Some("1m 5s"));
+        assert_eq!(
+            format_elapsed(Some(10_000), 75_000).as_deref(),
+            Some("1m 5s")
+        );
     }
 }

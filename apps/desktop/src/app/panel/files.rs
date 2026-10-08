@@ -44,9 +44,8 @@ impl FilesState {
         if !crate::app::ui_word_wrap() {
             editor.update(cx, |editor, cx| editor.set_soft_wrap(false, window, cx));
         }
-        let content_query = cx.new(|cx| {
-            InputState::new(window, cx).placeholder("Search project contents")
-        });
+        let content_query =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Search project contents"));
         subscriptions.push(cx.subscribe(&editor, |view, input, event, cx| {
             if matches!(event, InputEvent::Change) {
                 let text = input.read(cx).value().to_string();
@@ -153,8 +152,7 @@ impl Desktop {
         }
         let content_query = self.panels.files.content_query.read(cx).value().to_string();
         if !content_query.is_empty()
-            && self.panels.files.content_search_for
-                != Some((cwd.clone(), content_query.clone()))
+            && self.panels.files.content_search_for != Some((cwd.clone(), content_query.clone()))
         {
             self.panels.files.content_search_for = Some((cwd.clone(), content_query.clone()));
             self.perform(Intent::SearchContents {

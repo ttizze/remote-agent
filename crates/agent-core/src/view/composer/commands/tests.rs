@@ -692,9 +692,12 @@ fn choosing_a_pull_request_inserts_review_context() {
         range_start: 0,
         range_end: 1,
     };
-    let selection =
-        resolve_composer_command_selection("#", &trigger, &item, true, &[]).unwrap();
-    assert!(selection.text.starts_with("[#42](context://v1/review-comment/"));
+    let selection = resolve_composer_command_selection("#", &trigger, &item, true, &[]).unwrap();
+    assert!(
+        selection
+            .text
+            .starts_with("[#42](context://v1/review-comment/")
+    );
     let record = pull_request_context_record(
         "github.com",
         "owner/repo",

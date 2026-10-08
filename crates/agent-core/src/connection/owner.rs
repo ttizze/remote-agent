@@ -1085,7 +1085,9 @@ impl Owner {
 
 #[cfg(test)]
 mod tests {
-    use super::{DeviceInputSequencer, USAGE_REFRESH_INTERVAL_MS, usage_refresh_deadline, usage_refresh_due};
+    use super::{
+        DeviceInputSequencer, USAGE_REFRESH_INTERVAL_MS, usage_refresh_deadline, usage_refresh_due,
+    };
     use std::sync::Arc;
     use std::time::Duration;
 

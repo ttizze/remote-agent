@@ -13,13 +13,17 @@ struct BexIOSApp: App {
         WindowGroup {
             BexSwiftUIRoot(model: model)
                 .onReceive(NotificationCenter.default.publisher(for: .remoteAgentShortcut)) { notification in
-                    if notification.userInfo?["type"] as? String == "new-thread" { model.handleShortcut() }
+                    if notification.userInfo?["type"] as? String == "new-thread" {
+                        model.handleShortcut()
+                    }
                 }
                 .onAppear {
                     LocalNotifications.refreshAuthorization()
                     LocalNotifications.clearDelivered()
                     model.ingestIncomingShareHandoffs()
-                    if AgentPushCenter.takePendingShortcut() == "new-thread" { model.handleShortcut() }
+                    if AgentPushCenter.takePendingShortcut() == "new-thread" {
+                        model.handleShortcut()
+                    }
                     model.setActivityUpdater { [weak pushCenter] states in
                         guard #available(iOS 16.1, *) else { return }
                         Task { @MainActor in
@@ -40,7 +44,7 @@ struct BexIOSApp: App {
                         visibleThread: { [weak model] in model?.visiblePushThreadDeepLink() },
                         liveActivitiesEnabled: { [weak model] hostId in
                             model?.liveActivitiesEnabled(hostId: hostId) ?? true
-                        },
+                        }
                     )
                 }
                 .onChange(of: scenePhase) { _, phase in

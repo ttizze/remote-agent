@@ -8,11 +8,11 @@ pub mod terminology;
 pub mod toolbar;
 
 pub use actions::{
-    build_menu_items, default_branch_action_copy, format_elapsed, progress_view,
+    DefaultBranchActionCopy, GitAction, GitActionIcon, GitActionMenuItem, GitActionProgressView,
+    GitActionResultTiming, GitQuickAction, GitQuickActionKind, build_menu_items,
+    default_branch_action_copy, format_elapsed, progress_view,
     requires_default_branch_confirmation, resolve_quick_action, thread_branch_update,
-    DefaultBranchActionCopy, GitAction, GitActionIcon, GitActionMenuItem,
-    GitActionProgressView, GitActionResultTiming, GitQuickAction, GitQuickActionKind,
 };
-pub use status::{status_view, GitStatusView};
-pub use terminology::{change_request_terminology, ChangeRequestTerminology};
+pub use status::{GitStatusView, status_view};
+pub use terminology::{ChangeRequestTerminology, change_request_terminology};
 pub use toolbar::{branch_label, pull_label};

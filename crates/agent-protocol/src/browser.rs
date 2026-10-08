@@ -191,7 +191,10 @@ mod tests {
 
     #[test]
     fn preview_input_uses_the_resource_owned_viewport() {
-        let click = BrowserAction::Click { x: 1100.0, y: 800.0 };
+        let click = BrowserAction::Click {
+            x: 1100.0,
+            y: 800.0,
+        };
         assert!(click.validate().is_err());
         assert!(click.validate_for_viewport(1200, 900).is_ok());
     }

@@ -122,11 +122,7 @@ fn sanitize_branch_fragment(raw: &str) -> String {
                     || chars
                         .get(index + 1)
                         .is_some_and(|value| value.is_whitespace());
-                if surrounded_by_space {
-                    '-'
-                } else {
-                    '/'
-                }
+                if surrounded_by_space { '-' } else { '/' }
             } else if character.is_ascii_alphanumeric() || matches!(*character, '-' | '_') {
                 character.to_ascii_lowercase()
             } else {

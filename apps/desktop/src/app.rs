@@ -878,7 +878,11 @@ impl Desktop {
     /// Provider and Host mutations remain scoped to the owning Store even
     /// while the settings page is showing a combined environment list.
     pub(crate) fn perform_on_environment(&self, environment_id: &str, intent: Intent) {
-        if self.snapshot.environment.as_ref().map(|environment| environment.environment_id.as_str())
+        if self
+            .snapshot
+            .environment
+            .as_ref()
+            .map(|environment| environment.environment_id.as_str())
             == Some(environment_id)
         {
             self.perform(intent);
@@ -1639,12 +1643,7 @@ impl Desktop {
             // Notifications <-> NotificationsAndSound transition.
             self.dismiss_active_notifications(cx);
         }
-        let events = agent_core::view::notifications::between(
-            previous,
-            current,
-            focused,
-            focused,
-        );
+        let events = agent_core::view::notifications::between(previous, current, focused, focused);
         for event in events {
             if event.in_app {
                 let route = event.deep_link.clone();
@@ -1663,12 +1662,14 @@ impl Desktop {
                     }
                 };
                 window.push_notification(
-                    notification.title(event.title.clone()).on_click(move |_, _, app| {
-                        let _ = desktop.update(app, |view, cx| {
-                            view.queue_notification_route(route.clone());
-                            cx.notify();
-                        });
-                    }),
+                    notification
+                        .title(event.title.clone())
+                        .on_click(move |_, _, app| {
+                            let _ = desktop.update(app, |view, cx| {
+                                view.queue_notification_route(route.clone());
+                                cx.notify();
+                            });
+                        }),
                     cx,
                 );
             }
@@ -1733,11 +1734,7 @@ impl Desktop {
         self.publish_notification_badge();
     }
 
-    fn dismiss_environment_notifications(
-        &mut self,
-        environment_id: &str,
-        cx: &mut Context<Self>,
-    ) {
+    fn dismiss_environment_notifications(&mut self, environment_id: &str, cx: &mut Context<Self>) {
         let removed = self
             .active_notification_tags
             .iter()
@@ -1910,8 +1907,7 @@ impl Desktop {
                     return;
                 }
                 if result.is_err() {
-                    if view.environment_registry.selected()
-                        != Some(target_environment_id.as_str())
+                    if view.environment_registry.selected() != Some(target_environment_id.as_str())
                     {
                         return;
                     }
@@ -1929,12 +1925,8 @@ impl Desktop {
                     model: selection.2.clone(),
                     options: selection.3.clone(),
                 });
-                view.perform(Intent::SetRuntimeMode {
-                    mode: selection.4,
-                });
-                view.perform(Intent::SetInteractionMode {
-                    mode: selection.5,
-                });
+                view.perform(Intent::SetRuntimeMode { mode: selection.4 });
+                view.perform(Intent::SetInteractionMode { mode: selection.5 });
             },
         );
         AutomaticNewThreadResult::Started
@@ -2009,10 +2001,11 @@ impl Desktop {
     pub(crate) fn new_thread(&mut self, project_id: Option<String>, cx: &mut Context<Self>) {
         self.route = Route::Chat;
         self.invalidate_load_balancing_attempt();
-        let automatic = project_id.as_deref().map_or(
-            AutomaticNewThreadResult::Unavailable,
-            |project_id| self.automatic_new_thread(project_id, true),
-        );
+        let automatic = project_id
+            .as_deref()
+            .map_or(AutomaticNewThreadResult::Unavailable, |project_id| {
+                self.automatic_new_thread(project_id, true)
+            });
         if matches!(automatic, AutomaticNewThreadResult::Unavailable) {
             self.begin_new_thread(project_id);
         }
@@ -2299,7 +2292,6 @@ mod tests {
         assert!(!local_host_power_publish_allowed(true, true, false));
         assert!(!local_host_power_publish_allowed(true, false, true));
     }
-
 }
 
 impl Render for Desktop {

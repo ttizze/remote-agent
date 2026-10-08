@@ -38,10 +38,12 @@ pub(crate) fn repository_name_with_owner(url: &str) -> Option<String> {
     if trimmed.is_empty() {
         return None;
     }
-    let path = if let Some((_, rest)) = trimmed
-        .split_once("://")
-        .filter(|(scheme, _)| matches!(scheme.to_ascii_lowercase().as_str(), "ssh" | "http" | "https" | "git"))
-    {
+    let path = if let Some((_, rest)) = trimmed.split_once("://").filter(|(scheme, _)| {
+        matches!(
+            scheme.to_ascii_lowercase().as_str(),
+            "ssh" | "http" | "https" | "git"
+        )
+    }) {
         rest.split_once('/').map(|(_, path)| path)?
     } else if let Some((user_host, path)) = trimmed.split_once(':')
         && user_host.contains('@')
@@ -97,9 +99,7 @@ fn remote_repository(cwd: &Path, remote: Option<&str>) -> RemoteRepository {
     let url = config_value(cwd, &format!("remote.{remote}.url"));
     let name_with_owner = url.as_deref().and_then(repository_name_with_owner);
     RemoteRepository {
-        url_key: url
-            .as_deref()
-            .map(agent_runtime::normalize_remote_url),
+        url_key: url.as_deref().map(agent_runtime::normalize_remote_url),
         owner_login: owner_login(name_with_owner.as_deref()),
         name_with_owner,
     }
@@ -121,13 +121,15 @@ pub(crate) fn branch_head_context(
     upstream_ref: Option<&str>,
     remote_name: Option<String>,
 ) -> HeadContext {
-    let remote_name =
-        remote_name.or_else(|| config_value(cwd, &format!("branch.{branch}.remote")));
+    let remote_name = remote_name.or_else(|| config_value(cwd, &format!("branch.{branch}.remote")));
     let remotes = remote_names(cwd);
     let head_from_upstream = upstream_ref
         .map(|upstream| {
             let scoped: Vec<String> = remote_name.iter().cloned().collect();
-            super::branch_of_remote_ref(upstream, if scoped.is_empty() { &remotes } else { &scoped })
+            super::branch_of_remote_ref(
+                upstream,
+                if scoped.is_empty() { &remotes } else { &scoped },
+            )
         })
         .unwrap_or_default();
     let head_branch = if head_from_upstream.is_empty() {
@@ -183,9 +185,12 @@ pub(crate) fn branch_head_context(
         },
         head_branch,
         head_selectors: selectors,
-        head_remote_url_key: remote
-            .url_key
-            .or_else(|| remote_name.is_none().then(|| origin.url_key.clone()).flatten()),
+        head_remote_url_key: remote.url_key.or_else(|| {
+            remote_name
+                .is_none()
+                .then(|| origin.url_key.clone())
+                .flatten()
+        }),
         remote_name,
         head_repository_name_with_owner: remote.name_with_owner,
         head_repository_owner_login: remote.owner_login,
@@ -242,7 +247,8 @@ pub(crate) fn lookup_head_context(
 ) -> (HeadContext, bool) {
     let context = branch_head_context(cwd, branch, upstream_ref, remote_name);
     let upstream_is_default = Some(context.head_branch.as_str()) == default_branch
-        || (default_branch.is_none() && super::BASE_CANDIDATES.contains(&context.head_branch.as_str()));
+        || (default_branch.is_none()
+            && super::BASE_CANDIDATES.contains(&context.head_branch.as_str()));
     if context.head_branch == branch || !upstream_is_default || context.is_cross_repository {
         return (context, true);
     }
@@ -294,14 +300,15 @@ fn repository_name_from_pr_url(url: &str) -> Option<String> {
 }
 
 fn pr_head_identity(pr: &PullRequestRecord) -> (Option<String>, Option<String>) {
-    let name_with_owner = normalize_lower(pr.head_repository_name_with_owner.as_deref()).or_else(|| {
-        if pr.is_cross_repository != Some(true) {
-            return None;
-        }
-        let owner = normalize_lower(pr.head_repository_owner_login.as_deref())?;
-        let name = repository_name_from_pr_url(&pr.url)?;
-        Some(format!("{owner}/{}", name.to_lowercase()))
-    });
+    let name_with_owner =
+        normalize_lower(pr.head_repository_name_with_owner.as_deref()).or_else(|| {
+            if pr.is_cross_repository != Some(true) {
+                return None;
+            }
+            let owner = normalize_lower(pr.head_repository_owner_login.as_deref())?;
+            let name = repository_name_from_pr_url(&pr.url)?;
+            Some(format!("{owner}/{}", name.to_lowercase()))
+        });
     let owner = normalize_lower(pr.head_repository_owner_login.as_deref())
         .or_else(|| owner_login(name_with_owner.as_deref()));
     (name_with_owner, owner)
@@ -457,7 +464,11 @@ async fn find_latest_pr(
     }
     let mut all: Vec<PullRequestRecord> = by_number.into_values().collect();
     // Newest activity first; rows without a time last.
-    all.sort_by(|a, b| b.updated_at.cmp(&a.updated_at).then(b.number.cmp(&a.number)));
+    all.sort_by(|a, b| {
+        b.updated_at
+            .cmp(&a.updated_at)
+            .then(b.number.cmp(&a.number))
+    });
     Ok(all
         .iter()
         .find(|pr| pr.state == ChangeRequestState::Open)
@@ -607,7 +618,9 @@ impl PullRequestLookup {
             Ok((latest, context)) => {
                 let mut state = self.lock();
                 state.failure_streaks.remove(key);
-                let ttl = if latest.as_ref().is_some_and(|pr| pr.state == ChangeRequestState::Open)
+                let ttl = if latest
+                    .as_ref()
+                    .is_some_and(|pr| pr.state == ChangeRequestState::Open)
                 {
                     PR_LOOKUP_CACHE_TTL
                 } else {
@@ -657,7 +670,9 @@ impl PullRequestLookup {
         match self.cached_lookup(path, &key, details).await {
             Ok((latest, context)) => {
                 let pr = latest
-                    .filter(|pr| !(details.is_default_branch && pr.state != ChangeRequestState::Open))
+                    .filter(|pr| {
+                        !(details.is_default_branch && pr.state != ChangeRequestState::Open)
+                    })
                     .map(|pr| to_status_pr(&pr));
                 let mut state = self.lock();
                 if state.last_known.len() >= PR_LOOKUP_CACHE_CAPACITY {
@@ -799,10 +814,16 @@ mod tests {
         origin_fork.head_repository_name_with_owner = Some("alice/repository".into());
         origin_fork.head_repository_owner_login = Some("alice".into());
         assert!(matches_branch_head_context(&alice, &origin_fork));
-        assert!(!matches_branch_head_context(&record("other"), &context("feature")));
+        assert!(!matches_branch_head_context(
+            &record("other"),
+            &context("feature")
+        ));
         let mut unknown_fork = record("feature");
         unknown_fork.is_cross_repository = Some(true);
-        assert!(!matches_branch_head_context(&unknown_fork, &context("feature")));
+        assert!(!matches_branch_head_context(
+            &unknown_fork,
+            &context("feature")
+        ));
     }
 
     // "derives fork repository identity from PR URL when GitHub omits

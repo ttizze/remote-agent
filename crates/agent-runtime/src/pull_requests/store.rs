@@ -22,9 +22,8 @@ pub struct PullRequestStore {
 impl PullRequestStore {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, PullRequestStoreError> {
         if let Some(parent) = path.as_ref().parent() {
-            std::fs::create_dir_all(parent).map_err(|error| {
-                rusqlite::Error::ToSqlConversionFailure(Box::new(error))
-            })?;
+            std::fs::create_dir_all(parent)
+                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
         }
         let connection = Connection::open(path)?;
         connection.execute_batch(
@@ -67,7 +66,10 @@ impl PullRequestStore {
         links: &[PullRequestLink],
         updated_at: &str,
     ) -> Result<(), PullRequestStoreError> {
-        let connection = self.connection.lock().map_err(|_| PullRequestStoreError::Poisoned)?;
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| PullRequestStoreError::Poisoned)?;
         let transaction = connection.unchecked_transaction()?;
         transaction.execute(
             "DELETE FROM pull_request_links WHERE thread_id = ?1",
@@ -83,15 +85,15 @@ impl PullRequestStore {
                 "INSERT INTO pull_request_links
                     (thread_id, host, repository, number, payload, updated_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![
-                thread.as_str(),
-                &key.host,
-                &key.repository,
-                key.number,
-                serde_json::to_string(link)?,
-                updated_at,
-            ],
-        )?;
+                params![
+                    thread.as_str(),
+                    &key.host,
+                    &key.repository,
+                    key.number,
+                    serde_json::to_string(link)?,
+                    updated_at,
+                ],
+            )?;
             if let Some(watch) = link.watch.as_ref() {
                 transaction.execute(
                     "INSERT INTO pull_request_watches
@@ -113,7 +115,10 @@ impl PullRequestStore {
     }
 
     pub fn links(&self, thread: &ThreadId) -> Result<Vec<PullRequestLink>, PullRequestStoreError> {
-        let connection = self.connection.lock().map_err(|_| PullRequestStoreError::Poisoned)?;
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| PullRequestStoreError::Poisoned)?;
         let mut statement = connection.prepare(
             "SELECT links.payload, watches.payload FROM pull_request_links links
              LEFT JOIN pull_request_watches watches
@@ -161,7 +166,10 @@ impl PullRequestStore {
         watch: Option<&PullRequestWatch>,
         updated_at: &str,
     ) -> Result<(), PullRequestStoreError> {
-        let connection = self.connection.lock().map_err(|_| PullRequestStoreError::Poisoned)?;
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| PullRequestStoreError::Poisoned)?;
         if let Some(watch) = watch {
             connection.execute(
                 "INSERT INTO pull_request_watches
@@ -193,7 +201,10 @@ impl PullRequestStore {
         thread: &ThreadId,
         key: &PullRequestKey,
     ) -> Result<Option<PullRequestWatch>, PullRequestStoreError> {
-        let connection = self.connection.lock().map_err(|_| PullRequestStoreError::Poisoned)?;
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| PullRequestStoreError::Poisoned)?;
         let payload = connection
             .query_row(
                 "SELECT payload FROM pull_request_watches
@@ -210,13 +221,13 @@ impl PullRequestStore {
 
     /// Returns links whose watches survive a process restart. The caller owns
     /// provider I/O and decides when a due link is refreshed.
-    pub fn watched_links(
-        &self,
-    ) -> Result<Vec<(ThreadId, PullRequestLink)>, PullRequestStoreError> {
-        let connection = self.connection.lock().map_err(|_| PullRequestStoreError::Poisoned)?;
-        let mut statement = connection.prepare(
-            "SELECT DISTINCT thread_id FROM pull_request_links ORDER BY thread_id",
-        )?;
+    pub fn watched_links(&self) -> Result<Vec<(ThreadId, PullRequestLink)>, PullRequestStoreError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| PullRequestStoreError::Poisoned)?;
+        let mut statement = connection
+            .prepare("SELECT DISTINCT thread_id FROM pull_request_links ORDER BY thread_id")?;
         let threads = statement
             .query_map([], |row| row.get::<_, String>(0))?
             .collect::<Result<Vec<_>, _>>()?;
@@ -245,7 +256,10 @@ impl PullRequestStore {
         key: &PullRequestKey,
         limit: usize,
     ) -> Result<(Vec<(String, bool)>, bool), PullRequestStoreError> {
-        let connection = self.connection.lock().map_err(|_| PullRequestStoreError::Poisoned)?;
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| PullRequestStoreError::Poisoned)?;
         let mut statement = connection.prepare(
             "SELECT path, viewed FROM pull_request_viewed_files
              WHERE host = ?1 AND repository = ?2 AND number = ?3
@@ -253,7 +267,12 @@ impl PullRequestStore {
         )?;
         let rows = statement
             .query_map(
-                params![&key.host, &key.repository, key.number, limit.saturating_add(1)],
+                params![
+                    &key.host,
+                    &key.repository,
+                    key.number,
+                    limit.saturating_add(1)
+                ],
                 |row| Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?)),
             )?
             .collect::<Result<Vec<_>, _>>()?;
@@ -267,7 +286,10 @@ impl PullRequestStore {
         files: &[(&str, bool)],
         updated_at: &str,
     ) -> Result<(), PullRequestStoreError> {
-        let connection = self.connection.lock().map_err(|_| PullRequestStoreError::Poisoned)?;
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| PullRequestStoreError::Poisoned)?;
         let transaction = connection.unchecked_transaction()?;
         for (path, viewed) in files {
             transaction.execute(
@@ -276,7 +298,14 @@ impl PullRequestStore {
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6)
                  ON CONFLICT(host, repository, number, path)
                  DO UPDATE SET viewed = excluded.viewed, updated_at = excluded.updated_at",
-                params![&key.host, &key.repository, key.number, path, viewed, updated_at],
+                params![
+                    &key.host,
+                    &key.repository,
+                    key.number,
+                    path,
+                    viewed,
+                    updated_at
+                ],
             )?;
         }
         transaction.commit()?;
@@ -306,7 +335,9 @@ mod tests {
             stack: None,
             watch: None,
         };
-        store.sync_thread(&thread, std::slice::from_ref(&link), "2026-10-01T00:00:00Z").unwrap();
+        store
+            .sync_thread(&thread, std::slice::from_ref(&link), "2026-10-01T00:00:00Z")
+            .unwrap();
         assert_eq!(store.links(&thread).unwrap(), vec![link.clone()]);
         let key = link.key();
         let watch = PullRequestWatch {
@@ -319,7 +350,9 @@ mod tests {
             conflicting: false,
             wakes: 0,
         };
-        store.set_watch(&thread, &key, Some(&watch), "2026-10-01T00:00:00Z").unwrap();
+        store
+            .set_watch(&thread, &key, Some(&watch), "2026-10-01T00:00:00Z")
+            .unwrap();
         drop(store);
         let reopened = PullRequestStore::open(&path).unwrap();
         assert_eq!(reopened.watch(&thread, &key).unwrap(), Some(watch.clone()));

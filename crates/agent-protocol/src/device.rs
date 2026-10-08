@@ -56,7 +56,10 @@ impl DeviceHostConfig {
             return Err("device host id must be 1 to 128 characters".into());
         }
         if id == LOCAL_DEVICE_HOST_ID
-            || !id.bytes().next().is_some_and(|byte| byte.is_ascii_alphanumeric())
+            || !id
+                .bytes()
+                .next()
+                .is_some_and(|byte| byte.is_ascii_alphanumeric())
             || !id
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
@@ -65,7 +68,10 @@ impl DeviceHostConfig {
         }
         if label.is_empty()
             || target.is_empty()
-            || self.identity_file.as_deref().is_some_and(|path| path.trim().is_empty())
+            || self
+                .identity_file
+                .as_deref()
+                .is_some_and(|path| path.trim().is_empty())
         {
             return Err("device host label and target are required".into());
         }
@@ -402,11 +408,17 @@ pub enum DevicePermissionDecision {
 pub enum DeviceActionKind {
     SetAppearance(DeviceAppearance),
     SetTextSize(DeviceTextSize),
-    SetToggle { setting: String, value: bool },
+    SetToggle {
+        setting: String,
+        value: bool,
+    },
     SetLiquidGlass(String),
     SetColorFilter(DeviceColorFilter),
     SetOrientation(DeviceOrientation),
-    SetLocation { latitude: f64, longitude: f64 },
+    SetLocation {
+        latitude: f64,
+        longitude: f64,
+    },
     ClearLocation,
     SetPermission {
         app_id: String,
@@ -464,11 +476,13 @@ impl DeviceActionInput {
             {
                 Err("device liquid-glass value is invalid".into())
             }
-            DeviceActionKind::SetLocation { latitude, longitude }
-                if !latitude.is_finite()
-                    || !longitude.is_finite()
-                    || !(-90.0..=90.0).contains(latitude)
-                    || !(-180.0..=180.0).contains(longitude) =>
+            DeviceActionKind::SetLocation {
+                latitude,
+                longitude,
+            } if !latitude.is_finite()
+                || !longitude.is_finite()
+                || !(-90.0..=90.0).contains(latitude)
+                || !(-180.0..=180.0).contains(longitude) =>
             {
                 Err("device location is invalid".into())
             }
@@ -632,7 +646,12 @@ pub struct DeviceEventLogEntry {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum DeviceInputKind {
-    Touch { phase: DeviceTouchPhase, x: f32, y: f32, raw: bool },
+    Touch {
+        phase: DeviceTouchPhase,
+        x: f32,
+        y: f32,
+        raw: bool,
+    },
     /// A keyboard event carries both its physical code and the platform's
     /// actual key value. iOS uses the code for HID; Android uses the key value
     /// so shifted and non-ASCII input is preserved without client-side
@@ -647,8 +666,12 @@ pub enum DeviceInputKind {
     HardwareButton(DeviceHardwareButton),
     Rotate,
     SetOrientation(DeviceOrientation),
-    Fold { command: DeviceFoldPosture },
-    Duo { command: DeviceDuoCommand },
+    Fold {
+        command: DeviceFoldPosture,
+    },
+    Duo {
+        command: DeviceDuoCommand,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -683,11 +706,19 @@ impl DeviceInput {
             return Err("device id is invalid".into());
         }
         match &self.input {
-            DeviceInputKind::Touch { x, y, .. } if !x.is_finite() || !y.is_finite() || !(0.0..=1.0).contains(x) || !(0.0..=1.0).contains(y) => {
+            DeviceInputKind::Touch { x, y, .. }
+                if !x.is_finite()
+                    || !y.is_finite()
+                    || !(0.0..=1.0).contains(x)
+                    || !(0.0..=1.0).contains(y) =>
+            {
                 Err("device touch coordinates must be finite and normalized".into())
             }
             DeviceInputKind::Key { code, key, .. }
-                if code.trim().is_empty() || code.len() > 64 || key.is_empty() || key.len() > 128 =>
+                if code.trim().is_empty()
+                    || code.len() > 64
+                    || key.is_empty()
+                    || key.len() > 128 =>
             {
                 Err("device key code or key value is invalid".into())
             }
@@ -698,10 +729,7 @@ impl DeviceInput {
 }
 
 fn validate_device_session_epoch(epoch: &str) -> Result<(), String> {
-    if epoch.trim().is_empty()
-        || epoch.len() > 256
-        || epoch.chars().any(char::is_control)
-    {
+    if epoch.trim().is_empty() || epoch.len() > 256 || epoch.chars().any(char::is_control) {
         return Err("device session epoch is invalid".into());
     }
     Ok(())
@@ -829,16 +857,23 @@ pub struct DeviceToolCloseInput {
 
 pub fn agent_device_target_args(device: &DeviceSummary) -> Vec<String> {
     match device.platform {
-        DevicePlatform::Ios => vec!["--platform".into(), "ios".into(), "--udid".into(), device.id.clone()],
-        DevicePlatform::Android => vec!["--platform".into(), "android".into(), "--serial".into(), device.id.clone()],
+        DevicePlatform::Ios => vec![
+            "--platform".into(),
+            "ios".into(),
+            "--udid".into(),
+            device.id.clone(),
+        ],
+        DevicePlatform::Android => vec![
+            "--platform".into(),
+            "android".into(),
+            "--serial".into(),
+            device.id.clone(),
+        ],
     }
 }
 
 pub fn png_dimensions(png: &[u8]) -> (u32, u32) {
-    if png.len() < 24
-        || png[0..8] != [137, 80, 78, 71, 13, 10, 26, 10]
-        || &png[12..16] != b"IHDR"
-    {
+    if png.len() < 24 || png[0..8] != [137, 80, 78, 71, 13, 10, 26, 10] || &png[12..16] != b"IHDR" {
         return (0, 0);
     }
     (
@@ -861,17 +896,34 @@ mod tests {
             port: None,
         };
         assert!(bad_host.validate().is_err());
-        assert!(DeviceHostConfig { id: "-remote".into(), ..bad_host.clone() }.validate().is_err());
-        assert!(DeviceHostConfig { id: "remote".into(), identity_file: Some(" ".into()), ..bad_host }.validate().is_err());
-        assert!(DeviceHostConfig {
-            id: " remote ".into(),
-            label: " build host ".into(),
-            target: " user@example.com ".into(),
-            identity_file: Some(" ~/.ssh/id_ed25519 ".into()),
-            port: Some(22),
-        }
-        .validate()
-        .is_ok());
+        assert!(
+            DeviceHostConfig {
+                id: "-remote".into(),
+                ..bad_host.clone()
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            DeviceHostConfig {
+                id: "remote".into(),
+                identity_file: Some(" ".into()),
+                ..bad_host
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            DeviceHostConfig {
+                id: " remote ".into(),
+                label: " build host ".into(),
+                target: " user@example.com ".into(),
+                identity_file: Some(" ~/.ssh/id_ed25519 ".into()),
+                port: Some(22),
+            }
+            .validate()
+            .is_ok()
+        );
         let bad_action = DeviceActionInput {
             thread_id: ThreadId::new("thread").unwrap(),
             host_id: None,
@@ -883,39 +935,45 @@ mod tests {
             },
         };
         assert!(bad_action.validate().is_err());
-        assert!(DeviceActionInput {
-            thread_id: ThreadId::new("thread").unwrap(),
-            host_id: None,
-            device_id: "sim".into(),
-            session_epoch: "epoch".into(),
-            action: DeviceActionKind::SetToggle {
-                setting: "shell".into(),
-                value: true,
-            },
-        }
-        .validate()
-        .is_err());
-        assert!(DeviceActionInput {
-            thread_id: ThreadId::new("thread").unwrap(),
-            host_id: None,
-            device_id: "sim".into(),
-            session_epoch: "epoch".into(),
-            action: DeviceActionKind::SetLiquidGlass("opaque".into()),
-        }
-        .validate()
-        .is_err());
-        assert!(DeviceActionInput {
-            thread_id: ThreadId::new("thread").unwrap(),
-            host_id: None,
-            device_id: "sim".into(),
-            session_epoch: "epoch".into(),
-            action: DeviceActionKind::SendPush {
-                app_id: "app.example".into(),
-                payload: serde_json::json!(["not", "an", "object"]),
-            },
-        }
-        .validate()
-        .is_err());
+        assert!(
+            DeviceActionInput {
+                thread_id: ThreadId::new("thread").unwrap(),
+                host_id: None,
+                device_id: "sim".into(),
+                session_epoch: "epoch".into(),
+                action: DeviceActionKind::SetToggle {
+                    setting: "shell".into(),
+                    value: true,
+                },
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            DeviceActionInput {
+                thread_id: ThreadId::new("thread").unwrap(),
+                host_id: None,
+                device_id: "sim".into(),
+                session_epoch: "epoch".into(),
+                action: DeviceActionKind::SetLiquidGlass("opaque".into()),
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            DeviceActionInput {
+                thread_id: ThreadId::new("thread").unwrap(),
+                host_id: None,
+                device_id: "sim".into(),
+                session_epoch: "epoch".into(),
+                action: DeviceActionKind::SendPush {
+                    app_id: "app.example".into(),
+                    payload: serde_json::json!(["not", "an", "object"]),
+                },
+            }
+            .validate()
+            .is_err()
+        );
     }
 
     #[test]
@@ -929,7 +987,10 @@ mod tests {
             booted: true,
             physical: false,
         };
-        assert_eq!(agent_device_target_args(&device), ["--platform", "android", "--serial", "emulator-1"]);
+        assert_eq!(
+            agent_device_target_args(&device),
+            ["--platform", "android", "--serial", "emulator-1"]
+        );
         let mut png = vec![137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13];
         png.extend_from_slice(b"IHDR");
         png.extend_from_slice(&320u32.to_be_bytes());

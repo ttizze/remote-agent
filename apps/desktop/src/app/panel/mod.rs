@@ -470,19 +470,15 @@ impl Desktop {
     /// A surface's tab title.
     fn surface_title(&self, surface: &Surface, cx: &App) -> String {
         match surface {
-            Surface::Browser { id } => self
-                .panels
-                .preview_browsers
-                .get(id)
-                .map_or_else(
-                    || {
-                        self.panels
-                            .browsers
-                            .get(id)
-                            .map_or_else(|| "Browser".into(), |browser| browser.read(cx).title(cx))
-                    },
-                    |browser| browser.read(cx).title(cx),
-                ),
+            Surface::Browser { id } => self.panels.preview_browsers.get(id).map_or_else(
+                || {
+                    self.panels
+                        .browsers
+                        .get(id)
+                        .map_or_else(|| "Browser".into(), |browser| browser.read(cx).title(cx))
+                },
+                |browser| browser.read(cx).title(cx),
+            ),
             Surface::Terminal { active, .. } => {
                 let thread = self.panel_thread();
                 self.snapshot
@@ -830,12 +826,11 @@ impl Desktop {
                             appearance: resolved_browser.appearance,
                             zoom: resolved_browser.zoom,
                             profile_id: Some(resolved_browser.profile_id),
-                            recording_options:
-                                agent_protocol::preview::PreviewRecordingOptions {
-                                    frame_rate: resolved_browser.recording_frame_rate as u8,
-                                    show_key_presses: resolved_browser.recording_show_key_presses,
-                                    show_mouse_presses: resolved_browser.recording_show_mouse_presses,
-                                },
+                            recording_options: agent_protocol::preview::PreviewRecordingOptions {
+                                frame_rate: resolved_browser.recording_frame_rate as u8,
+                                show_key_presses: resolved_browser.recording_show_key_presses,
+                                show_mouse_presses: resolved_browser.recording_show_mouse_presses,
+                            },
                         },
                         window,
                         cx,

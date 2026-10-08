@@ -309,9 +309,7 @@ pub(crate) fn assemble(
     });
     let projects = snapshot.shell_projects();
     let target_project = if thread.is_none() {
-        snapshot
-            .new_thread_project_id()
-            .unwrap_or(CHATS_PROJECT)
+        snapshot.new_thread_project_id().unwrap_or(CHATS_PROJECT)
     } else {
         snapshot
             .selected_project

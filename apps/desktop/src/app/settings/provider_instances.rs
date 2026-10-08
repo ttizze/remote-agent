@@ -6,11 +6,11 @@
 //! Host remains the owner of persisted launch configuration.
 
 use super::{Row, notice, section};
-use crate::app::{Desktop, ui::{color, icon, tint}};
-use agent_core::{
-    state::Intent,
-    view::provider_instances as editing,
+use crate::app::{
+    Desktop,
+    ui::{color, icon, tint},
 };
+use agent_core::{state::Intent, view::provider_instances as editing};
 use agent_domain::Driver;
 use agent_protocol::models::{ProviderCustomModel, ProviderInstanceConfig};
 use gpui_kit::{
@@ -48,14 +48,14 @@ fn effective_instances(view: &Desktop) -> BTreeMap<String, ProviderInstanceConfi
     // it creates the explicit override the Host already supports.
     if let Some(providers) = &view.snapshot.providers {
         for provider in providers {
-            instances.entry(provider.instance.clone()).or_insert_with(|| {
-                ProviderInstanceConfig {
+            instances
+                .entry(provider.instance.clone())
+                .or_insert_with(|| ProviderInstanceConfig {
                     driver: provider.driver,
                     display_name: provider.display_name.clone(),
                     enabled: provider.enabled,
                     ..Default::default()
-                }
-            });
+                });
         }
     }
     instances
@@ -113,11 +113,11 @@ impl Desktop {
             .on_click(cx.listener(|view, _, window, cx| open(view, None, window, cx)));
         let mut rows = Vec::new();
         for (index, (instance_id, instance)) in instances.into_iter().enumerate() {
-            let live = self
-                .snapshot
-                .providers
-                .as_ref()
-                .and_then(|providers| providers.iter().find(|provider| provider.instance == instance_id));
+            let live = self.snapshot.providers.as_ref().and_then(|providers| {
+                providers
+                    .iter()
+                    .find(|provider| provider.instance == instance_id)
+            });
             let title = if instance.display_name.trim().is_empty() {
                 format!("{} ({instance_id})", driver_label(instance.driver))
             } else {
@@ -127,7 +127,11 @@ impl Desktop {
                 "{} · {} custom model{}{}",
                 driver_label(instance.driver),
                 instance.custom_models.len(),
-                if instance.custom_models.len() == 1 { "" } else { "s" },
+                if instance.custom_models.len() == 1 {
+                    ""
+                } else {
+                    "s"
+                },
                 if instance.enabled { "" } else { " · disabled" },
             );
             let update_instance = live
@@ -140,7 +144,9 @@ impl Desktop {
                     agent_protocol::models::ProviderVersionAdvisoryStatus::BehindLatest => {
                         "update available"
                     }
-                    agent_protocol::models::ProviderVersionAdvisoryStatus::Unknown => "version unknown",
+                    agent_protocol::models::ProviderVersionAdvisoryStatus::Unknown => {
+                        "version unknown"
+                    }
                 };
                 detail.push_str(&format!(" · {status}"));
                 if let Some(latest) = &advisory.latest_version {
@@ -252,7 +258,8 @@ impl ModelEditor {
         });
         options.update(cx, |input, cx| {
             input.set_value(
-                serde_json::to_string_pretty(&model.option_descriptors).unwrap_or_else(|_| "[]".into()),
+                serde_json::to_string_pretty(&model.option_descriptors)
+                    .unwrap_or_else(|_| "[]".into()),
                 window,
                 cx,
             )
@@ -340,7 +347,9 @@ impl ProviderInstanceEditor {
         id.update(cx, |input, cx| {
             input.set_value(instance_id.clone().unwrap_or_default(), window, cx)
         });
-        display_name.update(cx, |input, cx| input.set_value(initial.display_name, window, cx));
+        display_name.update(cx, |input, cx| {
+            input.set_value(initial.display_name, window, cx)
+        });
         accent_color.update(cx, |input, cx| {
             input.set_value(initial.accent_color.unwrap_or_default(), window, cx)
         });
@@ -351,10 +360,18 @@ impl ProviderInstanceEditor {
             input.set_value(initial.home_path.unwrap_or_default(), window, cx)
         });
         environment.update(cx, |input, cx| {
-            input.set_value(editing::format_environment_lines(&initial.environment), window, cx)
+            input.set_value(
+                editing::format_environment_lines(&initial.environment),
+                window,
+                cx,
+            )
         });
         launch_args.update(cx, |input, cx| {
-            input.set_value(editing::format_launch_args(&initial.launch_args), window, cx)
+            input.set_value(
+                editing::format_launch_args(&initial.launch_args),
+                window,
+                cx,
+            )
         });
         let mut editor = Self {
             desktop,

@@ -713,7 +713,6 @@ fn worktree() -> Vec<Value> {
     ]
 }
 
-
 fn device() -> Vec<Value> {
     vec![
         tool(
@@ -734,7 +733,11 @@ fn device() -> Vec<Value> {
                 "platform": described(literals(&["ios", "android"]), "Required when deviceId is omitted and both platforms are available."),
             }),
             &[],
-            Hints { destructive: false, idempotent: true, ..DEFAULT },
+            Hints {
+                destructive: false,
+                idempotent: true,
+                ..DEFAULT
+            },
         ),
         tool(
             "device_screenshot",
@@ -757,14 +760,25 @@ fn device() -> Vec<Value> {
                 "shutdown": described(json!({"type":"boolean"}), "Also power the simulator or emulator off. Defaults to false."),
             }),
             &[],
-            Hints { idempotent: true, ..DEFAULT },
+            Hints {
+                idempotent: true,
+                ..DEFAULT
+            },
         ),
     ]
 }
 
 /// Every served tool.
 pub(crate) fn tools() -> Vec<Value> {
-    [orchestrator(), thread(), project(), worktree(), device(), diagnostics()].concat()
+    [
+        orchestrator(),
+        thread(),
+        project(),
+        worktree(),
+        device(),
+        diagnostics(),
+    ]
+    .concat()
 }
 
 fn diagnostics() -> Vec<Value> {
@@ -847,7 +861,11 @@ fn device() -> Vec<Value> {
                 "platform": described(literals(&["ios", "android"]), "Required when deviceId is omitted and both platforms are available."),
             }),
             &[],
-            Hints { destructive: false, idempotent: true, ..DEFAULT },
+            Hints {
+                destructive: false,
+                idempotent: true,
+                ..DEFAULT
+            },
         ),
         tool(
             "device_screenshot",
@@ -870,7 +888,10 @@ fn device() -> Vec<Value> {
                 "shutdown": described(json!({"type":"boolean"}), "Also power the simulator or emulator off. Defaults to false."),
             }),
             &[],
-            Hints { idempotent: true, ..DEFAULT },
+            Hints {
+                idempotent: true,
+                ..DEFAULT
+            },
         ),
     ]
 }

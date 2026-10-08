@@ -31,33 +31,17 @@ class LocalNotificationsTest {
         val firstRoute = "remoteagent://threads/host/Aa"
         val secondRoute = "remoteagent://threads/host/BB"
         try {
-            LocalNotifications.deliver(
-                context,
-                "Input A",
-                "A",
-                sound = true,
-                deepLink = firstRoute,
-            )
-            LocalNotifications.deliver(
-                context,
-                "Input B",
-                "B",
-                sound = true,
-                deepLink = secondRoute,
-            )
+            LocalNotifications.deliver(context, "Input A", "A", sound = true, deepLink = firstRoute)
+            LocalNotifications.deliver(context, "Input B", "B", sound = true, deepLink = secondRoute)
             val before = manager.activeNotifications.associateBy { it.tag }
             assertEquals(firstRoute.hashCode(), secondRoute.hashCode())
-            assertEquals(
-                setOf(
-                    "local-attention:$firstRoute",
-                    "local-attention:$secondRoute",
-                ),
-                before.keys,
-            )
+            assertEquals(setOf("local-attention:$firstRoute", "local-attention:$secondRoute"), before.keys)
             LocalNotifications.updateBadge(context)
             val after = manager.activeNotifications.associateBy { it.tag }
             assertEquals(before.keys, after.keys)
-            assertTrue(after.values.all { it.notification.flags and android.app.Notification.FLAG_ONLY_ALERT_ONCE != 0 })
+            assertTrue(
+                after.values.all { it.notification.flags and android.app.Notification.FLAG_ONLY_ALERT_ONCE != 0 }
+            )
         } finally {
             LocalNotifications.clearDelivered(context)
         }
@@ -77,16 +61,25 @@ class LocalNotificationsTest {
             val notices = manager.activeNotifications.associateBy { it.tag }
             assertEquals(2, notices.size)
             assertNotEquals(
-                notices["local-attention:$firstRoute"]?.notification?.extras?.getString(android.app.Notification.EXTRA_TITLE),
+                notices["local-attention:$firstRoute"]
+                    ?.notification
+                    ?.extras
+                    ?.getString(android.app.Notification.EXTRA_TITLE),
                 "Old",
             )
             assertEquals(
                 "New",
-                notices["local-attention:$firstRoute"]?.notification?.extras?.getString(android.app.Notification.EXTRA_TITLE),
+                notices["local-attention:$firstRoute"]
+                    ?.notification
+                    ?.extras
+                    ?.getString(android.app.Notification.EXTRA_TITLE),
             )
             assertEquals(
                 "Other",
-                notices["local-attention:$secondRoute"]?.notification?.extras?.getString(android.app.Notification.EXTRA_TITLE),
+                notices["local-attention:$secondRoute"]
+                    ?.notification
+                    ?.extras
+                    ?.getString(android.app.Notification.EXTRA_TITLE),
             )
         } finally {
             LocalNotifications.clearDelivered(context)
@@ -98,20 +91,8 @@ class LocalNotificationsTest {
         val context = context()
         val manager = context.getSystemService(NotificationManager::class.java)
         try {
-            LocalNotifications.deliver(
-                context,
-                "A",
-                "A",
-                false,
-                deepLink = "remoteagent://threads/host-a/thread-a",
-            )
-            LocalNotifications.deliver(
-                context,
-                "B",
-                "B",
-                false,
-                deepLink = "remoteagent://threads/host-b/thread-b",
-            )
+            LocalNotifications.deliver(context, "A", "A", false, deepLink = "remoteagent://threads/host-a/thread-a")
+            LocalNotifications.deliver(context, "B", "B", false, deepLink = "remoteagent://threads/host-b/thread-b")
             LocalNotifications.removeEnvironment(context, "host-a")
 
             val notices = manager.activeNotifications.associateBy { it.tag }

@@ -219,7 +219,9 @@ async fn bridge_request(
             }
             Ok(BridgeResponse::Empty)
         }
-        BridgeRequest::PreviewRecordingStart { tab_id, options, .. } => {
+        BridgeRequest::PreviewRecordingStart {
+            tab_id, options, ..
+        } => {
             let tab_id = match tab_id {
                 Some(tab_id) => tab_id,
                 None => browser.preview_active_tab_for_owner(owner, thread).await?,
@@ -368,7 +370,10 @@ enum ToolCall {
     Browser(BrowserAction),
     PreviewList,
     PreviewClose(Option<String>),
-    PreviewRecordingStart(Option<String>, agent_protocol::preview::PreviewRecordingOptions),
+    PreviewRecordingStart(
+        Option<String>,
+        agent_protocol::preview::PreviewRecordingOptions,
+    ),
     PreviewRecordingStop(Option<String>),
 }
 

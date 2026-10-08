@@ -102,13 +102,13 @@ struct TerminalScreen: View {
                     fontSize = next
                     AppTheme.updateTerminalFontSize(next)
                 }
-                    .disabled(fontSize <= 6)
+                .disabled(fontSize <= 6)
                 Button("A+ \(String(format: "%.1f", stepped(1))) pt") {
                     let next = stepped(1)
                     fontSize = next
                     AppTheme.updateTerminalFontSize(next)
                 }
-                    .disabled(fontSize >= 14)
+                .disabled(fontSize >= 14)
             }
             ForEach(tabs.filter { $0.running || $0.terminalId == terminalId }, id: \.terminalId) { tab in
                 Button { switchTo(tab.terminalId) } label: {

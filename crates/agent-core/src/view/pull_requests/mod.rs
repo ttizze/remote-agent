@@ -1,7 +1,5 @@
 //! Pull-request views shared by desktop and mobile surfaces.
-use crate::state::{
-    PullRequestDiffChangeTypeInput, Snapshot, pull_request_diff_context_key,
-};
+use crate::state::{PullRequestDiffChangeTypeInput, Snapshot, pull_request_diff_context_key};
 use agent_domain::{
     PullRequestBadge, PullRequestDetail, PullRequestKey, PullRequestLink, PullRequestLinkSource,
     PullRequestSearchMatch, PullRequestState, PullRequestSummary, resolve_pull_request_badge,
@@ -43,8 +41,7 @@ pub struct PullRequestDiffView {
     pub patch: String,
     pub truncated: bool,
     pub next_cursor: Option<String>,
-    pub omitted_file_stats:
-        Option<Vec<agent_protocol::pull_requests::PullRequestOmittedFileStat>>,
+    pub omitted_file_stats: Option<Vec<agent_protocol::pull_requests::PullRequestOmittedFileStat>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -67,7 +64,10 @@ pub struct PullRequestPanelOptions {
     pub include_closed: bool,
 }
 
-pub fn pull_request_list(snapshot: &Snapshot, options: &PullRequestPanelOptions) -> PullRequestListView {
+pub fn pull_request_list(
+    snapshot: &Snapshot,
+    options: &PullRequestPanelOptions,
+) -> PullRequestListView {
     let project_id = options
         .project_id
         .clone()
@@ -100,7 +100,10 @@ pub fn pull_request_list(snapshot: &Snapshot, options: &PullRequestPanelOptions)
     }
 }
 
-pub fn pull_request_detail(snapshot: &Snapshot, key: &PullRequestKey) -> Option<PullRequestDetailView> {
+pub fn pull_request_detail(
+    snapshot: &Snapshot,
+    key: &PullRequestKey,
+) -> Option<PullRequestDetailView> {
     snapshot
         .pull_requests
         .details

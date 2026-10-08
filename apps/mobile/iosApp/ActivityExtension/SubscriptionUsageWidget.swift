@@ -98,10 +98,10 @@ struct SubscriptionUsageView: View {
                             ) : .gray)
                         if family != .accessoryRectangular {
                             if let reset = window.resetAt {
-                                Text(
-                                    "Next reset \(Date(timeIntervalSince1970: Double(reset) / 1000).formatted(date: .abbreviated, time: .shortened))"
-                                )
-                                .font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                                let resetDate = Date(timeIntervalSince1970: Double(reset) / 1000)
+                                    .formatted(date: .abbreviated, time: .shortened)
+                                Text("Next reset \(resetDate)")
+                                    .font(.caption2).foregroundStyle(.secondary).lineLimit(1)
                             } else {
                                 Text("Reset time unavailable").font(.caption2).foregroundStyle(.secondary)
                             }
@@ -110,10 +110,10 @@ struct SubscriptionUsageView: View {
                 }
             }
             if family != .accessoryRectangular, let checked = current?.checkedAt, checked > 0 {
-                Text(
-                    "As of \(Date(timeIntervalSince1970: Double(checked) / 1000).formatted(date: .abbreviated, time: .shortened))"
-                )
-                .font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                let checkedDate = Date(timeIntervalSince1970: Double(checked) / 1000)
+                    .formatted(date: .abbreviated, time: .shortened)
+                Text("As of \(checkedDate)")
+                    .font(.caption2).foregroundStyle(.secondary).lineLimit(1)
             }
         }
         .containerBackground(.background, for: .widget)

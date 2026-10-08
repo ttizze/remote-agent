@@ -309,7 +309,11 @@ pub fn pull_request_key_of(link: &PullRequestLink) -> PullRequestKey {
 }
 
 pub fn visible_pull_requests(links: &[PullRequestLink]) -> Vec<PullRequestLink> {
-    let mut result = links.iter().filter(|link| link.visible()).cloned().collect::<Vec<_>>();
+    let mut result = links
+        .iter()
+        .filter(|link| link.visible())
+        .cloned()
+        .collect::<Vec<_>>();
     result.sort_by(|left, right| {
         right
             .effective_updated_at()
@@ -337,7 +341,10 @@ pub fn resolve_current_pull_request(links: &[PullRequestLink]) -> Option<PullReq
     open.iter()
         .filter_map(|link| {
             let stack = link.stack.as_ref()?;
-            let position = stack.layers.iter().position(|layer| layer.number == link.number)?;
+            let position = stack
+                .layers
+                .iter()
+                .position(|layer| layer.number == link.number)?;
             Some((position, link))
         })
         .max_by_key(|(position, link)| (*position, link.effective_updated_at(), &link.linked_at))
@@ -354,7 +361,9 @@ pub fn resolve_pull_request_chains(links: &[PullRequestLink]) -> Vec<Vec<PullReq
     // branch names. A dismissed layer is already absent from `visible`.
     let mut native = BTreeSet::new();
     for link in &visible {
-        let Some(stack) = link.stack.as_ref() else { continue };
+        let Some(stack) = link.stack.as_ref() else {
+            continue;
+        };
         let stack_key = format!("{}/{}:{}", link.host, link.repository, stack.id);
         if native.contains(&stack_key) {
             continue;
@@ -395,16 +404,23 @@ pub fn resolve_pull_request_chains(links: &[PullRequestLink]) -> Vec<Vec<PullReq
         .collect::<Vec<_>>();
     let mut by_head = std::collections::BTreeMap::<String, Option<PullRequestLink>>::new();
     for link in &remaining {
-        let Some(snapshot) = link.snapshot.as_ref() else { continue };
+        let Some(snapshot) = link.snapshot.as_ref() else {
+            continue;
+        };
         let branch = format!("{}:{}:{}", link.host, link.repository, snapshot.head_branch);
         let value = by_head.entry(branch).or_insert_with(|| Some(link.clone()));
-        if value.as_ref().is_some_and(|existing| existing.key() != link.key()) {
+        if value
+            .as_ref()
+            .is_some_and(|existing| existing.key() != link.key())
+        {
             *value = None;
         }
     }
     let mut has_child = BTreeSet::new();
     for link in &remaining {
-        let Some(snapshot) = link.snapshot.as_ref() else { continue };
+        let Some(snapshot) = link.snapshot.as_ref() else {
+            continue;
+        };
         let branch = format!("{}:{}:{}", link.host, link.repository, snapshot.base_branch);
         if let Some(Some(parent)) = by_head.get(&branch) {
             if parent.key() != link.key() {
@@ -510,7 +526,10 @@ pub fn filter_composer_pull_request_matches(
         })
         .map(|link| PullRequestSearchMatch {
             key: link.key(),
-            project: link.snapshot.as_ref().and_then(|snapshot| snapshot.project.clone()),
+            project: link
+                .snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.project.clone()),
             title: link
                 .snapshot
                 .as_ref()
@@ -557,25 +576,28 @@ pub fn parse_change_request_url(value: &str) -> Option<ParsedPullRequestUrl> {
         return None;
     }
     let host = url.host_str()?.to_ascii_lowercase();
-    let segments = url.path_segments()?.filter(|segment| !segment.is_empty()).collect::<Vec<_>>();
+    let segments = url
+        .path_segments()?
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>();
     let githubish = host == "github.com"
         || host.ends_with(".github.com")
-        || host.split('.').any(|part| part.eq_ignore_ascii_case("github"));
-    let (owner, repository, number) = if githubish
-        && segments.len() >= 4
-        && segments[2].eq_ignore_ascii_case("pull")
-    {
-        (segments[0], segments[1], segments[3])
-    } else if segments.len() >= 5
-        && segments[2] == "-"
-        && segments[3].eq_ignore_ascii_case("merge_requests")
-    {
-        (segments[0], segments[1], segments[4])
-    } else if segments.len() >= 4 && segments[2].eq_ignore_ascii_case("pulls") {
-        (segments[0], segments[1], segments[3])
-    } else {
-        return None;
-    };
+        || host
+            .split('.')
+            .any(|part| part.eq_ignore_ascii_case("github"));
+    let (owner, repository, number) =
+        if githubish && segments.len() >= 4 && segments[2].eq_ignore_ascii_case("pull") {
+            (segments[0], segments[1], segments[3])
+        } else if segments.len() >= 5
+            && segments[2] == "-"
+            && segments[3].eq_ignore_ascii_case("merge_requests")
+        {
+            (segments[0], segments[1], segments[4])
+        } else if segments.len() >= 4 && segments[2].eq_ignore_ascii_case("pulls") {
+            (segments[0], segments[1], segments[3])
+        } else {
+            return None;
+        };
     let number = number.parse().ok()?;
     Some(ParsedPullRequestUrl {
         key: PullRequestKey::new(host, format!("{owner}/{repository}"), number),
@@ -655,8 +677,13 @@ mod tests {
     #[test]
     fn parses_github_and_gitlab_paths() {
         let github = parse_change_request_url("https://github.com/Owner/Repo/pull/42").unwrap();
-        assert_eq!(github.key, PullRequestKey::new("github.com", "owner/repo", 42));
-        let gitlab = parse_change_request_url("https://gitlab.example/owner/repo/-/merge_requests/7").unwrap();
+        assert_eq!(
+            github.key,
+            PullRequestKey::new("github.com", "owner/repo", 42)
+        );
+        let gitlab =
+            parse_change_request_url("https://gitlab.example/owner/repo/-/merge_requests/7")
+                .unwrap();
         assert_eq!(gitlab.key.number, 7);
         assert!(parse_change_request_url("https://example/owner/repo/issues/1").is_none());
     }
@@ -675,7 +702,10 @@ mod tests {
         let mut hidden = link(3, PullRequestState::Open, "2026-10-03T00:00:00Z");
         hidden.source = PullRequestLinkSource::StackDismissed;
         let matches = filter_composer_pull_request_matches(
-            &[hidden, link(2, PullRequestState::Open, "2026-10-02T00:00:00Z")],
+            &[
+                hidden,
+                link(2, PullRequestState::Open, "2026-10-02T00:00:00Z"),
+            ],
             Some("project"),
             "OWNER/REPO",
             "#2",
@@ -689,9 +719,15 @@ mod tests {
     fn badge_prioritizes_checks_and_conflicts() {
         let mut link = link(1, PullRequestState::Open, "2026-10-01T00:00:00Z");
         link.snapshot.as_mut().unwrap().checks_state = PullRequestChecksState::Failure;
-        assert_eq!(resolve_pull_request_badge(&link), PullRequestBadge::ChecksFailed);
+        assert_eq!(
+            resolve_pull_request_badge(&link),
+            PullRequestBadge::ChecksFailed
+        );
         link.snapshot.as_mut().unwrap().checks_state = PullRequestChecksState::Success;
         link.snapshot.as_mut().unwrap().mergeability = PullRequestMergeability::Conflicting;
-        assert_eq!(resolve_pull_request_badge(&link), PullRequestBadge::Conflicting);
+        assert_eq!(
+            resolve_pull_request_badge(&link),
+            PullRequestBadge::Conflicting
+        );
     }
 }

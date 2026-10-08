@@ -16,11 +16,7 @@ use gpui_kit::{
 };
 
 /// Opens the GitHub-only publish form for the selected checkout.
-pub(super) fn open(
-    cwd: String,
-    window: &mut Window,
-    cx: &mut Context<Desktop>,
-) {
+pub(super) fn open(cwd: String, window: &mut Window, cx: &mut Context<Desktop>) {
     let desktop = cx.entity().downgrade();
     let form = cx.new(|cx| PublishForm::new(desktop, cwd, window, cx));
     window.open_dialog(cx, move |dialog, _, _| {
@@ -102,8 +98,12 @@ impl PublishForm {
 
 fn valid_repository(value: &str) -> bool {
     let mut parts = value.split('/');
-    let Some(owner) = parts.next() else { return false };
-    let Some(name) = parts.next() else { return false };
+    let Some(owner) = parts.next() else {
+        return false;
+    };
+    let Some(name) = parts.next() else {
+        return false;
+    };
     !owner.trim().is_empty() && !name.trim().is_empty() && parts.next().is_none()
 }
 

@@ -202,14 +202,11 @@ pub fn shell(state: &State) -> Option<ThreadShell> {
             .and_then(|(.., reset_at)| reset_at.clone()),
         last_error_class: failure.and_then(|(_, class, _)| class),
         limit_recovery: thread.limit_recovery.clone(),
-        linked_pull_request: thread
-            .linked_pull_request
-            .clone()
-            .or_else(|| {
-                resolve_current_pull_request(&state.pull_requests)
-                    .as_ref()
-                    .map(crate::pull_requests::linked_pull_request)
-            }),
+        linked_pull_request: thread.linked_pull_request.clone().or_else(|| {
+            resolve_current_pull_request(&state.pull_requests)
+                .as_ref()
+                .map(crate::pull_requests::linked_pull_request)
+        }),
         pull_requests: visible_pull_requests(&state.pull_requests),
         pending_request: state
             .requests

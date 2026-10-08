@@ -21,21 +21,17 @@ impl GitState {
             vcs::VcsStatusStreamEvent::Snapshot { local, remote } => {
                 workspace::VcsStatus::merge(local.clone(), remote.clone())
             }
-            vcs::VcsStatusStreamEvent::LocalUpdated { local } => {
-                workspace::VcsStatus::merge(
-                    local.clone(),
-                    current.as_ref().map(workspace::VcsStatus::remote),
-                )
-            }
-            vcs::VcsStatusStreamEvent::RemoteUpdated { remote } => {
-                workspace::VcsStatus::merge(
-                    current
-                        .as_ref()
-                        .map(workspace::VcsStatus::local)
-                        .unwrap_or_else(vcs::VcsStatusLocal::not_repository),
-                    remote.clone(),
-                )
-            }
+            vcs::VcsStatusStreamEvent::LocalUpdated { local } => workspace::VcsStatus::merge(
+                local.clone(),
+                current.as_ref().map(workspace::VcsStatus::remote),
+            ),
+            vcs::VcsStatusStreamEvent::RemoteUpdated { remote } => workspace::VcsStatus::merge(
+                current
+                    .as_ref()
+                    .map(workspace::VcsStatus::local)
+                    .unwrap_or_else(vcs::VcsStatusLocal::not_repository),
+                remote.clone(),
+            ),
         };
         self.status.insert(cwd.clone(), next);
         self.status_events.insert(cwd, event);
@@ -107,7 +103,10 @@ mod tests {
                 remote: Some(remote(3, 0)),
             },
         );
-        assert_eq!(state.status["/repo"].ref_name.as_deref(), Some("feature/demo"));
+        assert_eq!(
+            state.status["/repo"].ref_name.as_deref(),
+            Some("feature/demo")
+        );
         assert!(state.status["/repo"].has_working_tree_changes);
         assert_eq!(state.status["/repo"].ahead_count, 3);
         assert_eq!(state.status["/repo"].behind_count, 0);
@@ -131,6 +130,9 @@ mod tests {
             },
         );
         assert!(state.status["/repo"].is_repo);
-        assert_eq!(state.status["/repo"].ref_name.as_deref(), Some("feature/demo"));
+        assert_eq!(
+            state.status["/repo"].ref_name.as_deref(),
+            Some("feature/demo")
+        );
     }
 }

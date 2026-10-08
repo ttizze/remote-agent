@@ -21,10 +21,10 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
-import dev.remoteagent.core.Intent
 import dev.remoteagent.core.CatalogFilter
 import dev.remoteagent.core.CatalogSheetItem
 import dev.remoteagent.core.CatalogSheetOptions
+import dev.remoteagent.core.Intent
 import dev.remoteagent.core.ScheduledTaskDraft
 import dev.remoteagent.core.ScheduledTaskScheduleDraft
 import dev.remoteagent.core.ScheduledTaskWorkspaceDraft
@@ -42,10 +42,7 @@ internal fun ScheduledTasksScreen(model: AndroidAppModel) {
         }
     }
     ScreenScaffold("Scheduled tasks", onBack = model::back) {
-        LazyColumn(
-            contentPadding = PaddingValues(16.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp),
-        ) {
+        LazyColumn(contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
             item {
                 SectionCard("Automations") {
                     model.snapshot.scheduledTasks().tasks.forEachIndexed { index, task ->
@@ -53,40 +50,51 @@ internal fun ScheduledTasksScreen(model: AndroidAppModel) {
                         Row(Modifier.fillMaxWidth().padding(16.dp)) {
                             Column(Modifier.weight(1f)) {
                                 Text(task.title, style = AppTheme.body, color = AppTheme.colors.foreground)
-                                Text("${task.scheduleLabel} · ${task.lastRunStatus}", style = AppTheme.caption, color = AppTheme.colors.foregroundMuted)
+                                Text(
+                                    "${task.scheduleLabel} · ${task.lastRunStatus}",
+                                    style = AppTheme.caption,
+                                    color = AppTheme.colors.foregroundMuted,
+                                )
                             }
-                            TextButton(onClick = {
-                                model.perform(Intent.SetScheduledTaskEnabled(task.id, !task.enabled))
-                            }) {
+                            TextButton(
+                                onClick = { model.perform(Intent.SetScheduledTaskEnabled(task.id, !task.enabled)) }
+                            ) {
                                 Text(if (task.enabled) "Pause" else "Enable")
                             }
                             TextButton(onClick = { model.perform(Intent.RunScheduledTaskNow(task.id)) }) {
                                 Text("Run now")
                             }
-                            TextButton(onClick = {
-                                model.perform(Intent.DeleteScheduledTask(task.id))
-                                if (selected == task.id) {
-                                    selected = null
-                                    draft = null
-                                    saveError = null
+                            TextButton(
+                                onClick = {
+                                    model.perform(Intent.DeleteScheduledTask(task.id))
+                                    if (selected == task.id) {
+                                        selected = null
+                                        draft = null
+                                        saveError = null
+                                    }
                                 }
-                            }) {
+                            ) {
                                 Text("Delete", color = AppTheme.colors.dangerForeground)
                             }
                         }
-                        TextButton(onClick = {
-                            selected = task.id
-                            draft = model.snapshot.scheduledTaskDraft(task.id)
-                            saveError = null
-                        }, modifier = Modifier.padding(horizontal = 12.dp)) {
+                        TextButton(
+                            onClick = {
+                                selected = task.id
+                                draft = model.snapshot.scheduledTaskDraft(task.id)
+                                saveError = null
+                            },
+                            modifier = Modifier.padding(horizontal = 12.dp),
+                        ) {
                             Text("Edit")
                         }
                     }
-                    TextButton(onClick = {
-                        selected = null
-                        draft = model.snapshot.scheduledTaskDraft(null)
-                        saveError = null
-                    }) {
+                    TextButton(
+                        onClick = {
+                            selected = null
+                            draft = model.snapshot.scheduledTaskDraft(null)
+                            saveError = null
+                        }
+                    ) {
                         Text("New scheduled task")
                     }
                 }
@@ -97,9 +105,10 @@ internal fun ScheduledTasksScreen(model: AndroidAppModel) {
                         model = model,
                         current = current,
                         snapshot = model.snapshot,
-                        taskMissing = selected != null
-                            && current.id == selected
-                            && model.snapshot.scheduledTasks().tasks.none { it.id == selected },
+                        taskMissing =
+                            selected != null &&
+                                current.id == selected &&
+                                model.snapshot.scheduledTasks().tasks.none { it.id == selected },
                         saveError = saveError,
                         projects = model.snapshot.projects().map { it.id to it.name },
                         onChange = { draft = it },
@@ -136,9 +145,7 @@ private fun ScheduledTaskEditor(
 ) {
     var branchOpen by remember(current.projectId) { mutableStateOf(false) }
     var branchQuery by remember(current.projectId) { mutableStateOf("") }
-    LaunchedEffect(current.projectId) {
-        model.perform(Intent.SearchScheduledTaskBranches(current.projectId, ""))
-    }
+    LaunchedEffect(current.projectId) { model.perform(Intent.SearchScheduledTaskBranches(current.projectId, "")) }
     SectionCard(if (current.id == null) "New scheduled task" else "Edit scheduled task") {
         TextField(
             current.title,
@@ -157,10 +164,7 @@ private fun ScheduledTaskEditor(
             verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
         ) {
             Text("Enabled", modifier = Modifier.weight(1f))
-            Switch(
-                checked = current.enabled,
-                onCheckedChange = { onChange(current.copy(enabled = it)) },
-            )
+            Switch(checked = current.enabled, onCheckedChange = { onChange(current.copy(enabled = it)) })
         }
         var projectOpen by remember { mutableStateOf(false) }
         TextButton(onClick = { projectOpen = !projectOpen }) {
@@ -183,7 +187,9 @@ private fun ScheduledTaskEditor(
         val catalogOptions = CatalogSheetOptions(CatalogFilter.All, false, "", emptyList(), null)
         val catalog by rememberView(snapshot, catalogOptions) { it.catalogSheet(catalogOptions) }
         TextButton(onClick = { modelOpen = !modelOpen }) {
-            Text("Model: ${current.instanceId.ifBlank { "Choose a provider" }} / ${current.model.ifBlank { "Choose a model" }}")
+            Text(
+                "Model: ${current.instanceId.ifBlank { "Choose a provider" }} / ${current.model.ifBlank { "Choose a model" }}"
+            )
         }
         if (modelOpen) {
             catalog?.items.orEmpty().forEach { item ->
@@ -199,7 +205,7 @@ private fun ScheduledTaskEditor(
                                     driver = item.driver,
                                     model = item.slug,
                                     options = if (sameModel) current.options else emptyList(),
-                                ),
+                                )
                             )
                         },
                         label = { Text(item.label) },
@@ -208,17 +214,15 @@ private fun ScheduledTaskEditor(
                 }
             }
         }
-        val traits by rememberView(snapshot, current.instanceId, current.model, current.options) {
-            it.scheduledTaskTraits(current)
-        }
+        val traits by
+            rememberView(snapshot, current.instanceId, current.model, current.options) {
+                it.scheduledTaskTraits(current)
+            }
         traits?.controls.orEmpty().forEach { control ->
             when (control) {
                 is TraitControl.Select -> {
                     Text(control.label, modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
-                    Row(
-                        Modifier.padding(horizontal = 16.dp),
-                        horizontalArrangement = Arrangement.spacedBy(4.dp),
-                    ) {
+                    Row(Modifier.padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                         control.choices.forEach { choice ->
                             FilterChip(
                                 selected = choice.id == control.selected,
@@ -238,9 +242,7 @@ private fun ScheduledTaskEditor(
                         Text(control.label, modifier = Modifier.weight(1f))
                         Switch(
                             checked = control.on,
-                            onCheckedChange = {
-                                onChange(snapshot.toggleScheduledTaskTrait(current, control.id, it))
-                            },
+                            onCheckedChange = { onChange(snapshot.toggleScheduledTaskTrait(current, control.id, it)) },
                         )
                     }
                 }
@@ -248,10 +250,7 @@ private fun ScheduledTaskEditor(
         }
         val runtimeChoices = snapshot.scheduledTaskRuntimeModes(current)
         Text("Runtime", modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
-        Row(
-            Modifier.padding(horizontal = 16.dp),
-            horizontalArrangement = Arrangement.spacedBy(4.dp),
-        ) {
+        Row(Modifier.padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
             runtimeChoices.forEach { choice ->
                 FilterChip(
                     selected = current.runtimeMode == choice.mode,
@@ -281,20 +280,19 @@ private fun ScheduledTaskEditor(
                 onClick = {
                     onChange(
                         current.copy(
-                            schedule = ScheduledTaskScheduleDraft.FixedTime(
-                                "09:00",
-                                listOf(1u, 2u, 3u, 4u, 5u).map { it.toUByte() },
-                            ),
-                        ),
+                            schedule =
+                                ScheduledTaskScheduleDraft.FixedTime(
+                                    "09:00",
+                                    listOf(1u, 2u, 3u, 4u, 5u).map { it.toUByte() },
+                                )
+                        )
                     )
                 },
                 label = { Text("Fixed time") },
             )
             FilterChip(
                 selected = interval,
-                onClick = {
-                    onChange(current.copy(schedule = ScheduledTaskScheduleDraft.Interval(900_000UL)))
-                },
+                onClick = { onChange(current.copy(schedule = ScheduledTaskScheduleDraft.Interval(900_000UL))) },
                 label = { Text("Interval") },
             )
         }
@@ -327,7 +325,12 @@ private fun ScheduledTaskEditor(
                                 val days = schedule.weekdays.toMutableList()
                                 val day = index.toUByte()
                                 if (!days.remove(day)) days.add(day)
-                                onChange(current.copy(schedule = ScheduledTaskScheduleDraft.FixedTime(schedule.timeOfDay, days.sorted())))
+                                onChange(
+                                    current.copy(
+                                        schedule =
+                                            ScheduledTaskScheduleDraft.FixedTime(schedule.timeOfDay, days.sorted())
+                                    )
+                                )
                             },
                             label = { Text(label) },
                         )
@@ -338,31 +341,30 @@ private fun ScheduledTaskEditor(
         Text("Workspace", modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
         val workspace = current.workspace
         Row(Modifier.padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            listOf(
-                "root" to "Project checkout",
-                "worktree" to "New worktree",
-                "existing" to "Existing worktree",
-            ).forEach { (kind, label) ->
-                FilterChip(
-                    selected = when (kind) {
-                        "worktree" -> workspace is ScheduledTaskWorkspaceDraft.Worktree
-                        "existing" -> workspace is ScheduledTaskWorkspaceDraft.ExistingWorktree
-                        else -> workspace is ScheduledTaskWorkspaceDraft.Root
-                    },
-                    onClick = {
-                        onChange(
-                            current.copy(
-                                workspace = when (kind) {
-                                    "worktree" -> ScheduledTaskWorkspaceDraft.Worktree("main", null, true)
-                                    "existing" -> ScheduledTaskWorkspaceDraft.ExistingWorktree("", null)
-                                    else -> ScheduledTaskWorkspaceDraft.Root(null)
-                                },
-                            ),
-                        )
-                    },
-                    label = { Text(label) },
-                )
-            }
+            listOf("root" to "Project checkout", "worktree" to "New worktree", "existing" to "Existing worktree")
+                .forEach { (kind, label) ->
+                    FilterChip(
+                        selected =
+                            when (kind) {
+                                "worktree" -> workspace is ScheduledTaskWorkspaceDraft.Worktree
+                                "existing" -> workspace is ScheduledTaskWorkspaceDraft.ExistingWorktree
+                                else -> workspace is ScheduledTaskWorkspaceDraft.Root
+                            },
+                        onClick = {
+                            onChange(
+                                current.copy(
+                                    workspace =
+                                        when (kind) {
+                                            "worktree" -> ScheduledTaskWorkspaceDraft.Worktree("main", null, true)
+                                            "existing" -> ScheduledTaskWorkspaceDraft.ExistingWorktree("", null)
+                                            else -> ScheduledTaskWorkspaceDraft.Root(null)
+                                        }
+                                )
+                            )
+                        },
+                        label = { Text(label) },
+                    )
+                }
         }
         when (workspace) {
             is ScheduledTaskWorkspaceDraft.Worktree -> {
@@ -395,9 +397,9 @@ private fun ScheduledTaskEditor(
                         )
                     }
                     if (branches.hasMore) {
-                        TextButton(onClick = {
-                            model.perform(Intent.LoadMoreScheduledTaskBranches(current.projectId))
-                        }) {
+                        TextButton(
+                            onClick = { model.perform(Intent.LoadMoreScheduledTaskBranches(current.projectId)) }
+                        ) {
                             Text("Load more branches")
                         }
                     }
@@ -426,10 +428,8 @@ private fun ScheduledTaskEditor(
             }
             is ScheduledTaskWorkspaceDraft.Root -> Unit
         }
-        TextButton(
-            onClick = onSave,
-            enabled = !taskMissing,
-            modifier = Modifier.padding(16.dp),
-        ) { Text("Save scheduled task") }
+        TextButton(onClick = onSave, enabled = !taskMissing, modifier = Modifier.padding(16.dp)) {
+            Text("Save scheduled task")
+        }
     }
 }

@@ -4,9 +4,9 @@ import android.content.Context
 import android.graphics.Canvas
 import android.graphics.Paint
 import android.graphics.RectF
+import android.graphics.SurfaceTexture
 import android.media.MediaCodec
 import android.media.MediaFormat
-import android.graphics.SurfaceTexture
 import android.os.Handler
 import android.os.HandlerThread
 import android.view.Surface
@@ -17,11 +17,9 @@ import java.nio.ByteBuffer
 import java.util.ArrayDeque
 
 /** Bounds UI-to-worker handoff before payload copies and Handler posts occur. */
-internal class DeviceVideoIngressGate(
-    private val maxFrames: Int = 8,
-    private val maxBytes: Int = 16 * 1024 * 1024,
-) {
+internal class DeviceVideoIngressGate(private val maxFrames: Int = 8, private val maxBytes: Int = 16 * 1024 * 1024) {
     data class Admission(val generation: Long, val bytes: Int)
+
     data class Completion(val current: Boolean, val resync: Boolean)
 
     private var streamKey: String? = null
@@ -73,8 +71,7 @@ internal class DeviceVideoIngressGate(
         return Completion(current, resync)
     }
 
-    @Synchronized
-    fun isCurrent(admission: Admission): Boolean = admission.generation == generation && !closed
+    @Synchronized fun isCurrent(admission: Admission): Boolean = admission.generation == generation && !closed
 
     @Synchronized
     fun forceResync() {
@@ -91,11 +88,7 @@ internal class DeviceVideoIngressGate(
     }
 }
 
-internal data class DeviceResetRequest(
-    val streamKey: String,
-    val width: Int,
-    val height: Int,
-)
+internal data class DeviceResetRequest(val streamKey: String, val width: Int, val height: Int)
 
 /** Coalesces recomposition-driven decoder resets before they reach the worker queue. */
 internal class DeviceVideoResetGate {
@@ -112,8 +105,7 @@ internal class DeviceVideoResetGate {
         return true
     }
 
-    @Synchronized
-    fun next(): DeviceResetRequest? = pending
+    @Synchronized fun next(): DeviceResetRequest? = pending
 
     @Synchronized
     fun finish(request: DeviceResetRequest): Boolean {
@@ -162,12 +154,7 @@ internal class DeviceVideoPumpGate {
 
 /** A bounded, stateful H.264 decoder for the Host's live device transport. */
 internal class DeviceVideoDecoder : TextureView.SurfaceTextureListener {
-    private data class Frame(
-        val payload: ByteArray,
-        val encoding: String,
-        val timestampUs: Long,
-        val keyframe: Boolean,
-    )
+    private data class Frame(val payload: ByteArray, val encoding: String, val timestampUs: Long, val keyframe: Boolean)
 
     private val worker = HandlerThread("device-video-decoder").apply { start() }
     private val handler = Handler(worker.looper)
@@ -192,54 +179,50 @@ internal class DeviceVideoDecoder : TextureView.SurfaceTextureListener {
         this.textureView?.surfaceTextureListener = null
         this.textureView = textureView
         textureView.surfaceTextureListener = this
-        if (textureView.isAvailable) textureView.surfaceTexture?.let { onSurfaceTextureAvailable(it, textureView.width, textureView.height) }
+        if (textureView.isAvailable)
+            textureView.surfaceTexture?.let { onSurfaceTextureAvailable(it, textureView.width, textureView.height) }
     }
 
     fun reset(streamKey: String, width: Int, height: Int) {
         if (closed) return
-        val request = DeviceResetRequest(
-            streamKey = streamKey,
-            width = width.coerceAtLeast(1),
-            height = height.coerceAtLeast(1),
-        )
+        val request =
+            DeviceResetRequest(streamKey = streamKey, width = width.coerceAtLeast(1), height = height.coerceAtLeast(1))
         // Dimensions are part of the ingress identity so a resize invalidates queued frames
         // even when the Host keeps the same stream key.
         ingress.reset("${request.streamKey}\u0000${request.width}x${request.height}")
         if (!resetGate.request(request)) return
-        if (!handler.post {
-            while (!closed) {
-                val pendingReset = resetGate.next() ?: return@post
-                closeCodec()
-                this.streamKey = pendingReset.streamKey
-                this.width = pendingReset.width
-                this.height = pendingReset.height
-                codecDescription = null
-                needsKeyframe = true
-                ingress.forceResync()
-                lastSequence = null
-                pending.clear()
-                if (!resetGate.finish(pendingReset)) return@post
+        if (
+            !handler.post {
+                while (!closed) {
+                    val pendingReset = resetGate.next() ?: return@post
+                    closeCodec()
+                    this.streamKey = pendingReset.streamKey
+                    this.width = pendingReset.width
+                    this.height = pendingReset.height
+                    codecDescription = null
+                    needsKeyframe = true
+                    ingress.forceResync()
+                    lastSequence = null
+                    pending.clear()
+                    if (!resetGate.finish(pendingReset)) return@post
+                }
             }
-        }) {
+        ) {
             resetGate.cancel()
         }
     }
 
-    fun submit(
-        payload: ByteArray,
-        encoding: String,
-        sequence: ULong,
-        timestampUs: ULong?,
-        keyframe: Boolean,
-    ) {
+    fun submit(payload: ByteArray, encoding: String, sequence: ULong, timestampUs: ULong?, keyframe: Boolean) {
         if (closed) return
         val admission = ingress.offer(sequence, encoding, keyframe, payload.size) ?: return
         val copy = payload.copyOf()
-        if (!handler.post {
-            if (ingress.isCurrent(admission)) submitOnWorker(copy, encoding, sequence, timestampUs, keyframe)
-            val completion = ingress.complete(admission)
-            if (completion.resync) requestKeyframeResync()
-        }) {
+        if (
+            !handler.post {
+                if (ingress.isCurrent(admission)) submitOnWorker(copy, encoding, sequence, timestampUs, keyframe)
+                val completion = ingress.complete(admission)
+                if (completion.resync) requestKeyframeResync()
+            }
+        ) {
             ingress.complete(admission)
         }
     }
@@ -268,7 +251,7 @@ internal class DeviceVideoDecoder : TextureView.SurfaceTextureListener {
                 encoding = encoding,
                 timestampUs = timestampUs?.toLong() ?: sequence.toLong(),
                 keyframe = keyframe,
-            ),
+            )
         )
         while (pending.size > MAX_PENDING_FRAMES) {
             pending.removeFirst()
@@ -334,26 +317,25 @@ internal class DeviceVideoDecoder : TextureView.SurfaceTextureListener {
         val outputSurface = surface ?: return
         if (!outputSurface.isValid) return
         runCatching {
-            val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, width, height)
-            format.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, MAX_INPUT_SIZE)
-            codecDescription?.let { description ->
-                val (sps, pps) = splitCodecDescription(description)
-                sps?.let { format.setByteBuffer("csd-0", ByteBuffer.wrap(it)) }
-                pps?.let { format.setByteBuffer("csd-1", ByteBuffer.wrap(it)) }
+                val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, width, height)
+                format.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, MAX_INPUT_SIZE)
+                codecDescription?.let { description ->
+                    val (sps, pps) = splitCodecDescription(description)
+                    sps?.let { format.setByteBuffer("csd-0", ByteBuffer.wrap(it)) }
+                    pps?.let { format.setByteBuffer("csd-1", ByteBuffer.wrap(it)) }
+                }
+                val decoder = MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
+                try {
+                    decoder.configure(format, outputSurface, null, 0)
+                    decoder.start()
+                    codec = decoder
+                } catch (error: Throwable) {
+                    runCatching { decoder.stop() }
+                    runCatching { decoder.release() }
+                    throw error
+                }
             }
-            val decoder = MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
-            try {
-                decoder.configure(format, outputSurface, null, 0)
-                decoder.start()
-                codec = decoder
-            } catch (error: Throwable) {
-                runCatching { decoder.stop() }
-                runCatching { decoder.release() }
-                throw error
-            }
-        }.onFailure {
-            closeCodec()
-        }
+            .onFailure { closeCodec() }
     }
 
     private fun drainPending() {
@@ -369,23 +351,23 @@ internal class DeviceVideoDecoder : TextureView.SurfaceTextureListener {
                 pending.removeFirst()
                 continue
             }
-            val index = runCatching { decoder.dequeueInputBuffer(0L) }.getOrElse {
-                closeCodec()
-                return
-            }
+            val index =
+                runCatching { decoder.dequeueInputBuffer(0L) }
+                    .getOrElse {
+                        closeCodec()
+                        return
+                    }
             if (index < 0) break
             val input = decoder.getInputBuffer(index)
             val payload = normalizeH264Payload(frame.payload)
             if (input == null || payload.isEmpty()) {
-                runCatching { decoder.queueInputBuffer(index, 0, 0, frame.timestampUs, 0) }
-                    .onFailure { closeCodec() }
+                runCatching { decoder.queueInputBuffer(index, 0, 0, frame.timestampUs, 0) }.onFailure { closeCodec() }
                 pending.removeFirst()
                 if (codec == null) return
                 continue
             }
             if (payload.size > input.capacity()) {
-                runCatching { decoder.queueInputBuffer(index, 0, 0, frame.timestampUs, 0) }
-                    .onFailure { closeCodec() }
+                runCatching { decoder.queueInputBuffer(index, 0, 0, frame.timestampUs, 0) }.onFailure { closeCodec() }
                 pending.removeFirst()
                 if (codec == null) return
                 requestKeyframeResync()
@@ -395,11 +377,10 @@ internal class DeviceVideoDecoder : TextureView.SurfaceTextureListener {
             input.put(payload)
             var queued = false
             runCatching {
-                decoder.queueInputBuffer(index, 0, payload.size, frame.timestampUs, 0)
-                queued = true
-            }.onFailure {
-                closeCodec()
-            }
+                    decoder.queueInputBuffer(index, 0, payload.size, frame.timestampUs, 0)
+                    queued = true
+                }
+                .onFailure { closeCodec() }
             pending.removeFirst()
             if (!queued || codec == null) return
             if (frame.keyframe) needsKeyframe = false
@@ -412,14 +393,15 @@ internal class DeviceVideoDecoder : TextureView.SurfaceTextureListener {
 
     private fun scheduleOutputPump() {
         if (closed || codec == null) return
-        val pump = object : Runnable {
-            override fun run() {
-                if (!outputPumpGate.begin(this)) return
-                if (closed || codec == null) return
-                drainOutput(codec ?: return)
-                drainPending()
+        val pump =
+            object : Runnable {
+                override fun run() {
+                    if (!outputPumpGate.begin(this)) return
+                    if (closed || codec == null) return
+                    drainOutput(codec ?: return)
+                    drainPending()
+                }
             }
-        }
         if (!outputPumpGate.admit(pump)) return
         if (closed || !handler.postDelayed(pump, OUTPUT_PUMP_INTERVAL_MS)) {
             outputPumpGate.cancel()?.let { handler.removeCallbacks(it) }
@@ -430,15 +412,21 @@ internal class DeviceVideoDecoder : TextureView.SurfaceTextureListener {
     private fun drainOutput(decoder: MediaCodec) {
         val info = MediaCodec.BufferInfo()
         while (true) {
-            val index = runCatching { decoder.dequeueOutputBuffer(info, 0L) }.getOrElse {
-                closeCodec()
-                return
-            }
+            val index =
+                runCatching { decoder.dequeueOutputBuffer(info, 0L) }
+                    .getOrElse {
+                        closeCodec()
+                        return
+                    }
             when {
                 index == MediaCodec.INFO_TRY_AGAIN_LATER -> return
                 index == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> Unit
-                index >= 0 -> runCatching { decoder.releaseOutputBuffer(index, true) }
-                    .onFailure { closeCodec(); return }
+                index >= 0 ->
+                    runCatching { decoder.releaseOutputBuffer(index, true) }
+                        .onFailure {
+                            closeCodec()
+                            return
+                        }
             }
         }
     }
@@ -474,11 +462,12 @@ internal class DeviceVideoDecoder : TextureView.SurfaceTextureListener {
 
 /** Native sibling overlay so accessibility bounds stay above a TextureView. */
 internal class DeviceAccessibilityOverlayView(context: Context) : View(context) {
-    private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = android.graphics.Color.rgb(79, 140, 255)
-        style = Paint.Style.STROKE
-        strokeWidth = 2f
-    }
+    private val paint =
+        Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = android.graphics.Color.rgb(79, 140, 255)
+            style = Paint.Style.STROKE
+            strokeWidth = 2f
+        }
 
     var rects: List<RectF> = emptyList()
         set(value) {
@@ -576,11 +565,17 @@ private fun annexBNalUnits(payload: ByteArray): List<ByteArray> {
     val starts = mutableListOf<Pair<Int, Int>>()
     var index = 0
     while (index + 2 < payload.size) {
-        val length = when {
-            payload[index] == 0.toByte() && payload[index + 1] == 0.toByte() && payload[index + 2] == 1.toByte() -> 3
-            index + 4 <= payload.size && payload[index] == 0.toByte() && payload[index + 1] == 0.toByte() && payload[index + 2] == 0.toByte() && payload[index + 3] == 1.toByte() -> 4
-            else -> 0
-        }
+        val length =
+            when {
+                payload[index] == 0.toByte() && payload[index + 1] == 0.toByte() && payload[index + 2] == 1.toByte() ->
+                    3
+                index + 4 <= payload.size &&
+                    payload[index] == 0.toByte() &&
+                    payload[index + 1] == 0.toByte() &&
+                    payload[index + 2] == 0.toByte() &&
+                    payload[index + 3] == 1.toByte() -> 4
+                else -> 0
+            }
         if (length > 0) {
             starts += index to (index + length)
             index += length
@@ -594,11 +589,15 @@ private fun annexBNalUnits(payload: ByteArray): List<ByteArray> {
     }
 }
 
-private fun ByteArray.withAnnexBPrefix(): ByteArray =
-    ANNEX_B_START_CODE + this
+private fun ByteArray.withAnnexBPrefix(): ByteArray = ANNEX_B_START_CODE + this
 
 private fun ByteArray.startsWithAnnexB(): Boolean =
-    size >= 3 && ((this[0] == 0.toByte() && this[1] == 0.toByte() && this[2] == 1.toByte()) ||
-        (size >= 4 && this[0] == 0.toByte() && this[1] == 0.toByte() && this[2] == 0.toByte() && this[3] == 1.toByte()))
+    size >= 3 &&
+        ((this[0] == 0.toByte() && this[1] == 0.toByte() && this[2] == 1.toByte()) ||
+            (size >= 4 &&
+                this[0] == 0.toByte() &&
+                this[1] == 0.toByte() &&
+                this[2] == 0.toByte() &&
+                this[3] == 1.toByte()))
 
 private val ANNEX_B_START_CODE = byteArrayOf(0, 0, 0, 1)

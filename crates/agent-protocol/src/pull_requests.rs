@@ -4,8 +4,8 @@
 //! boundary.  The provider remains at the Host boundary; clients consume the
 //! shared domain values.
 use agent_domain::{
-    PullRequestAction, PullRequestDetail, PullRequestKey, PullRequestLink,
-    PullRequestLinkSource, PullRequestSummary,
+    PullRequestAction, PullRequestDetail, PullRequestKey, PullRequestLink, PullRequestLinkSource,
+    PullRequestSummary,
 };
 use serde::{Deserialize, Serialize};
 
@@ -76,7 +76,11 @@ impl ListPullRequests {
         if self.limit == 0 || self.limit > 100 {
             return Err("pull request limit must be between 1 and 100".into());
         }
-        if self.query.as_deref().is_some_and(|query| query.chars().count() > 256) {
+        if self
+            .query
+            .as_deref()
+            .is_some_and(|query| query.chars().count() > 256)
+        {
             return Err("pull request query is too long".into());
         }
         Ok(())
@@ -155,14 +159,18 @@ impl GetPullRequestDiff {
         {
             return Err("diff cursor must be a decimal page number".into());
         }
-        if self.cursor.as_deref().is_some_and(|cursor| {
-            cursor.is_empty() || cursor.len() > 7 || cursor == "0"
-        }) {
+        if self
+            .cursor
+            .as_deref()
+            .is_some_and(|cursor| cursor.is_empty() || cursor.len() > 7 || cursor == "0")
+        {
             return Err("diff cursor must be a bounded positive page number".into());
         }
         if self.commit.as_deref().is_some_and(|commit| {
             !(7..=64).contains(&commit.len())
-                || !commit.chars().all(|character| character.is_ascii_hexdigit())
+                || !commit
+                    .chars()
+                    .all(|character| character.is_ascii_hexdigit())
         }) {
             return Err("diff commit must be a hexadecimal revision".into());
         }
@@ -195,7 +203,9 @@ impl GetPullRequestDiffFileContents {
         self.reference.validate()?;
         if self.commit.as_deref().is_some_and(|commit| {
             !(7..=64).contains(&commit.len())
-                || !commit.chars().all(|character| character.is_ascii_hexdigit())
+                || !commit
+                    .chars()
+                    .all(|character| character.is_ascii_hexdigit())
         }) {
             return Err("diff commit must be a hexadecimal revision".into());
         }
@@ -291,7 +301,11 @@ impl SetPullRequestFilesViewed {
         if self.files.len() > 500 {
             return Err("at most 500 viewed files may be changed at once".into());
         }
-        if self.files.iter().any(|file| validate_file_path(&file.path).is_err()) {
+        if self
+            .files
+            .iter()
+            .any(|file| validate_file_path(&file.path).is_err())
+        {
             return Err("viewed-file paths must be relative and at most 4096 bytes".into());
         }
         Ok(())
@@ -358,7 +372,12 @@ impl UnlinkPullRequest {
     }
 
     pub fn validate(&self) -> Result<(), String> {
-        if self.thread_id.trim().is_empty() || self.project_id.trim().is_empty() || self.host.trim().is_empty() || self.repository.trim().is_empty() || self.number == 0 {
+        if self.thread_id.trim().is_empty()
+            || self.project_id.trim().is_empty()
+            || self.host.trim().is_empty()
+            || self.repository.trim().is_empty()
+            || self.number == 0
+        {
             return Err("thread, host, repository and a positive number are required".into());
         }
         Ok(())
@@ -376,7 +395,10 @@ pub struct SetPullRequestWatch {
 
 impl SetPullRequestWatch {
     pub fn validate(&self) -> Result<(), String> {
-        if self.thread_id.trim().is_empty() || self.project_id.trim().is_empty() || self.link.number == 0 {
+        if self.thread_id.trim().is_empty()
+            || self.project_id.trim().is_empty()
+            || self.link.number == 0
+        {
             return Err("thread id and a positive pull request number are required".into());
         }
         if self.link.host.trim().is_empty() || self.link.repository.trim().is_empty() {
@@ -495,7 +517,11 @@ pub struct SourceControlAuthRequest {
 
 impl SourceControlAuthRequest {
     pub fn validate(&self) -> Result<(), String> {
-        if self.host.as_deref().is_some_and(|host| host.trim().is_empty()) {
+        if self
+            .host
+            .as_deref()
+            .is_some_and(|host| host.trim().is_empty())
+        {
             return Err("source-control host must not be empty".into());
         }
         Ok(())
@@ -593,7 +619,14 @@ mod tests {
             fresh: false,
         };
         assert!(request.validate().is_ok());
-        assert!(ListPullRequests { limit: 101, ..request }.validate().is_err());
+        assert!(
+            ListPullRequests {
+                limit: 101,
+                ..request
+            }
+            .validate()
+            .is_err()
+        );
     }
 
     #[test]
@@ -612,22 +645,26 @@ mod tests {
             fresh: true,
         };
         assert!(request.validate().is_ok());
-        assert!(GetPullRequestFile {
-            reference: reference.clone(),
-            path: "docs/a?b#c.txt".into(),
-            max_bytes: 1024,
-        }
-        .validate()
-        .is_ok());
-        assert!(SetPullRequestFilesViewed {
-            reference,
-            files: vec![PullRequestViewedFile {
+        assert!(
+            GetPullRequestFile {
+                reference: reference.clone(),
                 path: "docs/a?b#c.txt".into(),
-                viewed: true,
-            }],
-        }
-        .validate()
-        .is_ok());
+                max_bytes: 1024,
+            }
+            .validate()
+            .is_ok()
+        );
+        assert!(
+            SetPullRequestFilesViewed {
+                reference,
+                files: vec![PullRequestViewedFile {
+                    path: "docs/a?b#c.txt".into(),
+                    viewed: true,
+                }],
+            }
+            .validate()
+            .is_ok()
+        );
     }
 
     #[test]
@@ -639,22 +676,26 @@ mod tests {
             host: None,
             allow_stale: false,
         };
-        assert!(GetPullRequestDiff {
-            reference: reference.clone(),
-            cursor: Some("0".into()),
-            commit: None,
-            fresh: false,
-        }
-        .validate()
-        .is_err());
-        assert!(GetPullRequestDiffFileContents {
-            reference,
-            commit: None,
-            change_type: PullRequestDiffChangeType::Change,
-            old_path: "../secret".into(),
-            new_path: "safe".into(),
-        }
-        .validate()
-        .is_err());
+        assert!(
+            GetPullRequestDiff {
+                reference: reference.clone(),
+                cursor: Some("0".into()),
+                commit: None,
+                fresh: false,
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            GetPullRequestDiffFileContents {
+                reference,
+                commit: None,
+                change_type: PullRequestDiffChangeType::Change,
+                old_path: "../secret".into(),
+                new_path: "safe".into(),
+            }
+            .validate()
+            .is_err()
+        );
     }
 }

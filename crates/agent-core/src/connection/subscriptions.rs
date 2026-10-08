@@ -51,9 +51,7 @@ impl Owner {
             }
             StreamKey::Keybindings => tokio::spawn(follow(target, call, Payload::Keybindings)),
             StreamKey::VcsStatus(_) => tokio::spawn(follow(target, call, Payload::VcsStatus)),
-            StreamKey::GitAction(_) => {
-                tokio::spawn(follow(target, call, Payload::ActionProgress))
-            }
+            StreamKey::GitAction(_) => tokio::spawn(follow(target, call, Payload::ActionProgress)),
             StreamKey::ScheduledTasks => {
                 tokio::spawn(follow(target, call, Payload::ScheduledTasks))
             }

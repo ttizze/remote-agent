@@ -116,7 +116,9 @@ fn npm_prefix(path: &Path, package: &str) -> Option<PathBuf> {
     if real[..index].contains("/node_modules/") {
         return None;
     }
-    if let Some(rest) = real[..index].split_once("/mise/installs/").map(|(_, rest)| rest)
+    if let Some(rest) = real[..index]
+        .split_once("/mise/installs/")
+        .map(|(_, rest)| rest)
         && rest.split('/').next().is_some_and(|tool| tool != "node")
     {
         return None;
@@ -659,7 +661,12 @@ pub(crate) async fn advisory(
     }
     let latest_version = if check_for_updates && can_update && current_version.is_some() {
         match update_command(driver, binary, home, None) {
-            Ok(command) if command.args.iter().any(|arg| arg == &format!("{package}@latest")) => {
+            Ok(command)
+                if command
+                    .args
+                    .iter()
+                    .any(|arg| arg == &format!("{package}@latest")) =>
+            {
                 latest_npm_version(package).await.ok()
             }
             Ok(command) if command.executable == Path::new("brew") => {
@@ -986,7 +993,10 @@ mod tests {
         let cask: serde_json::Value = serde_json::json!({
             "casks": [{"version": "1.2.3,456"}]
         });
-        assert_eq!(parse_homebrew_latest(&formula, "formulae"), Some("1.2.3".into()));
+        assert_eq!(
+            parse_homebrew_latest(&formula, "formulae"),
+            Some("1.2.3".into())
+        );
         assert_eq!(parse_homebrew_latest(&cask, "casks"), Some("1.2.3".into()));
         assert_eq!(parse_homebrew_latest(&formula, "casks"), None);
     }

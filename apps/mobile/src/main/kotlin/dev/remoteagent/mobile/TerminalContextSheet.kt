@@ -75,7 +75,7 @@ internal fun TerminalContextSheet(output: String, onClose: () -> Unit, onAttach:
                                     anchor = null
                                 }
                             }
-                        .padding(vertical = 4.dp),
+                            .padding(vertical = 4.dp),
                         style = AppTheme.footnote,
                         fontFamily = AppTheme.mono,
                         fontSize = AppTheme.terminalFontSize.sp,

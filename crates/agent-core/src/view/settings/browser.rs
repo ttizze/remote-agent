@@ -1,16 +1,17 @@
 //! Device-local Preview browser defaults and recording controls.
 use super::{
-    SettingChoice, SettingControl, SettingId, SettingValue, SettingsRow,
-    SettingsScope, choice, registry::{Context, Section}, row, section,
+    SettingChoice, SettingControl, SettingId, SettingValue, SettingsRow, SettingsScope, choice,
+    registry::{Context, Section},
+    row, section,
 };
 use crate::{
     state::{Intent, Preferences},
     view::browser::{BrowserProfileKind, BrowserSettings},
 };
 use agent_protocol::preview::{
-    BrowserLinkTarget, PreviewAppearance, PreviewViewportPreset, PreviewViewportSetting,
-    PreviewZoom, PREVIEW_VIEWPORT_MAX_DIMENSION, PREVIEW_VIEWPORT_MIN_DIMENSION,
-    PREVIEW_VIEWPORT_PRESETS,
+    BrowserLinkTarget, PREVIEW_VIEWPORT_MAX_DIMENSION, PREVIEW_VIEWPORT_MIN_DIMENSION,
+    PREVIEW_VIEWPORT_PRESETS, PreviewAppearance, PreviewViewportPreset, PreviewViewportSetting,
+    PreviewZoom,
 };
 
 const RESPONSIVE_VIEWPORT_ID: &str = "responsive";
@@ -47,16 +48,22 @@ fn viewport_id(viewport: &PreviewViewportSetting) -> String {
 
 fn viewport_choices() -> Vec<SettingChoice> {
     let mut choices = vec![
-        choice("fill", "Fill panel", Some("Use the Preview panel's current size.")),
+        choice(
+            "fill",
+            "Fill panel",
+            Some("Use the Preview panel's current size."),
+        ),
         choice(
             RESPONSIVE_VIEWPORT_ID,
             "Responsive",
             Some("Use a custom width and height for newly opened tabs."),
         ),
     ];
-    choices.extend(PREVIEW_VIEWPORT_PRESETS.iter().map(|preset| {
-        choice(viewport_preset_id(preset.id), preset.label, None)
-    }));
+    choices.extend(
+        PREVIEW_VIEWPORT_PRESETS
+            .iter()
+            .map(|preset| choice(viewport_preset_id(preset.id), preset.label, None)),
+    );
     choices
 }
 
@@ -140,8 +147,16 @@ fn link_target_id(target: BrowserLinkTarget) -> &'static str {
 
 fn link_target_choices() -> Vec<SettingChoice> {
     vec![
-        choice("system", "Your default browser", Some("Open links outside the app.")),
-        choice("app", "Remote Agent", Some("Open links in the in-app Preview surface.")),
+        choice(
+            "system",
+            "Your default browser",
+            Some("Open links outside the app."),
+        ),
+        choice(
+            "app",
+            "Remote Agent",
+            Some("Open links in the in-app Preview surface."),
+        ),
     ]
 }
 
@@ -310,7 +325,7 @@ pub(super) const SECTION: Section = Section {
                 },
                 browser.default_profile_id != defaults.default_profile_id
                     || resolved.profile_id != default_resolved.profile_id,
-                ),
+            ),
             row(
                 SettingId::BrowserProfiles,
                 "Browser profiles",
@@ -380,7 +395,9 @@ pub(super) const SECTION: Section = Section {
             (SettingId::BrowserRecordingFrameRate, SettingValue::Choice { id }) => id
                 .parse::<u32>()
                 .ok()
-                .filter(|frame_rate| crate::view::browser::BROWSER_RECORDING_FRAME_RATES.contains(frame_rate))
+                .filter(|frame_rate| {
+                    crate::view::browser::BROWSER_RECORDING_FRAME_RATES.contains(frame_rate)
+                })
                 .map(|frame_rate| Intent::SetBrowserRecordingFrameRate { frame_rate }),
             (SettingId::BrowserRecordingShowKeyPresses, SettingValue::Switch { on }) => {
                 Some(Intent::SetBrowserRecordingShowKeyPresses { enabled: *on })
@@ -394,29 +411,23 @@ pub(super) const SECTION: Section = Section {
             (SettingId::BrowserAutoShowFloatingPreview, SettingValue::Switch { on }) => {
                 Some(Intent::SetBrowserAutoShowFloatingPreview { enabled: *on })
             }
-            (SettingId::BrowserDefaultProfile, SettingValue::Choice { id }) => {
-                snapshot
-                    .preferences
-                    .browser
-                    .resolved()
-                    .profiles
-                    .iter()
-                    .find(|profile| {
-                        profile.id == *id && profile.kind == BrowserProfileKind::Persistent
-                    })
-                    .map(|profile| Intent::SetBrowserDefaultProfile {
-                        profile_id: profile.id.clone(),
-                    })
-            }
+            (SettingId::BrowserDefaultProfile, SettingValue::Choice { id }) => snapshot
+                .preferences
+                .browser
+                .resolved()
+                .profiles
+                .iter()
+                .find(|profile| profile.id == *id && profile.kind == BrowserProfileKind::Persistent)
+                .map(|profile| Intent::SetBrowserDefaultProfile {
+                    profile_id: profile.id.clone(),
+                }),
             (SettingId::BrowserProfiles, SettingValue::Choice { id }) => snapshot
                 .preferences
                 .browser
                 .resolved()
                 .profiles
                 .iter()
-                .find(|profile| {
-                    profile.id == *id && profile.kind == BrowserProfileKind::Persistent
-                })
+                .find(|profile| profile.id == *id && profile.kind == BrowserProfileKind::Persistent)
                 .map(|profile| Intent::SetBrowserDefaultProfile {
                     profile_id: profile.id.clone(),
                 }),
@@ -434,7 +445,9 @@ pub(super) const SECTION: Section = Section {
                     viewport: defaults.viewport,
                 })
             }
-            SettingId::BrowserDefaultZoom => Some(Intent::SetBrowserZoom { zoom: defaults.zoom }),
+            SettingId::BrowserDefaultZoom => Some(Intent::SetBrowserZoom {
+                zoom: defaults.zoom,
+            }),
             SettingId::BrowserDefaultAppearance => Some(Intent::SetBrowserAppearance {
                 appearance: defaults.appearance,
             }),
@@ -480,8 +493,17 @@ mod tests {
         let mut snapshot = Snapshot::default();
         snapshot.preferences.browser.zoom = PreviewZoom::X125;
         snapshot.preferences.browser.link_target = BrowserLinkTarget::App;
-        let view = settings_view(&snapshot, None, &SettingsScope::Host, TimestampFormat::Locale);
-        let section = view.sections.iter().find(|section| section.id == "browser").unwrap();
+        let view = settings_view(
+            &snapshot,
+            None,
+            &SettingsScope::Host,
+            TimestampFormat::Locale,
+        );
+        let section = view
+            .sections
+            .iter()
+            .find(|section| section.id == "browser")
+            .unwrap();
         assert_eq!(section.rows.len(), 10);
         assert_eq!(
             section.rows[1].control,
@@ -519,8 +541,17 @@ mod tests {
             width: 1_024,
             height: 768,
         };
-        let view = settings_view(&snapshot, None, &SettingsScope::Host, TimestampFormat::Locale);
-        let section = view.sections.iter().find(|section| section.id == "browser").unwrap();
+        let view = settings_view(
+            &snapshot,
+            None,
+            &SettingsScope::Host,
+            TimestampFormat::Locale,
+        );
+        let section = view
+            .sections
+            .iter()
+            .find(|section| section.id == "browser")
+            .unwrap();
         assert!(matches!(
             section.rows[1].control,
             SettingControl::Number {
@@ -543,12 +574,14 @@ mod tests {
                 }
             })
         ));
-        assert!((SECTION.intent)(
-            &snapshot,
-            &SettingsScope::Host,
-            SettingId::BrowserDefaultViewportWidth,
-            &SettingValue::Number { value: 10 },
-        )
-        .is_none());
+        assert!(
+            (SECTION.intent)(
+                &snapshot,
+                &SettingsScope::Host,
+                SettingId::BrowserDefaultViewportWidth,
+                &SettingValue::Number { value: 10 },
+            )
+            .is_none()
+        );
     }
 }

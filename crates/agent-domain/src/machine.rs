@@ -2938,7 +2938,10 @@ impl Decision {
                 Reply::Accepted
             }
             SyncPullRequests { links } => {
-                if links.iter().any(|link| link.number == 0 || link.url.trim().is_empty()) {
+                if links
+                    .iter()
+                    .any(|link| link.number == 0 || link.url.trim().is_empty())
+                {
                     return reject("invalid-pull-request");
                 }
                 self.fact(FactBody::PullRequestsSynced {
@@ -2947,21 +2950,30 @@ impl Decision {
                 Reply::Accepted
             }
             LinkPullRequest { link } => {
-                if link.number == 0 || link.host.trim().is_empty() || link.repository.trim().is_empty() || link.url.trim().is_empty() {
+                if link.number == 0
+                    || link.host.trim().is_empty()
+                    || link.repository.trim().is_empty()
+                    || link.url.trim().is_empty()
+                {
                     return reject("invalid-pull-request");
                 }
                 self.fact(FactBody::PullRequestLinkSynced { link: link.clone() });
                 Reply::Accepted
             }
             SyncPullRequestLink { link } => {
-                if link.number == 0 || link.host.trim().is_empty() || link.repository.trim().is_empty() || link.url.trim().is_empty() {
+                if link.number == 0
+                    || link.host.trim().is_empty()
+                    || link.repository.trim().is_empty()
+                    || link.url.trim().is_empty()
+                {
                     return reject("invalid-pull-request");
                 }
                 self.fact(FactBody::PullRequestLinkSynced { link: link.clone() });
                 Reply::Accepted
             }
             SetPullRequestWatch { key, watch } => {
-                if key.number == 0 || key.host.trim().is_empty() || key.repository.trim().is_empty() {
+                if key.number == 0 || key.host.trim().is_empty() || key.repository.trim().is_empty()
+                {
                     return reject("invalid-pull-request");
                 }
                 self.fact(FactBody::PullRequestWatchSet {
@@ -2971,7 +2983,8 @@ impl Decision {
                 Reply::Accepted
             }
             SyncPullRequestWatch { key, watch } => {
-                if key.number == 0 || key.host.trim().is_empty() || key.repository.trim().is_empty() {
+                if key.number == 0 || key.host.trim().is_empty() || key.repository.trim().is_empty()
+                {
                     return reject("invalid-pull-request");
                 }
                 self.fact(FactBody::PullRequestWatchSynced {
@@ -2981,7 +2994,10 @@ impl Decision {
                 Reply::Accepted
             }
             ResolveBranchPullRequest { link } => {
-                if link.as_ref().is_some_and(|link| link.number == 0 || link.url.trim().is_empty()) {
+                if link
+                    .as_ref()
+                    .is_some_and(|link| link.number == 0 || link.url.trim().is_empty())
+                {
                     return reject("invalid-pull-request");
                 }
                 self.fact(FactBody::BranchPullRequestResolved { link: link.clone() });
@@ -3001,9 +3017,7 @@ impl Decision {
                 reply
             }
             UnlinkPullRequest { key } => {
-                if key.number == 0
-                    || key.host.trim().is_empty()
-                    || key.repository.trim().is_empty()
+                if key.number == 0 || key.host.trim().is_empty() || key.repository.trim().is_empty()
                 {
                     return reject("invalid-pull-request");
                 }

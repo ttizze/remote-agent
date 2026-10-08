@@ -45,23 +45,25 @@ pub fn parse_time_of_day(value: &str) -> Option<(u32, u32)> {
 
 /// A local wall-clock time, moved past a daylight-saving gap the way a
 /// calendar does.
-fn at_time<Tz: TimeZone>(timezone: &Tz, date: NaiveDate, hour: u32, minute: u32) -> Option<DateTime<Tz>> {
+fn at_time<Tz: TimeZone>(
+    timezone: &Tz,
+    date: NaiveDate,
+    hour: u32,
+    minute: u32,
+) -> Option<DateTime<Tz>> {
     let local = date.and_hms_opt(hour, minute, 0)?;
-    timezone
-        .from_local_datetime(&local)
-        .earliest()
-        .or_else(|| {
-            // A daylight-saving transition can skip a non-hour interval
-            // (Lord Howe skips thirty minutes) or an entire civil day
-            // (Samoa skipped twenty-four hours).  Move through local wall
-            // minutes until the timezone can represent the requested time;
-            // adding one hour silently loses the first valid time in a
-            // shorter gap and still fails for a longer one.
-            (1..=2 * 24 * 60).find_map(|minutes| {
-                let candidate = local.checked_add_signed(Duration::minutes(minutes))?;
-                timezone.from_local_datetime(&candidate).earliest()
-            })
+    timezone.from_local_datetime(&local).earliest().or_else(|| {
+        // A daylight-saving transition can skip a non-hour interval
+        // (Lord Howe skips thirty minutes) or an entire civil day
+        // (Samoa skipped twenty-four hours).  Move through local wall
+        // minutes until the timezone can represent the requested time;
+        // adding one hour silently loses the first valid time in a
+        // shorter gap and still fails for a longer one.
+        (1..=2 * 24 * 60).find_map(|minutes| {
+            let candidate = local.checked_add_signed(Duration::minutes(minutes))?;
+            timezone.from_local_datetime(&candidate).earliest()
         })
+    })
 }
 
 /// The first run after `from`; `None` when the schedule cannot fire (a
@@ -196,10 +198,7 @@ mod tests {
             LocalResult::Single(FixedOffset::east_opt(0).unwrap())
         }
 
-        fn offset_from_local_datetime(
-            &self,
-            local: &NaiveDateTime,
-        ) -> LocalResult<Self::Offset> {
+        fn offset_from_local_datetime(&self, local: &NaiveDateTime) -> LocalResult<Self::Offset> {
             let end = self.start + Duration::minutes(self.minutes);
             if *local >= self.start && *local < end {
                 LocalResult::None
@@ -383,15 +382,12 @@ mod tests {
 
     #[test]
     fn describes_interval_and_daily_schedules() {
+        assert_eq!(describe_schedule(&interval(60_000)), "Every minute");
+        assert_eq!(describe_schedule(&interval(90_000)), "Every 90 seconds");
         assert_eq!(
-            describe_schedule(&interval(60_000)),
-            "Every minute"
+            describe_schedule(&fixed("09:00", &[])),
+            "At 09:00 every day"
         );
-        assert_eq!(
-            describe_schedule(&interval(90_000)),
-            "Every 90 seconds"
-        );
-        assert_eq!(describe_schedule(&fixed("09:00", &[])), "At 09:00 every day");
         assert_eq!(
             describe_schedule(&fixed("09:00", &[1, 2, 3, 4, 5])),
             "At 09:00 every weekday"

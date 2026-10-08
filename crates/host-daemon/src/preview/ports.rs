@@ -8,13 +8,16 @@ use agent_protocol::{
     operations::TerminalSummary,
     preview::{
         COMMON_DEV_PORTS, CONFIGURED_LOCAL_SERVER_URLS_MAX_ITEMS, DiscoveredLocalServer,
-        PreviewTerminalOwner, PREVIEW_URL_MAX_LENGTH,
+        PREVIEW_URL_MAX_LENGTH, PreviewTerminalOwner,
     },
 };
 use std::{
     collections::{HashMap, HashSet},
     process::Stdio,
-    sync::{Arc, Mutex, atomic::{AtomicUsize, Ordering}},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::{Duration, Instant},
 };
 use tokio::{process::Command, sync::mpsc};
@@ -154,7 +157,13 @@ impl PortScanner {
                 }
             }
         });
-        (receiver, Subscription { stop, _retain: lease })
+        (
+            receiver,
+            Subscription {
+                stop,
+                _retain: lease,
+            },
+        )
     }
 
     /// Scans listeners and returns metadata that can order discovery changes
@@ -379,8 +388,8 @@ fn canonical_configured_url(raw: &str) -> Option<String> {
 }
 
 fn canonical_probe_url(raw: &str) -> Result<String, String> {
-    let configured = canonical_configured_url(raw)
-        .ok_or_else(|| "invalid local preview URL".to_owned())?;
+    let configured =
+        canonical_configured_url(raw).ok_or_else(|| "invalid local preview URL".to_owned())?;
     let mut url = url::Url::parse(&configured).map_err(|_| "invalid local preview URL")?;
     url.set_fragment(None);
     Ok(url.to_string())
@@ -432,15 +441,23 @@ fn parse_lsof(raw: &str) -> Vec<Listener> {
             "c" => process_name = (!value.trim().is_empty()).then(|| value.trim().to_owned()),
             "n" => {
                 let name = value.split_whitespace().next().unwrap_or_default();
-                let Some(port) = name.rsplit_once(':').and_then(|(_, port)| port.parse().ok())
+                let Some(port) = name
+                    .rsplit_once(':')
+                    .and_then(|(_, port)| port.parse().ok())
                 else {
                     continue;
                 };
-                let host = name.rsplit_once(':').map(|(host, _)| host).unwrap_or_default();
+                let host = name
+                    .rsplit_once(':')
+                    .map(|(host, _)| host)
+                    .unwrap_or_default();
                 if !(host.is_empty() || host == "*" || is_loopback(host.trim_matches(['[', ']']))) {
                     continue;
                 }
-                if !output.iter().any(|listener: &Listener| listener.port == port) {
+                if !output
+                    .iter()
+                    .any(|listener: &Listener| listener.port == port)
+                {
                     output.push(Listener {
                         port,
                         process_name: process_name.clone(),
@@ -460,14 +477,25 @@ fn parse_windows(raw: &str) -> Vec<Listener> {
     let mut output = Vec::new();
     for line in raw.lines() {
         let mut fields = line.split('|');
-        let (Some(host), Some(port), Some(pid)) = (fields.next(), fields.next(), fields.next()) else {
+        let (Some(host), Some(port), Some(pid)) = (fields.next(), fields.next(), fields.next())
+        else {
             continue;
         };
-        let (Ok(port), Ok(pid)) = (port.trim().parse(), pid.trim().parse()) else { continue };
-        if is_loopback(host.trim()) && !output.iter().any(|listener: &Listener| listener.port == port) {
+        let (Ok(port), Ok(pid)) = (port.trim().parse(), pid.trim().parse()) else {
+            continue;
+        };
+        if is_loopback(host.trim())
+            && !output
+                .iter()
+                .any(|listener: &Listener| listener.port == port)
+        {
             output.push(Listener {
                 port,
-                process_name: fields.next().map(str::trim).filter(|name| !name.is_empty()).map(str::to_owned),
+                process_name: fields
+                    .next()
+                    .map(str::trim)
+                    .filter(|name| !name.is_empty())
+                    .map(str::to_owned),
                 pid: Some(pid),
             });
         }
@@ -528,7 +556,9 @@ async fn probe_http(url: &str) -> bool {
     {
         return true;
     }
-    let Ok(bytes) = response.bytes().await else { return false };
+    let Ok(bytes) = response.bytes().await else {
+        return false;
+    };
     if bytes.len() > MAX_PROBE_BYTES {
         return false;
     }
@@ -544,7 +574,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn parses_lsof_listener_identity_and_ignores_remote_addresses() {
-        let listeners = parse_lsof("p123\ncnode\nn*:5173\nn192.0.2.1:7000\np456\ncvite\nn127.0.0.1:4173\n");
+        let listeners =
+            parse_lsof("p123\ncnode\nn*:5173\nn192.0.2.1:7000\np456\ncvite\nn127.0.0.1:4173\n");
         assert_eq!(listeners.len(), 2);
         assert_eq!(listeners[0].port, 4173);
         assert_eq!(listeners[1].pid, Some(123));

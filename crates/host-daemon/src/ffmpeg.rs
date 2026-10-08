@@ -74,10 +74,9 @@ mod tests {
     #[test]
     fn resolve_prefers_override_then_existing_sibling_then_path_name() {
         let directory = tempfile::tempdir().unwrap();
-        let executable = directory.path().join(format!(
-            "host-daemon{}",
-            std::env::consts::EXE_SUFFIX
-        ));
+        let executable = directory
+            .path()
+            .join(format!("host-daemon{}", std::env::consts::EXE_SUFFIX));
         let sibling = sibling_candidate(&executable).unwrap();
         fs::write(&sibling, b"fixture").unwrap();
         let override_path = directory.path().join("override-ffmpeg");

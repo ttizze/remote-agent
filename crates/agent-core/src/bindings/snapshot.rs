@@ -544,12 +544,8 @@ impl Snapshot {
                     current_version: advisory.current_version.clone(),
                     latest_version: advisory.latest_version.clone(),
                     status: match advisory.status {
-                        agent_protocol::models::ProviderVersionAdvisoryStatus::Unknown => {
-                            "unknown"
-                        }
-                        agent_protocol::models::ProviderVersionAdvisoryStatus::Current => {
-                            "current"
-                        }
+                        agent_protocol::models::ProviderVersionAdvisoryStatus::Unknown => "unknown",
+                        agent_protocol::models::ProviderVersionAdvisoryStatus::Current => "current",
                         agent_protocol::models::ProviderVersionAdvisoryStatus::BehindLatest => {
                             "behindLatest"
                         }

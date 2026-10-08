@@ -1,8 +1,8 @@
 use super::{intents::Next, owner::Owner};
 use crate::{peer::PeerError, protocol::Call, state::Intent};
 use agent_protocol::vcs::{
-    CloneProtocol, PreparePullRequestThread, PullRequestThreadMode, PublishRepository,
-    RepositoryVisibility, RunStackedAction, StackedAction, SourceControlProviderKind,
+    CloneProtocol, PreparePullRequestThread, PublishRepository, PullRequestThreadMode,
+    RepositoryVisibility, RunStackedAction, SourceControlProviderKind, StackedAction,
 };
 
 fn action(value: &str) -> Result<StackedAction, PeerError> {
@@ -20,7 +20,9 @@ fn thread_mode(value: &str) -> Result<PullRequestThreadMode, PeerError> {
     match value {
         "local" => Ok(PullRequestThreadMode::Local),
         "worktree" => Ok(PullRequestThreadMode::Worktree),
-        _ => Err(super::intents::invalid("Unknown pull request checkout mode")),
+        _ => Err(super::intents::invalid(
+            "Unknown pull request checkout mode",
+        )),
     }
 }
 
@@ -125,7 +127,10 @@ impl Owner {
                 None,
             )),
             Intent::ResolvePullRequest { cwd, reference } => Ok(Next::call(
-                Call::ResolvePullRequest(agent_protocol::vcs::ResolvePullRequest { cwd, reference }),
+                Call::ResolvePullRequest(agent_protocol::vcs::ResolvePullRequest {
+                    cwd,
+                    reference,
+                }),
                 None,
             )),
             Intent::PreparePullRequestThread {

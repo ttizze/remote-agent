@@ -49,7 +49,10 @@ pub fn parse_environment_lines(input: &str) -> Result<BTreeMap<String, String>, 
         };
         let name = name.trim().to_owned();
         if name.is_empty() {
-            return Err(format!("Environment line {} has no variable name.", line_number + 1));
+            return Err(format!(
+                "Environment line {} has no variable name.",
+                line_number + 1
+            ));
         }
         if environment.insert(name.clone(), value.to_owned()).is_some() {
             return Err(format!("Environment variable {name} is repeated."));
@@ -112,9 +115,7 @@ pub fn normalize_config(
 
 /// Normalizes every custom model before the protocol's canonical validator
 /// checks required fields, slug length, and uniqueness.
-pub fn normalize_custom_models(
-    models: Vec<ProviderCustomModel>,
-) -> Vec<ProviderCustomModel> {
+pub fn normalize_custom_models(models: Vec<ProviderCustomModel>) -> Vec<ProviderCustomModel> {
     let mut normalized = Vec::with_capacity(models.len());
     for mut model in models {
         model.slug = model.slug.trim().to_owned();
@@ -229,7 +230,10 @@ mod tests {
         let parsed = parse_environment_lines("TOKEN=a=b\n MODE = work ").unwrap();
         assert_eq!(parsed["TOKEN"], "a=b");
         assert_eq!(parsed["MODE"], " work ");
-        assert_eq!(parse_environment_lines("bad").unwrap_err(), "Environment line 1 must use NAME=value.");
+        assert_eq!(
+            parse_environment_lines("bad").unwrap_err(),
+            "Environment line 1 must use NAME=value."
+        );
     }
 
     #[test]
@@ -256,14 +260,16 @@ mod tests {
                 ..Default::default()
             },
         ];
-        assert!(normalize_config(
-            "build",
-            ProviderInstanceConfig {
-                custom_models: models.clone(),
-                ..Default::default()
-            }
-        )
-        .is_err());
+        assert!(
+            normalize_config(
+                "build",
+                ProviderInstanceConfig {
+                    custom_models: models.clone(),
+                    ..Default::default()
+                }
+            )
+            .is_err()
+        );
         assert_eq!(models[0].name, "First");
     }
 

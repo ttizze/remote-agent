@@ -1,5 +1,6 @@
 package dev.remoteagent.mobile
 
+import android.net.Uri
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -8,13 +9,11 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.ui.platform.LocalContext
-import android.net.Uri
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -22,11 +21,12 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import dev.remoteagent.core.ComposerUsageLimits
 import dev.remoteagent.core.Intent
 import dev.remoteagent.core.PriceOverride
 import dev.remoteagent.core.Resolution
-import dev.remoteagent.core.ComposerUsageLimits
 import dev.remoteagent.core.UsagePreferences
 import dev.remoteagent.core.UsageSummaryInput
 
@@ -52,25 +52,38 @@ internal fun UsageScreen(model: AndroidAppModel, initialTab: UsageTab = UsageTab
         }
         loadUsage(model)
     }
-    ScreenScaffold("Usage", onBack = model::back, actions = {
-        TextButton(onClick = { loadUsage(model) }) { Text("Refresh") }
-        TextButton(onClick = {
-            model.perform(Intent.RefreshUsageRates) { result ->
-                if (result.isSuccess) loadUsage(model)
+    ScreenScaffold(
+        "Usage",
+        onBack = model::back,
+        actions = {
+            TextButton(onClick = { loadUsage(model) }) { Text("Refresh") }
+            TextButton(
+                onClick = {
+                    model.perform(Intent.RefreshUsageRates) { result -> if (result.isSuccess) loadUsage(model) }
+                }
+            ) {
+                Text("Refresh rates")
             }
-        }) { Text("Refresh rates") }
-    }) {
-        LazyColumn(
-            contentPadding = PaddingValues(16.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp),
-        ) {
+        },
+    ) {
+        LazyColumn(contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
             item {
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
                     TextButton(onClick = { tab = UsageTab.USAGE }) {
-                        Text("Usage", color = if (tab == UsageTab.USAGE) AppTheme.colors.primaryText else AppTheme.colors.foregroundMuted)
+                        Text(
+                            "Usage",
+                            color =
+                                if (tab == UsageTab.USAGE) AppTheme.colors.primaryText
+                                else AppTheme.colors.foregroundMuted,
+                        )
                     }
                     TextButton(onClick = { tab = UsageTab.LIMITS }) {
-                        Text("Limits", color = if (tab == UsageTab.LIMITS) AppTheme.colors.primaryText else AppTheme.colors.foregroundMuted)
+                        Text(
+                            "Limits",
+                            color =
+                                if (tab == UsageTab.LIMITS) AppTheme.colors.primaryText
+                                else AppTheme.colors.foregroundMuted,
+                        )
                     }
                 }
             }
@@ -81,20 +94,34 @@ internal fun UsageScreen(model: AndroidAppModel, initialTab: UsageTab = UsageTab
                             Text("Tokens: ${view.totalTokensLabel} · ${view.sessions} sessions", style = AppTheme.body)
                             Text("Estimated cost: ${view.costLabel} · ${view.pricingStatus}", style = AppTheme.body)
                             if (view.state == "loading") Text("Loading…", style = AppTheme.caption)
-                            view.error?.let { Text(it, style = AppTheme.caption, color = AppTheme.colors.dangerForeground) }
+                            view.error?.let {
+                                Text(it, style = AppTheme.caption, color = AppTheme.colors.dangerForeground)
+                            }
                         }
                     }
                 }
                 item { Text("Usage by model", style = AppTheme.title) }
                 items(view.rows, key = { "${it.day}:${it.provider}:${it.model}" }) { row ->
-                    Column(Modifier.fillMaxWidth().padding(horizontal = 8.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                    Column(
+                        Modifier.fillMaxWidth().padding(horizontal = 8.dp),
+                        verticalArrangement = Arrangement.spacedBy(3.dp),
+                    ) {
                         Text("${row.provider} · ${row.model}", style = AppTheme.body)
-                        Text("${row.day} · ${row.tokens} tokens · ${row.costLabel}", style = AppTheme.caption, color = AppTheme.colors.foregroundMuted)
+                        Text(
+                            "${row.day} · ${row.tokens} tokens · ${row.costLabel}",
+                            style = AppTheme.caption,
+                            color = AppTheme.colors.foregroundMuted,
+                        )
                     }
                 }
-                if (view.rows.isEmpty() && view.state == "ready") item {
-                    Text("No usage in this period.", style = AppTheme.caption, color = AppTheme.colors.foregroundMuted)
-                }
+                if (view.rows.isEmpty() && view.state == "ready")
+                    item {
+                        Text(
+                            "No usage in this period.",
+                            style = AppTheme.caption,
+                            color = AppTheme.colors.foregroundMuted,
+                        )
+                    }
                 item { Text("Daily trend", style = AppTheme.title) }
                 items(view.chart, key = { it.day }) { point ->
                     Column(
@@ -109,9 +136,7 @@ internal fun UsageScreen(model: AndroidAppModel, initialTab: UsageTab = UsageTab
                         )
                     }
                 }
-                item {
-                    UsagePreferencesEditor(model, model.snapshot.usagePreferences())
-                }
+                item { UsagePreferencesEditor(model, model.snapshot.usagePreferences()) }
             } else {
                 item {
                     SectionCard("Limits") {
@@ -121,13 +146,21 @@ internal fun UsageScreen(model: AndroidAppModel, initialTab: UsageTab = UsageTab
                         val pooledIds = pools.flatMap { it.accounts }.map { it.id }.toSet()
                         fun consumeReset(account: dev.remoteagent.core.UsageLimitAccount) {
                             val sourceId = account.resetCreditAccountId ?: account.id
-                            sourceAccounts.firstOrNull { it.id == sourceId }?.let { source ->
-                                model.perform(Intent.ConsumeResetCredit(source.provider, source.id, account.nextCreditId))
-                                model.perform(Intent.LoadAccounts)
-                            }
+                            sourceAccounts
+                                .firstOrNull { it.id == sourceId }
+                                ?.let { source ->
+                                    model.perform(
+                                        Intent.ConsumeResetCredit(source.provider, source.id, account.nextCreditId)
+                                    )
+                                    model.perform(Intent.LoadAccounts)
+                                }
                         }
                         if (pools.isEmpty() && accounts.isEmpty()) {
-                            Text("Provider limits are unavailable until accounts are loaded.", Modifier.padding(16.dp), style = AppTheme.caption)
+                            Text(
+                                "Provider limits are unavailable until accounts are loaded.",
+                                Modifier.padding(16.dp),
+                                style = AppTheme.caption,
+                            )
                         } else {
                             pools.forEachIndexed { index, pool ->
                                 if (index > 0) HorizontalDivider(color = AppTheme.colors.border)
@@ -166,24 +199,20 @@ private fun UsagePreferencesEditor(model: AndroidAppModel, preferences: UsagePre
     }
 
     SectionCard("Usage preferences") {
-        Column(
-            Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("Model aliases", style = AppTheme.title)
             preferences.modelAliases.toSortedMap().forEach { (modelName, alias) ->
                 Row(Modifier.fillMaxWidth(), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
                     Text("$modelName → $alias", style = AppTheme.caption, modifier = Modifier.weight(1f))
-                    TextButton(onClick = {
-                        val aliases = preferences.modelAliases.toMutableMap()
-                        aliases.remove(modelName)
-                        save(
-                            UsagePreferences(
-                                modelAliases = aliases,
-                                priceOverrides = preferences.priceOverrides,
-                            )
-                        )
-                    }) { Text("Remove", color = colors.primaryText) }
+                    TextButton(
+                        onClick = {
+                            val aliases = preferences.modelAliases.toMutableMap()
+                            aliases.remove(modelName)
+                            save(UsagePreferences(modelAliases = aliases, priceOverrides = preferences.priceOverrides))
+                        }
+                    ) {
+                        Text("Remove", color = colors.primaryText)
+                    }
                 }
             }
             SettingsField(aliasModel, { aliasModel = it }, "Source model")
@@ -193,16 +222,13 @@ private fun UsagePreferencesEditor(model: AndroidAppModel, preferences: UsagePre
                 onClick = {
                     val aliases = preferences.modelAliases.toMutableMap()
                     aliases[aliasModel.trim()] = aliasTarget.trim()
-                    save(
-                        UsagePreferences(
-                            modelAliases = aliases,
-                            priceOverrides = preferences.priceOverrides,
-                        )
-                    )
+                    save(UsagePreferences(modelAliases = aliases, priceOverrides = preferences.priceOverrides))
                     aliasModel = ""
                     aliasTarget = ""
                 },
-            ) { Text("Save alias", color = colors.primaryText) }
+            ) {
+                Text("Save alias", color = colors.primaryText)
+            }
 
             Text("Price overrides (USD per million tokens)", style = AppTheme.title)
             preferences.priceOverrides.toSortedMap().forEach { (modelName, prices) ->
@@ -213,16 +239,15 @@ private fun UsagePreferencesEditor(model: AndroidAppModel, preferences: UsagePre
                         style = AppTheme.caption,
                         color = colors.foregroundMuted,
                     )
-                    TextButton(onClick = {
-                        val overrides = preferences.priceOverrides.toMutableMap()
-                        overrides.remove(modelName)
-                        save(
-                            UsagePreferences(
-                                modelAliases = preferences.modelAliases,
-                                priceOverrides = overrides,
-                            )
-                        )
-                    }) { Text("Remove", color = colors.primaryText) }
+                    TextButton(
+                        onClick = {
+                            val overrides = preferences.priceOverrides.toMutableMap()
+                            overrides.remove(modelName)
+                            save(UsagePreferences(modelAliases = preferences.modelAliases, priceOverrides = overrides))
+                        }
+                    ) {
+                        Text("Remove", color = colors.primaryText)
+                    }
                 }
             }
             SettingsField(priceModel, { priceModel = it }, "Model price key")
@@ -231,7 +256,10 @@ private fun UsagePreferencesEditor(model: AndroidAppModel, preferences: UsagePre
             SettingsField(cacheReadPrice, { cacheReadPrice = it }, "Cache read price (optional)")
             SettingsField(cacheWritePrice, { cacheWritePrice = it }, "Cache write price (optional)")
             TextButton(
-                enabled = priceModel.isNotBlank() && inputPrice.toDoubleOrNull() != null && outputPrice.toDoubleOrNull() != null,
+                enabled =
+                    priceModel.isNotBlank() &&
+                        inputPrice.toDoubleOrNull() != null &&
+                        outputPrice.toDoubleOrNull() != null,
                 onClick = {
                     val input = inputPrice.toDoubleOrNull()
                     val output = outputPrice.toDoubleOrNull()
@@ -239,18 +267,14 @@ private fun UsagePreferencesEditor(model: AndroidAppModel, preferences: UsagePre
                         error = "Enter numeric input and output prices."
                     } else {
                         val overrides = preferences.priceOverrides.toMutableMap()
-                        overrides[priceModel.trim()] = PriceOverride(
-                            inputCostPerMillionTokens = input,
-                            outputCostPerMillionTokens = output,
-                            cacheReadCostPerMillionTokens = cacheReadPrice.toDoubleOrNull(),
-                            cacheWriteCostPerMillionTokens = cacheWritePrice.toDoubleOrNull(),
-                        )
-                        save(
-                            UsagePreferences(
-                                modelAliases = preferences.modelAliases,
-                                priceOverrides = overrides,
+                        overrides[priceModel.trim()] =
+                            PriceOverride(
+                                inputCostPerMillionTokens = input,
+                                outputCostPerMillionTokens = output,
+                                cacheReadCostPerMillionTokens = cacheReadPrice.toDoubleOrNull(),
+                                cacheWriteCostPerMillionTokens = cacheWritePrice.toDoubleOrNull(),
                             )
-                        )
+                        save(UsagePreferences(modelAliases = preferences.modelAliases, priceOverrides = overrides))
                         priceModel = ""
                         inputPrice = ""
                         outputPrice = ""
@@ -258,7 +282,9 @@ private fun UsagePreferencesEditor(model: AndroidAppModel, preferences: UsagePre
                         cacheWritePrice = ""
                     }
                 },
-            ) { Text("Save price override", color = colors.primaryText) }
+            ) {
+                Text("Save price override", color = colors.primaryText)
+            }
             error?.let { Text(it, style = AppTheme.caption, color = colors.dangerForeground) }
         }
     }
@@ -288,9 +314,7 @@ private fun UsageLimitPoolView(
                 color = colors.primary,
                 trackColor = colors.secondary,
             )
-            window.pace?.let { pace ->
-                Text("Pace: $pace", style = AppTheme.caption, color = colors.foregroundMuted)
-            }
+            window.pace?.let { pace -> Text("Pace: $pace", style = AppTheme.caption, color = colors.foregroundMuted) }
             window.resets.firstOrNull()?.let { reset ->
                 Text(
                     "Next reset: ${reset.label} restores ${reset.restoresPercent}% at ${usageResetTime(reset.at)}",
@@ -310,12 +334,8 @@ private fun UsageLimitPoolView(
             }
         }
         pool.accounts
-            .filter {
-                it.resetCreditCount > 0 || it.externalLabel != null || it.error != null
-            }
-            .forEach { account ->
-                UsageLimitAccount(account, showWindows = false) { useReset(account) }
-            }
+            .filter { it.resetCreditCount > 0 || it.externalLabel != null || it.error != null }
+            .forEach { account -> UsageLimitAccount(account, showWindows = false) { useReset(account) } }
     }
 }
 
@@ -346,19 +366,28 @@ private fun UsageLimitAccount(
         }
         if (account.resetCreditCount > 0) {
             Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
-                Text("Reset credits: ${account.resetCreditCount}", style = AppTheme.caption, color = colors.foregroundMuted, modifier = Modifier.weight(1f))
+                Text(
+                    "Reset credits: ${account.resetCreditCount}",
+                    style = AppTheme.caption,
+                    color = colors.foregroundMuted,
+                    modifier = Modifier.weight(1f),
+                )
                 TextButton(onClick = { confirmingReset = true }) { Text("Use reset", color = colors.primaryText) }
             }
         }
         account.externalLabel?.let { label ->
-            TextButton(onClick = {
-                account.externalUrl?.let { url ->
-                    val uri = Uri.parse(url)
-                    if (uri.scheme == "https") {
-                        context.startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW, uri))
+            TextButton(
+                onClick = {
+                    account.externalUrl?.let { url ->
+                        val uri = Uri.parse(url)
+                        if (uri.scheme == "https") {
+                            context.startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW, uri))
+                        }
                     }
                 }
-            }) { Text(label, style = AppTheme.caption, color = colors.primaryText) }
+            ) {
+                Text(label, style = AppTheme.caption, color = colors.primaryText)
+            }
         }
         account.error?.let { Text(it, style = AppTheme.caption, color = colors.warningForeground) }
     }
@@ -368,31 +397,39 @@ private fun UsageLimitAccount(
             title = { Text("Use a reset credit?") },
             text = { Text("This redeems one credit and clears the current rate-limit windows.") },
             confirmButton = {
-                TextButton(onClick = { confirmingReset = false; useReset() }) { Text("Use credit") }
+                TextButton(
+                    onClick = {
+                        confirmingReset = false
+                        useReset()
+                    }
+                ) {
+                    Text("Use credit")
+                }
             },
             dismissButton = { TextButton(onClick = { confirmingReset = false }) { Text("Cancel") } },
         )
     }
 }
 
-private fun usageResetTime(at: Long): String = java.time.Instant
-    .ofEpochMilli(at)
-    .atZone(java.time.ZoneId.systemDefault())
-    .format(java.time.format.DateTimeFormatter.ofLocalizedDateTime(java.time.format.FormatStyle.SHORT))
+private fun usageResetTime(at: Long): String =
+    java.time.Instant.ofEpochMilli(at)
+        .atZone(java.time.ZoneId.systemDefault())
+        .format(java.time.format.DateTimeFormatter.ofLocalizedDateTime(java.time.format.FormatStyle.SHORT))
 
 private fun loadUsage(model: AndroidAppModel) {
     val now = java.time.LocalDate.now()
     val preferences = model.snapshot.usagePreferences()
-    val input = UsageSummaryInput(
-        sinceDay = now.minusDays(30).toString(),
-        untilDay = now.toString(),
-        timeZone = java.time.ZoneId.systemDefault().id,
-        resolution = Resolution.DAY,
-        sinceTime = null,
-        untilTime = null,
-        modelAliases = preferences.modelAliases,
-        priceOverrides = preferences.priceOverrides,
-    )
+    val input =
+        UsageSummaryInput(
+            sinceDay = now.minusDays(30).toString(),
+            untilDay = now.toString(),
+            timeZone = java.time.ZoneId.systemDefault().id,
+            resolution = Resolution.DAY,
+            sinceTime = null,
+            untilTime = null,
+            modelAliases = preferences.modelAliases,
+            priceOverrides = preferences.priceOverrides,
+        )
     model.perform(Intent.LoadUsageSummary(input))
     model.perform(Intent.LoadAccounts)
 }

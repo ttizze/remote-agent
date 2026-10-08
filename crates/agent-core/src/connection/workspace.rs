@@ -13,8 +13,8 @@ use crate::{
     peer::PeerError,
     protocol::Call,
     state::{
-        DiffFilePatch, DiffFilesEntry, DiffPreviewEntry, DraftWorkspace, EntryQuery,
-        ContentSearchQuery, PROVIDER_COMMANDS_RETRY_MS, RefScope, RefsEntry, SearchRequest,
+        ContentSearchQuery, DiffFilePatch, DiffFilesEntry, DiffPreviewEntry, DraftWorkspace,
+        EntryQuery, PROVIDER_COMMANDS_RETRY_MS, RefScope, RefsEntry, SearchRequest,
     },
     view::{
         checkpoints::DiffSelection,
@@ -71,9 +71,16 @@ impl Owner {
             self.state.sources.entries.due_at_ms = None;
             if let Some(project_id) = self.state.selected_project.clone()
                 && self.state.connected
-                && !self.state.pull_requests.list_requested.contains(&project_id)
+                && !self
+                    .state
+                    .pull_requests
+                    .list_requested
+                    .contains(&project_id)
             {
-                self.state.pull_requests.list_requested.insert(project_id.clone());
+                self.state
+                    .pull_requests
+                    .list_requested
+                    .insert(project_id.clone());
                 self.job(
                     Call::ListPullRequests(pr::ListPullRequests {
                         project_id,
@@ -318,7 +325,9 @@ impl Owner {
                 state.result = Some((query, found));
             }
             Err(error) => {
-                state.error = Some(crate::presentation::error::error_message(&error.to_string()));
+                state.error = Some(crate::presentation::error::error_message(
+                    &error.to_string(),
+                ));
             }
         }
     }
@@ -490,16 +499,10 @@ impl Owner {
         generation: Option<u64>,
     ) {
         let current_generation = self.state.sources.diff_generation;
-        let Some(entry) = self
-            .state
-            .sources
-            .diff_preview
-            .as_mut()
-            .filter(|entry| {
-                generation.is_none_or(|generation| generation == current_generation)
-                    && &entry.request == request
-            })
-        else {
+        let Some(entry) = self.state.sources.diff_preview.as_mut().filter(|entry| {
+            generation.is_none_or(|generation| generation == current_generation)
+                && &entry.request == request
+        }) else {
             return;
         };
         match result {

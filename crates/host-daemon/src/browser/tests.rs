@@ -71,9 +71,18 @@ fn owner_frame_selection_does_not_follow_another_preview_owner() {
         Browser::activate_tab_for_owner(&mut page, Some("client-b"), None).unwrap(),
         "owner-b"
     );
-    assert_eq!(page.active_by_owner.get("client-a").map(String::as_str), Some("owner-a"));
-    assert_eq!(page.active_by_owner.get("client-b").map(String::as_str), Some("owner-b"));
-    assert_eq!(page.active_by_owner.get("local").map(String::as_str), Some("owner-a"));
+    assert_eq!(
+        page.active_by_owner.get("client-a").map(String::as_str),
+        Some("owner-a")
+    );
+    assert_eq!(
+        page.active_by_owner.get("client-b").map(String::as_str),
+        Some("owner-b")
+    );
+    assert_eq!(
+        page.active_by_owner.get("local").map(String::as_str),
+        Some("owner-a")
+    );
 }
 
 #[tokio::test]
@@ -278,7 +287,8 @@ async fn shared_browser_live() {
     let scope_a = thread_a.to_string();
     let scope_b = thread_b.to_string();
     let mut initial = browser
-        .agent(
+        .agent_for_owner(
+            COLLABORATIVE_BROWSER_OWNER,
             &scope_a,
             BrowserAction::Navigate {
                 url: format!("http://{address}/"),
@@ -293,17 +303,23 @@ async fn shared_browser_live() {
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         initial = browser
-            .request(&request(&thread_a, &initial, BrowserAction::Read))
+            .request_for_owner(
+                COLLABORATIVE_BROWSER_OWNER,
+                &request(&thread_a, &initial, BrowserAction::Read),
+            )
             .await
             .unwrap();
     }
     assert!(initial.tabs.iter().any(|tab| tab.title == "Fixture"));
     browser
-        .request(&request(
-            &thread_a,
-            &initial,
-            BrowserAction::Click { x: 100.0, y: 40.0 },
-        ))
+        .request_for_owner(
+            COLLABORATIVE_BROWSER_OWNER,
+            &request(
+                &thread_a,
+                &initial,
+                BrowserAction::Click { x: 100.0, y: 40.0 },
+            ),
+        )
         .await
         .unwrap();
     let phone_input = request(
@@ -314,18 +330,22 @@ async fn shared_browser_live() {
         },
     );
     let (agent, phone) = tokio::join!(
-        browser.agent(
+        browser.agent_for_owner(
+            COLLABORATIVE_BROWSER_OWNER,
             &scope_a,
             BrowserAction::Type {
                 text: "AI input".into()
             }
         ),
-        browser.request(&phone_input),
+        browser.request_for_owner(COLLABORATIVE_BROWSER_OWNER, &phone_input),
     );
     agent.unwrap();
     phone.unwrap();
     let typed = browser
-        .request(&request(&thread_a, &initial, BrowserAction::Read))
+        .request_for_owner(
+            COLLABORATIVE_BROWSER_OWNER,
+            &request(&thread_a, &initial, BrowserAction::Read),
+        )
         .await
         .unwrap();
     assert!(
@@ -336,23 +356,32 @@ async fn shared_browser_live() {
         "both overlapping phone and agent inputs must execute: {:?}",
         typed.tabs
     );
-    let observed = browser.agent(&scope_a, BrowserAction::Read).await.unwrap();
+    let observed = browser
+        .agent_for_owner(COLLABORATIVE_BROWSER_OWNER, &scope_a, BrowserAction::Read)
+        .await
+        .unwrap();
     assert_eq!(
         observed.tabs, typed.tabs,
         "agent reads remain available after phone input"
     );
     browser
-        .request(&request(
-            &thread_a,
-            &initial,
-            BrowserAction::Click { x: 100.0, y: 110.0 },
-        ))
+        .request_for_owner(
+            COLLABORATIVE_BROWSER_OWNER,
+            &request(
+                &thread_a,
+                &initial,
+                BrowserAction::Click { x: 100.0, y: 110.0 },
+            ),
+        )
         .await
         .unwrap();
     let mut popup = typed;
     for _ in 0..20 {
         popup = browser
-            .request(&request(&thread_a, &popup, BrowserAction::Read))
+            .request_for_owner(
+                COLLABORATIVE_BROWSER_OWNER,
+                &request(&thread_a, &popup, BrowserAction::Read),
+            )
             .await
             .unwrap();
         if popup.tabs.len() == 2 {
@@ -364,19 +393,28 @@ async fn shared_browser_live() {
     assert_ne!(popup.tab_id, initial.tab_id);
     assert!(
         browser
-            .request(&request(
-                &thread_a,
-                &initial,
-                BrowserAction::Click { x: 20.0, y: 20.0 }
-            ))
+            .request_for_owner(
+                COLLABORATIVE_BROWSER_OWNER,
+                &request(
+                    &thread_a,
+                    &initial,
+                    BrowserAction::Click { x: 20.0, y: 20.0 }
+                )
+            )
             .await
             .is_err(),
         "stale tab input must fail"
     );
-    let other = browser.agent(&scope_b, BrowserAction::Read).await.unwrap();
+    let other = browser
+        .agent_for_owner(COLLABORATIVE_BROWSER_OWNER, &scope_b, BrowserAction::Read)
+        .await
+        .unwrap();
     assert_eq!(other.tabs.len(), 1);
     let unchanged = browser
-        .request(&request(&thread_b, &other, BrowserAction::Read))
+        .request_for_owner(
+            COLLABORATIVE_BROWSER_OWNER,
+            &request(&thread_b, &other, BrowserAction::Read),
+        )
         .await
         .unwrap();
     assert!(
@@ -385,7 +423,8 @@ async fn shared_browser_live() {
     );
     assert!(
         browser
-            .agent(
+            .agent_for_owner(
+                COLLABORATIVE_BROWSER_OWNER,
                 &scope_b,
                 BrowserAction::SelectTab {
                     id: popup.tab_id.clone()
@@ -398,7 +437,8 @@ async fn shared_browser_live() {
     drop(browser);
     let browser = Browser::start(profile).await.unwrap();
     browser
-        .agent(
+        .agent_for_owner(
+            COLLABORATIVE_BROWSER_OWNER,
             &scope_a,
             BrowserAction::Navigate {
                 url: format!("http://{address}/verify"),
@@ -408,7 +448,10 @@ async fn shared_browser_live() {
         .unwrap();
     let mut restored = BrowserFrame::default();
     for _ in 0..20 {
-        restored = browser.agent(&scope_a, BrowserAction::Read).await.unwrap();
+        restored = browser
+            .agent_for_owner(COLLABORATIVE_BROWSER_OWNER, &scope_a, BrowserAction::Read)
+            .await
+            .unwrap();
         if restored
             .tabs
             .iter()

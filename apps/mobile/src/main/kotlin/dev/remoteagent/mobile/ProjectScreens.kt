@@ -207,13 +207,16 @@ internal fun AddProjectScreen(model: AndroidAppModel) {
 @Composable
 internal fun LocalFolderScreen(model: AndroidAppModel) {
     val colors = AppTheme.colors
-    val configuredBase = model.snapshot.settings(SettingsScope.Host).sections
-        .flatMap { it.rows }
-        .firstOrNull { it.id == SettingId.AddProjectBaseDirectory }
-        ?.control
-        ?.let { it as? SettingControl.Text }
-        ?.value
-        ?.takeIf(String::isNotBlank)
+    val configuredBase =
+        model.snapshot
+            .settings(SettingsScope.Host)
+            .sections
+            .flatMap { it.rows }
+            .firstOrNull { it.id == SettingId.AddProjectBaseDirectory }
+            ?.control
+            ?.let { it as? SettingControl.Text }
+            ?.value
+            ?.takeIf(String::isNotBlank)
     var path by remember(configuredBase) { mutableStateOf(addProjectInitialQuery(configuredBase)) }
     var error by remember { mutableStateOf<String?>(null) }
     // The folder whose listing failed, and why.

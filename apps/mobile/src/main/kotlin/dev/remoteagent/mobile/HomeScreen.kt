@@ -95,13 +95,14 @@ internal fun HomeScreen(model: AndroidAppModel) {
         )
     val list by
         rememberView(snapshot, now / MINUTE_MILLIS, options) { it.threadList(System.currentTimeMillis(), options) }
-    val aggregate = model.environmentThreadList(
-        System.currentTimeMillis(),
-        options,
-        search,
-        snapshot.selectedProjectId()?.let { snapshot.scopedProjectId(it) },
-        snapshot.selectedThreadId()?.let { snapshot.scopedThreadId(it) },
-    )
+    val aggregate =
+        model.environmentThreadList(
+            System.currentTimeMillis(),
+            options,
+            search,
+            snapshot.selectedProjectId()?.let { snapshot.scopedProjectId(it) },
+            snapshot.selectedThreadId()?.let { snapshot.scopedThreadId(it) },
+        )
     val acrossEnvironments = model.environmentSnapshots.size > 1
     val drivers by rememberView(snapshot) { instanceDrivers(it) }
     val environment = snapshot.hostName()
@@ -147,17 +148,10 @@ internal fun HomeScreen(model: AndroidAppModel) {
                 if (acrossEnvironments) {
                     if (!aggregate.hasThreads && aggregate.rows.isEmpty() && aggregate.pendingTasks.isEmpty()) {
                         EmptyList(
-                            ThreadListEmpty(
-                                "No threads yet",
-                                "Choose an environment or create a new task.",
-                                false,
-                            )
+                            ThreadListEmpty("No threads yet", "Choose an environment or create a new task.", false)
                         )
                     } else {
-                        LazyColumn(
-                            state = listState,
-                            contentPadding = PaddingValues(top = 14.dp, bottom = 160.dp),
-                        ) {
+                        LazyColumn(state = listState, contentPadding = PaddingValues(top = 14.dp, bottom = 160.dp)) {
                             items(aggregate.rows, key = { it.row.key }) { item ->
                                 ThreadListRow(
                                     item.row,
@@ -376,7 +370,15 @@ private fun HomeFabs(model: AndroidAppModel, expanded: Boolean, modifier: Modifi
                 HorizontalDivider(color = colors.border)
                 model.environmentProjects("").forEach { project ->
                     DropdownMenuItem(
-                        text = { Text(checked("${project.environmentLabel} · ${project.title}", selected == project.projectId), style = AppTheme.footnote) },
+                        text = {
+                            Text(
+                                checked(
+                                    "${project.environmentLabel} · ${project.title}",
+                                    selected == project.projectId,
+                                ),
+                                style = AppTheme.footnote,
+                            )
+                        },
                         onClick = {
                             filter = false
                             model.perform(Intent.FilterProject(project.projectId))

@@ -13,8 +13,9 @@ use gpui_kit::{
     component::{
         Sizable, StyledExt,
         button::{Button, ButtonVariants},
+        h_flex,
         input::{Input, InputEvent, InputState},
-        h_flex, v_flex,
+        v_flex,
     },
     prelude::FluentBuilder,
     *,
@@ -32,19 +33,30 @@ pub(super) struct UsageState {
 
 impl UsageState {
     pub(super) fn new(window: &mut Window, cx: &mut Context<Desktop>) -> Self {
-        let aliases = cx.new(|cx| InputState::new(window, cx).placeholder("{\"short-name\":\"provider/model\"}"));
-        let prices = cx.new(|cx| InputState::new(window, cx).placeholder("{\"provider/model\":{...}}"));
+        let aliases = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("{\"short-name\":\"provider/model\"}")
+        });
+        let prices =
+            cx.new(|cx| InputState::new(window, cx).placeholder("{\"provider/model\":{...}}"));
         let subscriptions = vec![
-            cx.subscribe_in(&aliases, window, |view, _, event: &InputEvent, window, cx| {
-                if matches!(event, InputEvent::Blur | InputEvent::PressEnter { .. }) {
-                    view.commit_usage_preferences(window, cx);
-                }
-            }),
-            cx.subscribe_in(&prices, window, |view, _, event: &InputEvent, window, cx| {
-                if matches!(event, InputEvent::Blur | InputEvent::PressEnter { .. }) {
-                    view.commit_usage_preferences(window, cx);
-                }
-            }),
+            cx.subscribe_in(
+                &aliases,
+                window,
+                |view, _, event: &InputEvent, window, cx| {
+                    if matches!(event, InputEvent::Blur | InputEvent::PressEnter { .. }) {
+                        view.commit_usage_preferences(window, cx);
+                    }
+                },
+            ),
+            cx.subscribe_in(
+                &prices,
+                window,
+                |view, _, event: &InputEvent, window, cx| {
+                    if matches!(event, InputEvent::Blur | InputEvent::PressEnter { .. }) {
+                        view.commit_usage_preferences(window, cx);
+                    }
+                },
+            ),
         ];
         Self {
             aliases,
@@ -56,7 +68,12 @@ impl UsageState {
         }
     }
 
-    fn sync(&mut self, preferences: &UsagePreferences, window: &mut Window, cx: &mut Context<Desktop>) {
+    fn sync(
+        &mut self,
+        preferences: &UsagePreferences,
+        window: &mut Window,
+        cx: &mut Context<Desktop>,
+    ) {
         let aliases = serde_json::to_string(
             &preferences
                 .model_aliases
@@ -157,7 +174,9 @@ impl Desktop {
                 self.settings.usage.error = Some("Model aliases must be valid JSON.".into());
                 self.settings.usage.aliases_value = None;
                 self.settings.usage.prices_value = None;
-                self.settings.usage.sync(&self.snapshot.usage_preferences(), window, cx);
+                self.settings
+                    .usage
+                    .sync(&self.snapshot.usage_preferences(), window, cx);
                 return;
             }
         };
@@ -167,7 +186,9 @@ impl Desktop {
                 self.settings.usage.error = Some("Price overrides must be valid JSON.".into());
                 self.settings.usage.aliases_value = None;
                 self.settings.usage.prices_value = None;
-                self.settings.usage.sync(&self.snapshot.usage_preferences(), window, cx);
+                self.settings
+                    .usage
+                    .sync(&self.snapshot.usage_preferences(), window, cx);
                 return;
             }
         };
@@ -176,13 +197,16 @@ impl Desktop {
             model_aliases: aliases.into_iter().collect(),
             price_overrides: prices.into_iter().collect(),
         };
-        self.perform_then(Intent::SetUsagePreferences { preferences }, |view, result, _, _| {
-            if result.is_ok() {
-                view.perform(Intent::LoadUsageSummary {
-                    input: summary_input(&view.snapshot),
-                });
-            }
-        });
+        self.perform_then(
+            Intent::SetUsagePreferences { preferences },
+            |view, result, _, _| {
+                if result.is_ok() {
+                    view.perform(Intent::LoadUsageSummary {
+                        input: summary_input(&view.snapshot),
+                    });
+                }
+            },
+        );
     }
 }
 
@@ -277,7 +301,9 @@ impl Desktop {
         let mut preference_rows = vec![preference_error];
         preference_rows.extend([
             Row::new("Model aliases")
-                .description("Map a transcript model name to the model used for pricing, as a JSON object.")
+                .description(
+                    "Map a transcript model name to the model used for pricing, as a JSON object.",
+                )
                 .control(
                     Input::new(&self.settings.usage.aliases)
                         .small()
@@ -286,7 +312,9 @@ impl Desktop {
                 )
                 .render(),
             Row::new("Price overrides")
-                .description("Override input and output prices per million tokens, as a JSON object.")
+                .description(
+                    "Override input and output prices per million tokens, as a JSON object.",
+                )
                 .control(
                     Input::new(&self.settings.usage.prices)
                         .small()

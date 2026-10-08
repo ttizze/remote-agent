@@ -329,7 +329,11 @@ pub(crate) fn remote_details(cwd: &Path) -> Result<Option<RemoteDetails>> {
     if !cwd.is_dir() {
         return Ok(None);
     }
-    let head = git(cwd, &["rev-parse", "--abbrev-ref", "HEAD"], Options::default())?;
+    let head = git(
+        cwd,
+        &["rev-parse", "--abbrev-ref", "HEAD"],
+        Options::default(),
+    )?;
     let branch = if head.ok() {
         let value = head.text().trim().to_owned();
         (!value.is_empty() && value != "HEAD").then_some(value)

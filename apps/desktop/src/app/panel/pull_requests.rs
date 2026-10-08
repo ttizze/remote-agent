@@ -1,11 +1,22 @@
 //! Desktop pull-request surface backed by agent-core views and intents.
 use super::PanelTab;
-use crate::app::{Desktop, ui::{color, icon, tint}};
+use crate::app::{
+    Desktop,
+    ui::{color, icon, tint},
+};
 use agent_core::{
     state::{Intent, PullRequestStackHeadInput, PullRequestViewedFileInput},
     view::pull_requests::PullRequestPanelOptions,
 };
-use gpui_kit::{component::{Sizable, button::{Button, ButtonVariants}, h_flex, v_flex}, prelude::FluentBuilder, *};
+use gpui_kit::{
+    component::{
+        Sizable,
+        button::{Button, ButtonVariants},
+        h_flex, v_flex,
+    },
+    prelude::FluentBuilder,
+    *,
+};
 
 #[derive(Default)]
 pub(super) struct PullRequestsState {
@@ -20,7 +31,12 @@ impl Desktop {
         let Some(project_id) = self.snapshot.selected_project.clone() else {
             return;
         };
-        if !self.snapshot.pull_requests.by_project.contains_key(&project_id) {
+        if !self
+            .snapshot
+            .pull_requests
+            .by_project
+            .contains_key(&project_id)
+        {
             self.perform(Intent::LoadPullRequests {
                 project_id,
                 repository: None,
@@ -30,7 +46,11 @@ impl Desktop {
         }
     }
 
-    pub(super) fn render_pull_requests(&mut self, _: &mut Window, cx: &mut Context<Desktop>) -> AnyElement {
+    pub(super) fn render_pull_requests(
+        &mut self,
+        _: &mut Window,
+        cx: &mut Context<Desktop>,
+    ) -> AnyElement {
         let project_id = self.snapshot.selected_project.clone().unwrap_or_default();
         let view = self.snapshot.pull_request_list(PullRequestPanelOptions {
             project_id: Some(project_id.clone()),
@@ -44,7 +64,10 @@ impl Desktop {
             let label = format!("#{}  {}", key.number, entry.title);
             let project_id = project_id.clone();
             h_flex()
-                .id(SharedString::from(format!("pull-request-{}", key.canonical())))
+                .id(SharedString::from(format!(
+                    "pull-request-{}",
+                    key.canonical()
+                )))
                 .w_full()
                 .gap_2()
                 .px_3()
@@ -71,11 +94,29 @@ impl Desktop {
                         });
                     });
                 })
-                .child(icon("git-pull-request").size_4().text_color(color("textMuted")))
-                .child(v_flex().min_w_0().flex_1().child(div().truncate().child(label)).child(
-                    div().text_xs().text_color(color("textMuted")).child(format!("{} → {}", entry.head_branch, entry.base_branch)),
-                ))
-                .child(div().text_xs().text_color(color("textMuted")).child(format!("{:?}", entry.badge)))
+                .child(
+                    icon("git-pull-request")
+                        .size_4()
+                        .text_color(color("textMuted")),
+                )
+                .child(
+                    v_flex()
+                        .min_w_0()
+                        .flex_1()
+                        .child(div().truncate().child(label))
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(color("textMuted"))
+                                .child(format!("{} → {}", entry.head_branch, entry.base_branch)),
+                        ),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(color("textMuted"))
+                        .child(format!("{:?}", entry.badge)),
+                )
         });
         let refresh_project = project_id.clone();
         let detail = self
@@ -143,7 +184,11 @@ impl Desktop {
                         stack
                             .layers
                             .iter()
-                            .take(if action == "merge" { end } else { stack.layers.len() })
+                            .take(if action == "merge" {
+                                end
+                            } else {
+                                stack.layers.len()
+                            })
                             .filter(|layer| layer.state != agent_domain::PullRequestState::Merged)
                             .filter_map(|layer| {
                                 Some(PullRequestStackHeadInput {
@@ -155,16 +200,8 @@ impl Desktop {
                     })
                     .unwrap_or_default();
                 let confirmation = match action {
-                    "merge" => Some((
-                        "Merge pull request",
-                        "Merge this pull request?",
-                        true,
-                    )),
-                    "close" => Some((
-                        "Close pull request",
-                        "Close this pull request?",
-                        true,
-                    )),
+                    "merge" => Some(("Merge pull request", "Merge this pull request?", true)),
+                    "close" => Some(("Close pull request", "Close this pull request?", true)),
                     "update_branch" => Some((
                         "Update pull request branch",
                         "Update this pull request branch?",
@@ -232,11 +269,33 @@ impl Desktop {
                 .border_t_1()
                 .border_color(color("border"))
                 .p_3()
-                .child(div().font_weight(FontWeight::MEDIUM).child(format!("#{} {}", key.number, detail.summary.title)))
-                .child(div().text_xs().text_color(color("textMuted")).child(format!("{} → {}", detail.summary.head_branch, detail.summary.base_branch)))
-                .child(div().text_xs().child(format!("Checks: {:?}   Review: {:?}   Mergeability: {:?}", detail.summary.checks_state, detail.summary.review_decision, detail.summary.mergeability)))
+                .child(
+                    div()
+                        .font_weight(FontWeight::MEDIUM)
+                        .child(format!("#{} {}", key.number, detail.summary.title)),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(color("textMuted"))
+                        .child(format!(
+                            "{} → {}",
+                            detail.summary.head_branch, detail.summary.base_branch
+                        )),
+                )
+                .child(div().text_xs().child(format!(
+                    "Checks: {:?}   Review: {:?}   Mergeability: {:?}",
+                    detail.summary.checks_state,
+                    detail.summary.review_decision,
+                    detail.summary.mergeability
+                )))
                 .when(!detail.body.trim().is_empty(), |row| {
-                    row.child(div().text_xs().text_color(color("textMuted")).child(detail.body.clone()))
+                    row.child(
+                        div()
+                            .text_xs()
+                            .text_color(color("textMuted"))
+                            .child(detail.body.clone()),
+                    )
                 })
                 .child(
                     h_flex()
@@ -248,11 +307,10 @@ impl Desktop {
                         .child(action("Update", "update_branch"))
                         .child(review("Approve", "approve"))
                         .child(review("Request changes", "request_changes"))
-                        .child(
-                            {
-                                let diff_project_id = project_id.clone();
-                                let diff_key = key.clone();
-                                Button::new("pull-request-diff")
+                        .child({
+                            let diff_project_id = project_id.clone();
+                            let diff_key = key.clone();
+                            Button::new("pull-request-diff")
                                 .label("Files")
                                 .ghost()
                                 .xsmall()
@@ -266,8 +324,7 @@ impl Desktop {
                                         commit: None,
                                     });
                                 }))
-                            },
-                        ),
+                        }),
                 )
                 .when_some(diff_next_cursor, |row, cursor| {
                     let owner = owner.clone();
@@ -371,8 +428,21 @@ impl Desktop {
                 .children(detail.comments.iter().take(5).map(|comment| {
                     v_flex()
                         .gap_0p5()
-                        .child(div().text_xs().font_weight(FontWeight::MEDIUM).child(comment.author.as_ref().map(|author| author.login.clone()).unwrap_or_else(|| "Unknown")))
-                        .child(div().text_xs().text_color(color("textMuted")).child(comment.body.clone()))
+                        .child(
+                            div().text_xs().font_weight(FontWeight::MEDIUM).child(
+                                comment
+                                    .author
+                                    .as_ref()
+                                    .map(|author| author.login.clone())
+                                    .unwrap_or_else(|| "Unknown"),
+                            ),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(color("textMuted"))
+                                .child(comment.body.clone()),
+                        )
                 }))
                 .children(diff_files.into_iter().map(|file| {
                     let path = file.path.clone();
@@ -390,24 +460,29 @@ impl Desktop {
                     let context_path = path.clone();
                     let context_old_path = old_path.clone();
                     let context_type = file.change_type;
-                    let context_button = Button::new(SharedString::from(format!("diff-context-{}", path)))
-                        .label(if context.is_some() { "Reload context" } else { "Context" })
-                        .ghost()
-                        .xsmall()
-                        .on_click(move |_, _, cx| {
-                            let _ = context_owner.update(cx, |view, _| {
-                                view.perform(Intent::LoadPullRequestDiffFileContents {
-                                    project_id: context_project_id.clone(),
-                                    host: Some(context_key_for_file.host.clone()),
-                                    repository: context_key_for_file.repository.clone(),
-                                    number: context_key_for_file.number,
-                                    commit: None,
-                                    change_type: context_type,
-                                    old_path: context_old_path.clone(),
-                                    new_path: context_path.clone(),
+                    let context_button =
+                        Button::new(SharedString::from(format!("diff-context-{}", path)))
+                            .label(if context.is_some() {
+                                "Reload context"
+                            } else {
+                                "Context"
+                            })
+                            .ghost()
+                            .xsmall()
+                            .on_click(move |_, _, cx| {
+                                let _ = context_owner.update(cx, |view, _| {
+                                    view.perform(Intent::LoadPullRequestDiffFileContents {
+                                        project_id: context_project_id.clone(),
+                                        host: Some(context_key_for_file.host.clone()),
+                                        repository: context_key_for_file.repository.clone(),
+                                        number: context_key_for_file.number,
+                                        commit: None,
+                                        change_type: context_type,
+                                        old_path: context_old_path.clone(),
+                                        new_path: context_path.clone(),
+                                    });
                                 });
                             });
-                        });
                     v_flex()
                         .gap_0p5()
                         .pt_1()
@@ -415,7 +490,12 @@ impl Desktop {
                             h_flex()
                                 .gap_1()
                                 .items_center()
-                                .child(div().text_xs().font_weight(FontWeight::MEDIUM).child(path.clone()))
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .child(path.clone()),
+                                )
                                 .child(
                                     div()
                                         .text_xs()
@@ -423,11 +503,15 @@ impl Desktop {
                                         .child(format!("+{} -{}", file.additions, file.deletions)),
                                 )
                                 .child(
-                                    Button::new(SharedString::from(format!("viewed-file-{}", path)))
-                                        .label(if viewed { "Viewed" } else { "Mark viewed" })
-                                        .ghost()
-                                        .xsmall()
-                                        .on_click(move |_, _, cx| {
+                                    Button::new(SharedString::from(format!(
+                                        "viewed-file-{}",
+                                        path
+                                    )))
+                                    .label(if viewed { "Viewed" } else { "Mark viewed" })
+                                    .ghost()
+                                    .xsmall()
+                                    .on_click(
+                                        move |_, _, cx| {
                                             let _ = owner.update(cx, |view, _| {
                                                 view.perform(Intent::SetPullRequestFilesViewed {
                                                     project_id: project_id.clone(),
@@ -440,7 +524,8 @@ impl Desktop {
                                                     }],
                                                 });
                                             });
-                                        }),
+                                        },
+                                    ),
                                 )
                                 .child(context_button),
                         )
@@ -453,28 +538,32 @@ impl Desktop {
                             )
                         })
                         .when(!has_patch, |row| {
-                            row.child(
-                                div()
-                                    .text_xs()
-                                    .text_color(color("textMuted"))
-                                    .child(if patch_truncated {
-                                        "Textual patch unavailable"
-                                    } else {
-                                        "No textual patch"
-                                    }),
-                            )
+                            row.child(div().text_xs().text_color(color("textMuted")).child(
+                                if patch_truncated {
+                                    "Textual patch unavailable"
+                                } else {
+                                    "No textual patch"
+                                },
+                            ))
                         })
                         .when_some(context, |row, context| {
-                            row.child(
-                                div()
-                                    .text_xs()
-                                    .text_color(color("textMuted"))
-                                    .child(format!(
+                            row.child(div().text_xs().text_color(color("textMuted")).child(
+                                format!(
                                         "Before: {}\nAfter: {}",
-                                        context.old_contents.lines().take(4).collect::<Vec<_>>().join("\n"),
-                                        context.new_contents.lines().take(4).collect::<Vec<_>>().join("\n"),
-                                    )),
-                            )
+                                        context
+                                            .old_contents
+                                            .lines()
+                                            .take(4)
+                                            .collect::<Vec<_>>()
+                                            .join("\n"),
+                                        context
+                                            .new_contents
+                                            .lines()
+                                            .take(4)
+                                            .collect::<Vec<_>>()
+                                            .join("\n"),
+                                    ),
+                            ))
                         })
                 }))
                 .into_any_element()

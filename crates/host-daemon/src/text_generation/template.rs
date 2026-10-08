@@ -19,19 +19,14 @@ const DIRECTORY_CANDIDATES: [&str; 3] = [
 const MAX_TEMPLATE_BYTES: usize = 8_000;
 
 fn entries(cwd: &Path, treeish: &str) -> Result<Vec<(String, String)>> {
-    let mut args = vec![
-        "ls-tree",
-        "-r",
-        "-z",
-        "--full-tree",
-        treeish,
-        "--",
-    ];
+    let mut args = vec!["ls-tree", "-r", "-z", "--full-tree", treeish, "--"];
     args.extend(FILE_CANDIDATES);
     args.extend(DIRECTORY_CANDIDATES);
     let result = run_git(cwd, &args, Options::default())?;
     if !result.ok() {
-        return Err(anyhow!("Git could not read the pull request template tree."));
+        return Err(anyhow!(
+            "Git could not read the pull request template tree."
+        ));
     }
     Ok(result
         .stdout
@@ -95,7 +90,11 @@ mod tests {
     use std::process::Command;
 
     fn git(cwd: &Path, args: &[&str]) {
-        let status = Command::new("git").args(args).current_dir(cwd).status().unwrap();
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .status()
+            .unwrap();
         assert!(status.success(), "git {args:?}");
     }
 

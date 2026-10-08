@@ -127,7 +127,8 @@ pub(crate) async fn create_worktree(
 
 fn missing_worktree(stderr: &str) -> bool {
     let normalized = stderr.to_lowercase();
-    normalized.contains("is not a working tree") || normalized.contains("cannot remove working tree")
+    normalized.contains("is not a working tree")
+        || normalized.contains("cannot remove working tree")
 }
 
 /// `git worktree remove`; a worktree already gone is pruned instead so a
@@ -264,13 +265,14 @@ pub(crate) async fn fetch(cwd: &Path, remote: &str, refspec: Option<&str>) -> Re
 }
 
 /// Fetches a pull request's head into a local branch.
-pub(crate) async fn fetch_pull_request_branch(
-    cwd: &Path,
-    number: u64,
-    branch: &str,
-) -> Result<()> {
-    let remote = primary_remote(cwd)
-        .ok_or_else(|| failed("GitVcsDriver.resolvePrimaryRemoteName", cwd, "No git remote is configured for this repository."))?;
+pub(crate) async fn fetch_pull_request_branch(cwd: &Path, number: u64, branch: &str) -> Result<()> {
+    let remote = primary_remote(cwd).ok_or_else(|| {
+        failed(
+            "GitVcsDriver.resolvePrimaryRemoteName",
+            cwd,
+            "No git remote is configured for this repository.",
+        )
+    })?;
     fetch(
         cwd,
         &remote,
@@ -321,8 +323,13 @@ pub(crate) async fn origin_start(cwd: &Path, base_ref: &str) -> Result<String> {
 /// Fetches a pull request's head into `FETCH_HEAD` and names its commit, for
 /// a head whose branch is checked out somewhere.
 pub(crate) async fn fetch_pull_request_head_commit(cwd: &Path, number: u64) -> Result<String> {
-    let remote = primary_remote(cwd)
-        .ok_or_else(|| failed("GitVcsDriver.resolvePrimaryRemoteName", cwd, "No git remote is configured for this repository."))?;
+    let remote = primary_remote(cwd).ok_or_else(|| {
+        failed(
+            "GitVcsDriver.resolvePrimaryRemoteName",
+            cwd,
+            "No git remote is configured for this repository.",
+        )
+    })?;
     fetch(cwd, &remote, Some(&format!("refs/pull/{number}/head")))
         .await
         .map_err(|_| {
@@ -336,9 +343,12 @@ pub(crate) async fn fetch_pull_request_head_commit(cwd: &Path, number: u64) -> R
 }
 
 pub(crate) fn resolve_commit(cwd: &Path, revision: &str) -> Result<String> {
-    stdout(cwd, &["rev-parse", "--verify", &format!("{revision}^{{commit}}")])
-        .filter(|sha| !sha.is_empty())
-        .ok_or_else(|| failed("GitVcsDriver.resolveCommit", cwd, "git rev-parse failed"))
+    stdout(
+        cwd,
+        &["rev-parse", "--verify", &format!("{revision}^{{commit}}")],
+    )
+    .filter(|sha| !sha.is_empty())
+    .ok_or_else(|| failed("GitVcsDriver.resolveCommit", cwd, "git rev-parse failed"))
 }
 
 pub(crate) fn set_branch_upstream(

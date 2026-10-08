@@ -3,20 +3,22 @@
 //! pull, the stacked commit / push / PR actions, worktrees and `git init`.
 //! `Changes` compares the working tree, untracked files included, with the
 //! merge base of HEAD and the base branch.
-mod broadcaster;
 mod actions;
+mod broadcaster;
 mod diff;
+mod pr_checkout;
 pub(crate) mod process;
 mod pull;
 mod pull_requests;
-mod pr_checkout;
 mod refs;
 mod status;
 mod worktree_ops;
 
 pub(crate) use actions::start as start_action;
 pub(crate) use broadcaster::VcsStatusBroadcaster;
-pub(crate) use pr_checkout::{prepare as prepare_pull_request_thread, publish, resolve as resolve_pull_request};
+pub(crate) use pr_checkout::{
+    prepare as prepare_pull_request_thread, publish, resolve as resolve_pull_request,
+};
 pub(crate) use pull::pull_current_branch;
 pub(crate) use refs::{create_ref, refs, switch_ref};
 pub(crate) use status::{BranchHead, branch_head, local_status};
@@ -194,14 +196,12 @@ pub(super) fn primary_remote(cwd: &Path) -> Option<String> {
 /// on `gh`'s implicit working-directory discovery, which is ambiguous for
 /// enterprise hosts and fork checkouts.
 pub(super) fn github_scope(cwd: &Path) -> (Option<String>, Option<String>) {
-    let remote = primary_remote(cwd)
-        .and_then(|name| config_value(cwd, &format!("remote.{name}.url")));
+    let remote =
+        primary_remote(cwd).and_then(|name| config_value(cwd, &format!("remote.{name}.url")));
     let repository = remote
         .as_deref()
         .and_then(pull_requests::repository_name_with_owner);
-    let host = remote
-        .as_deref()
-        .and_then(crate::repository::remote_host);
+    let host = remote.as_deref().and_then(crate::repository::remote_host);
     (repository, host)
 }
 

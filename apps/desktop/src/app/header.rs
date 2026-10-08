@@ -9,7 +9,9 @@ use super::{
 };
 use agent_core::{
     state::Intent,
-    view::header::{HeaderInput, PanelToggle, ThreadHeaderView, snapshot_thread_header, thread_header},
+    view::header::{
+        HeaderInput, PanelToggle, ThreadHeaderView, snapshot_thread_header, thread_header,
+    },
 };
 use gpui_kit::{
     component::{h_flex, menu::PopupMenuItem, tooltip::Tooltip},

@@ -230,9 +230,15 @@ async fn searches_text_with_ranges_case_and_whole_word_filters() {
         .unwrap();
     assert_eq!(result.matches.len(), 2);
     assert_eq!(result.matches[0].line_number, 1);
-    assert_eq!(result.matches[0].match_ranges, [ContentMatchRange { start: 0, end: 4 }]);
+    assert_eq!(
+        result.matches[0].match_ranges,
+        [ContentMatchRange { start: 0, end: 4 }]
+    );
     assert_eq!(result.matches[1].line_number, 2);
-    assert_eq!(result.matches[1].match_ranges, [ContentMatchRange { start: 9, end: 13 }]);
+    assert_eq!(
+        result.matches[1].match_ranges,
+        [ContentMatchRange { start: 9, end: 13 }]
+    );
 }
 
 #[tokio::test]
@@ -254,7 +260,14 @@ async fn content_search_honors_gitignore_and_reports_invalid_regex() {
         })
         .await
         .unwrap();
-    assert_eq!(result.matches.iter().map(|item| item.path.as_str()).collect::<Vec<_>>(), ["kept.txt"]);
+    assert_eq!(
+        result
+            .matches
+            .iter()
+            .map(|item| item.path.as_str())
+            .collect::<Vec<_>>(),
+        ["kept.txt"]
+    );
     let invalid = WorkspaceSearch::default()
         .search_contents(SearchContents {
             cwd: root.to_string_lossy().into_owned(),

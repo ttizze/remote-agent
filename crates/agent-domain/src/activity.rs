@@ -639,11 +639,7 @@ pub fn bounded_activity_link(value: &str) -> String {
                     segments.len() == 2 && segments.iter().all(|segment| !segment.is_empty())
                 })));
     valid.then(|| value.to_owned()).unwrap_or_default()
-
 }
-
-
-
 
 /// Trims a display string and bounds it in UTF-16 units without splitting a
 /// surrogate pair. The ellipsis is part of the display budget.

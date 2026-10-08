@@ -97,7 +97,9 @@ impl DeviceState {
 
 impl Desktop {
     fn release_device_input(&mut self) {
-        let Some(thread) = self.thread_id() else { return };
+        let Some(thread) = self.thread_id() else {
+            return;
+        };
         let sessions = self
             .snapshot
             .device()
@@ -123,7 +125,9 @@ impl Desktop {
     }
 
     fn release_device_input_for(&mut self, host_id: &str, device_id: &str) {
-        let Some(thread) = self.thread_id() else { return };
+        let Some(thread) = self.thread_id() else {
+            return;
+        };
         let session_epoch = self
             .snapshot
             .device()
@@ -140,17 +144,13 @@ impl Desktop {
             device_id: device_id.to_owned(),
             session_epoch,
         });
-        if self
-            .panels
-            .device
-            .keyboard_target
-            .as_ref()
-            .is_some_and(|(current_thread, current_host, current_device, _)| {
+        if self.panels.device.keyboard_target.as_ref().is_some_and(
+            |(current_thread, current_host, current_device, _)| {
                 current_thread == thread.as_str()
                     && current_host == host_id
                     && current_device == device_id
-            })
-        {
+            },
+        ) {
             self.panels.device.keyboard_target = None;
         }
     }
@@ -170,26 +170,30 @@ impl Desktop {
         if phase == "begin" {
             self.send_device_touch_end();
         }
-        let current_epoch = self
-            .thread_id()
-            .and_then(|thread| {
-                self.snapshot
-                    .device()
-                    .sessions
-                    .iter()
-                    .find(|session| {
-                        session.thread_id == thread
-                            && session.host_id == host_id
-                            && session.device_id == device_id
-                    })
-                    .map(|session| session.session_epoch.clone())
-            });
+        let current_epoch = self.thread_id().and_then(|thread| {
+            self.snapshot
+                .device()
+                .sessions
+                .iter()
+                .find(|session| {
+                    session.thread_id == thread
+                        && session.host_id == host_id
+                        && session.device_id == device_id
+                })
+                .map(|session| session.session_epoch.clone())
+        });
         if current_epoch.as_deref() != Some(session_epoch.as_str()) {
-            if self.panels.device.active_touch.as_ref().is_some_and(|touch| {
-                touch.host_id == host_id
-                    && touch.device_id == device_id
-                    && touch.screen_id == screen_id
-            }) {
+            if self
+                .panels
+                .device
+                .active_touch
+                .as_ref()
+                .is_some_and(|touch| {
+                    touch.host_id == host_id
+                        && touch.device_id == device_id
+                        && touch.screen_id == screen_id
+                })
+            {
                 self.panels.device.active_touch = None;
             }
             cx.stop_propagation();
@@ -316,7 +320,12 @@ impl Desktop {
         }) {
             return;
         }
-        let target = (thread_id.clone(), host_id.clone(), device_id.clone(), session_epoch.clone());
+        let target = (
+            thread_id.clone(),
+            host_id.clone(),
+            device_id.clone(),
+            session_epoch.clone(),
+        );
         if self.panels.device.keyboard_target.as_ref() != Some(&target) {
             if let Some((_old_thread, old_host, old_device, old_epoch)) =
                 self.panels.device.keyboard_target.replace(target)
@@ -588,16 +597,12 @@ impl Desktop {
         {
             self.send_device_touch_end();
         }
-        if self
-            .panels
-            .device
-            .keyboard_target
-            .as_ref()
-            .is_some_and(|(thread_id, host_id, device_id, epoch)| {
+        if self.panels.device.keyboard_target.as_ref().is_some_and(
+            |(thread_id, host_id, device_id, epoch)| {
                 thread_id != thread.as_str()
                     || live_epochs.get(&(host_id.clone(), device_id.clone())) != Some(epoch)
-            })
-        {
+            },
+        ) {
             self.panels.device.keyboard_target = None;
         }
         self.panels

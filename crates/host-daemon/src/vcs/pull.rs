@@ -22,8 +22,8 @@ pub(crate) async fn pull_current_branch(cwd: &str) -> Result<PullResult> {
     let (branch, upstream, before) = tokio::task::spawn_blocking({
         let cwd = cwd.clone();
         move || -> Result<_> {
-            let details = remote_details(&cwd)?
-                .ok_or_else(|| failed(&cwd, "Not a Git repository."))?;
+            let details =
+                remote_details(&cwd)?.ok_or_else(|| failed(&cwd, "Not a Git repository."))?;
             let branch = details
                 .branch
                 .ok_or_else(|| failed(&cwd, "Cannot pull from detached HEAD."))?;

@@ -7,10 +7,10 @@ use super::{
 };
 use agent_domain::{
     BackgroundKind, Command, CompletionWake, DeliveryState, DispatchMode, Driver, InputIntent,
-    InteractionMode, ItemStatus, LinkedPullRequest, MessageAuthor, MessageId, ModelSelection,
-    MIN_SCHEDULED_TASK_INTERVAL_MS, NodeId, NotificationSource, Run, RunId, RunStatus,
-    RuntimeMode, Schedule, SendMessage, State, Task, ThreadId, delegated_result,
-    delegated_task_status, parse_time_of_day,
+    InteractionMode, ItemStatus, LinkedPullRequest, MIN_SCHEDULED_TASK_INTERVAL_MS, MessageAuthor,
+    MessageId, ModelSelection, NodeId, NotificationSource, Run, RunId, RunStatus, RuntimeMode,
+    Schedule, SendMessage, State, Task, ThreadId, delegated_result, delegated_task_status,
+    parse_time_of_day,
 };
 use agent_runtime::{ScheduledTask, ScheduledTaskInput, WorkspaceStrategy};
 use serde::Deserialize;
@@ -844,11 +844,7 @@ impl AgentTools {
         }))
     }
 
-    pub(crate) async fn update_scheduled_task(
-        &self,
-        scope: Scope<'_>,
-        input: &Value,
-    ) -> Outcome {
+    pub(crate) async fn update_scheduled_task(&self, scope: Scope<'_>, input: &Value) -> Outcome {
         let input: UpdateScheduledTaskInput = decode(input)?;
         let parent = self.load_caller(scope).await?;
         self.require_capability(scope, &parent)?;
@@ -901,11 +897,7 @@ impl AgentTools {
         Ok(scheduled_task_summary(&task))
     }
 
-    pub(crate) async fn delete_scheduled_task(
-        &self,
-        scope: Scope<'_>,
-        input: &Value,
-    ) -> Outcome {
+    pub(crate) async fn delete_scheduled_task(&self, scope: Scope<'_>, input: &Value) -> Outcome {
         let input: ScheduledTaskRefInput = decode(input)?;
         let parent = self.load_caller(scope).await?;
         self.require_capability(scope, &parent)?;
@@ -919,11 +911,7 @@ impl AgentTools {
         Ok(json!({"scheduledTaskId": existing.id, "deleted": true}))
     }
 
-    pub(crate) async fn run_scheduled_task_now(
-        &self,
-        scope: Scope<'_>,
-        input: &Value,
-    ) -> Outcome {
+    pub(crate) async fn run_scheduled_task_now(&self, scope: Scope<'_>, input: &Value) -> Outcome {
         let input: RunScheduledTaskInput = decode(input)?;
         let parent = self.load_caller(scope).await?;
         self.require_capability(scope, &parent)?;

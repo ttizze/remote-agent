@@ -1,10 +1,10 @@
 //! `gh` as the Host runs it: bounded output, a timeout, and failures sorted
 //! into sign-in, rate limit, not found and plain command failures without
 //! retaining the tool's output, which can carry tokens.
-use serde::Deserialize;
-use serde_json::Value;
 use crate::vcs::process::{CommandCancelled, CommandTimedOut, execute_program};
 pub(crate) use agent_protocol::vcs::{ChangeRequestState, RepositoryVisibility};
+use serde::Deserialize;
+use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
@@ -734,10 +734,7 @@ impl GitHubCli {
         host: Option<&str>,
         cancel: Option<&CancellationToken>,
     ) -> Result<Output, GhError> {
-        let mut env = vec![
-            ("GH_PROMPT_DISABLED", "1"),
-            ("GH_NO_UPDATE_NOTIFIER", "1"),
-        ];
+        let mut env = vec![("GH_PROMPT_DISABLED", "1"), ("GH_NO_UPDATE_NOTIFIER", "1")];
         if let Some(host) = host
             .map(str::trim)
             .filter(|host| !host.is_empty() && !host.eq_ignore_ascii_case("github.com"))
@@ -1001,7 +998,12 @@ impl GitHubCli {
     ) -> Result<Option<String>, GhError> {
         let repository = scoped_repository(host, repository);
         let mut args = vec!["repo", "view", &repository];
-        args.extend(["--json", "defaultBranchRef", "--jq", ".defaultBranchRef.name"]);
+        args.extend([
+            "--json",
+            "defaultBranchRef",
+            "--jq",
+            ".defaultBranchRef.name",
+        ]);
         let output = self
             .run_with_host_cancel(cwd, &args, Budget::default(), host, cancel)
             .await?;
@@ -1015,7 +1017,13 @@ impl GitHubCli {
         host: Option<&str>,
     ) -> Result<CloneUrls, GhError> {
         let repository = scoped_repository(host, repository);
-        let args = ["repo", "view", &repository, "--json", "nameWithOwner,url,sshUrl"];
+        let args = [
+            "repo",
+            "view",
+            &repository,
+            "--json",
+            "nameWithOwner,url,sshUrl",
+        ];
         let value = self
             .run_json_with_host(cwd, &args, Budget::default(), host)
             .await?;
@@ -1042,7 +1050,11 @@ impl GitHubCli {
                 host,
             )
             .await?;
-        Ok(clone_urls_from_create_output(&output.stdout, repository, host))
+        Ok(clone_urls_from_create_output(
+            &output.stdout,
+            repository,
+            host,
+        ))
     }
 
     pub(crate) async fn checkout_pull_request(
@@ -1224,10 +1236,7 @@ mod tests {
     #[test]
     fn failures_are_classified_without_retaining_stderr() {
         assert_eq!(
-            classify_failure(
-                "authentication failed for token redacted-value",
-                Some(1)
-            ),
+            classify_failure("authentication failed for token redacted-value", Some(1)),
             GhError::Authentication
         );
         assert_eq!(
@@ -1372,7 +1381,10 @@ mod tests {
             gh.calls(),
             vec!["pr list --repo ghe.example/acme/tool --head feature --state open --limit 100 --json number,title,url,baseRefName,headRefName,headRefOid,state,isDraft,mergedAt,closedAt,updatedAt,isCrossRepository,headRepository,headRepositoryOwner".to_owned()]
         );
-        assert_eq!(scoped_repository(Some("ghe.example"), "acme/tool"), "ghe.example/acme/tool");
+        assert_eq!(
+            scoped_repository(Some("ghe.example"), "acme/tool"),
+            "ghe.example/acme/tool"
+        );
     }
 
     #[tokio::test]
@@ -1446,7 +1458,10 @@ mod tests {
 
     #[tokio::test]
     async fn stderr_is_drained_with_the_same_memory_budget() {
-        let gh = FakeGh::new(&[("api *", "head -c 5000 /dev/zero | tr '\\0' 'e' >&2; echo ok")]);
+        let gh = FakeGh::new(&[(
+            "api *",
+            "head -c 5000 /dev/zero | tr '\\0' 'e' >&2; echo ok",
+        )]);
         let directory = cwd();
         let output = gh
             .cli()

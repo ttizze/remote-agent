@@ -78,7 +78,9 @@ pub(super) const SECTION: Section = Section {
                     ..row(
                         SettingId::AddProjectBaseDirectory,
                         "Add-project folder",
-                        Some("Start the add-project folder picker here; leave empty for your home directory."),
+                        Some(
+                            "Start the add-project folder picker here; leave empty for your home directory.",
+                        ),
                         SettingControl::Text {
                             value: host.add_project_base_directory.clone(),
                             placeholder: Some("Home directory".into()),
@@ -193,7 +195,9 @@ pub(super) const SECTION: Section = Section {
         )),
         SettingId::AddProjectBaseDirectory => Some(update(
             &SettingsScope::Host,
-            SettingChange::AddProjectBaseDirectory { value: String::new() },
+            SettingChange::AddProjectBaseDirectory {
+                value: String::new(),
+            },
         )),
         _ => None,
     },
@@ -213,7 +217,12 @@ mod tests {
     fn add_project_base_directory_is_a_persisted_host_setting() {
         let mut host = HostSettings::default();
         host.add_project_base_directory = "~/projects".into();
-        let view = settings_view(&Snapshot::default(), Some(&host), &SettingsScope::Host, TimestampFormat::Locale);
+        let view = settings_view(
+            &Snapshot::default(),
+            Some(&host),
+            &SettingsScope::Host,
+            TimestampFormat::Locale,
+        );
         let row = view
             .sections
             .iter()
@@ -230,7 +239,9 @@ mod tests {
                 &Snapshot::default(),
                 &SettingsScope::Host,
                 SettingId::AddProjectBaseDirectory,
-                &SettingValue::Text { value: " /tmp/projects ".into() },
+                &SettingValue::Text {
+                    value: " /tmp/projects ".into()
+                },
             ),
             Some(crate::state::Intent::UpdateSettings {
                 scope: SettingsScope::Host,

@@ -310,10 +310,7 @@ fn a_launch_opens_its_thread_once_the_shell_shows_it() {
     live_shell(&mut owner, 5, vec![row(&entry.thread)]);
     assert_eq!(owner.state.selected_thread, Some(entry.thread.clone()));
     assert_eq!(owner.state.current_draft().text, "Next message");
-    assert_eq!(
-        owner.state.drafts[entry.thread.as_str()].project_id,
-        None
-    );
+    assert_eq!(owner.state.drafts[entry.thread.as_str()].project_id, None);
     assert!(owner.state.drafts[&follow_up_key].text.is_empty());
     assert_eq!(owner.state.drafts[&follow_up_key].project_id, None);
     assert_eq!(
@@ -2266,18 +2263,22 @@ fn browser_preferences_validate_persist_and_project_a_safe_default() {
         owner.state.preferences.browser
     );
 
-    assert!(owner
-        .prepare(Intent::SetBrowserRecordingFrameRate { frame_rate: 59 })
-        .is_err());
-    assert!(owner
-        .prepare(Intent::SetBrowserProfiles {
-            profiles: vec![crate::view::browser::BrowserProfile {
-                id: "bad\0id".into(),
-                name: "Bad".into(),
-                kind: crate::view::browser::BrowserProfileKind::Persistent,
-            }],
-        })
-        .is_err());
+    assert!(
+        owner
+            .prepare(Intent::SetBrowserRecordingFrameRate { frame_rate: 59 })
+            .is_err()
+    );
+    assert!(
+        owner
+            .prepare(Intent::SetBrowserProfiles {
+                profiles: vec![crate::view::browser::BrowserProfile {
+                    id: "bad\0id".into(),
+                    name: "Bad".into(),
+                    kind: crate::view::browser::BrowserProfileKind::Persistent,
+                }],
+            })
+            .is_err()
+    );
 }
 
 #[test]
@@ -2319,12 +2320,14 @@ fn browser_profile_intents_share_naming_and_reset_default_after_removal() {
         owner.state.preferences.browser.default_profile_id,
         crate::view::browser::DEFAULT_BROWSER_PROFILE_ID
     );
-    assert!(owner
-        .prepare(Intent::RenameBrowserProfile {
-            profile_id: crate::view::browser::DEFAULT_BROWSER_PROFILE_ID.into(),
-            name: "Nope".into(),
-        })
-        .is_err());
+    assert!(
+        owner
+            .prepare(Intent::RenameBrowserProfile {
+                profile_id: crate::view::browser::DEFAULT_BROWSER_PROFILE_ID.into(),
+                name: "Nope".into(),
+            })
+            .is_err()
+    );
 }
 
 #[test]
@@ -2731,8 +2734,14 @@ fn each_new_thread_navigation_mints_an_independent_draft() {
     let second = owner.state.new_thread_draft_key();
     assert_ne!(first, second);
     assert_eq!(owner.state.drafts[&first].text, "keep");
-    assert_eq!(owner.state.drafts[&first].project_id.as_deref(), Some("first"));
-    assert_eq!(owner.state.drafts[&second].project_id.as_deref(), Some("second"));
+    assert_eq!(
+        owner.state.drafts[&first].project_id.as_deref(),
+        Some("first")
+    );
+    assert_eq!(
+        owner.state.drafts[&second].project_id.as_deref(),
+        Some("second")
+    );
 }
 
 #[test]
@@ -2829,7 +2838,10 @@ fn initial_new_thread_dictation_uses_the_draft_identity() {
         Next::Call(_, Some(sent)) => assert_eq!(sent.as_ref().0, key),
         _ => panic!("dictation should retain the draft it will update"),
     }
-    assert_eq!(owner.state.drafts[&key].project_id.as_deref(), Some("chats"));
+    assert_eq!(
+        owner.state.drafts[&key].project_id.as_deref(),
+        Some("chats")
+    );
 }
 
 // mobile queries.ts usePaginatedBranches: later pages join the first.
@@ -3150,11 +3162,13 @@ fn reconnect_requeues_search_and_lazy_diff_jobs() {
     };
     owner.state.sources.diff_files = Some(diff.clone());
     owner.abandon_requests();
-    assert!(owner
-        .state
-        .search_request
-        .as_ref()
-        .is_some_and(|request| request.due_at_ms.is_some()));
+    assert!(
+        owner
+            .state
+            .search_request
+            .as_ref()
+            .is_some_and(|request| request.due_at_ms.is_some())
+    );
     assert!(owner.state.sources.entries.due_at_ms.is_some());
     diff = owner.state.sources.diff_files.take().unwrap();
     assert!(diff.superseded.is_empty());
@@ -3489,7 +3503,16 @@ fn reloading_a_diff_focus_invalidates_the_old_preview_and_lazy_files() {
         duo_request: None,
         device_input_target: None,
     });
-    assert!(owner.state.sources.diff_preview.as_ref().unwrap().result.is_none());
+    assert!(
+        owner
+            .state
+            .sources
+            .diff_preview
+            .as_ref()
+            .unwrap()
+            .result
+            .is_none()
+    );
     owner.finished(JobResult {
         call: current,
         result: Ok(CallReply::DiffPreview(w::DiffPreviewResult {
@@ -3503,14 +3526,16 @@ fn reloading_a_diff_focus_invalidates_the_old_preview_and_lazy_files() {
         duo_request: None,
         device_input_target: None,
     });
-    assert!(owner
-        .state
-        .sources
-        .diff_preview
-        .as_ref()
-        .unwrap()
-        .result
-        .is_some());
+    assert!(
+        owner
+            .state
+            .sources
+            .diff_preview
+            .as_ref()
+            .unwrap()
+            .result
+            .is_some()
+    );
 }
 
 #[test]

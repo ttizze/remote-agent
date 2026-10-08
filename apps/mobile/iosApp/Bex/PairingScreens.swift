@@ -196,7 +196,8 @@ struct ProfilesScreen: View {
                                     Text(profile.name).font(.headline)
                                     Text(environment.map { current in
                                         [current.state, current.platform, current.machine,
-                                         current.capabilities.isEmpty ? nil : "\(current.capabilities.count) capabilities"]
+                                         current.capabilities
+                                             .isEmpty ? nil : "\(current.capabilities.count) capabilities"]
                                             .compactMap { value in value }
                                             .joined(separator: " · ")
                                     } ?? "登録済みのPC")

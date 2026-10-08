@@ -549,7 +549,9 @@ pub fn pending_task_actions(kind: PendingTaskKind) -> PendingTaskActions {
             is_draft: false,
         },
         PendingTaskKind::Draft { draft_key } => PendingTaskActions {
-            open: Intent::OpenDraft { draft_key: draft_key.clone() },
+            open: Intent::OpenDraft {
+                draft_key: draft_key.clone(),
+            },
             discard: Intent::DiscardDraft { draft_key },
             status: "Draft".into(),
             is_draft: true,

@@ -56,9 +56,7 @@ impl ProvidersState {
         Self {
             selected: ProviderKind::Codex,
             code: cx.new(|cx| InputState::new(window, cx)),
-            acp_query: cx.new(|cx| {
-                InputState::new(window, cx).placeholder("Search ACP agents")
-            }),
+            acp_query: cx.new(|cx| InputState::new(window, cx).placeholder("Search ACP agents")),
             closed_logins: BTreeSet::new(),
             started: None,
         }
@@ -251,18 +249,24 @@ impl Desktop {
                     .environment_registry
                     .snapshot(&id)
                     .and_then(|snapshot| {
-                        snapshot.preferences.load_balancing_weights.get(&id).copied()
+                        snapshot
+                            .preferences
+                            .load_balancing_weights
+                            .get(&id)
+                            .copied()
                     })
-                    .or_else(|| self.snapshot.preferences.load_balancing_weights.get(&id).copied());
+                    .or_else(|| {
+                        self.snapshot
+                            .preferences
+                            .load_balancing_weights
+                            .get(&id)
+                            .copied()
+                    });
                 let preference = load_balancing::preference_for_weight(weight);
                 let title = environment.descriptor.label.clone();
                 let detail = match environment.connection {
-                    agent_core::environment::EnvironmentConnectionState::Connected => {
-                        "Connected"
-                    }
-                    agent_core::environment::EnvironmentConnectionState::Connecting => {
-                        "Connecting"
-                    }
+                    agent_core::environment::EnvironmentConnectionState::Connected => "Connected",
+                    agent_core::environment::EnvironmentConnectionState::Connecting => "Connecting",
                     agent_core::environment::EnvironmentConnectionState::Disconnected => {
                         "Disconnected"
                     }
@@ -318,7 +322,9 @@ impl Desktop {
         rows.insert(
             0,
             Row::new("load-balancing-toggle")
-                .description("New threads in shared projects use the machine with the most free capacity.")
+                .description(
+                    "New threads in shared projects use the machine with the most free capacity.",
+                )
                 .control(toggle.into_any_element())
                 .render(),
         );
@@ -326,7 +332,10 @@ impl Desktop {
             .gap(px(8.))
             .child(section(
                 Some("Load balancing".into()),
-                Some("Choose how often each connected environment receives automatic new threads.".into()),
+                Some(
+                    "Choose how often each connected environment receives automatic new threads."
+                        .into(),
+                ),
                 None,
                 rows,
             ))
@@ -563,9 +572,12 @@ impl Desktop {
             .into_iter()
             .find(|usage| usage.source_account_ids.iter().any(|id| id == &account.id));
         if let Some(usage) = &limit {
-            details.extend(usage.windows.iter().map(|window| {
-                format!("{} {}% left", window.label, window.remaining_percent)
-            }));
+            details.extend(
+                usage
+                    .windows
+                    .iter()
+                    .map(|window| format!("{} {}% left", window.label, window.remaining_percent)),
+            );
             if usage.reset_credit_count > 0 {
                 details.push(format!("{} reset credit(s)", usage.reset_credit_count));
             }
@@ -580,8 +592,12 @@ impl Desktop {
             .as_ref()
             .and_then(|usage| usage.reset_credit_account_id.clone())
             .unwrap_or_else(|| account.id.clone());
-        let reset_credit_id = limit.as_ref().and_then(|usage| usage.next_credit_id.clone());
-        let can_reset = limit.as_ref().is_some_and(|usage| usage.reset_credit_count > 0);
+        let reset_credit_id = limit
+            .as_ref()
+            .and_then(|usage| usage.next_credit_id.clone());
+        let can_reset = limit
+            .as_ref()
+            .is_some_and(|usage| usage.reset_credit_count > 0);
         let external_url = limit.as_ref().and_then(|usage| usage.external_url.clone());
         let label = provider_name(provider);
         let message = format!(

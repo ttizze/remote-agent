@@ -43,7 +43,10 @@ pub fn watch_is_due(link: &PullRequestLink, now: &Timestamp, interval: Duration)
         return false;
     }
     let elapsed = now.millis().saturating_sub(watch.started_at.millis());
-    elapsed >= interval.as_millis().saturating_mul((watch.wakes as u128).saturating_add(1)) as i64
+    elapsed
+        >= interval
+            .as_millis()
+            .saturating_mul((watch.wakes as u128).saturating_add(1)) as i64
 }
 
 pub fn start_watch(now: Timestamp, head_sha: Option<String>) -> PullRequestWatch {
@@ -132,11 +135,12 @@ pub fn update_watch_detail(
                 .map(|actor| actor.login.to_ascii_lowercase())
         });
     let mut remarks: BTreeMap<String, &agent_domain::PullRequestComment> = BTreeMap::new();
-    for comment in detail
-        .comments
-        .iter()
-        .chain(detail.review_threads.iter().flat_map(|thread| thread.comments.iter()))
-    {
+    for comment in detail.comments.iter().chain(
+        detail
+            .review_threads
+            .iter()
+            .flat_map(|thread| thread.comments.iter()),
+    ) {
         if own_login.as_deref().is_some_and(|own| {
             comment
                 .author
@@ -161,7 +165,11 @@ pub fn update_watch_detail(
         })
         .copied()
         .collect::<Vec<_>>();
-    if let Some(latest) = fresh.iter().map(|comment| comment.created_at.millis()).max() {
+    if let Some(latest) = fresh
+        .iter()
+        .map(|comment| comment.created_at.millis())
+        .max()
+    {
         if let Ok(timestamp) = Timestamp::from_millis(latest) {
             watch.remarks_through = Some(timestamp);
             watch.remark_ids = fresh
@@ -206,7 +214,11 @@ pub fn update_watch_detail(
         lines.push(format!(
             "- {} new {}:",
             fresh.len(),
-            if fresh.len() == 1 { "comment" } else { "comments" }
+            if fresh.len() == 1 {
+                "comment"
+            } else {
+                "comments"
+            }
         ));
         for comment in fresh.iter().take(10) {
             let body = comment
@@ -232,12 +244,7 @@ pub fn update_watch_detail(
             MAX_WATCH_WAKES
         ));
     }
-    let detail_text = lines
-        .iter()
-        .skip(1)
-        .cloned()
-        .collect::<Vec<_>>()
-        .join(" ");
+    let detail_text = lines.iter().skip(1).cloned().collect::<Vec<_>>().join(" ");
     Some(PullRequestWatchWake {
         text: lines.join("\n"),
         detail: truncate_chars(&detail_text, 500),

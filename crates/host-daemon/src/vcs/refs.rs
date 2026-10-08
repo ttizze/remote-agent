@@ -292,7 +292,12 @@ pub(crate) async fn create_ref(request: CreateRef) -> Result<SwitchedRef> {
 pub(crate) fn list_local_branch_names(cwd: &Path) -> Result<Vec<String>> {
     let run = git(
         cwd,
-        &["branch", "--list", "--no-column", "--format=%(refname:short)"],
+        &[
+            "branch",
+            "--list",
+            "--no-column",
+            "--format=%(refname:short)",
+        ],
         Options::default(),
     )?;
     if !run.ok() {

@@ -87,7 +87,8 @@ impl Page {
     }
 
     fn remove_from_selections(&mut self, tab_id: &str) {
-        self.active_by_owner.retain(|_, selected| selected != tab_id);
+        self.active_by_owner
+            .retain(|_, selected| selected != tab_id);
         if self.active == tab_id {
             self.active = self.tabs.last().cloned().unwrap_or_default();
         }
@@ -106,11 +107,7 @@ fn can_access_preview_tab(page: &Page, owner: Option<&str>, tab_id: &str) -> boo
     !page.preview_tabs.contains(tab_id)
         || owner.is_none_or(|owner| {
             owner == COLLABORATIVE_BROWSER_OWNER
-                || page
-                    .preview_profile_owners
-                    .get(tab_id)
-                    .map(String::as_str)
-                    == Some(owner)
+                || page.preview_profile_owners.get(tab_id).map(String::as_str) == Some(owner)
         })
 }
 
@@ -568,7 +565,8 @@ impl Browser {
                     while entries.len() > 1 {
                         paths_to_remove.push(PathBuf::from(entries.remove(0).path));
                     }
-                    let evicted = prune_completed_recordings(&mut artifacts, MAX_RETAINED_RECORDINGS);
+                    let evicted =
+                        prune_completed_recordings(&mut artifacts, MAX_RETAINED_RECORDINGS);
                     for (key, path) in evicted {
                         invalidated_recordings.push(key);
                         paths_to_remove.push(path);
@@ -598,11 +596,7 @@ impl Browser {
             if let Some(preview) = preview.as_ref()
                 && let Ok(thread_id) = agent_domain::ThreadId::new(monitor_thread.clone())
             {
-                preview.recording_finished(
-                    &thread_id,
-                    &monitor_tab_id,
-                    &monitor_recording_id,
-                );
+                preview.recording_finished(&thread_id, &monitor_tab_id, &monitor_recording_id);
             }
             if externally_detached
                 && let Some(preview) = preview.as_ref()
@@ -613,9 +607,7 @@ impl Browser {
             let mut recordings = recordings.lock().await;
             if recordings
                 .get(&monitor_key)
-                .is_some_and(|active| {
-                    active.recording_id.as_str() == monitor_recording_id.as_str()
-                })
+                .is_some_and(|active| active.recording_id.as_str() == monitor_recording_id.as_str())
             {
                 recordings.remove(&monitor_key);
             }
@@ -765,8 +757,7 @@ impl Browser {
             let mut recordings = self.recordings.lock().await;
             match recordings.get_mut(&key) {
                 Some(active) => {
-                    if expected_recording_id
-                        .is_some_and(|expected| expected != active.recording_id)
+                    if expected_recording_id.is_some_and(|expected| expected != active.recording_id)
                     {
                         return Err(format!(
                             "recording lifetime changed for preview tab {tab_id}"
@@ -1012,10 +1003,6 @@ impl Browser {
             .get(&(thread.to_owned(), tab_id.to_owned()))
             .map(|active| active.recording_id.clone())
             .ok_or_else(|| format!("recording is not active for preview tab {tab_id}"))
-    }
-
-    pub async fn preview_active_tab(&self, thread: &str) -> Result<String, String> {
-        self.preview_active_tab_for_owner(COLLABORATIVE_BROWSER_OWNER, thread).await
     }
 
     pub(crate) async fn preview_active_tab_for_owner(
@@ -1349,11 +1336,7 @@ impl Browser {
         Ok(())
     }
 
-    pub async fn request(&self, request: &BrowserRequest) -> Result<BrowserFrame, String> {
-        self.request_for_owner(COLLABORATIVE_BROWSER_OWNER, request).await
-    }
-
-    pub(crate) async fn request_for_owner(
+    pub async fn request_for_owner(
         &self,
         owner: &str,
         request: &BrowserRequest,
@@ -1369,11 +1352,7 @@ impl Browser {
         };
         let viewport = state.pages[&thread].viewport_for(&active);
         request.validate_for_viewport(viewport.0, viewport.1)?;
-        validate_tab(
-            &active,
-            &request.tab_id,
-            &request.action,
-        )?;
+        validate_tab(&active, &request.tab_id, &request.action)?;
         Self::action(&mut state, owner, &thread, &request.action).await?;
         let viewport = state.pages[&thread].viewport_for(&request.tab_id);
         drop(state);
@@ -1390,14 +1369,6 @@ impl Browser {
         }
         self.report_preview_frame(&thread, &frame);
         Ok(frame)
-    }
-
-    pub(super) async fn agent(
-        &self,
-        thread: &str,
-        action: BrowserAction,
-    ) -> Result<BrowserFrame, String> {
-        self.agent_for_owner(COLLABORATIVE_BROWSER_OWNER, thread, action).await
     }
 
     pub(super) async fn agent_for_owner(
@@ -1473,29 +1444,6 @@ impl Browser {
     /// Creates a Host browser tab for the Preview surface and returns its
     /// first frame. Existing agent browser tabs remain in the same conversation
     /// scope and are never replaced.
-    pub async fn open_preview_tab(
-        &self,
-        thread: &str,
-        url: Option<&str>,
-        viewport: PreviewViewportSetting,
-        appearance: PreviewAppearance,
-        zoom: PreviewZoom,
-        rendered_size: Option<PreviewRenderedViewportSize>,
-        profile_id: Option<String>,
-    ) -> Result<BrowserFrame, String> {
-        self.open_preview_tab_for_owner(
-            COLLABORATIVE_BROWSER_OWNER,
-            thread,
-            url,
-            viewport,
-            appearance,
-            zoom,
-            rendered_size,
-            profile_id,
-        )
-        .await
-    }
-
     pub(crate) async fn open_preview_tab_for_owner(
         &self,
         owner: &str,
@@ -1564,11 +1512,6 @@ impl Browser {
     /// Clears the cookies, cache and origin storage for one browser profile
     /// owned by this Host. The profile row remains the caller's responsibility
     /// and must only be removed after this operation returns successfully.
-    pub async fn clear_preview_profile(&self, profile_id: &str) -> Result<(), String> {
-        self.clear_preview_profile_for_owner(COLLABORATIVE_BROWSER_OWNER, profile_id)
-            .await
-    }
-
     pub(crate) async fn clear_preview_profile_for_owner(
         &self,
         owner: &str,
@@ -1607,17 +1550,6 @@ impl Browser {
         result
     }
 
-    pub async fn resize_preview_tab(
-        &self,
-        thread: &str,
-        tab_id: &str,
-        viewport: PreviewViewportSetting,
-        rendered_size: Option<PreviewRenderedViewportSize>,
-    ) -> Result<BrowserFrame, String> {
-        self.resize_preview_tab_for_owner(COLLABORATIVE_BROWSER_OWNER, thread, tab_id, viewport, rendered_size)
-            .await
-    }
-
     pub(crate) async fn resize_preview_tab_for_owner(
         &self,
         owner: &str,
@@ -1648,16 +1580,6 @@ impl Browser {
             page.viewports.insert(tab_id.to_owned(), dimensions);
         }
         Self::frame(&mut state, thread, Some(owner), Some(tab_id)).await
-    }
-
-    pub async fn set_preview_appearance(
-        &self,
-        thread: &str,
-        tab_id: &str,
-        appearance: agent_protocol::preview::PreviewAppearance,
-    ) -> Result<BrowserFrame, String> {
-        self.set_preview_appearance_for_owner(COLLABORATIVE_BROWSER_OWNER, thread, tab_id, appearance)
-            .await
     }
 
     pub(crate) async fn set_preview_appearance_for_owner(
@@ -1700,16 +1622,6 @@ impl Browser {
         Self::frame(&mut state, thread, Some(owner), Some(tab_id)).await
     }
 
-    pub async fn set_preview_zoom(
-        &self,
-        thread: &str,
-        tab_id: &str,
-        zoom: agent_protocol::preview::PreviewZoom,
-    ) -> Result<BrowserFrame, String> {
-        self.set_preview_zoom_for_owner(COLLABORATIVE_BROWSER_OWNER, thread, tab_id, zoom)
-            .await
-    }
-
     pub(crate) async fn set_preview_zoom_for_owner(
         &self,
         owner: &str,
@@ -1748,16 +1660,6 @@ impl Browser {
             .entry(active.clone())
             .and_modify(|settings| settings.1 = zoom);
         Self::frame(&mut state, thread, Some(owner), Some(tab_id)).await
-    }
-
-    pub async fn close_preview_tab(&self, thread: &str, tab_id: &str) -> Result<(), String> {
-        self.close_preview_tab_with_cancel_for_owner(
-            COLLABORATIVE_BROWSER_OWNER,
-            thread,
-            tab_id,
-            CancellationToken::new(),
-        )
-        .await
     }
 
     pub(crate) async fn close_preview_tab_with_cancel_for_owner(
@@ -1899,13 +1801,6 @@ impl Browser {
     /// Returns the tabs currently owned by the shared browser page.  The RPC
     /// Preview manager remains the authoritative metadata owner; this view is
     /// used only by the provider bridge's preview discovery tool.
-    pub async fn preview_list(
-        &self,
-        thread: &str,
-    ) -> Result<agent_protocol::preview::PreviewListResult, String> {
-        self.preview_list_for_owner(COLLABORATIVE_BROWSER_OWNER, thread).await
-    }
-
     pub(crate) async fn preview_list_for_owner(
         &self,
         owner: &str,
@@ -1913,12 +1808,7 @@ impl Browser {
     ) -> Result<agent_protocol::preview::PreviewListResult, String> {
         let thread_id = agent_domain::ThreadId::new(thread.to_owned())
             .map_err(|_| "browser scope is invalid".to_owned())?;
-        let (
-            mut browser_result,
-            detached_preview_tabs,
-            live_preview_tabs,
-            owned_preview_tabs,
-        ) = {
+        let (mut browser_result, detached_preview_tabs, live_preview_tabs, owned_preview_tabs) = {
             let mut state = self.state.lock().await;
             self.ensure(&mut state, thread).await?;
             let (tabs, viewports, settings) = {
@@ -1992,10 +1882,8 @@ impl Browser {
                 .filter(|target| tabs.contains(&target.target_id))
                 .map(|target| {
                     let tab_id = target.target_id.clone();
-                    let (width, height) = viewports
-                        .get(&tab_id)
-                        .copied()
-                        .unwrap_or((WIDTH, HEIGHT));
+                    let (width, height) =
+                        viewports.get(&tab_id).copied().unwrap_or((WIDTH, HEIGHT));
                     let (appearance, zoom) = settings.get(&tab_id).copied().unwrap_or((
                         agent_protocol::preview::PreviewAppearance::System,
                         agent_protocol::preview::PreviewZoom::X100,
@@ -2201,11 +2089,7 @@ impl Browser {
             let page = state.pages.get(thread).unwrap();
             let viewport = page.viewport_for(&active);
             let profile_key = Self::tab_profile(page, &active);
-            (
-                active,
-                viewport,
-                profile_key,
-            )
+            (active, viewport, profile_key)
         };
         let chrome = match profile_key {
             Some(key) => state
@@ -2269,12 +2153,7 @@ impl Browser {
             let active = Self::activate_tab_for_owner(page, owner, preferred)?;
             let viewport = page.viewport_for(&active);
             let profile_key = Self::tab_profile(page, &active);
-            (
-                active.clone(),
-                viewport,
-                page.tabs.clone(),
-                profile_key,
-            )
+            (active.clone(), viewport, page.tabs.clone(), profile_key)
         };
         let (image, dialog) = {
             let chrome = match profile_key {
@@ -2302,12 +2181,9 @@ impl Browser {
                 .filter(|target| {
                     tabs.contains(&target.target_id)
                         && owner.is_none_or(|owner| {
-                            state
-                                .pages
-                                .get(thread)
-                                .is_none_or(|page| {
-                                    can_access_preview_tab(page, Some(owner), &target.target_id)
-                                })
+                            state.pages.get(thread).is_none_or(|page| {
+                                can_access_preview_tab(page, Some(owner), &target.target_id)
+                            })
                         })
                 })
                 .map(|target| BrowserTab {
@@ -2331,8 +2207,7 @@ impl Browser {
         preferred: Option<&str>,
     ) -> Result<String, String> {
         let authorized = |tab_id: &str| {
-            page.tabs.iter().any(|id| id == tab_id)
-                && can_access_preview_tab(page, owner, tab_id)
+            page.tabs.iter().any(|id| id == tab_id) && can_access_preview_tab(page, owner, tab_id)
         };
         let owned_preview = || {
             owner.and_then(|owner| {
@@ -2345,11 +2220,11 @@ impl Browser {
         let selected = owner.and_then(|owner| page.selected_for_owner(Some(owner)));
         let active = preferred
             .filter(|tab_id| authorized(*tab_id))
-            .or_else(|| {
-                selected.filter(|tab_id| authorized(tab_id))
-            })
+            .or_else(|| selected.filter(|tab_id| authorized(tab_id)))
             .or_else(|| owned_preview().map(String::as_str))
-            .or_else(|| (!owner.is_some() && authorized(&page.active)).then_some(page.active.as_str()))
+            .or_else(|| {
+                (!owner.is_some() && authorized(&page.active)).then_some(page.active.as_str())
+            })
             .or_else(|| {
                 page.tabs
                     .iter()

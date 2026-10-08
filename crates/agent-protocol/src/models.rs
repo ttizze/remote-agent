@@ -369,7 +369,6 @@ mod update_tests {
     }
 }
 
-
 /// The stable identity and capabilities of the Host serving a connection.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -501,7 +500,6 @@ pub struct AwarenessSnapshot {
     pub activities: Vec<AwarenessActivity>,
     pub updated_at_ms: i64,
 }
-
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

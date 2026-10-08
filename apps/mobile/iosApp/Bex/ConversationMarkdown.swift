@@ -36,7 +36,10 @@ struct ConversationMarkdown: View {
                                     Text(marker).font(AppTheme.font(16)).foregroundStyle(AppTheme.tertiary)
                                 }
                                 Text(attributed(text, header: style.header))
-                                    .lineSpacing(max(0, AppTheme.markdownBodyLineHeight - AppTheme.markdownFontSize(style.header) * 1.2))
+                                    .lineSpacing(max(
+                                        0,
+                                        AppTheme.markdownBodyLineHeight - AppTheme.markdownFontSize(style.header) * 1.2
+                                    ))
                                     .textSelection(.enabled)
                                     .frame(maxWidth: .infinity, alignment: .leading)
                             }.padding(.leading, style.quoted ? 12 : 0)

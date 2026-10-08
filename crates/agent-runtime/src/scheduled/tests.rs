@@ -237,12 +237,11 @@ async fn due_poll_skips_a_corrupt_schedule_without_defecting_healthy_tasks() {
         .await
         .unwrap();
 
-    let due = h
-        .rig
-        .store
-        .due_scheduled_tasks(&at(NOW))
-        .unwrap();
-    assert_eq!(due.into_iter().map(|task| task.id).collect::<Vec<_>>(), ["due-healthy"]);
+    let due = h.rig.store.due_scheduled_tasks(&at(NOW)).unwrap();
+    assert_eq!(
+        due.into_iter().map(|task| task.id).collect::<Vec<_>>(),
+        ["due-healthy"]
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -462,7 +461,10 @@ async fn cancelling_a_held_dispatch_releases_the_durable_run() {
     let tasks = h.tasks.clone();
     let run = tokio::spawn(async move { tasks.run_now(&task.id).await });
     gate.until_arrived(1).await;
-    assert_eq!(h.task("cancelled").await.last_run_status, ScheduledTaskRunStatus::Running);
+    assert_eq!(
+        h.task("cancelled").await.last_run_status,
+        ScheduledTaskRunStatus::Running
+    );
 
     run.abort();
     assert!(run.await.unwrap_err().is_cancelled());
@@ -541,7 +543,10 @@ async fn a_deleted_and_recreated_task_is_not_stamped_by_the_old_run() {
     let tasks = h.tasks.clone();
     let first = tokio::spawn(async move { tasks.run_now(&task.id).await });
     gate.until_arrived(1).await;
-    assert_eq!(h.task("replace").await.last_run_status, ScheduledTaskRunStatus::Running);
+    assert_eq!(
+        h.task("replace").await.last_run_status,
+        ScheduledTaskRunStatus::Running
+    );
 
     h.tasks.delete("replace").await.unwrap();
     let replacement = h

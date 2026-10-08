@@ -11,13 +11,12 @@ plugins {
 }
 
 fun publicFirebaseOption(property: String, environment: String): String =
-    providers.gradleProperty(property)
-        .orElse(providers.environmentVariable(environment))
-        .orElse("")
-        .get()
+    providers.gradleProperty(property).orElse(providers.environmentVariable(environment)).orElse("").get()
 
 fun buildConfigString(value: String): String {
-    require(value.none { Character.isISOControl(it.code) }) { "Firebase public options cannot contain control characters" }
+    require(value.none { Character.isISOControl(it.code) }) {
+        "Firebase public options cannot contain control characters"
+    }
     return "\"${value.replace("\\", "\\\\").replace("\"", "\\\"")}\""
 }
 
@@ -103,16 +102,18 @@ tasks
 
 tasks.matching { it.name.matches(Regex("merge.*JniLibFolders")) }.configureEach { dependsOn(buildAgentAndroid) }
 
-val releaseSigningValues = listOf(
-    providers.environmentVariable("ANDROID_RELEASE_KEYSTORE").orNull,
-    providers.environmentVariable("ANDROID_RELEASE_KEY_ALIAS").orNull,
-    providers.environmentVariable("ANDROID_RELEASE_KEYSTORE_PASSWORD").orNull,
-    providers.environmentVariable("ANDROID_RELEASE_KEY_PASSWORD").orNull,
-)
+val releaseSigningValues =
+    listOf(
+        providers.environmentVariable("ANDROID_RELEASE_KEYSTORE").orNull,
+        providers.environmentVariable("ANDROID_RELEASE_KEY_ALIAS").orNull,
+        providers.environmentVariable("ANDROID_RELEASE_KEYSTORE_PASSWORD").orNull,
+        providers.environmentVariable("ANDROID_RELEASE_KEY_PASSWORD").orNull,
+    )
 val releaseSigningConfigured = releaseSigningValues.all { !it.isNullOrEmpty() }
 val releaseVersion = providers.gradleProperty("releaseVersion").orNull
 val releaseCode = providers.gradleProperty("releaseCode").orNull?.toIntOrNull()
 val releaseChannel = providers.gradleProperty("releaseChannel").orNull ?: "stable"
+
 require(releaseChannel in setOf("nightly", "preview", "stable")) {
     "releaseChannel must be nightly, preview, or stable"
 }
@@ -144,9 +145,7 @@ android {
         }
     }
     buildTypes {
-        getByName("release") {
-            if (releaseSigningConfigured) signingConfig = signingConfigs.getByName("release")
-        }
+        getByName("release") { if (releaseSigningConfigured) signingConfig = signingConfigs.getByName("release") }
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17

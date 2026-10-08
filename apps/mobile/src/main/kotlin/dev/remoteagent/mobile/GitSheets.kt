@@ -89,24 +89,39 @@ internal fun GitOverviewSheet(model: AndroidAppModel, cwd: String, onDismiss: ()
             onEditingChanged = { editingFiles = it },
             onReset = { excludedFiles = emptySet() },
             onToggle = { path ->
-                excludedFiles = if (path in excludedFiles) {
-                    excludedFiles - path
+                excludedFiles =
+                    if (path in excludedFiles) {
+                        excludedFiles - path
+                    } else {
+                        excludedFiles + path
+                    }
+            },
+        )
+        GitActionRows(
+            menu,
+            noneSelected = selectedFiles.isEmpty(),
+            onAction = { action ->
+                if (action == GitAction.OPEN_PR) {
+                    status?.pullRequestUrl?.let { url ->
+                        context.startActivity(AndroidIntent(AndroidIntent.ACTION_VIEW, Uri.parse(url)))
+                    }
                 } else {
-                    excludedFiles + path
+                    pendingAction = action
+                    confirmation = model.snapshot.gitRequiresDefaultBranchConfirmation(cwd, actionName(action))
+                    if (!confirmation)
+                        runGitAction(
+                            model,
+                            cwd,
+                            action,
+                            commitMessage,
+                            if (allFilesSelected) null else selectedFiles.map { it.path },
+                            false,
+                        ) {
+                            actionId = it
+                        }
                 }
             },
         )
-        GitActionRows(menu, noneSelected = selectedFiles.isEmpty(), onAction = { action ->
-            if (action == GitAction.OPEN_PR) {
-                status?.pullRequestUrl?.let { url ->
-                    context.startActivity(AndroidIntent(AndroidIntent.ACTION_VIEW, Uri.parse(url)))
-                }
-            } else {
-                pendingAction = action
-                confirmation = model.snapshot.gitRequiresDefaultBranchConfirmation(cwd, actionName(action))
-                if (!confirmation) runGitAction(model, cwd, action, commitMessage, if (allFilesSelected) null else selectedFiles.map { it.path }, false) { actionId = it }
-            }
-        })
         TextField(
             value = commitMessage,
             onValueChange = { commitMessage = it },
@@ -144,12 +159,7 @@ internal fun GitOverviewSheet(model: AndroidAppModel, cwd: String, onDismiss: ()
                 val reference = checkoutReference.trim()
                 if (reference.isNotEmpty()) {
                     model.perform(
-                        Intent.PreparePullRequestThread(
-                            cwd,
-                            reference,
-                            checkoutMode,
-                            model.snapshot.selectedThreadId(),
-                        )
+                        Intent.PreparePullRequestThread(cwd, reference, checkoutMode, model.snapshot.selectedThreadId())
                     ) { result ->
                         val prepared = (result.getOrNull() as? Outcome.GitPullRequestThreadPrepared)?.result
                         if (prepared != null) {
@@ -168,15 +178,40 @@ internal fun GitOverviewSheet(model: AndroidAppModel, cwd: String, onDismiss: ()
             copy,
             onContinue = {
                 confirmation = false
-                pendingAction?.let { action -> runGitAction(model, cwd, action, commitMessage, if (allFilesSelected) null else selectedFiles.map { it.path }, false) { actionId = it } }
+                pendingAction?.let { action ->
+                    runGitAction(
+                        model,
+                        cwd,
+                        action,
+                        commitMessage,
+                        if (allFilesSelected) null else selectedFiles.map { it.path },
+                        false,
+                    ) {
+                        actionId = it
+                    }
+                }
                 pendingAction = null
             },
             onFeatureBranch = {
                 confirmation = false
-                pendingAction?.let { action -> runGitAction(model, cwd, action, commitMessage, if (allFilesSelected) null else selectedFiles.map { it.path }, true) { actionId = it } }
+                pendingAction?.let { action ->
+                    runGitAction(
+                        model,
+                        cwd,
+                        action,
+                        commitMessage,
+                        if (allFilesSelected) null else selectedFiles.map { it.path },
+                        true,
+                    ) {
+                        actionId = it
+                    }
+                }
                 pendingAction = null
             },
-            onDismiss = { confirmation = false; pendingAction = null },
+            onDismiss = {
+                confirmation = false
+                pendingAction = null
+            },
         )
     }
 }
@@ -195,7 +230,10 @@ private fun GitBranchSection(
     onWorktreeBranchNameChanged: (String) -> Unit,
     onRefresh: () -> Unit,
 ) {
-    Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+    Column(
+        Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
         Text("Branches & worktrees", fontWeight = FontWeight.Bold)
         if (status?.isRepo == false) {
             Button(onClick = { model.perform(Intent.InitRepository(cwd)) { onRefresh() } }) {
@@ -220,7 +258,9 @@ private fun GitBranchSection(
                     }
                 },
                 enabled = newBranchName.trim().isNotEmpty(),
-            ) { Text("Create & checkout") }
+            ) {
+                Text("Create & checkout")
+            }
 
             TextField(
                 value = worktreeBaseBranch,
@@ -262,19 +302,27 @@ private fun GitBranchSection(
                             text = {
                                 Column {
                                     Text(ref.name)
-                                    Text(refDetail(ref, cwd), style = AppTheme.caption, color = AppTheme.colors.foregroundMuted)
+                                    Text(
+                                        refDetail(ref, cwd),
+                                        style = AppTheme.caption,
+                                        color = AppTheme.colors.foregroundMuted,
+                                    )
                                 }
                             },
-                            onClick = {
-                                model.perform(Intent.SwitchVcsRef(cwd, ref.name)) { onRefresh() }
-                            },
+                            onClick = { model.perform(Intent.SwitchVcsRef(cwd, ref.name)) { onRefresh() } },
                             enabled = !ref.current && ref.worktreePath == null,
                         )
-                        ref.worktreePath?.takeIf { it != cwd }?.let { path ->
-                            TextButton(onClick = {
-                                model.perform(Intent.RemoveVcsWorktree(cwd, path, false)) { onRefresh() }
-                            }) { Text("Remove worktree", color = AppTheme.colors.dangerForeground) }
-                        }
+                        ref.worktreePath
+                            ?.takeIf { it != cwd }
+                            ?.let { path ->
+                                TextButton(
+                                    onClick = {
+                                        model.perform(Intent.RemoveVcsWorktree(cwd, path, false)) { onRefresh() }
+                                    }
+                                ) {
+                                    Text("Remove worktree", color = AppTheme.colors.dangerForeground)
+                                }
+                            }
                     }
                 }
             }
@@ -282,21 +330,22 @@ private fun GitBranchSection(
     }
 }
 
-private fun refDetail(ref: dev.remoteagent.core.GitRef, cwd: String): String = when {
-    ref.current -> "Checked out here"
-    ref.worktreePath == cwd -> "Checked out here"
-    ref.worktreePath != null -> "Checked out in ${ref.worktreePath}"
-    ref.isDefault -> "Default branch"
-    else -> "Local branch"
-}
+private fun refDetail(ref: dev.remoteagent.core.GitRef, cwd: String): String =
+    when {
+        ref.current -> "Checked out here"
+        ref.worktreePath == cwd -> "Checked out here"
+        ref.worktreePath != null -> "Checked out in ${ref.worktreePath}"
+        ref.isDefault -> "Default branch"
+        else -> "Local branch"
+    }
 
 @Composable
-private fun GitStatusCard(
-    status: dev.remoteagent.core.GitStatus?,
-    onRefresh: () -> Unit,
-) {
+private fun GitStatusCard(status: dev.remoteagent.core.GitStatus?, onRefresh: () -> Unit) {
     val colors = AppTheme.colors
-    Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+    Column(
+        Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             Icon(Icons.AutoMirrored.Outlined.AltRoute, null, tint = colors.primaryText)
             Column(Modifier.weight(1f)) {
@@ -307,7 +356,15 @@ private fun GitStatusCard(
                 Icon(Icons.Outlined.Refresh, "Refresh Git status", tint = colors.iconMuted)
             }
         }
-        status?.pullRequestUrl?.let { url -> Text(url, style = AppTheme.caption, color = colors.primaryText, maxLines = 1, overflow = TextOverflow.Ellipsis) }
+        status?.pullRequestUrl?.let { url ->
+            Text(
+                url,
+                style = AppTheme.caption,
+                color = colors.primaryText,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
     }
 }
 
@@ -338,9 +395,7 @@ private fun GitFileSelection(
                 TextButton(onClick = onReset) { Text("Reset") }
             }
             if (files.isNotEmpty()) {
-                TextButton(onClick = { onEditingChanged(!editing) }) {
-                    Text(if (editing) "Done" else "Edit")
-                }
+                TextButton(onClick = { onEditingChanged(!editing) }) { Text(if (editing) "Done" else "Edit") }
             }
         }
         if (files.isEmpty()) {
@@ -351,9 +406,12 @@ private fun GitFileSelection(
                     text = {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Icon(
-                                if (file.path in selectedPaths) Icons.Outlined.CheckCircle else Icons.Outlined.CheckCircle,
+                                if (file.path in selectedPaths) Icons.Outlined.CheckCircle
+                                else Icons.Outlined.CheckCircle,
                                 null,
-                                tint = if (file.path in selectedPaths) AppTheme.colors.foregroundMuted else AppTheme.colors.primaryText,
+                                tint =
+                                    if (file.path in selectedPaths) AppTheme.colors.foregroundMuted
+                                    else AppTheme.colors.primaryText,
                             )
                             Text(file.path, Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
                             Text("+${file.insertions}  -${file.deletions}", style = AppTheme.caption)
@@ -370,18 +428,18 @@ private fun GitFileSelection(
                 }
             }
             if (selected.size > 3) {
-                Text("+${selected.size - 3} more files", style = AppTheme.caption, color = AppTheme.colors.foregroundMuted)
+                Text(
+                    "+${selected.size - 3} more files",
+                    style = AppTheme.caption,
+                    color = AppTheme.colors.foregroundMuted,
+                )
             }
         }
     }
 }
 
 @Composable
-private fun GitActionRows(
-    items: List<GitActionMenuItem>,
-    noneSelected: Boolean,
-    onAction: (GitAction) -> Unit,
-) {
+private fun GitActionRows(items: List<GitActionMenuItem>, noneSelected: Boolean, onAction: (GitAction) -> Unit) {
     Column(Modifier.fillMaxWidth()) {
         items.forEach { item ->
             DropdownMenuItem(
@@ -426,12 +484,16 @@ private fun GitPullRequestThreadSection(
 
 @Composable
 private fun GitProgress(progress: GitActionProgress) {
-    Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+    Column(
+        Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
         Text("Git action", fontWeight = FontWeight.Bold)
         Text(progress.label ?: progress.status.replace('_', ' ').replaceFirstChar { it.uppercase() })
         progress.output?.takeIf { it.isNotEmpty() }?.let { Text(it, style = AppTheme.caption) }
         progress.error?.let { Text(it, color = AppTheme.colors.dangerForeground) }
-        if (progress.status == "started" || progress.status == "phase_started") CircularProgressIndicator(Modifier.padding(top = 4.dp).align(Alignment.Start), strokeWidth = 2.dp)
+        if (progress.status == "started" || progress.status == "phase_started")
+            CircularProgressIndicator(Modifier.padding(top = 4.dp).align(Alignment.Start), strokeWidth = 2.dp)
     }
 }
 
@@ -493,7 +555,9 @@ private fun GitAction.icon() =
     when (this) {
         GitAction.COMMIT -> Icons.Outlined.CheckCircle
         GitAction.PUSH -> Icons.Outlined.ArrowUpward
-        GitAction.CREATE_PR, GitAction.COMMIT_PUSH_PR, GitAction.OPEN_PR -> Icons.Outlined.TextSnippet
+        GitAction.CREATE_PR,
+        GitAction.COMMIT_PUSH_PR,
+        GitAction.OPEN_PR -> Icons.Outlined.TextSnippet
         GitAction.COMMIT_PUSH -> Icons.Outlined.ArrowUpward
     }
 

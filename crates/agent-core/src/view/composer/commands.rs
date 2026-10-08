@@ -234,11 +234,23 @@ impl BuiltInSlashCommand {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum ComposerCommandTarget {
-    BuiltIn { command: BuiltInSlashCommand },
-    ProviderCommand { name: String },
-    Skill { name: String },
-    Path { path: String, directory: bool },
-    Thread { thread_id: String, title: String },
+    BuiltIn {
+        command: BuiltInSlashCommand,
+    },
+    ProviderCommand {
+        name: String,
+    },
+    Skill {
+        name: String,
+    },
+    Path {
+        path: String,
+        directory: bool,
+    },
+    Thread {
+        thread_id: String,
+        title: String,
+    },
     PullRequest {
         host: String,
         repository: String,
@@ -601,9 +613,7 @@ fn path_item(entry: &ComposerPathEntry) -> ComposerCommandItem {
     }
 }
 
-pub(crate) fn pull_request_items(
-    matches: &[PullRequestSearchMatch],
-) -> Vec<ComposerCommandItem> {
+pub(crate) fn pull_request_items(matches: &[PullRequestSearchMatch]) -> Vec<ComposerCommandItem> {
     matches
         .iter()
         .map(|pull_request| ComposerCommandItem {
@@ -691,10 +701,7 @@ impl ThreadContextAttachment {
 /// The stable identity used by the review-context record attached to a
 /// composer pull-request selection.
 pub fn pull_request_context_id(host: &str, repository: &str, number: u64) -> String {
-    super::chips::kind_scoped_context_id(
-        "review-comment",
-        &format!("{host}/{repository}/{number}"),
-    )
+    super::chips::kind_scoped_context_id("review-comment", &format!("{host}/{repository}/{number}"))
 }
 
 fn bounded_context_text(value: &str) -> String {

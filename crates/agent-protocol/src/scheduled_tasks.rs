@@ -112,7 +112,9 @@ impl UpsertScheduledTask {
                 return Err(format!("Scheduled task {field} must not be empty."));
             }
             if value.is_some_and(|value| value.trim() != value || value.is_empty()) {
-                return Err(format!("Scheduled task {field} must not be empty or padded."));
+                return Err(format!(
+                    "Scheduled task {field} must not be empty or padded."
+                ));
             }
             Ok(())
         };
@@ -126,9 +128,7 @@ impl UpsertScheduledTask {
                 valid_ref("branch", branch.as_deref(), false)?;
             }
             WorkspaceStrategy::Worktree {
-                base_ref,
-                branch,
-                ..
+                base_ref, branch, ..
             } => {
                 valid_ref("base ref", Some(base_ref), true)?;
                 valid_ref("branch", branch.as_deref(), false)?;

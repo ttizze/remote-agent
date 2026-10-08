@@ -76,9 +76,7 @@ class MainActivity : ComponentActivity() {
                     activity = this,
                     model = model,
                     requestQrScan = requestQrScan,
-                    requestNotifications = {
-                        requestNotifications.launch(Manifest.permission.POST_NOTIFICATIONS)
-                    },
+                    requestNotifications = { requestNotifications.launch(Manifest.permission.POST_NOTIFICATIONS) },
                 )
             } else {
                 AppMaterialTheme {

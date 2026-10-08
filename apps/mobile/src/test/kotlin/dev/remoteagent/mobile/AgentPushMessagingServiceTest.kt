@@ -15,7 +15,7 @@ import org.junit.Test
 class AgentPushMessagingServiceTest {
     private fun activityState(updatedAt: String): JsonObject =
         Json.parseToJsonElement(
-            """
+                """
             {
               "title":"Project",
               "subtitle":"Agent work",
@@ -23,24 +23,28 @@ class AgentPushMessagingServiceTest {
               "updatedAt":"$updatedAt",
               "activities":[]
             }
-            """.trimIndent(),
-        ).jsonObject
+            """
+                    .trimIndent()
+            )
+            .jsonObject
 
     @Test
     fun activityPresentationPrioritizesAttentionAndKeepsTheOngoingState() {
-        val presentation = parseActivityPresentation(
-            """
-            {
-              "title":"Project",
-              "subtitle":"Agent work",
-              "activeCount":2,
-              "activities":[
-                {"phase":"running","status":"Working","threadTitle":"Build","projectTitle":"Project","deepLink":"remoteagent://threads/host/build"},
-                {"phase":"waiting_for_input","status":"Input","threadTitle":"Answer","projectTitle":"Project","deepLink":"remoteagent://threads/host/answer"}
-              ]
-            }
-            """.trimIndent()
-        )
+        val presentation =
+            parseActivityPresentation(
+                """
+                {
+                  "title":"Project",
+                  "subtitle":"Agent work",
+                  "activeCount":2,
+                  "activities":[
+                    {"phase":"running","status":"Working","threadTitle":"Build","projectTitle":"Project","deepLink":"remoteagent://threads/host/build"},
+                    {"phase":"waiting_for_input","status":"Input","threadTitle":"Answer","projectTitle":"Project","deepLink":"remoteagent://threads/host/answer"}
+                  ]
+                }
+                """
+                    .trimIndent()
+            )
 
         requireNotNull(presentation)
         assertEquals("2 active agents · 1 needs attention", presentation.title)
@@ -51,12 +55,15 @@ class AgentPushMessagingServiceTest {
 
     @Test
     fun activityPresentationFallsBackToCompletionAndRejectsOversizedJson() {
-        val presentation = parseActivityPresentation(
-            """
+        val presentation =
+            parseActivityPresentation(
+                """
             {"title":"Project","subtitle":"Done","activeCount":0,
              "activities":[{"phase":"failed","status":"Failed","threadTitle":"Run","projectTitle":"Project"}]}
-            """.replace("\n", "").replace(" ", "")
-        )
+            """
+                    .replace("\n", "")
+                    .replace(" ", "")
+            )
 
         requireNotNull(presentation)
         assertEquals("Agent work failed", presentation.title)
@@ -79,18 +86,14 @@ class AgentPushMessagingServiceTest {
             PushRegistrationStore.scopedDeviceId(base, "host-a"),
         )
         assertFalse(
-            PushRegistrationStore.scopedDeviceId(base, "host-a") ==
-                PushRegistrationStore.scopedDeviceId(base, "host-b"),
+            PushRegistrationStore.scopedDeviceId(base, "host-a") == PushRegistrationStore.scopedDeviceId(base, "host-b")
         )
     }
 
     @Test
     fun notificationIdentityUsesTagsAndUniquePendingIntentData() {
         assertEquals(ONGOING_ACTIVITY_TAG, notificationTag("ignored", ongoing = true))
-        assertNotEquals(
-            ONGOING_ACTIVITY_TAG,
-            notificationTag("agent-activity", ongoing = false),
-        )
+        assertNotEquals(ONGOING_ACTIVITY_TAG, notificationTag("agent-activity", ongoing = false))
         assertNotEquals(
             notificationTag("remoteagent://threads/host/one", ongoing = false),
             notificationTag("remoteagent://threads/host/two", ongoing = false),
@@ -135,21 +138,16 @@ class AgentPushMessagingServiceTest {
         val expired = activityState("2027-01-15T07:49:59Z")
 
         assertFalse(agentActivityMessageIsFresh(now - 10 * 60 * 1_000 - 1, now))
-        assertTrue(
-            retainedActivityStates(
-                mapOf("host-a" to expired),
-                mapOf("host-a" to now - 1),
+        assertTrue(retainedActivityStates(mapOf("host-a" to expired), mapOf("host-a" to now - 1), now).isEmpty())
+        val result =
+            mergeActivityStates(
+                emptyMap(),
+                "host-a",
+                expired,
                 now,
-            ).isEmpty(),
-        )
-        val result = mergeActivityStates(
-            emptyMap(),
-            "host-a",
-            expired,
-            now,
-            deliveryAllowed = true,
-            incomingExpiryAtMillis = now - 1,
-        )
+                deliveryAllowed = true,
+                incomingExpiryAtMillis = now - 1,
+            )
         assertEquals(ActivityStateMergeDisposition.Expired, result.disposition)
         assertTrue(result.states.isEmpty())
     }
@@ -158,14 +156,15 @@ class AgentPushMessagingServiceTest {
     fun hostExpiryFactRemovesAnOtherwiseFreshActivityState() {
         val now = 1_800_000_000_000L
         val state = activityState("2027-01-15T08:00:00Z")
-        val result = mergeActivityStates(
-            emptyMap(),
-            "host-a",
-            state,
-            now,
-            deliveryAllowed = true,
-            incomingExpiryAtMillis = now - 1,
-        )
+        val result =
+            mergeActivityStates(
+                emptyMap(),
+                "host-a",
+                state,
+                now,
+                deliveryAllowed = true,
+                incomingExpiryAtMillis = now - 1,
+            )
 
         assertEquals(ActivityStateMergeDisposition.Expired, result.disposition)
         assertTrue(result.states.isEmpty())
@@ -191,13 +190,7 @@ class AgentPushMessagingServiceTest {
     fun removalGateWinsOverLateActivityPayload() {
         val now = 1_800_000_000_000L
         val state = activityState("2027-01-15T08:00:00Z")
-        val result = mergeActivityStates(
-            mapOf("host-a" to state),
-            "host-a",
-            state,
-            now,
-            deliveryAllowed = false,
-        )
+        val result = mergeActivityStates(mapOf("host-a" to state), "host-a", state, now, deliveryAllowed = false)
 
         assertEquals(ActivityStateMergeDisposition.Blocked, result.disposition)
         assertTrue(result.states.isEmpty())

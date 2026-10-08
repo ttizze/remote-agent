@@ -266,9 +266,7 @@ impl WorkspaceSearch {
         &self,
         request: agent_protocol::workspace::SearchContents,
     ) -> Result<agent_protocol::workspace::ContentSearch> {
-        request
-            .validate()
-            .map_err(|error| anyhow!(error))?;
+        request.validate().map_err(|error| anyhow!(error))?;
         let root = tokio::fs::canonicalize(request.cwd.trim()).await?;
         let root = dunce::simplified(&root).to_owned();
         if !root.is_dir() {
@@ -391,9 +389,18 @@ impl ContentMatcher {
 fn whole_word(line: &str, start: usize, end: usize) -> bool {
     let previous = line[..start].chars().next_back();
     let next = line[end..].chars().next();
-    let word = |value: Option<char>| value.is_some_and(|value| value.is_alphanumeric() || value == '_');
-    !(word(previous) && line[start..].chars().next().is_some_and(|value| value.is_alphanumeric() || value == '_'))
-        && !(word(next) && line[..end].chars().next_back().is_some_and(|value| value.is_alphanumeric() || value == '_'))
+    let word =
+        |value: Option<char>| value.is_some_and(|value| value.is_alphanumeric() || value == '_');
+    !(word(previous)
+        && line[start..]
+            .chars()
+            .next()
+            .is_some_and(|value| value.is_alphanumeric() || value == '_'))
+        && !(word(next)
+            && line[..end]
+                .chars()
+                .next_back()
+                .is_some_and(|value| value.is_alphanumeric() || value == '_'))
 }
 
 #[cfg(test)]

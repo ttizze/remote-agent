@@ -121,7 +121,9 @@ impl Desktop {
                     if view.snapshot.selected_thread.is_none()
                         && view.snapshot.open_new_thread_draft.is_some()
                     {
-                        view.perform(Intent::SetNewThreadProject { project_id: project });
+                        view.perform(Intent::SetNewThreadProject {
+                            project_id: project,
+                        });
                     } else {
                         view.new_thread(project, cx);
                     }
@@ -257,9 +259,9 @@ impl AddProject {
                     tokio::task::spawn_blocking(move || {
                         crate::platform::choose_folder(initial_directory.as_deref())
                     })
-                        .await
-                        .ok()
-                        .flatten()
+                    .await
+                    .ok()
+                    .flatten()
                 },
                 move |view, picked: Option<PathBuf>, window, cx| {
                     if let Some(path) = picked {

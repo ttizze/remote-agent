@@ -399,14 +399,10 @@ impl Desktop {
             .iter()
             .find(|row| row.key == "profile")
             .map(|row| row.value.to_ascii_lowercase());
-        let git_fetch_seconds = background_interval_seconds(
-            &background_rows,
-            "automaticGitFetchIntervalMs",
-        );
-        let provider_health_seconds = background_interval_seconds(
-            &background_rows,
-            "providerHealthRefreshIntervalMs",
-        );
+        let git_fetch_seconds =
+            background_interval_seconds(&background_rows, "automaticGitFetchIntervalMs");
+        let provider_health_seconds =
+            background_interval_seconds(&background_rows, "providerHealthRefreshIntervalMs");
         let choices = ["balanced", "performance", "battery-saver"]
             .into_iter()
             .map(|id| Choice {
@@ -682,13 +678,14 @@ impl Desktop {
         window: &mut Window,
         cx: &mut Context<Desktop>,
     ) {
-        let Some(value) = sections
-            .iter()
-            .flat_map(|section| &section.rows)
-            .find_map(|row| match row.control {
-                SettingControl::Number { value, .. } if row.id == id => Some(value),
-                _ => None,
-            })
+        let Some(value) =
+            sections
+                .iter()
+                .flat_map(|section| &section.rows)
+                .find_map(|row| match row.control {
+                    SettingControl::Number { value, .. } if row.id == id => Some(value),
+                    _ => None,
+                })
         else {
             return;
         };
@@ -706,9 +703,12 @@ impl Desktop {
                 if self.settings.general.browser_height_value != shown =>
             {
                 self.settings.general.browser_height_value = shown;
-                self.settings.general.browser_height.update(cx, |input, cx| {
-                    input.set_value(value.to_string(), window, cx)
-                });
+                self.settings
+                    .general
+                    .browser_height
+                    .update(cx, |input, cx| {
+                        input.set_value(value.to_string(), window, cx)
+                    });
             }
             _ => {}
         }
@@ -738,9 +738,10 @@ impl Desktop {
         let shown = Some((scope.clone(), value.clone()));
         if self.settings.general.project_base_value != shown {
             self.settings.general.project_base_value = shown;
-            self.settings.general.project_base.update(cx, |input, cx| {
-                input.set_value(value, window, cx)
-            });
+            self.settings
+                .general
+                .project_base
+                .update(cx, |input, cx| input.set_value(value, window, cx));
         }
     }
 
@@ -854,61 +855,61 @@ impl Desktop {
         default_profile_id: &str,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let mut rows = v_flex().gap(px(4.)).children(profiles.iter().map(|profile| {
-            let profile_id = profile.id.clone();
-            let is_default = profile.id == default_profile_id;
-            let built_in = matches!(profile.id.as_str(), "default" | "incognito");
-            let mut row = h_flex()
-                .gap(px(8.))
-                .child(
-                    div()
-                        .flex_1()
-                        .text_sm()
-                        .child(profile.name.clone()),
-                );
-            if profile.id != "incognito" {
-                row = row.child(
-                    Button::new(("browser-profile-select", profile.id.clone()))
-                        .outline()
-                        .small()
-                        .label(if is_default { "Default" } else { "Use" })
-                        .on_click(cx.listener(move |view, _, _, _| {
-                            view.perform(Intent::SetBrowserDefaultProfile {
-                                profile_id: profile_id.clone(),
-                            });
-                        })),
-                );
-            }
-            if !built_in {
-                let edit_id = profile.id.clone();
-                let edit_name = profile.name.clone();
-                let remove_id = profile.id.clone();
-                row = row
-                    .child(
-                        Button::new(("browser-profile-rename", profile.id.clone()))
+        let mut rows = v_flex()
+            .gap(px(4.))
+            .children(profiles.iter().map(|profile| {
+                let profile_id = profile.id.clone();
+                let is_default = profile.id == default_profile_id;
+                let built_in = matches!(profile.id.as_str(), "default" | "incognito");
+                let mut row = h_flex()
+                    .gap(px(8.))
+                    .child(div().flex_1().text_sm().child(profile.name.clone()));
+                if profile.id != "incognito" {
+                    row = row.child(
+                        Button::new(("browser-profile-select", profile.id.clone()))
                             .outline()
                             .small()
-                            .label("Rename")
-                            .on_click(cx.listener(move |view, _, window, cx| {
-                                view.settings.general.browser_profile_edit_id =
-                                    Some(edit_id.clone());
-                                view.settings.general.browser_profile_name.update(cx, |input, cx| {
-                                    input.set_value(edit_name.clone(), window, cx)
+                            .label(if is_default { "Default" } else { "Use" })
+                            .on_click(cx.listener(move |view, _, _, _| {
+                                view.perform(Intent::SetBrowserDefaultProfile {
+                                    profile_id: profile_id.clone(),
                                 });
                             })),
-                    )
-                    .child(
-                        Button::new(("browser-profile-remove", profile.id.clone()))
-                            .outline()
-                            .small()
-                            .label("Remove")
-                            .on_click(cx.listener(move |view, _, window, cx| {
-                                view.remove_browser_profile(remove_id.clone(), window, cx);
-                            })),
                     );
-            }
-            row
-        }));
+                }
+                if !built_in {
+                    let edit_id = profile.id.clone();
+                    let edit_name = profile.name.clone();
+                    let remove_id = profile.id.clone();
+                    row = row
+                        .child(
+                            Button::new(("browser-profile-rename", profile.id.clone()))
+                                .outline()
+                                .small()
+                                .label("Rename")
+                                .on_click(cx.listener(move |view, _, window, cx| {
+                                    view.settings.general.browser_profile_edit_id =
+                                        Some(edit_id.clone());
+                                    view.settings
+                                        .general
+                                        .browser_profile_name
+                                        .update(cx, |input, cx| {
+                                            input.set_value(edit_name.clone(), window, cx)
+                                        });
+                                })),
+                        )
+                        .child(
+                            Button::new(("browser-profile-remove", profile.id.clone()))
+                                .outline()
+                                .small()
+                                .label("Remove")
+                                .on_click(cx.listener(move |view, _, window, cx| {
+                                    view.remove_browser_profile(remove_id.clone(), window, cx);
+                                })),
+                        );
+                }
+                row
+            }));
         let create = Button::new("browser-profile-create")
             .outline()
             .small()
@@ -1171,7 +1172,10 @@ impl Desktop {
     }
 }
 
-fn background_interval_seconds(rows: &[agent_core::view::diagnostics::DiagnosticRow], key: &str) -> u32 {
+fn background_interval_seconds(
+    rows: &[agent_core::view::diagnostics::DiagnosticRow],
+    key: &str,
+) -> u32 {
     rows.iter()
         .find(|row| row.key == key)
         .and_then(|row| row.value.parse::<u64>().ok())

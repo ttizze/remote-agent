@@ -1394,7 +1394,10 @@ fn scheduled_tools_publish_the_reference_contract() {
             .unwrap_or_else(|| panic!("missing tool {name}"))
     };
     let schedule = find("schedule_task");
-    assert_eq!(schedule["inputSchema"]["required"], json!(["prompt", "schedule"]));
+    assert_eq!(
+        schedule["inputSchema"]["required"],
+        json!(["prompt", "schedule"])
+    );
     let schedule_variants = schedule["inputSchema"]["properties"]["schedule"]["anyOf"]
         .as_array()
         .unwrap();
@@ -1407,10 +1410,22 @@ fn scheduled_tools_publish_the_reference_contract() {
         schedule_variants[1]["properties"]["timeOfDay"]["pattern"],
         "^([01]?\\d|2[0-3]):([0-5]\\d)$"
     );
-    assert_eq!(find("list_scheduled_tasks")["annotations"]["readOnlyHint"], true);
-    assert_eq!(find("update_scheduled_task")["annotations"]["readOnlyHint"], false);
-    assert_eq!(find("delete_scheduled_task")["annotations"]["destructiveHint"], true);
-    assert_eq!(find("run_scheduled_task_now")["inputSchema"]["required"], json!(["taskId"]));
+    assert_eq!(
+        find("list_scheduled_tasks")["annotations"]["readOnlyHint"],
+        true
+    );
+    assert_eq!(
+        find("update_scheduled_task")["annotations"]["readOnlyHint"],
+        false
+    );
+    assert_eq!(
+        find("delete_scheduled_task")["annotations"]["destructiveHint"],
+        true
+    );
+    assert_eq!(
+        find("run_scheduled_task_now")["inputSchema"]["required"],
+        json!(["taskId"])
+    );
 }
 
 #[test]

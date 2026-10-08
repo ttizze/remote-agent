@@ -97,7 +97,9 @@ fn validate_definition(definition: &Definition) -> Result<(), StoreError> {
         ("project", definition.project.as_str()),
     ] {
         if value.is_empty() || value.trim() != value {
-            return Err(corrupt(format!("scheduled task {field} is empty or padded")));
+            return Err(corrupt(format!(
+                "scheduled task {field} is empty or padded"
+            )));
         }
     }
     let valid_optional_ref = |value: &Option<String>| {
@@ -107,14 +109,10 @@ fn validate_definition(definition: &Definition) -> Result<(), StoreError> {
     };
     match &definition.workspace {
         WorkspaceStrategy::Root { branch } if valid_optional_ref(branch) => {}
-        WorkspaceStrategy::ExistingWorktree {
-            path,
-            branch,
-        } if !path.is_empty() && path.trim() == path && valid_optional_ref(branch) => {}
+        WorkspaceStrategy::ExistingWorktree { path, branch }
+            if !path.is_empty() && path.trim() == path && valid_optional_ref(branch) => {}
         WorkspaceStrategy::Worktree {
-            base_ref,
-            branch,
-            ..
+            base_ref, branch, ..
         } if !base_ref.is_empty() && base_ref.trim() == base_ref && valid_optional_ref(branch) => {}
         _ => return Err(corrupt("scheduled task workspace is invalid")),
     }

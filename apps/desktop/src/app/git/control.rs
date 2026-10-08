@@ -1,6 +1,6 @@
+use crate::app::ui;
 use agent_core::state::Intent;
 use agent_core::view::git::GitAction;
-use crate::app::ui;
 
 /// The one intent a toolbar button sends for a stacked action.
 pub(super) fn action_intent(

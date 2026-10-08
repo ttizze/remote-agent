@@ -166,7 +166,9 @@ async fn execute(peer: &Peer, call: &Call) -> Result<Reply, PeerError> {
         | Call::UnlinkPullRequest(_)
         | Call::SetPullRequestWatch(_)
         | Call::PullRequestAction(_)
-        | Call::SubmitPullRequestReview(_) => Reply::PullRequestOperation(peer.request(call).await?),
+        | Call::SubmitPullRequestReview(_) => {
+            Reply::PullRequestOperation(peer.request(call).await?)
+        }
         Call::SourceControlAuth(_) => Reply::PullRequestAuth(peer.request(call).await?),
         Call::SourceControlDiscovery(_) => Reply::PullRequestDiscovery(peer.request(call).await?),
         Call::DeviceList(_) | Call::DeviceConfigure(_) | Call::DeviceHosts(_) => {
@@ -177,7 +179,10 @@ async fn execute(peer: &Peer, call: &Call) -> Result<Reply, PeerError> {
             Reply::DeviceDetail(peer.request(call).await?)
         }
         Call::DeviceScreenshot(_) => Reply::DeviceScreenshot(peer.request(call).await?),
-        Call::DeviceInput(_) => { let _: m::Empty = peer.request(call).await?; Reply::Done }
+        Call::DeviceInput(_) => {
+            let _: m::Empty = peer.request(call).await?;
+            Reply::Done
+        }
         Call::DeviceAccessibility(_) => Reply::DeviceAccessibility(peer.request(call).await?),
         Call::DeviceEventLog(_) => Reply::DeviceEventLog(peer.request(call).await?),
         Call::DeviceRecordingStart(_) => Reply::DeviceRecordingStatus(peer.request(call).await?),
@@ -212,12 +217,8 @@ async fn execute(peer: &Peer, call: &Call) -> Result<Reply, PeerError> {
         | Call::PreviewResize(_)
         | Call::PreviewSetAppearance(_)
         | Call::PreviewSetZoom(_) => Reply::PreviewSession(peer.request(call).await?),
-        Call::PreviewRecordingStart(_) => {
-            Reply::PreviewRecordingStatus(peer.request(call).await?)
-        }
-        Call::PreviewRecordingStop(_) => {
-            Reply::PreviewRecordingArtifact(peer.request(call).await?)
-        }
+        Call::PreviewRecordingStart(_) => Reply::PreviewRecordingStatus(peer.request(call).await?),
+        Call::PreviewRecordingStop(_) => Reply::PreviewRecordingArtifact(peer.request(call).await?),
         Call::PreviewReportStatus(_)
         | Call::PreviewClose(_)
         | Call::PreviewRefresh(_)
@@ -242,9 +243,7 @@ async fn execute(peer: &Peer, call: &Call) -> Result<Reply, PeerError> {
         Call::CancelSetup(_) => Reply::SetupCancelled(peer.request(call).await?),
         Call::UpsertScheduledTask(_)
         | Call::SetScheduledTaskEnabled(_)
-        | Call::RunScheduledTaskNow(_) => {
-            Reply::ScheduledTask(peer.request(call).await?)
-        }
+        | Call::RunScheduledTaskNow(_) => Reply::ScheduledTask(peer.request(call).await?),
         Call::ListScheduledTasks(_) => Reply::ScheduledTasks(peer.request(call).await?),
         Call::DeleteScheduledTask(_) => Reply::ScheduledTaskRef(peer.request(call).await?),
         Call::ReadBackground(_)
@@ -326,8 +325,8 @@ impl Owner {
             self.accounts_refresh_in_flight_epoch = Some(self.epoch);
             self.usage_refresh_last_attempt_ms = Some(super::owner::now_ms());
         }
-        let diff_generation = matches!(&call, Call::DiffPreview(_))
-            .then_some(self.state.sources.diff_generation);
+        let diff_generation =
+            matches!(&call, Call::DiffPreview(_)).then_some(self.state.sources.diff_generation);
         let sender = self.sender.clone();
         let cancel = match &call {
             Call::Transcribe(params) => params
@@ -631,7 +630,9 @@ impl Owner {
                 result: GitPullOutcome {
                     status: match result.status {
                         agent_protocol::vcs::PullStatus::Pulled => "pulled".into(),
-                        agent_protocol::vcs::PullStatus::SkippedUpToDate => "skipped_up_to_date".into(),
+                        agent_protocol::vcs::PullStatus::SkippedUpToDate => {
+                            "skipped_up_to_date".into()
+                        }
                     },
                     ref_name: result.ref_name.clone(),
                     upstream_ref: result.upstream_ref.clone(),
@@ -736,9 +737,9 @@ impl Owner {
                         | Call::DeviceRecordingStart(_)
                         | Call::DeviceRecordingStop(_)
                 ) {
-                    self.state.device.error = Some(
-                        crate::presentation::error::error_message(&error.to_string()),
-                    );
+                    self.state.device.error = Some(crate::presentation::error::error_message(
+                        &error.to_string(),
+                    ));
                 }
                 if let Some(request) = duo_request.as_ref() {
                     self.state.device.fail_duo(request, error.to_string());
@@ -789,7 +790,9 @@ impl Owner {
                             .list_requested
                             .remove(&request.project_id);
                     }
-                    Call::SearchContents(request) => self.content_search_finished(request, Err(&error)),
+                    Call::SearchContents(request) => {
+                        self.content_search_finished(request, Err(&error))
+                    }
                     Call::CancelSetup(_) => self.work_locally = None,
                     Call::ProjectFavicon(request) => self.project_icon_read(request, Err(())),
                     _ => {}
@@ -1005,10 +1008,7 @@ impl Owner {
             Reply::PreviewList(result) => self.state.preview.apply_list(result),
             Reply::PreviewSession(session) => self.state.preview.upsert(session),
             Reply::PreviewRecordingStatus(status) => {
-                self.state
-                    .preview
-                    .last_recordings
-                    .remove(&status.tab_id);
+                self.state.preview.last_recordings.remove(&status.tab_id);
                 self.state
                     .preview
                     .recordings
@@ -1158,10 +1158,7 @@ impl Owner {
                     Call::RefreshVcsStatus(request) => Some(request.cwd.clone()),
                     _ => None,
                 } {
-                    self.state
-                        .git
-                        .status
-                        .insert(cwd, status);
+                    self.state.git.status.insert(cwd, status);
                 }
             }
             Reply::PullResult(_)
@@ -1207,7 +1204,8 @@ impl Owner {
             }
             Reply::PullRequestDiff(diff) => {
                 let key = diff.reference.key().canonical();
-                let append = matches!(call, Call::GetPullRequestDiff(request) if request.cursor.is_some());
+                let append =
+                    matches!(call, Call::GetPullRequestDiff(request) if request.cursor.is_some());
                 if append {
                     if let Some(previous) = self.state.pull_requests.diffs.get_mut(&key) {
                         previous.files.extend(diff.files);
@@ -1246,10 +1244,10 @@ impl Owner {
                 }
             }
             Reply::PullRequestFile(file) => {
-                self.state
-                    .pull_requests
-                    .files
-                    .insert(format!("{}:{}", file.reference.key().canonical(), file.path), file);
+                self.state.pull_requests.files.insert(
+                    format!("{}:{}", file.reference.key().canonical(), file.path),
+                    file,
+                );
             }
             Reply::PullRequestViewedFiles(viewed) => {
                 self.state
@@ -1275,7 +1273,10 @@ impl Owner {
             Reply::PullRequestDiscovery(discovery) => {
                 self.state.pull_requests.discovery = Some(discovery)
             }
-            Reply::DeviceState(service) => self.state.device.apply_event(d::DeviceEvent::State(service)),
+            Reply::DeviceState(service) => self
+                .state
+                .device
+                .apply_event(d::DeviceEvent::State(service)),
             Reply::DeviceSession(session) => {
                 self.state.device.sessions.retain(|existing| {
                     !(existing.thread_id == session.thread_id
@@ -1294,18 +1295,26 @@ impl Owner {
                 self.state.device.last_screenshot = Some(screenshot);
             }
             Reply::DeviceAccessibility(tree) => {
-                self.state.device.apply_event(d::DeviceEvent::Accessibility(tree));
+                self.state
+                    .device
+                    .apply_event(d::DeviceEvent::Accessibility(tree));
             }
             Reply::DeviceEventLog(entries) => {
                 for entry in entries {
-                    self.state.device.apply_event(d::DeviceEvent::EventLog(entry));
+                    self.state
+                        .device
+                        .apply_event(d::DeviceEvent::EventLog(entry));
                 }
             }
             Reply::DeviceRecordingStatus(status) => {
-                self.state.device.apply_event(d::DeviceEvent::Recording(status));
+                self.state
+                    .device
+                    .apply_event(d::DeviceEvent::Recording(status));
             }
             Reply::DeviceRecording(recording) => {
-                self.state.device.apply_event(d::DeviceEvent::RecordingComplete(recording));
+                self.state
+                    .device
+                    .apply_event(d::DeviceEvent::RecordingComplete(recording));
             }
             Reply::SwitchedRef(switched) => match call {
                 Call::SwitchRef(request) => {
