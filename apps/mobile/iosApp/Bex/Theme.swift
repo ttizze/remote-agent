@@ -280,7 +280,9 @@ struct MobileAppearanceState: Equatable {
 
     static func load() -> Self {
         guard let data = UserDefaults.standard.data(forKey: key),
-              let value = try? JSONDecoder().decode(Self.self, from: data) else { return Self() }
+              let value = try? JSONDecoder().decode(Self.self, from: data) else {
+            return Self(core: mobileAppearanceDefault())
+        }
         return value.normalized()
     }
 
