@@ -29,25 +29,17 @@ def exclusion(path):
     if '/legacy/' in s or path.name == 'Orchestrator.migration.test.ts':
         return '製品は未公開。ユーザー指示により旧 V1 の互換性・移行を作らない。'
     if '/fixtures/' in s and re.search(r'(?:/fixtures/(?:grok|opencode|pi|cursor)[^/]*|/(?:grok|opencode|pi|cursor|registry)_transcript|/(?:grok|opencode|pi|cursor)_output)', s):
-        return 'Codex/Claude 以外の provider 専用 replay fixture。Bex では対象外。'
+        return 'Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。'
     if '/orchestration-v2/' in s and re.search(r'(Acp|Antigravity|Cursor|Devin|Grok|OpenCode|Pi(?:Adapter|Rpc|Orchestrator)|piT3)', path.name):
-        return 'Bex の provider は Codex と Claude。その他の provider の実装・専用試験は対象外。'
-    if '/orchestration-v2/' in s and re.search(r'(PullRequest|pullRequestWatch|workflowScriptQuery)', path.name):
-        return '今回の指示では M3（PR・workflow 周辺機能）を実装しない。'
+        return 'この実装の provider は Codex と Claude。その他の provider の実装・専用試験は対象外。'
     if '/client-runtime/' in s:
-        if any(x in s for x in ['/device/', '/relay/', '/authorization/']):
-            return 'T3 Connect の認証・relay、Web 用の仮想 device viewer は作らない。iroh/QR の境界は別途記録。'
-        if any(x in s for x in ['pullRequest', 'PullRequest', '/vcs', '/gitActions', '/git.ts', '/usage.', '/sharedSettings', '/outdated', '/codexArtifactTemplates', '/projectFavicon', '/worktreeSetup']):
-            return '今回の指示では M3 の Git/PR/usage/全設定・更新配布 UI は実装しない。会話に必要な契約・回復経路は除外しない。'
+        if any(x in s for x in ['/relay/', '/authorization/']):
+            return 'T3 Connect の認証・relay は作らない。iroh/QR の境界は別途記録。'
         if path.name == 'remotePerformance.bench.ts':
             return 'Web/relay の benchmark。Rust の意味論テストには該当しない。'
     if '/contracts/' in s:
-        if re.search(r'^(acpRegistry|auth|browserImport|browserProfile|desktopAppActivation|desktopBootstrap|device|editor|environmentHttp|keybindings|preview|previewAutomation|relay|relayClient|remoteAccess|resourceTelemetry)', path.name):
-            return 'T3 Connect/ブラウザ・Web 専用/外部サービスの契約。Bex の iroh/ネイティブ境界に該当。'
-        if re.search(r'^(git|pullRequest|projectClone|scheduledTask|settings|sourceControl|threadPullRequest|usage|worktreeMcp|worktreeSetup|vcs)', path.name):
-            return 'M3 の独立機能・契約。今回保留（会話から使う関連型は該当ファイルで個別に記録）。'
-    if '/project/' in s and not path.name.startswith(('AgentSession',)):
-        return '履歴取り込み以外の project 機能は今回の翻訳範囲外。残す Host のプロジェクト機能との接続点は importer に記録。'
+        if re.search(r'^(auth|environmentHttp|relay|relayClient|remoteAccess)', path.name):
+            return 'T3 Connect の認証・HTTP・relay の契約。iroh/QR の境界は別途記録。'
     return None
 
 
@@ -93,14 +85,25 @@ def main():
     for index, row in enumerate(inventory):
         if row['source'] in old:
             assert old[row['source']]['sha256'] == row['sha256'], f"Source changed: {row['source']}"
-            inventory[index] = old[row['source']]
+            previous_row = old[row['source']]
+            # A previous generated row may still carry a boundary that was
+            # removed from the current scope. Preserve reviewed records, but
+            # refresh unreviewed exclusions from the current classifier.
+            if previous_row['status'] == '対象外' and not previous_row['reviewed_ranges']:
+                previous_row = {**previous_row, 'status': row['status'], 'reason': row['reason']}
+            inventory[index] = previous_row
     if args.check:
         assert set(old) == {row['source'] for row in inventory}, 'Inventory contains missing or extra source files'
         assert previous['commit'] == COMMIT
         print(f'Fixed source inventory: {len(inventory)} files, hashes match.')
         return
     path.write_text(json.dumps({'commit': COMMIT, 'files': inventory}, ensure_ascii=False, indent=2) + '\n')
-    intro = (DOCS / 'PORT_MAP.md').read_text().split('<!-- generated inventory -->')[0]
+    document = (DOCS / 'PORT_MAP.md').read_text()
+    intro, generated = document.split('<!-- generated inventory -->', 1)
+    if '<!-- end generated inventory -->' in generated:
+        notes = generated.split('<!-- end generated inventory -->', 1)[1]
+    else:
+        notes = '\n## 新設計の挙動テスト対応' + generated.split('\n## 新設計の挙動テスト対応', 1)[1]
     out = [intro, '<!-- generated inventory -->\n', '\n## ファイル対応表\n\n各ファイルの状態と対象外の理由を示す。新設計での対応先は「新設計の挙動テスト対応」以降に記録する。\n']
     for root in ROOTS:
         rows = [r for r in inventory if r['source'].startswith(root + '/')]
@@ -111,7 +114,7 @@ def main():
         for r in rows:
             tests = '<br>'.join(r['tests']) or '—'
             out.append(f'| `{r["source"]}` ({r["lines"]}) | {tests} | {r["status"]}' + (f'：{r["reason"]}' if r['reason'] else '') + ' |\n')
-    (DOCS / 'PORT_MAP.md').write_text(''.join(out))
+    (DOCS / 'PORT_MAP.md').write_text(''.join(out) + '\n<!-- end generated inventory -->' + notes)
 
 
 if __name__ == '__main__':

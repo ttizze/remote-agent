@@ -1,8 +1,8 @@
 # T3 の翻訳対応表
 
-参照を `4ee6bfd50ef4a089440d5c3662db2298da9cc50e` に固定する。旧実装に対する M1/M2 の完了記録は、関数単位の翻訳完了・T3 のテスト通過を意味しない。この表で照合を終えた範囲だけを翻訳済みとする。
+参照を `4ee6bfd50ef4a089440d5c3662db2298da9cc50e` に固定する。旧実装に対する M1/M2 の完了記録は、関数単位の翻訳完了・T3 のテスト通過を意味しない。この表で照合を終えた範囲だけを翻訳済みとする。段階 6 の対応先表は source family の抜粋であり、960 件の全行を逐一検証したという意味ではない。
 
-新設計では段階 1 の `agent-domain` と段階 2 の `agent-providers` を先に実装・検証し、push と PR 更新後にレビューを待つ。Host の永続化・履歴取り込みは段階 3、core と3クライアントは段階 4、旧 crate の削除は段階 5 とする。main のマージ、実 Host の起動・再起動、他 worktree の変更は行わない。
+新設計では段階 1 の `agent-domain` と段階 2 の `agent-providers` を先に実装・検証し、Host の永続化・履歴取り込みは段階 3、core と3クライアントは段階 4、旧 crate の削除は段階 5、M3 の追加領域は段階 6 とする。main のマージ、実 Host の起動・再起動、他 worktree の変更は行わない。
 
 生成されたファイル対応表は、固定版の全ファイルと対象外の理由を保持する。旧方針の翻訳先（`crates/orchestration`、`crates/provider-adapters`）は段階 5 で crate とともに削除した。実装・テストの対応は末尾の「新設計の挙動テスト対応」以降を正本とする。
 
@@ -169,9 +169,9 @@ SDK の取得記録（tarball の integrity/hash と制御関数）、persistenc
 | `apps/server/src/orchestration-v2/ProviderTurnStartService.testkit.ts` (16) | — | 未翻訳 |
 | `apps/server/src/orchestration-v2/ProviderTurnStartService.ts` (1266) | — | 未翻訳 |
 | `apps/server/src/orchestration-v2/ProviderTurnTokenUsage.test.ts` (43) | — | 未翻訳 |
-| `apps/server/src/orchestration-v2/PullRequestSyncReactor.test.ts` (966) | — | 対象外：今回の指示では M3（PR・workflow 周辺機能）を実装しない。 |
-| `apps/server/src/orchestration-v2/PullRequestSyncReactor.ts` (411) | — | 対象外：今回の指示では M3（PR・workflow 周辺機能）を実装しない。 |
-| `apps/server/src/orchestration-v2/PullRequestWatchReactor.ts` (280) | — | 対象外：今回の指示では M3（PR・workflow 周辺機能）を実装しない。 |
+| `apps/server/src/orchestration-v2/PullRequestSyncReactor.test.ts` (966) | — | 未翻訳 |
+| `apps/server/src/orchestration-v2/PullRequestSyncReactor.ts` (411) | — | 未翻訳 |
+| `apps/server/src/orchestration-v2/PullRequestWatchReactor.ts` (280) | — | 未翻訳 |
 | `apps/server/src/orchestration-v2/QueuedRunOrder.test.ts` (51) | — | 未翻訳 |
 | `apps/server/src/orchestration-v2/QueuedRunOrder.ts` (32) | — | 未翻訳 |
 | `apps/server/src/orchestration-v2/RandomUuid.ts` (13) | — | 未翻訳 |
@@ -211,8 +211,8 @@ SDK の取得記録（tarball の integrity/hash と制御関数）、persistenc
 | `apps/server/src/orchestration-v2/ThreadManagementService.ts` (782) | — | 未翻訳 |
 | `apps/server/src/orchestration-v2/ThreadMessageIntake.test.ts` (766) | — | 未翻訳 |
 | `apps/server/src/orchestration-v2/ThreadMessageIntake.ts` (239) | — | 未翻訳 |
-| `apps/server/src/orchestration-v2/ThreadPullRequestService.test.ts` (322) | — | 対象外：今回の指示では M3（PR・workflow 周辺機能）を実装しない。 |
-| `apps/server/src/orchestration-v2/ThreadPullRequestService.ts` (408) | — | 対象外：今回の指示では M3（PR・workflow 周辺機能）を実装しない。 |
+| `apps/server/src/orchestration-v2/ThreadPullRequestService.test.ts` (322) | — | 未翻訳 |
+| `apps/server/src/orchestration-v2/ThreadPullRequestService.ts` (408) | — | 未翻訳 |
 | `apps/server/src/orchestration-v2/ThreadSearch.test.ts` (201) | — | 未翻訳 |
 | `apps/server/src/orchestration-v2/ThreadSearch.ts` (168) | — | 未翻訳 |
 | `apps/server/src/orchestration-v2/ThreadSettlementService.test.ts` (1124) | — | 未翻訳 |
@@ -237,8 +237,8 @@ SDK の取得記録（tarball の integrity/hash と制御関数）、persistenc
 | `apps/server/src/orchestration-v2/legacy/LegacyV1Cutover.integration.test.ts` (1045) | — | 対象外：製品は未公開。ユーザー指示により旧 V1 の互換性・移行を作らない。 |
 | `apps/server/src/orchestration-v2/legacy/LegacyV1ThreadImporter.test.ts` (532) | — | 対象外：製品は未公開。ユーザー指示により旧 V1 の互換性・移行を作らない。 |
 | `apps/server/src/orchestration-v2/legacy/LegacyV1ThreadImporter.ts` (833) | — | 対象外：製品は未公開。ユーザー指示により旧 V1 の互換性・移行を作らない。 |
-| `apps/server/src/orchestration-v2/pullRequestWatch.test.ts` (217) | — | 対象外：今回の指示では M3（PR・workflow 周辺機能）を実装しない。 |
-| `apps/server/src/orchestration-v2/pullRequestWatch.ts` (209) | — | 対象外：今回の指示では M3（PR・workflow 周辺機能）を実装しない。 |
+| `apps/server/src/orchestration-v2/pullRequestWatch.test.ts` (217) | — | 未翻訳 |
+| `apps/server/src/orchestration-v2/pullRequestWatch.ts` (209) | — | 未翻訳 |
 | `apps/server/src/orchestration-v2/runtimeLayer.test.ts` (4758) | — | 未翻訳 |
 | `apps/server/src/orchestration-v2/runtimeLayer.ts` (325) | — | 未翻訳 |
 | `apps/server/src/orchestration-v2/testkit/ClaudeReplayFixtures.integration.test.ts` (382) | — | 未翻訳 |
@@ -256,7 +256,7 @@ SDK の取得記録（tarball の integrity/hash と制御関数）、persistenc
 | `apps/server/src/orchestration-v2/testkit/ReplayTranscriptNdjson.ts` (248) | — | 未翻訳 |
 | `apps/server/src/orchestration-v2/testkit/ThreadFork.integration.test.ts` (1200) | — | 未翻訳 |
 | `apps/server/src/orchestration-v2/testkit/ThreadMergeBack.integration.test.ts` (732) | — | 未翻訳 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/acp_elicitation/registry_transcript.ndjson` (11) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/acp_elicitation/registry_transcript.ndjson` (11) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
 | `apps/server/src/orchestration-v2/testkit/fixtures/claude_background_monitor_wake/claude_transcript.ndjson` (87) | — | 未翻訳 |
 | `apps/server/src/orchestration-v2/testkit/fixtures/claude_background_monitor_wake/input.ts` (29) | — | 未翻訳 |
 | `apps/server/src/orchestration-v2/testkit/fixtures/claude_background_monitor_wake/output.ts` (67) | — | 未翻訳 |
@@ -309,156 +309,156 @@ SDK の取得記録（tarball の integrity/hash と制御関数）、persistenc
 | `apps/server/src/orchestration-v2/testkit/fixtures/claude_result_is_error/output.ts` (73) | — | 未翻訳 |
 | `apps/server/src/orchestration-v2/testkit/fixtures/claude_subagent_resume_after_restart/claude_transcript.ndjson` (61) | — | 未翻訳 |
 | `apps/server/src/orchestration-v2/testkit/fixtures/delegated_task_status/codex_transcript.ndjson` (41) | — | 未翻訳 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/grok_auto_blocked_command/grok_transcript.ndjson` (136) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/grok_auto_blocked_command/input.ts` (30) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/grok_auto_blocked_command/output.ts` (97) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/grok_background_bash/grok_transcript.ndjson` (241) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/grok_background_bash/input.ts` (24) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/grok_background_bash/output.ts` (100) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/grok_background_bash_fast_wake/grok_transcript.ndjson` (258) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/grok_background_bash_fast_wake/input.ts` (18) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/grok_background_bash_fast_wake/output.ts` (11) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/grok_background_subagent/grok_transcript.ndjson` (353) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/grok_background_subagent/input.ts` (23) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/grok_background_subagent/output.ts` (116) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/grok_monitor/grok_transcript.ndjson` (361) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/grok_monitor/input.ts` (25) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/grok_monitor/output.ts` (112) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/grok_prompt_error/grok_transcript.ndjson` (74) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/grok_prompt_error/input.ts` (20) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/grok_prompt_error/output.ts` (45) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/grok_subagent_lineage/grok_transcript.ndjson` (17) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/grok_subagent_lineage/input.ts` (9) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/grok_subagent_lineage/output.ts` (98) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/grok_auto_blocked_command/grok_transcript.ndjson` (136) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/grok_auto_blocked_command/input.ts` (30) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/grok_auto_blocked_command/output.ts` (97) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/grok_background_bash/grok_transcript.ndjson` (241) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/grok_background_bash/input.ts` (24) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/grok_background_bash/output.ts` (100) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/grok_background_bash_fast_wake/grok_transcript.ndjson` (258) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/grok_background_bash_fast_wake/input.ts` (18) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/grok_background_bash_fast_wake/output.ts` (11) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/grok_background_subagent/grok_transcript.ndjson` (353) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/grok_background_subagent/input.ts` (23) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/grok_background_subagent/output.ts` (116) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/grok_monitor/grok_transcript.ndjson` (361) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/grok_monitor/input.ts` (25) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/grok_monitor/output.ts` (112) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/grok_prompt_error/grok_transcript.ndjson` (74) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/grok_prompt_error/input.ts` (20) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/grok_prompt_error/output.ts` (45) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/grok_subagent_lineage/grok_transcript.ndjson` (17) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/grok_subagent_lineage/input.ts` (9) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/grok_subagent_lineage/output.ts` (98) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
 | `apps/server/src/orchestration-v2/testkit/fixtures/index.ts` (1633) | — | 未翻訳 |
 | `apps/server/src/orchestration-v2/testkit/fixtures/message_steering/claude_output.ts` (43) | — | 未翻訳 |
 | `apps/server/src/orchestration-v2/testkit/fixtures/message_steering/claude_transcript.ndjson` (13) | — | 未翻訳 |
 | `apps/server/src/orchestration-v2/testkit/fixtures/message_steering/codex_output.ts` (43) | — | 未翻訳 |
 | `apps/server/src/orchestration-v2/testkit/fixtures/message_steering/codex_transcript.ndjson` (43) | — | 未翻訳 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/message_steering/cursor_output.ts` (56) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/message_steering/cursor_transcript.ndjson` (25) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/message_steering/grok_output.ts` (55) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/message_steering/grok_transcript.ndjson` (67) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/message_steering/cursor_output.ts` (56) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/message_steering/cursor_transcript.ndjson` (25) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/message_steering/grok_output.ts` (55) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/message_steering/grok_transcript.ndjson` (67) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
 | `apps/server/src/orchestration-v2/testkit/fixtures/message_steering/input.ts` (31) | — | 未翻訳 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/message_steering/pi_output.ts` (62) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/message_steering/pi_transcript.ndjson` (65) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/message_steering/registry_transcript.ndjson` (14) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/message_steering/pi_output.ts` (62) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/message_steering/pi_transcript.ndjson` (65) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/message_steering/registry_transcript.ndjson` (14) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
 | `apps/server/src/orchestration-v2/testkit/fixtures/multi_turn/claude_output.ts` (53) | — | 未翻訳 |
 | `apps/server/src/orchestration-v2/testkit/fixtures/multi_turn/claude_transcript.ndjson` (14) | — | 未翻訳 |
 | `apps/server/src/orchestration-v2/testkit/fixtures/multi_turn/codex_output.ts` (40) | — | 未翻訳 |
 | `apps/server/src/orchestration-v2/testkit/fixtures/multi_turn/codex_transcript.ndjson` (46) | — | 未翻訳 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/multi_turn/cursor_transcript.ndjson` (44) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/multi_turn/grok_transcript.ndjson` (91) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/multi_turn/cursor_transcript.ndjson` (44) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/multi_turn/grok_transcript.ndjson` (91) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
 | `apps/server/src/orchestration-v2/testkit/fixtures/multi_turn/input.ts` (14) | — | 未翻訳 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/multi_turn/pi_output.ts` (17) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/multi_turn/pi_transcript.ndjson` (72) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/multi_turn/registry_transcript.ndjson` (12) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/multi_turn/pi_output.ts` (17) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/multi_turn/pi_transcript.ndjson` (72) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/multi_turn/registry_transcript.ndjson` (12) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
 | `apps/server/src/orchestration-v2/testkit/fixtures/multi_turn_restart/claude_transcript.ndjson` (19) | — | 未翻訳 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_background/input.ts` (15) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_background/opencode_transcript.ndjson` (69) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_background/output.ts` (114) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_command/input.ts` (5) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_command/opencode_transcript.ndjson` (34) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_command/output.ts` (34) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_compaction/input.ts` (15) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_compaction/opencode_transcript.ndjson` (66) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_compaction/output.ts` (61) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_fork/opencode_transcript.ndjson` (69) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_inbox/input.ts` (24) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_inbox/opencode_transcript.ndjson` (53) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_inbox/output.ts` (72) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_interrupt/input.ts` (11) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_interrupt/opencode_transcript.ndjson` (36) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_interrupt/output.ts` (47) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_nested_background/input.ts` (15) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_nested_background/opencode_transcript.ndjson` (131) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_nested_background/output.ts` (77) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_permission/input.ts` (15) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_permission/opencode_transcript.ndjson` (117) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_permission/output.ts` (81) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_question/input.ts` (11) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_question/opencode_transcript.ndjson` (42) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_question/output.ts` (59) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_resume_after_restart/input.ts` (14) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_resume_after_restart/opencode_transcript.ndjson` (54) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_resume_after_restart/output.ts` (53) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_revert/input.ts` (17) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_revert/opencode_transcript.ndjson` (68) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_revert/output.ts` (39) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_simple/input.ts` (5) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_simple/opencode_transcript.ndjson` (53) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_simple/output.ts` (51) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_skill/input.ts` (5) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_skill/opencode_transcript.ndjson` (32) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_skill/output.ts` (34) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_subagent/input.ts` (5) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_subagent/opencode_transcript.ndjson` (83) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_subagent/output.ts` (74) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_switch/opencode_transcript.ndjson` (88) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_tool_call/input.ts` (5) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_tool_call/opencode_transcript.ndjson` (44) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_tool_call/output.ts` (56) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/opencode_child_approval/input.ts` (10) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/opencode_child_approval/opencode_transcript.ndjson` (40) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/opencode_child_approval/output.ts` (43) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/opencode_running_child_approval/input.ts` (16) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/opencode_running_child_approval/opencode_transcript.ndjson` (41) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/opencode_running_child_approval/output.ts` (88) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/opencode_subagent/input.ts` (7) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/opencode_subagent/opencode_transcript.ndjson` (34) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/opencode_subagent/output.ts` (71) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/pi_compaction/input.ts` (30) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/pi_compaction/output.ts` (93) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/pi_compaction/pi_transcript.ndjson` (160) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_background/input.ts` (15) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_background/opencode_transcript.ndjson` (69) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_background/output.ts` (114) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_command/input.ts` (5) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_command/opencode_transcript.ndjson` (34) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_command/output.ts` (34) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_compaction/input.ts` (15) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_compaction/opencode_transcript.ndjson` (66) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_compaction/output.ts` (61) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_fork/opencode_transcript.ndjson` (69) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_inbox/input.ts` (24) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_inbox/opencode_transcript.ndjson` (53) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_inbox/output.ts` (72) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_interrupt/input.ts` (11) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_interrupt/opencode_transcript.ndjson` (36) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_interrupt/output.ts` (47) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_nested_background/input.ts` (15) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_nested_background/opencode_transcript.ndjson` (131) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_nested_background/output.ts` (77) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_permission/input.ts` (15) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_permission/opencode_transcript.ndjson` (117) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_permission/output.ts` (81) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_question/input.ts` (11) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_question/opencode_transcript.ndjson` (42) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_question/output.ts` (59) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_resume_after_restart/input.ts` (14) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_resume_after_restart/opencode_transcript.ndjson` (54) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_resume_after_restart/output.ts` (53) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_revert/input.ts` (17) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_revert/opencode_transcript.ndjson` (68) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_revert/output.ts` (39) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_simple/input.ts` (5) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_simple/opencode_transcript.ndjson` (53) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_simple/output.ts` (51) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_skill/input.ts` (5) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_skill/opencode_transcript.ndjson` (32) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_skill/output.ts` (34) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_subagent/input.ts` (5) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_subagent/opencode_transcript.ndjson` (83) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_subagent/output.ts` (74) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_switch/opencode_transcript.ndjson` (88) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_tool_call/input.ts` (5) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_tool_call/opencode_transcript.ndjson` (44) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_tool_call/output.ts` (56) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/opencode_child_approval/input.ts` (10) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/opencode_child_approval/opencode_transcript.ndjson` (40) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/opencode_child_approval/output.ts` (43) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/opencode_running_child_approval/input.ts` (16) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/opencode_running_child_approval/opencode_transcript.ndjson` (41) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/opencode_running_child_approval/output.ts` (88) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/opencode_subagent/input.ts` (7) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/opencode_subagent/opencode_transcript.ndjson` (34) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/opencode_subagent/output.ts` (71) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/pi_compaction/input.ts` (30) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/pi_compaction/output.ts` (93) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/pi_compaction/pi_transcript.ndjson` (160) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
 | `apps/server/src/orchestration-v2/testkit/fixtures/plan_questions/codex_output.ts` (67) | — | 未翻訳 |
 | `apps/server/src/orchestration-v2/testkit/fixtures/plan_questions/codex_transcript.ndjson` (39) | — | 未翻訳 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/plan_questions/grok_transcript.ndjson` (11) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/plan_questions/grok_transcript.ndjson` (11) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
 | `apps/server/src/orchestration-v2/testkit/fixtures/plan_questions/input.ts` (18) | — | 未翻訳 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/plan_questions/opencode_output.ts` (26) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/plan_questions/opencode_transcript.ndjson` (27) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/plan_questions/opencode_output.ts` (26) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/plan_questions/opencode_transcript.ndjson` (27) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
 | `apps/server/src/orchestration-v2/testkit/fixtures/proposed_plan/codex_output.ts` (43) | — | 未翻訳 |
 | `apps/server/src/orchestration-v2/testkit/fixtures/proposed_plan/codex_transcript.ndjson` (278) | — | 未翻訳 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/proposed_plan/cursor_output.ts` (39) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/proposed_plan/cursor_transcript.ndjson` (132) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/proposed_plan/cursor_output.ts` (39) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/proposed_plan/cursor_transcript.ndjson` (132) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
 | `apps/server/src/orchestration-v2/testkit/fixtures/proposed_plan/input.ts` (8) | — | 未翻訳 |
 | `apps/server/src/orchestration-v2/testkit/fixtures/provider_thread_resume/codex_transcript.ndjson` (79) | — | 未翻訳 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/provider_thread_resume/cursor_transcript.ndjson` (67) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/provider_thread_resume/cursor_transcript.ndjson` (67) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
 | `apps/server/src/orchestration-v2/testkit/fixtures/provider_thread_resume/input.ts` (21) | — | 未翻訳 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/provider_thread_resume/pi_output.ts` (68) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/provider_thread_resume/pi_transcript.ndjson` (124) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/provider_thread_resume/pi_output.ts` (68) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/provider_thread_resume/pi_transcript.ndjson` (124) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
 | `apps/server/src/orchestration-v2/testkit/fixtures/queued_cancelled_while_active/codex_output.ts` (46) | — | 未翻訳 |
 | `apps/server/src/orchestration-v2/testkit/fixtures/queued_cancelled_while_active/input.ts` (25) | — | 未翻訳 |
 | `apps/server/src/orchestration-v2/testkit/fixtures/queued_turn/claude_transcript.ndjson` (14) | — | 未翻訳 |
 | `apps/server/src/orchestration-v2/testkit/fixtures/queued_turn/codex_output.ts` (49) | — | 未翻訳 |
 | `apps/server/src/orchestration-v2/testkit/fixtures/queued_turn/codex_transcript.ndjson` (46) | — | 未翻訳 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/queued_turn/cursor_transcript.ndjson` (36) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/queued_turn/grok_transcript.ndjson` (88) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/queued_turn/cursor_transcript.ndjson` (36) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/queued_turn/grok_transcript.ndjson` (88) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
 | `apps/server/src/orchestration-v2/testkit/fixtures/queued_turn/input.ts` (14) | — | 未翻訳 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/queued_turn/registry_transcript.ndjson` (12) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/queued_turn/registry_transcript.ndjson` (12) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
 | `apps/server/src/orchestration-v2/testkit/fixtures/shared.ts` (1485) | — | 未翻訳 |
 | `apps/server/src/orchestration-v2/testkit/fixtures/simple/claude_output.ts` (33) | — | 未翻訳 |
 | `apps/server/src/orchestration-v2/testkit/fixtures/simple/claude_transcript.ndjson` (10) | — | 未翻訳 |
 | `apps/server/src/orchestration-v2/testkit/fixtures/simple/codex_output.ts` (33) | — | 未翻訳 |
 | `apps/server/src/orchestration-v2/testkit/fixtures/simple/codex_transcript.ndjson` (30) | — | 未翻訳 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/simple/cursor_transcript.ndjson` (20) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/simple/grok_transcript.ndjson` (76) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/simple/cursor_transcript.ndjson` (20) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/simple/grok_transcript.ndjson` (76) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
 | `apps/server/src/orchestration-v2/testkit/fixtures/simple/input.ts` (7) | — | 未翻訳 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/simple/opencode_transcript.ndjson` (23) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/simple/pi_output.ts` (117) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/simple/pi_transcript.ndjson` (46) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/simple/registry_transcript.ndjson` (12) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/skill_invocation/cursor_output.ts` (39) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/skill_invocation/cursor_transcript.ndjson` (64) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/simple/opencode_transcript.ndjson` (23) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/simple/pi_output.ts` (117) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/simple/pi_transcript.ndjson` (46) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/simple/registry_transcript.ndjson` (12) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/skill_invocation/cursor_output.ts` (39) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/skill_invocation/cursor_transcript.ndjson` (64) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
 | `apps/server/src/orchestration-v2/testkit/fixtures/skill_invocation/input.ts` (19) | — | 未翻訳 |
 | `apps/server/src/orchestration-v2/testkit/fixtures/stop_background_work_after_failed_turn/input.ts` (33) | — | 未翻訳 |
 | `apps/server/src/orchestration-v2/testkit/fixtures/stop_background_work_after_failed_turn/output.ts` (44) | — | 未翻訳 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/stop_background_work_after_failed_turn/registry_transcript.ndjson` (10) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/stop_background_work_after_failed_turn/registry_transcript.ndjson` (10) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
 | `apps/server/src/orchestration-v2/testkit/fixtures/subagent/claude_output.ts` (123) | — | 未翻訳 |
 | `apps/server/src/orchestration-v2/testkit/fixtures/subagent/claude_transcript.ndjson` (29) | — | 未翻訳 |
 | `apps/server/src/orchestration-v2/testkit/fixtures/subagent/codex_output.ts` (124) | — | 未翻訳 |
 | `apps/server/src/orchestration-v2/testkit/fixtures/subagent/codex_transcript.ndjson` (628) | — | 未翻訳 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/subagent/cursor_output.ts` (96) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/subagent/cursor_transcript.ndjson` (353) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/subagent/cursor_output.ts` (96) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/subagent/cursor_transcript.ndjson` (353) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
 | `apps/server/src/orchestration-v2/testkit/fixtures/subagent/input.ts` (7) | — | 未翻訳 |
 | `apps/server/src/orchestration-v2/testkit/fixtures/subagent_continue/codex_output.ts` (60) | — | 未翻訳 |
 | `apps/server/src/orchestration-v2/testkit/fixtures/subagent_continue/codex_transcript.ndjson` (138) | — | 未翻訳 |
@@ -492,41 +492,41 @@ SDK の取得記録（tarball の integrity/hash と制御関数）、persistenc
 | `apps/server/src/orchestration-v2/testkit/fixtures/thread_rollback/codex_output.ts` (72) | — | 未翻訳 |
 | `apps/server/src/orchestration-v2/testkit/fixtures/thread_rollback/codex_transcript.ndjson` (99) | — | 未翻訳 |
 | `apps/server/src/orchestration-v2/testkit/fixtures/thread_rollback/input.ts` (21) | — | 未翻訳 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/thread_rollback/pi_output.ts` (83) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/thread_rollback/pi_transcript.ndjson` (163) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/thread_rollback/pi_output.ts` (83) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/thread_rollback/pi_transcript.ndjson` (163) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
 | `apps/server/src/orchestration-v2/testkit/fixtures/thread_rollback_after_restart/codex_output.ts` (31) | — | 未翻訳 |
 | `apps/server/src/orchestration-v2/testkit/fixtures/thread_rollback_after_restart/codex_transcript.ndjson` (107) | — | 未翻訳 |
 | `apps/server/src/orchestration-v2/testkit/fixtures/thread_rollback_after_restart/input.ts` (27) | — | 未翻訳 |
 | `apps/server/src/orchestration-v2/testkit/fixtures/thread_rollback_after_stop/input.ts` (29) | — | 未翻訳 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/thread_rollback_after_stop/pi_output.ts` (83) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/thread_rollback_after_stop/pi_transcript.ndjson` (274) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/thread_rollback_after_stop/pi_output.ts` (83) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/thread_rollback_after_stop/pi_transcript.ndjson` (274) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
 | `apps/server/src/orchestration-v2/testkit/fixtures/thread_rollback_to_stopped_turn/codex_output.ts` (66) | — | 未翻訳 |
 | `apps/server/src/orchestration-v2/testkit/fixtures/thread_rollback_to_stopped_turn/codex_transcript.ndjson` (279) | — | 未翻訳 |
 | `apps/server/src/orchestration-v2/testkit/fixtures/thread_rollback_to_stopped_turn/input.ts` (28) | — | 未翻訳 |
 | `apps/server/src/orchestration-v2/testkit/fixtures/todo_list/codex_output.ts` (39) | — | 未翻訳 |
 | `apps/server/src/orchestration-v2/testkit/fixtures/todo_list/codex_transcript.ndjson` (37) | — | 未翻訳 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/todo_list/cursor_output.ts` (72) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/todo_list/cursor_transcript.ndjson` (210) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/todo_list/grok_output.ts` (52) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/todo_list/grok_transcript.ndjson` (329) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/todo_list/cursor_output.ts` (72) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/todo_list/cursor_transcript.ndjson` (210) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/todo_list/grok_output.ts` (52) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/todo_list/grok_transcript.ndjson` (329) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
 | `apps/server/src/orchestration-v2/testkit/fixtures/todo_list/input.ts` (7) | — | 未翻訳 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/todo_list/registry_transcript.ndjson` (16) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/todo_list/registry_transcript.ndjson` (16) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
 | `apps/server/src/orchestration-v2/testkit/fixtures/tool_call_denied_write/claude_output.ts` (44) | — | 未翻訳 |
 | `apps/server/src/orchestration-v2/testkit/fixtures/tool_call_denied_write/claude_transcript.ndjson` (89) | — | 未翻訳 |
 | `apps/server/src/orchestration-v2/testkit/fixtures/tool_call_denied_write/input.ts` (24) | — | 未翻訳 |
 | `apps/server/src/orchestration-v2/testkit/fixtures/tool_call_read_only/claude_output.ts` (62) | — | 未翻訳 |
 | `apps/server/src/orchestration-v2/testkit/fixtures/tool_call_read_only/claude_transcript.ndjson` (16) | — | 未翻訳 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/tool_call_read_only/cursor_output.ts` (58) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/tool_call_read_only/cursor_transcript.ndjson` (49) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/tool_call_read_only/grok_transcript.ndjson` (15) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/tool_call_read_only/cursor_output.ts` (58) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/tool_call_read_only/cursor_transcript.ndjson` (49) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/tool_call_read_only/grok_transcript.ndjson` (15) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
 | `apps/server/src/orchestration-v2/testkit/fixtures/tool_call_read_only/input.ts` (7) | — | 未翻訳 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/tool_call_read_only/registry_transcript.ndjson` (15) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/tool_call_read_only/registry_transcript.ndjson` (15) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
 | `apps/server/src/orchestration-v2/testkit/fixtures/tool_call_read_only_on_request/claude_transcript.ndjson` (15) | — | 未翻訳 |
 | `apps/server/src/orchestration-v2/testkit/fixtures/tool_call_read_only_on_request/codex_transcript.ndjson` (81) | — | 未翻訳 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/tool_call_read_only_on_request/grok_transcript.ndjson` (181) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/tool_call_read_only_on_request/grok_transcript.ndjson` (181) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
 | `apps/server/src/orchestration-v2/testkit/fixtures/tool_call_read_only_on_request/input.ts` (10) | — | 未翻訳 |
 | `apps/server/src/orchestration-v2/testkit/fixtures/tool_call_read_only_on_request/output.ts` (108) | — | 未翻訳 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/tool_call_read_only_on_request/registry_transcript.ndjson` (13) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/tool_call_read_only_on_request/registry_transcript.ndjson` (13) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
 | `apps/server/src/orchestration-v2/testkit/fixtures/tool_call_restricted_granular/claude_output.ts` (41) | — | 未翻訳 |
 | `apps/server/src/orchestration-v2/testkit/fixtures/tool_call_restricted_granular/claude_transcript.ndjson` (15) | — | 未翻訳 |
 | `apps/server/src/orchestration-v2/testkit/fixtures/tool_call_restricted_granular/codex_output.ts` (36) | — | 未翻訳 |
@@ -541,19 +541,19 @@ SDK の取得記録（tarball の integrity/hash と制御関数）、persistenc
 | `apps/server/src/orchestration-v2/testkit/fixtures/turn_interrupt/claude_transcript.ndjson` (7) | — | 未翻訳 |
 | `apps/server/src/orchestration-v2/testkit/fixtures/turn_interrupt/codex_output.ts` (49) | — | 未翻訳 |
 | `apps/server/src/orchestration-v2/testkit/fixtures/turn_interrupt/codex_transcript.ndjson` (25) | — | 未翻訳 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/turn_interrupt/grok_transcript.ndjson` (28) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/turn_interrupt/grok_transcript.ndjson` (28) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
 | `apps/server/src/orchestration-v2/testkit/fixtures/turn_interrupt/input.ts` (10) | — | 未翻訳 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/turn_interrupt/opencode_transcript.ndjson` (20) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/turn_interrupt/registry_transcript.ndjson` (9) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/turn_interrupt/opencode_transcript.ndjson` (20) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/turn_interrupt/registry_transcript.ndjson` (9) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
 | `apps/server/src/orchestration-v2/testkit/fixtures/turn_interrupt_mid_tool/claude_output.ts` (95) | — | 未翻訳 |
 | `apps/server/src/orchestration-v2/testkit/fixtures/turn_interrupt_mid_tool/claude_transcript.ndjson` (11) | — | 未翻訳 |
 | `apps/server/src/orchestration-v2/testkit/fixtures/turn_interrupt_mid_tool/codex_output.ts` (150) | — | 未翻訳 |
 | `apps/server/src/orchestration-v2/testkit/fixtures/turn_interrupt_mid_tool/codex_transcript.ndjson` (35) | — | 未翻訳 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/turn_interrupt_mid_tool/cursor_output.ts` (76) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/turn_interrupt_mid_tool/cursor_transcript.ndjson` (33) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/turn_interrupt_mid_tool/cursor_output.ts` (76) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/turn_interrupt_mid_tool/cursor_transcript.ndjson` (33) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
 | `apps/server/src/orchestration-v2/testkit/fixtures/turn_interrupt_mid_tool/input.ts` (10) | — | 未翻訳 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/turn_interrupt_mid_tool/pi_output.ts` (67) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
-| `apps/server/src/orchestration-v2/testkit/fixtures/turn_interrupt_mid_tool/pi_transcript.ndjson` (59) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装 では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/turn_interrupt_mid_tool/pi_output.ts` (67) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
+| `apps/server/src/orchestration-v2/testkit/fixtures/turn_interrupt_mid_tool/pi_transcript.ndjson` (59) | — | 対象外：Codex/Claude 以外の provider 専用 replay fixture。この実装では対象外。 |
 | `apps/server/src/orchestration-v2/testkit/fixtures/turn_interrupt_restart/claude_output.ts` (129) | — | 未翻訳 |
 | `apps/server/src/orchestration-v2/testkit/fixtures/turn_interrupt_restart/claude_transcript.ndjson` (20) | — | 未翻訳 |
 | `apps/server/src/orchestration-v2/testkit/fixtures/turn_interrupt_restart/input.ts` (15) | — | 未翻訳 |
@@ -565,8 +565,8 @@ SDK の取得記録（tarball の integrity/hash と制御関数）、persistenc
 | `apps/server/src/orchestration-v2/testkit/pullRequestFixtures.ts` (70) | — | 未翻訳 |
 | `apps/server/src/orchestration-v2/threadHistoryPaging.test.ts` (702) | — | 未翻訳 |
 | `apps/server/src/orchestration-v2/threadHistoryPaging.ts` (532) | — | 未翻訳 |
-| `apps/server/src/orchestration-v2/workflowScriptQuery.test.ts` (74) | — | 対象外：今回の指示では M3（PR・workflow 周辺機能）を実装しない。 |
-| `apps/server/src/orchestration-v2/workflowScriptQuery.ts` (127) | — | 対象外：今回の指示では M3（PR・workflow 周辺機能）を実装しない。 |
+| `apps/server/src/orchestration-v2/workflowScriptQuery.test.ts` (74) | — | 未翻訳 |
+| `apps/server/src/orchestration-v2/workflowScriptQuery.ts` (127) | — | 未翻訳 |
 
 ### `apps/server/src/project`
 
@@ -580,30 +580,30 @@ SDK の取得記録（tarball の integrity/hash と制御関数）、persistenc
 | `apps/server/src/project/AgentSessionJson.ts` (201) | — | 未翻訳 |
 | `apps/server/src/project/AgentSessionScanner.test.ts` (3196) | — | 未翻訳 |
 | `apps/server/src/project/AgentSessionScanner.ts` (1495) | — | 未翻訳 |
-| `apps/server/src/project/ManagedProjectFolders.test.ts` (572) | — | 一部翻訳：named project の作成（createNamedProject、newProjectFolderName）を移植。Scratch project の作成と icon の設定は対象外。 |
-| `apps/server/src/project/ManagedProjectFolders.ts` (510) | — | 一部翻訳：named project の作成（createNamedProject、newProjectFolderName）を移植。Scratch project の作成と icon の設定は対象外。 |
-| `apps/server/src/project/ProjectCloneTracker.test.ts` (303) | — | 対象外：履歴取り込み以外の project 機能は今回の翻訳範囲外。残す Host のプロジェクト機能との接続点は importer に記録。 |
-| `apps/server/src/project/ProjectCloneTracker.ts` (479) | — | 対象外：履歴取り込み以外の project 機能は今回の翻訳範囲外。残す Host のプロジェクト機能との接続点は importer に記録。 |
-| `apps/server/src/project/ProjectEnrichmentService.test.ts` (343) | — | 一部翻訳：repository identity の enrichment を移植（favicon の 2 件は Host に favicon がないため対象外）。 |
-| `apps/server/src/project/ProjectEnrichmentService.ts` (297) | — | 一部翻訳：repository identity の enrichment を移植。favicon は対象外。 |
-| `apps/server/src/project/ProjectFaviconResolver.test.ts` (468) | — | 対象外：履歴取り込み以外の project 機能は今回の翻訳範囲外。残す Host のプロジェクト機能との接続点は importer に記録。 |
-| `apps/server/src/project/ProjectFaviconResolver.ts` (347) | — | 対象外：履歴取り込み以外の project 機能は今回の翻訳範囲外。残す Host のプロジェクト機能との接続点は importer に記録。 |
-| `apps/server/src/project/ProjectMutation.test.ts` (93) | — | 対象外：履歴取り込み以外の project 機能は今回の翻訳範囲外。残す Host のプロジェクト機能との接続点は importer に記録。 |
-| `apps/server/src/project/ProjectMutation.ts` (53) | — | 対象外：履歴取り込み以外の project 機能は今回の翻訳範囲外。残す Host のプロジェクト機能との接続点は importer に記録。 |
-| `apps/server/src/project/ProjectService.deletion.test.ts` (486) | — | 対象外：履歴取り込み以外の project 機能は今回の翻訳範囲外。残す Host のプロジェクト機能との接続点は importer に記録。 |
-| `apps/server/src/project/ProjectService.test.ts` (805) | — | 対象外：履歴取り込み以外の project 機能は今回の翻訳範囲外。残す Host のプロジェクト機能との接続点は importer に記録。 |
-| `apps/server/src/project/ProjectService.ts` (572) | — | 対象外：履歴取り込み以外の project 機能は今回の翻訳範囲外。残す Host のプロジェクト機能との接続点は importer に記録。 |
-| `apps/server/src/project/ProjectSetupScriptRunner.test.ts` (119) | — | 対象外：履歴取り込み以外の project 機能は今回の翻訳範囲外。残す Host のプロジェクト機能との接続点は importer に記録。 |
-| `apps/server/src/project/ProjectSetupScriptRunner.ts` (456) | — | 対象外：履歴取り込み以外の project 機能は今回の翻訳範囲外。残す Host のプロジェクト機能との接続点は importer に記録。 |
-| `apps/server/src/project/RepositoryIdentityResolver.test.ts` (393) | — | 翻訳済み：全 10 件を移植。 |
-| `apps/server/src/project/RepositoryIdentityResolver.ts` (197) | — | 翻訳済み。 |
-| `apps/server/src/project/T3ProjectFileLoader.test.ts` (89) | — | 対象外：履歴取り込み以外の project 機能は今回の翻訳範囲外。残す Host のプロジェクト機能との接続点は importer に記録。 |
-| `apps/server/src/project/T3ProjectFileLoader.ts` (109) | — | 対象外：履歴取り込み以外の project 機能は今回の翻訳範囲外。残す Host のプロジェクト機能との接続点は importer に記録。 |
-| `apps/server/src/project/WorktreeSetupTracker.test.ts` (226) | — | 対象外：履歴取り込み以外の project 機能は今回の翻訳範囲外。残す Host のプロジェクト機能との接続点は importer に記録。 |
-| `apps/server/src/project/WorktreeSetupTracker.ts` (366) | — | 対象外：履歴取り込み以外の project 機能は今回の翻訳範囲外。残す Host のプロジェクト機能との接続点は importer に記録。 |
-| `apps/server/src/project/gitCloneProgress.ts` (44) | — | 対象外：履歴取り込み以外の project 機能は今回の翻訳範囲外。残す Host のプロジェクト機能との接続点は importer に記録。 |
-| `apps/server/src/project/http.test.ts` (54) | — | 対象外：履歴取り込み以外の project 機能は今回の翻訳範囲外。残す Host のプロジェクト機能との接続点は importer に記録。 |
-| `apps/server/src/project/http.ts` (60) | — | 対象外：履歴取り込み以外の project 機能は今回の翻訳範囲外。残す Host のプロジェクト機能との接続点は importer に記録。 |
+| `apps/server/src/project/ManagedProjectFolders.test.ts` (572) | — | 未翻訳 |
+| `apps/server/src/project/ManagedProjectFolders.ts` (510) | — | 未翻訳 |
+| `apps/server/src/project/ProjectCloneTracker.test.ts` (303) | — | 未翻訳 |
+| `apps/server/src/project/ProjectCloneTracker.ts` (479) | — | 未翻訳 |
+| `apps/server/src/project/ProjectEnrichmentService.test.ts` (343) | — | 未翻訳 |
+| `apps/server/src/project/ProjectEnrichmentService.ts` (297) | — | 未翻訳 |
+| `apps/server/src/project/ProjectFaviconResolver.test.ts` (468) | — | 未翻訳 |
+| `apps/server/src/project/ProjectFaviconResolver.ts` (347) | — | 未翻訳 |
+| `apps/server/src/project/ProjectMutation.test.ts` (93) | — | 未翻訳 |
+| `apps/server/src/project/ProjectMutation.ts` (53) | — | 未翻訳 |
+| `apps/server/src/project/ProjectService.deletion.test.ts` (486) | — | 未翻訳 |
+| `apps/server/src/project/ProjectService.test.ts` (805) | — | 未翻訳 |
+| `apps/server/src/project/ProjectService.ts` (572) | — | 未翻訳 |
+| `apps/server/src/project/ProjectSetupScriptRunner.test.ts` (119) | — | 未翻訳 |
+| `apps/server/src/project/ProjectSetupScriptRunner.ts` (456) | — | 未翻訳 |
+| `apps/server/src/project/RepositoryIdentityResolver.test.ts` (393) | — | 未翻訳 |
+| `apps/server/src/project/RepositoryIdentityResolver.ts` (197) | — | 未翻訳 |
+| `apps/server/src/project/T3ProjectFileLoader.test.ts` (89) | — | 未翻訳 |
+| `apps/server/src/project/T3ProjectFileLoader.ts` (109) | — | 未翻訳 |
+| `apps/server/src/project/WorktreeSetupTracker.test.ts` (226) | — | 未翻訳 |
+| `apps/server/src/project/WorktreeSetupTracker.ts` (366) | — | 未翻訳 |
+| `apps/server/src/project/gitCloneProgress.ts` (44) | — | 未翻訳 |
+| `apps/server/src/project/http.test.ts` (54) | — | 未翻訳 |
+| `apps/server/src/project/http.ts` (60) | — | 未翻訳 |
 
 ### `packages/client-runtime`
 
@@ -612,14 +612,14 @@ SDK の取得記録（tarball の integrity/hash と制御関数）、persistenc
 | T3 のファイル（行数） | 移植した T3 テスト | 状態・理由 |
 |---|---|---|
 | `packages/client-runtime/package.json` (400) | — | 未翻訳 |
-| `packages/client-runtime/src/authorization/index.ts` (6) | — | 対象外：T3 Connect の認証・relay、Web 用の仮想 device viewer は作らない。iroh/QR の境界は別途記録。 |
-| `packages/client-runtime/src/authorization/layer.test.ts` (937) | — | 対象外：T3 Connect の認証・relay、Web 用の仮想 device viewer は作らない。iroh/QR の境界は別途記録。 |
-| `packages/client-runtime/src/authorization/remote.test.ts` (488) | — | 対象外：T3 Connect の認証・relay、Web 用の仮想 device viewer は作らない。iroh/QR の境界は別途記録。 |
-| `packages/client-runtime/src/authorization/remote.ts` (250) | — | 対象外：T3 Connect の認証・relay、Web 用の仮想 device viewer は作らない。iroh/QR の境界は別途記録。 |
-| `packages/client-runtime/src/authorization/service.ts` (508) | — | 対象外：T3 Connect の認証・relay、Web 用の仮想 device viewer は作らない。iroh/QR の境界は別途記録。 |
-| `packages/client-runtime/src/authorization/tokenStore.ts` (38) | — | 対象外：T3 Connect の認証・relay、Web 用の仮想 device viewer は作らない。iroh/QR の境界は別途記録。 |
-| `packages/client-runtime/src/codexArtifactTemplates.test.ts` (119) | — | 対象外：今回の指示では M3 の Git/PR/usage/全設定・更新配布 UI は実装しない。会話に必要な契約・回復経路は除外しない。 |
-| `packages/client-runtime/src/codexArtifactTemplates.ts` (136) | — | 対象外：今回の指示では M3 の Git/PR/usage/全設定・更新配布 UI は実装しない。会話に必要な契約・回復経路は除外しない。 |
+| `packages/client-runtime/src/authorization/index.ts` (6) | — | 対象外：T3 Connect の認証・relay は作らない。iroh/QR の境界は別途記録。 |
+| `packages/client-runtime/src/authorization/layer.test.ts` (937) | — | 対象外：T3 Connect の認証・relay は作らない。iroh/QR の境界は別途記録。 |
+| `packages/client-runtime/src/authorization/remote.test.ts` (488) | — | 対象外：T3 Connect の認証・relay は作らない。iroh/QR の境界は別途記録。 |
+| `packages/client-runtime/src/authorization/remote.ts` (250) | — | 対象外：T3 Connect の認証・relay は作らない。iroh/QR の境界は別途記録。 |
+| `packages/client-runtime/src/authorization/service.ts` (508) | — | 対象外：T3 Connect の認証・relay は作らない。iroh/QR の境界は別途記録。 |
+| `packages/client-runtime/src/authorization/tokenStore.ts` (38) | — | 対象外：T3 Connect の認証・relay は作らない。iroh/QR の境界は別途記録。 |
+| `packages/client-runtime/src/codexArtifactTemplates.test.ts` (119) | — | 未翻訳 |
+| `packages/client-runtime/src/codexArtifactTemplates.ts` (136) | — | 未翻訳 |
 | `packages/client-runtime/src/codexFileCitations.test.ts` (77) | — | 未翻訳 |
 | `packages/client-runtime/src/codexFileCitations.ts` (56) | — | 未翻訳 |
 | `packages/client-runtime/src/codexMarkdownDirectives.test.ts` (175) | — | 未翻訳 |
@@ -640,8 +640,8 @@ SDK の取得記録（tarball の integrity/hash と制御関数）、persistenc
 | `packages/client-runtime/src/connection/model.ts` (178) | — | 未翻訳 |
 | `packages/client-runtime/src/connection/onboarding.test.ts` (335) | — | 未翻訳 |
 | `packages/client-runtime/src/connection/onboarding.ts` (279) | — | 未翻訳 |
-| `packages/client-runtime/src/connection/outdatedHostUpdate.test.ts` (278) | — | 対象外：今回の指示では M3 の Git/PR/usage/全設定・更新配布 UI は実装しない。会話に必要な契約・回復経路は除外しない。 |
-| `packages/client-runtime/src/connection/outdatedHostUpdate.ts` (190) | — | 対象外：今回の指示では M3 の Git/PR/usage/全設定・更新配布 UI は実装しない。会話に必要な契約・回復経路は除外しない。 |
+| `packages/client-runtime/src/connection/outdatedHostUpdate.test.ts` (278) | — | 未翻訳 |
+| `packages/client-runtime/src/connection/outdatedHostUpdate.ts` (190) | — | 未翻訳 |
 | `packages/client-runtime/src/connection/presentation.test.ts` (199) | — | 未翻訳 |
 | `packages/client-runtime/src/connection/presentation.ts` (110) | — | 未翻訳 |
 | `packages/client-runtime/src/connection/profileStore.ts` (20) | — | 未翻訳 |
@@ -654,44 +654,44 @@ SDK の取得記録（tarball の integrity/hash と制御関数）、persistenc
 | `packages/client-runtime/src/connection/wakeups.ts` (34) | — | 未翻訳 |
 | `packages/client-runtime/src/delayedStatus.test.ts` (65) | — | 未翻訳 |
 | `packages/client-runtime/src/delayedStatus.ts` (86) | — | 未翻訳 |
-| `packages/client-runtime/src/device/androidFoldScene.test.ts` (78) | — | 対象外：T3 Connect の認証・relay、Web 用の仮想 device viewer は作らない。iroh/QR の境界は別途記録。 |
-| `packages/client-runtime/src/device/androidFoldScene.ts` (420) | — | 対象外：T3 Connect の認証・relay、Web 用の仮想 device viewer は作らない。iroh/QR の境界は別途記録。 |
-| `packages/client-runtime/src/device/deviceFraming.test.ts` (53) | — | 対象外：T3 Connect の認証・relay、Web 用の仮想 device viewer は作らない。iroh/QR の境界は別途記録。 |
-| `packages/client-runtime/src/device/deviceFraming.ts` (82) | — | 対象外：T3 Connect の認証・relay、Web 用の仮想 device viewer は作らない。iroh/QR の境界は別途記録。 |
-| `packages/client-runtime/src/device/deviceMotion.test.ts` (175) | — | 対象外：T3 Connect の認証・relay、Web 用の仮想 device viewer は作らない。iroh/QR の境界は別途記録。 |
-| `packages/client-runtime/src/device/deviceMotion.ts` (279) | — | 対象外：T3 Connect の認証・relay、Web 用の仮想 device viewer は作らない。iroh/QR の境界は別途記録。 |
-| `packages/client-runtime/src/device/deviceViewSnap.ts` (26) | — | 対象外：T3 Connect の認証・relay、Web 用の仮想 device viewer は作らない。iroh/QR の境界は別途記録。 |
-| `packages/client-runtime/src/device/duoControl.test.ts` (109) | — | 対象外：T3 Connect の認証・relay、Web 用の仮想 device viewer は作らない。iroh/QR の境界は別途記録。 |
-| `packages/client-runtime/src/device/duoControl.ts` (113) | — | 対象外：T3 Connect の認証・relay、Web 用の仮想 device viewer は作らない。iroh/QR の境界は別途記録。 |
-| `packages/client-runtime/src/device/duoScene.test.ts` (108) | — | 対象外：T3 Connect の認証・relay、Web 用の仮想 device viewer は作らない。iroh/QR の境界は別途記録。 |
-| `packages/client-runtime/src/device/duoScene.ts` (244) | — | 対象外：T3 Connect の認証・relay、Web 用の仮想 device viewer は作らない。iroh/QR の境界は別途記録。 |
-| `packages/client-runtime/src/device/duoSnap.test.ts` (54) | — | 対象外：T3 Connect の認証・relay、Web 用の仮想 device viewer は作らない。iroh/QR の境界は別途記録。 |
-| `packages/client-runtime/src/device/duoSnap.ts` (86) | — | 対象外：T3 Connect の認証・relay、Web 用の仮想 device viewer は作らない。iroh/QR の境界は別途記録。 |
-| `packages/client-runtime/src/device/duoStream.test.ts` (285) | — | 対象外：T3 Connect の認証・relay、Web 用の仮想 device viewer は作らない。iroh/QR の境界は別途記録。 |
-| `packages/client-runtime/src/device/duoViewer.test.ts` (703) | — | 対象外：T3 Connect の認証・relay、Web 用の仮想 device viewer は作らない。iroh/QR の境界は別途記録。 |
-| `packages/client-runtime/src/device/duoViewer.ts` (566) | — | 対象外：T3 Connect の認証・relay、Web 用の仮想 device viewer は作らない。iroh/QR の境界は別途記録。 |
-| `packages/client-runtime/src/device/frame.test.ts` (32) | — | 対象外：T3 Connect の認証・relay、Web 用の仮想 device viewer は作らない。iroh/QR の境界は別途記録。 |
-| `packages/client-runtime/src/device/frame.ts` (24) | — | 対象外：T3 Connect の認証・relay、Web 用の仮想 device viewer は作らない。iroh/QR の境界は別途記録。 |
-| `packages/client-runtime/src/device/hubAccess.ts` (18) | — | 対象外：T3 Connect の認証・relay、Web 用の仮想 device viewer は作らない。iroh/QR の境界は別途記録。 |
-| `packages/client-runtime/src/device/model.test.ts` (126) | — | 対象外：T3 Connect の認証・relay、Web 用の仮想 device viewer は作らない。iroh/QR の境界は別途記録。 |
-| `packages/client-runtime/src/device/model.ts` (88) | — | 対象外：T3 Connect の認証・relay、Web 用の仮想 device viewer は作らない。iroh/QR の境界は別途記録。 |
-| `packages/client-runtime/src/device/modelScene.test.ts` (121) | — | 対象外：T3 Connect の認証・relay、Web 用の仮想 device viewer は作らない。iroh/QR の境界は別途記録。 |
-| `packages/client-runtime/src/device/modelScene.ts` (118) | — | 対象外：T3 Connect の認証・relay、Web 用の仮想 device viewer は作らない。iroh/QR の境界は別途記録。 |
-| `packages/client-runtime/src/device/phoneInteraction.test.ts` (105) | — | 対象外：T3 Connect の認証・relay、Web 用の仮想 device viewer は作らない。iroh/QR の境界は別途記録。 |
-| `packages/client-runtime/src/device/phoneInteraction.ts` (83) | — | 対象外：T3 Connect の認証・relay、Web 用の仮想 device viewer は作らない。iroh/QR の境界は別途記録。 |
-| `packages/client-runtime/src/device/phoneScene.test.ts` (150) | — | 対象外：T3 Connect の認証・relay、Web 用の仮想 device viewer は作らない。iroh/QR の境界は別途記録。 |
-| `packages/client-runtime/src/device/phoneScene.ts` (302) | — | 対象外：T3 Connect の認証・relay、Web 用の仮想 device viewer は作らない。iroh/QR の境界は別途記録。 |
-| `packages/client-runtime/src/device/phoneViewer.test.ts` (530) | — | 対象外：T3 Connect の認証・relay、Web 用の仮想 device viewer は作らない。iroh/QR の境界は別途記録。 |
-| `packages/client-runtime/src/device/phoneViewer.ts` (444) | — | 対象外：T3 Connect の認証・relay、Web 用の仮想 device viewer は作らない。iroh/QR の境界は別途記録。 |
-| `packages/client-runtime/src/device/renderScheduler.test.ts` (27) | — | 対象外：T3 Connect の認証・relay、Web 用の仮想 device viewer は作らない。iroh/QR の境界は別途記録。 |
-| `packages/client-runtime/src/device/renderScheduler.ts` (23) | — | 対象外：T3 Connect の認証・relay、Web 用の仮想 device viewer は作らない。iroh/QR の境界は別途記録。 |
-| `packages/client-runtime/src/device/screenshot.test.ts` (50) | — | 対象外：T3 Connect の認証・relay、Web 用の仮想 device viewer は作らない。iroh/QR の境界は別途記録。 |
-| `packages/client-runtime/src/device/screenshot.ts` (30) | — | 対象外：T3 Connect の認証・relay、Web 用の仮想 device viewer は作らない。iroh/QR の境界は別途記録。 |
-| `packages/client-runtime/src/device/shapeProfile.test.ts` (27) | — | 対象外：T3 Connect の認証・relay、Web 用の仮想 device viewer は作らない。iroh/QR の境界は別途記録。 |
-| `packages/client-runtime/src/device/shapeProfile.ts` (124) | — | 対象外：T3 Connect の認証・relay、Web 用の仮想 device viewer は作らない。iroh/QR の境界は別途記録。 |
-| `packages/client-runtime/src/device/stream.test.ts` (738) | — | 対象外：T3 Connect の認証・relay、Web 用の仮想 device viewer は作らない。iroh/QR の境界は別途記録。 |
-| `packages/client-runtime/src/device/stream.ts` (1091) | — | 対象外：T3 Connect の認証・relay、Web 用の仮想 device viewer は作らない。iroh/QR の境界は別途記録。 |
-| `packages/client-runtime/src/device/streamFrames.test.ts` (97) | — | 対象外：T3 Connect の認証・relay、Web 用の仮想 device viewer は作らない。iroh/QR の境界は別途記録。 |
+| `packages/client-runtime/src/device/androidFoldScene.test.ts` (78) | — | 未翻訳 |
+| `packages/client-runtime/src/device/androidFoldScene.ts` (420) | — | 未翻訳 |
+| `packages/client-runtime/src/device/deviceFraming.test.ts` (53) | — | 未翻訳 |
+| `packages/client-runtime/src/device/deviceFraming.ts` (82) | — | 未翻訳 |
+| `packages/client-runtime/src/device/deviceMotion.test.ts` (175) | — | 未翻訳 |
+| `packages/client-runtime/src/device/deviceMotion.ts` (279) | — | 未翻訳 |
+| `packages/client-runtime/src/device/deviceViewSnap.ts` (26) | — | 未翻訳 |
+| `packages/client-runtime/src/device/duoControl.test.ts` (109) | — | 未翻訳 |
+| `packages/client-runtime/src/device/duoControl.ts` (113) | — | 未翻訳 |
+| `packages/client-runtime/src/device/duoScene.test.ts` (108) | — | 未翻訳 |
+| `packages/client-runtime/src/device/duoScene.ts` (244) | — | 未翻訳 |
+| `packages/client-runtime/src/device/duoSnap.test.ts` (54) | — | 未翻訳 |
+| `packages/client-runtime/src/device/duoSnap.ts` (86) | — | 未翻訳 |
+| `packages/client-runtime/src/device/duoStream.test.ts` (285) | — | 未翻訳 |
+| `packages/client-runtime/src/device/duoViewer.test.ts` (703) | — | 未翻訳 |
+| `packages/client-runtime/src/device/duoViewer.ts` (566) | — | 未翻訳 |
+| `packages/client-runtime/src/device/frame.test.ts` (32) | — | 未翻訳 |
+| `packages/client-runtime/src/device/frame.ts` (24) | — | 未翻訳 |
+| `packages/client-runtime/src/device/hubAccess.ts` (18) | — | 未翻訳 |
+| `packages/client-runtime/src/device/model.test.ts` (126) | — | 未翻訳 |
+| `packages/client-runtime/src/device/model.ts` (88) | — | 未翻訳 |
+| `packages/client-runtime/src/device/modelScene.test.ts` (121) | — | 未翻訳 |
+| `packages/client-runtime/src/device/modelScene.ts` (118) | — | 未翻訳 |
+| `packages/client-runtime/src/device/phoneInteraction.test.ts` (105) | — | 未翻訳 |
+| `packages/client-runtime/src/device/phoneInteraction.ts` (83) | — | 未翻訳 |
+| `packages/client-runtime/src/device/phoneScene.test.ts` (150) | — | 未翻訳 |
+| `packages/client-runtime/src/device/phoneScene.ts` (302) | — | 未翻訳 |
+| `packages/client-runtime/src/device/phoneViewer.test.ts` (530) | — | 未翻訳 |
+| `packages/client-runtime/src/device/phoneViewer.ts` (444) | — | 未翻訳 |
+| `packages/client-runtime/src/device/renderScheduler.test.ts` (27) | — | 未翻訳 |
+| `packages/client-runtime/src/device/renderScheduler.ts` (23) | — | 未翻訳 |
+| `packages/client-runtime/src/device/screenshot.test.ts` (50) | — | 未翻訳 |
+| `packages/client-runtime/src/device/screenshot.ts` (30) | — | 未翻訳 |
+| `packages/client-runtime/src/device/shapeProfile.test.ts` (27) | — | 未翻訳 |
+| `packages/client-runtime/src/device/shapeProfile.ts` (124) | — | 未翻訳 |
+| `packages/client-runtime/src/device/stream.test.ts` (738) | — | 未翻訳 |
+| `packages/client-runtime/src/device/stream.ts` (1091) | — | 未翻訳 |
+| `packages/client-runtime/src/device/streamFrames.test.ts` (97) | — | 未翻訳 |
 | `packages/client-runtime/src/environment/descriptor.ts` (17) | — | 未翻訳 |
 | `packages/client-runtime/src/environment/endpoint.test.ts` (61) | — | 未翻訳 |
 | `packages/client-runtime/src/environment/endpoint.ts` (9) | — | 未翻訳 |
@@ -713,7 +713,7 @@ SDK の取得記録（tarball の integrity/hash と制御関数）、persistenc
 | `packages/client-runtime/src/filePreview.ts` (44) | — | 未翻訳 |
 | `packages/client-runtime/src/handoff.test.ts` (65) | — | 未翻訳 |
 | `packages/client-runtime/src/handoff.ts` (64) | — | 未翻訳 |
-| `packages/client-runtime/src/load-balancing.ts` (40) | `crates/agent-core/src/view/load_balancing.rs`（`select_environment`、4 段階の preference、client receipt の freshness）、`crates/agent-core/src/environment.rs`（同じ repository identity・provider instance の Host 候補と scoped project route）、`connection::{owner,calls,intents}`（自動 draft 中だけの HostResources refresh）、desktop / iOS / Android の新規 task owner | 翻訳済み：`load-balancing.ts`・`useLoadBalancedEnvironment.ts`・`LoadBalancingSettings.tsx` の capacity、pending refresh、failure/manual fallback、0/25/50/100 の preference を接続。Host の sample clock は跨る環境で比較せず client receipt を使う。 |
+| `packages/client-runtime/src/load-balancing.ts` (40) | — | 未翻訳 |
 | `packages/client-runtime/src/markdownImages.test.ts` (71) | — | 未翻訳 |
 | `packages/client-runtime/src/markdownImages.ts` (72) | — | 未翻訳 |
 | `packages/client-runtime/src/markdownLinks.test.ts` (320) | — | 未翻訳 |
@@ -739,19 +739,19 @@ SDK の取得記録（tarball の integrity/hash と制御関数）、persistenc
 | `packages/client-runtime/src/platform/source.ts` (15) | — | 未翻訳 |
 | `packages/client-runtime/src/platform/storageDocument.test.ts` (414) | — | 未翻訳 |
 | `packages/client-runtime/src/platform/storageDocument.ts` (206) | — | 未翻訳 |
-| `packages/client-runtime/src/projectFaviconCache.test.ts` (323) | — | 対象外：今回の指示では M3 の Git/PR/usage/全設定・更新配布 UI は実装しない。会話に必要な契約・回復経路は除外しない。 |
-| `packages/client-runtime/src/projectFaviconCache.ts` (263) | — | 対象外：今回の指示では M3 の Git/PR/usage/全設定・更新配布 UI は実装しない。会話に必要な契約・回復経路は除外しない。 |
+| `packages/client-runtime/src/projectFaviconCache.test.ts` (323) | — | 未翻訳 |
+| `packages/client-runtime/src/projectFaviconCache.ts` (263) | — | 未翻訳 |
 | `packages/client-runtime/src/providerSkills.test.ts` (277) | — | 未翻訳 |
 | `packages/client-runtime/src/providerSkills.ts` (134) | — | 未翻訳 |
-| `packages/client-runtime/src/relay/discovery.test.ts` (432) | — | 対象外：T3 Connect の認証・relay、Web 用の仮想 device viewer は作らない。iroh/QR の境界は別途記録。 |
-| `packages/client-runtime/src/relay/discovery.ts` (350) | — | 対象外：T3 Connect の認証・relay、Web 用の仮想 device viewer は作らない。iroh/QR の境界は別途記録。 |
-| `packages/client-runtime/src/relay/errorPresentation.test.ts` (57) | — | 対象外：T3 Connect の認証・relay、Web 用の仮想 device viewer は作らない。iroh/QR の境界は別途記録。 |
-| `packages/client-runtime/src/relay/errorPresentation.ts` (66) | — | 対象外：T3 Connect の認証・relay、Web 用の仮想 device viewer は作らない。iroh/QR の境界は別途記録。 |
-| `packages/client-runtime/src/relay/index.ts` (4) | — | 対象外：T3 Connect の認証・relay、Web 用の仮想 device viewer は作らない。iroh/QR の境界は別途記録。 |
-| `packages/client-runtime/src/relay/managedRelay.test.ts` (708) | — | 対象外：T3 Connect の認証・relay、Web 用の仮想 device viewer は作らない。iroh/QR の境界は別途記録。 |
-| `packages/client-runtime/src/relay/managedRelay.ts` (940) | — | 対象外：T3 Connect の認証・relay、Web 用の仮想 device viewer は作らない。iroh/QR の境界は別途記録。 |
-| `packages/client-runtime/src/relay/managedRelayState.test.ts` (449) | — | 対象外：T3 Connect の認証・relay、Web 用の仮想 device viewer は作らない。iroh/QR の境界は別途記録。 |
-| `packages/client-runtime/src/relay/managedRelayState.ts` (445) | — | 対象外：T3 Connect の認証・relay、Web 用の仮想 device viewer は作らない。iroh/QR の境界は別途記録。 |
+| `packages/client-runtime/src/relay/discovery.test.ts` (432) | — | 対象外：T3 Connect の認証・relay は作らない。iroh/QR の境界は別途記録。 |
+| `packages/client-runtime/src/relay/discovery.ts` (350) | — | 対象外：T3 Connect の認証・relay は作らない。iroh/QR の境界は別途記録。 |
+| `packages/client-runtime/src/relay/errorPresentation.test.ts` (57) | — | 対象外：T3 Connect の認証・relay は作らない。iroh/QR の境界は別途記録。 |
+| `packages/client-runtime/src/relay/errorPresentation.ts` (66) | — | 対象外：T3 Connect の認証・relay は作らない。iroh/QR の境界は別途記録。 |
+| `packages/client-runtime/src/relay/index.ts` (4) | — | 対象外：T3 Connect の認証・relay は作らない。iroh/QR の境界は別途記録。 |
+| `packages/client-runtime/src/relay/managedRelay.test.ts` (708) | — | 対象外：T3 Connect の認証・relay は作らない。iroh/QR の境界は別途記録。 |
+| `packages/client-runtime/src/relay/managedRelay.ts` (940) | — | 対象外：T3 Connect の認証・relay は作らない。iroh/QR の境界は別途記録。 |
+| `packages/client-runtime/src/relay/managedRelayState.test.ts` (449) | — | 対象外：T3 Connect の認証・relay は作らない。iroh/QR の境界は別途記録。 |
+| `packages/client-runtime/src/relay/managedRelayState.ts` (445) | — | 対象外：T3 Connect の認証・relay は作らない。iroh/QR の境界は別途記録。 |
 | `packages/client-runtime/src/remotePerformance.bench.ts` (135) | — | 対象外：Web/relay の benchmark。Rust の意味論テストには該当しない。 |
 | `packages/client-runtime/src/repairMarkdownFileLinks.ts` (84) | — | 未翻訳 |
 | `packages/client-runtime/src/rpc/client.test.ts` (838) | — | 未翻訳 |
@@ -786,8 +786,8 @@ SDK の取得記録（tarball の integrity/hash と制御関数）、persistenc
 | `packages/client-runtime/src/state/environmentHttpAuth.ts` (208) | — | 未翻訳 |
 | `packages/client-runtime/src/state/filesystem.test.ts` (70) | — | 未翻訳 |
 | `packages/client-runtime/src/state/filesystem.ts` (83) | — | 未翻訳 |
-| `packages/client-runtime/src/state/git.ts` (23) | — | 対象外：今回の指示では M3 の Git/PR/usage/全設定・更新配布 UI は実装しない。会話に必要な契約・回復経路は除外しない。 |
-| `packages/client-runtime/src/state/gitActions.ts` (358) | — | 対象外：今回の指示では M3 の Git/PR/usage/全設定・更新配布 UI は実装しない。会話に必要な契約・回復経路は除外しない。 |
+| `packages/client-runtime/src/state/git.ts` (23) | — | 未翻訳 |
+| `packages/client-runtime/src/state/gitActions.ts` (358) | — | 未翻訳 |
 | `packages/client-runtime/src/state/itemSupport.test.ts` (205) | — | 未翻訳 |
 | `packages/client-runtime/src/state/itemSupport.ts` (138) | — | 未翻訳 |
 | `packages/client-runtime/src/state/models.ts` (329) | — | 未翻訳 |
@@ -795,7 +795,7 @@ SDK の取得記録（tarball の integrity/hash と制御関数）、persistenc
 | `packages/client-runtime/src/state/orchestrationV2Projection.test.ts` (351) | — | 未翻訳 |
 | `packages/client-runtime/src/state/orchestrationV2Projection.ts` (286) | — | 未翻訳 |
 | `packages/client-runtime/src/state/orchestrationV2TestFixtures.ts` (110) | — | 未翻訳 |
-| `packages/client-runtime/src/state/outdatedServerUpdate.ts` (78) | — | 対象外：今回の指示では M3 の Git/PR/usage/全設定・更新配布 UI は実装しない。会話に必要な契約・回復経路は除外しない。 |
+| `packages/client-runtime/src/state/outdatedServerUpdate.ts` (78) | — | 未翻訳 |
 | `packages/client-runtime/src/state/presentation.test.ts` (200) | — | 未翻訳 |
 | `packages/client-runtime/src/state/presentation.ts` (221) | — | 未翻訳 |
 | `packages/client-runtime/src/state/preview.test.ts` (18) | — | 未翻訳 |
@@ -808,11 +808,11 @@ SDK の取得記録（tarball の integrity/hash と制御関数）、persistenc
 | `packages/client-runtime/src/state/projects.ts` (208) | — | 未翻訳 |
 | `packages/client-runtime/src/state/providerInstanceDisplay.test.ts` (136) | — | 未翻訳 |
 | `packages/client-runtime/src/state/providerInstanceDisplay.ts` (103) | — | 未翻訳 |
-| `packages/client-runtime/src/state/pullRequestDiffHttp.test.ts` (120) | — | 対象外：今回の指示では M3 の Git/PR/usage/全設定・更新配布 UI は実装しない。会話に必要な契約・回復経路は除外しない。 |
-| `packages/client-runtime/src/state/pullRequestDiffHttp.ts` (102) | — | 対象外：今回の指示では M3 の Git/PR/usage/全設定・更新配布 UI は実装しない。会話に必要な契約・回復経路は除外しない。 |
-| `packages/client-runtime/src/state/pullRequestRouting.ts` (423) | — | 対象外：今回の指示では M3 の Git/PR/usage/全設定・更新配布 UI は実装しない。会話に必要な契約・回復経路は除外しない。 |
-| `packages/client-runtime/src/state/pullRequests.test.ts` (1568) | — | 対象外：今回の指示では M3 の Git/PR/usage/全設定・更新配布 UI は実装しない。会話に必要な契約・回復経路は除外しない。 |
-| `packages/client-runtime/src/state/pullRequests.ts` (525) | — | 対象外：今回の指示では M3 の Git/PR/usage/全設定・更新配布 UI は実装しない。会話に必要な契約・回復経路は除外しない。 |
+| `packages/client-runtime/src/state/pullRequestDiffHttp.test.ts` (120) | — | 未翻訳 |
+| `packages/client-runtime/src/state/pullRequestDiffHttp.ts` (102) | — | 未翻訳 |
+| `packages/client-runtime/src/state/pullRequestRouting.ts` (423) | — | 未翻訳 |
+| `packages/client-runtime/src/state/pullRequests.test.ts` (1568) | — | 未翻訳 |
+| `packages/client-runtime/src/state/pullRequests.ts` (525) | — | 未翻訳 |
 | `packages/client-runtime/src/state/relayDiscovery.ts` (41) | — | 未翻訳 |
 | `packages/client-runtime/src/state/review.ts` (75) | — | 未翻訳 |
 | `packages/client-runtime/src/state/runtime.test.ts` (954) | — | 未翻訳 |
@@ -822,8 +822,8 @@ SDK の取得記録（tarball の integrity/hash と制御関数）、persistenc
 | `packages/client-runtime/src/state/serverConfigProjection.ts` (99) | — | 未翻訳 |
 | `packages/client-runtime/src/state/serverUsage.test.ts` (263) | — | 未翻訳 |
 | `packages/client-runtime/src/state/session.ts` (165) | — | 未翻訳 |
-| `packages/client-runtime/src/state/sharedSettings.test.ts` (404) | — | 対象外：今回の指示では M3 の Git/PR/usage/全設定・更新配布 UI は実装しない。会話に必要な契約・回復経路は除外しない。 |
-| `packages/client-runtime/src/state/sharedSettings.ts` (178) | — | 対象外：今回の指示では M3 の Git/PR/usage/全設定・更新配布 UI は実装しない。会話に必要な契約・回復経路は除外しない。 |
+| `packages/client-runtime/src/state/sharedSettings.test.ts` (404) | — | 未翻訳 |
+| `packages/client-runtime/src/state/sharedSettings.ts` (178) | — | 未翻訳 |
 | `packages/client-runtime/src/state/shell-sync.test.ts` (956) | — | 未翻訳 |
 | `packages/client-runtime/src/state/shell.test.ts` (234) | — | 未翻訳 |
 | `packages/client-runtime/src/state/shell.ts` (453) | — | 未翻訳 |
@@ -882,21 +882,21 @@ SDK の取得記録（tarball の integrity/hash と制御関数）、persistenc
 | `packages/client-runtime/src/state/threads.ts` (1009) | — | 未翻訳 |
 | `packages/client-runtime/src/state/turnItemPresentation.test.ts` (104) | — | 未翻訳 |
 | `packages/client-runtime/src/state/turnItemPresentation.ts` (49) | — | 未翻訳 |
-| `packages/client-runtime/src/state/usage.test.ts` (323) | — | 対象外：今回の指示では M3 の Git/PR/usage/全設定・更新配布 UI は実装しない。会話に必要な契約・回復経路は除外しない。 |
-| `packages/client-runtime/src/state/usage.ts` (135) | — | 対象外：今回の指示では M3 の Git/PR/usage/全設定・更新配布 UI は実装しない。会話に必要な契約・回復経路は除外しない。 |
-| `packages/client-runtime/src/state/vcs.test.ts` (645) | — | 対象外：今回の指示では M3 の Git/PR/usage/全設定・更新配布 UI は実装しない。会話に必要な契約・回復経路は除外しない。 |
-| `packages/client-runtime/src/state/vcs.ts` (363) | — | 対象外：今回の指示では M3 の Git/PR/usage/全設定・更新配布 UI は実装しない。会話に必要な契約・回復経路は除外しない。 |
-| `packages/client-runtime/src/state/vcsAction.test.ts` (720) | — | 対象外：今回の指示では M3 の Git/PR/usage/全設定・更新配布 UI は実装しない。会話に必要な契約・回復経路は除外しない。 |
-| `packages/client-runtime/src/state/vcsAction.ts` (595) | — | 対象外：今回の指示では M3 の Git/PR/usage/全設定・更新配布 UI は実装しない。会話に必要な契約・回復経路は除外しない。 |
-| `packages/client-runtime/src/state/vcsCommandScheduler.ts` (13) | — | 対象外：今回の指示では M3 の Git/PR/usage/全設定・更新配布 UI は実装しない。会話に必要な契約・回復経路は除外しない。 |
-| `packages/client-runtime/src/state/vcsRef.ts` (9) | — | 対象外：今回の指示では M3 の Git/PR/usage/全設定・更新配布 UI は実装しない。会話に必要な契約・回復経路は除外しない。 |
-| `packages/client-runtime/src/state/vcsRefInvalidation.ts` (83) | — | 対象外：今回の指示では M3 の Git/PR/usage/全設定・更新配布 UI は実装しない。会話に必要な契約・回復経路は除外しない。 |
+| `packages/client-runtime/src/state/usage.test.ts` (323) | — | 未翻訳 |
+| `packages/client-runtime/src/state/usage.ts` (135) | — | 未翻訳 |
+| `packages/client-runtime/src/state/vcs.test.ts` (645) | — | 未翻訳 |
+| `packages/client-runtime/src/state/vcs.ts` (363) | — | 未翻訳 |
+| `packages/client-runtime/src/state/vcsAction.test.ts` (720) | — | 未翻訳 |
+| `packages/client-runtime/src/state/vcsAction.ts` (595) | — | 未翻訳 |
+| `packages/client-runtime/src/state/vcsCommandScheduler.ts` (13) | — | 未翻訳 |
+| `packages/client-runtime/src/state/vcsRef.ts` (9) | — | 未翻訳 |
+| `packages/client-runtime/src/state/vcsRefInvalidation.ts` (83) | — | 未翻訳 |
 | `packages/client-runtime/src/t3ToolSummary.test.ts` (251) | — | 未翻訳 |
 | `packages/client-runtime/src/t3ToolSummary.ts` (403) | — | 未翻訳 |
 | `packages/client-runtime/src/textPaste.test.ts` (156) | — | 未翻訳 |
 | `packages/client-runtime/src/textPaste.ts` (76) | — | 未翻訳 |
-| `packages/client-runtime/src/threadPullRequestCompatibility.test.ts` (133) | — | 対象外：今回の指示では M3 の Git/PR/usage/全設定・更新配布 UI は実装しない。会話に必要な契約・回復経路は除外しない。 |
-| `packages/client-runtime/src/threadPullRequestCompatibility.ts` (75) | — | 対象外：今回の指示では M3 の Git/PR/usage/全設定・更新配布 UI は実装しない。会話に必要な契約・回復経路は除外しない。 |
+| `packages/client-runtime/src/threadPullRequestCompatibility.test.ts` (133) | — | 未翻訳 |
+| `packages/client-runtime/src/threadPullRequestCompatibility.ts` (75) | — | 未翻訳 |
 | `packages/client-runtime/src/userMessage.test.ts` (70) | — | 未翻訳 |
 | `packages/client-runtime/src/userMessage.ts` (31) | — | 未翻訳 |
 | `packages/client-runtime/src/voice-input/controller.test.ts` (640) | — | 未翻訳 |
@@ -914,7 +914,7 @@ SDK の取得記録（tarball の integrity/hash と制御関数）、persistenc
 | `packages/client-runtime/src/work-log/toolPresentation.ts` (131) | — | 未翻訳 |
 | `packages/client-runtime/src/work-log/userInput.test.ts` (37) | — | 未翻訳 |
 | `packages/client-runtime/src/work-log/userInput.ts` (44) | — | 未翻訳 |
-| `packages/client-runtime/src/worktreeSetup.ts` (64) | — | 対象外：今回の指示では M3 の Git/PR/usage/全設定・更新配布 UI は実装しない。会話に必要な契約・回復経路は除外しない。 |
+| `packages/client-runtime/src/worktreeSetup.ts` (64) | — | 未翻訳 |
 | `packages/client-runtime/tsconfig.json` (4) | — | 未翻訳 |
 | `packages/client-runtime/vite.config.ts` (10) | — | 未翻訳 |
 
@@ -925,8 +925,8 @@ SDK の取得記録（tarball の integrity/hash と制御関数）、persistenc
 | T3 のファイル（行数） | 移植した T3 テスト | 状態・理由 |
 |---|---|---|
 | `packages/contracts/package.json` (34) | — | 未翻訳 |
-| `packages/contracts/src/acpRegistry.test.ts` (180) | — | 対象外：T3 Connect/ブラウザ・Web 専用/外部サービスの契約。この実装の iroh/ネイティブ境界に該当。 |
-| `packages/contracts/src/acpRegistry.ts` (347) | — | 対象外：T3 Connect/ブラウザ・Web 専用/外部サービスの契約。この実装の iroh/ネイティブ境界に該当。 |
+| `packages/contracts/src/acpRegistry.test.ts` (180) | — | 未翻訳 |
+| `packages/contracts/src/acpRegistry.ts` (347) | — | 未翻訳 |
 | `packages/contracts/src/agentSessions.test.ts` (36) | — | 未翻訳 |
 | `packages/contracts/src/agentSessions.ts` (111) | — | 未翻訳 |
 | `packages/contracts/src/applicationEvent.test.ts` (63) | — | 未翻訳 |
@@ -934,13 +934,13 @@ SDK の取得記録（tarball の integrity/hash と制御関数）、persistenc
 | `packages/contracts/src/assets.test.ts` (60) | — | 未翻訳 |
 | `packages/contracts/src/assets.ts` (320) | — | 未翻訳 |
 | `packages/contracts/src/assistantCitations.ts` (31) | — | 未翻訳 |
-| `packages/contracts/src/auth.ts` (355) | — | 対象外：T3 Connect/ブラウザ・Web 専用/外部サービスの契約。この実装の iroh/ネイティブ境界に該当。 |
+| `packages/contracts/src/auth.ts` (355) | — | 対象外：T3 Connect の認証・HTTP・relay の契約。iroh/QR の境界は別途記録。 |
 | `packages/contracts/src/background.test.ts` (18) | — | 未翻訳 |
 | `packages/contracts/src/background.ts` (110) | — | 未翻訳 |
 | `packages/contracts/src/baseSchemas.ts` (223) | — | 未翻訳 |
-| `packages/contracts/src/browserImport.ts` (165) | — | 対象外：T3 Connect/ブラウザ・Web 専用/外部サービスの契約。この実装の iroh/ネイティブ境界に該当。 |
-| `packages/contracts/src/browserProfile.test.ts` (111) | — | 対象外：T3 Connect/ブラウザ・Web 専用/外部サービスの契約。この実装の iroh/ネイティブ境界に該当。 |
-| `packages/contracts/src/browserProfile.ts` (99) | — | 対象外：T3 Connect/ブラウザ・Web 専用/外部サービスの契約。この実装の iroh/ネイティブ境界に該当。 |
+| `packages/contracts/src/browserImport.ts` (165) | — | 未翻訳 |
+| `packages/contracts/src/browserProfile.test.ts` (111) | — | 未翻訳 |
+| `packages/contracts/src/browserProfile.ts` (99) | — | 未翻訳 |
 | `packages/contracts/src/chatAttachment.test.ts` (82) | — | 未翻訳 |
 | `packages/contracts/src/chatAttachment.ts` (260) | — | 未翻訳 |
 | `packages/contracts/src/checkpointDiff.test.ts` (75) | — | 未翻訳 |
@@ -948,24 +948,24 @@ SDK の取得記録（tarball の integrity/hash と制御関数）、persistenc
 | `packages/contracts/src/composerContext.test.ts` (271) | — | 未翻訳 |
 | `packages/contracts/src/composerContext.ts` (298) | — | 未翻訳 |
 | `packages/contracts/src/composerContextClipboard.ts` (27) | — | 未翻訳 |
-| `packages/contracts/src/desktopAppActivation.ts` (53) | — | 対象外：T3 Connect/ブラウザ・Web 専用/外部サービスの契約。この実装の iroh/ネイティブ境界に該当。 |
-| `packages/contracts/src/desktopBootstrap.ts` (31) | — | 対象外：T3 Connect/ブラウザ・Web 専用/外部サービスの契約。この実装の iroh/ネイティブ境界に該当。 |
-| `packages/contracts/src/device.test.ts` (21) | — | 対象外：T3 Connect/ブラウザ・Web 専用/外部サービスの契約。この実装の iroh/ネイティブ境界に該当。 |
-| `packages/contracts/src/device.ts` (583) | — | 対象外：T3 Connect/ブラウザ・Web 専用/外部サービスの契約。この実装の iroh/ネイティブ境界に該当。 |
-| `packages/contracts/src/editor.ts` (232) | — | 対象外：T3 Connect/ブラウザ・Web 専用/外部サービスの契約。この実装の iroh/ネイティブ境界に該当。 |
+| `packages/contracts/src/desktopAppActivation.ts` (53) | — | 未翻訳 |
+| `packages/contracts/src/desktopBootstrap.ts` (31) | — | 未翻訳 |
+| `packages/contracts/src/device.test.ts` (21) | — | 未翻訳 |
+| `packages/contracts/src/device.ts` (583) | — | 未翻訳 |
+| `packages/contracts/src/editor.ts` (232) | — | 未翻訳 |
 | `packages/contracts/src/environment.test.ts` (99) | — | 未翻訳 |
 | `packages/contracts/src/environment.ts` (253) | — | 未翻訳 |
-| `packages/contracts/src/environmentHttp.test.ts` (62) | — | 対象外：T3 Connect/ブラウザ・Web 専用/外部サービスの契約。この実装の iroh/ネイティブ境界に該当。 |
-| `packages/contracts/src/environmentHttp.ts` (660) | — | 対象外：T3 Connect/ブラウザ・Web 専用/外部サービスの契約。この実装の iroh/ネイティブ境界に該当。 |
+| `packages/contracts/src/environmentHttp.test.ts` (62) | — | 対象外：T3 Connect の認証・HTTP・relay の契約。iroh/QR の境界は別途記録。 |
+| `packages/contracts/src/environmentHttp.ts` (660) | — | 対象外：T3 Connect の認証・HTTP・relay の契約。iroh/QR の境界は別途記録。 |
 | `packages/contracts/src/filesystem.test.ts` (33) | — | 未翻訳 |
 | `packages/contracts/src/filesystem.ts` (67) | — | 未翻訳 |
-| `packages/contracts/src/git.test.ts` (169) | — | 対象外：M3 の独立機能・契約。今回保留（会話から使う関連型は該当ファイルで個別に記録）。 |
-| `packages/contracts/src/git.ts` (482) | — | 対象外：M3 の独立機能・契約。今回保留（会話から使う関連型は該当ファイルで個別に記録）。 |
+| `packages/contracts/src/git.test.ts` (169) | — | 未翻訳 |
+| `packages/contracts/src/git.ts` (482) | — | 未翻訳 |
 | `packages/contracts/src/index.ts` (62) | — | 未翻訳 |
 | `packages/contracts/src/ipc.test.ts` (38) | — | 未翻訳 |
 | `packages/contracts/src/ipc.ts` (1391) | — | 未翻訳 |
-| `packages/contracts/src/keybindings.test.ts` (322) | — | 対象外：T3 Connect/ブラウザ・Web 専用/外部サービスの契約。この実装の iroh/ネイティブ境界に該当。 |
-| `packages/contracts/src/keybindings.ts` (218) | — | 対象外：T3 Connect/ブラウザ・Web 専用/外部サービスの契約。この実装の iroh/ネイティブ境界に該当。 |
+| `packages/contracts/src/keybindings.test.ts` (322) | — | 未翻訳 |
+| `packages/contracts/src/keybindings.ts` (218) | — | 未翻訳 |
 | `packages/contracts/src/model.ts` (232) | — | 未翻訳 |
 | `packages/contracts/src/modelSelection.test.ts` (124) | — | 未翻訳 |
 | `packages/contracts/src/modelSelection.ts` (63) | — | 未翻訳 |
@@ -976,12 +976,12 @@ SDK の取得記録（tarball の integrity/hash と制御関数）、persistenc
 | `packages/contracts/src/orchestrationV2.ts` (3405) | — | 未翻訳 |
 | `packages/contracts/src/orchestratorMcp.test.ts` (166) | — | 未翻訳 |
 | `packages/contracts/src/orchestratorMcp.ts` (589) | — | 未翻訳 |
-| `packages/contracts/src/preview.test.ts` (364) | — | 対象外：T3 Connect/ブラウザ・Web 専用/外部サービスの契約。この実装の iroh/ネイティブ境界に該当。 |
-| `packages/contracts/src/preview.ts` (354) | — | 対象外：T3 Connect/ブラウザ・Web 専用/外部サービスの契約。この実装の iroh/ネイティブ境界に該当。 |
-| `packages/contracts/src/previewAutomation.ts` (953) | — | 対象外：T3 Connect/ブラウザ・Web 専用/外部サービスの契約。この実装の iroh/ネイティブ境界に該当。 |
+| `packages/contracts/src/preview.test.ts` (364) | — | 未翻訳 |
+| `packages/contracts/src/preview.ts` (354) | — | 未翻訳 |
+| `packages/contracts/src/previewAutomation.ts` (953) | — | 未翻訳 |
 | `packages/contracts/src/project.test.ts` (288) | — | 未翻訳 |
 | `packages/contracts/src/project.ts` (536) | — | 未翻訳 |
-| `packages/contracts/src/projectClone.ts` (122) | — | 対象外：M3 の独立機能・契約。今回保留（会話から使う関連型は該当ファイルで個別に記録）。 |
+| `packages/contracts/src/projectClone.ts` (122) | — | 未翻訳 |
 | `packages/contracts/src/provider.test.ts` (318) | — | 未翻訳 |
 | `packages/contracts/src/provider.ts` (164) | — | 未翻訳 |
 | `packages/contracts/src/providerInstance.test.ts` (206) | — | 未翻訳 |
@@ -992,39 +992,41 @@ SDK の取得記録（tarball の integrity/hash と制御関数）、persistenc
 | `packages/contracts/src/providerSetup.test.ts` (53) | — | 未翻訳 |
 | `packages/contracts/src/providerSetup.ts` (255) | — | 未翻訳 |
 | `packages/contracts/src/providerUsageLimits.ts` (176) | — | 未翻訳 |
-| `packages/contracts/src/pullRequest.test.ts` (340) | — | 対象外：M3 の独立機能・契約。今回保留（会話から使う関連型は該当ファイルで個別に記録）。 |
-| `packages/contracts/src/pullRequest.ts` (1424) | — | 対象外：M3 の独立機能・契約。今回保留（会話から使う関連型は該当ファイルで個別に記録）。 |
-| `packages/contracts/src/relay.test.ts` (61) | — | 対象外：T3 Connect/ブラウザ・Web 専用/外部サービスの契約。この実装の iroh/ネイティブ境界に該当。 |
-| `packages/contracts/src/relay.ts` (1194) | — | 対象外：T3 Connect/ブラウザ・Web 専用/外部サービスの契約。この実装の iroh/ネイティブ境界に該当。 |
-| `packages/contracts/src/relayClient.ts` (63) | — | 対象外：T3 Connect/ブラウザ・Web 専用/外部サービスの契約。この実装の iroh/ネイティブ境界に該当。 |
-| `packages/contracts/src/remoteAccess.ts` (68) | — | 対象外：T3 Connect/ブラウザ・Web 専用/外部サービスの契約。この実装の iroh/ネイティブ境界に該当。 |
-| `packages/contracts/src/resourceTelemetry.ts` (522) | — | 対象外：T3 Connect/ブラウザ・Web 専用/外部サービスの契約。この実装の iroh/ネイティブ境界に該当。 |
+| `packages/contracts/src/pullRequest.test.ts` (340) | — | 未翻訳 |
+| `packages/contracts/src/pullRequest.ts` (1424) | — | 未翻訳 |
+| `packages/contracts/src/relay.test.ts` (61) | — | 対象外：T3 Connect の認証・HTTP・relay の契約。iroh/QR の境界は別途記録。 |
+| `packages/contracts/src/relay.ts` (1194) | — | 対象外：T3 Connect の認証・HTTP・relay の契約。iroh/QR の境界は別途記録。 |
+| `packages/contracts/src/relayClient.ts` (63) | — | 対象外：T3 Connect の認証・HTTP・relay の契約。iroh/QR の境界は別途記録。 |
+| `packages/contracts/src/remoteAccess.ts` (68) | — | 対象外：T3 Connect の認証・HTTP・relay の契約。iroh/QR の境界は別途記録。 |
+| `packages/contracts/src/resourceTelemetry.ts` (522) | — | 未翻訳 |
 | `packages/contracts/src/review.ts` (70) | — | 未翻訳 |
 | `packages/contracts/src/rpc.test.ts` (70) | — | 未翻訳 |
 | `packages/contracts/src/rpc.ts` (1877) | — | 未翻訳 |
-| `packages/contracts/src/scheduledTask.test.ts` (52) | — | 対象外：M3 の独立機能・契約。今回保留（会話から使う関連型は該当ファイルで個別に記録）。 |
-| `packages/contracts/src/scheduledTask.ts` (185) | — | 対象外：M3 の独立機能・契約。今回保留（会話から使う関連型は該当ファイルで個別に記録）。 |
+| `packages/contracts/src/scheduledTask.test.ts` (52) | — | 未翻訳 |
+| `packages/contracts/src/scheduledTask.ts` (185) | — | 未翻訳 |
 | `packages/contracts/src/server.test.ts` (268) | — | 未翻訳 |
 | `packages/contracts/src/server.ts` (955) | — | 未翻訳 |
-| `packages/contracts/src/settings.test.ts` (1107) | — | 対象外：M3 の独立機能・契約。今回保留（会話から使う関連型は該当ファイルで個別に記録）。 |
-| `packages/contracts/src/settings.ts` (1807) | — | 対象外：M3 の独立機能・契約。今回保留（会話から使う関連型は該当ファイルで個別に記録）。 |
-| `packages/contracts/src/sourceControl.ts` (188) | — | 対象外：M3 の独立機能・契約。今回保留（会話から使う関連型は該当ファイルで個別に記録）。 |
+| `packages/contracts/src/settings.test.ts` (1107) | — | 未翻訳 |
+| `packages/contracts/src/settings.ts` (1807) | — | 未翻訳 |
+| `packages/contracts/src/sourceControl.ts` (188) | — | 未翻訳 |
 | `packages/contracts/src/t3ProjectFile.test.ts` (71) | — | 未翻訳 |
 | `packages/contracts/src/t3ProjectFile.ts` (143) | — | 未翻訳 |
 | `packages/contracts/src/terminal.test.ts` (347) | — | 未翻訳 |
 | `packages/contracts/src/terminal.ts` (381) | — | 未翻訳 |
 | `packages/contracts/src/threadMetadataMcp.test.ts` (100) | — | 未翻訳 |
 | `packages/contracts/src/threadMetadataMcp.ts` (122) | — | 未翻訳 |
-| `packages/contracts/src/threadPullRequest.test.ts` (56) | — | 対象外：M3 の独立機能・契約。今回保留（会話から使う関連型は該当ファイルで個別に記録）。 |
-| `packages/contracts/src/threadPullRequest.ts` (128) | — | 対象外：M3 の独立機能・契約。今回保留（会話から使う関連型は該当ファイルで個別に記録）。 |
+| `packages/contracts/src/threadPullRequest.test.ts` (56) | — | 未翻訳 |
+| `packages/contracts/src/threadPullRequest.ts` (128) | — | 未翻訳 |
 | `packages/contracts/src/threadSearch.ts` (42) | — | 未翻訳 |
 | `packages/contracts/src/threadTitle.ts` (10) | — | 未翻訳 |
-| `packages/contracts/src/usage.ts` (246) | — | 対象外：M3 の独立機能・契約。今回保留（会話から使う関連型は該当ファイルで個別に記録）。 |
-| `packages/contracts/src/usageLimitSourceId.ts` (9) | — | 対象外：M3 の独立機能・契約。今回保留（会話から使う関連型は該当ファイルで個別に記録）。 |
-| `packages/contracts/src/vcs.ts` (287) | — | 対象外：M3 の独立機能・契約。今回保留（会話から使う関連型は該当ファイルで個別に記録）。 |
-| `packages/contracts/src/worktreeMcp.ts` (127) | — | 対象外：M3 の独立機能・契約。今回保留（会話から使う関連型は該当ファイルで個別に記録）。 |
-| `packages/contracts/src/worktreeSetup.ts` (124) | — | 対象外：M3 の独立機能・契約。今回保留（会話から使う関連型は該当ファイルで個別に記録）。 |
+| `packages/contracts/src/usage.ts` (246) | — | 未翻訳 |
+| `packages/contracts/src/usageLimitSourceId.ts` (9) | — | 未翻訳 |
+| `packages/contracts/src/vcs.ts` (287) | — | 未翻訳 |
+| `packages/contracts/src/worktreeMcp.ts` (127) | — | 未翻訳 |
+| `packages/contracts/src/worktreeSetup.ts` (124) | — | 未翻訳 |
 | `packages/contracts/tsconfig.json` (5) | — | 未翻訳 |
+
+<!-- end generated inventory -->
 
 ## 新設計の挙動テスト対応（段階 1・2）
 
@@ -1704,3 +1706,28 @@ Appearance の保存と Themes・Contrast・Composer context・Motion・Advanced
 | mobile `widgets/AgentActivity.tsx` と同テスト | `agent-core/view/activity.rs` と iOS `Shared/AgentActivityAttributes.swift`・`ActivityExtension/AgentActivityWidget.swift`。attention-first の順、失敗優先の終了表示、期限切れの進行状態、明暗・monochrome・Always On の色、アプリ内だけのリンク、Lock Screen・Dynamic Island・small family の描画。ActivityKit token と request/update/end は push owner と統合する。 |
 
 Swift 構文と plist/project 構造、固定 formatter、diff の検証を実施した。新しい共通 binding と native build・unit test の最終結果は統合後に記録する。
+
+## 段階 6: M3 source family 対応（2026-10-08）
+
+この表は固定版の 960 ファイルを機械的に保持する。下表は実装済み production family の対応先を抜粋したもので、各 source 行を逐一照合した、または全 T3 テストを移植したという意味ではない。`PORT_MAP.json` の個別行は、対応先とテストを記録するまで `未翻訳` のまま残す。`対象外` は下記の承認済み境界だけに使う。
+
+| T3 source family | production の対応先（抜粋） | 対応するテスト（抜粋） |
+|---|---|---|
+| Git/VCS と GitHub PR（`vcs`、`git`、`pullRequest`、`sourceControl`、`threadPullRequest`） | `crates/agent-protocol/src/vcs.rs`・`pull_requests.rs`、`crates/host-daemon/src/vcs/`、`crates/host-daemon/src/github/{cli,pulls}.rs`、`crates/agent-domain/src/pull_requests.rs`、`crates/agent-core/src/view/pull_requests/`、desktop `app/panel/pull_requests.rs` | `crates/host-daemon/src/vcs/tests.rs`、`crates/host-daemon/src/github/pulls.rs` の unit tests、`agent-domain/src/pull_requests.rs` と `agent-core/src/view/pull_requests/` の tests |
+| Scheduled tasks（`scheduledTasks`、`scheduledTask`、`scheduling`） | `crates/agent-domain/src/schedule.rs`、`crates/agent-protocol/src/scheduled_tasks.rs`、`crates/agent-runtime/src/scheduled/`、`crates/agent-core/src/view/scheduled_tasks.rs`、desktop/iOS/Android の ScheduledTasks screens | `agent-domain/src/schedule.rs`、`agent-runtime/src/scheduled/tests.rs` と scheduled view tests |
+| Usage limits/page/pricing（`usage`、`providerUsageLimits`、`usageLimits`） | `crates/host-daemon/src/{account_usage.rs,usage/}`、`crates/agent-protocol/src/usage.rs`、`crates/agent-core/src/view/usage/`、desktop `settings/usage.rs`、iOS `UsageScreen.swift`、Android `UsageScreen.kt`、widget publishers | `agent-core/src/view/usage/`、`host-daemon/src/usage/` と account usage tests |
+| Settings/platform (notifications, provider maintenance, capture, project folders, shortcuts) | `crates/agent-core/src/view/settings/`、`crates/agent-protocol/src/models.rs`、`crates/host-daemon/src/host_runtime.rs`、desktop settings、iOS/Android Settings screens | settings registry/section tests、native parser and fake-delivery tests; final integrated build remains pending |
+| Preview/browser and device streams (excluding browser auto-import) | `crates/host-daemon/src/preview/`、`crates/agent-protocol/src/{preview,device}.rs`、`crates/agent-core/src/{view/preview.rs,state/device.rs}`、`crates/host-daemon/src/{device.rs,device_stream.rs}`、desktop/mobile device and browser surfaces | `host-daemon/src/device_stream.rs` Cisco fixture tests (SPS `152x100`), `agent-core/src/state/device.rs` epoch/Duo/lifetime tests, Host device tests |
+| Push/activity and OS widgets | `crates/agent-domain/src/activity.rs`、`crates/agent-core/src/{view/activity.rs,bindings/activity.rs}`、`crates/host-daemon/src/host_rpc/push.rs`、iOS Activity/Push sources、Android Push/Activity sources | activity/domain tests, Android `AgentPushMessagingServiceTest`, native parser and bounded-payload tests |
+| Updater/release runtime | `crates/host-daemon/src/update.rs` and `host_runtime.rs`, `scripts/stage-ffmpeg-runtime.sh`, `scripts/ffmpeg-runtime-test.sh`, release metadata docs | updater unit tests, release metadata/actionlint/shellcheck checks; final same-head builds remain pending |
+| Claude/Codex usage and conversation adapters | `crates/agent-providers/`, `crates/host-daemon/src/{claude,conversation}/`, `crates/codex-app-server/` | provider replay fixtures, Claude bridge tests, conversation/domain tests; no live model calls |
+
+### 承認済みの境界
+
+- PR の status・作成・publish・lookup は GitHub (`gh`) に限定する。Git の一般操作と iroh RPC は維持する。
+- Usage と conversation adapter は Codex と Claude の production paths を対象にする。その他 provider 専用 replay は対象外とする。
+- push は Host 所有の直接 APNs/FCM 配信と OS capability gate を使う。push relay や外部認証サービスは追加しない。
+- transport とペアリングは既存の iroh/QR 境界を維持し、ALPN は `remote-agent/streams/14` の現行形式だけを扱う。
+- browser auto-import と旧 V1/legacy migration paths は対象外とする。現在形式の browser preview と native device surfaces は対応表の production family に含める。
+
+統合 head `7fd114ef` では上記 source family と current consumers の静的な対応を記録した。最終 unit test、workspace clippy (`-D warnings`)、fmt、Host/GPUI、UniFFI 再生成、iOS の共有/Activity/Share Extension、Android の同一 revision build は root の QA として保留している。外部 provider、実機・実端末、稼働中 Host、signing、CI 待ちはこの記録の検証に含めない。

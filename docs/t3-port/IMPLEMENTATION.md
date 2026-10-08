@@ -9,9 +9,9 @@
 | 3 | 完了 | `agent-runtime`: actor、SQLite の事実ログ、outbox、provider session、同期、履歴の取り込み。`host-daemon` の `conversation` が RPC へ接続する |
 | 4 | 完了 | `agent-core` の同期・outbox・表示用データと UniFFI、desktop・iOS・Android。未接続の項目は PORT_MAP の「段階 4 の統合」に記録する |
 | 5 | 完了 | 旧 `crates/orchestration` と `crates/provider-adapters`、旧 `orchestration/*` RPC、cwd から作る terminal handle、旧ランタイムの文書の削除 |
-| M3 | 未着手 | T3 の Git/worktree 操作、GitHub PR 連携、scheduled tasks、usage の拡張、全設定、Nightly 配布 |
+| M3 | 統合中・owner follow-up と最終検証待ち | Git/VCS、GitHub PR、scheduled tasks、usage、settings/platform、Preview/device、push/activity、updater/release。対応先と境界は `PORT_MAP.md` の段階 6 に記録する |
 
-会話の RPC の ALPN は `remote-agent/streams/13`。旧形式の互換性・移行は設けない。iroh、QR ペアリング、provider プロセス管理、terminal・files・browser・dictation・accounts・既存 worktree 機能は維持する。
+会話の RPC の ALPN は `remote-agent/streams/14`。旧形式の互換性・移行は設けない。iroh、QR ペアリング、provider プロセス管理、terminal・files・browser・dictation・accounts・既存 worktree 機能は維持する。
 
 Claude 接続は固定版の Agent SDK を Node 子プロセスから直接呼ぶ。SDK 本体とライセンスは npm lockfile に従って vendoring し、Host に埋め込む。Host 上には Node.js 18 以上が必要（開発環境は Nix の Node を使う）。SDK 内部の制御・fork の履歴変換の Rust 再実装は削除した。
 
@@ -20,6 +20,8 @@ Claude 接続は固定版の Agent SDK を Node 子プロセスから直接呼�
 変更 crate の単体・property test、Rust lint、Host/GPUI の build、iOS Rust/Swift の build、Android の単体テストと assembleDebug を行う。CI の結果待ち、cargo-mutants、live-provider E2E、Simulator UI テストは行わない。pixel・実機操作の受入確認はこのビルド検証に含めない。稼働中 Host を再起動せず、main と他 worktree は変更しない。
 
 2026-10-08 の統合と SDK 接続で確認した結果:
+
+これらは途中のチェックポイントでの結果であり、M3 最終統合 head の証明ではない。現在の最終 head では、全 unit test、`-D warnings` clippy、fmt、Host/GPUI、iOS（共有・Activity・Share Extension）、Android、UniFFI 再生成の確認を保留している。外部 provider、実機・実端末、稼働中 Host、signing、CI 待ちの検証は行わない。
 
 - `scripts/dev-env.sh just unit-tests`: Rust 3,370件が通過、手動・外部の5件は skip。agent-peer の5群と、公式 SDK の Node テスト8件も通過した。
 - workspace の clippy（全 target、`-D warnings`）、fmt、Host・GPUI・UniFFI の build が通過した。
