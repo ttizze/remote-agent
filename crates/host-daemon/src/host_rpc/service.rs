@@ -4130,6 +4130,10 @@ mod provider_settings_tests {
 mod handoff_service_tests {
     use super::HostRpcService;
     use crate::ProjectStore;
+    use agent_protocol::{
+        models::{UpdateStatusRequest, UpdateTarget},
+        protocol::Call,
+    };
     use std::sync::atomic::Ordering;
     use std::time::Duration;
 
@@ -4168,6 +4172,46 @@ mod handoff_service_tests {
             .expect("handoff task");
         assert!(!accepted.expect("handoff inspection"));
         assert!(!service.handoff_is_draining());
+    }
+
+    #[tokio::test]
+    async fn dispatched_status_read_does_not_reenter_after_handoff_writer_queues() {
+        let (_directory, service) = test_service();
+        let held = service
+            .acquire_handoff_gate(false)
+            .await
+            .expect("held operation admission");
+        let handoff_service = service.clone();
+        let handoff = tokio::spawn(async move { handoff_service.accept_handoff_if_idle().await });
+        tokio::task::yield_now().await;
+
+        let session = service.open_session();
+        let session_id = session.id();
+        let dispatch_service = service.clone();
+        let dispatch = tokio::spawn(async move {
+            dispatch_service
+                .dispatch(
+                    session_id,
+                    &Call::ReadUpdateStatus(UpdateStatusRequest {
+                        target: UpdateTarget::Host,
+                    }),
+                )
+                .await
+        });
+        drop(held);
+
+        let result = tokio::time::timeout(Duration::from_secs(1), dispatch)
+            .await
+            .expect("dispatch completes after queued handoff writer releases")
+            .expect("dispatch task")
+            .expect("status dispatch");
+        drop(result);
+        let accepted = tokio::time::timeout(Duration::from_secs(1), handoff)
+            .await
+            .expect("handoff completes")
+            .expect("handoff task")
+            .expect("handoff inspection");
+        assert!(!accepted);
     }
 
     #[tokio::test]
