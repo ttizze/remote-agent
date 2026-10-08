@@ -27,6 +27,7 @@ import dev.remoteagent.core.environmentSettings as buildEnvironmentSettings
 import dev.remoteagent.core.environmentThreadList as buildEnvironmentThreadList
 import dev.remoteagent.core.generateIdentity
 import dev.remoteagent.core.parseInvitation
+import dev.remoteagent.core.subscriptionUsageWidgetsJson
 import dev.remoteagent.core.validateInvitation
 import java.io.File
 import kotlinx.coroutines.CancellationException
@@ -590,6 +591,12 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
         )
         environments = (environments.filterNot { it.profileId == profile.id } + row)
             .sortedBy { it.label.lowercase() }
+        publishUsageWidget()
+    }
+
+    private fun publishUsageWidget() {
+        val snapshots = backgroundOwners.values.map { it.snapshot() } + listOfNotNull(owner?.snapshot())
+        usageWidget.publish(subscriptionUsageWidgetsJson(snapshots, UInt.MAX_VALUE))
     }
 
     fun removeProfile(id: String) {
@@ -606,6 +613,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
                     scope.launch { old?.shutdown() }
                 }
                 profiles = profiles.filterNot { it.id == id }
+                publishUsageWidget()
                 environments = environments.filterNot { it.profileId == id }
                 environmentSnapshots = environmentSnapshots - id
                 repository.saveProfiles(profiles)
@@ -774,7 +782,6 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
         profileId?.let { id ->
             profiles.firstOrNull { it.id == id }?.let { profile -> publishEnvironment(profile, next) }
         }
-        usageWidget.publish(next.subscriptionUsageWidgetJson(0, UInt.MAX_VALUE))
         val selected = next.selectedThreadId()
         val from = followingFrom
         if (from != null && selected != null && selected != from) {
