@@ -500,6 +500,13 @@ fn new_chat_selects_catalog_defaults_in_either_load_order() {
     .unwrap();
     for catalog_first in [false, true] {
         let mut current = Snapshot::default();
+        op::ListAccounts {}.apply(
+            &mut current,
+            serde_json::from_value(json!({
+                "accounts":[{"id":"account","provider":"codex"}], "selected":{"codex":"account"}
+            }))
+            .unwrap(),
+        );
         for load_catalog in [catalog_first, !catalog_first] {
             if load_catalog {
                 op::LoadModels {}.apply(
@@ -870,6 +877,13 @@ fn incomplete_model_catalog_preserves_restored_choices_and_defaults_only_new_dra
         } else {
             json!({})
         };
+        op::ListAccounts {}.apply(
+            &mut state,
+            serde_json::from_value(json!({
+                "accounts":[{"id":"account","provider":"codex"}], "selected":{"codex":"account"}
+            }))
+            .unwrap(),
+        );
         op::LoadModels {}.apply(
             &mut state,
             serde_json::from_value(json!({"data":[{
