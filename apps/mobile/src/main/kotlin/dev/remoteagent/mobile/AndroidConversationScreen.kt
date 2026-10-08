@@ -239,7 +239,9 @@ internal fun ThreadComposer(
                 },
                 enabled =
                     snapshot.modelProviderForDraft(navigation.draftKey) != null &&
-                        inputUnavailable == null && !sending && (draft.text.isNotBlank() || draft.attachments.isNotEmpty()),
+                        inputUnavailable == null &&
+                        !sending &&
+                        (draft.text.isNotBlank() || draft.attachments.isNotEmpty()),
             ) {
                 Text("送信")
             }
