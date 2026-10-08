@@ -880,19 +880,28 @@ pub(crate) struct BackgroundOwner {
     changes: broadcast::Sender<BackgroundPolicySnapshot>,
     resources: Arc<ResourceOwner>,
     state_directory: PathBuf,
+    policy_path: PathBuf,
 }
 impl BackgroundOwner {
     pub(crate) fn new(state_directory: PathBuf) -> Arc<Self> {
         let _ = std::fs::create_dir_all(state_directory.join("logs"));
+        let policy_path = state_directory.join("background-policy.json");
+        let policy = std::fs::read_to_string(&policy_path)
+            .ok()
+            .and_then(|contents| serde_json::from_str(&contents).ok())
+            .unwrap_or_else(|| {
+                BackgroundActivityPolicy::preset(agent_domain::BackgroundActivityProfile::Balanced)
+            });
         let (changes, _) = broadcast::channel(16);
         Arc::new(Self {
             mutation: TokioMutex::new(()),
-            policy: RwLock::new(BackgroundActivityPolicy::preset(agent_domain::BackgroundActivityProfile::Balanced)),
+            policy: RwLock::new(policy.normalized()),
             leases: RwLock::new(BTreeMap::new()),
             power: Arc::new(HostPowerMonitor::new()),
             changes,
             resources: Arc::new(ResourceOwner::new()),
             state_directory,
+            policy_path,
         })
     }
 
@@ -902,7 +911,11 @@ impl BackgroundOwner {
 
     pub(crate) async fn set_policy(&self, policy: BackgroundActivityPolicy) -> BackgroundPolicySnapshot {
         let _mutation = self.mutation.lock().await;
-        *self.policy.write().await = policy.normalized();
+        let policy = policy.normalized();
+        *self.policy.write().await = policy.clone();
+        if let Err(error) = crate::platform::save_private_json(&self.policy_path, &policy) {
+            tracing::warn!(target: "bex", operation = "background.policy.persist", message = %error);
+        }
         self.publish().await
     }
 
@@ -939,6 +952,63 @@ impl BackgroundOwner {
     /// A cheap gate for owner-managed opportunistic refreshes.
     pub(crate) async fn should_run_opportunistic_work(&self) -> bool {
         self.snapshot().await.should_run_opportunistic_work
+    }
+
+    /// Active VCS leases are the Host's source of truth for which checkouts
+    /// may receive an automatic remote refresh. The returned paths are
+    /// deduplicated before the owner starts Git work so several clients
+    /// watching one checkout do not create parallel fetches.
+    pub(crate) async fn demanded_vcs_workspaces(&self) -> Vec<String> {
+        let at = now();
+        let policy = self.policy().await;
+        let power = self.power.snapshot().await;
+        if host_power_constrained(&power, &policy) {
+            return vec![];
+        }
+        let leases = self.leases.read().await;
+        let mut workspaces = std::collections::BTreeSet::new();
+        for lease in leases.values() {
+            for scope in &lease.scopes {
+                if matches!(scope, BackgroundScope::VcsStatus { .. })
+                    && lease_may_run_scoped_work(lease, scope, &at, &policy)
+                    && let BackgroundScope::VcsStatus { cwd } = scope
+                    && !cwd.trim().is_empty()
+                {
+                    workspaces.insert(cwd.clone());
+                }
+            }
+        }
+        workspaces.into_iter().collect()
+    }
+
+    /// Provider health is one catalog operation, so a generic provider
+    /// lease or an instance-specific lease is enough to refresh the live
+    /// catalog. The provider owner still decides which instances are
+    /// configured; this method only supplies the policy gate.
+    pub(crate) async fn has_provider_status_demand(&self) -> bool {
+        let at = now();
+        let policy = self.policy().await;
+        let power = self.power.snapshot().await;
+        if host_power_constrained(&power, &policy) {
+            return false;
+        }
+        let leases = self.leases.read().await;
+        leases.values().any(|lease| {
+            lease.scopes.iter().any(|scope| {
+                matches!(scope, BackgroundScope::ProviderStatus { .. })
+                    && lease_may_run_scoped_work(lease, scope, &at, &policy)
+            })
+        })
+    }
+
+    /// Resource history is sampled only while a diagnostics client has an
+    /// active lease. Explicit diagnostics reads still take an immediate
+    /// sample through their normal RPC path.
+    pub(crate) async fn sample_resources_if_demanded(&self) {
+        let scope = BackgroundScope::Diagnostics;
+        if self.should_run_scope_work(&scope).await {
+            let _ = self.resources.snapshot(self.power.snapshot().await);
+        }
     }
 
     pub(crate) async fn snapshot(&self) -> BackgroundPolicySnapshot {
@@ -1255,6 +1325,64 @@ mod tests {
         let lease = snapshot.leases.first().expect("activity lease");
         assert!(lease.updated_at.millis() >= before);
         assert!(lease.expires_at.millis() > lease.updated_at.millis());
+    }
+
+    #[tokio::test]
+    async fn active_leases_gate_vcs_provider_and_diagnostic_consumers() {
+        let directory = tempfile::tempdir().unwrap();
+        let owner = BackgroundOwner::new(directory.path().to_owned());
+        let report = ClientActivityReport {
+            environment_id: None,
+            client_id: "client".into(),
+            client_kind: agent_domain::BackgroundClientKind::DesktopRenderer,
+            visible: true,
+            focused: true,
+            recently_interacted: true,
+            app_state: Some(agent_domain::BackgroundAppState::Active),
+            low_power_mode: Some(BackgroundBooleanState::False),
+            battery_state: Some(agent_domain::BackgroundBatteryState::Full),
+            network_type: None,
+            scopes: vec![
+                BackgroundScope::VcsStatus { cwd: "/repo".into() },
+                BackgroundScope::ProviderStatus { instance_id: None },
+                BackgroundScope::Diagnostics,
+            ],
+            ttl_ms: Some(60_000),
+            observed_at: now(),
+        };
+        owner
+            .report_activity(
+                1,
+                agent_protocol::background::ReportClientActivity {
+                    rpc_client_id: 2,
+                    report,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(owner.demanded_vcs_workspaces().await, vec!["/repo"]);
+        assert!(owner.has_provider_status_demand().await);
+        owner.sample_resources_if_demanded().await;
+        assert!(owner.process_diagnostics().await.read_at.millis() > 0);
+    }
+
+    #[tokio::test]
+    async fn policy_recovers_from_state_directory() {
+        let directory = tempfile::tempdir().unwrap();
+        let owner = BackgroundOwner::new(directory.path().to_owned());
+        owner
+            .set_policy(BackgroundActivityPolicy::preset(BackgroundActivityProfile::Performance))
+            .await;
+
+        let recovered = BackgroundOwner::new(directory.path().to_owned());
+        assert_eq!(
+            recovered.policy().await.profile,
+            BackgroundActivityProfile::Performance
+        );
+        assert_eq!(
+            recovered.policy().await.automatic_git_fetch_interval_ms,
+            15_000
+        );
     }
 
     #[test]

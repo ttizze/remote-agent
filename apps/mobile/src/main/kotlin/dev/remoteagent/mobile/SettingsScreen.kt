@@ -46,6 +46,7 @@ import androidx.compose.ui.unit.sp
 import dev.remoteagent.core.ArchivedLayout
 import dev.remoteagent.core.ArchivedOptions
 import dev.remoteagent.core.ArchivedSortOrder
+import dev.remoteagent.core.DiagnosticRow
 import dev.remoteagent.core.Intent
 import dev.remoteagent.core.NativeUpdatePlatform
 import dev.remoteagent.core.NativeUpdateRequest
@@ -84,6 +85,7 @@ internal fun SettingsScreen(model: AndroidAppModel, projectId: String?) {
                     )
                 )
             )
+            model.perform(Intent.LoadBackgroundPolicy)
         }
     }
     val view = model.snapshot.settings(scope)
@@ -168,6 +170,7 @@ internal fun SettingsScreen(model: AndroidAppModel, projectId: String?) {
             }
             if (projectId == null) item { AccountsSection(model) }
             if (projectId == null) item { NativeUpdateSection(model) }
+            if (projectId == null) item { BackgroundDiagnosticsSection(model) }
             if (projectId == null)
                 item { Text(privacyPolicy(), style = AppTheme.caption, color = AppTheme.colors.foregroundMuted) }
         }
@@ -272,6 +275,72 @@ internal fun AppearanceScreen(model: AndroidAppModel) {
 }
 
 @Composable
+private fun BackgroundDiagnosticsSection(model: AndroidAppModel) {
+    val colors = AppTheme.colors
+    val rows = model.snapshot.backgroundRows()
+    SectionCard("Background activity & diagnostics") {
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text("Host policy", Modifier.weight(1f), style = AppTheme.body, color = colors.foreground)
+            TextButton(onClick = { model.perform(Intent.LoadDiagnostics("")) }) {
+                Text("Refresh", color = colors.primaryText)
+            }
+        }
+        rows.forEachIndexed { index, row ->
+            if (row.key == "profile" ||
+                row.key == "automaticGitFetchIntervalMs" ||
+                row.key == "providerHealthRefreshIntervalMs"
+            ) return@forEachIndexed
+            if (index > 0) HorizontalDivider(color = colors.border)
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                Text(row.key, Modifier.weight(1f), style = AppTheme.caption, color = colors.foregroundMuted)
+                Text(row.value, style = AppTheme.caption, color = colors.foregroundSecondary)
+            }
+        }
+        val profile = rows.firstOrNull { it.key == "profile" }?.value?.lowercase()
+        if (profile != null) {
+            HorizontalDivider(color = colors.border)
+            listOf("balanced", "performance", "battery-saver").forEach { choice ->
+                ChoiceRow(choice.replace('-', ' ').replaceFirstChar { it.uppercase() }, null, profile == choice) {
+                    model.perform(Intent.SetBackgroundProfile(choice))
+                }
+            }
+        }
+        BackgroundIntervalPicker(
+            "Git fetch interval",
+            backgroundIntervalSeconds(rows, "automaticGitFetchIntervalMs"),
+            listOf(0, 15, 30, 60, 300, 900),
+        ) { seconds ->
+            model.perform(Intent.SetAutomaticGitFetchInterval(seconds))
+        }
+        BackgroundIntervalPicker(
+            "Provider health interval",
+            backgroundIntervalSeconds(rows, "providerHealthRefreshIntervalMs"),
+            listOf(0, 60, 300, 900, 1800),
+        ) { seconds ->
+            model.perform(Intent.SetProviderHealthRefreshInterval(seconds))
+        }
+        model.snapshot.hostResourceRows().forEach { row ->
+            Text("${row.key}: ${row.value}", Modifier.padding(horizontal = 16.dp, vertical = 4.dp), style = AppTheme.caption, color = colors.foregroundMuted)
+        }
+        model.snapshot.processRows().take(8).forEach { row ->
+            Text("${row.key}: ${row.value}", Modifier.padding(horizontal = 16.dp, vertical = 4.dp), style = AppTheme.caption, color = colors.foregroundMuted)
+        }
+        model.snapshot.processHistoryRows().take(8).forEach { row ->
+            Text("${row.key}: ${row.value}", Modifier.padding(horizontal = 16.dp, vertical = 4.dp), style = AppTheme.caption, color = colors.foregroundMuted)
+        }
+        model.snapshot.traceRows().forEach { row ->
+            Text("${row.key}: ${row.value}", Modifier.padding(horizontal = 16.dp, vertical = 4.dp), style = AppTheme.caption, color = colors.foregroundMuted)
+        }
+    }
+}
+
+@Composable
 private fun NativeUpdateSection(model: AndroidAppModel) {
     val context = LocalContext.current
     val update = model.snapshot.nativeUpdate()
@@ -297,6 +366,34 @@ private fun NativeUpdateSection(model: AndroidAppModel) {
                     Text("Open Play Store", color = AppTheme.colors.primaryText)
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun BackgroundIntervalPicker(
+    title: String,
+    selectedSeconds: Int,
+    values: List<Int>,
+    onChange: (Int) -> Unit,
+) {
+    val options = (values + selectedSeconds).distinct().sorted()
+    val index = options.indexOf(selectedSeconds)
+    Row(
+        Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(title, Modifier.weight(1f), style = AppTheme.caption, color = AppTheme.colors.foregroundMuted)
+        TextButton(onClick = { onChange(options[index - 1]) }, enabled = index > 0) {
+            Text("−", color = AppTheme.colors.foreground)
+        }
+        Text(
+            if (selectedSeconds == 0) "Disabled" else "$selectedSeconds s",
+            style = AppTheme.caption,
+            color = AppTheme.colors.foregroundSecondary,
+        )
+        TextButton(onClick = { onChange(options[index + 1]) }, enabled = index >= 0 && index + 1 < options.size) {
+            Text("+", color = AppTheme.colors.foreground)
         }
     }
 }
@@ -328,6 +425,9 @@ private fun SizeRow(label: String, value: Double, min: Double, max: Double, step
         TextButton(onClick = { if (value < max) onChange((value + step).coerceAtMost(max)) }, enabled = value < max) { Text("+") }
     }
 }
+
+private fun backgroundIntervalSeconds(rows: List<DiagnosticRow>, key: String): Int =
+    rows.firstOrNull { it.key == key }?.value?.toLongOrNull()?.div(1_000L)?.coerceAtMost(Int.MAX_VALUE.toLong())?.toInt() ?: 0
 
 @Composable
 private fun NavigationRow(icon: ImageVector, label: String, onClick: () -> Unit) {

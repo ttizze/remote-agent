@@ -36,6 +36,11 @@ pub struct RemoveClientActivity {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct ReadBackground;
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdateBackgroundPolicy {
+    pub policy: BackgroundActivityPolicy,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct ReadHostResources;
 

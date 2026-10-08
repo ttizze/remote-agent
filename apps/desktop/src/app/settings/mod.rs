@@ -503,6 +503,7 @@ impl Desktop {
                 self.perform(Intent::LoadSettings);
                 self.perform(Intent::LoadWorktreeSettings);
                 self.perform(Intent::ListWorktrees);
+                self.perform(Intent::LoadDiagnostics { trace_file_path: String::new() });
             }
             SettingsPage::Projects { .. } => self.perform(Intent::LoadSettings),
             SettingsPage::Providers => {

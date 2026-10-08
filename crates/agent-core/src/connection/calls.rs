@@ -187,6 +187,7 @@ async fn execute(peer: &Peer, call: &Call) -> Result<Reply, PeerError> {
         Call::ListScheduledTasks(_) => Reply::ScheduledTasks(peer.request(call).await?),
         Call::DeleteScheduledTask(_) => Reply::ScheduledTaskRef(peer.request(call).await?),
         Call::ReadBackground(_)
+        | Call::UpdateBackgroundPolicy(_)
         | Call::ReportClientActivity(_)
         | Call::RemoveClientActivity(_) => Reply::Background(peer.request(call).await?),
         Call::ReportHostPowerState(_) => {
@@ -758,10 +759,14 @@ impl Owner {
             }
             Reply::Keybindings(config) => self.state.keybindings = Some(Arc::new(config)),
             Reply::Background(snapshot) => self.state.background_policy = Some(snapshot),
-            Reply::HostResources(_)
-            | Reply::ProcessDiagnostics(_)
-            | Reply::ProcessResourceHistory(_)
-            | Reply::TraceDiagnostics(_) => {}
+            Reply::HostResources(resources) => self.state.host_resources = Some(resources),
+            Reply::ProcessDiagnostics(processes) => {
+                self.state.process_diagnostics = Some(processes)
+            }
+            Reply::ProcessResourceHistory(history) => {
+                self.state.process_resource_history = Some(history)
+            }
+            Reply::TraceDiagnostics(trace) => self.state.trace_diagnostics = Some(trace),
             Reply::SessionScan(scan) => {
                 let import = &mut self.state.session_import;
                 import.scan_pending = false;

@@ -138,6 +138,7 @@ contracts! {
     PreviewRefresh, "host/preview/refresh" => (crate::preview::PreviewTab, crate::models::Empty) [clone],
     ConnectionPerformance, "host/diagnostics/connection" => (crate::diagnostics::ConnectionPerformance, m::Empty) [clone],
     ReadBackground, "host/background/read" => (crate::background::ReadBackground, crate::background::BackgroundPolicySnapshot) [clone],
+    UpdateBackgroundPolicy, "host/background/updatePolicy" => (crate::background::UpdateBackgroundPolicy, crate::background::BackgroundPolicySnapshot) [clone],
     ReportClientActivity, "host/background/reportActivity" => (crate::background::ReportClientActivity, crate::background::BackgroundPolicySnapshot) [clone],
     ReportHostPowerState, "host/background/reportPower" => (crate::background::HostPowerSnapshot, m::Empty) [clone],
     RemoveClientActivity, "host/background/removeActivity" => (crate::background::RemoveClientActivity, crate::background::BackgroundPolicySnapshot) [clone],

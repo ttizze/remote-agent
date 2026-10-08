@@ -227,6 +227,30 @@ impl Snapshot {
             .map(crate::view::diagnostics::background_rows)
             .unwrap_or_default()
     }
+    pub fn host_resource_rows(&self) -> Vec<crate::view::diagnostics::DiagnosticRow> {
+        self.host_resources
+            .as_ref()
+            .map(crate::view::diagnostics::host_resource_rows)
+            .unwrap_or_default()
+    }
+    pub fn process_rows(&self) -> Vec<crate::view::diagnostics::DiagnosticRow> {
+        self.process_diagnostics
+            .as_ref()
+            .map(crate::view::diagnostics::process_rows)
+            .unwrap_or_default()
+    }
+    pub fn process_history_rows(&self) -> Vec<crate::view::diagnostics::DiagnosticRow> {
+        self.process_resource_history
+            .as_ref()
+            .map(crate::view::diagnostics::process_history_rows)
+            .unwrap_or_default()
+    }
+    pub fn trace_rows(&self) -> Vec<crate::view::diagnostics::DiagnosticRow> {
+        self.trace_diagnostics
+            .as_ref()
+            .map(crate::view::diagnostics::trace_rows)
+            .unwrap_or_default()
+    }
     pub fn error(&self) -> Option<String> {
         self.error.clone()
     }
