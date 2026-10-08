@@ -93,7 +93,7 @@ pub struct DraftHeroHeadline {
     pub reserve_second_line: bool,
 }
 
-/// The headline above a new-thread draft whose target is `selected_project`
+/// The headline above a new-thread draft whose target project is selected
 /// (none means the chats project).
 pub fn draft_hero_headline(
     projects: &[Project],
@@ -159,7 +159,7 @@ pub fn draft_hero_headline(
 impl Snapshot {
     /// The headline above the current new-thread draft.
     pub fn draft_hero_headline(&self) -> DraftHeroHeadline {
-        draft_hero_headline(self.shell_projects(), self.selected_project.as_deref())
+        draft_hero_headline(self.shell_projects(), self.new_thread_project_id())
     }
 }
 

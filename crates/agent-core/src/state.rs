@@ -81,6 +81,10 @@ pub struct Draft {
     pub context: Option<MessageContext>,
     /// Where a new thread's first run works; only new-thread drafts set it.
     pub workspace: Option<DraftWorkspace>,
+    /// The project selected when this new-thread draft was opened.
+    pub project_id: Option<String>,
+    /// When the draft was opened for its project; used to order pending work.
+    pub project_selected_at_ms: Option<i64>,
     /// When a new-thread draft first held work for its project; the list
     /// orders unsent drafts by it.
     pub created_at_ms: Option<i64>,
@@ -96,6 +100,8 @@ pub struct DraftWorkspace {
     /// An existing worktree that has the branch checked out.
     pub worktree_path: Option<String>,
     pub start_from_origin: bool,
+    /// A choice made by the user survives mode changes and late defaults.
+    pub start_from_origin_choice: Option<bool>,
 }
 impl Default for Draft {
     fn default() -> Self {
@@ -110,6 +116,8 @@ impl Default for Draft {
             interaction_mode: InteractionMode::Default,
             context: None,
             workspace: None,
+            project_id: None,
+            project_selected_at_ms: None,
             created_at_ms: None,
         }
     }
@@ -379,6 +387,8 @@ pub struct Snapshot {
     pub follow_up: FollowUpBehavior,
     pub selected_thread: Option<ThreadId>,
     pub selected_project: Option<String>,
+    /// The independently keyed new-thread draft currently being edited.
+    pub open_new_thread_draft: Option<String>,
     pub editing_run: Option<RunId>,
     pub search: String,
     pub search_matches: Vec<SearchMatch>,
@@ -476,6 +486,39 @@ impl Snapshot {
             .map(ToString::to_string)
             .unwrap_or_else(|| self.new_thread_draft_key())
     }
+    /// Starts an independently keyed new-thread draft and selects its project.
+    pub fn begin_new_thread_draft(
+        &mut self,
+        key: String,
+        project_id: Option<String>,
+        selected_at_ms: i64,
+    ) {
+        let mut draft = self.default_draft.clone();
+        draft.project_id = Some(
+            project_id
+                .clone()
+                .unwrap_or_else(|| CHATS_PROJECT.to_owned()),
+        );
+        draft.project_selected_at_ms = Some(selected_at_ms);
+        draft.created_at_ms = None;
+        self.drafts.insert(key.clone(), draft);
+        self.open_new_thread_draft = Some(key);
+        self.selected_project = project_id;
+    }
+    /// Retargets the open new-thread draft without replacing its identity.
+    pub fn retarget_new_thread_draft(&mut self, project_id: Option<String>) {
+        let key = self.new_thread_draft_key();
+        let target = project_id
+            .clone()
+            .unwrap_or_else(|| CHATS_PROJECT.to_owned());
+        if let Some(draft) = self.drafts.get_mut(&key) {
+            if draft.project_id.as_deref() != Some(target.as_str()) {
+                draft.project_id = Some(target);
+                draft.workspace = None;
+            }
+        }
+        self.selected_project = project_id;
+    }
     /// Stamps new-thread drafts that just gained work with `now_ms`, forgets
     /// the stamp of ones emptied again, and freezes the copy of the open
     /// draft the sidebar shows when the open draft changed.
@@ -484,7 +527,7 @@ impl Snapshot {
             .drafts
             .iter()
             .filter(|(key, draft)| {
-                key.starts_with("new:") && draft.created_at_ms.is_none() != draft.is_empty()
+                draft.project_id.is_some() && draft.created_at_ms.is_none() != draft.is_empty()
             })
             .map(|(key, _)| key.clone())
             .collect();
@@ -513,10 +556,12 @@ impl Snapshot {
         }
     }
     pub fn new_thread_draft_key(&self) -> String {
-        format!(
-            "new:{}",
-            self.selected_project.as_deref().unwrap_or(CHATS_PROJECT)
-        )
+        self.open_new_thread_draft.clone().unwrap_or_else(|| {
+            format!(
+                "new:{}",
+                self.selected_project.as_deref().unwrap_or(CHATS_PROJECT)
+            )
+        })
     }
     pub fn current_draft(&self) -> Draft {
         self.drafts
@@ -582,12 +627,25 @@ impl Snapshot {
     }
     /// The root of the project a new thread would use; none for chats.
     pub fn new_thread_project_root(&self) -> Option<String> {
-        let project = self.selected_project.as_deref()?;
+        let project = self.new_thread_project_id()?;
         self.shell_projects()
             .iter()
             .find(|candidate| candidate.id == project)
             .and_then(|project| project.roots.first())
             .map(|root| root.path.clone())
+    }
+    /// The project stamped on the active new-thread draft, or the selected
+    /// project while a draft has not been opened yet.
+    pub fn new_thread_project_id(&self) -> Option<&str> {
+        match self
+            .drafts
+            .get(&self.new_thread_draft_key())
+            .and_then(|draft| draft.project_id.as_deref())
+        {
+            Some(CHATS_PROJECT) => None,
+            Some(project) => Some(project),
+            None => self.selected_project.as_deref(),
+        }
     }
     /// The checked-out branch of the project's root and the worktree it is
     /// checked out in when that differs from the root.
@@ -616,11 +674,16 @@ impl Snapshot {
     /// mode on the project's checkout.
     pub fn new_thread_workspace(&self) -> DraftWorkspace {
         use crate::view::projects::selection::ThreadWorkspaceMode;
-        if let Some(workspace) = self
+        if let Some(mut workspace) = self
             .drafts
             .get(&self.new_thread_draft_key())
             .and_then(|draft| draft.workspace.clone())
         {
+            if workspace.start_from_origin_choice.is_none() {
+                workspace.start_from_origin = workspace.mode
+                    == ThreadWorkspaceMode::Worktree
+                    && self.new_worktree_starts_from_origin(workspace.mode);
+            }
             return workspace;
         }
         let worktree = self.new_thread_project_root().is_some()
@@ -643,6 +706,7 @@ impl Snapshot {
             branch,
             worktree_path,
             start_from_origin: self.new_worktree_starts_from_origin(mode),
+            start_from_origin_choice: None,
         }
     }
     /// A new-thread draft's origin choice when its mode is set: on for a new
@@ -654,7 +718,7 @@ impl Snapshot {
         mode == crate::view::projects::selection::ThreadWorkspaceMode::Worktree
             && crate::view::settings::new_worktrees_start_from_origin(
                 self.conversation_settings.as_ref(),
-                self.selected_project.as_deref(),
+                self.new_thread_project_id(),
             )
     }
     /// Where a thread's files and terminals open: its worktree or checkout,
@@ -747,6 +811,8 @@ pub struct Workspace {
     pub review_generation: u64,
     pub review: Option<Arc<crate::models::WorkspaceReview>>,
     pub diff_request: Option<agent_protocol::conversation::GetTurnDiff>,
+    /// A diff selection waits for the selected environment's cwd to arrive.
+    pub diff_retry_when_cwd_available: bool,
     pub worktree_settings: Option<crate::models::WorktreeSettings>,
     pub worktrees: Vec<crate::models::Worktree>,
 }
@@ -883,8 +949,16 @@ pub enum Intent {
     OpenThread {
         thread_id: String,
     },
+    /// Reopens one independently keyed unsent new-thread draft.
+    OpenDraft {
+        draft_key: String,
+    },
     LeaveThread,
     NewThread {
+        project_id: Option<String>,
+    },
+    /// Moves the open new-thread draft to a project while retaining its key and content.
+    SetNewThreadProject {
         project_id: Option<String>,
     },
     ShowArchived {
@@ -930,7 +1004,7 @@ pub enum Intent {
         thread_id: String,
         output: crate::view::terminals::output_context::TerminalOutputContext,
     },
-    /// Drops an unsent draft: a thread's (its id) or a new thread's (`new:<project>`).
+    /// Drops an unsent draft: a thread's id or an independently keyed new thread.
     DiscardDraft {
         draft_key: String,
     },
@@ -1512,5 +1586,22 @@ mod tests {
                 .as_deref(),
             Some("pending:1")
         );
+    }
+
+    #[test]
+    fn new_thread_drafts_keep_identity_and_project_stamp_when_retargeted() {
+        let mut snapshot = Snapshot::default();
+        snapshot.begin_new_thread_draft("new:first".into(), Some("one".into()), 11);
+        snapshot.drafts.get_mut("new:first").unwrap().text = "keep".into();
+        snapshot.retarget_new_thread_draft(Some("two".into()));
+        let draft = &snapshot.drafts["new:first"];
+        assert_eq!(snapshot.new_thread_draft_key(), "new:first");
+        assert_eq!(draft.text, "keep");
+        assert_eq!(draft.project_id.as_deref(), Some("two"));
+        assert_eq!(draft.project_selected_at_ms, Some(11));
+        assert_eq!(draft.workspace, None);
+        snapshot.retarget_new_thread_draft(None);
+        snapshot.selected_project = Some("other".into());
+        assert_eq!(snapshot.new_thread_project_id(), None);
     }
 }

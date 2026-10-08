@@ -275,12 +275,18 @@ impl Owner {
                 return;
             }
             // Text typed while the thread was created becomes its follow-up.
-            if let Some(draft) = self.state.drafts.get(&key).cloned()
-                && !draft.text.is_empty()
-            {
-                self.state.drafts.insert(target.to_string(), draft);
+            if let Some(mut draft) = self.state.drafts.get(&key).cloned() {
+                if !draft.text.is_empty() {
+                    draft.project_id = None;
+                    draft.project_selected_at_ms = None;
+                    self.state.drafts.insert(target.to_string(), draft);
+                }
                 if let Some(source) = self.state.drafts.get_mut(&key) {
                     source.text.clear();
+                    source.project_id = None;
+                    source.project_selected_at_ms = None;
+                    source.created_at_ms = None;
+                    source.workspace = None;
                 }
             }
         } else if self.state.selected_thread.as_ref() != Some(&entry.thread) {

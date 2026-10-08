@@ -220,8 +220,11 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
      */
     fun chooseProject(projectId: String?) {
         draftEdits.reset()
-        perform(Intent.NewThread(projectId))
         val below = stack.getOrNull(stack.size - 2)
+        perform(
+            if (below == Route.NewTask) Intent.SetNewThreadProject(projectId)
+            else Intent.NewThread(projectId)
+        )
         stack = if (below == Route.NewTask) stack.dropLast(1) else stack + Route.NewTask
     }
 
@@ -229,7 +232,10 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
     fun projectAdded(projectId: String) {
         val flow = setOf(Route.ChooseProject, Route.AddProject, Route.AddProjectLocal, Route.NewTask)
         draftEdits.reset()
-        perform(Intent.NewThread(projectId))
+        perform(
+            if (Route.NewTask in stack) Intent.SetNewThreadProject(projectId)
+            else Intent.NewThread(projectId)
+        )
         stack = stack.takeWhile { it !in flow } + Route.NewTask
     }
 

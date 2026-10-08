@@ -7,8 +7,9 @@ use super::{
     sidebar::window_drag,
     ui::{self, color, icon},
 };
-use agent_core::view::header::{
-    HeaderInput, PanelToggle, ThreadHeaderView, snapshot_thread_header, thread_header,
+use agent_core::{
+    state::Intent,
+    view::header::{HeaderInput, PanelToggle, ThreadHeaderView, snapshot_thread_header, thread_header},
 };
 use gpui_kit::{
     component::{h_flex, menu::PopupMenuItem, tooltip::Tooltip},
@@ -239,9 +240,17 @@ impl Desktop {
                     .child(self.project_icon(&project.id, &project.name, 14.))
                     .child(div().max_w(px(160.)).truncate().child(project.name.clone()))
                     .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
-                    .on_click(
-                        cx.listener(move |view, _, _, cx| view.new_thread(Some(id.clone()), cx)),
-                    ),
+                    .on_click(cx.listener(move |view, _, _, cx| {
+                        if view.snapshot.selected_thread.is_none()
+                            && view.snapshot.open_new_thread_draft.is_some()
+                        {
+                            view.perform(Intent::SetNewThreadProject {
+                                project_id: Some(id.clone()),
+                            });
+                        } else {
+                            view.new_thread(Some(id.clone()), cx);
+                        }
+                    })),
             )
         });
         let server_thread = header.is_server_thread;

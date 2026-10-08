@@ -533,7 +533,7 @@ pub struct PendingTaskActions {
 }
 
 #[cfg_attr(feature = "bindings", uniffi::export)]
-pub fn pending_task_actions(kind: PendingTaskKind, project_id: String) -> PendingTaskActions {
+pub fn pending_task_actions(kind: PendingTaskKind) -> PendingTaskActions {
     use crate::state::Intent;
     match kind {
         PendingTaskKind::Queued {
@@ -546,9 +546,7 @@ pub fn pending_task_actions(kind: PendingTaskKind, project_id: String) -> Pendin
             is_draft: false,
         },
         PendingTaskKind::Draft { draft_key } => PendingTaskActions {
-            open: Intent::NewThread {
-                project_id: Some(project_id),
-            },
+            open: Intent::OpenDraft { draft_key: draft_key.clone() },
             discard: Intent::DiscardDraft { draft_key },
             status: "Draft".into(),
             is_draft: true,
@@ -1000,7 +998,7 @@ pub fn pending_tasks(snapshot: &Snapshot, listed: &BTreeSet<&str>) -> Vec<Pendin
             Request::Dispatch(_) => None,
         });
     let drafts = snapshot.drafts.iter().filter_map(|(key, draft)| {
-        let project = key.strip_prefix("new:")?;
+        let project = draft.project_id.as_deref()?;
         (!draft.is_empty()).then(|| PendingTaskRow {
             key: format!("draft-task:{key}"),
             kind: PendingTaskKind::Draft {
@@ -1013,7 +1011,10 @@ pub fn pending_tasks(snapshot: &Snapshot, listed: &BTreeSet<&str>) -> Vec<Pendin
                 .workspace
                 .as_ref()
                 .and_then(|workspace| workspace.branch.clone()),
-            created_at_ms: draft.created_at_ms.unwrap_or_default(),
+            created_at_ms: draft
+                .project_selected_at_ms
+                .or(draft.created_at_ms)
+                .unwrap_or_default(),
             show_pending_divider: false,
             show_trailing_divider: false,
         })

@@ -149,7 +149,7 @@ internal fun HomeScreen(model: AndroidAppModel) {
                                         rowActions,
                                     )
                                 is ThreadListItem.PendingTask -> {
-                                    val actions = pendingTaskActions(item.task.kind, item.task.projectId)
+                                    val actions = pendingTaskActions(item.task.kind)
                                     PendingTaskListRow(
                                         item.task,
                                         status = actions.status,
@@ -159,6 +159,7 @@ internal fun HomeScreen(model: AndroidAppModel) {
                                                 is Intent.OpenThread ->
                                                     model.navigate(Route.Thread(open.threadId), open)
                                                 is Intent.NewThread -> model.navigate(Route.NewTask, open)
+                                                is Intent.OpenDraft -> model.navigate(Route.NewTask, open)
                                                 else -> Unit
                                             }
                                         },

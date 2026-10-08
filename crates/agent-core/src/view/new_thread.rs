@@ -336,7 +336,7 @@ pub fn new_thread_view(snapshot: &Snapshot, options: &ComposerOptions) -> NewThr
             ..DraftHeroInput::default()
         }),
         composer: composer_view(snapshot, None, options),
-        project_id: snapshot.selected_project.clone(),
+        project_id: snapshot.new_thread_project_id().map(str::to_owned),
         launching_thread_id: launching,
         workspace: workspace_view(snapshot),
     }
@@ -377,6 +377,7 @@ mod tests {
             "new:app".into(),
             crate::state::Draft {
                 text: "Sketch the API".into(),
+                project_id: Some("app".into()),
                 ..Default::default()
             },
         );
@@ -482,6 +483,7 @@ mod tests {
                     branch: None,
                     worktree_path: None,
                     start_from_origin: true,
+                    start_from_origin_choice: Some(true),
                 }),
                 ..Default::default()
             },
@@ -592,6 +594,7 @@ mod tests {
                     branch: None,
                     worktree_path: None,
                     start_from_origin: false,
+                    start_from_origin_choice: Some(false),
                 }),
                 ..Default::default()
             },

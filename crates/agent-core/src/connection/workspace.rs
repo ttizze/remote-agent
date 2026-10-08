@@ -160,14 +160,19 @@ impl Owner {
             .filter(|entry| !entry.in_flight && self.connected())
             .filter_map(|entry| entry.retry_at_ms);
         let search = self
-            .state
-            .search_request
-            .as_ref()
-            .and_then(|request| request.due_at_ms);
+            .connected()
+            .then(|| {
+                self.state
+                    .search_request
+                    .as_ref()
+                    .and_then(|request| request.due_at_ms)
+            })
+            .flatten();
         sources
             .entries
             .due_at_ms
             .into_iter()
+            .filter(|_| self.connected())
             .chain(search)
             .chain(retry)
             .min()
@@ -176,6 +181,9 @@ impl Owner {
     /// Asks the debounced path and message searches and retries the
     /// composer's provider commands once their cooldown passes.
     pub(super) fn sources_tick(&mut self, now: u64) {
+        if !self.connected() {
+            return;
+        }
         if let Some(request) = self
             .state
             .search_request
@@ -371,20 +379,21 @@ impl Owner {
         base_ref: Option<String>,
         ignore_whitespace: bool,
     ) -> Call {
+        self.state.sources.diff_generation = self.state.sources.diff_generation.wrapping_add(1);
         let request = w::DiffPreview {
             cwd,
             base_ref,
             ignore_whitespace,
             file: None,
         };
-        let previous = self.state.sources.diff_preview.take();
+        self.state.sources.diff_files = None;
         self.state.sources.diff_preview = Some(DiffPreviewEntry {
-            result: previous
-                .filter(|entry| entry.request == request)
-                .and_then(|entry| entry.result),
+            result: None,
             request: request.clone(),
             error: None,
         });
+        self.state.workspace.review = None;
+        self.state.workspace.review_generation += 1;
         self.state.workspace.diff_request = None;
         Call::DiffPreview(request)
     }
@@ -393,13 +402,18 @@ impl Owner {
         &mut self,
         request: &w::DiffPreview,
         result: Result<w::DiffPreviewResult, &PeerError>,
+        generation: Option<u64>,
     ) {
+        let current_generation = self.state.sources.diff_generation;
         let Some(entry) = self
             .state
             .sources
             .diff_preview
             .as_mut()
-            .filter(|entry| &entry.request == request)
+            .filter(|entry| {
+                generation.is_none_or(|generation| generation == current_generation)
+                    && &entry.request == request
+            })
         else {
             return;
         };
@@ -536,7 +550,7 @@ impl Owner {
 
     /// Sends queued file reads while fewer than four are in flight; a file
     /// waits for its superseded read to answer first.
-    fn read_diff_files(&mut self) {
+    pub(super) fn read_diff_files(&mut self) {
         let mut calls = vec![];
         if let Some(entry) = self.state.sources.diff_files.as_mut() {
             let mut reading = entry.reading();
@@ -566,7 +580,12 @@ impl Owner {
         &mut self,
         request: &w::DiffPreview,
         result: Result<w::DiffPreviewResult, &PeerError>,
+        generation: Option<u64>,
     ) {
+        let current_generation = self.state.sources.diff_generation;
+        if !generation.is_none_or(|generation| generation == current_generation) {
+            return;
+        }
         let Some(file) = &request.file else {
             return;
         };
@@ -737,7 +756,10 @@ impl Owner {
             return Err(invalid("Choose a project first"));
         }
         let current = self.new_thread_workspace();
-        let start_from_origin = self.state.new_worktree_starts_from_origin(mode);
+        let start_from_origin_choice = current.start_from_origin_choice;
+        let start_from_origin = mode == ThreadWorkspaceMode::Worktree
+            && start_from_origin_choice
+                .unwrap_or_else(|| self.state.new_worktree_starts_from_origin(mode));
         let next = match mode {
             ThreadWorkspaceMode::Local => {
                 let local = self.state.new_thread_local_selection();
@@ -745,12 +767,14 @@ impl Owner {
                     mode,
                     branch: local.0,
                     worktree_path: local.1,
-                    start_from_origin,
+                    start_from_origin: false,
+                    start_from_origin_choice,
                 }
             }
             ThreadWorkspaceMode::Worktree => DraftWorkspace {
                 mode,
                 start_from_origin,
+                start_from_origin_choice,
                 ..current
             },
         };
@@ -881,6 +905,7 @@ impl Owner {
                 branch: Some(branch),
                 worktree_path,
                 start_from_origin: false,
+                start_from_origin_choice: None,
             })
         });
     }
@@ -890,6 +915,7 @@ impl Owner {
         self.update_new_thread_draft(|draft| {
             draft.workspace = Some(DraftWorkspace {
                 start_from_origin: on,
+                start_from_origin_choice: Some(on),
                 ..current
             })
         });
@@ -897,6 +923,7 @@ impl Owner {
     }
 
     fn update_new_thread_draft(&mut self, change: impl FnOnce(&mut crate::state::Draft)) {
+        self.ensure_new_thread_draft();
         let key = self.state.new_thread_draft_key();
         let mut draft = self
             .state

@@ -160,13 +160,39 @@ impl Owner {
                 self.select_thread(Some(thread_id(id)?));
                 Next::Done
             }
+            Intent::OpenDraft { draft_key } => {
+                let draft = self
+                    .state
+                    .drafts
+                    .get(&draft_key)
+                    .filter(|draft| !draft_key.is_empty() && draft.project_id.is_some())
+                    .ok_or_else(|| invalid("Unknown draft"))?;
+                let project_id = draft.project_id.clone();
+                self.select_thread(None);
+                self.state.open_new_thread_draft = Some(draft_key);
+                self.state.selected_project = project_id
+                    .filter(|project| project.as_str() != CHATS_PROJECT);
+                Next::Done
+            }
             Intent::LeaveThread => {
                 self.select_thread(None);
                 Next::Done
             }
             Intent::NewThread { project_id } => {
                 self.select_thread(None);
-                self.state.selected_project = project_id;
+                self.state.begin_new_thread_draft(
+                    new_id("new"),
+                    project_id,
+                    super::owner::now_ms() as i64,
+                );
+                Next::Done
+            }
+            Intent::SetNewThreadProject { project_id } => {
+                if self.state.selected_thread.is_some() {
+                    return Err(invalid("Open a new thread first"));
+                }
+                self.ensure_new_thread_draft();
+                self.state.retarget_new_thread_draft(project_id);
                 Next::Done
             }
             Intent::ShowArchived { open } => {
@@ -186,6 +212,7 @@ impl Owner {
                 before_thread_id,
             } => self.reorder_pinned(moved, before_thread_id)?,
             Intent::EditDraft { text, base_text } => {
+                self.ensure_new_thread_draft();
                 let mut draft = self.state.current_draft();
                 draft.text = match base_text {
                     Some(base) => merge_draft_text(base, text, draft.text.clone()),
@@ -412,7 +439,11 @@ impl Owner {
                 worktree_path,
             } => {
                 self.select_thread(None);
-                self.state.selected_project = Some(project_id);
+                self.state.begin_new_thread_draft(
+                    new_id("new"),
+                    Some(project_id),
+                    super::owner::now_ms() as i64,
+                );
                 self.start_new_thread_on_branch(branch, worktree_path);
                 self.load_new_thread_branches(String::new());
                 Next::Done
@@ -680,6 +711,7 @@ impl Owner {
                 model,
                 options,
             } => {
+                self.ensure_new_thread_draft();
                 let mut draft = self.state.current_draft();
                 draft.instance_id = instance_id;
                 draft.driver = driver;
@@ -689,6 +721,9 @@ impl Owner {
                 self.state.default_draft = Draft {
                     text: String::new(),
                     attachments: vec![],
+                    project_id: None,
+                    project_selected_at_ms: None,
+                    created_at_ms: None,
                     ..draft.clone()
                 };
                 let key = self.state.draft_key();
@@ -762,6 +797,7 @@ impl Owner {
     }
 
     fn update_draft(&mut self, change: impl FnOnce(&mut Draft)) {
+        self.ensure_new_thread_draft();
         let mut draft = self.state.current_draft();
         change(&mut draft);
         let key = self.state.draft_key();
@@ -822,6 +858,7 @@ impl Owner {
         if self.state.editing_run.is_some() {
             return self.queue(QueueAction::SaveEdit);
         }
+        self.ensure_new_thread_draft();
         let draft = self.state.current_draft();
         let slash = draft.text.trim().to_ascii_lowercase();
         if matches!(slash.as_str(), "/plan" | "/default") && draft.attachments.is_empty() {
@@ -890,8 +927,8 @@ impl Owner {
                     thread: Some(thread.clone()),
                     project: self
                         .state
-                        .selected_project
-                        .clone()
+                        .new_thread_project_id()
+                        .map(str::to_owned)
                         .unwrap_or_else(|| CHATS_PROJECT.into()),
                     title: title_seed.clone(),
                     title_seed: Some(title_seed),
@@ -1114,15 +1151,23 @@ impl Owner {
 
     /// Admits the picked files by the reference rules, then uploads the accepted ones.
     /// Images over the size limit must be downscaled by the client first.
-    fn attach_files(&mut self, key: String, files: Vec<LocalFile>) -> Result<(), PeerError> {
+    fn attach_files(&mut self, mut key: String, files: Vec<LocalFile>) -> Result<(), PeerError> {
+        let answer_draft = key.starts_with("answer:");
+        if self.state.selected_thread.is_none() && !answer_draft {
+            let was_current = key == self.state.draft_key();
+            self.ensure_new_thread_draft();
+            if was_current && !self.state.drafts.contains_key(&key) {
+                key = self.state.draft_key();
+            }
+        }
         if key != self.state.draft_key()
             && !self.state.drafts.contains_key(&key)
-            && !key.starts_with("answer:")
+            && !answer_draft
         {
             return Err(invalid("The attachment draft is no longer available"));
         }
         let mut draft = self.state.drafts.get(&key).cloned().unwrap_or_else(|| {
-            if key.starts_with("answer:") {
+            if answer_draft {
                 Draft::default()
             } else {
                 self.state.current_draft()
@@ -1277,10 +1322,20 @@ impl Owner {
     fn peripheral(&mut self, intent: Intent) -> Result<Next, PeerError> {
         Ok(match intent {
             Intent::Transcribe {
-                draft_key,
+                mut draft_key,
                 preparation,
                 audio,
             } => {
+                if self.state.selected_thread.is_none()
+                    && self
+                        .state
+                        .drafts
+                        .get(&draft_key)
+                        .is_none_or(|draft| draft.project_id.is_none())
+                {
+                    self.ensure_new_thread_draft();
+                    draft_key = self.state.draft_key();
+                }
                 let draft = self
                     .state
                     .drafts
@@ -1341,6 +1396,7 @@ impl Owner {
                 )
             }
             Intent::ReviewWorkspace { cwd } => {
+                self.state.workspace.diff_retry_when_cwd_available = false;
                 self.state.workspace.diff_request = None;
                 self.state.workspace.review = None;
                 Next::call(Call::ReviewWorkspace(op::ReviewWorkspace { cwd }), None)
@@ -1350,6 +1406,7 @@ impl Owner {
                 to_run_ordinal,
                 ignore_whitespace,
             } => {
+                self.state.workspace.diff_retry_when_cwd_available = false;
                 let request = c::GetTurnDiff {
                     thread_id: self.selected()?,
                     from_run_ordinal,
