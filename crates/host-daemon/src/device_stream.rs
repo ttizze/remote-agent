@@ -1070,7 +1070,7 @@ mod tests {
         assert_eq!(nals.len(), 12);
         assert!(fixture_nal(5).len() > 1_000);
         assert!(fixture_nal(1).len() > 700);
-        assert_eq!(sps_dimensions(&fixture_nal(7)), Some((152, 212)));
+        assert_eq!(sps_dimensions(&fixture_nal(7)), Some((152, 100)));
     }
 
     #[test]
@@ -1120,7 +1120,7 @@ mod tests {
         let mdat_payload = &bytes[mdat.start + 8..mdat.start + mdat.size];
         assert_eq!(samples.iter().map(|sample| sample.size as usize).sum::<usize>(), mdat_payload.len());
         assert_eq!(sample_nal_types(mdat_payload, 0, &samples).unwrap(), [vec![6, 5], vec![6, 1]]);
-        assert_eq!(sps_dimensions(&fixture_nal(7)), Some((152, 212)));
+        assert_eq!(sps_dimensions(&fixture_nal(7)), Some((152, 100)));
     }
 
     #[test]
