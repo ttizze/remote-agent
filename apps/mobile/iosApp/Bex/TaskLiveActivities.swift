@@ -236,17 +236,15 @@ extension BexAppViewModel {
                       let owner = store else { continue }
                 do {
                     let receipt = try owner.dispatch(intent: request.intent)
-                    Task { [weak self] in
-                        guard let outcome = try? await receipt.wait(),
-                              case let .liveActivityRegistered(enabled) = outcome else { return }
-                        guard let self else { return }
-                        liveActivities.registrationFinished(
-                            activityID: request.activityID,
-                            token: request.token,
-                            enabled: enabled
-                        )
-                        synchronizeLiveActivities(foreground: UIApplication.shared.applicationState == .active)
-                    }
+                    // Finish each request before dispatching a rotated token or unregistering.
+                    let outcome = try await receipt.wait()
+                    guard case let .liveActivityRegistered(enabled) = outcome else { continue }
+                    liveActivities.registrationFinished(
+                        activityID: request.activityID,
+                        token: request.token,
+                        enabled: enabled
+                    )
+                    synchronizeLiveActivities(foreground: UIApplication.shared.applicationState == .active)
                 } catch {
                     // Registration retries with the current token after reconnecting.
                 }
