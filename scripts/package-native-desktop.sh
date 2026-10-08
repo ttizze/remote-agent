@@ -25,6 +25,15 @@ trap cleanup EXIT
 cp "$source" "$stage/desktop$suffix"
 scripts_dir=$(cd "$(dirname "$0")" && pwd)
 "$scripts_dir/stage-ffmpeg-runtime.sh" "$platform" "$stage"
+if [[ $platform == linux ]]; then
+    desktop_entry="$scripts_dir/../apps/desktop/linux/app.remoteagent.desktop.desktop"
+    [[ -f $desktop_entry ]] || {
+        echo "missing Linux desktop entry: $desktop_entry" >&2
+        exit 1
+    }
+    mkdir -p "$stage/share/applications"
+    cp "$desktop_entry" "$stage/share/applications/app.remoteagent.desktop.desktop"
+fi
 printf '%s\n' "$platform" > "$stage/platform"
 printf '%s\n' "$arch" > "$stage/architecture"
 mkdir -p "$output_dir"

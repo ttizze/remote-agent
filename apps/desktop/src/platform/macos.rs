@@ -53,3 +53,7 @@ pub(super) fn set_notification_badge(count: u32) {
     }
     dock_tile.display();
 }
+
+pub(super) fn shutdown_notification_badge() {
+    set_notification_badge(0);
+}

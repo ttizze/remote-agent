@@ -48,6 +48,10 @@ pub(crate) fn set_notification_badge(count: u32) {
     os::set_notification_badge(count);
 }
 
+pub(crate) fn shutdown_notification_badge() {
+    os::shutdown_notification_badge();
+}
+
 mod microphone;
 #[cfg(target_os = "macos")]
 pub(crate) use microphone::prepare_microphone;

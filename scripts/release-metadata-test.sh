@@ -111,6 +111,17 @@ tar -xOf "$temporary/desktop/desktop-windows-x86_64.tar.gz" ./FFMPEG-RUNTIME.txt
     grep -F 'license_files=FFMPEG-LICENSE-' >/dev/null
 [[ $(tar -tzf "$temporary/desktop/desktop-windows-x86_64.tar.gz" | grep -c -F './FFMPEG-LICENSE-') -eq 5 ]]
 
+printf '%s\n' 'desktop' > "$temporary/target/release/bex-desktop"
+AGENT_FFMPEG_EXECUTABLE="$temporary/ffmpeg.exe" AGENT_FFMPEG_RUNTIME_DIR="$temporary" \
+AGENT_FFMPEG_COMPONENT='ffmpeg-9.0.2-essentials_build' AGENT_FFMPEG_LICENSE_DIR="$project_root/third_party/ffmpeg" \
+AGENT_FFMPEG_LICENSE_INVENTORY="$project_root/third_party/ffmpeg/components.tsv" \
+    scripts/package-native-desktop.sh linux x86_64 "$temporary/desktop-linux" "$temporary/target" >/dev/null
+tar -tzf "$temporary/desktop-linux/desktop-linux-x86_64.tar.gz" |
+    grep -Fx './share/applications/app.remoteagent.desktop.desktop' >/dev/null
+tar -xOf "$temporary/desktop-linux/desktop-linux-x86_64.tar.gz" \
+    ./share/applications/app.remoteagent.desktop.desktop |
+    grep -Fx 'Name=Remote Agent' >/dev/null
+
 if scripts/release-metadata.sh --channel invalid >/dev/null 2>&1; then
     echo 'invalid channel unexpectedly succeeded' >&2
     exit 1
