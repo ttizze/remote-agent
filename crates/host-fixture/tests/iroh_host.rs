@@ -1574,15 +1574,15 @@ async fn title_lists_are_recent_scoped_small_and_expand_without_loading_bodies()
         assert!(!first.data.iter().any(|t|t.id.as_ref().unwrap().id.starts_with("p1-")),"old project content is deferred");
         assert_eq!(first.projects.iter().map(|p|p.id.as_str()).collect::<Vec<_>>(),["project-5","project-3","project-7","project-6","project-1","project-2","project-4"]);
         assert!(first.data.iter().all(|t|t.turns.is_none() && t.preview.is_none()));
-        let more=mobile.peer.call(&rpc::ListProjectSessions { project_id:"project-5".into(),limit:15 }).await.unwrap();
+        let more=mobile.peer.call(&rpc::ListProjectSessions { project_id:"project-5".into(),limit:15,search_term:String::new() }).await.unwrap();
         assert_eq!(more.data.len(),15);
         assert_eq!(more.data[14].id.as_ref().unwrap().id,"p5-5");
         assert!(more.has_more);
         assert!(more.data.iter().all(|t|t.project_id.as_deref()==Some("project-5") && t.turns.is_none()));
-        let end=mobile.peer.call(&rpc::ListProjectSessions { project_id:"project-5".into(),limit:25 }).await.unwrap();
+        let end=mobile.peer.call(&rpc::ListProjectSessions { project_id:"project-5".into(),limit:25,search_term:String::new() }).await.unwrap();
         assert_eq!(end.data.len(),19);
         assert!(!end.has_more);
-        let old=mobile.peer.call(&rpc::ListProjectSessions { project_id:"project-1".into(),limit:5 }).await.unwrap();
+        let old=mobile.peer.call(&rpc::ListProjectSessions { project_id:"project-1".into(),limit:5,search_term:String::new() }).await.unwrap();
         assert_eq!(old.data.len(),5);
         assert_eq!(old.data[0].id.as_ref().unwrap().id,"p1-18");
         assert!(old.has_more);
@@ -1591,6 +1591,12 @@ async fn title_lists_are_recent_scoped_small_and_expand_without_loading_bodies()
         assert_eq!(found.data.len(),18);
         assert_eq!(found.data[0].id.as_ref().unwrap().id,"p1-18");
         assert!(!found.has_more);
+        let project_search = mobile.peer.call(&rpc::ListProjectSessions {
+            project_id: "project-1".into(), limit: 5, search_term: "conversation 18".into(),
+        }).await.unwrap();
+        assert_eq!(project_search.data.len(), 1);
+        assert_eq!(project_search.data[0].id.as_ref().unwrap().id, "p1-18");
+        assert!(!project_search.has_more);
         let body = open_session(&mobile.peer, &json!({"provider":"codex","id":"p5-1"}), 5).await.0["response"].clone();
         assert_eq!(body["thread"]["projectId"], json!({"Assigned":"project-5"}));
         assert_eq!(body_json(&body["thread"]["turns"][0]["items"][0])["assistantText"]["text"], "History for Project 05 conversation 01");

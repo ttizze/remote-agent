@@ -219,8 +219,11 @@ impl Operation for ListSessions {
         Arc::make_mut(&mut snapshot.expanded_projects)
             .retain(|id, _| visible.contains(id.as_str()));
         Arc::make_mut(&mut snapshot.project_threads).retain(|id, _| visible.contains(id.as_str()));
-        Arc::make_mut(&mut snapshot.operations).retain(|key,_| {
-            !matches!(key,OperationKey::ProjectList { project_id } if !snapshot.expanded_projects.contains_key(project_id))
+        Arc::make_mut(&mut snapshot.operations).retain(|key, _| match key {
+            OperationKey::ProjectList { project_id } => {
+                snapshot.expanded_projects.contains_key(project_id)
+            }
+            _ => true,
         });
         snapshot.threads = Some(Arc::new(threads));
         let mut effects = Vec::new();
@@ -234,6 +237,7 @@ impl Operation for ListSessions {
                 effects.push(Effect::execute(ListProjectSessions {
                     project_id: id.clone(),
                     limit: *limit,
+                    search_term: snapshot.list_query.search_term.clone(),
                 }));
             }
         }
@@ -813,7 +817,13 @@ mod tests {
                     .unwrap()
                     .unwrap()
             }
-            let initial = Snapshot::default();
+            let initial = Snapshot {
+                list_query: Arc::new(crate::models::ListQuery {
+                    search_term: "Archive".into(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
             let (peer, mut reader, writer) = host_fixture::connect(&initial).await;
             let store = crate::store::Store::new(peer, initial);
             let page =
@@ -847,7 +857,7 @@ mod tests {
                 .unwrap();
             let request = read(&mut reader).await;
             assert_eq!(request["method"], "host/project/sessions");
-            assert_eq!(request["params"], json!({"projectId":"old","limit":5}));
+            assert_eq!(request["params"], json!({"projectId":"old","limit":5,"searchTerm":"Archive"}));
             assert!(store.snapshot().thread_list().unwrap().projects[0].loading);
             assert!(
                 !store
@@ -879,6 +889,7 @@ mod tests {
                 .await
                 .unwrap();
             let request = read(&mut reader).await;
+            assert_eq!(request["params"]["searchTerm"], "Archive");
             writer.reply(&request,json!({"error":{"code":"provider_failed","message":"fixture unavailable","delivery":"notSent"}})).await.unwrap();
             while {
                 let snapshot = updates.borrow_and_update();
@@ -1090,6 +1101,7 @@ mod tests {
         ListProjectSessions {
             project_id: "old".into(),
             limit: 5,
+            search_term: String::new(),
         }
         .apply(&mut opened, page("old"));
         assert!(Arc::ptr_eq(
@@ -1115,6 +1127,7 @@ mod tests {
         ListProjectSessions {
             project_id: "old".into(),
             limit: 5,
+            search_term: String::new(),
         }
         .apply(&mut closed, page("old"));
         assert!(closed.project_threads.is_empty());

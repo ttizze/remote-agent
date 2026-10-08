@@ -879,7 +879,7 @@ impl HostRpcService {
             }
             Call::ListProjectSessions(params) => self
                 .host_title_list(
-                    "",
+                    &params.search_term,
                     crate::projects::titles::TitleQuery::Project {
                         id: &params.project_id,
                         limit: params.limit,

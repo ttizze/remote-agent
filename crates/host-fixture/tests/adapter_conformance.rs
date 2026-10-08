@@ -884,6 +884,7 @@ async fn title_lists_stop_after_visible_sections_and_merge_provider_pages_in_ord
         .call(&op::ListProjectSessions {
             project_id: "project-0".into(),
             limit: 150,
+            search_term: String::new(),
         })
         .await
         .unwrap();

@@ -71,7 +71,6 @@ async fn run(args: Args) -> anyhow::Result<()> {
             snapshot.list_query = Arc::new(ListQuery {
                 limit: *limit,
                 search_term: search.clone(),
-                ..Default::default()
             })
         }
         Command::Send { thread_id, .. } => {

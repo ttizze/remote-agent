@@ -297,6 +297,7 @@ pub struct ListSessions {
 pub struct ListProjectSessions {
     pub project_id: String,
     pub limit: u32,
+    pub search_term: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

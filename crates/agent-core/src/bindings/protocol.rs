@@ -510,6 +510,7 @@ struct ListSessions {
 struct ListProjectSessions {
     pub project_id: String,
     pub limit: u32,
+    pub search_term: String,
 }
 #[uniffi::remote(Record)]
 struct ListAgents {

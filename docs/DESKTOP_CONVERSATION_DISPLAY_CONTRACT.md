@@ -70,7 +70,8 @@ hydration must not change this default.
 - Opening a project loads its first five root titles independently. More adds
   ten titles only to that project. Closing it removes its read target and ignores
   late replies. Recent rows already proving the page are reused without another
-  read. Project loading and failure stay local to that section; the recent list
+  read. Project pages use the same title search as recent tasks. Project loading
+  and failure stay local to that section; the recent list
   remains usable and its green loading indicator does not wait for project reads.
 - Recent limits, search and project expansion are not persisted. Reopening
   restores 30 recent titles and closed projects. Live navigation and reconnection

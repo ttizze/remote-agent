@@ -513,7 +513,11 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
             let Some(limit) = previous.expanded_projects.get(&project_id).copied() else {
                 return (next, Vec::new());
             };
-            return prepare(previous, next, op::ListProjectSessions { project_id, limit });
+            return prepare(previous, next, op::ListProjectSessions {
+                project_id,
+                limit,
+                search_term: previous.list_query.search_term.clone(),
+            });
         }
         Intent::SetProjectExpanded { project_id, expanded } => {
             if previous.expanded_projects.contains_key(&project_id) == expanded {
@@ -531,7 +535,11 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
                     return (next, Vec::new());
                 }
                 let effects = if next.connected {
-                    vec![Effect::execute(op::ListProjectSessions { project_id, limit: 5 })]
+                    vec![Effect::execute(op::ListProjectSessions {
+                        project_id,
+                        limit: 5,
+                        search_term: previous.list_query.search_term.clone(),
+                    })]
                 } else {
                     Vec::new()
                 };
@@ -555,7 +563,11 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
                     Arc::make_mut(&mut next.operations).remove(&op::OperationKey::ProjectList { project_id });
                     return (next, Vec::new());
                 }
-                return prepare(previous, next, op::ListProjectSessions { project_id, limit });
+                return prepare(previous, next, op::ListProjectSessions {
+                    project_id,
+                    limit,
+                    search_term: previous.list_query.search_term.clone(),
+                });
             }
             let mut query = (*previous.list_query).clone();
             query.limit = query.limit.saturating_add(30);
