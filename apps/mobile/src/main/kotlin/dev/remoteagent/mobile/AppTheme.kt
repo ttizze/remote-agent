@@ -26,8 +26,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
 import dev.remoteagent.core.MobileAppearance
 import dev.remoteagent.core.MobileColorScheme
-import dev.remoteagent.core.mobileAssignTheme
 import dev.remoteagent.core.mobileAppearanceDefault
+import dev.remoteagent.core.mobileAssignTheme
 import dev.remoteagent.core.mobileThemeColors
 import dev.remoteagent.core.mobileTypography
 import dev.remoteagent.core.normalizeMobileAppearance
@@ -435,10 +435,11 @@ internal data class MobileAppearanceSettings(
             return MobileAppearanceSettings(
                     colorScheme =
                         runCatching {
-                            MobileColorScheme.valueOf(
-                                prefs.getString("colorScheme", null) ?: defaults.colorScheme.name
-                            )
-                        }.getOrDefault(defaults.colorScheme),
+                                MobileColorScheme.valueOf(
+                                    prefs.getString("colorScheme", null) ?: defaults.colorScheme.name
+                                )
+                            }
+                            .getOrDefault(defaults.colorScheme),
                     theme = prefs.getString("theme", null),
                     lightTheme = prefs.getString("lightTheme", null),
                     darkTheme = prefs.getString("darkTheme", null),

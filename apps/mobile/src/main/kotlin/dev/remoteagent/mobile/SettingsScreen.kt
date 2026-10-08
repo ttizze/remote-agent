@@ -300,36 +300,36 @@ internal fun AppearanceScreen(model: AndroidAppModel) {
                         }
                     }
                     mobileThemeChoices(true).forEach { choice ->
-                            val id = choice.id
-                            val label = choice.label
-                            val selected =
+                        val id = choice.id
+                        val label = choice.label
+                        val selected =
+                            when (themeTarget) {
+                                "light" -> appearance.lightTheme == id
+                                "dark" -> appearance.darkTheme == id
+                                else ->
+                                    appearance.theme == id &&
+                                        appearance.lightTheme == null &&
+                                        appearance.darkTheme == null
+                            }
+                        val pick = {
+                            update(
                                 when (themeTarget) {
-                                    "light" -> appearance.lightTheme == id
-                                    "dark" -> appearance.darkTheme == id
-                                    else ->
-                                        appearance.theme == id &&
-                                            appearance.lightTheme == null &&
-                                            appearance.darkTheme == null
+                                    "light" -> appearance.assigningTheme(false, id)
+                                    "dark" -> appearance.assigningTheme(true, id)
+                                    else -> appearance.copy(theme = id, lightTheme = null, darkTheme = null)
                                 }
-                            val pick = {
-                                update(
-                                    when (themeTarget) {
-                                        "light" -> appearance.assigningTheme(false, id)
-                                        "dark" -> appearance.assigningTheme(true, id)
-                                        else -> appearance.copy(theme = id, lightTheme = null, darkTheme = null)
-                                    }
-                                )
-                            }
-                            Row(
-                                Modifier.fillMaxWidth()
-                                    .clickable(onClick = pick)
-                                    .padding(horizontal = 16.dp, vertical = 10.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                            ) {
-                                RadioButton(selected, pick)
-                                Text(label, style = AppTheme.body)
-                            }
+                            )
                         }
+                        Row(
+                            Modifier.fillMaxWidth()
+                                .clickable(onClick = pick)
+                                .padding(horizontal = 16.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            RadioButton(selected, pick)
+                            Text(label, style = AppTheme.body)
+                        }
+                    }
                 }
             }
             item {
@@ -340,7 +340,9 @@ internal fun AppearanceScreen(model: AndroidAppModel) {
             item {
                 SectionCard("Code") {
                     ToggleRow("Custom size", appearance.codeFontSize != null) {
-                        update(appearance.copy(codeFontSize = if (it) resolvedTypography.codeFontSize.toInt() else null))
+                        update(
+                            appearance.copy(codeFontSize = if (it) resolvedTypography.codeFontSize.toInt() else null)
+                        )
                     }
                     appearance.codeFontSize?.let { size ->
                         SizeRow("Code size", size, 8, 18) { update(appearance.copy(codeFontSize = it)) }
