@@ -282,8 +282,7 @@ impl Browser {
         .map_err(|_| format!("recording stop timeout for tab {tab_id} after 120000ms"));
         let result = match result {
             Ok(Ok(result)) => result,
-            Ok(Err(error)) => Err(error),
-            Err(error) => {
+            Ok(Err(error)) | Err(error) => {
                 abort.abort();
                 let _ = tokio::time::timeout(
                     Duration::from_secs(5),
@@ -311,16 +310,16 @@ impl Browser {
             (active.cancel.clone(), active.abort.clone())
         };
         cancel.cancel();
-        if tokio::time::timeout(timeout, wait_for_recording_completion(done))
-            .await
-            .is_err()
-        {
-            abort.abort();
-            let _ = tokio::time::timeout(
-                Duration::from_secs(5),
-                wait_for_recording_completion(done),
-            )
-            .await;
+        match tokio::time::timeout(timeout, wait_for_recording_completion(done)).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(_)) | Err(_) => {
+                abort.abort();
+                let _ = tokio::time::timeout(
+                    Duration::from_secs(5),
+                    wait_for_recording_completion(done),
+                )
+                .await;
+            }
         }
     }
 
@@ -371,18 +370,23 @@ impl Browser {
                 active.cancel.cancel();
                 active.done.subscribe()
             };
-            if tokio::time::timeout(Duration::from_secs(10), wait_for_recording_completion(&mut done))
-                .await
-                .is_err()
+            match tokio::time::timeout(
+                Duration::from_secs(10),
+                wait_for_recording_completion(&mut done),
+            )
+            .await
             {
-                if let Some(active) = self.recordings.lock().await.get(&key) {
-                    active.abort.abort();
+                Ok(Ok(_)) => {}
+                Ok(Err(_)) | Err(_) => {
+                    if let Some(active) = self.recordings.lock().await.get(&key) {
+                        active.abort.abort();
+                    }
+                    let _ = tokio::time::timeout(
+                        Duration::from_secs(5),
+                        wait_for_recording_completion(&mut done),
+                    )
+                    .await;
                 }
-                let _ = tokio::time::timeout(
-                    Duration::from_secs(5),
-                    wait_for_recording_completion(&mut done),
-                )
-                .await;
             }
         }
         if let Some(chrome) = self.state.lock().await.chrome.take() {
