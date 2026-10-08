@@ -1320,7 +1320,6 @@ struct Inner {
     agents: Mutex<BTreeMap<String, AgentRuntime>>,
     recordings: Mutex<BTreeMap<(ThreadId, String, String), ActiveDeviceRecording>>,
     event_log_tasks: Mutex<BTreeMap<(String, String), (u16, tokio::task::JoinHandle<()>)>>,
-    native_snapshot_at: Mutex<BTreeMap<(String, String), Instant>>,
     recovery_tasks: Mutex<BTreeMap<String, tokio::task::JoinHandle<()>>>,
 }
 
@@ -1449,7 +1448,7 @@ impl DeviceService {
             state.agent_access_enabled = settings.agent_access_enabled;
             state.onboarding_completed = settings.onboarding_completed;
         }
-    Arc::new(Self { inner: Arc::new(Inner { config_path: state_root.join("device-hosts.json"), settings_path: state_root.join("settings.json"), hosts: RwLock::new(hosts), state: RwLock::new(state), events, frame_sequence: AtomicU64::new(0), control_sequence: AtomicU64::new(0), operation: Mutex::new(()), tool_install: Mutex::new(()), hub: Mutex::new(None), remote_hubs: Mutex::new(BTreeMap::new()), agents: Mutex::new(BTreeMap::new()), recordings: Mutex::new(BTreeMap::new()), event_log_tasks: Mutex::new(BTreeMap::new()), native_snapshot_at: Mutex::new(BTreeMap::new()), recovery_tasks: Mutex::new(BTreeMap::new()) }) })
+    Arc::new(Self { inner: Arc::new(Inner { config_path: state_root.join("device-hosts.json"), settings_path: state_root.join("settings.json"), hosts: RwLock::new(hosts), state: RwLock::new(state), events, frame_sequence: AtomicU64::new(0), control_sequence: AtomicU64::new(0), operation: Mutex::new(()), tool_install: Mutex::new(()), hub: Mutex::new(None), remote_hubs: Mutex::new(BTreeMap::new()), agents: Mutex::new(BTreeMap::new()), recordings: Mutex::new(BTreeMap::new()), event_log_tasks: Mutex::new(BTreeMap::new()), recovery_tasks: Mutex::new(BTreeMap::new()) }) })
     }
 
     pub async fn state_async(&self) -> DeviceServiceState {
@@ -2186,7 +2185,6 @@ impl DeviceService {
         };
         for (_, (_, task)) in event_log_tasks { task.abort(); }
         self.inner.recordings.lock().await.clear();
-        self.inner.native_snapshot_at.lock().await.clear();
         let root = self
             .inner
             .config_path
@@ -2896,9 +2894,6 @@ impl DeviceService {
             }
         }
         drop(event_log_tasks);
-        let mut native_snapshots = self.inner.native_snapshot_at.lock().await;
-        native_snapshots.retain(|key, _| retained_devices.contains(key));
-        drop(native_snapshots);
         self.publish_state(next).await;
         for recording in completed_recordings {
             let _ = self.inner.events.send(DeviceEvent::RecordingComplete(recording));
@@ -3107,9 +3102,6 @@ impl DeviceService {
             };
             if let Ok(transport) = transport {
                 let (width, height) = screen.as_ref().map(|screen| (screen.width, screen.height)).unwrap_or((0, 0));
-                let native_snapshot = prefer_mjpeg
-                    && device.platform == DevicePlatform::Android
-                    && transport.iter().any(|frame| matches!(frame.encoding, DeviceFrameEncoding::H264 | DeviceFrameEncoding::Semu));
                 for frame in transport {
                     let sequence = self.inner.frame_sequence.fetch_add(1, Ordering::Relaxed).saturating_add(1);
                     self.append_recording(thread, &session, &frame).await;
@@ -3132,16 +3124,6 @@ impl DeviceService {
                     screen.device_id = Some(device.id.clone());
                     frames.push(DeviceEvent::Screen(screen));
                 }
-                // Android's SEMU/H.264 transport remains available to a native
-                // decoder, while the current native surfaces use a bounded
-                // JPEG snapshot fallback so a live device never renders as a
-                // blank panel.  The raw transport is still delivered above.
-                if native_snapshot && self.native_snapshot_due(&session.host_id, &device.id).await
-                    && let Ok(screenshot) = self.screenshot(DeviceScreenshotInput { host_id: Some(session.host_id.clone()), device_id: session.device_id.clone() }).await
-                {
-                    self.append_recording(&session.thread_id, &session, &TransportFrame { payload: screenshot.png.clone(), encoding: DeviceFrameEncoding::Png, keyframe: true, timestamp_us: None, screen_id: None }).await;
-                    frames.push(DeviceEvent::Frame(agent_protocol::device::DeviceFrame { thread_id: thread.clone(), device: screenshot.device, png: screenshot.png, width: screenshot.width, height: screenshot.height, sequence: self.inner.frame_sequence.fetch_add(1, Ordering::Relaxed).saturating_add(1) }));
-                }
                 continue;
             }
             // Stills remain a deliberate recovery path for helpers that have
@@ -3158,17 +3140,6 @@ impl DeviceService {
     async fn screen_config(&self, host_id: &str, device: &DeviceSummary) -> Result<DeviceScreenConfig, String> {
         let port = self.hub_port(host_id).await.ok_or_else(|| "device hub is not running".to_owned())?;
         hub_screen_config(port, device.platform, &device.id).await
-    }
-
-    async fn native_snapshot_due(&self, host_id: &str, device_id: &str) -> bool {
-        let key = (host_id.to_owned(), device_id.to_owned());
-        let now = Instant::now();
-        let mut snapshots = self.inner.native_snapshot_at.lock().await;
-        if snapshots.get(&key).is_some_and(|last| now.duration_since(*last) < Duration::from_secs(1)) {
-            return false;
-        }
-        snapshots.insert(key, now);
-        true
     }
 
     async fn ensure_event_log_task(&self, host_id: &str, device_id: &str, port: u16) {
