@@ -302,12 +302,15 @@ impl Desktop {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        if !self.right().open {
+        let panel_key = self.panel_thread();
+        let right = self.right().clone();
+        if !right.open && !self.panels.threads.contains_key(&panel_key) {
             return None;
         }
         let viewport = window.viewport_size().width.as_f32();
         let width = clamp_panel_width(self.panels.width, viewport);
-        let body = match self.right().active_surface().cloned() {
+        let open = right.open;
+        let body = match right.active_surface().cloned() {
             None => self.render_launcher(cx),
             Some(Surface::Browser { id }) => match self.panels.browsers.get(&id) {
                 Some(browser) => div()
@@ -323,49 +326,62 @@ impl Desktop {
             Some(Surface::Files) => self.render_files(window, cx),
             Some(Surface::Diff) => self.render_diff(window, cx),
         };
-        Some(
-            v_flex()
-                .id("right-panel")
-                .relative()
-                .w(px(width))
-                .flex_shrink_0()
-                .h_full()
-                .bg(color("canvas"))
-                .border_l_1()
-                .border_color(color("border"))
-                .on_drag_move(cx.listener(
-                    |view, event: &DragMoveEvent<PanelResize>, window, cx| {
-                        let viewport = window.viewport_size().width.as_f32();
-                        let right = event.bounds.right().as_f32();
-                        view.panels.width =
-                            clamp_panel_width(right - event.event.position.x.as_f32(), viewport);
-                        cx.notify();
+        let panel = v_flex()
+            .id("right-panel")
+            .relative()
+            .w(px(if open { width } else { 0. }))
+            .flex_shrink_0()
+            .h_full()
+            .overflow_hidden()
+            .bg(color("canvas"))
+            .border_l_1()
+            .border_color(color("border"))
+            .on_drag_move(
+                cx.listener(|view, event: &DragMoveEvent<PanelResize>, window, cx| {
+                    let viewport = window.viewport_size().width.as_f32();
+                    let right = event.bounds.right().as_f32();
+                    view.panels.width =
+                        clamp_panel_width(right - event.event.position.x.as_f32(), viewport);
+                    cx.notify();
+                }),
+            )
+            .child(self.render_tab_bar(cx))
+            .child(v_flex().flex_1().min_h_0().child(body))
+            .child(
+                div()
+                    .id("right-panel-resize")
+                    .absolute()
+                    .left(px(-3.))
+                    .top_0()
+                    .bottom_0()
+                    .w(px(6.))
+                    .cursor_col_resize()
+                    .on_drag(PanelResize, |drag, _, _, cx| {
+                        cx.stop_propagation();
+                        cx.new(|_| drag.clone())
+                    })
+                    .on_click(cx.listener(|view, event: &ClickEvent, _, cx| {
+                        if event.click_count() == 2 {
+                            view.panels.width = super::ui::metrics().panel_width;
+                            cx.notify();
+                        }
+                    })),
+            );
+        let duration = Desktop::panel_animation_duration();
+        Some(if duration.is_zero() {
+            panel.into_any_element()
+        } else {
+            panel
+                .with_animation(
+                    ("desktop-right-panel-animation", open),
+                    Animation::new(duration),
+                    move |panel, delta| {
+                        let progress = if open { delta } else { 1. - delta };
+                        panel.w(px(width * progress))
                     },
-                ))
-                .child(self.render_tab_bar(cx))
-                .child(v_flex().flex_1().min_h_0().child(body))
-                .child(
-                    div()
-                        .id("right-panel-resize")
-                        .absolute()
-                        .left(px(-3.))
-                        .top_0()
-                        .bottom_0()
-                        .w(px(6.))
-                        .cursor_col_resize()
-                        .on_drag(PanelResize, |drag, _, _, cx| {
-                            cx.stop_propagation();
-                            cx.new(|_| drag.clone())
-                        })
-                        .on_click(cx.listener(|view, event: &ClickEvent, _, cx| {
-                            if event.click_count() == 2 {
-                                view.panels.width = super::ui::metrics().panel_width;
-                                cx.notify();
-                            }
-                        })),
                 )
-                .into_any_element(),
-        )
+                .into_any_element()
+        })
     }
 
     /// A surface's tab title.
@@ -627,10 +643,35 @@ impl Desktop {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        if !self.panels.terminals.drawer_open() {
+        let open = self.panels.terminals.drawer_open();
+        if !open && !self.panels.terminals.drawer_present() {
             return None;
         }
-        Some(self.render_terminals(None, window, cx))
+        let height = self
+            .panels
+            .terminals
+            .drawer_height(window.viewport_size().height.as_f32());
+        let drawer = v_flex()
+            .id("terminal-drawer-animation")
+            .h(px(if open { height } else { 0. }))
+            .flex_shrink_0()
+            .overflow_hidden()
+            .child(self.render_terminals(None, window, cx));
+        let duration = Desktop::panel_animation_duration();
+        Some(if duration.is_zero() {
+            drawer.into_any_element()
+        } else {
+            drawer
+                .with_animation(
+                    ("desktop-terminal-drawer-animation", open),
+                    Animation::new(duration),
+                    move |drawer, delta| {
+                        let progress = if open { delta } else { 1. - delta };
+                        drawer.h(px(height * progress))
+                    },
+                )
+                .into_any_element()
+        })
     }
 
     /// Follows the snapshot: the diff source, file editor and terminals.

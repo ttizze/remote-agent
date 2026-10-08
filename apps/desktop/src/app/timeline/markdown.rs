@@ -28,12 +28,24 @@ use std::{path::Path, sync::Arc};
 const CONTEXT_LINK: &str = "context://v1/";
 
 fn style() -> TextViewStyle {
+    let word_wrap = super::super::ui_word_wrap();
     let mut code_block = StyleRefinement::default()
         .bg(color("secondary"))
         .border_1()
         .border_color(tint("border", 0.7))
         .rounded(px(10.));
     code_block.text.font_size = Some(px(super::super::ui::metrics().code_size).into());
+    code_block.text.white_space = Some(if word_wrap {
+        WhiteSpace::Normal
+    } else {
+        WhiteSpace::Nowrap
+    });
+    let mut table = StyleRefinement::default();
+    let mut table_cell = StyleRefinement::default();
+    if !word_wrap {
+        table.overflow.x = Some(Overflow::Scroll);
+        table_cell.text.white_space = Some(WhiteSpace::Nowrap);
+    }
     TextViewStyle::default()
         .paragraph_gap(rems(0.65))
         .heading_font_size(|level, base| match level {
@@ -43,6 +55,8 @@ fn style() -> TextViewStyle {
             _ => base,
         })
         .code_block(code_block)
+        .table(table)
+        .table_cell(table_cell)
         .inline_code(HighlightStyle {
             background_color: Some(tint("text", 0.06)),
             ..HighlightStyle::default()

@@ -40,7 +40,7 @@ use gpui_kit::{
     *,
 };
 use hosts::{HostEvent, Hosts};
-use std::{path::PathBuf, sync::Arc};
+use std::{path::PathBuf, sync::Arc, time::Duration};
 
 /// Runs once a dispatched intent resolves.
 type Done = Box<
@@ -113,6 +113,7 @@ pub(crate) struct Desktop {
     pub(crate) hosts: Entity<Hosts>,
     pub(crate) route: Route,
     pub(crate) sidebar_hidden: bool,
+    sidebar_animation_runs: u64,
     generation: u64,
     views_running: bool,
     shown_error: Option<String>,
@@ -211,6 +212,7 @@ impl Desktop {
             hosts,
             route: Route::Chat,
             sidebar_hidden: false,
+            sidebar_animation_runs: 0,
             generation: 0,
             views_running: false,
             shown_error: None,
@@ -623,6 +625,7 @@ impl Desktop {
         match command {
             "sidebar.toggle" => {
                 self.sidebar_hidden = !self.sidebar_hidden;
+                self.sidebar_animation_runs += 1;
                 cx.notify();
             }
             "rightPanel.toggle" => self.toggle_right_panel(window, cx),
@@ -678,6 +681,44 @@ impl Desktop {
             }
         }
         true
+    }
+}
+
+impl Desktop {
+    fn panel_animation_duration() -> Duration {
+        Duration::from_millis(u64::from(ui::appearance().panel_animation_ms))
+    }
+
+    fn render_navigation(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let navigation = match self.route {
+            Route::Settings => self.render_settings_nav(window, cx),
+            Route::Chat => self.render_sidebar(window, cx),
+        };
+        let width = ui::metrics().sidebar_width;
+        let hidden = self.sidebar_hidden;
+        let runs = self.sidebar_animation_runs;
+        let duration = Self::panel_animation_duration();
+        let navigation = div()
+            .id("desktop-navigation")
+            .h_full()
+            .flex_shrink_0()
+            .overflow_hidden()
+            .w(px(if hidden { 0. } else { width }))
+            .child(navigation);
+        if runs == 0 || duration.is_zero() {
+            navigation.into_any_element()
+        } else {
+            navigation
+                .with_animation(
+                    ("desktop-navigation-animation", runs),
+                    Animation::new(duration),
+                    move |navigation, delta| {
+                        let progress = if hidden { 1. - delta } else { delta };
+                        navigation.w(px(width * progress))
+                    },
+                )
+                .into_any_element()
+        }
     }
 }
 
@@ -744,12 +785,7 @@ impl Render for Desktop {
             .child(
                 h_flex()
                     .size_full()
-                    .when(!self.sidebar_hidden, |root| {
-                        root.child(match self.route {
-                            Route::Settings => self.render_settings_nav(window, cx),
-                            Route::Chat => self.render_sidebar(window, cx),
-                        })
-                    })
+                    .child(self.render_navigation(window, cx))
                     .child(main),
             )
             .children(gpui_kit::component::Root::render_dialog_layer(window, cx))
