@@ -627,6 +627,22 @@ async fn worktree_lists_read_each_native_page_once_and_refresh_activity() {
             .unwrap();
         assert_eq!(deleted.branch, "削除済み");
         assert!(deleted.blocked_reason.is_none() && deleted.threads.is_empty());
+        let activity = local
+            .peer
+            .call(&agent_protocol::live_activity::ReadTaskActivity {})
+            .await
+            .unwrap();
+        assert_eq!(activity.display.current.total, u32::from(running));
+        assert_eq!(activity.display.ongoing, running);
+        assert_eq!(
+            activity.display.current.label,
+            if running {
+                "実行中 1件"
+            } else {
+                "すべてのタスクが終了"
+            },
+            "task activity includes the oldest native page outside the visible title list"
+        );
     }
     local.close().await;
     host.close().await.unwrap();

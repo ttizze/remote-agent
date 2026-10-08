@@ -1124,29 +1124,38 @@ mod tests {
             initial.display,
             "a cached list cannot change the last confirmed task state"
         );
-        let request = serde_json::from_value(serde_json::json!({
-            "id":"question", "target":"session", "delivery":"awaiting", "body":{"question":{"questions":[]}}
-        })).unwrap();
         router.session_change(
             &target,
             SessionChange::Status {
                 status: SessionStatus::Running,
             },
         );
-        router.session_change(&target, SessionChange::Request { request });
-        let waiting = router.task_activity(Vec::new(), 0);
-        assert_eq!(waiting.display.current.label, "確認待ち 1件 · 実行中 1件");
-        router.session_change(
-            &target,
-            SessionChange::RequestDelivery {
-                request_id: "question".into(),
-                state: RequestDelivery::Sent,
-            },
-        );
-        assert_eq!(
-            router.task_activity(Vec::new(), 0).display.current.label,
-            "実行中 2件"
-        );
+        for (id, body) in [
+            ("question", serde_json::json!({"question":{"questions":[]}})),
+            (
+                "approval",
+                serde_json::json!({"approval":{"kind":"command","description":"run","details":"","choices":[]}}),
+            ),
+        ] {
+            let request = serde_json::from_value(serde_json::json!({
+                "id":id, "target":"session", "delivery":"awaiting", "body":body
+            }))
+            .unwrap();
+            router.session_change(&target, SessionChange::Request { request });
+            let waiting = router.task_activity(Vec::new(), 0);
+            assert_eq!(waiting.display.current.label, "確認待ち 1件 · 実行中 1件");
+            router.session_change(
+                &target,
+                SessionChange::RequestDelivery {
+                    request_id: id.into(),
+                    state: RequestDelivery::Sent,
+                },
+            );
+            assert_eq!(
+                router.task_activity(Vec::new(), 0).display.current.label,
+                "実行中 2件"
+            );
+        }
         let read_revision = router.task_activity_revision();
         router.session_change(
             &target,
