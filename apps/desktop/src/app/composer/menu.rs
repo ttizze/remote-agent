@@ -161,6 +161,7 @@ impl Desktop {
                     Some(if *directory { "folder" } else { "file" })
                 }
                 ComposerCommandTarget::Thread { .. } => Some("message-square"),
+                ComposerCommandTarget::PullRequest { .. } => Some("git-pull-request"),
                 _ => None,
             };
             let (text, item_id) = (text.clone(), item.id.clone());

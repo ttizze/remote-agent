@@ -2,7 +2,7 @@
 use super::commands::{
     ComposerCommandItem, ComposerCommandMenuInput, ComposerPathEntry, ComposerSkill,
     ComposerTrigger, ComposerTriggerKind, ProviderSlashCommand, composer_command_items,
-    detect_composer_trigger, has_compactable_conversation,
+    detect_composer_trigger, has_compactable_conversation, pull_request_items,
 };
 use crate::state::Snapshot;
 use crate::view::timeline::rows::TimelineLayout;
@@ -21,8 +21,7 @@ pub struct ComposerMenuView {
     pub loading: bool,
 }
 
-/// The empty menu's text for a trigger in each layout's wording. The Host
-/// looks up no pull requests, so that trigger never has a project to search.
+/// The empty menu's text for a trigger in each layout's wording.
 pub fn composer_menu_empty_label(
     kind: ComposerTriggerKind,
     layout: TimelineLayout,
@@ -66,10 +65,18 @@ pub fn composer_menu(snapshot: &Snapshot, text: &str, cursor: u32) -> ComposerMe
         return ComposerMenuView::default();
     };
     let layout = snapshot.sources.composer_layout;
-    let loading = trigger.kind == ComposerTriggerKind::Path
-        && !trigger.query.trim().is_empty()
-        && !snapshot.composer_cwd().is_empty()
-        && path_entries(snapshot, &trigger).is_none();
+    let loading = if trigger.kind == ComposerTriggerKind::PullRequest {
+        snapshot
+            .selected_project
+            .as_deref()
+            .or_else(|| snapshot.pull_requests.selected_project.as_deref())
+            .is_some_and(|project| !snapshot.pull_requests.by_project.contains_key(project))
+    } else {
+        trigger.kind == ComposerTriggerKind::Path
+            && !trigger.query.trim().is_empty()
+            && !snapshot.composer_cwd().is_empty()
+            && path_entries(snapshot, &trigger).is_none()
+    };
     let items = composer_menu_items(snapshot, &trigger);
     ComposerMenuView {
         empty_label: items.is_empty().then(|| {
@@ -166,7 +173,7 @@ pub(crate) fn composer_menu_items(
     let allow_interaction_mode = crate::view::models::catalog(snapshot)
         .instance(&draft.instance_id)
         .is_none_or(|instance| instance.show_interaction_mode_toggle);
-    composer_command_items(&ComposerCommandMenuInput {
+    let mut items = composer_command_items(&ComposerCommandMenuInput {
         trigger,
         driver: (!draft.instance_id.is_empty()).then_some(draft.driver),
         has_thread: thread.is_some(),
@@ -177,7 +184,23 @@ pub(crate) fn composer_menu_items(
         path_entries: &path_entries,
         threads: &threads,
         current_thread: thread.map(|id| id.as_str()),
-    })
+    });
+    if trigger.kind == ComposerTriggerKind::PullRequest {
+        let project_id = snapshot
+            .selected_project
+            .as_deref()
+            .or_else(|| snapshot.pull_requests.selected_project.as_deref());
+        items = project_id
+            .map(|project_id| {
+                pull_request_items(&crate::view::pull_requests::composer_pull_request_matches(
+                    snapshot,
+                    project_id,
+                    &trigger.query,
+                ))
+            })
+            .unwrap_or_default();
+    }
+    items
 }
 
 #[cfg(test)]

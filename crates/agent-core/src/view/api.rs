@@ -39,6 +39,7 @@ use crate::view::{
     thread::{ThreadView, ThreadViewOptions, selected_thread_view, thread_view},
     thread_arrangement::{ArrangementDrop, ArrangementOptions},
     thread_list::{ThreadListHolds, ThreadListOptions, ThreadListView, thread_list},
+    pull_requests::{PullRequestDetailView, PullRequestListView, PullRequestPanelOptions, pull_request_detail, pull_request_list},
     thread_menu::{ThreadMenuOptions, ThreadMenuView, thread_menu},
     time::TimestampFormat,
     timeline::mobile_follow::{LiveFollowEvent, StreamHaptic, StreamingMessageMark},
@@ -77,6 +78,17 @@ pub struct PreferencesView {
 }
 
 impl Snapshot {
+    pub fn pull_request_list(&self, options: PullRequestPanelOptions) -> PullRequestListView {
+        pull_request_list(self, &options)
+    }
+
+    pub fn pull_request_detail(
+        &self,
+        key: agent_domain::PullRequestKey,
+    ) -> Option<PullRequestDetailView> {
+        pull_request_detail(self, &key)
+    }
+
     fn picker_options(
         &self,
         query: String,

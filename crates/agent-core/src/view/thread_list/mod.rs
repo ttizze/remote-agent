@@ -471,6 +471,9 @@ pub struct ThreadRow {
     pub project_id: String,
     pub project_title: Option<String>,
     pub branch: Option<String>,
+    /// The current linked change request, when this thread has one.
+    pub pull_request_label: Option<String>,
+    pub pull_request_url: Option<String>,
     pub variant: RowVariant,
     pub snoozed: bool,
     pub pinned: bool,
@@ -677,6 +680,14 @@ fn thread_row(item: &LayoutItem, input: &ListItemsInput, queued: &BTreeSet<Strin
         project_id: thread.project.clone(),
         project_title: None,
         branch: thread.branch.clone(),
+        pull_request_label: thread
+            .linked_pull_request
+            .as_ref()
+            .map(|pull_request| format!("#{}", pull_request.number)),
+        pull_request_url: thread
+            .linked_pull_request
+            .as_ref()
+            .map(|pull_request| pull_request.url.clone()),
         variant: item.variant,
         snoozed: item.snoozed,
         pinned: item.pinned,

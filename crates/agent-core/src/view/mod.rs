@@ -15,6 +15,7 @@ pub mod models;
 pub mod new_thread;
 pub mod plan;
 pub mod projects;
+pub mod pull_requests;
 pub mod queue;
 pub mod rejection;
 pub mod relationships;

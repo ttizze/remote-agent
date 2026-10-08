@@ -664,3 +664,54 @@ fn choosing_a_thread_inserts_its_link_and_attaches_it_once() {
         Err(TOO_MANY_CONTEXT_ITEMS.into())
     );
 }
+
+#[test]
+fn choosing_a_pull_request_inserts_review_context() {
+    let item = ComposerCommandItem {
+        id: "pull-request:github.com/owner/repo/42".into(),
+        label: "#42 Fix login".into(),
+        description: "owner/repo".into(),
+        skill_source: None,
+        file_icon: None,
+        target: ComposerCommandTarget::PullRequest {
+            host: "github.com".into(),
+            repository: "owner/repo".into(),
+            number: 42,
+            url: "https://github.com/owner/repo/pull/42".into(),
+            title: "Fix login".into(),
+            state: "open".into(),
+            is_draft: false,
+            head_branch: "feature/login".into(),
+            base_branch: "main".into(),
+        },
+    };
+    let trigger = ComposerTrigger {
+        kind: ComposerTriggerKind::PullRequest,
+        query: "".into(),
+        range_start: 0,
+        range_end: 1,
+    };
+    let selection =
+        resolve_composer_command_selection("#", &trigger, &item, true, &[]).unwrap();
+    assert!(selection.text.starts_with("[#42](context://v1/review-comment/"));
+    let record = pull_request_context_record(
+        "github.com",
+        "owner/repo",
+        42,
+        "https://github.com/owner/repo/pull/42",
+        "Fix login",
+        "open",
+        false,
+        "feature/login",
+        "main",
+    );
+    assert_eq!(record["pullRequest"]["headBranch"], "feature/login");
+    assert!(
+        agent_domain::MessageContext {
+            version: 1,
+            records: vec![agent_domain::Json(record)],
+        }
+        .normalized()
+        .is_some()
+    );
+}

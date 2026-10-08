@@ -21,7 +21,8 @@ use crate::{
     checkpoints::Checkpoints, terminals::Terminals, workspace_files::WorkspaceFiles,
     worktrees::Worktrees,
 };
-use agent_runtime::{Runtime, RuntimeConfig};
+use agent_domain::{Command, CommandId, ThreadId};
+use agent_runtime::{Committed, Runtime, RuntimeConfig};
 use futures_util::future::BoxFuture;
 use std::{
     path::PathBuf,
@@ -174,6 +175,19 @@ impl Conversation {
     /// are imported.
     pub(crate) async fn project_added(&self, project: &str) {
         project_added(&self.runtime, &self.resources.projects, project).await;
+    }
+
+    /// Applies a Host-owned projection command through the same runtime actor
+    /// as conversation dispatches, so shell subscribers and replayed facts stay
+    /// consistent with native pull-request operations.
+    pub(crate) async fn dispatch_host_command(
+        &self,
+        thread: ThreadId,
+        command: Command,
+    ) -> Result<Committed, agent_runtime::RuntimeError> {
+        let id = CommandId::new(format!("host-pull-request-{}", uuid::Uuid::new_v4()))
+            .expect("generated command ids are nonempty");
+        self.runtime.dispatch_host(thread, id, command).await
     }
 }
 

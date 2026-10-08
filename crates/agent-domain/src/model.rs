@@ -676,6 +676,8 @@ pub struct Receipt {
 pub struct State {
     pub delegation: Option<Delegation>,
     pub thread: Option<Thread>,
+    /// Provider snapshots remain in the thread projection for offline reads.
+    pub pull_requests: Vec<PullRequestLink>,
     pub checkpoint_scope: Option<CheckpointScope>,
     pub runs: Vec<Run>,
     pub attempts: Vec<Attempt>,
@@ -894,6 +896,40 @@ pub enum Command {
         limit_recovery: Option<Option<LimitRecoveryUpdate>>,
         linked_pull_request: Option<Option<LinkedPullRequest>>,
         project_root: Option<String>,
+    },
+    /// Replaces the provider snapshot for all links belonging to this thread.
+    SyncPullRequests {
+        links: Vec<PullRequestLink>,
+    },
+    /// Links one provider request to this thread after Host validation.
+    LinkPullRequest {
+        link: PullRequestLink,
+    },
+    /// Refreshes one linked request's provider snapshot.
+    SyncPullRequestLink {
+        link: PullRequestLink,
+    },
+    /// Changes or refreshes one linked request's durable watch.
+    SetPullRequestWatch {
+        key: PullRequestKey,
+        watch: Option<PullRequestWatch>,
+    },
+    SyncPullRequestWatch {
+        key: PullRequestKey,
+        watch: Option<PullRequestWatch>,
+    },
+    /// Resolves the checked-out branch to its provider request.
+    ResolveBranchPullRequest {
+        link: Option<PullRequestLink>,
+    },
+    /// A Host-side pull-request watch queues an agent turn and its monitor
+    /// notification through the same durable message facts as a provider wake.
+    PullRequestWake {
+        message: SendMessage,
+        notification: Notification,
+    },
+    UnlinkPullRequest {
+        key: PullRequestKey,
     },
     /// Automatic settlement from the Host's settlement sweep.
     SettleAutomatically {
@@ -1135,11 +1171,19 @@ pub fn host_only_command(command: &Command) -> bool {
         | Command::PreparedRunProgress { .. }
         | Command::SettleAutomatically { .. }
         | Command::ImplementPlan { .. }
+        | Command::SyncPullRequests { .. }
+        | Command::LinkPullRequest { .. }
+        | Command::SyncPullRequestLink { .. }
+        | Command::SetPullRequestWatch { .. }
+        | Command::SyncPullRequestWatch { .. }
+        | Command::ResolveBranchPullRequest { .. }
+        | Command::PullRequestWake { .. }
         | Command::FailPrepared { .. } => true,
         Command::Create { .. }
         | Command::Rename { .. }
         | Command::RegenerateTitle
         | Command::UpdateMetadata { .. }
+        | Command::UnlinkPullRequest { .. }
         | Command::Archive { .. }
         | Command::Delete
         | Command::Settle { .. }

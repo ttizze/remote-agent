@@ -333,6 +333,22 @@ private fun ReviewScreen(model: AndroidAppModel) {
             contentPadding = PaddingValues(vertical = 8.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
+            val pullRequestLabel = model.snapshot.selectedPullRequestLabel()
+            val pullRequestUrl = model.snapshot.selectedPullRequestUrl()
+            if (pullRequestLabel != null && pullRequestUrl != null)
+                item {
+                    val context = LocalContext.current
+                    TextButton(
+                        onClick = {
+                            context.startActivity(
+                                android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(pullRequestUrl))
+                            )
+                        },
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp),
+                    ) {
+                        Text("$pullRequestLabel  ↗", color = colors.primaryText)
+                    }
+                }
             val error = git?.error?.takeIf { gitScope }
             val empty = panel?.emptyMessage
             when {

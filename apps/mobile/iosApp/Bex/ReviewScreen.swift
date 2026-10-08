@@ -54,6 +54,25 @@ struct ReviewScreen: View {
             }
         }
         .background(AppTheme.screen.ignoresSafeArea())
+        .safeAreaInset(edge: .top, spacing: 0) {
+            if let label = model.snapshot.selectedPullRequestLabel(),
+               let url = model.snapshot.selectedPullRequestUrl(),
+               let destination = URL(string: url) {
+                Link(destination: destination) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "arrow.triangle.pull")
+                        Text(label).font(AppTheme.font(13, weight: .medium)).lineLimit(1)
+                        Spacer(minLength: 0)
+                        Image(systemName: "arrow.up.right.square").font(.system(size: 12))
+                    }
+                    .foregroundStyle(AppTheme.indigo)
+                    .padding(.horizontal, 16).padding(.vertical, 10)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(AppTheme.groupedCard)
+                }
+                .accessibilityLabel("Open linked pull request")
+            }
+        }
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .principal) {

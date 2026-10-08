@@ -5,7 +5,8 @@ use crate::commands::outbox::Outbox;
 use crate::sync::{ShellCache, ShellStatus, ThreadSync};
 use agent_domain::{
     Attachment, AttachmentKind, CheckpointId, Driver, InteractionMode, MessageContext,
-    ModelSelection, RunId, RuntimeMode, State, ThreadId, ThreadShell, WorktreeSetupSnapshot,
+    ModelSelection, PullRequestDetail, PullRequestLink, PullRequestSummary, RunId, RuntimeMode,
+    State, ThreadId, ThreadShell, WorktreeSetupSnapshot,
 };
 use agent_protocol::conversation::{SearchMatch, ShellSnapshot};
 use serde::{Deserialize, Serialize};
@@ -360,6 +361,35 @@ pub struct SearchRequest {
 }
 
 #[derive(Debug, Clone, Default)]
+pub struct PullRequestClientState {
+    pub by_project: BTreeMap<String, Vec<PullRequestSummary>>,
+    pub list_requested: BTreeSet<String>,
+    pub links_by_thread: BTreeMap<ThreadId, Vec<PullRequestLink>>,
+    pub details: BTreeMap<String, PullRequestDetail>,
+    pub diffs: BTreeMap<String, agent_protocol::pull_requests::PullRequestDiff>,
+    pub files: BTreeMap<String, agent_protocol::pull_requests::PullRequestFile>,
+    pub viewed_files:
+        BTreeMap<String, agent_protocol::pull_requests::PullRequestViewedFiles>,
+    pub auth: Option<agent_protocol::pull_requests::SourceControlAuth>,
+    pub discovery: Option<agent_protocol::pull_requests::SourceControlDiscovery>,
+    pub selected_project: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct PullRequestViewedFileInput {
+    pub path: String,
+    pub viewed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct PullRequestStackHeadInput {
+    pub number: u64,
+    pub head_sha: String,
+}
+
+#[derive(Debug, Clone, Default)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Object))]
 pub struct Snapshot {
     pub store_id: String,
@@ -392,6 +422,7 @@ pub struct Snapshot {
     pub terminals: BTreeMap<String, Terminal>,
     /// Provider commands, path search, Git status, refs and diff previews.
     pub sources: WorkspaceSources,
+    pub pull_requests: PullRequestClientState,
     /// By project id.
     pub project_icons: BTreeMap<String, ProjectIconEntry>,
     /// What the Host's terminal metadata stream reports for every thread's
@@ -897,6 +928,87 @@ pub enum Intent {
         project_id: Option<String>,
     },
     Refresh,
+
+    // Pull requests and source control.
+    LoadPullRequests {
+        project_id: String,
+        repository: Option<String>,
+        query: Option<String>,
+        include_closed: bool,
+    },
+    LoadPullRequest {
+        project_id: String,
+        host: Option<String>,
+        repository: String,
+        number: u64,
+    },
+    LoadPullRequestDiff {
+        project_id: String,
+        host: Option<String>,
+        repository: String,
+        number: u64,
+    },
+    LoadPullRequestViewedFiles {
+        project_id: String,
+        host: Option<String>,
+        repository: String,
+        number: u64,
+    },
+    SetPullRequestFilesViewed {
+        project_id: String,
+        host: Option<String>,
+        repository: String,
+        number: u64,
+        files: Vec<PullRequestViewedFileInput>,
+    },
+    PullRequestAction {
+        project_id: String,
+        host: Option<String>,
+        repository: String,
+        number: u64,
+        action: String,
+        stack_number: Option<u64>,
+        expected_stack_heads: Vec<PullRequestStackHeadInput>,
+        merge_method: Option<String>,
+    },
+    SubmitPullRequestReview {
+        project_id: String,
+        host: Option<String>,
+        repository: String,
+        number: u64,
+        verdict: String,
+        body: String,
+    },
+    LinkPullRequest {
+        thread_id: String,
+        project_id: String,
+        host: String,
+        repository: String,
+        number: u64,
+        url: String,
+    },
+    UnlinkPullRequest {
+        thread_id: String,
+        project_id: String,
+        host: String,
+        repository: String,
+        number: u64,
+    },
+    SetPullRequestWatch {
+        thread_id: String,
+        project_id: String,
+        host: String,
+        repository: String,
+        number: u64,
+        url: String,
+        enabled: bool,
+    },
+    LoadSourceControlAuth {
+        cwd: Option<String>,
+    },
+    LoadSourceControlDiscovery {
+        cwd: String,
+    },
 
     // Composer.
     EditDraft {

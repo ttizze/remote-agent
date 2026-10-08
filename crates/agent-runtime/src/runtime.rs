@@ -349,6 +349,20 @@ impl Runtime {
             .await
     }
 
+    /// A Host-owned command. Provider reactors and durable sync services use
+    /// this path for commands that clients must never be able to forge.
+    pub async fn dispatch_host(
+        &self,
+        thread: ThreadId,
+        id: CommandId,
+        command: Command,
+    ) -> Result<Committed, RuntimeError> {
+        let _admitted = self.admit().await?;
+        self.registry()
+            .dispatch(&thread, id, command, CommandOrigin::Internal)
+            .await
+    }
+
     /// Facts the state machine of one thread cannot read itself: another
     /// thread's proposed plan, and the project root a workspace update falls
     /// back to. A replayed command keeps its first result.

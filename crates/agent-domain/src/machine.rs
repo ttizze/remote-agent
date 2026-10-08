@@ -2932,6 +2932,79 @@ impl Decision {
                 }
                 Reply::Accepted
             }
+            SyncPullRequests { links } => {
+                if links.iter().any(|link| link.number == 0 || link.url.trim().is_empty()) {
+                    return reject("invalid-pull-request");
+                }
+                self.fact(FactBody::PullRequestsSynced {
+                    links: links.clone(),
+                });
+                Reply::Accepted
+            }
+            LinkPullRequest { link } => {
+                if link.number == 0 || link.host.trim().is_empty() || link.repository.trim().is_empty() || link.url.trim().is_empty() {
+                    return reject("invalid-pull-request");
+                }
+                self.fact(FactBody::PullRequestLinkSynced { link: link.clone() });
+                Reply::Accepted
+            }
+            SyncPullRequestLink { link } => {
+                if link.number == 0 || link.host.trim().is_empty() || link.repository.trim().is_empty() || link.url.trim().is_empty() {
+                    return reject("invalid-pull-request");
+                }
+                self.fact(FactBody::PullRequestLinkSynced { link: link.clone() });
+                Reply::Accepted
+            }
+            SetPullRequestWatch { key, watch } => {
+                if key.number == 0 || key.host.trim().is_empty() || key.repository.trim().is_empty() {
+                    return reject("invalid-pull-request");
+                }
+                self.fact(FactBody::PullRequestWatchSet {
+                    key: key.clone(),
+                    watch: watch.clone(),
+                });
+                Reply::Accepted
+            }
+            SyncPullRequestWatch { key, watch } => {
+                if key.number == 0 || key.host.trim().is_empty() || key.repository.trim().is_empty() {
+                    return reject("invalid-pull-request");
+                }
+                self.fact(FactBody::PullRequestWatchSynced {
+                    key: key.clone(),
+                    watch: watch.clone(),
+                });
+                Reply::Accepted
+            }
+            ResolveBranchPullRequest { link } => {
+                if link.as_ref().is_some_and(|link| link.number == 0 || link.url.trim().is_empty()) {
+                    return reject("invalid-pull-request");
+                }
+                self.fact(FactBody::BranchPullRequestResolved { link: link.clone() });
+                Reply::Accepted
+            }
+            PullRequestWake {
+                message,
+                notification,
+            } => {
+                let reply = self.create_run(message);
+                if !matches!(&reply, Reply::Rejected { .. }) {
+                    self.fact(FactBody::MessageNotificationAssigned {
+                        id: message.id.clone(),
+                        notification: notification.clone(),
+                    });
+                }
+                reply
+            }
+            UnlinkPullRequest { key } => {
+                if key.number == 0
+                    || key.host.trim().is_empty()
+                    || key.repository.trim().is_empty()
+                {
+                    return reject("invalid-pull-request");
+                }
+                self.fact(FactBody::PullRequestUnlinked { key: key.clone() });
+                Reply::Accepted
+            }
             // Any change after the sweep's snapshot, or an explicit settle or
             // un-settle, wins over the sweep.
             SettleAutomatically {

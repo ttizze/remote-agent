@@ -10,4 +10,5 @@ pub mod operations;
 pub mod permissions;
 pub mod protocol;
 pub mod provider;
+pub mod pull_requests;
 pub mod workspace;
