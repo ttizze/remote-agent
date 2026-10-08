@@ -87,7 +87,7 @@ impl Snapshot {
                             thread.list_stale != Some(true)
                                 && thread.status != SessionStatus::Unknown
                         }));
-                let (status, _, ongoing) = task_phase(
+                let (status, ongoing) = task_phase(
                     known,
                     task_active(observed, session_status),
                     waiting && observed != Some(false),

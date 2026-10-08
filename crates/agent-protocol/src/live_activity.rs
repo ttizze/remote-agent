@@ -81,22 +81,22 @@ pub fn task_phase(
     active: bool,
     waiting: bool,
     turn: Option<TurnStatus>,
-) -> (&'static str, &'static str, bool) {
+) -> (&'static str, bool) {
     if waiting {
-        return ("waiting", "確認待ち", true);
+        return ("waiting", true);
     }
     if !known {
-        return ("unknown", "更新待ち", false);
+        return ("unknown", false);
     }
     if active {
-        return ("running", "実行中", true);
+        return ("running", true);
     }
     match turn {
-        Some(TurnStatus::Completed) => ("completed", "完了", false),
-        Some(TurnStatus::Failed) => ("failed", "失敗", false),
-        Some(TurnStatus::Interrupted) => ("interrupted", "中断", false),
-        Some(TurnStatus::Running) => ("finishing", "結果を確認中", true),
-        _ => ("finished", "終了", false),
+        Some(TurnStatus::Completed) => ("completed", false),
+        Some(TurnStatus::Failed) => ("failed", false),
+        Some(TurnStatus::Interrupted) => ("interrupted", false),
+        Some(TurnStatus::Running) => ("finishing", true),
+        _ => ("finished", false),
     }
 }
 
@@ -130,41 +130,26 @@ mod tests {
             Some(TurnStatus::Interrupted),
         ] {
             for active in [false, true] {
-                assert_eq!(
-                    task_phase(false, active, false, turn),
-                    ("unknown", "更新待ち", false)
-                );
+                assert_eq!(task_phase(false, active, false, turn), ("unknown", false));
                 for known in [false, true] {
-                    assert_eq!(
-                        task_phase(known, active, true, turn),
-                        ("waiting", "確認待ち", true)
-                    );
+                    assert_eq!(task_phase(known, active, true, turn), ("waiting", true));
                 }
             }
         }
     }
     #[test]
-    fn execution_and_final_results_have_distinct_system_labels() {
+    fn execution_and_final_results_have_distinct_phases() {
         let cases = [
-            (None, ("finished", "終了", false)),
-            (Some(TurnStatus::Unknown), ("finished", "終了", false)),
-            (
-                Some(TurnStatus::Running),
-                ("finishing", "結果を確認中", true),
-            ),
-            (Some(TurnStatus::Completed), ("completed", "完了", false)),
-            (Some(TurnStatus::Failed), ("failed", "失敗", false)),
-            (
-                Some(TurnStatus::Interrupted),
-                ("interrupted", "中断", false),
-            ),
+            (None, ("finished", false)),
+            (Some(TurnStatus::Unknown), ("finished", false)),
+            (Some(TurnStatus::Running), ("finishing", true)),
+            (Some(TurnStatus::Completed), ("completed", false)),
+            (Some(TurnStatus::Failed), ("failed", false)),
+            (Some(TurnStatus::Interrupted), ("interrupted", false)),
         ];
         for (turn, expected) in cases {
             assert_eq!(task_phase(true, false, false, turn), expected);
-            assert_eq!(
-                task_phase(true, true, false, turn),
-                ("running", "実行中", true)
-            );
+            assert_eq!(task_phase(true, true, false, turn), ("running", true));
         }
     }
     proptest::proptest! {
