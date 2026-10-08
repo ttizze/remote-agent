@@ -451,6 +451,11 @@ pub struct PreviewState {
 }
 impl PreviewState {
     pub fn apply_list(&mut self, result: agent_protocol::preview::PreviewListResult) {
+        let server_epoch_changed = !result.server_epoch.is_empty()
+            && self
+                .server_epoch
+                .as_deref()
+                .is_some_and(|epoch| epoch != result.server_epoch);
         let same_server_epoch = self
             .server_epoch
             .as_deref()
@@ -476,6 +481,11 @@ impl PreviewState {
             .into_iter()
             .map(|status| (status.tab_id.clone(), status))
             .collect();
+        self.last_recordings
+            .retain(|tab_id, _| self.sessions.contains_key(tab_id));
+        if server_epoch_changed {
+            self.last_recordings.clear();
+        }
         self.closed_tabs
             .retain(|tab_id| !self.sessions.contains_key(tab_id));
         for session in self.sessions.values() {
@@ -606,10 +616,22 @@ mod preview_state_tests {
     fn accepts_a_new_host_epoch_even_when_its_revision_is_lower() {
         let mut state = PreviewState::default();
         state.apply_list(list("old", 18, "old-tab"));
+        state.last_recordings.insert(
+            "old-tab".into(),
+            agent_protocol::preview::PreviewRecordingArtifact {
+                id: "browser-recording-old".into(),
+                tab_id: "old-tab".into(),
+                path: "/tmp/browser-recording-old.webm".into(),
+                mime_type: "video/webm".into(),
+                size_bytes: 1,
+                created_at: "2026-01-01T00:00:00Z".into(),
+            },
+        );
         state.apply_list(list("new", 1, "new-tab"));
         assert_eq!(state.server_epoch.as_deref(), Some("new"));
         assert!(state.sessions.contains_key("new-tab"));
         assert!(!state.sessions.contains_key("old-tab"));
+        assert!(state.last_recordings.is_empty());
     }
 
     #[test]
