@@ -14,6 +14,7 @@ mod keybindings;
 pub mod local_host;
 pub mod platform;
 mod projects;
+pub(crate) mod preview;
 mod repository;
 mod terminals;
 mod vcs;

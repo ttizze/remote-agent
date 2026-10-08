@@ -104,12 +104,31 @@ impl Owner {
             .preferences
             .last_run_scripts
             .insert(project, script.id.clone());
-        self.new_terminal(
-            thread,
+        let preview_url = script
+            .auto_open_preview
+            .unwrap_or(false)
+            .then_some(script.preview_url)
+            .flatten();
+        let next = self.new_terminal(
+            thread.clone(),
             None,
             size,
             format!("{}\r", script.command).into_bytes(),
-        )
+        )?;
+        if let Some(url) = preview_url {
+            self.job(
+                Call::PreviewOpen(agent_protocol::preview::PreviewOpen {
+                    thread_id: thread,
+                    url: Some(url),
+                    viewport: agent_protocol::preview::PreviewViewportSetting::Fill,
+                    appearance: agent_protocol::preview::PreviewAppearance::System,
+                    zoom: agent_protocol::preview::PreviewZoom::X100,
+                }),
+                None,
+                None,
+            );
+        }
+        Ok(next)
     }
 
     pub(super) fn terminal_call(

@@ -9,5 +9,6 @@ pub mod models;
 pub mod operations;
 pub mod permissions;
 pub mod protocol;
+pub mod preview;
 pub mod provider;
 pub mod workspace;

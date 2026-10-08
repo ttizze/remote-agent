@@ -205,9 +205,10 @@ impl Chrome {
             .map(str::to_owned)
             .ok_or_else(|| "ブラウザのタブを作成できません。".into())
     }
-    pub async fn attach(&mut self, target: &str) -> Result<String, String> {
-        if let Some(session) = self.sessions.get(target) {
-            return Ok(session.clone());
+    pub async fn attach(&mut self, target: &str, width: u32, height: u32) -> Result<String, String> {
+        if let Some(session) = self.sessions.get(target).cloned() {
+            self.set_viewport(&session, width, height).await?;
+            return Ok(session);
         }
         let response = self
             .call(
@@ -221,14 +222,58 @@ impl Chrome {
             .ok_or("ブラウザのタブに接続できません。")?
             .to_owned();
         self.call(Some(&session), "Page.enable", json!({})).await?;
-        self.call(
-            Some(&session),
-            "Emulation.setDeviceMetricsOverride",
-            json!({"width":WIDTH,"height":HEIGHT,"deviceScaleFactor":1,"mobile":false}),
-        )
-        .await?;
+        self.set_viewport(&session, width, height).await?;
         self.sessions.insert(target.into(), session.clone());
         Ok(session)
+    }
+    async fn set_viewport(&mut self, session: &str, width: u32, height: u32) -> Result<(), String> {
+        self.call(
+            Some(session),
+            "Emulation.setDeviceMetricsOverride",
+            json!({"width":width,"height":height,"deviceScaleFactor":1,"mobile":false}),
+        )
+        .await
+        .map(|_| ())
+    }
+    pub async fn set_appearance(
+        &mut self,
+        session: &str,
+        appearance: agent_protocol::preview::PreviewAppearance,
+    ) -> Result<(), String> {
+        let features = match appearance {
+            agent_protocol::preview::PreviewAppearance::System => Vec::new(),
+            agent_protocol::preview::PreviewAppearance::Light => {
+                vec![json!({"name":"prefers-color-scheme","value":"light"})]
+            }
+            agent_protocol::preview::PreviewAppearance::Dark => {
+                vec![json!({"name":"prefers-color-scheme","value":"dark"})]
+            }
+        };
+        self.call(
+            Some(session),
+            "Emulation.setEmulatedMedia",
+            json!({"features":features}),
+        )
+        .await
+        .map(|_| ())
+    }
+    pub async fn set_zoom(&mut self, session: &str, zoom: agent_protocol::preview::PreviewZoom) -> Result<(), String> {
+        self.call(
+            Some(session),
+            "Emulation.setPageScaleFactor",
+            json!({"pageScaleFactor":zoom.factor()}),
+        )
+        .await
+        .map(|_| ())
+    }
+    pub async fn close_target(&mut self, target: &str) -> Result<(), String> {
+        self.call(None, "Target.closeTarget", json!({"targetId":target}))
+            .await
+            .map(|_| {
+                if let Some(session) = self.sessions.remove(target) {
+                    self.dialogs.remove(&session);
+                }
+            })
     }
     pub fn dialog(&self, session: &str) -> Option<BrowserDialog> {
         self.dialogs.get(session).cloned()

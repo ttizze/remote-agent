@@ -1,4 +1,8 @@
-use agent_protocol::browser::browser_url;
+use agent_core::{connection::Store, state::Intent};
+use agent_protocol::browser::{browser_url, BrowserAction, BrowserFrame, BrowserRequest};
+use agent_protocol::preview::{
+    DiscoveredLocalServer, PreviewAppearance, PreviewViewportSetting, PreviewZoom,
+};
 #[cfg(target_os = "macos")]
 use gpui_kit::component::{
     Disableable,
@@ -16,6 +20,7 @@ use gpui_kit::{
     *,
 };
 use gpui_wry::WebView;
+use std::sync::Arc;
 
 enum Event {
     Location(String),
@@ -288,6 +293,643 @@ impl Browser {
                     cx.notify();
                 });
             })
+    }
+}
+
+enum HostBrowserRequest {
+    Open,
+    Action(BrowserAction),
+    Intent(Intent),
+}
+
+/// Renders frames from the Host-owned Preview browser. The image and every
+/// input action share the Host tab identity, so a panel switch never creates a
+/// second local page behind the user's visible Preview.
+pub(crate) struct HostBrowser {
+    store: Arc<Store>,
+    thread_id: String,
+    frame: Option<BrowserFrame>,
+    image: Option<Arc<Image>>,
+    local_servers: Vec<DiscoveredLocalServer>,
+    recent_urls: Vec<String>,
+    address: Entity<InputState>,
+    focus: FocusHandle,
+    frame_bounds: Bounds<Pixels>,
+    error: String,
+    _subscription: Subscription,
+}
+
+impl HostBrowser {
+    pub(crate) fn new(
+        store: Arc<Store>,
+        thread_id: String,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Entity<Self> {
+        let address = cx.new(|cx| InputState::new(window, cx).placeholder("Enter preview URL"));
+        cx.new(|cx: &mut Context<Self>| {
+            let subscription = cx.subscribe_in(&address, window, |view, _, event, window, cx| {
+                if matches!(event, InputEvent::PressEnter { .. }) {
+                    view.navigate(window, cx);
+                }
+            });
+            let mut view = Self {
+                store,
+                thread_id,
+                frame: None,
+                image: None,
+                local_servers: Vec::new(),
+                recent_urls: Vec::new(),
+                address,
+                focus: cx.focus_handle(),
+                frame_bounds: Bounds::default(),
+                error: String::new(),
+                _subscription: subscription,
+            };
+            view.request(HostBrowserRequest::Open, window, cx);
+            view
+        })
+    }
+
+    pub(crate) fn title(&self, _: &App) -> String {
+        self.frame
+            .as_ref()
+            .and_then(|frame| frame.tabs.iter().find(|tab| tab.id == frame.tab_id))
+            .and_then(|tab| url::Url::parse(&tab.url).ok())
+            .and_then(|url| url.host_str().map(str::to_owned))
+            .unwrap_or_else(|| "Preview".into())
+    }
+
+    pub(crate) fn set_visible(&mut self, _: bool, _: &mut Context<Self>) {}
+
+    pub(crate) fn close(&self) {
+        let store = self.store.clone();
+        let tab_id = self.frame.as_ref().map(|frame| frame.tab_id.clone());
+        tokio::spawn(async move {
+            if let Some(tab_id) = tab_id {
+                let _ = store
+                    .dispatch(Intent::PreviewClose {
+                        tab_id: Some(tab_id),
+                    })
+                    .await;
+            }
+        });
+    }
+
+    fn navigate(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let value = self.address.read(cx).value();
+        let url = match agent_protocol::preview::normalize_preview_url(&value) {
+            Ok(url) => url,
+            Err(error) => {
+                self.error = error;
+                cx.notify();
+                return;
+            }
+        };
+        self.request(
+            HostBrowserRequest::Action(BrowserAction::Navigate { url }),
+            window,
+            cx,
+        );
+    }
+
+    fn request(
+        &mut self,
+        request: HostBrowserRequest,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let store = self.store.clone();
+        let thread_id = self.thread_id.clone();
+        let frame = self.frame.clone();
+        cx.spawn_in(window, async move |view, cx| {
+            let result = host_browser_request(store, thread_id, frame, request).await;
+            let _ = view.update_in(cx, |view, window, cx| {
+                match result {
+                    Ok(frame) => view.apply_frame(frame, window, cx),
+                    Err(error) => {
+                        view.error = error;
+                        cx.notify();
+                    }
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn apply_frame(&mut self, frame: BrowserFrame, window: &mut Window, cx: &mut Context<Self>) {
+        self.error.clear();
+        let preview = self.store.snapshot().preview.clone();
+        self.local_servers = preview.local_servers;
+        self.recent_urls = preview.recent_urls;
+        if let Some(tab) = frame.tabs.iter().find(|tab| tab.id == frame.tab_id) {
+            let value = if tab.url == "about:blank" {
+                String::new()
+            } else {
+                tab.url.clone()
+            };
+            self.address
+                .update(cx, |input, cx| input.set_value(value, window, cx));
+        }
+        if !frame.image.is_empty() {
+            self.image = Some(Arc::new(Image::from_bytes(
+                ImageFormat::Jpeg,
+                frame.image.clone(),
+            )));
+        }
+        self.frame = Some(frame);
+        cx.notify();
+    }
+
+    fn frame_point(&self, point: Point<Pixels>) -> (f64, f64) {
+        let Some(frame) = self.frame.as_ref() else {
+            return (0.0, 0.0);
+        };
+        let width = self.frame_bounds.size.width.as_f32().max(1.0);
+        let height = self.frame_bounds.size.height.as_f32().max(1.0);
+        let scale = (width / frame.width as f32).min(height / frame.height as f32);
+        let rendered_width = frame.width as f32 * scale;
+        let rendered_height = frame.height as f32 * scale;
+        let offset_x = (width - rendered_width) / 2.0;
+        let offset_y = (height - rendered_height) / 2.0;
+        let x = (point.x.as_f32() - self.frame_bounds.left().as_f32() - offset_x)
+            .clamp(0.0, rendered_width);
+        let y = (point.y.as_f32() - self.frame_bounds.top().as_f32() - offset_y)
+            .clamp(0.0, rendered_height);
+        (
+            f64::from(x) / f64::from(scale),
+            f64::from(y) / f64::from(scale),
+        )
+    }
+}
+
+fn next_viewport(current: PreviewViewportSetting) -> PreviewViewportSetting {
+    use agent_protocol::preview::PREVIEW_VIEWPORT_PRESETS;
+    let make = |preset: agent_protocol::preview::PreviewViewportPresetDefinition| {
+        PreviewViewportSetting::Preset {
+            preset: preset.id,
+            width: preset.width,
+            height: preset.height,
+        }
+    };
+    let Some(index) = PREVIEW_VIEWPORT_PRESETS.iter().position(|preset| {
+        matches!(
+            current,
+            PreviewViewportSetting::Preset { preset: id, .. } if id == preset.id
+        )
+    }) else {
+        return PREVIEW_VIEWPORT_PRESETS
+            .first()
+            .copied()
+            .map_or(PreviewViewportSetting::Fill, make);
+    };
+    PREVIEW_VIEWPORT_PRESETS
+        .get(index + 1)
+        .copied()
+        .map_or(PreviewViewportSetting::Fill, make)
+}
+
+fn next_appearance(current: PreviewAppearance) -> PreviewAppearance {
+    match current {
+        PreviewAppearance::System => PreviewAppearance::Light,
+        PreviewAppearance::Light => PreviewAppearance::Dark,
+        PreviewAppearance::Dark => PreviewAppearance::System,
+    }
+}
+
+async fn host_browser_request(
+    store: Arc<Store>,
+    thread_id: String,
+    frame: Option<BrowserFrame>,
+    request: HostBrowserRequest,
+) -> Result<BrowserFrame, String> {
+    let sync_navigation = matches!(
+        &request,
+        HostBrowserRequest::Action(
+            BrowserAction::Back | BrowserAction::Forward | BrowserAction::Reload
+        )
+    );
+    let tab_id = frame.as_ref().map(|frame| frame.tab_id.clone()).unwrap_or_default();
+    let image_id = frame
+        .as_ref()
+        .map(|frame| frame.image_id.clone())
+        .unwrap_or_default();
+    let action = match request {
+        HostBrowserRequest::Open => {
+            dispatch_preview(
+                &store,
+                Intent::PreviewOpen {
+                    url: None,
+                    viewport: PreviewViewportSetting::Fill,
+                    appearance: PreviewAppearance::System,
+                    zoom: PreviewZoom::X100,
+                },
+            )
+            .await?;
+            dispatch_preview(
+                &store,
+                Intent::PreviewList {
+                    configured_urls: configured_preview_urls(&store),
+                },
+            )
+            .await?;
+            BrowserAction::Read
+        }
+        HostBrowserRequest::Action(BrowserAction::Navigate { url }) => {
+            dispatch_preview(
+                &store,
+                Intent::PreviewNavigate {
+                    tab_id: tab_id.clone(),
+                    url,
+                },
+            )
+            .await?;
+            BrowserAction::Read
+        }
+        HostBrowserRequest::Intent(intent) => {
+            dispatch_preview(&store, intent).await?;
+            BrowserAction::Read
+        }
+        HostBrowserRequest::Action(action) => action,
+    };
+    let frame = store
+        .browser(BrowserRequest {
+            thread_id: agent_domain::ThreadId::new(thread_id)
+                .map_err(|_| "thread is invalid".to_owned())?,
+            tab_id,
+            image_id,
+            action,
+        })
+        .await
+        .map_err(|error| error.to_string())?;
+    if sync_navigation {
+        let _ = dispatch_preview(
+            &store,
+            Intent::PreviewList {
+                configured_urls: configured_preview_urls(&store),
+            },
+        )
+        .await;
+    }
+    Ok(frame)
+}
+
+fn configured_preview_urls(store: &Store) -> Vec<String> {
+    store
+        .snapshot()
+        .shell_projects()
+        .iter()
+        .flat_map(|project| &project.scripts)
+        .filter_map(|script| script.preview_url.clone())
+        .collect()
+}
+
+async fn dispatch_preview(store: &Store, intent: Intent) -> Result<(), String> {
+    store
+        .dispatch(intent)
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+impl Render for HostBrowser {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let image = self.image.clone();
+        let frame = self.frame.as_ref();
+        let frame_owner = cx.entity().downgrade();
+        let empty = frame
+            .and_then(|frame| frame.tabs.iter().find(|tab| tab.id == frame.tab_id))
+            .is_none_or(|tab| tab.url.is_empty() || tab.url == "about:blank");
+        let local_servers = self.local_servers.clone();
+        let recent_urls = self.recent_urls.clone();
+        v_flex()
+            .size_full()
+            .min_w_0()
+            .min_h_0()
+            .child(
+                h_flex()
+                    .gap_1()
+                    .p_2()
+                    .child(
+                        Button::new("preview-back")
+                            .icon(IconName::ArrowLeft)
+                            .small()
+                            .ghost()
+                            .tooltip("Back")
+                            .accessibility_label("Back")
+                            .on_click(cx.listener(|s, _, window, cx| {
+                                s.request(
+                                    HostBrowserRequest::Action(BrowserAction::Back),
+                                    window,
+                                    cx,
+                                )
+                            })),
+                    )
+                    .child(
+                        Button::new("preview-forward")
+                            .icon(IconName::ArrowRight)
+                            .small()
+                            .ghost()
+                            .tooltip("Forward")
+                            .accessibility_label("Forward")
+                            .on_click(cx.listener(|s, _, window, cx| {
+                                s.request(
+                                    HostBrowserRequest::Action(BrowserAction::Forward),
+                                    window,
+                                    cx,
+                                )
+                            })),
+                    )
+                    .child(
+                        Button::new("preview-reload")
+                            .icon(IconName::RotateCw)
+                            .small()
+                            .ghost()
+                            .tooltip("Refresh")
+                            .accessibility_label("Refresh")
+                            .on_click(cx.listener(|s, _, window, cx| {
+                                s.request(
+                                    HostBrowserRequest::Action(BrowserAction::Reload),
+                                    window,
+                                    cx,
+                                )
+                            })),
+                    )
+                    .child(
+                        Button::new("preview-zoom-out")
+                            .label("−")
+                            .small()
+                            .ghost()
+                            .tooltip("Zoom out")
+                            .accessibility_label("Zoom out")
+                            .on_click(cx.listener(|s, _, window, cx| {
+                                let Some(tab_id) = s.frame.as_ref().map(|frame| frame.tab_id.clone()) else { return };
+                                let zoom = s
+                                    .store
+                                    .snapshot()
+                                    .preview
+                                    .session(&tab_id)
+                                    .map_or(PreviewZoom::X100, |session| session.zoom)
+                                    .stepped(-1);
+                                s.request(
+                                    HostBrowserRequest::Intent(Intent::PreviewSetZoom {
+                                        tab_id,
+                                        zoom,
+                                    }),
+                                    window,
+                                    cx,
+                                );
+                            })),
+                    )
+                    .child(
+                        Button::new("preview-zoom-in")
+                            .label("+")
+                            .small()
+                            .ghost()
+                            .tooltip("Zoom in")
+                            .accessibility_label("Zoom in")
+                            .on_click(cx.listener(|s, _, window, cx| {
+                                let Some(tab_id) = s.frame.as_ref().map(|frame| frame.tab_id.clone()) else { return };
+                                let zoom = s
+                                    .store
+                                    .snapshot()
+                                    .preview
+                                    .session(&tab_id)
+                                    .map_or(PreviewZoom::X100, |session| session.zoom)
+                                    .stepped(1);
+                                s.request(
+                                    HostBrowserRequest::Intent(Intent::PreviewSetZoom {
+                                        tab_id,
+                                        zoom,
+                                    }),
+                                    window,
+                                    cx,
+                                );
+                            })),
+                    )
+                    .child(
+                        Button::new("preview-viewport")
+                            .label("Viewport")
+                            .small()
+                            .ghost()
+                            .tooltip("Cycle viewport")
+                            .accessibility_label("Cycle viewport")
+                            .on_click(cx.listener(|s, _, window, cx| {
+                                let Some(tab_id) = s.frame.as_ref().map(|frame| frame.tab_id.clone()) else { return };
+                                let viewport = s
+                                    .store
+                                    .snapshot()
+                                    .preview
+                                    .session(&tab_id)
+                                    .map_or(PreviewViewportSetting::Fill, |session| session.viewport);
+                                s.request(
+                                    HostBrowserRequest::Intent(Intent::PreviewResize {
+                                        tab_id,
+                                        viewport: next_viewport(viewport),
+                                    }),
+                                    window,
+                                    cx,
+                                );
+                            })),
+                    )
+                    .child(
+                        Button::new("preview-appearance")
+                            .label("Theme")
+                            .small()
+                            .ghost()
+                            .tooltip("Cycle appearance")
+                            .accessibility_label("Cycle appearance")
+                            .on_click(cx.listener(|s, _, window, cx| {
+                                let Some(tab_id) = s.frame.as_ref().map(|frame| frame.tab_id.clone()) else { return };
+                                let appearance = s
+                                    .store
+                                    .snapshot()
+                                    .preview
+                                    .session(&tab_id)
+                                    .map_or(PreviewAppearance::System, |session| session.appearance);
+                                s.request(
+                                    HostBrowserRequest::Intent(Intent::PreviewSetAppearance {
+                                        tab_id,
+                                        appearance: next_appearance(appearance),
+                                    }),
+                                    window,
+                                    cx,
+                                );
+                            })),
+                    )
+                    .child(Input::new(&self.address).small().aria_label("Preview URL"))
+                    .child(
+                        Button::new("preview-go")
+                            .icon(IconName::ArrowRight)
+                            .small()
+                            .ghost()
+                            .tooltip("Open")
+                            .accessibility_label("Open")
+                            .on_click(cx.listener(|s, _, window, cx| s.navigate(window, cx))),
+                    ),
+            )
+            .when(!self.error.is_empty(), |body| {
+                body.child(
+                    div()
+                        .px_3()
+                        .pb_2()
+                        .text_sm()
+                        .text_color(rgb(0xff8e86))
+                        .child(self.error.clone()),
+                )
+            })
+            .child(
+                div()
+                    .id("preview-frame")
+                    .on_prepaint(move |bounds, _, cx| {
+                        let _ = frame_owner.update(cx, |view, _| view.frame_bounds = bounds);
+                    })
+                    .track_focus(&self.focus)
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .bg(rgb(0x181818))
+                    .when(empty, |body| {
+                        body.child(
+                            v_flex()
+                                .gap_1()
+                                .p_4()
+                                .max_w(px(420.))
+                                .child(div().text_sm().child("Open a local preview"))
+                                .children(local_servers.iter().map(|server| {
+                                    let url = server.url.clone();
+                                    h_flex()
+                                        .id(SharedString::from(format!("preview-local-{}", server.port)))
+                                        .w_full()
+                                        .gap_2()
+                                        .p_2()
+                                        .rounded_md()
+                                        .cursor_pointer()
+                                        .hover(|row| row.bg(rgb(0x2a2a2a)))
+                                        .child(server.url.clone())
+                                        .on_click(cx.listener(move |s, _, window, cx| {
+                                            s.request(
+                                                HostBrowserRequest::Action(BrowserAction::Navigate {
+                                                    url: url.clone(),
+                                                }),
+                                                window,
+                                                cx,
+                                            )
+                                        }))
+                                }))
+                                .when(!recent_urls.is_empty(), |body| {
+                                    body.child(div().pt_2().text_xs().child("Recent"))
+                                        .children(recent_urls.iter().map(|url| {
+                                            let url = url.clone();
+                                            div()
+                                                .id(SharedString::from(format!("preview-recent-{url}")))
+                                                .w_full()
+                                                .p_1()
+                                                .cursor_pointer()
+                                                .text_xs()
+                                                .child(url.clone())
+                                                .on_click(cx.listener(move |s, _, window, cx| {
+                                                    s.request(
+                                                        HostBrowserRequest::Action(
+                                                            BrowserAction::Navigate { url: url.clone() },
+                                                        ),
+                                                        window,
+                                                        cx,
+                                                    )
+                                                }))
+                                        }))
+                                }),
+                        )
+                    })
+                    .when_some(image, |body, image| {
+                        body.child(img(image).size_full().object_fit(ObjectFit::Contain))
+                    })
+                    .when(frame.is_some(), |body| {
+                        body.on_key_down(cx.listener(|s, event: &KeyDownEvent, window, cx| {
+                            let key = event.keystroke.key.as_str();
+                            let modifiers = event.keystroke.modifiers;
+                            let action = if (modifiers.platform || modifiers.control) && key == "a" {
+                                Some(BrowserAction::Key {
+                                    key: agent_protocol::browser::BrowserKey::SelectAll,
+                                })
+                            } else if (modifiers.platform || modifiers.control) && key == "v" {
+                                cx.read_from_clipboard().and_then(|text| {
+                                    text.text().map(|text| BrowserAction::Type { text })
+                                })
+                            } else {
+                                match key {
+                                    "enter" => Some(BrowserAction::Key {
+                                        key: agent_protocol::browser::BrowserKey::Enter,
+                                    }),
+                                    "tab" => Some(BrowserAction::Key {
+                                        key: agent_protocol::browser::BrowserKey::Tab,
+                                    }),
+                                    "backspace" => Some(BrowserAction::Key {
+                                        key: agent_protocol::browser::BrowserKey::Backspace,
+                                    }),
+                                    "escape" => Some(BrowserAction::Key {
+                                        key: agent_protocol::browser::BrowserKey::Escape,
+                                    }),
+                                    "up" => Some(BrowserAction::Key {
+                                        key: agent_protocol::browser::BrowserKey::ArrowUp,
+                                    }),
+                                    "down" => Some(BrowserAction::Key {
+                                        key: agent_protocol::browser::BrowserKey::ArrowDown,
+                                    }),
+                                    "left" => Some(BrowserAction::Key {
+                                        key: agent_protocol::browser::BrowserKey::ArrowLeft,
+                                    }),
+                                    "right" => Some(BrowserAction::Key {
+                                        key: agent_protocol::browser::BrowserKey::ArrowRight,
+                                    }),
+                                    value if !modifiers.control
+                                        && !modifiers.alt
+                                        && !modifiers.platform
+                                        && value.chars().count() == 1 => {
+                                        Some(BrowserAction::Type {
+                                            text: value.to_owned(),
+                                        })
+                                    }
+                                    _ => None,
+                                }
+                            };
+                            if let Some(action) = action {
+                                cx.stop_propagation();
+                                s.request(HostBrowserRequest::Action(action), window, cx);
+                            }
+                        }))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|s, event: &MouseDownEvent, window, cx| {
+                                s.focus.focus(window, cx);
+                                let (x, y) = s.frame_point(event.position);
+                                s.request(
+                                    HostBrowserRequest::Action(BrowserAction::Click {
+                                        x,
+                                        y,
+                                    }),
+                                    window,
+                                    cx,
+                                )
+                            })
+                        )
+                        .on_scroll_wheel(cx.listener(|s, event: &ScrollWheelEvent, window, cx| {
+                            let delta = event.delta.pixel_delta(px(1.));
+                            let (x, y) = s.frame_point(event.position);
+                            s.request(
+                                HostBrowserRequest::Action(BrowserAction::Scroll {
+                                    x,
+                                    y,
+                                    delta_x: delta.x.as_f32() as f64,
+                                    delta_y: delta.y.as_f32() as f64,
+                                }),
+                                window,
+                                cx,
+                            )
+                        }))
+                    }),
+            )
     }
 }
 

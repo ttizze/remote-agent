@@ -757,6 +757,13 @@ impl Owner {
                 self.app_became_active();
                 Next::Done
             }
+            Intent::PreviewSelectTab { tab_id } => {
+                if self.state.preview.session(&tab_id).is_none() {
+                    return Err(invalid("Preview tab is unavailable"));
+                }
+                self.state.preview.active_tab = Some(tab_id);
+                Next::Done
+            }
             other => self.peripheral(other)?,
         })
     }
@@ -1292,6 +1299,37 @@ impl Owner {
                     Some((draft_key, draft)),
                 )
             }
+            Intent::SearchContents {
+                cwd,
+                query,
+                limit,
+                case_sensitive,
+                whole_word,
+                use_regex,
+            } => {
+                let request = agent_protocol::workspace::SearchContents {
+                    cwd: cwd.clone(),
+                    query: query.clone(),
+                    limit,
+                    case_sensitive,
+                    whole_word,
+                    use_regex,
+                };
+                request.validate().map_err(invalid)?;
+                self.state.sources.content_search.wanted = Some(
+                    crate::state::ContentSearchQuery {
+                        cwd,
+                        query,
+                        limit,
+                        case_sensitive,
+                        whole_word,
+                        use_regex,
+                    },
+                );
+                self.state.sources.content_search.in_flight = true;
+                self.state.sources.content_search.error = None;
+                Next::call(Call::SearchContents(request), None)
+            }
             Intent::ListFiles { path } => {
                 self.state.workspace.requested_directory = Some(path.clone());
                 Next::call(Call::ListFiles(op::ListFiles { path }), None)
@@ -1404,6 +1442,84 @@ impl Owner {
             Intent::RevokeDevice { id } => Next::call(Call::Revoke(op::RevokeDevice { id }), None),
             Intent::AddProject { path } => {
                 Next::call(Call::AddProject(op::AddProject { cwd: path }), None)
+            }
+            Intent::PreviewList { configured_urls } => {
+                self.state.preview.configured_urls = configured_urls.clone();
+                Next::call(
+                    Call::PreviewList(agent_protocol::preview::PreviewList {
+                        thread_id: self.selected()?,
+                        configured_urls,
+                    }),
+                    None,
+                )
+            }
+            Intent::PreviewOpen {
+                url,
+                viewport,
+                appearance,
+                zoom,
+            } => {
+                let request = agent_protocol::preview::PreviewOpen {
+                    thread_id: self.selected()?,
+                    url,
+                    viewport,
+                    appearance,
+                    zoom,
+                };
+                request.validate().map_err(invalid)?;
+                Next::call(Call::PreviewOpen(request), None)
+            }
+            Intent::PreviewNavigate { tab_id, url } => {
+                let request = agent_protocol::preview::PreviewNavigate {
+                    thread_id: self.selected()?,
+                    tab_id,
+                    url,
+                };
+                request.validate().map_err(invalid)?;
+                Next::call(Call::PreviewNavigate(request), None)
+            }
+            Intent::PreviewResize { tab_id, viewport } => {
+                let request = agent_protocol::preview::PreviewResize {
+                    thread_id: self.selected()?,
+                    tab_id,
+                    viewport,
+                };
+                request.validate().map_err(invalid)?;
+                Next::call(Call::PreviewResize(request), None)
+            }
+            Intent::PreviewSetAppearance { tab_id, appearance } => {
+                let request = agent_protocol::preview::PreviewSetAppearance {
+                    thread_id: self.selected()?,
+                    tab_id,
+                    appearance,
+                };
+                request.validate().map_err(invalid)?;
+                Next::call(Call::PreviewSetAppearance(request), None)
+            }
+            Intent::PreviewSetZoom { tab_id, zoom } => {
+                let request = agent_protocol::preview::PreviewSetZoom {
+                    thread_id: self.selected()?,
+                    tab_id,
+                    zoom,
+                };
+                request.validate().map_err(invalid)?;
+                Next::call(Call::PreviewSetZoom(request), None)
+            }
+            Intent::PreviewRefresh { tab_id } => {
+                let request = agent_protocol::preview::PreviewTab {
+                    thread_id: self.selected()?,
+                    tab_id,
+                };
+                request.validate().map_err(invalid)?;
+                Next::call(Call::PreviewRefresh(request), None)
+            }
+            Intent::PreviewClose { tab_id } => {
+                let request = agent_protocol::preview::PreviewClose {
+                    thread_id: self.selected()?,
+                    tab_id,
+                };
+                request.validate().map_err(invalid)?;
+                Next::call(Call::PreviewClose(request), None)
             }
             _ => unreachable!("conversation intents are prepared above"),
         })

@@ -398,6 +398,8 @@ pub struct Snapshot {
     /// terminals, by thread and terminal id.
     pub terminal_metadata:
         BTreeMap<(ThreadId, String), agent_protocol::operations::TerminalSummary>,
+    /// Host-owned preview sessions and discovered local servers.
+    pub preview: PreviewState,
     pub accounts: Option<agent_protocol::operations::Accounts>,
     pub account_login: Option<agent_protocol::operations::AccountLogin>,
     pub host_status: Option<crate::models::HostStatus>,
@@ -425,6 +427,92 @@ pub struct Snapshot {
     pub thread_undo: crate::commands::undo::ThreadUndo,
     /// Timeline rows already built; every snapshot of the store shares them.
     pub timelines: Arc<std::sync::Mutex<crate::view::timeline::rows::TimelineCache>>,
+}
+
+/// The device's fold of Host preview metadata. Pixels remain in the browser
+/// panel; this state only describes tabs, server cards and ordering.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PreviewState {
+    pub sessions: BTreeMap<String, agent_protocol::preview::PreviewSessionSnapshot>,
+    pub local_servers: Vec<agent_protocol::preview::DiscoveredLocalServer>,
+    pub recent_urls: Vec<String>,
+    pub active_tab: Option<String>,
+    pub server_epoch: Option<String>,
+    pub revision: u64,
+    pub configured_urls: Vec<String>,
+}
+impl PreviewState {
+    pub fn apply_list(&mut self, result: agent_protocol::preview::PreviewListResult) {
+        if self
+            .server_epoch
+            .as_deref()
+            .is_some_and(|epoch| {
+                epoch == result.server_epoch.as_str() && result.revision < self.revision
+            })
+        {
+            return;
+        }
+        self.sessions = result
+            .sessions
+            .into_iter()
+            .map(|session| (session.tab_id.clone(), session))
+            .collect();
+        for session in self.sessions.values() {
+            if matches!(
+                &session.nav_status,
+                agent_protocol::preview::PreviewNavStatus::Idle
+            ) {
+                continue;
+            }
+            let url = match &session.nav_status {
+                agent_protocol::preview::PreviewNavStatus::Loading { url, .. }
+                | agent_protocol::preview::PreviewNavStatus::Success { url, .. }
+                | agent_protocol::preview::PreviewNavStatus::LoadFailed { url, .. } => url,
+                agent_protocol::preview::PreviewNavStatus::Idle => unreachable!(),
+            };
+            self.recent_urls.retain(|recent| recent != url);
+            self.recent_urls.insert(0, url.clone());
+        }
+        self.recent_urls.truncate(12);
+        self.local_servers = result.local_servers;
+        self.server_epoch = Some(result.server_epoch);
+        self.revision = result.revision;
+        if self
+            .active_tab
+            .as_ref()
+            .is_none_or(|tab| !self.sessions.contains_key(tab))
+        {
+            self.active_tab = self.sessions.keys().next().cloned();
+        }
+    }
+    pub fn upsert(&mut self, session: agent_protocol::preview::PreviewSessionSnapshot) {
+        self.active_tab = Some(session.tab_id.clone());
+        if let Some(url) = match &session.nav_status {
+            agent_protocol::preview::PreviewNavStatus::Loading { url, .. }
+            | agent_protocol::preview::PreviewNavStatus::Success { url, .. }
+            | agent_protocol::preview::PreviewNavStatus::LoadFailed { url, .. } => Some(url),
+            agent_protocol::preview::PreviewNavStatus::Idle => None,
+        } {
+            self.recent_urls.retain(|recent| recent != url);
+            self.recent_urls.insert(0, url.clone());
+            self.recent_urls.truncate(12);
+        }
+        self.sessions.insert(session.tab_id.clone(), session);
+    }
+    pub fn close(&mut self, tab_id: Option<&str>) {
+        if let Some(tab_id) = tab_id {
+            self.sessions.remove(tab_id);
+            if self.active_tab.as_deref() == Some(tab_id) {
+                self.active_tab = self.sessions.keys().next().cloned();
+            }
+        } else {
+            self.sessions.clear();
+            self.active_tab = None;
+        }
+    }
+    pub fn session(&self, tab_id: &str) -> Option<&agent_protocol::preview::PreviewSessionSnapshot> {
+        self.sessions.get(tab_id)
+    }
 }
 
 impl Snapshot {
@@ -897,6 +985,51 @@ pub enum Intent {
         project_id: Option<String>,
     },
     Refresh,
+
+    // Host-owned web preview.
+    PreviewList {
+        configured_urls: Vec<String>,
+    },
+    PreviewOpen {
+        url: Option<String>,
+        viewport: agent_protocol::preview::PreviewViewportSetting,
+        appearance: agent_protocol::preview::PreviewAppearance,
+        zoom: agent_protocol::preview::PreviewZoom,
+    },
+    PreviewNavigate {
+        tab_id: String,
+        url: String,
+    },
+    PreviewResize {
+        tab_id: String,
+        viewport: agent_protocol::preview::PreviewViewportSetting,
+    },
+    PreviewSetAppearance {
+        tab_id: String,
+        appearance: agent_protocol::preview::PreviewAppearance,
+    },
+    PreviewSetZoom {
+        tab_id: String,
+        zoom: agent_protocol::preview::PreviewZoom,
+    },
+    PreviewRefresh {
+        tab_id: String,
+    },
+    PreviewClose {
+        tab_id: Option<String>,
+    },
+    PreviewSelectTab {
+        tab_id: String,
+    },
+
+    SearchContents {
+        cwd: String,
+        query: String,
+        limit: u32,
+        case_sensitive: bool,
+        whole_word: bool,
+        use_regex: bool,
+    },
 
     // Composer.
     EditDraft {

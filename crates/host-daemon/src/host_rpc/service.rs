@@ -89,6 +89,8 @@ struct HostResources {
     claude: OnceLock<Arc<ClaudeResources>>,
     startup_errors: std::sync::RwLock<HashMap<ProviderKind, Failure>>,
     browser: OnceLock<Arc<crate::browser::Browser>>,
+    preview: Arc<crate::preview::PreviewManager>,
+    preview_ports: Arc<crate::preview::PortScanner>,
     conversation: OnceLock<Arc<Conversation>>,
     shared: SharedResources,
     worktree_access: tokio::sync::RwLock<()>,
@@ -146,6 +148,8 @@ impl HostRpcService {
             claude: OnceLock::new(),
             startup_errors: Default::default(),
             browser: OnceLock::new(),
+            preview: Arc::new(crate::preview::PreviewManager::new()),
+            preview_ports: crate::preview::PortScanner::new(),
             conversation: OnceLock::new(),
             shared,
             worktree_access: Default::default(),
@@ -569,6 +573,12 @@ impl HostRpcService {
                     .await
                     .map_err(|error| Failure::new("search_entries_failed", error))?
                     .into(),
+                Call::SearchContents(params) => resources
+                    .search
+                    .search_contents(params.clone())
+                    .await
+                    .map_err(|error| Failure::new("search_contents_failed", error))?
+                    .into(),
                 Call::VcsStatus(params) => crate::vcs::read_status(params.cwd.clone())
                     .await
                     .map_err(|error| Failure::new("vcs_status_failed", error))?
@@ -616,14 +626,254 @@ impl HostRpcService {
                     }
                     .into()
                 }
-                Call::Browser(params) => resources
-                    .browser
-                    .get()
-                    .ok_or_else(|| Failure::new("browser_unavailable", "browser unavailable"))?
-                    .request(params)
-                    .await
-                    .map_err(|error| Failure::new("browser_failed", error))?
-                    .into(),
+                Call::Browser(params) => {
+                    let browser = resources
+                        .browser
+                        .get()
+                        .ok_or_else(|| Failure::new("browser_unavailable", "browser unavailable"))?;
+                    let frame = browser
+                        .request(params)
+                        .await
+                        .map_err(|error| Failure::new("browser_failed", error))?;
+                    if matches!(
+                        &params.action,
+                        agent_protocol::browser::BrowserAction::Navigate { .. }
+                            | agent_protocol::browser::BrowserAction::Back
+                            | agent_protocol::browser::BrowserAction::Forward
+                            | agent_protocol::browser::BrowserAction::Reload
+                    ) {
+                        report_preview_frame(&resources.preview, &params.thread_id, &frame);
+                    }
+                    frame.into()
+                }
+                Call::PreviewList(params) => {
+                    params
+                        .validate()
+                        .map_err(|error| Failure::new("invalid_params", error))?;
+                    resources
+                        .preview_ports
+                        .set_terminal_owners(resources.shared.terminals.preview_process_owners());
+                    let terminals = resources.shared.terminals.summaries_now();
+                    let servers = resources
+                        .preview_ports
+                        .scan(&params.configured_urls, &terminals)
+                        .await
+                        .map_err(|error| Failure::new("preview_scan_failed", error))?;
+                    let mut result = resources.preview.list(&params.thread_id);
+                    result.local_servers = servers;
+                    result.into()
+                }
+                Call::PreviewOpen(params) => {
+                    params
+                        .validate()
+                        .map_err(|error| Failure::new("invalid_params", error))?;
+                    let browser = resources
+                        .browser
+                        .get()
+                        .ok_or_else(|| Failure::new("browser_unavailable", "browser unavailable"))?;
+                    let url = params
+                        .url
+                        .as_deref()
+                        .map(agent_protocol::preview::normalize_preview_url)
+                        .transpose()
+                        .map_err(|error| Failure::new("invalid_params", error))?;
+                    let frame = browser
+                        .open_preview_tab(
+                            &params.thread_id.to_string(),
+                            url.as_deref(),
+                            params.viewport,
+                            params.appearance,
+                            params.zoom,
+                        )
+                        .await
+                        .map_err(|error| Failure::new("preview_open_failed", error))?;
+                    let session = resources
+                        .preview
+                        .open(
+                            params.thread_id.clone(),
+                            frame.tab_id.clone(),
+                            url.as_deref(),
+                            params.viewport,
+                            params.appearance,
+                            params.zoom,
+                        )
+                        .map_err(|error| Failure::new("preview_open_failed", error))?;
+                    report_preview_frame(&resources.preview, &params.thread_id, &frame);
+                    resources
+                        .preview
+                        .get(&params.thread_id, &frame.tab_id)
+                        .unwrap_or(session)
+                        .into()
+                }
+                Call::PreviewNavigate(params) => {
+                    params
+                        .validate()
+                        .map_err(|error| Failure::new("invalid_params", error))?;
+                    let url = agent_protocol::preview::normalize_preview_url(&params.url)
+                        .map_err(|error| Failure::new("invalid_params", error))?;
+                    let browser = resources
+                        .browser
+                        .get()
+                        .ok_or_else(|| Failure::new("browser_unavailable", "browser unavailable"))?;
+                    browser
+                        .request(&agent_protocol::browser::BrowserRequest {
+                            thread_id: params.thread_id.clone(),
+                            tab_id: params.tab_id.clone(),
+                            image_id: String::new(),
+                            action: agent_protocol::browser::BrowserAction::SelectTab {
+                                id: params.tab_id.clone(),
+                            },
+                        })
+                        .await
+                        .map_err(|error| Failure::new("preview_navigation_failed", error))?;
+                    browser
+                        .request(&agent_protocol::browser::BrowserRequest {
+                            thread_id: params.thread_id.clone(),
+                            tab_id: params.tab_id.clone(),
+                            image_id: String::new(),
+                            action: agent_protocol::browser::BrowserAction::Navigate { url: url.clone() },
+                        })
+                        .await
+                        .map_err(|error| Failure::new("preview_navigation_failed", error))?;
+                    resources
+                        .preview
+                        .navigate(&params.thread_id, &params.tab_id, &url)
+                        .map_err(|error| Failure::new("preview_navigation_failed", error))?
+                        .into()
+                }
+                Call::PreviewResize(params) => {
+                    params
+                        .validate()
+                        .map_err(|error| Failure::new("invalid_params", error))?;
+                    let browser = resources
+                        .browser
+                        .get()
+                        .ok_or_else(|| Failure::new("browser_unavailable", "browser unavailable"))?;
+                    browser
+                        .resize_preview_tab(
+                            &params.thread_id.to_string(),
+                            &params.tab_id,
+                            params.viewport,
+                        )
+                        .await
+                        .map_err(|error| Failure::new("preview_resize_failed", error))?;
+                    resources
+                        .preview
+                        .resize(&params.thread_id, &params.tab_id, params.viewport)
+                        .map_err(|error| Failure::new("preview_resize_failed", error))?
+                        .into()
+                }
+                Call::PreviewSetAppearance(params) => {
+                    params
+                        .validate()
+                        .map_err(|error| Failure::new("invalid_params", error))?;
+                    let browser = resources
+                        .browser
+                        .get()
+                        .ok_or_else(|| Failure::new("browser_unavailable", "browser unavailable"))?;
+                    browser
+                        .set_preview_appearance(
+                            &params.thread_id.to_string(),
+                            &params.tab_id,
+                            params.appearance,
+                        )
+                        .await
+                        .map_err(|error| Failure::new("preview_appearance_failed", error))?;
+                    resources
+                        .preview
+                        .appearance(&params.thread_id, &params.tab_id, params.appearance)
+                        .map_err(|error| Failure::new("preview_appearance_failed", error))?
+                        .into()
+                }
+                Call::PreviewSetZoom(params) => {
+                    params
+                        .validate()
+                        .map_err(|error| Failure::new("invalid_params", error))?;
+                    let browser = resources
+                        .browser
+                        .get()
+                        .ok_or_else(|| Failure::new("browser_unavailable", "browser unavailable"))?;
+                    browser
+                        .set_preview_zoom(
+                            &params.thread_id.to_string(),
+                            &params.tab_id,
+                            params.zoom,
+                        )
+                        .await
+                        .map_err(|error| Failure::new("preview_zoom_failed", error))?;
+                    resources
+                        .preview
+                        .zoom(&params.thread_id, &params.tab_id, params.zoom)
+                        .map_err(|error| Failure::new("preview_zoom_failed", error))?
+                        .into()
+                }
+                Call::PreviewReportStatus(params) => {
+                    params
+                        .validate()
+                        .map_err(|error| Failure::new("invalid_params", error))?;
+                    resources
+                        .preview
+                        .report_status(
+                            &params.thread_id,
+                            &params.tab_id,
+                            params.nav_status.clone(),
+                            params.can_go_back,
+                            params.can_go_forward,
+                        )
+                        .map_err(|error| Failure::new("preview_status_failed", error))?;
+                    agent_protocol::models::Empty {}.into()
+                }
+                Call::PreviewClose(params) => {
+                    params
+                        .validate()
+                        .map_err(|error| Failure::new("invalid_params", error))?;
+                    let browser = resources
+                        .browser
+                        .get()
+                        .ok_or_else(|| Failure::new("browser_unavailable", "browser unavailable"))?;
+                    let ids = resources.preview.close(&params.thread_id, params.tab_id.as_deref());
+                    for id in ids {
+                        let _ = browser
+                            .close_preview_tab(&params.thread_id.to_string(), &id)
+                            .await;
+                    }
+                    agent_protocol::models::Empty {}.into()
+                }
+                Call::PreviewRefresh(params) => {
+                    params
+                        .validate()
+                        .map_err(|error| Failure::new("invalid_params", error))?;
+                    resources
+                        .preview
+                        .refresh(&params.thread_id, &params.tab_id)
+                        .map_err(|error| Failure::new("preview_refresh_failed", error))?;
+                    let browser = resources
+                        .browser
+                        .get()
+                        .ok_or_else(|| Failure::new("browser_unavailable", "browser unavailable"))?;
+                    browser
+                        .request(&agent_protocol::browser::BrowserRequest {
+                            thread_id: params.thread_id.clone(),
+                            tab_id: params.tab_id.clone(),
+                            image_id: String::new(),
+                            action: agent_protocol::browser::BrowserAction::SelectTab {
+                                id: params.tab_id.clone(),
+                            },
+                        })
+                        .await
+                        .map_err(|error| Failure::new("preview_refresh_failed", error))?;
+                    let frame = browser
+                        .request(&agent_protocol::browser::BrowserRequest {
+                            thread_id: params.thread_id.clone(),
+                            tab_id: params.tab_id.clone(),
+                            image_id: String::new(),
+                            action: agent_protocol::browser::BrowserAction::Reload,
+                        })
+                        .await
+                        .map_err(|error| Failure::new("preview_refresh_failed", error))?;
+                    report_preview_frame(&resources.preview, &params.thread_id, &frame);
+                    agent_protocol::models::Empty {}.into()
+                }
                 Call::ConnectionPerformance(params) => {
                     let params = params.clone();
                     tokio::task::spawn_blocking(move || {
@@ -1073,6 +1323,40 @@ impl HostRpcService {
             .await
             .map_err(|error| Failure::new("worktree_remove_failed", error))
     }
+}
+
+fn report_preview_frame(
+    manager: &crate::preview::PreviewManager,
+    thread_id: &agent_domain::ThreadId,
+    frame: &agent_protocol::browser::BrowserFrame,
+) {
+    let Ok(previous) = manager.get(thread_id, &frame.tab_id) else {
+        return;
+    };
+    let Some(tab) = frame.tabs.iter().find(|tab| tab.id == frame.tab_id) else {
+        return;
+    };
+    let nav_status = if tab.url.is_empty() || tab.url == "about:blank" {
+        agent_protocol::preview::PreviewNavStatus::Idle
+    } else if let Ok(url) = agent_protocol::preview::normalize_preview_url(&tab.url) {
+        agent_protocol::preview::PreviewNavStatus::Success {
+            url,
+            title: tab
+                .title
+                .chars()
+                .take(agent_protocol::preview::PREVIEW_TITLE_MAX_LENGTH)
+                .collect(),
+        }
+    } else {
+        previous.nav_status.clone()
+    };
+    let _ = manager.report_status(
+        thread_id,
+        &frame.tab_id,
+        nav_status,
+        previous.can_go_back,
+        previous.can_go_forward,
+    );
 }
 
 fn provider_key(provider: ProviderKind) -> String {

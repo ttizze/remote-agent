@@ -33,6 +33,9 @@ pub(super) enum Reply {
     Remotes(Vec<m::RemoteHost>),
     Remote(m::RemoteHost),
     Invitation(m::Invitation),
+    PreviewList(agent_protocol::preview::PreviewListResult),
+    PreviewSession(agent_protocol::preview::PreviewSessionSnapshot),
+    ContentSearch(agent_protocol::workspace::ContentSearch),
     Transcription(String),
     ConversationSettings(m::ConversationSettings),
     SessionScan(c::SessionScan),
@@ -81,6 +84,17 @@ async fn execute(peer: &Peer, call: &Call) -> Result<Reply, PeerError> {
         Call::ListRemotes(_) => Reply::Remotes(peer.request(call).await?),
         Call::RegisterRemote(_) => Reply::Remote(peer.request(call).await?),
         Call::Invite(_) => Reply::Invitation(peer.request(call).await?),
+        Call::PreviewList(_) => Reply::PreviewList(peer.request(call).await?),
+        Call::PreviewOpen(_)
+        | Call::PreviewNavigate(_)
+        | Call::PreviewResize(_)
+        | Call::PreviewSetAppearance(_)
+        | Call::PreviewSetZoom(_) => Reply::PreviewSession(peer.request(call).await?),
+        Call::PreviewReportStatus(_) | Call::PreviewClose(_) | Call::PreviewRefresh(_) => {
+            let _: m::Empty = peer.request(call).await?;
+            Reply::Done
+        }
+        Call::SearchContents(_) => Reply::ContentSearch(peer.request(call).await?),
         Call::Transcribe(_) => {
             Reply::Transcription(peer.request::<op::Transcription>(call).await?.text)
         }
@@ -217,10 +231,10 @@ impl Owner {
         };
         let peer = network.peer.clone();
         network.spawn(async move {
-            let result = match request.validate() {
-                Ok(()) => peer.request(&Call::Browser(request)).await,
-                Err(error) => Err(invalid(error)),
-            };
+            // The Host validates pointer coordinates against the page's
+            // resource-owned viewport. Client-side fixed-size validation would
+            // reject valid device presets before the Host sees them.
+            let result = peer.request(&Call::Browser(request)).await;
             let _ = complete.send(result);
         });
     }
@@ -352,6 +366,7 @@ impl Owner {
                     }
                     Call::DiffPreview(request) => self.diff_preview_finished(request, Err(&error)),
                     Call::Search(params) => self.search_finished(&params.query, None),
+                    Call::SearchContents(request) => self.content_search_finished(request, Err(&error)),
                     Call::CancelSetup(_) => self.work_locally = None,
                     Call::ProjectFavicon(request) => self.project_icon_read(request, Err(())),
                     _ => {}
@@ -483,6 +498,8 @@ impl Owner {
                 self.state.remote_hosts.push(host);
             }
             Reply::Invitation(invitation) => self.state.invitation = Some(invitation),
+            Reply::PreviewList(result) => self.state.preview.apply_list(result),
+            Reply::PreviewSession(session) => self.state.preview.upsert(session),
             Reply::ConversationSettings(settings) => {
                 self.state.conversation_settings = Some(settings)
             }
@@ -511,6 +528,11 @@ impl Owner {
             Reply::EntrySearch(found) => {
                 if let Call::SearchEntries(request) = call {
                     self.entries_found(request, found);
+                }
+            }
+            Reply::ContentSearch(found) => {
+                if let Call::SearchContents(request) = call {
+                    self.content_search_finished(request, Ok(found));
                 }
             }
             Reply::VcsStatus(status) => {
@@ -576,6 +598,7 @@ impl Owner {
                     terminal.phase = TerminalPhase::Detached;
                 }
             }
+            Call::PreviewClose(params) => self.state.preview.close(params.tab_id.as_deref()),
             Call::SelectAccount(_)
             | Call::SubmitAccountLogin(_)
             | Call::CancelAccountLogin(_)

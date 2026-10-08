@@ -25,6 +25,7 @@ use crate::view::{
         picker::{ProjectPickerView, project_picker},
         scripts::{ProjectScriptsView, project_scripts},
     },
+    preview::PreviewView,
     search::{SearchOptions, SearchView, search_view},
     settings::{
         SettingId, SettingValue, SettingsRow, SettingsScope, SettingsView, default_model_picker,
@@ -43,6 +44,7 @@ use crate::view::{
     time::TimestampFormat,
     timeline::mobile_follow::{LiveFollowEvent, StreamHaptic, StreamingMessageMark},
     timeline::rows::{TimelineRow, TimelineUpdate},
+    workspace_search::ContentSearchView,
 };
 use agent_domain::ThreadId;
 use chrono::{Local, TimeZone};
@@ -77,6 +79,12 @@ pub struct PreferencesView {
 }
 
 impl Snapshot {
+    pub fn preview(&self) -> PreviewView {
+        crate::view::preview::preview(self)
+    }
+    pub fn content_search(&self) -> ContentSearchView {
+        crate::view::workspace_search::content_search(self)
+    }
     fn picker_options(
         &self,
         query: String,

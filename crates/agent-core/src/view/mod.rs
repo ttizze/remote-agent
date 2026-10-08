@@ -15,6 +15,7 @@ pub mod models;
 pub mod new_thread;
 pub mod plan;
 pub mod projects;
+pub mod preview;
 pub mod queue;
 pub mod rejection;
 pub mod relationships;
@@ -38,6 +39,7 @@ pub mod time;
 pub mod timeline;
 pub mod work_log;
 pub mod working_status;
+pub mod workspace_search;
 
 /// A count and its noun: "1 file", "3 files".
 pub(crate) fn quantity(count: usize, noun: &str) -> String {
