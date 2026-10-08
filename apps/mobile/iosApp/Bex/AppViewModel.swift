@@ -33,8 +33,8 @@ final class BexAppViewModel: ObservableObject {
         let generation: UInt64
     }
 
-    var clientPreferencesData = SnapshotFiles.modelDefaults()
-    @Published var snapshot = AgentCore.Snapshot.empty(clientPreferences: clientPreferencesData)
+    var clientPreferencesData: Data
+    @Published var snapshot: AgentCore.Snapshot
     @Published var screen: AppScreen = .profiles
     @Published var isScanning = false
     @Published var isConnecting = false
@@ -109,6 +109,9 @@ final class BexAppViewModel: ObservableObject {
     let usageWidget = UsageWidgetPublisher()
 
     init() {
+        let defaults = SnapshotFiles.modelDefaults()
+        clientPreferencesData = defaults
+        snapshot = AgentCore.Snapshot.empty(clientPreferences: defaults)
         do { profiles = try HostProfile.load() } catch { notice = error.localizedDescription }
         let recoveryNotice = snapshot.error()
         if !clientPreferencesData.isEmpty,

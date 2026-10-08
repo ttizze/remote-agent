@@ -11,7 +11,7 @@ struct TerminalScreen: View {
     /// Changes when the user picks another terminal, replacing the view.
     @State private var session = UUID()
     @StateObject private var keys = TerminalKeys()
-    @AppStorage("terminal.fontSize") private var fontSize = AppTheme.terminalFontSize
+    @AppStorage("terminal.fontSize") private var fontSize = MobileAppearanceState.load().resolvedTerminalFontSize
     /// The terminal last seen running here, so its exit can leave it.
     @State private var runningTerminal: String?
     /// The visible lines captured for the attach sheet.
