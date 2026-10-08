@@ -96,15 +96,4 @@ class DeviceVideoDecoderTest {
         assertArrayEquals(byteArrayOf(0, 0, 0, 1, 0x68, 0xee.toByte()), pps)
     }
 
-    @Test
-    fun recordingAttachmentKeepsTheTransportFormat() {
-        assertEquals(
-            DeviceRecordingArtifact("avcc", "video/avc"),
-            recordingArtifact("avcc"),
-        )
-        assertEquals(
-            DeviceRecordingArtifact("mjpeg", "multipart/x-mixed-replace; boundary=remote-agent-device"),
-            recordingArtifact("mjpeg"),
-        )
-    }
 }

@@ -132,7 +132,7 @@ pub struct DeviceState {
     pub accessibility: BTreeMap<(String, String), DeviceAccessibilityTree>,
     pub event_log: BTreeMap<(String, String), Vec<DeviceEventLogEntry>>,
     pub foreground: BTreeMap<(String, String), DeviceForegroundUpdate>,
-    pub screens: BTreeMap<(String, String, String), DeviceScreenConfig>,
+    pub screens: BTreeMap<(String, String, String, u8), DeviceScreenConfig>,
     pub recordings: BTreeMap<(String, String, String), agent_protocol::device::DeviceRecordingStatus>,
     pub last_recording: Option<DeviceRecording>,
     pub last_screenshot: Option<DeviceScreenshot>,
@@ -201,7 +201,10 @@ impl DeviceState {
                 self.accessibility.retain(|key, _| active_devices.contains(key));
                 self.event_log.retain(|key, _| active_devices.contains(key));
                 self.foreground.retain(|key, _| active_devices.contains(key));
-                self.screens.retain(|key, _| active.contains(key));
+                self.screens.retain(|key, _| {
+                    active.contains(&(key.0.clone(), key.1.clone(), key.2.clone()))
+                        && !reopened.contains(&(key.0.clone(), key.1.clone(), key.2.clone()))
+                });
                 self.recordings.retain(|(thread, host, device), _| active.contains(&(thread.clone(), host.clone(), device.clone())));
                 if self.last_recording.as_ref().is_some_and(|recording| {
                     !active.contains(&(
@@ -302,7 +305,15 @@ impl DeviceState {
                     }) {
                         return;
                     }
-                    self.screens.insert((thread.to_string(), host.clone(), device.clone()), screen);
+                    self.screens.insert(
+                        (
+                            thread.to_string(),
+                            host.clone(),
+                            device.clone(),
+                            screen.screen_id.unwrap_or(0),
+                        ),
+                        screen,
+                    );
                 }
             }
             DeviceEvent::Recording(status) => {
@@ -373,7 +384,7 @@ fn retain_video_tail(events: &mut VecDeque<DeviceVideoFrame>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_protocol::device::{DeviceFrame, DeviceFrameEncoding, DevicePlatform, DeviceRecording, DeviceRecordingFormat, DeviceRecordingStatus, DeviceSummary, DeviceVideoFrame};
+    use agent_protocol::device::{DeviceFrame, DeviceFrameEncoding, DevicePlatform, DeviceRecording, DeviceRecordingFormat, DeviceRecordingStatus, DeviceScreenConfig, DeviceSummary, DeviceVideoFrame, DeviceOrientation};
 
     fn session(thread: &str, host: &str, device: &str) -> DeviceSession {
         DeviceSession {
@@ -447,12 +458,46 @@ mod tests {
         };
         state.apply_event(DeviceEvent::Recording(status.clone()));
         assert_eq!(state.recordings.len(), 1);
-        state.apply_event(DeviceEvent::RecordingComplete(DeviceRecording { status: DeviceRecordingStatus { active: false, ..status }, bytes: vec![1, 2] }));
+        state.apply_event(DeviceEvent::RecordingComplete(DeviceRecording {
+            status: DeviceRecordingStatus { active: false, ..status },
+            artifact: None,
+            bytes: vec![1, 2],
+        }));
         assert!(state.recordings.is_empty());
         assert_eq!(state.last_recording.as_ref().unwrap().bytes, vec![1, 2]);
         state.apply_event(DeviceEvent::State(DeviceServiceState::default()));
         assert!(state.recordings.is_empty());
         assert!(state.last_recording.is_none());
+    }
+
+    #[test]
+    fn screen_metadata_keeps_duo_panel_identities() {
+        let current = session("screens", "host", "device");
+        let mut state = DeviceState::default();
+        state.apply_event(DeviceEvent::State(DeviceServiceState {
+            sessions: vec![current.clone()],
+            ..DeviceServiceState::default()
+        }));
+        for screen_id in [Some(1), Some(3)] {
+            state.apply_event(DeviceEvent::Screen(DeviceScreenConfig {
+                thread_id: Some(current.thread_id.clone()),
+                host_id: Some(current.host_id.clone()),
+                device_id: Some(current.device_id.clone()),
+                width: 100,
+                height: 100,
+                orientation: DeviceOrientation::Portrait,
+                screen_id,
+                supports_hinge_angle: true,
+                supports_physical_orientation: false,
+                hinge_angle: Some(90.0),
+                hinge_pose: Some("book".into()),
+                table_mode: false,
+                table_mode_available: true,
+            }));
+        }
+        assert_eq!(state.screens.len(), 2);
+        let view = crate::view::device::device_view(&Snapshot { device: state, ..Snapshot::default() });
+        assert_eq!(view.screens.iter().map(|screen| screen.screen_id).collect::<Vec<_>>(), vec![Some(1), Some(3)]);
     }
 
     #[test]

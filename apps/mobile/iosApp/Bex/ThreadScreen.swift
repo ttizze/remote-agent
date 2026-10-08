@@ -327,7 +327,8 @@ struct DeviceScreen: View {
     var body: some View {
         let view = model.snapshot.device()
         let threadSessions = view.sessions.filter { $0.threadId == threadId }
-        let threadSessionKey = threadSessions.map { "\($0.hostId):\($0.deviceId)" }.joined(separator: ",")
+        let threadSessionKey = threadSessions.map { "\($0.hostId):\($0.deviceId):\($0.openedAt)" }.joined(separator: ",")
+        let sessionEpochs = Dictionary(uniqueKeysWithValues: threadSessions.map { ("\($0.hostId):\($0.deviceId)", $0.openedAt) })
         let decodedFrames = deviceFrames.frames(for: threadId)
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
@@ -464,19 +465,21 @@ struct DeviceScreen: View {
                                     action: .rotate
                                 ))
                             }
-                            Button("Book fold") {
-                                model.perform(.deviceAction(
-                                    hostId: session.hostId,
-                                    deviceId: session.deviceId,
-                                    action: .fold(command: "book")
-                                ))
-                            }
-                            Button("Table") {
-                                model.perform(.deviceAction(
-                                    hostId: session.hostId,
-                                    deviceId: session.deviceId,
-                                    action: .duo(command: "table")
-                                ))
+                            if session.platform == "ios" {
+                                Button("Book pose") {
+                                    model.perform(.deviceAction(
+                                        hostId: session.hostId,
+                                        deviceId: session.deviceId,
+                                        action: .duo(command: .pose(value: .book))
+                                    ))
+                                }
+                                Button("Table") {
+                                    model.perform(.deviceAction(
+                                        hostId: session.hostId,
+                                        deviceId: session.deviceId,
+                                        action: .duo(command: .table(value: true))
+                                    ))
+                                }
                             }
                             Button("Record") {
                                 model.perform(.startDeviceRecording(hostId: session.hostId, deviceId: session.deviceId, format: "avcc"))
@@ -507,9 +510,15 @@ struct DeviceScreen: View {
                                 }
                                 .overlay {
                                     GeometryReader { proxy in
-                                        Color.clear
-                                            .contentShape(Rectangle())
-                                            .gesture(deviceTouchGesture(hostId: frame.hostId, deviceId: frame.deviceId, size: proxy.size))
+                                    Color.clear
+                                        .contentShape(Rectangle())
+                                        .gesture(deviceTouchGesture(
+                                            hostId: frame.hostId,
+                                            deviceId: frame.deviceId,
+                                            screenId: frame.screenId,
+                                            size: proxy.size,
+                                            raw: deviceRawTouch(view, hostId: frame.hostId, deviceId: frame.deviceId, screenId: frame.screenId),
+                                        ))
                                     }
                                 }
                             }
@@ -524,9 +533,15 @@ struct DeviceScreen: View {
                         }
                         .overlay {
                             GeometryReader { proxy in
-                                Color.clear
-                                    .contentShape(Rectangle())
-                                    .gesture(deviceTouchGesture(hostId: frame.hostId, deviceId: frame.deviceId, size: proxy.size))
+                                    Color.clear
+                                        .contentShape(Rectangle())
+                                        .gesture(deviceTouchGesture(
+                                            hostId: frame.hostId,
+                                            deviceId: frame.deviceId,
+                                            screenId: 0,
+                                            size: proxy.size,
+                                            raw: deviceRawTouch(view, hostId: frame.hostId, deviceId: frame.deviceId, screenId: 0),
+                                        ))
                             }
                         }
                     } else if let frame = view.videoFrames.filter({ $0.threadId == threadId && ($0.encoding == "jpeg" || $0.encoding == "mjpeg") }).max(by: { $0.sequence < $1.sequence }),
@@ -537,9 +552,15 @@ struct DeviceScreen: View {
                         }
                         .overlay {
                             GeometryReader { proxy in
-                                Color.clear
-                                    .contentShape(Rectangle())
-                                    .gesture(deviceTouchGesture(hostId: frame.hostId, deviceId: frame.deviceId, size: proxy.size))
+                                    Color.clear
+                                        .contentShape(Rectangle())
+                                        .gesture(deviceTouchGesture(
+                                            hostId: frame.hostId,
+                                            deviceId: frame.deviceId,
+                                            screenId: 0,
+                                            size: proxy.size,
+                                            raw: deviceRawTouch(view, hostId: frame.hostId, deviceId: frame.deviceId, screenId: 0),
+                                        ))
                             }
                         }
                     } else {
@@ -564,26 +585,32 @@ struct DeviceScreen: View {
                                 .foregroundStyle(AppTheme.muted)
                             HStack(spacing: 8) {
                                 Button("Save recording") {
-                                    guard let file = deviceRecordingFileType(recording.format, recording.bytes) else {
-                                        model.notice = "The Host did not return a playable device recording."
+                                    guard recording.error == nil,
+                                          !recording.bytes.isEmpty,
+                                          let fileExtension = recording.artifactExtension,
+                                          recording.artifactMimeType != nil else {
+                                        model.notice = "The Host did not return a playable device recording. Save is unavailable until recording finalization succeeds."
                                         return
                                     }
                                     recordingDocument = DeviceRecordingDocument(data: Data(recording.bytes))
-                                    recordingFileName = "device-recording.\(file.extension)"
-                                    recordingContentType = file.type
+                                    recordingFileName = "device-recording.\(fileExtension)"
+                                    recordingContentType = UTType(filenameExtension: fileExtension) ?? .data
                                     exportingRecording = true
                                 }
                             Button("Attach recording") {
                                 do {
                                     let directory = try AttachmentFiles.directory()
-                                    guard let file = deviceRecordingFileType(recording.format, recording.bytes) else {
-                                        model.notice = "The Host did not return a playable device recording."
+                                    guard recording.error == nil,
+                                          !recording.bytes.isEmpty,
+                                          let fileExtension = recording.artifactExtension,
+                                          let mimeType = recording.artifactMimeType else {
+                                        model.notice = "The Host did not return a playable device recording. Attach is unavailable until recording finalization succeeds."
                                         return
                                     }
-                                    let url = directory.appendingPathComponent("device-\(recording.deviceId)-\(recording.byteCount).\(file.extension)")
+                                    let url = directory.appendingPathComponent("device-\(recording.deviceId)-\(recording.byteCount).\(fileExtension)")
                                     try Data(recording.bytes).write(to: url, options: .atomic)
                                     model.perform(.attachFiles(draftKey: model.snapshot.currentDraftKey(), files: [
-                                        LocalFile(path: url.path, name: url.lastPathComponent, mimeType: file.mime)
+                                        LocalFile(path: url.path, name: url.lastPathComponent, mimeType: mimeType)
                                     ]))
                                 } catch {
                                     model.notice = error.localizedDescription
@@ -602,7 +629,7 @@ struct DeviceScreen: View {
             model.perform(.openThread(threadId: threadId))
             model.perform(.loadDevices)
             model.perform(.subscribeDevice)
-            deviceFrames.consume(view.videoEvents, threadId: threadId)
+            deviceFrames.consume(view.videoEvents, threadId: threadId, sessionEpochs: sessionEpochs)
             for session in threadSessions {
                 model.perform(.loadDeviceDetail(hostId: session.hostId, deviceId: session.deviceId))
                 model.perform(.loadDeviceAccessibility(hostId: session.hostId, deviceId: session.deviceId))
@@ -611,9 +638,15 @@ struct DeviceScreen: View {
         }
         .onChange(of: model.snapshot.device().revision) { _, _ in
             let next = model.snapshot.device()
-            deviceFrames.consume(next.videoEvents, threadId: threadId)
+            deviceFrames.consume(next.videoEvents, threadId: threadId, sessionEpochs: sessionEpochs)
         }
         .onChange(of: threadSessionKey) { _, _ in
+            deviceFrames.reset(threadId: threadId)
+            let next = model.snapshot.device()
+            let nextEpochs = Dictionary(uniqueKeysWithValues: next.sessions
+                .filter { $0.threadId == threadId }
+                .map { ("\($0.hostId):\($0.deviceId)", $0.openedAt) })
+            deviceFrames.consume(next.videoEvents, threadId: threadId, sessionEpochs: nextEpochs)
             let sessions = model.snapshot.device().sessions
             for session in sessions where session.threadId == threadId {
                 model.perform(.loadDeviceDetail(hostId: session.hostId, deviceId: session.deviceId))
@@ -635,10 +668,10 @@ struct DeviceScreen: View {
         }
     }
 
-    private func deviceTouchGesture(hostId: String, deviceId: String, size: CGSize) -> some Gesture {
+    private func deviceTouchGesture(hostId: String, deviceId: String, screenId: Int, size: CGSize, raw: Bool) -> some Gesture {
         DragGesture(minimumDistance: 0)
             .onChanged { value in
-                let key = "\(hostId):\(deviceId)"
+                let key = "\(hostId):\(deviceId):\(screenId)"
                 let phase = touchingDevice == key ? "move" : "begin"
                 touchingDevice = key
                 let x = value.location.x / max(size.width, 1)
@@ -646,7 +679,7 @@ struct DeviceScreen: View {
                 model.perform(.deviceAction(
                     hostId: hostId,
                     deviceId: deviceId,
-                    action: .touch(phase: phase, x: Float(x.clamped(to: 0...1)), y: Float(y.clamped(to: 0...1))),
+                    action: .touch(phase: phase, x: Float(x.clamped(to: 0...1)), y: Float(y.clamped(to: 0...1)), raw: raw),
                 ))
             }
             .onEnded { value in
@@ -656,7 +689,7 @@ struct DeviceScreen: View {
                 model.perform(.deviceAction(
                     hostId: hostId,
                     deviceId: deviceId,
-                    action: .touch(phase: "end", x: Float(x.clamped(to: 0...1)), y: Float(y.clamped(to: 0...1))),
+                    action: .touch(phase: "end", x: Float(x.clamped(to: 0...1)), y: Float(y.clamped(to: 0...1)), raw: raw),
                 ))
             }
     }
@@ -677,17 +710,10 @@ private struct DeviceRecordingDocument: FileDocument {
     }
 }
 
-private func deviceRecordingFileType(_ format: String, _ bytes: [UInt8]) -> (extension: String, mime: String, type: UTType)? {
-    if bytes.starts(with: [0x1a, 0x45, 0xdf, 0xa3]) {
-        return ("webm", "video/webm", UTType(filenameExtension: "webm") ?? .movie)
+private func deviceRawTouch(_ view: DeviceView, hostId: String, deviceId: String, screenId: Int) -> Bool {
+    view.screens.contains { screen in
+        screen.hostId == hostId && screen.deviceId == deviceId && (screen.screenId.map(Int.init) ?? 0) == screenId && screen.rawTouch
     }
-    if bytes.count >= 12, Array(bytes[4..<8]) == Array("ftyp".utf8) {
-        return ("mp4", "video/mp4", UTType(filenameExtension: "mp4") ?? .movie)
-    }
-    if format == "mjpeg", zip(bytes, bytes.dropFirst()).contains(where: { $0.0 == 0xff && $0.1 == 0xd8 }) {
-        return ("mjpeg", "video/x-motion-jpeg", UTType.data)
-    }
-    return nil
 }
 
 private extension CGFloat {

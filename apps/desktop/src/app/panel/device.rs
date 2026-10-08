@@ -3,7 +3,9 @@ mod device_decoder;
 
 use super::PanelTab;
 use crate::app::{Desktop, ui::{color, icon, tint}};
-use agent_core::state::{DeviceActionIntent, Intent};
+use agent_core::state::{
+    DeviceActionIntent, DeviceDuoCommandIntent, DeviceDuoPoseIntent, Intent,
+};
 use gpui_kit::{component::{Sizable, button::{Button, ButtonVariants}, h_flex, input::{Input, InputState}, v_flex}, prelude::FluentBuilder, *};
 use std::{collections::{BTreeMap, BTreeSet}, sync::Arc};
 
@@ -14,7 +16,7 @@ pub(super) struct DeviceState {
     detail_requests: BTreeSet<String>,
     accessibility_requests: BTreeSet<String>,
     event_log_requests: BTreeSet<String>,
-    frames: BTreeMap<(String, String, u8), (u64, Arc<Image>)>,
+    frames: BTreeMap<(String, String, String, u8), (u64, Arc<Image>)>,
     decoder: device_decoder::DeviceVideoDecoder,
     ssh_label: Entity<InputState>,
     ssh_target: Entity<InputState>,
@@ -124,13 +126,27 @@ impl Desktop {
     }
 
     fn attach_device_recording(&self, draft_key: String, recording: agent_core::view::device::DeviceRecordingView) {
-        let Some((extension, mime_type)) = recording_file_type(&recording.format, &recording.bytes) else {
+        let Some(extension) = recording.artifact_extension.clone() else {
             let message = "The Host did not return a playable device recording. Save or attach is unavailable until recording finalization succeeds.".to_owned();
             self.stage(draft_key, move || {
                 Err::<(Vec<agent_core::state::LocalFile>, Option<String>), String>(message)
             });
             return;
         };
+        let Some(mime_type) = recording.artifact_mime_type.clone() else {
+            let message = "The Host did not return a playable device recording. Save or attach is unavailable until recording finalization succeeds.".to_owned();
+            self.stage(draft_key, move || {
+                Err::<(Vec<agent_core::state::LocalFile>, Option<String>), String>(message)
+            });
+            return;
+        };
+        if recording.bytes.is_empty() {
+            let message = "The Host did not return a playable device recording. Save or attach is unavailable until recording finalization succeeds.".to_owned();
+            self.stage(draft_key, move || {
+                Err::<(Vec<agent_core::state::LocalFile>, Option<String>), String>(message)
+            });
+            return;
+        }
         let name = format!("device-recording-{draft_key}.{extension}");
         let bytes = recording.bytes;
         let directory = self.attachments.directory.clone();
@@ -143,7 +159,7 @@ impl Desktop {
                 vec![agent_core::state::LocalFile {
                     path: path.to_string_lossy().into_owned(),
                     name,
-                    mime_type: mime_type.into(),
+                    mime_type,
                 }],
                 None,
             ))
@@ -198,6 +214,25 @@ impl Desktop {
             }
         }
         let view = self.snapshot.device();
+        let active_sessions = view
+            .sessions
+            .iter()
+            .filter(|session| session.thread_id == thread)
+            .map(|session| {
+                (
+                    session.thread_id.clone(),
+                    session.host_id.clone(),
+                    session.device_id.clone(),
+                    session.opened_at.clone(),
+                )
+            })
+            .collect::<BTreeSet<_>>();
+        self.panels.device.decoder.retain_sessions(&active_sessions);
+        self.panels.device.frames.retain(|(host_id, device_id, epoch, _), _| {
+            active_sessions.iter().any(|(_, active_host, active_device, active_epoch)| {
+                active_host == host_id && active_device == device_id && active_epoch == epoch
+            })
+        });
         let mut newest_frames = BTreeMap::new();
         for frame in view.frames.iter().filter(|frame| frame.thread_id == thread) {
             let entry = newest_frames
@@ -208,7 +243,14 @@ impl Desktop {
             }
         }
         for frame in newest_frames.into_values().filter(|frame| !frame.png.is_empty()) {
-            let key = (frame.host_id.clone(), frame.device_id.clone(), 0);
+            let Some(epoch) = view.sessions.iter().find(|session| {
+                session.thread_id == thread
+                    && session.host_id == frame.host_id
+                    && session.device_id == frame.device_id
+            }).map(|session| session.opened_at.clone()) else {
+                continue;
+            };
+            let key = (frame.host_id.clone(), frame.device_id.clone(), epoch, 0);
             if self
                 .panels
                 .device
@@ -238,7 +280,12 @@ impl Desktop {
                 device_decoder::DeviceImageFormat::Png => ImageFormat::Png,
             };
             self.panels.device.frames.insert(
-                (image.host_id.clone(), image.device_id.clone(), image.screen_id),
+                (
+                    image.host_id.clone(),
+                    image.device_id.clone(),
+                    image.session_epoch.clone(),
+                    image.screen_id,
+                ),
                 (
                     image.sequence,
                     Arc::new(Image::from_bytes(format, image.bytes)),
@@ -255,7 +302,7 @@ impl Desktop {
             .device
             .frames
             .values()
-            .map(|((host_id, device_id, _), (_, image))| {
+            .map(|((host_id, device_id, _, _), (_, image))| {
                 (host_id.clone(), device_id.clone(), image.clone())
             })
             .collect::<Vec<_>>();
@@ -266,7 +313,7 @@ impl Desktop {
             .sessions
             .iter()
             .filter(|session| current_thread.as_deref() == Some(session.thread_id.as_str()))
-            .map(|session| (session.host_id.clone(), session.device_id.clone()))
+            .map(|session| (session.host_id.clone(), session.device_id.clone(), session.platform.clone()))
             .collect::<Vec<_>>();
         let current_thread_has_session = !action_targets.is_empty();
         let entries = view.devices.iter().map(|device| {
@@ -323,7 +370,7 @@ impl Desktop {
                     row.child(Button::new(SharedString::from(format!("remove-device-host-{id}"))).label("Remove").xsmall().on_click(cx.listener(move |view, _, _, _| view.remove_device_ssh_host(&id))))
                 })
         });
-        let device_controls = action_targets.into_iter().map(|(host_id, device_id)| {
+        let device_controls = action_targets.into_iter().map(|(host_id, device_id, platform)| {
             let target = format!("{host_id}:{device_id}");
             h_flex()
                 .id(SharedString::from(format!("device-controls-{target}")))
@@ -408,12 +455,24 @@ impl Desktop {
                         view.perform(Intent::DeviceAction {
                             host_id: Some(host_id.clone()),
                             device_id: device_id.clone(),
-                            action: DeviceActionIntent::Key { code: "Enter".into(), down: true },
+                            action: DeviceActionIntent::Key {
+                                code: "Enter".into(),
+                                key: "Enter".into(),
+                                down: true,
+                                meta: false,
+                                ctrl: false,
+                            },
                         });
                         view.perform(Intent::DeviceAction {
                             host_id: Some(host_id.clone()),
                             device_id: device_id.clone(),
-                            action: DeviceActionIntent::Key { code: "Enter".into(), down: false },
+                            action: DeviceActionIntent::Key {
+                                code: "Enter".into(),
+                                key: "Enter".into(),
+                                down: false,
+                                meta: false,
+                                ctrl: false,
+                            },
                         });
                     }
                 })))
@@ -424,12 +483,12 @@ impl Desktop {
                         view.perform(Intent::DeviceAction {
                             host_id: Some(host_id.clone()),
                             device_id: device_id.clone(),
-                            action: DeviceActionIntent::Touch { phase: "begin".into(), x: 0.5, y: 0.5 },
+                            action: DeviceActionIntent::Touch { phase: "begin".into(), x: 0.5, y: 0.5, raw: false },
                         });
                         view.perform(Intent::DeviceAction {
                             host_id: Some(host_id.clone()),
                             device_id: device_id.clone(),
-                            action: DeviceActionIntent::Touch { phase: "end".into(), x: 0.5, y: 0.5 },
+                            action: DeviceActionIntent::Touch { phase: "end".into(), x: 0.5, y: 0.5, raw: false },
                         });
                     }
                 })))
@@ -450,13 +509,16 @@ impl Desktop {
                         device_id: device_id.clone(),
                     })
                 })))
-                .child(Button::new(SharedString::from(format!("device-fold-book-{host_id}-{device_id}"))).label("Book fold").xsmall().on_click(cx.listener({
+                .when(platform == "ios", |panel| panel
+                .child(Button::new(SharedString::from(format!("device-fold-book-{host_id}-{device_id}"))).label("Book pose").xsmall().on_click(cx.listener({
                     let host_id = host_id.clone();
                     let device_id = device_id.clone();
                     move |view, _, _, _| view.perform(Intent::DeviceAction {
                         host_id: Some(host_id.clone()),
                         device_id: device_id.clone(),
-                        action: DeviceActionIntent::Fold { command: "book".into() },
+                        action: DeviceActionIntent::Duo {
+                            command: DeviceDuoCommandIntent::Pose { value: DeviceDuoPoseIntent::Book },
+                        },
                     })
                 })))
                 .child(Button::new(SharedString::from(format!("device-duo-table-{host_id}-{device_id}"))).label("Table mode").xsmall().on_click(cx.listener({
@@ -465,9 +527,12 @@ impl Desktop {
                     move |view, _, _, _| view.perform(Intent::DeviceAction {
                         host_id: Some(host_id.clone()),
                         device_id: device_id.clone(),
-                        action: DeviceActionIntent::Duo { command: "table".into() },
+                        action: DeviceActionIntent::Duo {
+                            command: DeviceDuoCommandIntent::Table { value: true },
+                        },
                     })
                 })))
+                )
                 .child(Button::new(SharedString::from(format!("device-record-{host_id}-{device_id}"))).label("Record").xsmall().on_click(cx.listener({
                     let host_id = host_id.clone();
                     let device_id = device_id.clone();
@@ -621,19 +686,4 @@ impl Desktop {
                 })
         })
         .into_any_element()
-}
-
-}
-
-fn recording_file_type(format: &str, bytes: &[u8]) -> Option<(&'static str, &'static str)> {
-    if bytes.starts_with(&[0x1a, 0x45, 0xdf, 0xa3]) {
-        return Some(("webm", "video/webm"));
-    }
-    if bytes.len() >= 12 && &bytes[4..8] == b"ftyp" {
-        return Some(("mp4", "video/mp4"));
-    }
-    if format == "mjpeg" && bytes.windows(2).any(|window| window == [0xff, 0xd8]) {
-        return Some(("mjpeg", "video/x-motion-jpeg"));
-    }
-    None
 }

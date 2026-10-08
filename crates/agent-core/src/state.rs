@@ -1622,7 +1622,7 @@ pub enum DeviceActionIntent {
     TerminateApp { app_id: String },
     Shake,
     SendPush { app_id: String, payload: String },
-    Touch { phase: String, x: f32, y: f32 },
+    Touch { phase: String, x: f32, y: f32, raw: bool },
     Key {
         code: String,
         key: String,

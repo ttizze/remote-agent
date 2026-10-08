@@ -48,11 +48,21 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.viewinterop.AndroidView
 import dev.remoteagent.core.DeviceActionIntent
+import dev.remoteagent.core.DeviceDuoCommandIntent
+import dev.remoteagent.core.DeviceDuoOrientationIntent
+import dev.remoteagent.core.DeviceDuoPhysicalIntent
+import dev.remoteagent.core.DeviceDuoPoseIntent
+import dev.remoteagent.core.DeviceFoldPostureIntent
 import dev.remoteagent.core.DeviceView
 import dev.remoteagent.core.Intent
 import java.io.File
 
-private data class StreamKey(val hostId: String, val deviceId: String, val screenId: Int)
+private data class StreamKey(val hostId: String, val deviceId: String, val screenId: Int, val sessionEpoch: String)
+
+private fun rawTouchFor(view: DeviceView, hostId: String, deviceId: String, screenId: Int): Boolean =
+    view.screens.any {
+        it.hostId == hostId && it.deviceId == deviceId && (it.screenId?.toInt() ?: 0) == screenId && it.rawTouch
+    }
 
 private data class DeviceKeyFacts(
     val code: String,
@@ -68,7 +78,7 @@ internal fun DeviceScreen(model: AndroidAppModel, threadId: String) {
     val context = LocalContext.current
     val hostProfile = model.profileId
     val threadSessions = view.sessions.filter { it.threadId == threadId }
-    val sessionKey = threadSessions.joinToString(",") { "${it.hostId}:${it.deviceId}" }
+    val sessionKey = threadSessions.joinToString(",") { "${it.hostId}:${it.deviceId}:${it.openedAt}" }
     val liveEvents = view.videoEvents.filter { it.threadId == threadId }
     LaunchedEffect(threadId, hostProfile) {
         model.perform(Intent.OpenThread(threadId))
@@ -223,19 +233,104 @@ internal fun DeviceScreen(model: AndroidAppModel, threadId: String) {
                                 Intent.DeviceAction(
                                     session.hostId,
                                     session.deviceId,
-                                    DeviceActionIntent.Fold("table"),
+                                    DeviceActionIntent.Fold(DeviceFoldPostureIntent.Closed),
                                 ),
                             )
-                        }) { Text("Fold") }
+                        }) { Text("Close fold") }
                         Button(onClick = {
                             model.perform(
                                 Intent.DeviceAction(
                                     session.hostId,
                                     session.deviceId,
-                                    DeviceActionIntent.Duo("toggle"),
+                                    DeviceActionIntent.Fold(DeviceFoldPostureIntent.Opened),
                                 ),
                             )
-                        }) { Text("Duo") }
+                        }) { Text("Open fold") }
+                    }
+                    if (session.platform == "ios") {
+                        Button(onClick = {
+                            model.perform(
+                                Intent.DeviceAction(
+                                    session.hostId,
+                                    session.deviceId,
+                                    DeviceActionIntent.Duo(DeviceDuoCommandIntent.Angle(90f)),
+                                ),
+                            )
+                        }) { Text("Duo 90°") }
+                        Button(onClick = {
+                            model.perform(
+                                Intent.DeviceAction(
+                                    session.hostId,
+                                    session.deviceId,
+                                    DeviceActionIntent.Duo(DeviceDuoCommandIntent.Angle(180f)),
+                                ),
+                            )
+                        }) { Text("Duo 180°") }
+                        listOf(
+                            DeviceDuoPoseIntent.Closed to "Duo closed",
+                            DeviceDuoPoseIntent.Book to "Duo book",
+                            DeviceDuoPoseIntent.Open to "Duo open",
+                            DeviceDuoPoseIntent.Laptop to "Duo laptop",
+                            DeviceDuoPoseIntent.Tent to "Duo tent",
+                        ).forEach { (pose, label) ->
+                            Button(onClick = {
+                                model.perform(
+                                    Intent.DeviceAction(
+                                        session.hostId,
+                                        session.deviceId,
+                                        DeviceActionIntent.Duo(DeviceDuoCommandIntent.Pose(pose)),
+                                    ),
+                                )
+                            }) { Text(label) }
+                        }
+                        Button(onClick = {
+                            model.perform(
+                                Intent.DeviceAction(
+                                    session.hostId,
+                                    session.deviceId,
+                                    DeviceActionIntent.Duo(DeviceDuoCommandIntent.Table(true)),
+                                ),
+                            )
+                        }) { Text("Table on") }
+                        Button(onClick = {
+                            model.perform(
+                                Intent.DeviceAction(
+                                    session.hostId,
+                                    session.deviceId,
+                                    DeviceActionIntent.Duo(DeviceDuoCommandIntent.Table(false)),
+                                ),
+                            )
+                        }) { Text("Table off") }
+                        listOf(
+                            DeviceDuoPhysicalIntent.Faceup to "Face up",
+                            DeviceDuoPhysicalIntent.Facedown to "Face down",
+                        ).forEach { (physical, label) ->
+                            Button(onClick = {
+                                model.perform(
+                                    Intent.DeviceAction(
+                                        session.hostId,
+                                        session.deviceId,
+                                        DeviceActionIntent.Duo(DeviceDuoCommandIntent.Physical(physical)),
+                                    ),
+                                )
+                            }) { Text(label) }
+                        }
+                        listOf(
+                            DeviceDuoOrientationIntent.Portrait to "Portrait",
+                            DeviceDuoOrientationIntent.LandscapeLeft to "Landscape left",
+                            DeviceDuoOrientationIntent.PortraitUpsideDown to "Portrait upside down",
+                            DeviceDuoOrientationIntent.LandscapeRight to "Landscape right",
+                        ).forEach { (orientation, label) ->
+                            Button(onClick = {
+                                model.perform(
+                                    Intent.DeviceAction(
+                                        session.hostId,
+                                        session.deviceId,
+                                        DeviceActionIntent.Duo(DeviceDuoCommandIntent.Orientation(orientation)),
+                                    ),
+                                )
+                            }) { Text(label) }
+                        }
                     }
                     Button(onClick = {
                         model.perform(Intent.CloseDevice(session.hostId, session.deviceId, true))
@@ -274,7 +369,16 @@ internal fun DeviceScreen(model: AndroidAppModel, threadId: String) {
                                     .fillMaxWidth()
                                     .aspectRatio(frameAspect)
                                     .deviceKeyInput(model, frame.hostId, frame.deviceId)
-                                    .deviceTouchInput(model, frame.hostId, frame.deviceId, epoch, 0),
+                                    .deviceTouchInput(
+                                        model,
+                                        frame.hostId,
+                                        frame.deviceId,
+                                        epoch,
+                                        0,
+                                        rawTouchFor(view, frame.hostId, frame.deviceId, 0),
+                                        frame.width.toInt(),
+                                        frame.height.toInt(),
+                                    ),
                             ) {
                                 Image(it, "Live device frame", Modifier.fillMaxSize(), contentScale = ContentScale.Fit)
                                 DeviceAccessibilityOverlay(view, frame.hostId, frame.deviceId)
@@ -284,19 +388,31 @@ internal fun DeviceScreen(model: AndroidAppModel, threadId: String) {
                 }
             } else {
                 liveEvents
-                    .groupBy { StreamKey(it.hostId, it.deviceId, it.screenId?.toInt() ?: 0) }
-                    .toSortedMap(compareBy({ it.hostId }, { it.deviceId }, { it.screenId }))
+                    .groupBy { StreamKey(it.hostId, it.deviceId, it.screenId?.toInt() ?: 0, it.sessionEpoch) }
+                    .toSortedMap(compareBy({ it.hostId }, { it.deviceId }, { it.screenId }, { it.sessionEpoch }))
                     .forEach { (stream, events) ->
                         val ordered = events.sortedBy { it.sequence }
                         val frame = ordered.lastOrNull() ?: return@forEach
-                        val epoch = threadSessions.firstOrNull {
-                            it.hostId == stream.hostId && it.deviceId == stream.deviceId
-                        }?.openedAt.orEmpty()
+                        val epoch = frame.sessionEpoch
                         item(key = "video-frame-${stream.hostId}-${stream.deviceId}-${stream.screenId}-$epoch") {
                             if (ordered.size > 1 || stream.screenId != 0) Text("Live screen ${stream.screenId}")
                             when (frame.encoding) {
-                                "jpeg", "mjpeg" -> DeviceJpegFrame(model, view, frame, epoch, stream.screenId)
-                                "h264", "semu", "avcc-description" -> DeviceH264Frame(model, view, ordered, epoch, stream.screenId)
+                                "jpeg", "mjpeg" -> DeviceJpegFrame(
+                                    model,
+                                    view,
+                                    frame,
+                                    epoch,
+                                    stream.screenId,
+                                    rawTouchFor(view, frame.hostId, frame.deviceId, stream.screenId),
+                                )
+                                "h264", "semu", "avcc-description" -> DeviceH264Frame(
+                                    model,
+                                    view,
+                                    ordered,
+                                    epoch,
+                                    stream.screenId,
+                                    rawTouchFor(view, frame.hostId, frame.deviceId, stream.screenId),
+                                )
                                 else -> Text("Unsupported live device frame format: ${frame.encoding}")
                             }
                         }
@@ -327,8 +443,11 @@ internal fun DeviceScreen(model: AndroidAppModel, threadId: String) {
                 item(key = "last-recording-${recording.deviceId}-${recording.byteCount}") {
                     Text("Recording ready · ${recording.frameCount} frames · ${recording.byteCount} bytes")
                     recording.error?.let { error -> Text("Recording failed: $error") }
-                    if (recording.error == null && recording.bytes.isNotEmpty()) {
-                        val artifact = recordingArtifact(recording.format)
+                    val extension = recording.artifactExtension
+                    val mimeType = recording.artifactMimeType
+                    if (recording.error == null && recording.bytes.isNotEmpty() &&
+                        extension != null && mimeType != null
+                    ) {
                         var savedPath by remember(recording.byteCount) { mutableStateOf<String?>(null) }
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             Button(onClick = {
@@ -336,7 +455,7 @@ internal fun DeviceScreen(model: AndroidAppModel, threadId: String) {
                                     ?: context.filesDir
                                 val file = File(
                                     directory,
-                                    "device-${recording.deviceId}-${recording.byteCount}.${artifact.extension}",
+                                    "device-${recording.deviceId}-${recording.byteCount}.$extension",
                                 )
                                 runCatching {
                                     directory.mkdirs()
@@ -347,14 +466,14 @@ internal fun DeviceScreen(model: AndroidAppModel, threadId: String) {
                             Button(onClick = {
                                 val file = File(
                                     context.cacheDir,
-                                    "device-${recording.deviceId}-${recording.byteCount}.${artifact.extension}",
+                                    "device-${recording.deviceId}-${recording.byteCount}.$extension",
                                 )
                                 runCatching { file.writeBytes(recording.bytes) }
                                     .onSuccess {
                                         model.perform(
                                             Intent.AttachFiles(
                                                 threadId,
-                                                listOf(dev.remoteagent.core.LocalFile(file.path, file.name, artifact.mimeType)),
+                                                listOf(dev.remoteagent.core.LocalFile(file.path, file.name, mimeType)),
                                             ),
                                         ) { result ->
                                             result.exceptionOrNull()?.let { model.notice = "Could not attach recording: ${it.message}" }
@@ -364,6 +483,11 @@ internal fun DeviceScreen(model: AndroidAppModel, threadId: String) {
                             }) { Text("Attach") }
                         }
                         savedPath?.let { Text("Saved to $it") }
+                    }
+                    if (recording.error == null && recording.bytes.isNotEmpty() &&
+                        (extension == null || mimeType == null)
+                    ) {
+                        Text("Recording is not a playable artifact; save and attach are unavailable")
                     }
                 }
             }
@@ -378,6 +502,7 @@ private fun DeviceJpegFrame(
     frame: dev.remoteagent.core.DeviceVideoFrameView,
     sessionEpoch: String,
     screenId: Int,
+    rawTouch: Boolean,
 ) {
     val bitmap = remember(frame.sequence) {
         BitmapFactory.decodeByteArray(frame.payload, 0, frame.payload.size)?.asImageBitmap()
@@ -388,7 +513,16 @@ private fun DeviceJpegFrame(
                 .fillMaxWidth()
                 .aspectRatio(frame.width.toFloat() / frame.height.toFloat().coerceAtLeast(1f))
                 .deviceKeyInput(model, frame.hostId, frame.deviceId)
-                .deviceTouchInput(model, frame.hostId, frame.deviceId, sessionEpoch, screenId),
+                .deviceTouchInput(
+                    model,
+                    frame.hostId,
+                    frame.deviceId,
+                    sessionEpoch,
+                    screenId,
+                    rawTouch,
+                    frame.width.toInt(),
+                    frame.height.toInt(),
+                ),
         ) {
             Image(it, "Live device video frame", Modifier.fillMaxSize(), contentScale = ContentScale.Fit)
             DeviceAccessibilityOverlay(view, frame.hostId, frame.deviceId)
@@ -403,6 +537,7 @@ private fun DeviceH264Frame(
     frames: List<dev.remoteagent.core.DeviceVideoFrameView>,
     sessionEpoch: String,
     screenId: Int,
+    rawTouch: Boolean,
 ) {
     val frame = frames.lastOrNull() ?: return
     val decoder = remember { DeviceVideoDecoder() }
@@ -415,7 +550,16 @@ private fun DeviceH264Frame(
             .fillMaxWidth()
             .aspectRatio(frame.width.toFloat() / frame.height.toFloat().coerceAtLeast(1f))
             .deviceKeyInput(model, frame.hostId, frame.deviceId)
-            .deviceTouchInput(model, frame.hostId, frame.deviceId, sessionEpoch, screenId),
+            .deviceTouchInput(
+                model,
+                frame.hostId,
+                frame.deviceId,
+                sessionEpoch,
+                screenId,
+                rawTouch,
+                frame.width.toInt(),
+                frame.height.toInt(),
+            ),
     ) {
         AndroidView(
             modifier = Modifier.fillMaxSize(),
@@ -490,43 +634,54 @@ private fun Modifier.deviceTouchInput(
     deviceId: String,
     sessionEpoch: String,
     screenId: Int,
-): Modifier = pointerInput(hostId, deviceId, sessionEpoch, screenId) {
+    rawTouch: Boolean,
+    contentWidth: Int,
+    contentHeight: Int,
+): Modifier = pointerInput(hostId, deviceId, sessionEpoch, screenId, rawTouch, contentWidth, contentHeight) {
     awaitEachGesture {
         awaitPointerEventScope {
             val down = awaitFirstDown()
-            var lastPosition = down.position
+            fun project(position: androidx.compose.ui.geometry.Offset): dev.remoteagent.core.DeviceTouchPoint? =
+                model.snapshot.projectDeviceTouch(
+                    position.x,
+                    position.y,
+                    size.width.toFloat(),
+                    size.height.toFloat(),
+                    contentWidth.toFloat(),
+                    contentHeight.toFloat(),
+                )
             var ended = false
-            fun send(phase: String, position: androidx.compose.ui.geometry.Offset) {
-                val x = (position.x / size.width).coerceIn(0f, 1f)
-                val y = (position.y / size.height).coerceIn(0f, 1f)
+            var lastValidPosition = down.position
+            fun send(phase: String, position: androidx.compose.ui.geometry.Offset): Boolean {
+                val point = project(position) ?: return false
                 model.perform(
                     Intent.DeviceAction(
                         hostId,
                         deviceId,
-                        DeviceActionIntent.Touch(phase, x, y),
+                        DeviceActionIntent.Touch(phase, point.x, point.y, rawTouch),
                     ),
                 )
+                return true
             }
-            send("begin", down.position)
+            if (!send("begin", down.position)) return@awaitPointerEventScope
             try {
                 while (true) {
                     val event = awaitPointerEvent()
                     val change = event.changes.firstOrNull() ?: break
-                    lastPosition = change.position
                     when {
                         change.changedToUp() -> {
-                            send("end", change.position)
+                            if (!send("end", change.position)) send("end", lastValidPosition)
                             ended = true
                             break
                         }
                         change.positionChanged() -> {
                             change.consume()
-                            send("move", change.position)
+                            if (send("move", change.position)) lastValidPosition = change.position
                         }
                     }
                 }
             } finally {
-                if (!ended) send("end", lastPosition)
+                if (!ended) send("end", lastValidPosition)
             }
         }
     }

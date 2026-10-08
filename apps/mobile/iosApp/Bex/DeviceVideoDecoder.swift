@@ -225,10 +225,12 @@ final class DeviceFrameStore: ObservableObject {
     private var decoders: [String: DeviceVideoDecoder] = [:]
     private var sequences: [String: UInt64] = [:]
 
-    func consume(_ input: [DeviceVideoFrameView], threadId: String) {
+    func consume(_ input: [DeviceVideoFrameView], threadId: String, sessionEpochs: [String: String]) {
         for frame in input where frame.threadId == threadId {
             let screenId = Int(frame.screenId ?? 0)
-            let key = "\(threadId):\(frame.hostId):\(frame.deviceId):\(screenId)"
+            let deviceKey = "\(frame.hostId):\(frame.deviceId)"
+            guard let sessionEpoch = sessionEpochs[deviceKey], sessionEpoch == frame.sessionEpoch else { continue }
+            let key = "\(threadId):\(deviceKey):\(sessionEpoch):\(screenId)"
             if sequences[key].map({ frame.sequence <= $0 }) == true { continue }
             sequences[key] = frame.sequence
             let decoder = decoders[key] ?? {

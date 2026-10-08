@@ -12,6 +12,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::process::{Command, Stdio};
 
 const MAX_H264_BYTES: usize = 8 * 1024 * 1024;
+type DeviceStreamKey = (String, String, String, String, u8);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum DeviceImageFormat {
@@ -22,6 +23,7 @@ pub(super) enum DeviceImageFormat {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct DecodedDeviceImage {
     pub host_id: String,
+    pub session_epoch: String,
     pub sequence: u64,
     pub device_id: String,
     pub screen_id: u8,
@@ -31,10 +33,10 @@ pub(super) struct DecodedDeviceImage {
 
 #[derive(Debug, Default)]
 pub(super) struct DeviceVideoDecoder {
-    latest_sequence: BTreeMap<(String, String, String, u8), u64>,
-    awaiting_keyframe: BTreeSet<(String, String, String, u8)>,
-    descriptions: BTreeMap<(String, String, String, u8), Vec<u8>>,
-    access_units: BTreeMap<(String, String, String, u8), Vec<u8>>,
+    latest_sequence: BTreeMap<DeviceStreamKey, u64>,
+    awaiting_keyframe: BTreeSet<DeviceStreamKey>,
+    descriptions: BTreeMap<DeviceStreamKey, Vec<u8>>,
+    access_units: BTreeMap<DeviceStreamKey, Vec<u8>>,
     error: Option<String>,
 }
 
@@ -45,6 +47,24 @@ impl DeviceVideoDecoder {
 
     pub(super) fn error(&self) -> Option<&str> {
         self.error.as_deref()
+    }
+
+    pub(super) fn retain_sessions(&mut self, sessions: &BTreeSet<(String, String, String, String)>) {
+        self.latest_sequence.retain(|key, _| {
+            sessions.contains(&(key.0.clone(), key.1.clone(), key.2.clone(), key.3.clone()))
+        });
+        self.awaiting_keyframe.retain(|key| {
+            sessions.contains(&(key.0.clone(), key.1.clone(), key.2.clone(), key.3.clone()))
+        });
+        self.descriptions.retain(|key, _| {
+            sessions.contains(&(key.0.clone(), key.1.clone(), key.2.clone(), key.3.clone()))
+        });
+        self.access_units.retain(|key, _| {
+            sessions.contains(&(key.0.clone(), key.1.clone(), key.2.clone(), key.3.clone()))
+        });
+        if self.latest_sequence.is_empty() {
+            self.error = None;
+        }
     }
 
     pub(super) fn push(&mut self, frames: &[DeviceVideoFrameView]) -> Vec<DecodedDeviceImage> {
@@ -68,6 +88,7 @@ impl DeviceVideoDecoder {
                 frame.thread_id.clone(),
                 frame.host_id.clone(),
                 frame.device_id.clone(),
+                frame.session_epoch.clone(),
                 screen,
             );
             if self
@@ -84,8 +105,10 @@ impl DeviceVideoDecoder {
             match frame.encoding.as_str() {
                 "jpeg" | "mjpeg" => {
                     if let Some(bytes) = jpeg_bounds(&frame.payload) {
+                        self.error = None;
                         decoded.push(DecodedDeviceImage {
                             host_id: frame.host_id,
+                            session_epoch: frame.session_epoch,
                             sequence: frame.sequence,
                             device_id: frame.device_id,
                             screen_id: screen,
@@ -98,8 +121,10 @@ impl DeviceVideoDecoder {
                 }
                 "png" => {
                     if !frame.payload.is_empty() {
+                        self.error = None;
                         decoded.push(DecodedDeviceImage {
                             host_id: frame.host_id,
+                            session_epoch: frame.session_epoch,
                             sequence: frame.sequence,
                             device_id: frame.device_id,
                             screen_id: screen,
@@ -143,6 +168,7 @@ impl DeviceVideoDecoder {
                                 self.error = None;
                                 decoded.push(DecodedDeviceImage {
                                     host_id: frame.host_id,
+                                    session_epoch: frame.session_epoch,
                                     sequence: frame.sequence,
                                     device_id: frame.device_id,
                                     screen_id: screen,
@@ -288,6 +314,7 @@ mod tests {
             timestamp_us: Some(sequence),
             keyframe,
             screen_id: Some(1),
+            session_epoch: "session".into(),
         }
     }
 
@@ -309,6 +336,39 @@ mod tests {
         assert_eq!(image.last().map(|image| image.sequence), Some(3));
         assert_eq!(calls.len(), 2);
         assert!(calls[1].windows(2).any(|window| window == [0x41, 3]));
+    }
+
+    #[test]
+    fn decoder_accepts_sequence_restart_after_session_epoch_changes() {
+        let mut decoder = DeviceVideoDecoder::default();
+        let mut calls = Vec::new();
+        let mut first = frame(9, "h264", vec![0, 0, 1, 0x65], true);
+        let image = decoder.push_with(&[first.clone()], |bytes| {
+            calls.push(bytes.to_vec());
+            Ok(vec![0xff, 0xd8, 0xff, 0xd9])
+        });
+        assert_eq!(image.len(), 1);
+        first.session_epoch = "next-session".into();
+        first.sequence = 1;
+        let image = decoder.push_with(&[first], |bytes| {
+            calls.push(bytes.to_vec());
+            Ok(vec![0xff, 0xd8, 0xff, 0xd9])
+        });
+        assert_eq!(image.len(), 1);
+        assert_eq!(calls.len(), 2);
+    }
+
+    #[test]
+    fn retaining_active_sessions_drops_closed_stream_state() {
+        let mut decoder = DeviceVideoDecoder::default();
+        let first = frame(9, "h264", vec![0, 0, 1, 0x65], true);
+        let _ = decoder.push_with(&[first], |_| Ok(vec![0xff, 0xd8, 0xff, 0xd9]));
+        assert_eq!(decoder.latest_sequence.len(), 1);
+        decoder.retain_sessions(&BTreeSet::new());
+        assert!(decoder.latest_sequence.is_empty());
+        assert!(decoder.awaiting_keyframe.is_empty());
+        assert!(decoder.descriptions.is_empty());
+        assert!(decoder.access_units.is_empty());
     }
 
     #[test]

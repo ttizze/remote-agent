@@ -191,6 +191,25 @@ impl Snapshot {
         crate::view::device::device_view(self)
     }
 
+    pub fn project_device_touch(
+        &self,
+        x: f32,
+        y: f32,
+        viewport_width: f32,
+        viewport_height: f32,
+        content_width: f32,
+        content_height: f32,
+    ) -> Option<crate::view::device::DeviceTouchPoint> {
+        crate::view::device::project_touch_point(
+            x,
+            y,
+            viewport_width,
+            viewport_height,
+            content_width,
+            content_height,
+        )
+    }
+
     pub fn sidebar(&self, now_ms: i64, options: SidebarOptions) -> SidebarView {
         sidebar(
             self,

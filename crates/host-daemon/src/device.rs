@@ -14,7 +14,7 @@ use agent_protocol::device::{
     DeviceShutdownInput, DeviceSummary, DeviceTextSize, DeviceToolVersion,
     DeviceToolVersions, DeviceHostsInput, DeviceAccessibilityInput, DeviceAccessibilityTree,
     DeviceEventLogEntry, DeviceEventLogInput, DeviceFrameEncoding, DeviceInput, DeviceInputKind,
-    DeviceRecording, DeviceRecordingStartInput, DeviceRecordingStatus, DeviceRecordingStopInput,
+    DeviceRecording, DeviceRecordingArtifact, DeviceRecordingStartInput, DeviceRecordingStatus, DeviceRecordingStopInput,
     DeviceScreenConfig, DeviceTouchPhase, DeviceVideoFrame, DeviceHardwareButton, DeviceRecordingFormat, LOCAL_DEVICE_HOST_ID,
     DeviceDuoCommand, DeviceDuoPhysical, DeviceDuoPose, DeviceFoldPosture,
 };
@@ -1304,7 +1304,10 @@ fn duo_command_wire(command: &DeviceDuoCommand) -> serde_json::Value {
     }
 }
 
-fn rotate_touch(screen: Option<&DeviceScreenConfig>, x: f32, y: f32) -> (f32, f32) {
+fn map_touch(screen: Option<&DeviceScreenConfig>, x: f32, y: f32, raw: bool) -> (f32, f32) {
+    if raw {
+        return (x, y);
+    }
     let Some(screen) = screen else { return (x, y); };
     if screen.width > screen.height { return (x, y); }
     match screen.orientation {
@@ -1476,6 +1479,20 @@ struct ActiveDeviceRecording {
     error: Option<String>,
 }
 
+fn recording_artifact(format: DeviceRecordingFormat) -> Option<DeviceRecordingArtifact> {
+    match format {
+        DeviceRecordingFormat::Avcc => Some(DeviceRecordingArtifact {
+            extension: "mp4".into(),
+            mime_type: "video/mp4".into(),
+        }),
+        DeviceRecordingFormat::Mjpeg => Some(DeviceRecordingArtifact {
+            extension: "mjpeg".into(),
+            mime_type: "video/x-motion-jpeg".into(),
+        }),
+        DeviceRecordingFormat::RawFrames => None,
+    }
+}
+
 fn finish_recording(
     thread_id: ThreadId,
     host_id: String,
@@ -1488,18 +1505,26 @@ fn finish_recording(
             recording.error = Some(error.to_owned());
         }
     }
+    let format = recording.recorder.format();
+    let artifact = (recording.error.is_none() && !recording.recorder.bytes().is_empty())
+        .then(|| recording_artifact(format))
+        .flatten();
+    let started_at = recording.recorder.started_at().to_owned();
+    let frame_count = recording.recorder.frame_count();
+    let byte_count = recording.recorder.byte_count();
+    let bytes = recording.recorder.into_bytes();
     let status = DeviceRecordingStatus {
         thread_id,
         host_id,
         device_id,
-        format: recording.recorder.format(),
+        format,
         active: false,
-        started_at: recording.recorder.started_at().to_owned(),
-        frame_count: recording.recorder.frame_count(),
-        byte_count: recording.recorder.byte_count(),
+        started_at,
+        frame_count,
+        byte_count,
         error: recording.error,
     };
-    DeviceRecording { status, bytes: recording.recorder.into_bytes() }
+    DeviceRecording { status, artifact, bytes }
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -3583,7 +3608,9 @@ impl DeviceService {
         };
         if let Ok(transport) = transport {
             let (width, height) = screen.as_ref().map(|screen| (screen.width, screen.height)).unwrap_or((0, 0));
+            let mut screen_ids = std::collections::BTreeSet::new();
             for frame in transport {
+                screen_ids.insert(frame.screen_id);
                 frames.push(DeviceEvent::Video(DeviceVideoFrame {
                     thread_id: session.thread_id.clone(),
                     device: device.clone(),
@@ -3597,11 +3624,15 @@ impl DeviceService {
                     screen_id: frame.screen_id,
                 }));
             }
-            if let Some(mut screen) = screen {
-                screen.thread_id = Some(session.thread_id.clone());
-                screen.host_id = Some(session.host_id.clone());
-                screen.device_id = Some(device.id.clone());
-                frames.push(DeviceEvent::Screen(screen));
+            if let Some(screen) = screen {
+                for screen_id in screen_ids {
+                    let mut screen = screen.clone();
+                    screen.thread_id = Some(session.thread_id.clone());
+                    screen.host_id = Some(session.host_id.clone());
+                    screen.device_id = Some(device.id.clone());
+                    screen.screen_id = screen_id;
+                    frames.push(DeviceEvent::Screen(screen));
+                }
             }
             return frames;
         }
@@ -3788,9 +3819,9 @@ impl DeviceService {
                         DeviceInputKind::SetOrientation(orientation)
                     }
                 }
-                DeviceInputKind::Touch { phase, x, y } if device.platform == DevicePlatform::Ios => {
-                    let (x, y) = rotate_touch(screen.as_ref(), *x, *y);
-                    DeviceInputKind::Touch { phase: *phase, x, y }
+                DeviceInputKind::Touch { phase, x, y, raw } if device.platform == DevicePlatform::Ios => {
+                    let (x, y) = map_touch(screen.as_ref(), *x, *y, *raw);
+                    DeviceInputKind::Touch { phase: *phase, x, y, raw: *raw }
                 }
                 _ => input.input.clone(),
             };
@@ -4812,7 +4843,7 @@ async fn hub_input(
     .map_err(|_| "device input stream connection timed out".to_owned())?
     .map_err(|error| format!("device input stream failed: {error}"))?;
     let message = match (platform, input) {
-        (DevicePlatform::Ios, DeviceInputKind::Touch { phase, x, y }) => {
+        (DevicePlatform::Ios, DeviceInputKind::Touch { phase, x, y, .. }) => {
             let phase = match phase { DeviceTouchPhase::Begin => "begin", DeviceTouchPhase::Move => "move", DeviceTouchPhase::End => "end" };
             async_tungstenite::tungstenite::Message::binary([vec![0x03], serde_json::to_vec(&serde_json::json!({"type": phase, "x": x, "y": y})).map_err(|error| error.to_string())?].concat())
         }
@@ -4820,14 +4851,14 @@ async fn hub_input(
             let usage = ios_hid_usage(code).ok_or_else(|| format!("unsupported iOS keyboard code {code}"))?;
             async_tungstenite::tungstenite::Message::binary([vec![0x06], serde_json::to_vec(&serde_json::json!({"type": if *down { "down" } else { "up" }, "usage": usage})).map_err(|error| error.to_string())?].concat())
         }
-        (_, DeviceInputKind::Touch { phase, x, y }) => {
+        (_, DeviceInputKind::Touch { phase, x, y, .. }) => {
             let action = match phase { DeviceTouchPhase::Begin => "down", DeviceTouchPhase::Move => "move", DeviceTouchPhase::End => "up" };
             async_tungstenite::tungstenite::Message::Text(serde_json::json!({"type":"touch", "action": action, "x": x, "y": y}).to_string().into())
         }
         (DevicePlatform::Android, DeviceInputKind::Key { key, meta, ctrl, .. }) => {
             if key == "Escape" { async_tungstenite::tungstenite::Message::Text(serde_json::json!({"type":"back"}).to_string().into()) }
             else if let Some(keycode) = android_keycode(key) { async_tungstenite::tungstenite::Message::Text(serde_json::json!({"type":"key", "keycode": keycode}).to_string().into()) }
-            else if key.encode_utf16().count() == 1 && !meta && !ctrl { async_tungstenite::tungstenite::Message::Text(serde_json::json!({"type":"text", "text": key}).to_string().into()) }
+            else if key.chars().count() == 1 && !meta && !ctrl { async_tungstenite::tungstenite::Message::Text(serde_json::json!({"type":"text", "text": key}).to_string().into()) }
             else { return Err(format!("unsupported Android keyboard key {key}")); }
         }
         (DevicePlatform::Ios, DeviceInputKind::HardwareButton(button)) => async_tungstenite::tungstenite::Message::binary([vec![0x04], serde_json::to_vec(&serde_json::json!({"button": button_wire(*button, true)})).map_err(|error| error.to_string())?].concat()),
@@ -5582,6 +5613,19 @@ mod tests {
     }
 
     #[test]
+    fn recording_artifact_describes_only_playable_outputs() {
+        assert_eq!(
+            recording_artifact(DeviceRecordingFormat::Avcc),
+            Some(DeviceRecordingArtifact { extension: "mp4".into(), mime_type: "video/mp4".into() }),
+        );
+        assert_eq!(
+            recording_artifact(DeviceRecordingFormat::Mjpeg),
+            Some(DeviceRecordingArtifact { extension: "mjpeg".into(), mime_type: "video/x-motion-jpeg".into() }),
+        );
+        assert_eq!(recording_artifact(DeviceRecordingFormat::RawFrames), None);
+    }
+
+    #[test]
     fn accessibility_normalization_skips_full_window_containers() {
         let tree = normalize_accessibility("local", "sim", DevicePlatform::Android, serde_json::json!({
             "nodes": [
@@ -5636,7 +5680,8 @@ mod tests {
             table_mode: false,
             table_mode_available: false,
         };
-        assert_eq!(rotate_touch(Some(&screen), 0.25, 0.75), (0.75, 0.75));
+        assert_eq!(map_touch(Some(&screen), 0.25, 0.75, false), (0.75, 0.75));
+        assert_eq!(map_touch(Some(&screen), 0.25, 0.75, true), (0.25, 0.75));
     }
 
     #[tokio::test]
@@ -5742,7 +5787,7 @@ mod tests {
             port,
             DevicePlatform::Ios,
             "sim",
-            &DeviceInputKind::Touch { phase: DeviceTouchPhase::Begin, x: 0.25, y: 0.75 },
+            &DeviceInputKind::Touch { phase: DeviceTouchPhase::Begin, x: 0.25, y: 0.75, raw: false },
             0,
         )
         .await
@@ -5820,6 +5865,35 @@ mod tests {
         }
         server.abort();
 
+        let (port, receiver, server) = fake_websocket_server().await;
+        hub_input(
+            port,
+            DevicePlatform::Android,
+            "emu",
+            &DeviceInputKind::Key {
+                code: "KeySmile".into(),
+                key: "😀".into(),
+                down: true,
+                meta: false,
+                ctrl: false,
+            },
+            0,
+        )
+        .await
+        .unwrap();
+        let message = tokio::time::timeout(std::time::Duration::from_secs(1), receiver)
+            .await
+            .unwrap()
+            .unwrap();
+        match message {
+            async_tungstenite::tungstenite::Message::Text(text) => {
+                let payload: serde_json::Value = serde_json::from_str(&text.to_string()).unwrap();
+                assert_eq!(payload, serde_json::json!({"type": "text", "text": "😀"}));
+            }
+            other => panic!("unexpected Android supplementary Unicode frame: {other:?}"),
+        }
+        server.abort();
+
         let (port, _receiver, server) = fake_websocket_server().await;
         let error = hub_input(
             port,
@@ -5844,7 +5918,7 @@ mod tests {
             port,
             DevicePlatform::Android,
             "emu",
-            &DeviceInputKind::Touch { phase: DeviceTouchPhase::End, x: 0.2, y: 0.1 },
+            &DeviceInputKind::Touch { phase: DeviceTouchPhase::End, x: 0.2, y: 0.1, raw: false },
             0,
         )
         .await
