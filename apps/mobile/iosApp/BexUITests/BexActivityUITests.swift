@@ -15,7 +15,20 @@ extension BexLaunchUITests {
         XCTAssertTrue(input.isHittable)
         XCTAssertFalse(app.staticTexts["新しいタスク"].exists)
         XCTAssertFalse(app.buttons["task.send"].isEnabled)
-        captureScreen(app, named: "New conversation opens the existing empty chat")
+        let prompt = app.staticTexts["task.prompt"]
+        let folder = app.buttons["task.folder"]
+        let environment = app.buttons["task.environment"]
+        let emptyChat = app.scrollViews["task.empty"]
+        XCTAssertTrue(prompt.waitForExistence(timeout: 10))
+        XCTAssertTrue(folder.isHittable)
+        XCTAssertTrue(environment.isHittable)
+        XCTAssertLessThan(prompt.frame.maxY, folder.frame.minY)
+        XCTAssertLessThan(folder.frame.maxY, environment.frame.minY)
+        XCTAssertLessThan(environment.frame.maxY, input.frame.minY)
+        XCTAssertEqual(folder.frame.midX, emptyChat.frame.midX, accuracy: 2)
+        XCTAssertEqual(environment.frame.midX, emptyChat.frame.midX, accuracy: 2)
+        XCTAssertEqual((prompt.frame.minY + environment.frame.maxY) / 2, emptyChat.frame.midY, accuracy: 8)
+        captureScreen(app, named: "New conversation centers the prompt project and environment above composer")
         app.navigationBars.buttons.element(boundBy: 0).tap()
         XCTAssertTrue(app.descendants(matching: .any)["tasks.list"].waitForExistence(timeout: 10))
         try startSimulatorConversation(app, promptText: "[success] [immediate] Start the simulator conversation")

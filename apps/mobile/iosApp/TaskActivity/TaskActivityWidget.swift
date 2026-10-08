@@ -27,7 +27,7 @@ private struct BexTaskActivity: Widget {
             let view = context.state.display.current
             return DynamicIsland {
                 DynamicIslandExpandedRegion(.leading) {
-                    Text("Bex").font(.headline)
+                    Text("bex").font(.headline)
                 }
                 DynamicIslandExpandedRegion(.trailing) {
                     Text("\(view.total)件").font(.caption)

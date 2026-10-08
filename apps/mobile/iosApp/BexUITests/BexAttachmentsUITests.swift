@@ -18,7 +18,7 @@ extension BexLaunchUITests {
         folder.tap()
         app.buttons["検証プロジェクト"].tap()
         XCTAssertEqual(folder.label, "フォルダ: 検証プロジェクト")
-        captureScreen(app, named: "New chat environment and folder above composer")
+        captureScreen(app, named: "New chat project and environment in the centered prompt")
         let removals = app.buttons.matching(NSPredicate(format: "label ENDSWITH %@", "を外す"))
         selectPhotos(["写真"], in: app)
         app.buttons["Cancel"].tap()
@@ -166,7 +166,7 @@ extension BexLaunchUITests {
             if onPhone.waitForExistence(timeout: 3) {
                 onPhone.tap()
             }
-            let folder = app.staticTexts["Bex"]
+            let folder = app.staticTexts["bex"]
             if folder.waitForExistence(timeout: 3) {
                 folder.tap()
             }

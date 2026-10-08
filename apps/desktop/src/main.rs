@@ -99,7 +99,7 @@ fn open_main_window(cx: &mut App) {
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 titlebar: Some(TitlebarOptions {
-                    title: Some("Bex".into()),
+                    title: Some("bex".into()),
                     appears_transparent: true,
                     traffic_light_position: Some(point(
                         px(14.),

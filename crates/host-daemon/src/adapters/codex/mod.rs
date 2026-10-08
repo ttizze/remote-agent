@@ -72,6 +72,7 @@ fn unmaterialized_history(code: Option<&str>, message: &str, thread_id: &str) ->
 
 pub struct Codex {
     accounts: Arc<tokio::sync::Mutex<Option<crate::adapters::codex::accounts::Accounts>>>,
+    list_access: tokio::sync::Semaphore,
     restoration_error: tokio::sync::watch::Sender<Option<String>>,
     directory: PathBuf,
     instance: uuid::Uuid,
@@ -123,6 +124,7 @@ impl Codex {
             });
         Self {
             accounts: Arc::default(),
+            list_access: tokio::sync::Semaphore::new(4),
             restoration_error: tokio::sync::watch::channel(None).0,
             directory,
             instance: uuid::Uuid::new_v4(),
@@ -628,6 +630,12 @@ impl Agent for Codex {
         cursor: Option<String>,
         ancestor: Option<&str>,
     ) -> Result<SessionPage, Failure> {
+        // Share native list admission across all clients, including agent fleets.
+        let _listing = self
+            .list_access
+            .acquire()
+            .await
+            .expect("list access is open");
         let page: Page<Value> = self
             .request(
                 "thread/list",
