@@ -6,8 +6,12 @@
 //! the caller remains on the stale/observed-power contract instead of
 //! inferring suspend from elapsed time.
 
-use std::time::Duration;
-use tokio::sync::mpsc;
+use std::{
+    collections::VecDeque,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
+use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
 const LIFECYCLE_BUFFER: usize = 8;
@@ -36,20 +40,101 @@ impl SuspendLifecycleEvent {
     }
 }
 
+struct LifecycleMailboxState {
+    events: VecDeque<SuspendLifecycleEvent>,
+    closed: bool,
+}
+
+struct LifecycleMailbox {
+    capacity: usize,
+    state: Mutex<LifecycleMailboxState>,
+    notify: Notify,
+}
+
+impl LifecycleMailbox {
+    fn new(capacity: usize) -> Arc<Self> {
+        Arc::new(Self {
+            capacity: capacity.max(1),
+            state: Mutex::new(LifecycleMailboxState {
+                events: VecDeque::new(),
+                closed: false,
+            }),
+            notify: Notify::new(),
+        })
+    }
+
+    fn publish(&self, event: SuspendLifecycleEvent) -> bool {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        if state.closed {
+            return false;
+        }
+        if state.events.back() == Some(&event) {
+            return true;
+        }
+        if state.events.len() >= self.capacity {
+            state.events.pop_front();
+        }
+        state.events.push_back(event);
+        drop(state);
+        self.notify.notify_one();
+        true
+    }
+
+    fn take(&self) -> Option<SuspendLifecycleEvent> {
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .events
+            .pop_front()
+    }
+
+    fn close(&self) {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        state.closed = true;
+        drop(state);
+        self.notify.notify_waiters();
+    }
+
+    fn is_closed(&self) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .closed
+    }
+
+    async fn recv(&self, stop: &CancellationToken) -> Option<SuspendLifecycleEvent> {
+        loop {
+            let notified = self.notify.notified();
+            if self.is_closed() || stop.is_cancelled() {
+                return None;
+            }
+            if let Some(event) = self.take() {
+                return Some(event);
+            }
+            tokio::select! {
+                _ = stop.cancelled() => return None,
+                _ = notified => {}
+            }
+        }
+    }
+}
+
 pub(crate) struct SuspendLifecycleSource {
-    events: mpsc::Receiver<SuspendLifecycleEvent>,
+    mailbox: Arc<LifecycleMailbox>,
     stop: CancellationToken,
     task: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl SuspendLifecycleSource {
     pub(crate) fn start(owner_stop: &CancellationToken) -> Self {
-        let (sender, events) = mpsc::channel(LIFECYCLE_BUFFER);
+        let mailbox = LifecycleMailbox::new(LIFECYCLE_BUFFER);
+        let run_mailbox = mailbox.clone();
+        let close_mailbox = mailbox.clone();
         let stop = CancellationToken::new();
         let task_stop = stop.clone();
         let owner_stop = owner_stop.clone();
         let task = tokio::spawn(async move {
-            let run = run_platform_source(sender, task_stop.clone());
+            let run = run_platform_source(run_mailbox, task_stop.clone());
             tokio::pin!(run);
             tokio::select! {
                 _ = owner_stop.cancelled() => {
@@ -58,19 +143,21 @@ impl SuspendLifecycleSource {
                 }
                 _ = &mut run => {}
             }
+            close_mailbox.close();
         });
         Self {
-            events,
+            mailbox,
             stop,
             task: Some(task),
         }
     }
 
     pub(crate) async fn recv(&mut self) -> Option<SuspendLifecycleEvent> {
-        self.events.recv().await
+        self.mailbox.recv(&self.stop).await
     }
 
     pub(crate) async fn shutdown(&mut self) {
+        self.mailbox.close();
         self.stop.cancel();
         if let Some(task) = self.task.take() {
             let _ = task.await;
@@ -80,26 +167,27 @@ impl SuspendLifecycleSource {
 
 impl Drop for SuspendLifecycleSource {
     fn drop(&mut self) {
+        self.mailbox.close();
         self.stop.cancel();
     }
 }
 
-async fn run_platform_source(sender: mpsc::Sender<SuspendLifecycleEvent>, stop: CancellationToken) {
+async fn run_platform_source(mailbox: Arc<LifecycleMailbox>, stop: CancellationToken) {
     #[cfg(target_os = "linux")]
     {
-        run_linux_suspend_lifecycle_source(sender, stop).await;
+        run_linux_suspend_lifecycle_source(mailbox, stop).await;
         return;
     }
 
     #[cfg(target_os = "macos")]
     {
-        run_macos_suspend_lifecycle_source(sender, stop).await;
+        run_macos_suspend_lifecycle_source(mailbox, stop).await;
         return;
     }
 
     #[cfg(target_os = "windows")]
     {
-        run_windows_suspend_lifecycle_source(sender, stop).await;
+        run_windows_suspend_lifecycle_source(mailbox, stop).await;
         return;
     }
 
@@ -109,35 +197,22 @@ async fn run_platform_source(sender: mpsc::Sender<SuspendLifecycleEvent>, stop: 
     }
 }
 
-async fn send_lifecycle_event(
-    sender: &mpsc::Sender<SuspendLifecycleEvent>,
+fn send_lifecycle_event(
+    mailbox: &LifecycleMailbox,
     stop: &CancellationToken,
     event: SuspendLifecycleEvent,
-    last: &mut Option<SuspendLifecycleEvent>,
 ) -> bool {
-    if *last == Some(event) {
-        return true;
-    }
-    if tokio::select! {
-        _ = stop.cancelled() => false,
-        result = sender.send(event) => result.is_ok(),
-    } {
-        *last = Some(event);
-        true
-    } else {
-        false
-    }
+    !stop.is_cancelled() && mailbox.publish(event)
 }
 
 #[cfg(target_os = "linux")]
 async fn run_linux_suspend_lifecycle_source(
-    sender: mpsc::Sender<SuspendLifecycleEvent>,
+    mailbox: Arc<LifecycleMailbox>,
     stop: CancellationToken,
 ) {
     use futures_util::StreamExt;
 
     const RETRY: Duration = Duration::from_secs(30);
-    let mut last = None;
     loop {
         if stop.is_cancelled() {
             return;
@@ -197,7 +272,7 @@ async fn run_linux_suspend_lifecycle_source(
                             } else {
                                 SuspendLifecycleEvent::Resumed
                             };
-                            if !send_lifecycle_event(&sender, &stop, event, &mut last).await {
+                            if !send_lifecycle_event(&mailbox, &stop, event) {
                                 return;
                             }
                         }
@@ -216,7 +291,7 @@ async fn run_linux_suspend_lifecycle_source(
 
 #[cfg(target_os = "macos")]
 async fn run_macos_suspend_lifecycle_source(
-    sender: mpsc::Sender<SuspendLifecycleEvent>,
+    mailbox: Arc<LifecycleMailbox>,
     stop: CancellationToken,
 ) {
     const RETRY: Duration = Duration::from_secs(30);
@@ -225,9 +300,9 @@ async fn run_macos_suspend_lifecycle_source(
             return;
         }
         let watcher_stop = stop.clone();
-        let watcher_sender = sender.clone();
+        let watcher_mailbox = mailbox.clone();
         let watcher = tokio::task::spawn_blocking(move || {
-            run_macos_power_watcher(watcher_sender, watcher_stop);
+            run_macos_power_watcher(watcher_mailbox, watcher_stop);
         });
         let _ = watcher.await;
         tokio::select! {
@@ -238,7 +313,7 @@ async fn run_macos_suspend_lifecycle_source(
 }
 
 #[cfg(target_os = "macos")]
-fn run_macos_power_watcher(event_tx: mpsc::Sender<SuspendLifecycleEvent>, stop: CancellationToken) {
+fn run_macos_power_watcher(mailbox: Arc<LifecycleMailbox>, stop: CancellationToken) {
     use std::{ffi::c_void, ptr};
 
     type IoObject = u32;
@@ -250,9 +325,8 @@ fn run_macos_power_watcher(event_tx: mpsc::Sender<SuspendLifecycleEvent>, stop: 
 
     #[repr(C)]
     struct CallbackContext {
-        event_tx: mpsc::Sender<SuspendLifecycleEvent>,
+        mailbox: Arc<LifecycleMailbox>,
         root_port: IoConnect,
-        last_event: Option<SuspendLifecycleEvent>,
     }
 
     unsafe extern "C" fn callback(
@@ -266,22 +340,14 @@ fn run_macos_power_watcher(event_tx: mpsc::Sender<SuspendLifecycleEvent>, stop: 
             MAC_MESSAGE_CAN_SLEEP | MAC_MESSAGE_WILL_SLEEP => {
                 if message_type == MAC_MESSAGE_WILL_SLEEP {
                     let event = SuspendLifecycleEvent::Suspended;
-                    if context.last_event != Some(event)
-                        && context.event_tx.blocking_send(event).is_ok()
-                    {
-                        context.last_event = Some(event);
-                    }
+                    let _ = context.mailbox.publish(event);
                 }
                 let _ =
                     IOAllowPowerChange(context.root_port, mac_notification_id(message_argument));
             }
             MAC_MESSAGE_HAS_POWERED_ON => {
                 let event = SuspendLifecycleEvent::Resumed;
-                if context.last_event != Some(event)
-                    && context.event_tx.blocking_send(event).is_ok()
-                {
-                    context.last_event = Some(event);
-                }
+                let _ = context.mailbox.publish(event);
             }
             _ => {}
         }
@@ -291,9 +357,8 @@ fn run_macos_power_watcher(event_tx: mpsc::Sender<SuspendLifecycleEvent>, stop: 
         let mut notify_port: NotificationPort = ptr::null_mut();
         let mut notifier: IoObject = 0;
         let context = Box::new(CallbackContext {
-            event_tx,
+            mailbox,
             root_port: 0,
-            last_event: None,
         });
         let context_ptr = Box::into_raw(context);
         let root_port = IORegisterForSystemPower(
@@ -369,7 +434,7 @@ fn run_macos_power_watcher(event_tx: mpsc::Sender<SuspendLifecycleEvent>, stop: 
 
 #[cfg(target_os = "windows")]
 async fn run_windows_suspend_lifecycle_source(
-    sender: mpsc::Sender<SuspendLifecycleEvent>,
+    mailbox: Arc<LifecycleMailbox>,
     stop: CancellationToken,
 ) {
     const RETRY: Duration = Duration::from_secs(30);
@@ -378,9 +443,9 @@ async fn run_windows_suspend_lifecycle_source(
             return;
         }
         let watcher_stop = stop.clone();
-        let watcher_sender = sender.clone();
+        let watcher_mailbox = mailbox.clone();
         let watcher = tokio::task::spawn_blocking(move || {
-            run_windows_power_watcher(watcher_sender, watcher_stop);
+            run_windows_power_watcher(watcher_mailbox, watcher_stop);
         });
         let _ = watcher.await;
         tokio::select! {
@@ -390,11 +455,22 @@ async fn run_windows_suspend_lifecycle_source(
     }
 }
 
+#[cfg(any(target_os = "windows", test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WindowsMessageLoopExit {
+    Quit,
+    Error,
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn shutdown_windows_message_loop(exit: WindowsMessageLoopExit, watcher_stop: &CancellationToken) {
+    match exit {
+        WindowsMessageLoopExit::Quit | WindowsMessageLoopExit::Error => watcher_stop.cancel(),
+    }
+}
+
 #[cfg(target_os = "windows")]
-fn run_windows_power_watcher(
-    event_tx: mpsc::Sender<SuspendLifecycleEvent>,
-    stop: CancellationToken,
-) {
+fn run_windows_power_watcher(mailbox: Arc<LifecycleMailbox>, stop: CancellationToken) {
     // The worker owns a message-only HWND and registers that HWND with the
     // power manager.  The message loop is the documented Windows power
     // notification source; no idle-frequency heuristic is involved.
@@ -417,8 +493,7 @@ fn run_windows_power_watcher(
     };
 
     struct WindowContext {
-        event_tx: mpsc::Sender<SuspendLifecycleEvent>,
-        last_event: Option<SuspendLifecycleEvent>,
+        mailbox: Arc<LifecycleMailbox>,
     }
     const CLASS_NAME: [u16; 17] = [
         82, 101, 109, 111, 116, 101, 65, 103, 101, 110, 116, 80, 111, 119, 101, 114, 0,
@@ -451,11 +526,7 @@ fn run_windows_power_watcher(
                         SuspendLifecycleEvent::Resumed
                     };
                     let context = &mut *context;
-                    if context.last_event != Some(event)
-                        && context.event_tx.blocking_send(event).is_ok()
-                    {
-                        context.last_event = Some(event);
-                    }
+                    let _ = context.mailbox.publish(event);
                 }
             }
             return 1;
@@ -482,10 +553,7 @@ fn run_windows_power_watcher(
             ..mem::zeroed()
         };
         let _ = RegisterClassW(&class);
-        let context = Box::new(WindowContext {
-            event_tx,
-            last_event: None,
-        });
+        let context = Box::new(WindowContext { mailbox });
         let window = CreateWindowExW(
             0,
             CLASS_NAME.as_ptr(),
@@ -513,16 +581,28 @@ fn run_windows_power_watcher(
         }
         let mut message = MSG::default();
         PeekMessageW(&mut message, ptr::null_mut(), 0, 0, PM_NOREMOVE);
+        let watcher_stop = CancellationToken::new();
+        let helper_stop = watcher_stop.clone();
+        let parent_stop = stop.clone();
         let stop_thread = std::thread::spawn(move || {
-            while !stop.is_cancelled() {
+            while !parent_stop.is_cancelled() && !helper_stop.is_cancelled() {
                 std::thread::sleep(Duration::from_millis(10));
             }
+            helper_stop.cancel();
             let _ = PostThreadMessageW(thread_id, WM_QUIT, 0, 0);
         });
-        while GetMessageW(&mut message, ptr::null_mut(), 0, 0) > 0 {
-            TranslateMessage(&message);
-            DispatchMessageW(&message);
-        }
+        let message_loop_exit = loop {
+            let status = GetMessageW(&mut message, ptr::null_mut(), 0, 0);
+            if status > 0 {
+                TranslateMessage(&message);
+                DispatchMessageW(&message);
+            } else if status == 0 {
+                break WindowsMessageLoopExit::Quit;
+            } else {
+                break WindowsMessageLoopExit::Error;
+            }
+        };
+        shutdown_windows_message_loop(message_loop_exit, &watcher_stop);
         let _ = stop_thread.join();
         UnregisterSuspendResumeNotification(registration);
         DestroyWindow(window);
@@ -551,39 +631,76 @@ mod tests {
         assert_eq!(mac_notification_id(raw), 0x1234isize);
     }
 
+    #[test]
+    fn lifecycle_channel_coalesces_duplicates_without_dropping_wake() {
+        let mailbox = LifecycleMailbox::new(2);
+        let stop = CancellationToken::new();
+        assert!(send_lifecycle_event(
+            &mailbox,
+            &stop,
+            SuspendLifecycleEvent::Suspended,
+        ));
+        assert!(send_lifecycle_event(
+            &mailbox,
+            &stop,
+            SuspendLifecycleEvent::Suspended,
+        ));
+        assert!(send_lifecycle_event(
+            &mailbox,
+            &stop,
+            SuspendLifecycleEvent::Resumed,
+        ));
+        assert_eq!(mailbox.take(), Some(SuspendLifecycleEvent::Suspended));
+        assert_eq!(mailbox.take(), Some(SuspendLifecycleEvent::Resumed));
+    }
+
+    #[test]
+    fn saturated_callback_keeps_latest_alternating_state_without_blocking() {
+        let mailbox = LifecycleMailbox::new(2);
+        let producer_mailbox = mailbox.clone();
+        std::thread::spawn(move || {
+            assert!(producer_mailbox.publish(SuspendLifecycleEvent::Suspended));
+            assert!(producer_mailbox.publish(SuspendLifecycleEvent::Resumed));
+            assert!(producer_mailbox.publish(SuspendLifecycleEvent::Suspended));
+        })
+        .join()
+        .expect("saturated callback producer blocked");
+        assert_eq!(mailbox.take(), Some(SuspendLifecycleEvent::Resumed));
+        assert_eq!(mailbox.take(), Some(SuspendLifecycleEvent::Suspended));
+    }
+
+    #[test]
+    fn startup_failure_closes_callback_sink_without_waiting_for_a_reader() {
+        let mailbox = LifecycleMailbox::new(LIFECYCLE_BUFFER);
+        mailbox.close();
+        assert!(!mailbox.publish(SuspendLifecycleEvent::Suspended));
+    }
+
+    #[test]
+    fn message_loop_error_cancels_only_the_watcher_stop() {
+        let owner_stop = CancellationToken::new();
+        let watcher_stop = CancellationToken::new();
+        let helper_stop = watcher_stop.clone();
+        let helper = std::thread::spawn(move || {
+            while !helper_stop.is_cancelled() {
+                std::thread::yield_now();
+            }
+        });
+        shutdown_windows_message_loop(WindowsMessageLoopExit::Error, &watcher_stop);
+        assert!(watcher_stop.is_cancelled());
+        assert!(!owner_stop.is_cancelled());
+        helper.join().expect("watcher helper did not stop");
+    }
+
     #[tokio::test]
-    async fn lifecycle_channel_coalesces_duplicates_without_dropping_wake() {
-        let (sender, mut events) = mpsc::channel(2);
-        let mut last = None;
-        assert!(
-            send_lifecycle_event(
-                &sender,
-                &CancellationToken::new(),
-                SuspendLifecycleEvent::Suspended,
-                &mut last,
-            )
-            .await
-        );
-        assert!(
-            send_lifecycle_event(
-                &sender,
-                &CancellationToken::new(),
-                SuspendLifecycleEvent::Suspended,
-                &mut last,
-            )
-            .await
-        );
-        assert!(
-            send_lifecycle_event(
-                &sender,
-                &CancellationToken::new(),
-                SuspendLifecycleEvent::Resumed,
-                &mut last,
-            )
-            .await
-        );
-        assert_eq!(events.recv().await, Some(SuspendLifecycleEvent::Suspended));
-        assert_eq!(events.recv().await, Some(SuspendLifecycleEvent::Resumed));
+    async fn no_reader_shutdown_closes_a_saturated_callback_mailbox() {
+        let mailbox = LifecycleMailbox::new(2);
+        assert!(mailbox.publish(SuspendLifecycleEvent::Suspended));
+        assert!(mailbox.publish(SuspendLifecycleEvent::Resumed));
+        mailbox.close();
+        let stop = CancellationToken::new();
+        assert_eq!(mailbox.recv(&stop).await, None);
+        assert!(!mailbox.publish(SuspendLifecycleEvent::Suspended));
     }
 
     #[tokio::test]
