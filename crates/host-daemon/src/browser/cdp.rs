@@ -276,10 +276,17 @@ impl Chrome {
         self.call(None, "Target.closeTarget", json!({"targetId":target}))
             .await
             .map(|_| {
-                if let Some(session) = self.sessions.remove(target) {
-                    self.dialogs.remove(&session);
-                }
+                self.forget_target(target);
             })
+    }
+
+    /// Forget a target after Chrome has detached it externally.  No CDP
+    /// command can be sent in that case, but the shared Host page must stop
+    /// reusing the dead session on its next frame or input request.
+    pub fn forget_target(&mut self, target: &str) {
+        if let Some(session) = self.sessions.remove(target) {
+            self.dialogs.remove(&session);
+        }
     }
     pub fn dialog(&self, session: &str) -> Option<BrowserDialog> {
         self.dialogs.get(session).cloned()
