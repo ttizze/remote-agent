@@ -1,5 +1,6 @@
 //! Host-owned background policy, power probes, local resource samples, and
 //! trace diagnostics.  The domain crate supplies all decisions and views.
+use crate::power_events::next_suspend_lifecycle_event;
 use agent_domain::{
     BackgroundActivityPolicy, BackgroundPolicySnapshot, BackgroundScope, BackgroundBooleanState,
     HostPowerSnapshot, HostPowerSource, ResourceAggregate,
@@ -46,34 +47,98 @@ fn unknown_power(at: Timestamp) -> HostPowerSnapshot {
     HostPowerSnapshot::unknown(at)
 }
 
+fn native_power_source() -> HostPowerSource {
+    #[cfg(target_os = "linux")]
+    {
+        HostPowerSource::NodeLinux
+    }
+    #[cfg(target_os = "macos")]
+    {
+        HostPowerSource::NodeMacosNative
+    }
+    #[cfg(target_os = "windows")]
+    {
+        HostPowerSource::NodeWindows
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    {
+        HostPowerSource::Unknown
+    }
+}
+
 /// Semantic host-power state.  Idle seconds are retained in the snapshot but
 /// do not cause a policy publication by themselves.
 pub(crate) struct HostPowerMonitor {
-    latest: RwLock<HostPowerSnapshot>,
+    state: RwLock<HostPowerMonitorState>,
+}
+
+struct HostPowerMonitorState {
+    latest: HostPowerSnapshot,
+    /// A suspend/resume notification is authoritative until the matching
+    /// notification arrives.  Native samples may continue while a machine is
+    /// waking, but must not turn a real suspend notification into an awake
+    /// state before the OS reports resume.
+    lifecycle_suspended: Option<bool>,
 }
 impl HostPowerMonitor {
     fn new() -> Self {
         Self {
-            latest: RwLock::new(unknown_power(now())),
+            state: RwLock::new(HostPowerMonitorState {
+                latest: unknown_power(now()),
+                lifecycle_suspended: None,
+            }),
         }
     }
 
     async fn snapshot(&self) -> HostPowerSnapshot {
-        self.latest.read().await.clone()
+        self.state.read().await.latest.clone()
     }
 
-    async fn report(&self, next: HostPowerSnapshot) -> bool {
-        let mut latest = self.latest.write().await;
-        if next.updated_at < latest.updated_at {
+    async fn report(&self, mut next: HostPowerSnapshot) -> bool {
+        let mut state = self.state.write().await;
+        if next.updated_at < state.latest.updated_at {
             return false;
         }
-        if latest.same_state(&next) {
-            if next.updated_at > latest.updated_at {
-                *latest = next;
+        if let Some(suspended) = state.lifecycle_suspended {
+            next.suspended = suspended;
+        }
+        if state.latest.same_state(&next) {
+            if next.updated_at > state.latest.updated_at {
+                state.latest = next;
             }
             return false;
         }
-        *latest = next;
+        state.latest = next;
+        true
+    }
+
+    async fn report_lifecycle(&self, suspended: bool) -> bool {
+        self.report_lifecycle_at(suspended, now()).await
+    }
+
+    async fn report_lifecycle_at(&self, suspended: bool, updated_at: Timestamp) -> bool {
+        let mut state = self.state.write().await;
+        if updated_at < state.latest.updated_at {
+            return false;
+        }
+        state.lifecycle_suspended = Some(suspended);
+        let mut next = state.latest.clone();
+        if matches!(
+            next.source,
+            HostPowerSource::Unknown
+                | HostPowerSource::DesktopMain
+                | HostPowerSource::ElectronMain
+        ) {
+            next.source = native_power_source();
+        }
+        next.suspended = suspended;
+        next.stale = false;
+        next.updated_at = updated_at;
+        if state.latest.same_state(&next) {
+            state.latest = next;
+            return false;
+        }
+        state.latest = next;
         true
     }
 }
@@ -240,7 +305,7 @@ impl ResourceOwner {
         let groups = resource_groups(&processes, &state.lifecycle);
         let speed_limit_percent = power.speed_limit_percent.map(f64::from);
         let snapshot = ResourceTelemetrySnapshot {
-            read_at: sampled_at,
+            read_at: sampled_at.clone(),
             sample_interval_ms: 5_000,
             processes,
             groups,
@@ -1685,11 +1750,27 @@ impl BackgroundOwner {
             let mut interval = tokio::time::interval(Duration::from_secs(15));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             let mut next_power_sample_ms = now().millis();
+            let mut suspend_event = Box::pin(next_suspend_lifecycle_event(&stop));
             loop {
                 tokio::select! {
                     _ = stop.cancelled() => {
                         probe_stop.cancel();
                         return;
+                    },
+                    event = &mut suspend_event => {
+                        let Some(owner) = owner.upgrade() else {
+                            probe_stop.cancel();
+                            return;
+                        };
+                        let Some(event) = event else {
+                            probe_stop.cancel();
+                            return;
+                        };
+                        let _mutation = owner.mutation.lock().await;
+                        if owner.power.report_lifecycle(event.suspended()).await {
+                            let _ = owner.publish().await;
+                        }
+                        suspend_event = Box::pin(next_suspend_lifecycle_event(&stop));
                     },
                     _ = interval.tick() => {
                         let Some(owner) = owner.upgrade() else { return; };
@@ -1795,7 +1876,7 @@ async fn stop_power_command(child: &mut tokio::process::Child) {
 async fn finish_power_reader(
     reader: &mut tokio::task::JoinHandle<Option<Vec<u8>>>,
 ) -> Option<Vec<u8>> {
-    match tokio::time::timeout(POWER_COMMAND_TIMEOUT, reader).await {
+    match tokio::time::timeout(POWER_COMMAND_TIMEOUT, &mut *reader).await {
         Ok(Ok(output)) => output,
         Ok(Err(_)) | Err(_) => {
             reader.abort();
@@ -2311,6 +2392,64 @@ mod tests {
         assert_eq!(monitor.snapshot().await.updated_at, heartbeat_at);
         assert!(!monitor.report(HostPowerSnapshot { locked: BackgroundBooleanState::True, updated_at: Timestamp::from_millis(at.millis() - 1).unwrap(), ..initial.clone() }).await);
         assert_eq!(monitor.snapshot().await.locked, BackgroundBooleanState::Unknown);
+    }
+
+    #[tokio::test]
+    async fn lifecycle_events_are_authoritative_until_a_matching_resume() {
+        let monitor = HostPowerMonitor::new();
+        let at = now();
+        let initial = HostPowerSnapshot {
+            source: native_power_source(),
+            stale: false,
+            updated_at: at.clone(),
+            ..unknown_power(at.clone())
+        };
+        assert!(monitor.report(initial).await);
+
+        let suspended_at = Timestamp::from_millis(at.millis() + 1).unwrap();
+        assert!(monitor.report_lifecycle_at(true, suspended_at.clone()).await);
+        let suspended = monitor.snapshot().await;
+        assert!(suspended.suspended);
+        assert!(!suspended.stale);
+        assert!(host_power_constrained(
+            &suspended,
+            &BackgroundActivityPolicy::preset(BackgroundActivityProfile::Balanced),
+        ));
+
+        let awake_sample = HostPowerSnapshot {
+            source: native_power_source(),
+            stale: false,
+            suspended: false,
+            updated_at: Timestamp::from_millis(suspended_at.millis() + 1).unwrap(),
+            ..unknown_power(suspended_at.clone())
+        };
+        assert!(!monitor.report(awake_sample).await);
+        assert!(monitor.snapshot().await.suspended);
+
+        assert!(monitor
+            .report_lifecycle_at(
+                false,
+                Timestamp::from_millis(suspended_at.millis() + 2).unwrap(),
+            )
+            .await);
+        let resumed = monitor.snapshot().await;
+        assert!(!resumed.suspended);
+        assert!(!resumed.stale);
+    }
+
+    #[tokio::test]
+    async fn owner_stop_cancels_the_lifecycle_source() {
+        let directory = tempfile::tempdir().unwrap();
+        let owner = BackgroundOwner::new(directory.path().to_owned());
+        let stop = CancellationToken::new();
+        let mut task = owner.spawn(stop.clone());
+        stop.cancel();
+        let result = tokio::time::timeout(Duration::from_secs(2), &mut task)
+            .await
+            .expect("background owner did not stop")
+            .expect("background owner task failed");
+        assert_eq!(result, ());
+        assert!(owner.probe_stop.is_cancelled());
     }
 
     #[tokio::test]
