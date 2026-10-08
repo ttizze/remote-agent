@@ -1,13 +1,52 @@
 //! Provider-neutral awareness projection exposed to native clients.
 use agent_domain::{
-    ACTIVITY_OVERVIEW_DEEP_LINK, activity_content_state_json, activity_delivery_decision,
-    activity_display_expiry_at_ms, activity_expiry_is_due, activity_message_is_fresh,
-    activity_timestamp_millis, aggregate_activity_content_states_json,
+    ACTIVITY_OVERVIEW_DEEP_LINK, ActivityDeepLink, activity_content_state_json,
+    activity_delivery_decision, activity_display_expiry_at_ms, activity_expiry_is_due,
+    activity_message_is_fresh, activity_notification_deep_link, activity_thread_deep_link,
+    activity_timestamp_millis, aggregate_activity_content_states_json, parse_activity_deep_link,
 };
+
+#[derive(uniffi::Record)]
+pub struct ActivityThreadTarget {
+    pub environment_id: String,
+    pub thread_id: String,
+}
 
 #[uniffi::export]
 pub fn agent_activity_overview_deep_link() -> String {
     ACTIVITY_OVERVIEW_DEEP_LINK.into()
+}
+
+#[uniffi::export]
+pub fn agent_activity_thread_deep_link(environment_id: String, thread_id: String) -> String {
+    activity_thread_deep_link(&environment_id, &thread_id)
+}
+
+#[uniffi::export]
+pub fn agent_activity_thread_target(value: String) -> Option<ActivityThreadTarget> {
+    match parse_activity_deep_link(&value)? {
+        ActivityDeepLink::Thread {
+            environment_id,
+            thread_id,
+        } => Some(ActivityThreadTarget {
+            environment_id,
+            thread_id,
+        }),
+        ActivityDeepLink::Overview => None,
+    }
+}
+
+#[uniffi::export]
+pub fn agent_activity_notification_deep_link(
+    value: Option<String>,
+    environment_id: Option<String>,
+    thread_id: Option<String>,
+) -> Option<String> {
+    activity_notification_deep_link(
+        value.as_deref(),
+        environment_id.as_deref(),
+        thread_id.as_deref(),
+    )
 }
 
 /// Projects source awareness records into the exact ActivityKit/ongoing

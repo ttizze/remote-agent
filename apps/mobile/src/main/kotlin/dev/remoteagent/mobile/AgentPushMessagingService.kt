@@ -11,6 +11,7 @@ import com.google.firebase.messaging.RemoteMessage
 import dev.remoteagent.core.agentActivityDeliveryDecision
 import dev.remoteagent.core.agentActivityExpiryIsDue
 import dev.remoteagent.core.agentActivityMessageIsFresh
+import dev.remoteagent.core.agentActivityNotificationDeepLink
 import dev.remoteagent.core.agentActivityTimestampMillis
 import dev.remoteagent.core.agentActivityWidgetJson
 import dev.remoteagent.core.aggregateAgentActivityContentStatesJson
@@ -636,8 +637,7 @@ internal class AgentPushMessagingService : FirebaseMessagingService() {
     override fun onMessageReceived(message: RemoteMessage) {
         if (!FirebasePushBootstrap.ensure(this)) return
         val data = message.data
-        val deepLink =
-            data["deepLink"]?.takeIf(String::isNotBlank) ?: threadDeepLink(data["environmentId"], data["threadId"])
+        val deepLink = agentActivityNotificationDeepLink(data["deepLink"], data["environmentId"], data["threadId"])
         val title = message.notification?.title ?: data["alertTitle"] ?: data["headline"] ?: "Agent activity"
         val body =
             message.notification?.body ?: data["alertBody"] ?: data["detail"] ?: data["threadTitle"] ?: "Agent update"
@@ -679,20 +679,11 @@ internal class AgentPushMessagingService : FirebaseMessagingService() {
                     }
             val alertDeepLink =
                 if (data.containsKey("alertDeepLink")) {
-                    data["alertDeepLink"]?.takeIf(String::isNotBlank)
+                    agentActivityNotificationDeepLink(data["alertDeepLink"], null, null)
                 } else {
                     deepLink
                 }
             PushNotificationCenter.show(this, title, body, alertDeepLink, alertKey, deduplicate = true)
         }
     }
-
-    private fun threadDeepLink(environment: String?, thread: String?): String? =
-        if (environment.isNullOrBlank() || thread.isNullOrBlank()) null
-        else {
-            val encode = { value: String ->
-                java.net.URLEncoder.encode(value, Charsets.UTF_8.name()).replace("+", "%20")
-            }
-            "remoteagent://threads/${encode(environment)}/${encode(thread)}"
-        }
 }

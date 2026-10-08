@@ -34,8 +34,8 @@ extension BexAppViewModel {
                 phase: activity.phase,
                 headline: activity.headline,
                 updatedAtMs: activity.updatedAtMs,
-                deepLink: AgentPushCenter.threadDeepLink(
-                    hostId: environment,
+                deepLink: AgentCore.agentActivityThreadDeepLink(
+                    environmentId: environment,
                     threadId: activity.threadId
                 )
             )
@@ -82,7 +82,7 @@ extension BexAppViewModel {
         guard screen == .thread, let host = selectedProfileId, let thread = selectedThreadId else {
             return nil
         }
-        return AgentPushCenter.threadDeepLink(hostId: host, threadId: thread)
+        return AgentCore.agentActivityThreadDeepLink(environmentId: host, threadId: thread)
     }
 
     func openPushThread(hostId: String, threadId: String) {

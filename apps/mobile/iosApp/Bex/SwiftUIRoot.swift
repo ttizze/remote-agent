@@ -47,8 +47,8 @@ struct BexSwiftUIRoot: View {
                 model.openActivityOverviewDeepLink()
             } else if AgentPushCenter.isUsageDeepLink(value) {
                 model.openUsageDeepLink()
-            } else if let target = AgentPushCenter.threadTarget(from: value) {
-                model.openPushThread(hostId: target.hostId, threadId: target.threadId)
+            } else if let target = AgentCore.agentActivityThreadTarget(value: value) {
+                model.openPushThread(hostId: target.environmentId, threadId: target.threadId)
             } else {
                 model.handleSurfaceURL($0)
             }
@@ -95,8 +95,8 @@ struct BexSwiftUIRoot: View {
             model.openUsageDeepLink()
             return
         }
-        guard let target = AgentPushCenter.threadTarget(from: value) else { return }
-        model.openPushThread(hostId: target.hostId, threadId: target.threadId)
+        guard let target = AgentCore.agentActivityThreadTarget(value: value) else { return }
+        model.openPushThread(hostId: target.environmentId, threadId: target.threadId)
     }
 }
 

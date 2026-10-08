@@ -185,10 +185,10 @@ extension BexAppViewModel {
             openActivityOverviewDeepLink()
             return
         }
-        guard let target = AgentPushCenter.threadTarget(from: route) else { return }
+        guard let target = AgentCore.agentActivityThreadTarget(value: route) else { return }
         notificationThreadRoute = nil
         notice = nil
-        openPushThread(hostId: target.hostId, threadId: target.threadId)
+        openPushThread(hostId: target.environmentId, threadId: target.threadId)
     }
 
     /// Saves the model preferences every Host shares; the store writes its own state.

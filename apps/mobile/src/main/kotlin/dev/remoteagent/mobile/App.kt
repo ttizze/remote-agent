@@ -26,6 +26,8 @@ import dev.remoteagent.core.ShareContent
 import dev.remoteagent.core.Snapshot
 import dev.remoteagent.core.ThreadListOptions
 import dev.remoteagent.core.agentActivityOverviewDeepLink
+import dev.remoteagent.core.agentActivityThreadDeepLink
+import dev.remoteagent.core.agentActivityThreadTarget
 import dev.remoteagent.core.appendArtifactTemplateUsePrompt
 import dev.remoteagent.core.environmentProjectRows as buildEnvironmentProjectRows
 import dev.remoteagent.core.environmentSettings as buildEnvironmentSettings
@@ -94,7 +96,6 @@ private const val BACKGROUND_RETRY_MAX_MILLIS = 300_000L
 private const val LOAD_BALANCING_RETRY_DELAY_MILLIS = 3_000L
 private const val LOAD_BALANCING_POLL_DELAY_MILLIS = 50L
 private const val URI_WITHOUT_PORT = -1
-private const val PUSH_THREAD_ROUTE_PARTS = 3
 private const val HANDOFF_REVISION_INCREMENT = 1UL
 private const val HANDOFF_TOKEN_INCREMENT = 1L
 private const val BACKGROUND_RETRY_BACKOFF = 2L
@@ -831,7 +832,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
     fun visibleThreadDeepLink(): String? {
         val host = profileId ?: return null
         val thread = route as? Route.Thread ?: return null
-        return "remoteagent://threads/${android.net.Uri.encode(host)}/${android.net.Uri.encode(thread.id)}"
+        return agentActivityThreadDeepLink(host, thread.id)
     }
 
     fun openNotificationThread() {
@@ -1612,19 +1613,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
             openActivityOverviewDeepLink()
             return
         }
-        parsePushThreadRoute(uri)?.let { (hostId, threadId) -> openPushThread(hostId, threadId) }
-    }
-
-    private fun parsePushThreadRoute(uri: android.net.Uri): Pair<String, String>? {
-        if (uri.scheme != "remoteagent" || uri.host != "threads") return null
-        if (uri.userInfo != null || uri.port != URI_WITHOUT_PORT) return null
-        if (uri.fragment != null || uri.query != null) return null
-        val values = uri.encodedPath?.split('/') ?: return null
-        if (values.size != PUSH_THREAD_ROUTE_PARTS) return null
-        if (values[0].isNotEmpty()) return null
-        if (values[1].isEmpty() || values[2].isEmpty()) return null
-        val parts = values.drop(1).map { android.net.Uri.decode(it) }
-        return parts.takeIf { it.all(::validPushRouteSegment) }?.let { it[0] to it[1] }
+        agentActivityThreadTarget(value)?.let { target -> openPushThread(target.environmentId, target.threadId) }
     }
 
     private fun isUsageDeepLink(uri: android.net.Uri): Boolean =
@@ -1639,9 +1628,6 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
 
     private fun isActivityOverviewDeepLink(uri: android.net.Uri): Boolean =
         uri.toString() == agentActivityOverviewDeepLink()
-
-    private fun validPushRouteSegment(value: String): Boolean =
-        value.isNotEmpty() && value != "." && value != ".." && value.none { it == '\\' || it.isISOControl() }
 
     private fun openUsageDeepLink() {
         usageDeepLinkRequests += 1

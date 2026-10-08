@@ -1,6 +1,6 @@
 use agent_domain::{
     ACTIVITY_LINK_LIMIT, ACTIVITY_ROWS_LIMIT, ACTIVITY_STATUS_LIMIT, ACTIVITY_SUMMARY_LIMIT,
-    bounded_activity_text,
+    ActivityDeepLink, bounded_activity_text, parse_activity_deep_link,
 };
 use serde::{Deserialize, Serialize};
 
@@ -163,17 +163,12 @@ fn display(
         )
     };
     let deep_link = rows.first().and_then(|row| {
-        let url = url::Url::parse(&row.deep_link).ok()?;
         (row.deep_link.encode_utf16().count() <= ACTIVITY_LINK_LIMIT
-            && url.scheme() == "remoteagent"
-            && url.host_str() == Some("threads")
-            && url.username().is_empty()
-            && url.password().is_none()
-            && url.port().is_none()
-            && url.query().is_none()
-            && url.fragment().is_none()
-            && url.path_segments()?.filter(|part| !part.is_empty()).count() == 2)
-            .then(|| row.deep_link.clone())
+            && matches!(
+                parse_activity_deep_link(&row.deep_link),
+                Some(ActivityDeepLink::Thread { .. })
+            ))
+        .then(|| row.deep_link.clone())
     });
     ActivityDisplay {
         headline,

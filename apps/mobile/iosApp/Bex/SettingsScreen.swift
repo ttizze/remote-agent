@@ -16,88 +16,94 @@ struct SettingsScreen: View {
 
     var body: some View {
         NavigationStack {
-            if let projectId {
-                HostSettingsPage(
-                    model: model,
-                    title: "Project settings",
-                    sections: ["behavior", "auto-settle", "new-threads", "source-control", "agent", "maintenance"],
-                    projectId: projectId
-                )
-            } else {
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 20) {
-                        SettingsGroup(title: "Connections") {
-                            SettingsLink(symbol: "point.3.connected.trianglepath.dotted", label: "Environments",
-                                         value: "\(model.environmentSettings().count)") {
-                                ConnectionsScreen(model: model, close: { dismiss() })
+            Group {
+                if let projectId {
+                    HostSettingsPage(
+                        model: model,
+                        title: "Project settings",
+                        sections: ["behavior", "auto-settle", "new-threads", "source-control", "agent", "maintenance"],
+                        projectId: projectId
+                    )
+                } else {
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 20) {
+                            SettingsGroup(title: "Connections") {
+                                SettingsLink(symbol: "point.3.connected.trianglepath.dotted", label: "Environments",
+                                             value: "\(model.environmentSettings().count)") {
+                                    ConnectionsScreen(model: model, close: { dismiss() })
+                                }
+                            }
+                            SettingsGroup(title: "Interface") {
+                                SettingsLink(symbol: "paintbrush", label: "Appearance") { MobileAppearancePage() }
+                                SettingsLink(symbol: "keyboard", label: "Keyboard") { KeyboardSettingsPage() }
+                            }
+                            SettingsGroup(title: "Projects & threads") {
+                                SettingsLink(symbol: "text.bubble", label: "Thread behavior") {
+                                    HostSettingsPage(
+                                        model: model,
+                                        title: "Thread behavior",
+                                        sections: ["usage-limits", "auto-settle", "behavior", "maintenance"]
+                                    )
+                                }
+                                SettingsLink(symbol: "bell", label: "Notifications") {
+                                    HostSettingsPage(model: model, title: "Notifications", sections: ["notifications"])
+                                }
+                                SettingsLink(symbol: "globe", label: "Browser") {
+                                    HostSettingsPage(model: model, title: "Browser", sections: ["browser"])
+                                }
+                                SettingsLink(symbol: "arrow.turn.left.up", label: "Follow-ups") {
+                                    HostSettingsPage(model: model, title: "Follow-ups", sections: ["follow-ups"])
+                                }
+                                SettingsLink(symbol: "archivebox", label: "Archived Threads") {
+                                    ArchivedScreen(model: model)
+                                }
+                            }
+                            SettingsGroup(title: "Server settings") {
+                                SettingsLink(symbol: "calendar.badge.clock", label: "Scheduled tasks") {
+                                    ScheduledTasksScreen(model: model)
+                                }
+                                SettingsLink(symbol: "chart.bar.xaxis", label: "Usage") {
+                                    UsageScreen(model: model)
+                                }
+                                SettingsLink(symbol: "person.crop.circle", label: "Provider accounts") {
+                                    ProviderAccountsPage(model: model)
+                                }
+                                SettingsLink(symbol: "arrow.triangle.2.circlepath", label: "Load balancing") {
+                                    LoadBalancingSettingsPage(model: model)
+                                }
+                                SettingsLink(symbol: "plus.bubble", label: "New threads") {
+                                    HostSettingsPage(model: model, title: "New threads", sections: ["new-threads"])
+                                }
+                                SettingsLink(symbol: "gearshape.2", label: "Agent") {
+                                    HostSettingsPage(model: model, title: "Agent", sections: ["agent"])
+                                }
+                                SettingsLink(symbol: "arrow.triangle.branch", label: "Source control") {
+                                    HostSettingsPage(
+                                        model: model,
+                                        title: "Source control",
+                                        sections: ["source-control"]
+                                    )
+                                }
+                                SettingsLink(symbol: "arrow.triangle.branch", label: "Worktrees") {
+                                    WorktreeSettingsScreen(model: model).id(model.selectedProfileId)
+                                }
+                                SettingsLink(symbol: "internaldrive", label: "Storage") {
+                                    HostSettingsPage(model: model, title: "Storage", sections: ["storage"])
+                                }
+                                SettingsLink(symbol: "waveform.path.ecg", label: "Background activity") {
+                                    BackgroundDiagnosticsPage(model: model)
+                                }
+                            }
+                            SettingsGroup(title: "App") {
+                                SettingsLink(symbol: "arrow.down.circle", label: "App updates") {
+                                    NativeUpdatePage(model: model)
+                                }
+                                PrivacyPolicyButton().font(AppTheme.font(18)).padding(16)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
                             }
                         }
-                        SettingsGroup(title: "Interface") {
-                            SettingsLink(symbol: "paintbrush", label: "Appearance") { MobileAppearancePage() }
-                            SettingsLink(symbol: "keyboard", label: "Keyboard") { KeyboardSettingsPage() }
-                        }
-                        SettingsGroup(title: "Projects & threads") {
-                            SettingsLink(symbol: "text.bubble", label: "Thread behavior") {
-                                HostSettingsPage(
-                                    model: model,
-                                    title: "Thread behavior",
-                                    sections: ["usage-limits", "auto-settle", "behavior", "maintenance"]
-                                )
-                            }
-                            SettingsLink(symbol: "bell", label: "Notifications") {
-                                HostSettingsPage(model: model, title: "Notifications", sections: ["notifications"])
-                            }
-                            SettingsLink(symbol: "globe", label: "Browser") {
-                                HostSettingsPage(model: model, title: "Browser", sections: ["browser"])
-                            }
-                            SettingsLink(symbol: "arrow.turn.left.up", label: "Follow-ups") {
-                                HostSettingsPage(model: model, title: "Follow-ups", sections: ["follow-ups"])
-                            }
-                            SettingsLink(symbol: "archivebox", label: "Archived Threads") {
-                                ArchivedScreen(model: model)
-                            }
-                        }
-                        SettingsGroup(title: "Server settings") {
-                            SettingsLink(symbol: "calendar.badge.clock", label: "Scheduled tasks") {
-                                ScheduledTasksScreen(model: model)
-                            }
-                            SettingsLink(symbol: "chart.bar.xaxis", label: "Usage") {
-                                UsageScreen(model: model)
-                            }
-                            SettingsLink(symbol: "person.crop.circle", label: "Provider accounts") {
-                                ProviderAccountsPage(model: model)
-                            }
-                            SettingsLink(symbol: "arrow.triangle.2.circlepath", label: "Load balancing") {
-                                LoadBalancingSettingsPage(model: model)
-                            }
-                            SettingsLink(symbol: "plus.bubble", label: "New threads") {
-                                HostSettingsPage(model: model, title: "New threads", sections: ["new-threads"])
-                            }
-                            SettingsLink(symbol: "gearshape.2", label: "Agent") {
-                                HostSettingsPage(model: model, title: "Agent", sections: ["agent"])
-                            }
-                            SettingsLink(symbol: "arrow.triangle.branch", label: "Source control") {
-                                HostSettingsPage(model: model, title: "Source control", sections: ["source-control"])
-                            }
-                            SettingsLink(symbol: "arrow.triangle.branch", label: "Worktrees") {
-                                WorktreeSettingsScreen(model: model).id(model.selectedProfileId)
-                            }
-                            SettingsLink(symbol: "internaldrive", label: "Storage") {
-                                HostSettingsPage(model: model, title: "Storage", sections: ["storage"])
-                            }
-                            SettingsLink(symbol: "waveform.path.ecg", label: "Background activity") {
-                                BackgroundDiagnosticsPage(model: model)
-                            }
-                        }
-                        SettingsGroup(title: "App") {
-                            SettingsLink(symbol: "arrow.down.circle", label: "App updates") {
-                                NativeUpdatePage(model: model)
-                            }
-                            PrivacyPolicyButton().font(AppTheme.font(18)).padding(16)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                        }
+                        .padding(.horizontal, 16).padding(.vertical, 12)
                     }
-                    .padding(.horizontal, 16).padding(.vertical, 12)
                 }
             }
             .background(AppTheme.sheet.ignoresSafeArea())

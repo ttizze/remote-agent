@@ -6,10 +6,12 @@ mod protocol;
 mod snapshot;
 
 pub use activity::{
-    agent_activity_content_state_json, agent_activity_delivery_decision,
+    ActivityThreadTarget, agent_activity_content_state_json, agent_activity_delivery_decision,
     agent_activity_display_expiry_at, agent_activity_expiry_is_due,
-    agent_activity_message_is_fresh, agent_activity_overview_deep_link,
-    agent_activity_timestamp_millis, aggregate_agent_activity_content_states_json,
+    agent_activity_message_is_fresh, agent_activity_notification_deep_link,
+    agent_activity_overview_deep_link, agent_activity_thread_deep_link,
+    agent_activity_thread_target, agent_activity_timestamp_millis,
+    aggregate_agent_activity_content_states_json,
 };
 
 use crate::{

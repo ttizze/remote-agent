@@ -10,6 +10,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
+import dev.remoteagent.core.agentActivityThreadTarget
 
 private data class LocalNotificationRequest(
     val title: String,
@@ -138,12 +139,18 @@ internal object LocalNotifications {
         val removedTags =
             synchronized(activeNotifications) {
                 activeNotifications
-                    .filter { (_, request) -> environmentId == request.deepLink?.let(::deepLinkEnvironmentId) }
+                    .filter { (_, request) ->
+                        environmentId == request.deepLink?.let { agentActivityThreadTarget(it)?.environmentId }
+                    }
                     .map { (tag, _) -> tag }
                     .also { tags -> tags.forEach { tag -> activeNotifications.remove(tag) } }
             }
         removedTags.forEach { tag -> manager.cancel(tag, LOCAL_NOTIFICATION_ID) }
-        synchronized(pending) { pending.removeAll { environmentId == it.deepLink?.let(::deepLinkEnvironmentId) } }
+        synchronized(pending) {
+            pending.removeAll {
+                environmentId == it.deepLink?.let { deepLink -> agentActivityThreadTarget(deepLink)?.environmentId }
+            }
+        }
         updateBadge(context)
     }
 
@@ -205,12 +212,4 @@ internal object LocalNotifications {
     private const val LOCAL_ATTENTION_PREFIX = "$LOCAL_ATTENTION_TAG:"
 
     private fun notificationTag(route: String): String = "$LOCAL_ATTENTION_TAG:$route"
-
-    private fun deepLinkEnvironmentId(deepLink: String): String? =
-        runCatching { Uri.parse(deepLink) }
-            .getOrNull()
-            ?.takeIf { it.scheme == "remoteagent" && it.host == "threads" }
-            ?.pathSegments
-            ?.takeIf { it.size == 2 }
-            ?.firstOrNull()
 }

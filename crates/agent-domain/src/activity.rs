@@ -1,7 +1,6 @@
 //! Display bounds shared by operating-system activity delivery and rendering.
 
 use percent_encoding::percent_decode_str;
-use url::Url;
 
 pub const ACTIVITY_SUMMARY_LIMIT: usize = 120;
 pub const ACTIVITY_STATUS_LIMIT: usize = 40;
@@ -9,6 +8,7 @@ pub const ACTIVITY_LINK_LIMIT: usize = 512;
 pub const ACTIVITY_ROWS_LIMIT: usize = 5;
 /// Host-independent route used when one alert represents several rows.
 pub const ACTIVITY_OVERVIEW_DEEP_LINK: &str = "remoteagent://overview";
+const ACTIVITY_THREAD_DEEP_LINK_PREFIX: &str = "remoteagent://threads/";
 
 /// A validated activity deep link. The route keeps environment and thread
 /// identity together so native clients do not open a same-named thread on a
@@ -45,35 +45,82 @@ fn encode_route_segment(value: &str) -> String {
 }
 
 /// Parses the canonical routes shared by desktop and native click consumers.
+/// This intentionally parses the raw route instead of using a URL normalizer:
+/// malformed escapes and surrounding whitespace must not become a different
+/// target before the identity segments are validated.
 pub fn parse_activity_deep_link(value: &str) -> Option<ActivityDeepLink> {
-    let url = Url::parse(value).ok()?;
-    if !url.username().is_empty()
-        || url.password().is_some()
-        || url.port().is_some()
-        || url.query().is_some()
-        || url.fragment().is_some()
-    {
-        return None;
-    }
     if value == ACTIVITY_OVERVIEW_DEEP_LINK {
         return Some(ActivityDeepLink::Overview);
     }
-    let segments = url.path_segments()?.collect::<Vec<_>>();
-    match (url.scheme(), url.host_str()) {
-        ("remoteagent", Some("threads")) => {
-            let [environment_id, thread_id] = segments.as_slice() else {
-                return None;
-            };
+
+    if value.trim_matches(|character: char| {
+        character == '\u{feff}' || (character != '\u{85}' && character.is_whitespace())
+    }) != value
+        || value.contains('?')
+        || value.contains('#')
+    {
+        return None;
+    }
+
+    let path = value.strip_prefix(ACTIVITY_THREAD_DEEP_LINK_PREFIX)?;
+    let mut segments = path.split('/');
+    let environment_id = decode_route_segment(segments.next()?)?;
+    let thread_id = decode_route_segment(segments.next()?)?;
+    segments
+        .next()
+        .is_none()
+        .then_some(ActivityDeepLink::Thread {
+            environment_id,
+            thread_id,
+        })
+}
+
+/// Chooses and canonicalizes the route carried by a notification. An exact
+/// Overview route wins immediately; a valid thread route is decoded and
+/// rebuilt so equivalent percent encodings share one native target. Invalid
+/// explicit routes fall back to the non-empty environment and thread ids.
+pub fn activity_notification_deep_link(
+    value: Option<&str>,
+    environment_id: Option<&str>,
+    thread_id: Option<&str>,
+) -> Option<String> {
+    if let Some(value) = value {
+        match parse_activity_deep_link(value) {
+            Some(ActivityDeepLink::Overview) => return Some(ACTIVITY_OVERVIEW_DEEP_LINK.into()),
             Some(ActivityDeepLink::Thread {
-                environment_id: decode_route_segment(environment_id)?,
-                thread_id: decode_route_segment(thread_id)?,
-            })
+                environment_id,
+                thread_id,
+            }) => return Some(activity_thread_deep_link(&environment_id, &thread_id)),
+            None => {}
+        }
+    }
+
+    match (environment_id, thread_id) {
+        (Some(environment_id), Some(thread_id))
+            if !environment_id.is_empty() && !thread_id.is_empty() =>
+        {
+            Some(activity_thread_deep_link(environment_id, thread_id))
         }
         _ => None,
     }
 }
 
 fn decode_route_segment(segment: &str) -> Option<String> {
+    let bytes = segment.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            let high = *bytes.get(index + 1)?;
+            let low = *bytes.get(index + 2)?;
+            if !high.is_ascii_hexdigit() || !low.is_ascii_hexdigit() {
+                return None;
+            }
+            index += 3;
+        } else {
+            index += 1;
+        }
+    }
+
     (!segment.is_empty())
         .then(|| percent_decode_str(segment).decode_utf8().ok())
         .flatten()
@@ -645,23 +692,7 @@ pub fn bounded_activity_link(value: &str) -> String {
     if value.encode_utf16().count() > ACTIVITY_LINK_LIMIT {
         return String::new();
     }
-    let Ok(url) = url::Url::parse(value) else {
-        return String::new();
-    };
-    let common = url.scheme() == "remoteagent"
-        && url.username().is_empty()
-        && url.password().is_none()
-        && url.port().is_none()
-        && url.query().is_none()
-        && url.fragment().is_none();
-    let valid = common
-        && ((url.host_str() == Some("overview") && (url.path().is_empty() || url.path() == "/"))
-            || (url.host_str() == Some("threads")
-                && url.path_segments().is_some_and(|segments| {
-                    let segments = segments.collect::<Vec<_>>();
-                    segments.len() == 2 && segments.iter().all(|segment| !segment.is_empty())
-                })));
-    if valid {
+    if parse_activity_deep_link(value).is_some() {
         value.to_owned()
     } else {
         String::new()
@@ -693,6 +724,12 @@ pub fn bounded_activity_text(text: &str, max_units: usize) -> String {
 mod tests {
     use super::*;
     use proptest::prelude::*;
+
+    fn safe_route_scalar() -> impl Strategy<Value = char> {
+        any::<char>().prop_filter("safe activity route scalar", |character| {
+            *character != '\\' && !character.is_control()
+        })
+    }
 
     fn record(thread_id: &str, phase: &str, updated_at_ms: i64) -> ActivityRecord {
         ActivityRecord {
@@ -983,6 +1020,7 @@ mod tests {
             bounded_activity_link(ACTIVITY_OVERVIEW_DEEP_LINK),
             ACTIVITY_OVERVIEW_DEEP_LINK
         );
+        assert!(bounded_activity_link("remoteagent://overview/").is_empty());
     }
 
     #[test]
@@ -1006,6 +1044,7 @@ mod tests {
             parse_activity_deep_link(ACTIVITY_OVERVIEW_DEEP_LINK),
             Some(ActivityDeepLink::Overview)
         );
+        assert!(parse_activity_deep_link("remoteagent://overview/").is_none());
         assert_eq!(
             parse_activity_deep_link("remoteagent://threads/host-a/thread-1"),
             Some(ActivityDeepLink::Thread {
@@ -1027,6 +1066,123 @@ mod tests {
             "remoteagent://threads/host%2Fa/thread%2Fb"
         );
         assert!(parse_activity_deep_link("remoteagent://threads/host-a/thread-1?open=1").is_none());
+    }
+
+    #[test]
+    fn activity_routes_reject_malformed_escapes_and_unsafe_decoded_segments() {
+        for escape in ["%", "%0", "%gg", "%g0", "%0g", "%ff"] {
+            assert!(
+                parse_activity_deep_link(&format!("remoteagent://threads/host-a/thread-1{escape}"))
+                    .is_none(),
+                "malformed escape should be rejected: {escape}"
+            );
+        }
+        for link in [
+            "remoteagent://threads/host-a/%5C",
+            "remoteagent://threads/host-a/%0A",
+            "remoteagent://threads/host-a/%2E",
+            "remoteagent://threads/host-a/%2E%2E",
+            " remoteagent://threads/host-a/thread-1",
+            "remoteagent://threads/host-a/thread-1 ",
+            "\u{feff}remoteagent://threads/host-a/thread-1",
+            "remoteagent://threads/host-a/thread-1\u{feff}",
+            "\u{85}remoteagent://threads/host-a/thread-1",
+            "remoteagent://threads/host-a/thread-1\u{85}",
+            "remoteagent://threads/host-a/thread-1?open=1",
+            "remoteagent://threads/host-a/thread-1#details",
+        ] {
+            assert!(
+                parse_activity_deep_link(link).is_none(),
+                "unsafe link: {link}"
+            );
+        }
+    }
+
+    #[test]
+    fn activity_routes_roundtrip_unicode_without_parser_length_cap() {
+        let environment_id = "東京/環境";
+        let thread_id = format!("スレッド😀{}", "x".repeat(ACTIVITY_LINK_LIMIT));
+        let link = activity_thread_deep_link(environment_id, &thread_id);
+
+        assert!(link.encode_utf16().count() > ACTIVITY_LINK_LIMIT);
+        assert_eq!(
+            parse_activity_deep_link(&link),
+            Some(ActivityDeepLink::Thread {
+                environment_id: environment_id.into(),
+                thread_id,
+            })
+        );
+        assert!(bounded_activity_link(&link).is_empty());
+    }
+
+    #[test]
+    fn notification_routes_normalize_explicit_values_before_fallback() {
+        assert_eq!(
+            activity_notification_deep_link(
+                Some("remoteagent://threads/env%20%E6%9D%B1/thread%2f%E3%81%82"),
+                None,
+                None,
+            ),
+            Some("remoteagent://threads/env%20%E6%9D%B1/thread%2F%E3%81%82".into())
+        );
+        assert_eq!(
+            activity_notification_deep_link(
+                Some("remoteagent://threads/env/%"),
+                Some("fallback env"),
+                Some("thread/2"),
+            ),
+            Some("remoteagent://threads/fallback%20env/thread%2F2".into())
+        );
+        assert_eq!(
+            activity_notification_deep_link(
+                Some(ACTIVITY_OVERVIEW_DEEP_LINK),
+                Some("ignored"),
+                Some("ignored"),
+            ),
+            Some(ACTIVITY_OVERVIEW_DEEP_LINK.into())
+        );
+    }
+
+    #[test]
+    fn notification_routes_require_both_non_empty_fallback_ids() {
+        assert_eq!(
+            activity_notification_deep_link(None, Some(""), Some("thread")),
+            None
+        );
+        assert_eq!(
+            activity_notification_deep_link(None, Some("environment"), Some("")),
+            None
+        );
+        assert_eq!(
+            activity_notification_deep_link(Some(""), Some("environment"), Some("thread")),
+            Some("remoteagent://threads/environment/thread".into())
+        );
+        assert_eq!(
+            activity_notification_deep_link(Some("invalid"), None, None),
+            None
+        );
+    }
+
+    proptest! {
+        #[test]
+        fn safe_unicode_activity_routes_roundtrip(
+            environment in prop::collection::vec(safe_route_scalar(), 1..32),
+            thread in prop::collection::vec(safe_route_scalar(), 1..32),
+        ) {
+            let environment_id = environment.into_iter().collect::<String>();
+            let thread_id = thread.into_iter().collect::<String>();
+            prop_assume!(environment_id != "." && environment_id != "..");
+            prop_assume!(thread_id != "." && thread_id != "..");
+
+            let link = activity_thread_deep_link(&environment_id, &thread_id);
+            prop_assert_eq!(
+                parse_activity_deep_link(&link),
+                Some(ActivityDeepLink::Thread {
+                    environment_id,
+                    thread_id,
+                })
+            );
+        }
     }
 
     proptest! {

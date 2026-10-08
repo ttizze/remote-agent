@@ -194,12 +194,13 @@ enum LocalNotifications {
 
     static func removeEnvironment(_ environmentId: String) {
         let keys = postedIdentifiers.keys.filter {
-            AgentPushCenter.threadTarget(from: $0.replacingOccurrences(of: "route:", with: ""))?.hostId == environmentId
+            AgentCore.agentActivityThreadTarget(value: $0.replacingOccurrences(of: "route:", with: ""))?
+                .environmentId == environmentId
         }
         let identifiers = keys.compactMap { postedIdentifiers.removeValue(forKey: $0) }
         pending.removeAll {
             guard let deepLink = $0.deepLink else { return false }
-            return AgentPushCenter.threadTarget(from: deepLink)?.hostId == environmentId
+            return AgentCore.agentActivityThreadTarget(value: deepLink)?.environmentId == environmentId
         }
         let center = UNUserNotificationCenter.current()
         center.removeDeliveredNotifications(withIdentifiers: identifiers)
