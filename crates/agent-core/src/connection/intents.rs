@@ -1445,6 +1445,10 @@ impl Owner {
             }
             Intent::PreviewList { configured_urls } => {
                 self.state.preview.configured_urls = configured_urls.clone();
+                if let Some(thread) = self.state.selected_thread.clone() {
+                    self.close_stream(&super::owner::StreamKey::Preview(thread.clone()));
+                    self.subscribe_preview(&thread);
+                }
                 Next::call(
                     Call::PreviewList(agent_protocol::preview::PreviewList {
                         thread_id: self.selected()?,
@@ -1465,6 +1469,7 @@ impl Owner {
                     viewport,
                     appearance,
                     zoom,
+                    rendered_size: None,
                 };
                 request.validate().map_err(invalid)?;
                 Next::call(Call::PreviewOpen(request), None)
@@ -1478,11 +1483,24 @@ impl Owner {
                 request.validate().map_err(invalid)?;
                 Next::call(Call::PreviewNavigate(request), None)
             }
-            Intent::PreviewResize { tab_id, viewport } => {
+            Intent::PreviewResize {
+                tab_id,
+                viewport,
+                rendered_width,
+                rendered_height,
+            } => {
+                let rendered_size = match (rendered_width, rendered_height) {
+                    (Some(width), Some(height)) => Some(
+                        agent_protocol::preview::PreviewRenderedViewportSize { width, height },
+                    ),
+                    (None, None) => None,
+                    _ => return Err(invalid("measured preview viewport dimensions must be paired")),
+                };
                 let request = agent_protocol::preview::PreviewResize {
                     thread_id: self.selected()?,
                     tab_id,
                     viewport,
+                    rendered_size,
                 };
                 request.validate().map_err(invalid)?;
                 Next::call(Call::PreviewResize(request), None)

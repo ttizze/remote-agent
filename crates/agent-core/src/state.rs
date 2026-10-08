@@ -439,17 +439,27 @@ pub struct PreviewState {
     pub active_tab: Option<String>,
     pub server_epoch: Option<String>,
     pub revision: u64,
+    pub scanner_epoch: Option<String>,
+    pub scanner_revision: u64,
     pub configured_urls: Vec<String>,
+    #[serde(skip)]
+    closed_tabs: BTreeSet<String>,
 }
 impl PreviewState {
     pub fn apply_list(&mut self, result: agent_protocol::preview::PreviewListResult) {
-        if self
+        let same_server_epoch = self
             .server_epoch
             .as_deref()
-            .is_some_and(|epoch| {
-                epoch == result.server_epoch.as_str() && result.revision < self.revision
-            })
-        {
+            .is_some_and(|epoch| epoch == result.server_epoch.as_str());
+        let scanner_is_newer = !result.scanner_epoch.is_empty()
+            && (self.scanner_epoch.as_deref() != Some(result.scanner_epoch.as_str())
+                || result.scanner_revision > self.scanner_revision);
+        if same_server_epoch && result.revision <= self.revision {
+            if scanner_is_newer {
+                self.local_servers = result.local_servers;
+                self.scanner_epoch = Some(result.scanner_epoch);
+                self.scanner_revision = result.scanner_revision;
+            }
             return;
         }
         self.sessions = result
@@ -457,6 +467,8 @@ impl PreviewState {
             .into_iter()
             .map(|session| (session.tab_id.clone(), session))
             .collect();
+        self.closed_tabs
+            .retain(|tab_id| !self.sessions.contains_key(tab_id));
         for session in self.sessions.values() {
             if matches!(
                 &session.nav_status,
@@ -475,8 +487,17 @@ impl PreviewState {
         }
         self.recent_urls.truncate(12);
         self.local_servers = result.local_servers;
-        self.server_epoch = Some(result.server_epoch);
+        if !result.server_epoch.is_empty() {
+            self.server_epoch = Some(result.server_epoch);
+        }
         self.revision = result.revision;
+        if result.scanner_epoch.is_empty() {
+            self.scanner_epoch = None;
+            self.scanner_revision = 0;
+        } else {
+            self.scanner_epoch = Some(result.scanner_epoch);
+            self.scanner_revision = result.scanner_revision;
+        }
         if self
             .active_tab
             .as_ref()
@@ -486,6 +507,9 @@ impl PreviewState {
         }
     }
     pub fn upsert(&mut self, session: agent_protocol::preview::PreviewSessionSnapshot) {
+        if self.closed_tabs.contains(&session.tab_id) {
+            return;
+        }
         self.active_tab = Some(session.tab_id.clone());
         if let Some(url) = match &session.nav_status {
             agent_protocol::preview::PreviewNavStatus::Loading { url, .. }
@@ -501,17 +525,105 @@ impl PreviewState {
     }
     pub fn close(&mut self, tab_id: Option<&str>) {
         if let Some(tab_id) = tab_id {
+            self.closed_tabs.insert(tab_id.to_owned());
             self.sessions.remove(tab_id);
             if self.active_tab.as_deref() == Some(tab_id) {
                 self.active_tab = self.sessions.keys().next().cloned();
             }
         } else {
+            self.closed_tabs.extend(self.sessions.keys().cloned());
             self.sessions.clear();
             self.active_tab = None;
         }
     }
     pub fn session(&self, tab_id: &str) -> Option<&agent_protocol::preview::PreviewSessionSnapshot> {
         self.sessions.get(tab_id)
+    }
+}
+
+#[cfg(test)]
+mod preview_state_tests {
+    use super::PreviewState;
+    use agent_domain::ThreadId;
+    use agent_protocol::preview::{PreviewListResult, PreviewViewportSetting};
+
+    fn list(epoch: &str, revision: u64, tab_id: &str) -> PreviewListResult {
+        PreviewListResult {
+            sessions: vec![agent_protocol::preview::PreviewSessionSnapshot {
+                thread_id: ThreadId::new("thread").unwrap(),
+                tab_id: tab_id.into(),
+                nav_status: agent_protocol::preview::PreviewNavStatus::Idle,
+                can_go_back: false,
+                can_go_forward: false,
+                viewport: PreviewViewportSetting::Fill,
+                zoom: agent_protocol::preview::PreviewZoom::X100,
+                appearance: agent_protocol::preview::PreviewAppearance::System,
+                updated_at: String::new(),
+            }],
+            local_servers: vec![],
+            scanned_at: String::new(),
+            server_epoch: epoch.into(),
+            revision,
+            scanner_epoch: "scanner".into(),
+            scanner_revision: revision,
+        }
+    }
+
+    #[test]
+    fn ignores_stale_snapshot_within_the_same_host_epoch() {
+        let mut state = PreviewState::default();
+        state.apply_list(list("epoch", 4, "new"));
+        state.apply_list(list("epoch", 4, "old"));
+        state.apply_list(list("epoch", 3, "older"));
+        assert!(state.sessions.contains_key("new"));
+        assert!(!state.sessions.contains_key("old"));
+        assert!(!state.sessions.contains_key("older"));
+    }
+
+    #[test]
+    fn accepts_a_new_host_epoch_even_when_its_revision_is_lower() {
+        let mut state = PreviewState::default();
+        state.apply_list(list("old", 18, "old-tab"));
+        state.apply_list(list("new", 1, "new-tab"));
+        assert_eq!(state.server_epoch.as_deref(), Some("new"));
+        assert!(state.sessions.contains_key("new-tab"));
+        assert!(!state.sessions.contains_key("old-tab"));
+    }
+
+    #[test]
+    fn applies_new_scanner_data_without_replacing_same_revision_sessions() {
+        let mut state = PreviewState::default();
+        state.apply_list(list("epoch", 4, "tab"));
+        let mut next = list("epoch", 4, "tab");
+        next.scanner_revision = 5;
+        next.local_servers = vec![agent_protocol::preview::DiscoveredLocalServer {
+            host: "localhost".into(),
+            port: 5173,
+            url: "http://localhost:5173/".into(),
+            process_name: Some("node".into()),
+            pid: Some(42),
+            terminal: None,
+        }];
+        state.apply_list(next);
+        assert_eq!(state.local_servers.len(), 1);
+        assert!(state.sessions.contains_key("tab"));
+        assert_eq!(state.scanner_revision, 5);
+
+        let mut stale = list("epoch", 4, "tab");
+        stale.scanner_revision = 3;
+        state.apply_list(stale);
+        assert_eq!(state.local_servers.len(), 1);
+        assert_eq!(state.scanner_revision, 5);
+    }
+
+    #[test]
+    fn ignores_a_late_session_reply_after_a_local_close() {
+        let mut state = PreviewState::default();
+        state.apply_list(list("epoch", 1, "tab"));
+        let session = state.sessions.get("tab").cloned().unwrap();
+        state.close(Some("tab"));
+        state.upsert(session);
+        assert!(state.sessions.is_empty());
     }
 }
 
@@ -1003,6 +1115,8 @@ pub enum Intent {
     PreviewResize {
         tab_id: String,
         viewport: agent_protocol::preview::PreviewViewportSetting,
+        rendered_width: Option<u32>,
+        rendered_height: Option<u32>,
     },
     PreviewSetAppearance {
         tab_id: String,

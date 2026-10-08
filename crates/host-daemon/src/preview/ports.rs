@@ -45,6 +45,19 @@ struct Listener {
 struct State {
     probes: HashMap<ProbeKey, ProbeResult>,
     terminal_owners: HashMap<u32, PreviewTerminalOwner>,
+    last_servers: Option<Vec<DiscoveredLocalServer>>,
+    scan_revision: u64,
+}
+
+/// A scanner result carries its own process epoch and revision. The Preview
+/// manager revision only orders browser-tab metadata, so local-server changes
+/// must remain observable when tabs are unchanged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PortScanSnapshot {
+    pub servers: Vec<DiscoveredLocalServer>,
+    pub scanned_at: String,
+    pub epoch: String,
+    pub revision: u64,
 }
 
 /// A reference-counted scanner.  Polling owners retain a lease; the count is
@@ -52,6 +65,7 @@ struct State {
 pub struct PortScanner {
     state: Mutex<State>,
     retained: AtomicUsize,
+    epoch: String,
 }
 
 pub struct RetainGuard {
@@ -78,6 +92,7 @@ impl PortScanner {
         Arc::new(Self {
             state: Mutex::new(State::default()),
             retained: AtomicUsize::new(0),
+            epoch: uuid::Uuid::new_v4().to_string(),
         })
     }
 
@@ -103,8 +118,8 @@ impl PortScanner {
     pub fn subscribe(
         self: &Arc<Self>,
         configured_urls: Vec<String>,
-        terminals: Vec<TerminalSummary>,
-    ) -> (mpsc::Receiver<Vec<DiscoveredLocalServer>>, Subscription) {
+        terminals: Arc<crate::terminals::Terminals>,
+    ) -> (mpsc::Receiver<PortScanSnapshot>, Subscription) {
         let (sender, receiver) = mpsc::channel(4);
         let stop = tokio_util::sync::CancellationToken::new();
         let lease = self.retain();
@@ -113,16 +128,28 @@ impl PortScanner {
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(3));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            let mut previous: Option<Vec<DiscoveredLocalServer>> = None;
+            let mut previous: Option<PortScanSnapshot> = None;
             loop {
                 tokio::select! {
                     _ = cancel.cancelled() => break,
                     _ = interval.tick() => {
-                        let result = scanner.scan(&configured_urls, &terminals).await.unwrap_or_default();
-                        if previous.as_ref() != Some(&result) {
-                            previous = Some(result.clone());
-                            if sender.send(result).await.is_err() { break; }
+                        scanner.set_terminal_owners(terminals.preview_process_owners());
+                        let terminal_summaries = terminals.summaries_now();
+                        let result = match scanner.scan_snapshot(&configured_urls, &terminal_summaries).await {
+                            Ok(result) => result,
+                            Err(_) => continue,
+                        };
+                        if previous
+                            .as_ref()
+                            .is_none_or(|previous| previous.servers != result.servers)
+                        {
+                            let sent = tokio::select! {
+                                _ = cancel.cancelled() => false,
+                                result = sender.send(result.clone()) => result.is_ok(),
+                            };
+                            if !sent { break; }
                         }
+                        previous = Some(result);
                     }
                 }
             }
@@ -130,13 +157,13 @@ impl PortScanner {
         (receiver, Subscription { stop, _retain: lease })
     }
 
-    /// Scans listeners, configured URLs and only publishes pages that answer
-    /// as HTML over HTTP(S).
-    pub async fn scan(
+    /// Scans listeners and returns metadata that can order discovery changes
+    /// independently from browser-tab revisions.
+    pub async fn scan_snapshot(
         &self,
         configured_urls: &[String],
         terminals: &[TerminalSummary],
-    ) -> Result<Vec<DiscoveredLocalServer>, String> {
+    ) -> Result<PortScanSnapshot, String> {
         let configured = normalize_configured_urls(configured_urls);
         let configured_ports: HashSet<u16> = configured.iter().map(|url| url_port(url)).collect();
         let mut listeners = self.listeners(&configured_ports).await?;
@@ -192,7 +219,17 @@ impl PortScanner {
                 terminal: listener.pid.and_then(|pid| owners.get(&pid).cloned()),
             });
         }
-        Ok(found)
+        let (epoch, revision) = {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            record_scan(&mut state, &found);
+            (self.epoch.clone(), state.scan_revision)
+        };
+        Ok(PortScanSnapshot {
+            servers: found,
+            scanned_at: chrono::Utc::now().to_rfc3339(),
+            epoch,
+            revision,
+        })
     }
 
     async fn listeners(&self, configured_ports: &HashSet<u16>) -> Result<Vec<Listener>, String> {
@@ -254,8 +291,9 @@ impl PortScanner {
             Command::new("powershell.exe")
                 .args([
                     "-NoProfile",
+                    "-NonInteractive",
                     "-Command",
-                    "Get-NetTCPConnection -State Listen | ForEach-Object { \"$($_.LocalAddress)|$($_.LocalPort)|$($_.OwningProcess)\" }",
+                    "Get-NetTCPConnection -State Listen | ForEach-Object { $processName = (Get-Process -Id $_.OwningProcess -ErrorAction SilentlyContinue).ProcessName; \"$($_.LocalAddress)|$($_.LocalPort)|$($_.OwningProcess)|$processName\" }",
                 ])
                 .stdin(Stdio::null())
                 .stderr(Stdio::null())
@@ -296,6 +334,13 @@ impl PortScanner {
                 },
             );
         Ok(html)
+    }
+}
+
+fn record_scan(state: &mut State, servers: &[DiscoveredLocalServer]) {
+    if state.last_servers.as_deref() != Some(servers) {
+        state.last_servers = Some(servers.to_owned());
+        state.scan_revision = state.scan_revision.saturating_add(1);
     }
 }
 
@@ -420,7 +465,11 @@ fn parse_windows(raw: &str) -> Vec<Listener> {
         };
         let (Ok(port), Ok(pid)) = (port.trim().parse(), pid.trim().parse()) else { continue };
         if is_loopback(host.trim()) && !output.iter().any(|listener: &Listener| listener.port == port) {
-            output.push(Listener { port, process_name: None, pid: Some(pid) });
+            output.push(Listener {
+                port,
+                process_name: fields.next().map(str::trim).filter(|name| !name.is_empty()).map(str::to_owned),
+                pid: Some(pid),
+            });
         }
     }
     output.sort_by_key(|listener| listener.port);
@@ -516,6 +565,24 @@ mod tests {
     }
 
     #[test]
+    fn probe_cache_keys_drop_fragments_but_keep_the_listener_identity() {
+        assert_eq!(
+            super::canonical_probe_url("http://localhost:5173/docs#ready").unwrap(),
+            "http://localhost:5173/docs"
+        );
+        assert_ne!(
+            super::ProbeKey {
+                url: "http://localhost:5173/".into(),
+                pid: Some(10),
+            },
+            super::ProbeKey {
+                url: "http://localhost:5173/".into(),
+                pid: Some(11),
+            }
+        );
+    }
+
+    #[test]
     fn subscriptions_hold_one_scanner_lease_until_dropped() {
         let scanner = super::PortScanner::new();
         assert_eq!(scanner.retain_count(), 0);
@@ -523,5 +590,46 @@ mod tests {
         assert_eq!(scanner.retain_count(), 1);
         drop(lease);
         assert_eq!(scanner.retain_count(), 0);
+    }
+
+    #[test]
+    fn subscription_disposal_releases_its_scanner_lease() {
+        let scanner = super::PortScanner::new();
+        let subscription = super::Subscription {
+            stop: tokio_util::sync::CancellationToken::new(),
+            _retain: scanner.retain(),
+        };
+        assert_eq!(scanner.retain_count(), 1);
+        drop(subscription);
+        assert_eq!(scanner.retain_count(), 0);
+    }
+
+    #[test]
+    fn scan_revision_changes_only_when_server_identity_changes() {
+        let mut state = super::State::default();
+        let server = super::DiscoveredLocalServer {
+            host: "localhost".into(),
+            port: 5173,
+            url: "http://localhost:5173/".into(),
+            process_name: Some("node".into()),
+            pid: Some(42),
+            terminal: None,
+        };
+        super::record_scan(&mut state, std::slice::from_ref(&server));
+        assert_eq!(state.scan_revision, 1);
+        super::record_scan(&mut state, std::slice::from_ref(&server));
+        assert_eq!(state.scan_revision, 1);
+        super::record_scan(&mut state, &[]);
+        assert_eq!(state.scan_revision, 2);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn parses_windows_loopback_listener_identity() {
+        let listeners = super::parse_windows("127.0.0.1|5173|42|node\n192.0.2.1|4173|43|vite\n");
+        assert_eq!(listeners.len(), 1);
+        assert_eq!(listeners[0].port, 5173);
+        assert_eq!(listeners[0].pid, Some(42));
+        assert_eq!(listeners[0].process_name.as_deref(), Some("node"));
     }
 }

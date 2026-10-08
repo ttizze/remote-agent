@@ -1,7 +1,7 @@
 use agent_core::{connection::Store, state::Intent};
 use agent_protocol::browser::{browser_url, BrowserAction, BrowserFrame, BrowserRequest};
 use agent_protocol::preview::{
-    DiscoveredLocalServer, PreviewAppearance, PreviewViewportSetting, PreviewZoom,
+    PreviewAppearance, PreviewViewportSetting, PreviewZoom,
 };
 #[cfg(target_os = "macos")]
 use gpui_kit::component::{
@@ -310,11 +310,13 @@ pub(crate) struct HostBrowser {
     thread_id: String,
     frame: Option<BrowserFrame>,
     image: Option<Arc<Image>>,
-    local_servers: Vec<DiscoveredLocalServer>,
-    recent_urls: Vec<String>,
     address: Entity<InputState>,
+    freeform_width: Entity<InputState>,
+    freeform_height: Entity<InputState>,
     focus: FocusHandle,
     frame_bounds: Bounds<Pixels>,
+    last_fill_size: Option<(u32, u32)>,
+    request_generation: u64,
     error: String,
     _subscription: Subscription,
 }
@@ -327,6 +329,10 @@ impl HostBrowser {
         cx: &mut App,
     ) -> Entity<Self> {
         let address = cx.new(|cx| InputState::new(window, cx).placeholder("Enter preview URL"));
+        let freeform_width = cx.new(|cx| InputState::new(window, cx).placeholder("Width"));
+        let freeform_height = cx.new(|cx| InputState::new(window, cx).placeholder("Height"));
+        freeform_width.update(cx, |input, cx| input.set_value("1024", window, cx));
+        freeform_height.update(cx, |input, cx| input.set_value("768", window, cx));
         cx.new(|cx: &mut Context<Self>| {
             let subscription = cx.subscribe_in(&address, window, |view, _, event, window, cx| {
                 if matches!(event, InputEvent::PressEnter { .. }) {
@@ -338,11 +344,13 @@ impl HostBrowser {
                 thread_id,
                 frame: None,
                 image: None,
-                local_servers: Vec::new(),
-                recent_urls: Vec::new(),
                 address,
+                freeform_width,
+                freeform_height,
                 focus: cx.focus_handle(),
                 frame_bounds: Bounds::default(),
+                last_fill_size: None,
+                request_generation: 0,
                 error: String::new(),
                 _subscription: subscription,
             };
@@ -393,18 +401,66 @@ impl HostBrowser {
         );
     }
 
+    fn resize_freeform(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(tab_id) = self.frame.as_ref().map(|frame| frame.tab_id.clone()) else {
+            return;
+        };
+        let width = self
+            .freeform_width
+            .read(cx)
+            .value()
+            .trim()
+            .parse::<u32>()
+            .ok();
+        let height = self
+            .freeform_height
+            .read(cx)
+            .value()
+            .trim()
+            .parse::<u32>()
+            .ok();
+        let viewport = match width.zip(height) {
+            Some((width, height)) => PreviewViewportSetting::Freeform { width, height },
+            None => {
+                self.error = "Viewport width and height must be positive numbers".into();
+                cx.notify();
+                return;
+            }
+        };
+        if let Err(error) = viewport.validate() {
+            self.error = error;
+            cx.notify();
+            return;
+        }
+        self.request(
+            HostBrowserRequest::Intent(Intent::PreviewResize {
+                tab_id,
+                viewport,
+                rendered_width: None,
+                rendered_height: None,
+            }),
+            window,
+            cx,
+        );
+    }
+
     fn request(
         &mut self,
         request: HostBrowserRequest,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.request_generation = self.request_generation.wrapping_add(1);
+        let request_generation = self.request_generation;
         let store = self.store.clone();
         let thread_id = self.thread_id.clone();
         let frame = self.frame.clone();
         cx.spawn_in(window, async move |view, cx| {
             let result = host_browser_request(store, thread_id, frame, request).await;
             let _ = view.update_in(cx, |view, window, cx| {
+                if view.request_generation != request_generation {
+                    return;
+                }
                 match result {
                     Ok(frame) => view.apply_frame(frame, window, cx),
                     Err(error) => {
@@ -419,9 +475,13 @@ impl HostBrowser {
 
     fn apply_frame(&mut self, frame: BrowserFrame, window: &mut Window, cx: &mut Context<Self>) {
         self.error.clear();
-        let preview = self.store.snapshot().preview.clone();
-        self.local_servers = preview.local_servers;
-        self.recent_urls = preview.recent_urls;
+        if self
+            .frame
+            .as_ref()
+            .is_none_or(|previous| previous.tab_id != frame.tab_id)
+        {
+            self.last_fill_size = None;
+        }
         if let Some(tab) = frame.tabs.iter().find(|tab| tab.id == frame.tab_id) {
             let value = if tab.url == "about:blank" {
                 String::new()
@@ -489,6 +549,12 @@ fn next_viewport(current: PreviewViewportSetting) -> PreviewViewportSetting {
         .map_or(PreviewViewportSetting::Fill, make)
 }
 
+fn measured_frame_size(bounds: Bounds<Pixels>) -> Option<(u32, u32)> {
+    let width = bounds.size.width.as_f32().round() as u32;
+    let height = bounds.size.height.as_f32().round() as u32;
+    (width > 0 && height > 0).then_some((width, height))
+}
+
 fn next_appearance(current: PreviewAppearance) -> PreviewAppearance {
     match current {
         PreviewAppearance::System => PreviewAppearance::Light,
@@ -503,12 +569,6 @@ async fn host_browser_request(
     frame: Option<BrowserFrame>,
     request: HostBrowserRequest,
 ) -> Result<BrowserFrame, String> {
-    let sync_navigation = matches!(
-        &request,
-        HostBrowserRequest::Action(
-            BrowserAction::Back | BrowserAction::Forward | BrowserAction::Reload
-        )
-    );
     let tab_id = frame.as_ref().map(|frame| frame.tab_id.clone()).unwrap_or_default();
     let image_id = frame
         .as_ref()
@@ -562,15 +622,6 @@ async fn host_browser_request(
         })
         .await
         .map_err(|error| error.to_string())?;
-    if sync_navigation {
-        let _ = dispatch_preview(
-            &store,
-            Intent::PreviewList {
-                configured_urls: configured_preview_urls(&store),
-            },
-        )
-        .await;
-    }
     Ok(frame)
 }
 
@@ -594,15 +645,41 @@ async fn dispatch_preview(store: &Store, intent: Intent) -> Result<(), String> {
 }
 
 impl Render for HostBrowser {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some((width, height)) = measured_frame_size(self.frame_bounds)
+            && self
+                .frame
+                .as_ref()
+                .and_then(|frame| self.store.snapshot().preview.session(&frame.tab_id))
+                .is_some_and(|session| matches!(session.viewport, PreviewViewportSetting::Fill))
+            && self.last_fill_size != Some((width, height))
+        {
+            if let Some(tab_id) = self.frame.as_ref().map(|frame| frame.tab_id.clone()) {
+                self.last_fill_size = Some((width, height));
+                self.request(
+                    HostBrowserRequest::Intent(Intent::PreviewResize {
+                        tab_id,
+                        viewport: PreviewViewportSetting::Fill,
+                        rendered_width: Some(width),
+                        rendered_height: Some(height),
+                    }),
+                    window,
+                    cx,
+                );
+            }
+        }
         let image = self.image.clone();
         let frame = self.frame.as_ref();
         let frame_owner = cx.entity().downgrade();
         let empty = frame
             .and_then(|frame| frame.tabs.iter().find(|tab| tab.id == frame.tab_id))
             .is_none_or(|tab| tab.url.is_empty() || tab.url == "about:blank");
-        let local_servers = self.local_servers.clone();
-        let recent_urls = self.recent_urls.clone();
+        // The Store receives Host preview subscription snapshots independently
+        // of frame requests. Read its immutable snapshot during render so
+        // local server cards and recent URLs follow that live subscription.
+        let preview = self.store.snapshot().preview.clone();
+        let local_servers = preview.local_servers;
+        let recent_urls = preview.recent_urls;
         v_flex()
             .size_full()
             .min_w_0()
@@ -727,6 +804,8 @@ impl Render for HostBrowser {
                                     HostBrowserRequest::Intent(Intent::PreviewResize {
                                         tab_id,
                                         viewport: next_viewport(viewport),
+                                        rendered_width: None,
+                                        rendered_height: None,
                                     }),
                                     window,
                                     cx,
@@ -759,6 +838,17 @@ impl Render for HostBrowser {
                             })),
                     )
                     .child(Input::new(&self.address).small().aria_label("Preview URL"))
+                    .child(Input::new(&self.freeform_width).small().w(px(64.)).aria_label("Viewport width"))
+                    .child(Input::new(&self.freeform_height).small().w(px(64.)).aria_label("Viewport height"))
+                    .child(
+                        Button::new("preview-freeform")
+                            .label("Resize")
+                            .small()
+                            .ghost()
+                            .tooltip("Apply numeric freeform viewport")
+                            .accessibility_label("Apply numeric freeform viewport")
+                            .on_click(cx.listener(|s, _, window, cx| s.resize_freeform(window, cx))),
+                    )
                     .child(
                         Button::new("preview-go")
                             .icon(IconName::ArrowRight)
@@ -783,7 +873,12 @@ impl Render for HostBrowser {
                 div()
                     .id("preview-frame")
                     .on_prepaint(move |bounds, _, cx| {
-                        let _ = frame_owner.update(cx, |view, _| view.frame_bounds = bounds);
+                        let _ = frame_owner.update(cx, |view, cx| {
+                            if view.frame_bounds != bounds {
+                                view.frame_bounds = bounds;
+                                cx.notify();
+                            }
+                        });
                     })
                     .track_focus(&self.focus)
                     .flex_1()

@@ -186,10 +186,17 @@ impl HostRpcService {
             .ok_or_else(|| Failure::new("provider_unavailable", "provider unavailable"))
     }
     pub async fn enable_browser(&self, profile: PathBuf) -> Result<(), String> {
+        let resources = &self.inner.resources;
+        let browser = crate::browser::Browser::start(profile).await?;
+        browser.set_preview_resources(
+            resources.preview.clone(),
+            resources.preview_ports.clone(),
+            resources.shared.terminals.clone(),
+        )?;
         self.inner
             .resources
             .browser
-            .set(crate::browser::Browser::start(profile).await?)
+            .set(browser)
             .map_err(|_| "browser already configured".into())
     }
     pub async fn enable_accounts(
@@ -422,6 +429,10 @@ impl HostRpcService {
             let cancel = self.inner.connections.cancellation(session)?;
             return Ok(self.keybindings(cancel).await);
         }
+        if let Call::PreviewSubscribe(params) = call {
+            let cancel = self.inner.connections.cancellation(session)?;
+            return Ok(self.preview_subscribe(params, cancel).await);
+        }
         Ok(Response::from_result(self.request(session, call).await).into())
     }
     /// The keybindings in effect, then each change; a subscriber that fell
@@ -481,6 +492,116 @@ impl HostRpcService {
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => None,
                     }
+                })
+            },
+            cancel,
+        )
+    }
+    /// Streams the complete Preview snapshot whenever either tab metadata or
+    /// local-server discovery changes. Keeping the scanner lease inside the
+    /// forwarding task makes disposal release the shared three-second poll.
+    async fn preview_subscribe(
+        &self,
+        params: &agent_protocol::preview::PreviewSubscribe,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> HostReply {
+        if let Err(error) = params.validate() {
+            return Response::error("invalid_params", &error).into();
+        }
+        let resources = self.inner.resources.clone();
+        let mut metadata = resources.preview.subscribe();
+        resources
+            .preview_ports
+            .set_terminal_owners(resources.shared.terminals.preview_process_owners());
+        let terminals = resources.shared.terminals.summaries_now();
+        let configured_urls = params.configured_urls.clone();
+        let initial_scan = resources
+            .preview_ports
+            .scan_snapshot(&configured_urls, &terminals)
+            .await
+            .unwrap_or_else(|_| crate::preview::ports::PortScanSnapshot {
+                servers: Vec::new(),
+                scanned_at: String::new(),
+                epoch: String::new(),
+                revision: 0,
+            });
+        let mut initial = resources.preview.list(&params.thread_id);
+        initial.local_servers = initial_scan.servers.clone();
+        initial.scanned_at = initial_scan.scanned_at.clone();
+        initial.scanner_epoch = initial_scan.epoch.clone();
+        initial.scanner_revision = initial_scan.revision;
+        let (mut scanner, scanner_lease) = resources
+            .preview_ports
+            .subscribe(configured_urls, resources.shared.terminals.clone());
+        let thread_id = params.thread_id.clone();
+        let (sender, receiver) = tokio::sync::mpsc::channel(8);
+        let forward_cancel = cancel.clone();
+        tokio::spawn(async move {
+            let _scanner_lease = scanner_lease;
+            let mut scan = initial_scan;
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = forward_cancel.cancelled() => break,
+                    servers = scanner.recv() => {
+                        let Some(next_scan) = servers else { break };
+                        scan = next_scan;
+                        let mut snapshot = resources.preview.list(&thread_id);
+                        snapshot.local_servers = scan.servers.clone();
+                        snapshot.scanned_at = scan.scanned_at.clone();
+                        snapshot.scanner_epoch = scan.epoch.clone();
+                        snapshot.scanner_revision = scan.revision;
+                        let sent = tokio::select! {
+                            biased;
+                            _ = forward_cancel.cancelled() => false,
+                            result = sender.send(snapshot) => result.is_ok(),
+                        };
+                        if !sent { break; }
+                    }
+                    event = metadata.recv() => {
+                        let event = match event {
+                            Ok(event) => event,
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                                metadata = resources.preview.subscribe();
+                                let mut snapshot = resources.preview.list(&thread_id);
+                                snapshot.local_servers = scan.servers.clone();
+                                snapshot.scanned_at = scan.scanned_at.clone();
+                                snapshot.scanner_epoch = scan.epoch.clone();
+                                snapshot.scanner_revision = scan.revision;
+                                let sent = tokio::select! {
+                                    biased;
+                                    _ = forward_cancel.cancelled() => false,
+                                    result = sender.send(snapshot) => result.is_ok(),
+                                };
+                                if !sent { break; }
+                                continue;
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                        };
+                        if preview_event_thread(&event) != &thread_id { continue; }
+                        let mut snapshot = resources.preview.list(&thread_id);
+                        snapshot.local_servers = scan.servers.clone();
+                        snapshot.scanned_at = scan.scanned_at.clone();
+                        snapshot.scanner_epoch = scan.epoch.clone();
+                        snapshot.scanner_revision = scan.revision;
+                        let sent = tokio::select! {
+                            biased;
+                            _ = forward_cancel.cancelled() => false,
+                            result = sender.send(snapshot) => result.is_ok(),
+                        };
+                        if !sent { break; }
+                    }
+                }
+            }
+        });
+        let receiver = Arc::new(tokio::sync::Mutex::new(receiver));
+        crate::conversation::stream(
+            std::collections::VecDeque::from([initial.clone()]),
+            initial,
+            move || {
+                let receiver = receiver.clone();
+                Box::pin(async move {
+                    receiver.lock().await.recv().await.map(|snapshot| vec![snapshot])
                 })
             },
             cancel,
@@ -635,15 +756,6 @@ impl HostRpcService {
                         .request(params)
                         .await
                         .map_err(|error| Failure::new("browser_failed", error))?;
-                    if matches!(
-                        &params.action,
-                        agent_protocol::browser::BrowserAction::Navigate { .. }
-                            | agent_protocol::browser::BrowserAction::Back
-                            | agent_protocol::browser::BrowserAction::Forward
-                            | agent_protocol::browser::BrowserAction::Reload
-                    ) {
-                        report_preview_frame(&resources.preview, &params.thread_id, &frame);
-                    }
                     frame.into()
                 }
                 Call::PreviewList(params) => {
@@ -654,13 +766,16 @@ impl HostRpcService {
                         .preview_ports
                         .set_terminal_owners(resources.shared.terminals.preview_process_owners());
                     let terminals = resources.shared.terminals.summaries_now();
-                    let servers = resources
+                    let scan = resources
                         .preview_ports
-                        .scan(&params.configured_urls, &terminals)
+                        .scan_snapshot(&params.configured_urls, &terminals)
                         .await
                         .map_err(|error| Failure::new("preview_scan_failed", error))?;
                     let mut result = resources.preview.list(&params.thread_id);
-                    result.local_servers = servers;
+                    result.local_servers = scan.servers;
+                    result.scanned_at = scan.scanned_at;
+                    result.scanner_epoch = scan.epoch;
+                    result.scanner_revision = scan.revision;
                     result.into()
                 }
                 Call::PreviewOpen(params) => {
@@ -684,6 +799,7 @@ impl HostRpcService {
                             params.viewport,
                             params.appearance,
                             params.zoom,
+                            params.rendered_size,
                         )
                         .await
                         .map_err(|error| Failure::new("preview_open_failed", error))?;
@@ -698,7 +814,7 @@ impl HostRpcService {
                             params.zoom,
                         )
                         .map_err(|error| Failure::new("preview_open_failed", error))?;
-                    report_preview_frame(&resources.preview, &params.thread_id, &frame);
+                    browser.report_preview_frame(&params.thread_id.to_string(), &frame);
                     resources
                         .preview
                         .get(&params.thread_id, &frame.tab_id)
@@ -754,6 +870,7 @@ impl HostRpcService {
                             &params.thread_id.to_string(),
                             &params.tab_id,
                             params.viewport,
+                            params.rendered_size,
                         )
                         .await
                         .map_err(|error| Failure::new("preview_resize_failed", error))?;
@@ -831,11 +948,24 @@ impl HostRpcService {
                         .browser
                         .get()
                         .ok_or_else(|| Failure::new("browser_unavailable", "browser unavailable"))?;
-                    let ids = resources.preview.close(&params.thread_id, params.tab_id.as_deref());
+                    let ids: Vec<String> = resources
+                        .preview
+                        .list(&params.thread_id)
+                        .sessions
+                        .into_iter()
+                        .filter(|session| {
+                            params
+                                .tab_id
+                                .as_deref()
+                                .is_none_or(|tab_id| tab_id == session.tab_id)
+                        })
+                        .map(|session| session.tab_id)
+                        .collect();
                     for id in ids {
-                        let _ = browser
+                        browser
                             .close_preview_tab(&params.thread_id.to_string(), &id)
-                            .await;
+                            .await
+                            .map_err(|error| Failure::new("preview_close_failed", error))?;
                     }
                     agent_protocol::models::Empty {}.into()
                 }
@@ -862,7 +992,7 @@ impl HostRpcService {
                         })
                         .await
                         .map_err(|error| Failure::new("preview_refresh_failed", error))?;
-                    let frame = browser
+                    browser
                         .request(&agent_protocol::browser::BrowserRequest {
                             thread_id: params.thread_id.clone(),
                             tab_id: params.tab_id.clone(),
@@ -871,7 +1001,6 @@ impl HostRpcService {
                         })
                         .await
                         .map_err(|error| Failure::new("preview_refresh_failed", error))?;
-                    report_preview_frame(&resources.preview, &params.thread_id, &frame);
                     agent_protocol::models::Empty {}.into()
                 }
                 Call::ConnectionPerformance(params) => {
@@ -1325,38 +1454,14 @@ impl HostRpcService {
     }
 }
 
-fn report_preview_frame(
-    manager: &crate::preview::PreviewManager,
-    thread_id: &agent_domain::ThreadId,
-    frame: &agent_protocol::browser::BrowserFrame,
-) {
-    let Ok(previous) = manager.get(thread_id, &frame.tab_id) else {
-        return;
-    };
-    let Some(tab) = frame.tabs.iter().find(|tab| tab.id == frame.tab_id) else {
-        return;
-    };
-    let nav_status = if tab.url.is_empty() || tab.url == "about:blank" {
-        agent_protocol::preview::PreviewNavStatus::Idle
-    } else if let Ok(url) = agent_protocol::preview::normalize_preview_url(&tab.url) {
-        agent_protocol::preview::PreviewNavStatus::Success {
-            url,
-            title: tab
-                .title
-                .chars()
-                .take(agent_protocol::preview::PREVIEW_TITLE_MAX_LENGTH)
-                .collect(),
-        }
-    } else {
-        previous.nav_status.clone()
-    };
-    let _ = manager.report_status(
-        thread_id,
-        &frame.tab_id,
-        nav_status,
-        previous.can_go_back,
-        previous.can_go_forward,
-    );
+fn preview_event_thread(event: &agent_protocol::preview::PreviewEvent) -> &agent_domain::ThreadId {
+    match event {
+        agent_protocol::preview::PreviewEvent::Opened { thread_id, .. }
+        | agent_protocol::preview::PreviewEvent::Navigated { thread_id, .. }
+        | agent_protocol::preview::PreviewEvent::Resized { thread_id, .. }
+        | agent_protocol::preview::PreviewEvent::Failed { thread_id, .. }
+        | agent_protocol::preview::PreviewEvent::Closed { thread_id, .. } => thread_id,
+    }
 }
 
 fn provider_key(provider: ProviderKind) -> String {

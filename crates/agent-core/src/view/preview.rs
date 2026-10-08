@@ -11,6 +11,10 @@ pub struct PreviewView {
     pub local_servers: Vec<DiscoveredLocalServer>,
     pub recent_urls: Vec<String>,
     pub active_tab: Option<String>,
+    pub server_epoch: Option<String>,
+    pub revision: u64,
+    pub scanner_epoch: Option<String>,
+    pub scanner_revision: u64,
     pub empty_state: PreviewEmptyState,
     pub viewport_presets: Vec<PreviewViewportPresetView>,
 }
@@ -42,6 +46,10 @@ pub fn preview_state(state: &PreviewState) -> PreviewView {
         local_servers: state.local_servers.clone(),
         recent_urls: state.recent_urls.clone(),
         active_tab: state.active_tab.clone(),
+        server_epoch: state.server_epoch.clone(),
+        revision: state.revision,
+        scanner_epoch: state.scanner_epoch.clone(),
+        scanner_revision: state.scanner_revision,
         empty_state: if state.sessions.is_empty() {
             if state.local_servers.is_empty() {
                 PreviewEmptyState::NoTab

@@ -342,13 +342,35 @@ pub struct PreviewListResult {
     pub scanned_at: String,
     pub server_epoch: String,
     pub revision: u64,
+    /// The scanner's process epoch and change revision are independent from
+    /// browser-tab metadata, because port polling can change without tabs.
+    pub scanner_epoch: String,
+    pub scanner_revision: u64,
+}
+
+/// The measured guest viewport supplied by a Fill-mode owner. It has a
+/// separate contract from selectable viewport sizes because a narrow panel is
+/// allowed to be smaller than the minimum fixed device preset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewRenderedViewportSize {
+    pub width: u32,
+    pub height: u32,
+}
+impl PreviewRenderedViewportSize {
+    pub fn validate(self) -> Result<(), String> {
+        if self.width == 0 || self.height == 0 {
+            Err("measured preview viewport dimensions must be positive".into())
+        } else {
+            Ok(())
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PreviewList {
     pub thread_id: agent_domain::ThreadId,
-    #[serde(default)]
     pub configured_urls: Vec<String>,
 }
 impl PreviewList {
@@ -366,6 +388,25 @@ impl PreviewList {
     }
 }
 
+/// The long-lived Preview metadata and local-server subscription. Each stream
+/// item is a complete snapshot so a reconnect or scanner update carries the
+/// owning Host epoch and revision with it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewSubscribe {
+    pub thread_id: agent_domain::ThreadId,
+    pub configured_urls: Vec<String>,
+}
+impl PreviewSubscribe {
+    pub fn validate(&self) -> Result<(), String> {
+        PreviewList {
+            thread_id: self.thread_id.clone(),
+            configured_urls: self.configured_urls.clone(),
+        }
+        .validate()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PreviewOpen {
@@ -374,10 +415,14 @@ pub struct PreviewOpen {
     pub viewport: PreviewViewportSetting,
     pub appearance: PreviewAppearance,
     pub zoom: PreviewZoom,
+    pub rendered_size: Option<PreviewRenderedViewportSize>,
 }
 impl PreviewOpen {
     pub fn validate(&self) -> Result<(), String> {
         self.viewport.validate()?;
+        if let Some(size) = self.rendered_size {
+            size.validate()?;
+        }
         if let Some(url) = &self.url {
             normalize_preview_url(url).map(|_| ())?;
         }
@@ -405,13 +450,18 @@ pub struct PreviewResize {
     pub thread_id: agent_domain::ThreadId,
     pub tab_id: String,
     pub viewport: PreviewViewportSetting,
+    pub rendered_size: Option<PreviewRenderedViewportSize>,
 }
 impl PreviewResize {
     pub fn validate(&self) -> Result<(), String> {
         if self.tab_id.trim().is_empty() || self.tab_id.len() > 128 {
             return Err("preview tab id is invalid".into());
         }
-        self.viewport.validate()
+        self.viewport.validate()?;
+        if let Some(size) = self.rendered_size {
+            size.validate()?;
+        }
+        Ok(())
     }
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -590,6 +640,12 @@ mod tests {
         assert!(PreviewViewportSetting::Freeform { width: 239, height: 844 }.validate().is_err());
         assert!(PreviewViewportSetting::Freeform { width: 3840, height: 2161 }.validate().is_err());
         assert!(PreviewViewportSetting::Fill.validate().is_ok());
+    }
+
+    #[test]
+    fn measured_fill_dimensions_are_positive_without_using_selectable_preset_bounds() {
+        assert!(PreviewRenderedViewportSize { width: 1, height: 1 }.validate().is_ok());
+        assert!(PreviewRenderedViewportSize { width: 0, height: 1 }.validate().is_err());
     }
 
     #[test]

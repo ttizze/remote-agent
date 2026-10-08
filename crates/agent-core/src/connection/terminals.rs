@@ -123,6 +123,7 @@ impl Owner {
                     viewport: agent_protocol::preview::PreviewViewportSetting::Fill,
                     appearance: agent_protocol::preview::PreviewAppearance::System,
                     zoom: agent_protocol::preview::PreviewZoom::X100,
+                    rendered_size: None,
                 }),
                 None,
                 None,

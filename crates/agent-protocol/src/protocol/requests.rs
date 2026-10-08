@@ -112,6 +112,7 @@ contracts! {
     Revoke, "host/revoke" => (op::RevokeDevice, m::Empty) [clone],
     Browser, "host/browser" => (crate::browser::BrowserRequest, crate::browser::BrowserFrame) [clone],
     PreviewList, "host/preview/list" => (crate::preview::PreviewList, crate::preview::PreviewListResult) [clone],
+    PreviewSubscribe, "host/preview/subscribe" => (crate::preview::PreviewSubscribe, crate::preview::PreviewListResult),
     PreviewOpen, "host/preview/open" => (crate::preview::PreviewOpen, crate::preview::PreviewSessionSnapshot) [clone],
     PreviewNavigate, "host/preview/navigate" => (crate::preview::PreviewNavigate, crate::preview::PreviewSessionSnapshot) [clone],
     PreviewResize, "host/preview/resize" => (crate::preview::PreviewResize, crate::preview::PreviewSessionSnapshot) [clone],

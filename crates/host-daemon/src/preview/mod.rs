@@ -103,6 +103,8 @@ impl PreviewManager {
             scanned_at: now(),
             server_epoch: self.server_epoch.clone(),
             revision: state.revision,
+            scanner_epoch: String::new(),
+            scanner_revision: 0,
         }
     }
 
@@ -139,6 +141,18 @@ impl PreviewManager {
     ) -> Result<(), String> {
         nav_status.validate()?;
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        {
+            let current = state
+                .sessions
+                .get(&(thread_id.clone(), tab_id.to_owned()))
+                .ok_or_else(|| "preview session was not found".to_owned())?;
+            if current.nav_status == nav_status
+                && current.can_go_back == can_go_back
+                && current.can_go_forward == can_go_forward
+            {
+                return Ok(());
+            }
+        }
         let snapshot = {
             let snapshot = state
                 .sessions
@@ -284,6 +298,15 @@ mod tests {
     }
 
     #[test]
+    fn list_exposes_a_stable_nonempty_server_epoch() {
+        let manager = PreviewManager::new();
+        let first = manager.list(&thread("one"));
+        let second = manager.list(&thread("one"));
+        assert!(!first.server_epoch.is_empty());
+        assert_eq!(first.server_epoch, second.server_epoch);
+    }
+
+    #[test]
     fn closing_one_tab_keeps_the_other_tab() {
         let manager = PreviewManager::new();
         let id = thread("one");
@@ -328,5 +351,27 @@ mod tests {
             manager.get(&id, "tab").unwrap().nav_status,
             PreviewNavStatus::LoadFailed { code: -2, .. }
         ));
+    }
+
+    #[test]
+    fn repeated_frame_metadata_does_not_advance_the_revision() {
+        let manager = PreviewManager::new();
+        let id = thread("one");
+        manager
+            .open(
+                id.clone(),
+                "tab".into(),
+                Some("http://localhost:5173"),
+                PreviewViewportSetting::Fill,
+                PreviewAppearance::System,
+                PreviewZoom::X100,
+            )
+            .unwrap();
+        let before = manager.list(&id).revision;
+        let status = manager.get(&id, "tab").unwrap().nav_status;
+        manager
+            .report_status(&id, "tab", status, false, false)
+            .unwrap();
+        assert_eq!(manager.list(&id).revision, before);
     }
 }
