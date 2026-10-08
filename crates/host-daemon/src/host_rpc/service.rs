@@ -356,6 +356,14 @@ impl HostRpcService {
         if self.inner.updater.has_active_operations() {
             return true;
         }
+        if self.inner.resources.dictation.has_active_tasks() {
+            return true;
+        }
+        if let Some(browser) = self.inner.resources.browser.get()
+            && browser.has_active_tasks()
+        {
+            return true;
+        }
         if let Some(conversation) = self.inner.resources.conversation.get() {
             let threads = match conversation.runtime.store().thread_shells() {
                 Ok(threads) => threads,

@@ -24,13 +24,16 @@ across hosts with a different `/lib64` layout. Shared-library basenames that
 would overwrite different files fail packaging instead of silently changing
 the closure.
 
-Linux and macOS release jobs resolve FFmpeg from the lockfile-pinned Nixpkgs
-input. `scripts/stage-ffmpeg-runtime.sh` checks that the binary advertises
-`libvpx-vp9`, copies its non-system shared-library closure, and rewrites the
-Linux or macOS loader paths to the sibling `lib` directory. The macOS app puts
-the same layout in `Contents/MacOS`, so both `Bex` and its Host children see the
-same runtime. Nested macOS runtime files are signed before the app bundle is
-signed.
+Linux and macOS release jobs resolve the small, lockfile-pinned FFmpeg output
+declared in `flake.nix`. It enables only the FFmpeg libraries needed for the
+`libvpx-vp9` encoder and keeps the shared closure small enough to review. The
+component inventory is reviewed against the exact Nixpkgs revision in
+`flake.lock`.
+staging helper checks that the binary advertises `libvpx-vp9`, copies its
+non-system shared-library closure, and rewrites the Linux or macOS loader paths
+to the sibling `lib` directory. The macOS app puts the same layout in
+`Contents/MacOS`, so both `Bex` and its Host children see the same runtime.
+Nested macOS runtime files are signed before the app bundle is signed.
 
 The Windows runner uses the static FFmpeg 9.0.2 essentials archive from
 [Gyan's published builds](https://www.gyan.dev/ffmpeg/builds/), pinned by the
@@ -41,18 +44,23 @@ the release binaries as static GPLv3 builds, so the archive has no DLL
 prerequisite. The staging script still copies DLLs if a future pinned source
 supplies a shared build.
 
-The staging helper collects sorted license and copying files from the FFmpeg
-package root, every non-system Nix dependency root, and the checked-in
-`third_party/ffmpeg` notices needed when Nix splits license data out of its
-binary output. It fails when no such file is available and records the copied
-inventory in `FFMPEG-RUNTIME.txt`, so an artifact cannot silently omit the
-runtime's license material. The manifest also records the source executable
-digest and loader mode.
+The staging helper collects sorted license and copying files from a runtime
+root when they are present. Nix binary and library outputs commonly omit those
+files, so `third_party/ffmpeg/components.tsv` is an exact component-root
+inventory: each pinned output name maps to one checked-in notice, SPDX
+identifier, and HTTPS upstream source. A split inventory is accepted only for a
+listed component; an unknown unlicensed root fails packaging. The manifest
+records each component, license file, SPDX identifier, and source URL in
+`FFMPEG-RUNTIME.txt`, along with the source executable digest and loader mode.
+There is no generic license-directory fallback that could hide a new runtime
+dependency.
 
 Packaging fails if FFmpeg is missing, cannot report its version, lacks
-`libvpx-vp9`, has a conflicting dependency basename, or has no license file.
-`scripts/ffmpeg-runtime-test.sh` exercises the Linux loader wrapper,
-non-system license inventory, and fail-closed license check with fixture tools.
+`libvpx-vp9`, has a conflicting dependency basename, has an unresolved
+dependency, or has no mapped license file. `scripts/ffmpeg-runtime-test.sh`
+exercises the Linux loader wrapper, a binary root with split licenses, the
+unknown-component fail-closed path, and the conflict/license checks with
+fixture tools.
 `scripts/release-metadata-test.sh` also checks that Host and desktop Windows
 archive layouts contain the runtime manifest, sibling executable, and copied
 license inventory.

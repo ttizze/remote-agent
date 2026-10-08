@@ -37,6 +37,23 @@ fn request(thread: &ThreadId, frame: &BrowserFrame, action: BrowserAction) -> Br
     }
 }
 
+#[test]
+fn browser_reports_an_in_flight_action_without_treating_idle_chrome_as_busy() {
+    let bridge_directory = tempfile::tempdir().unwrap();
+    let browser = Browser {
+        profile: bridge_directory.path().join("profile"),
+        executable: "fixture-browser".into(),
+        state: tokio::sync::Mutex::new(State::default()),
+        stop: Default::default(),
+        bridge_directory,
+    };
+    assert!(!browser.has_active_tasks());
+    let state = browser.state.try_lock().unwrap();
+    assert!(browser.has_active_tasks());
+    drop(state);
+    assert!(!browser.has_active_tasks());
+}
+
 /// Exercises only a temporary BEX profile and a local, deterministic web fixture.
 #[tokio::test]
 #[ignore = "requires Chrome/Chromium and bex-provider-supervisor"]

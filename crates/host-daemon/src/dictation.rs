@@ -111,6 +111,16 @@ impl Dictation {
     pub(crate) fn close_session(&self, session: SessionId) {
         self.prepared.lock().unwrap().remove(&session);
     }
+    /// A prepared connection is the Host-side half of a device recording. It
+    /// stays present while the client records and is released only when the
+    /// recording is cancelled or submitted, so an update handoff must wait for
+    /// it to settle.
+    pub(crate) fn has_active_tasks(&self) -> bool {
+        self.prepared
+            .try_lock()
+            .map(|prepared| !prepared.is_empty())
+            .unwrap_or(true)
+    }
     fn take_preparation(&self, session: SessionId, id: Option<&str>) -> Option<Prepared> {
         let mut prepared = self.prepared.lock().unwrap();
         if id.is_some_and(|id| prepared.get(&session).is_some_and(|entry| entry.id == id)) {
@@ -655,6 +665,7 @@ mod tests {
                 Prepared::new(format!("recording-{session}"), std::future::pending()),
             );
         }
+        assert!(dictation.has_active_tasks());
         dictation.cancel(1, "old-recording");
         assert!(dictation.take_preparation(2, Some("recording-1")).is_none());
         assert!(dictation.take_preparation(1, None).is_none());
@@ -669,6 +680,7 @@ mod tests {
             "recording-2"
         );
         assert!(dictation.prepared.lock().unwrap().is_empty());
+        assert!(!dictation.has_active_tasks());
         dictation.prepared.lock().unwrap().insert(
             3,
             Prepared::new("last-recording".into(), std::future::pending()),

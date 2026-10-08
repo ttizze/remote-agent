@@ -79,6 +79,14 @@ impl Browser {
         }
     }
 
+    /// A browser action owns the state mutex for its complete CDP exchange.
+    /// Handoff uses this synchronous probe while holding the Host gate, so a
+    /// blocked probe means an action is still in flight and the browser must
+    /// not be torn down underneath it.
+    pub(crate) fn has_active_tasks(&self) -> bool {
+        self.state.try_lock().is_err()
+    }
+
     async fn ensure(&self, state: &mut State, thread: &str) -> Result<(), String> {
         if thread.is_empty() || thread.len() > 8192 {
             return Err("browser scope is required".into());

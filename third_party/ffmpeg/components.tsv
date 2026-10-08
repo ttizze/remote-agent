@@ -1,0 +1,10 @@
+# Exact Nix output names used by the lockfile-pinned FFmpeg runtime.
+# Nixpkgs input: 56c02bc00adcf003215cc4bd996d6efaf4cff188 (flake.lock)
+# component-root-name	license-file	SPDX identifier	pinned upstream source
+ffmpeg-9.0-bin	LICENSE-FFMPEG-GPL-3.0.txt	GPL-3.0-only	https://ffmpeg.org/releases/ffmpeg-9.0.tar.xz
+ffmpeg-9.0-lib	LICENSE-FFMPEG-GPL-3.0.txt	GPL-3.0-only	https://ffmpeg.org/releases/ffmpeg-9.0.tar.xz
+ffmpeg-9.0.1-bin	LICENSE-FFMPEG-GPL-3.0.txt	GPL-3.0-only	https://ffmpeg.org/releases/ffmpeg-9.0.1.tar.xz
+ffmpeg-9.0.1-lib	LICENSE-FFMPEG-GPL-3.0.txt	GPL-3.0-only	https://ffmpeg.org/releases/ffmpeg-9.0.1.tar.xz
+ffmpeg-headless-8.1.2-bin	LICENSE-FFMPEG-GPL-3.0.txt	GPL-3.0-only	https://ffmpeg.org/releases/ffmpeg-8.1.2.tar.xz
+ffmpeg-headless-8.1.2-lib	LICENSE-FFMPEG-GPL-3.0.txt	GPL-3.0-only	https://ffmpeg.org/releases/ffmpeg-8.1.2.tar.xz
+libvpx-1.16.0	LICENSE-LIBVPX-BSD-3-CLAUSE.txt	BSD-3-Clause	https://chromium.googlesource.com/webm/libvpx/+refs/tags/v1.16.0
