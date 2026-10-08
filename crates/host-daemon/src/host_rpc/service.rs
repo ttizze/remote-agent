@@ -1279,7 +1279,7 @@ impl HostRpcService {
         // The recent page can end before a visible root's older descendants.
         let descendants = futures_util::future::join_all(page.data.iter().filter_map(|thread| {
             let id = thread.id.as_ref()?;
-            if thread.parent_id.is_some() || id.provider != ProviderKind::Codex {
+            if thread.parent_id.is_some() {
                 return None;
             }
             let (_, agent) = agents
@@ -1291,20 +1291,21 @@ impl HostRpcService {
                     .try_flatten()
                     .boxed();
                 let mut children = Vec::new();
-                loop {
+                let error = loop {
                     match next_title(&mut threads, deadline).await {
                         Ok(Some(summary)) => children.push(summary),
-                        Ok(None) => return (children, agent.capabilities(), None),
-                        Err(error) => return (children, agent.capabilities(), Some(error)),
+                        Ok(None) => break None,
+                        Err(error) => break Some(error),
                     }
-                }
+                };
+                (id.provider, children, agent.capabilities(), error)
             })
         }))
         .await;
         let mut children = Vec::new();
-        for (summaries, capabilities, error) in descendants {
+        for (provider, summaries, capabilities, error) in descendants {
             if let Some(error) = error {
-                provider_errors.insert("codex".into(), serde_json::to_value(error)?);
+                provider_errors.insert(provider.key().into(), serde_json::to_value(error)?);
             }
             for summary in summaries {
                 let mut thread = summary.thread;
