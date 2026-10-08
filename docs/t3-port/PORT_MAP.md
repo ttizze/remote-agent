@@ -1687,3 +1687,12 @@ Appearance の保存と Themes・Contrast・Composer context・Motion・Advanced
 - `crate_boundaries` は `agent-domain` の依存が純粋な crate だけであること、`agent-core`（bindings の有無とも）と `agent-ffi` が `agent-runtime`・`agent-providers`・`rusqlite` を含まないことを確かめる。
 - 旧ランタイムを記述した文書（`SESSION_RUNTIME.md`、`BEX_PROTOCOL_DESIGN.md`、`BEX_PROTOCOL_NATIVE_CONTRACTS.md`、`CRATE_BOUNDARIES.md`、`IMPLEMENTATION.md`、`PLAN.md` の設計の節）を現在の設計に書き直し、旧コードの地図 `BEX_ARCHITECTURE_MAP.md` と、削除したテストを根拠にした `PR55_REVIEW.md`、この文書の「中断時の12ファイルの採否」を削除した。
 - どこからも参照されない core と runtime の定数・関数を削除した。T3 から移植してテストだけが使う関数（minimap、drag、citation など）は、未接続の T3 の挙動として残す。
+### 段階 6: OS ウィジェットと Live Activity（2026-10-08）
+
+| 固定ソース・テスト | 接続先と検証 |
+| --- | --- |
+| mobile `widgets/subscriptionUsageSnapshot.ts` と同テスト、`shared/usageLimits.ts` | `agent-core/view/usage/widget.rs`。メールの正規化と最新値による重複排除、kind/id ごとの平均残量、session/weekly の優先、保存上限、reset と15分の期限で別々に空になる timeline、API key・失敗・未取得の区別。OS へ渡す JSON にアカウント ID・メール・エラー・認証情報を入れない。unit と proptest を実装した。 |
+| mobile `widgets/SubscriptionUsage*` と `publishSubscriptionUsage*` | iOS `ActivityExtension/SubscriptionUsageWidget.swift` と AppGroup の atomic publication、Android `SubscriptionUsageWidget.kt` と RemoteViews・期限 alarm。共通関数が期限・period・family の quota 選択を返し、native は日付のローカライズと表示を行う。タップは Usage 画面へ渡す。 |
+| mobile `widgets/AgentActivity.tsx` と同テスト | `agent-core/view/activity.rs` と iOS `Shared/AgentActivityAttributes.swift`・`ActivityExtension/AgentActivityWidget.swift`。attention-first の順、失敗優先の終了表示、期限切れの進行状態、明暗・monochrome・Always On の色、アプリ内だけのリンク、Lock Screen・Dynamic Island・small family の描画。ActivityKit token と request/update/end は push owner と統合する。 |
+
+Swift 構文と plist/project 構造、固定 formatter、diff の検証を実施した。新しい共通 binding と native build・unit test の最終結果は統合後に記録する。

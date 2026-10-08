@@ -58,7 +58,20 @@
 		5A78A6A3E6A09CE733F83B47 /* ComposerMenu.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A71C19295E5E80AA6E3D427 /* ComposerMenu.swift */; };
 		5AFC0570AD7136B42551A29F /* FeedDividers.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A22A9A7CFE0FC491FA1F865 /* FeedDividers.swift */; };
 		5A75EFF73501B288889439CD /* ThreadListHeader.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A0CD55A0BBF9DC36773FC9A /* ThreadListHeader.swift */; };
+		A71000000000000000000015 = {isa = PBXBuildFile; fileRef = A71000000000000000000001; };
+		A71000000000000000000016 = {isa = PBXBuildFile; fileRef = A71000000000000000000002; };
+		A71000000000000000000017 = {isa = PBXBuildFile; fileRef = A71000000000000000000003; };
+		A71000000000000000000018 = {isa = PBXBuildFile; fileRef = A71000000000000000000001; };
+		A71000000000000000000019 = {isa = PBXBuildFile; fileRef = A71000000000000000000003; };
+		A7100000000000000000001A = {isa = PBXBuildFile; fileRef = A71000000000000000000004; };
+		A7100000000000000000001B = {isa = PBXBuildFile; fileRef = A71000000000000000000005; };
+		A7100000000000000000001C = {isa = PBXBuildFile; fileRef = A71000000000000000000008; };
+		A7100000000000000000001D = {isa = PBXBuildFile; fileRef = A7100000000000000000000A; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 /* End PBXBuildFile section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		A7100000000000000000002F /* Embed Activity Extension */ = {isa = PBXCopyFilesBuildPhase; buildActionMask = 2147483647; dstPath = ""; dstSubfolderSpec = 13; files = (A7100000000000000000001D, ); name = "Embed Activity Extension"; runOnlyForDeploymentPostprocessing = 0; };
+/* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
         B55D00000000000000000002 /* DraftRevision.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DraftRevision.swift; sourceTree = "<group>"; };
@@ -114,6 +127,16 @@
 		5A71C19295E5E80AA6E3D427 /* ComposerMenu.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposerMenu.swift; sourceTree = "<group>"; };
 		5A22A9A7CFE0FC491FA1F865 /* FeedDividers.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FeedDividers.swift; sourceTree = "<group>"; };
 		5A0CD55A0BBF9DC36773FC9A /* ThreadListHeader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThreadListHeader.swift; sourceTree = "<group>"; };
+		A71000000000000000000001 /* UsageWidgetData.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Shared/UsageWidgetData.swift"; sourceTree = SOURCE_ROOT; };
+		A71000000000000000000002 /* UsageWidgetPublisher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Bex/UsageWidgetPublisher.swift"; sourceTree = SOURCE_ROOT; };
+		A71000000000000000000003 /* AgentActivityAttributes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Shared/AgentActivityAttributes.swift"; sourceTree = SOURCE_ROOT; };
+		A71000000000000000000004 /* SubscriptionUsageWidget.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "ActivityExtension/SubscriptionUsageWidget.swift"; sourceTree = SOURCE_ROOT; };
+		A71000000000000000000005 /* AgentActivityWidget.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "ActivityExtension/AgentActivityWidget.swift"; sourceTree = SOURCE_ROOT; };
+		A71000000000000000000006 /* Activity Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = "ActivityExtension/Info.plist"; sourceTree = SOURCE_ROOT; };
+		A71000000000000000000007 /* ActivityExtension.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = "ActivityExtension/ActivityExtension.entitlements"; sourceTree = SOURCE_ROOT; };
+		A71000000000000000000008 /* Activity Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = "ActivityExtension/Assets.xcassets"; sourceTree = SOURCE_ROOT; };
+		A71000000000000000000009 /* RemoteAgent.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = "Bex/RemoteAgent.entitlements"; sourceTree = SOURCE_ROOT; };
+		A7100000000000000000000A /* AgentActivityExtension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; path = AgentActivityExtension.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -123,6 +146,7 @@
 			files = (C30000000000000000000001 /* SwiftTerm in Frameworks */, );
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		A7100000000000000000002B = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -130,6 +154,7 @@
 			isa = PBXGroup;
 			children = (
 				A10000000000000000000031 /* Bex */,
+				A7100000000000000000001E /* Agent widgets */,
 				A10000000000000000000032 /* Frameworks */,
 				A10000000000000000000033 /* Products */,
 			);
@@ -199,10 +224,11 @@
 		};
 		A10000000000000000000033 /* Products */ = {
 			isa = PBXGroup;
-			children = (A10000000000000000000010 /* Bex.app */,);
+			children = (A10000000000000000000010 /* Bex.app */, A7100000000000000000000A /* AgentActivityExtension.appex */,);
 			name = Products;
 			sourceTree = "<group>";
 		};
+		A7100000000000000000001E /* Agent widgets */ = {isa = PBXGroup; children = (A71000000000000000000001, A71000000000000000000002, A71000000000000000000003, A71000000000000000000004, A71000000000000000000005, A71000000000000000000006, A71000000000000000000007, A71000000000000000000008, A71000000000000000000009, ); name = "Agent widgets"; sourceTree = "<group>"; };
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
@@ -213,15 +239,17 @@
 				A10000000000000000000020 /* Sources */,
 				A10000000000000000000021 /* Frameworks */,
 				A10000000000000000000022 /* Resources */,
+				A7100000000000000000002F /* Embed Activity Extension */,
 			);
 			buildRules = ();
-			dependencies = ();
+			dependencies = (A7100000000000000000002D, );
 			packageProductDependencies = (C30000000000000000000002, );
             name = Bex;
 			productName = Bex;
 			productReference = A10000000000000000000010 /* Bex.app */;
 			productType = "com.apple.product-type.application";
 		};
+		A71000000000000000000028 /* AgentActivityExtension */ = {isa = PBXNativeTarget; buildConfigurationList = A71000000000000000000029; buildPhases = (A7100000000000000000002A, A7100000000000000000002B, A7100000000000000000002C, ); buildRules = (); dependencies = (); name = AgentActivityExtension; productName = AgentActivityExtension; productReference = A7100000000000000000000A; productType = "com.apple.product-type.app-extension"; };
 /* End PBXNativeTarget section */
 
 /* Begin XCRemoteSwiftPackageReference section */
@@ -250,18 +278,21 @@
 			projectDirPath = "";
 			projectRoot = "";
             packageReferences = (C30000000000000000000005, );
-			targets = (A10000000000000000000040 /* Bex */,);
+			targets = (A10000000000000000000040 /* Bex */, A71000000000000000000028 /* AgentActivityExtension */,);
 		};
 /* End PBXProject section */
 
 /* Begin PBXContainerItemProxy section */
+		A7100000000000000000002E = {isa = PBXContainerItemProxy; containerPortal = A10000000000000000000050; proxyType = 1; remoteGlobalIDString = A71000000000000000000028; remoteInfo = AgentActivityExtension; };
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXTargetDependency section */
+		A7100000000000000000002D = {isa = PBXTargetDependency; target = A71000000000000000000028; targetProxy = A7100000000000000000002E; };
 /* End PBXTargetDependency section */
 
 /* Begin PBXResourcesBuildPhase section */
 		A10000000000000000000022 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (F300000000000000000000012 /* dmsans_regular.ttf in Resources */, F300000000000000000000022 /* dmsans_medium.ttf in Resources */, F300000000000000000000032 /* dmsans_bold.ttf in Resources */, A10000000000000000000007 /* Assets.xcassets in Resources */, E50000000000000000000001 /* PrivacyInfo.xcprivacy in Resources */,); runOnlyForDeploymentPostprocessing = 0; };
+		A7100000000000000000002C = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (A7100000000000000000001C, ); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
@@ -270,6 +301,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				B55D00000000000000000001 /* DraftRevision.swift in Sources */,
+				A71000000000000000000015, A71000000000000000000016, A71000000000000000000017,
                 A10000000000000000000001 /* BexIOSApp.swift in Sources */,
 				A10000000000000000000002 /* PlatformServices.swift in Sources */,
 				A10000000000000000000003 /* QRCodeCaptureViewController.swift in Sources */,
@@ -318,6 +350,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		A7100000000000000000002A = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A71000000000000000000018, A71000000000000000000019, A7100000000000000000001A, A7100000000000000000001B, ); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXSourcesBuildPhase section */
 
 /* Begin XCBuildConfiguration section */
@@ -362,6 +395,7 @@
 				MARKETING_VERSION = 1.0;
 				"OTHER_LDFLAGS[sdk=iphoneos*]" = "$(inherited) $(BEX_CARGO_TARGET_DIR)/aarch64-apple-ios/release/libagent_ffi.a -lAgentCore -framework Security -framework SystemConfiguration";
 				"OTHER_LDFLAGS[sdk=iphonesimulator*]" = "$(inherited) $(BEX_CARGO_TARGET_DIR)/aarch64-apple-ios-sim/release/libagent_ffi.a -lAgentCore -framework Security -framework SystemConfiguration";
+				CODE_SIGN_ENTITLEMENTS = Bex/RemoteAgent.entitlements;
 				PRODUCT_BUNDLE_IDENTIFIER = com.ttizze.b-codex;
 				PRODUCT_NAME = Bex;
 				SUPPORTED_PLATFORMS = "iphonesimulator iphoneos";
@@ -390,6 +424,7 @@
 				MARKETING_VERSION = 1.0;
 				"OTHER_LDFLAGS[sdk=iphoneos*]" = "$(inherited) $(BEX_CARGO_TARGET_DIR)/aarch64-apple-ios/release/libagent_ffi.a -lAgentCore -framework Security -framework SystemConfiguration";
 				"OTHER_LDFLAGS[sdk=iphonesimulator*]" = "$(inherited) $(BEX_CARGO_TARGET_DIR)/aarch64-apple-ios-sim/release/libagent_ffi.a -lAgentCore -framework Security -framework SystemConfiguration";
+				CODE_SIGN_ENTITLEMENTS = Bex/RemoteAgent.entitlements;
 				PRODUCT_BUNDLE_IDENTIFIER = com.ttizze.b-codex;
 				PRODUCT_NAME = Bex;
 				SUPPORTED_PLATFORMS = "iphonesimulator iphoneos";
@@ -399,6 +434,58 @@
 			};
 			name = Release;
 		};
+		A7100000000000000000003C = {isa = XCBuildConfiguration; buildSettings = {APPLICATION_EXTENSION_API_ONLY = YES;
+ARCHS = arm64;
+BEX_CARGO_TARGET_DIR = "$(SRCROOT)/../../../target";
+CODE_SIGN_STYLE = Automatic;
+CODE_SIGN_ENTITLEMENTS = ActivityExtension/ActivityExtension.entitlements;
+CURRENT_PROJECT_VERSION = 70;
+DEVELOPMENT_TEAM = K65K9J8686;
+GENERATE_INFOPLIST_FILE = NO;
+INFOPLIST_FILE = ActivityExtension/Info.plist;
+IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks @executable_path/../../Frameworks";
+MARKETING_VERSION = 1.0;
+PRODUCT_BUNDLE_IDENTIFIER = com.ttizze.b-codex.activity;
+PRODUCT_NAME = AgentActivityExtension;
+SDKROOT = iphoneos;
+SKIP_INSTALL = YES;
+SUPPORTED_PLATFORMS = "iphonesimulator iphoneos";
+SWIFT_VERSION = 5.0;
+TARGETED_DEVICE_FAMILY = "1,2";
+"SWIFT_INCLUDE_PATHS[sdk=iphoneos*]" = "$(inherited) $(BEX_CARGO_TARGET_DIR)/aarch64-apple-ios/release $(SRCROOT)/../../../target/agent-bindings";
+"SWIFT_INCLUDE_PATHS[sdk=iphonesimulator*]" = "$(inherited) $(BEX_CARGO_TARGET_DIR)/aarch64-apple-ios-sim/release $(SRCROOT)/../../../target/agent-bindings";
+"LIBRARY_SEARCH_PATHS[sdk=iphoneos*]" = "$(inherited) $(BEX_CARGO_TARGET_DIR)/aarch64-apple-ios/release";
+"LIBRARY_SEARCH_PATHS[sdk=iphonesimulator*]" = "$(inherited) $(BEX_CARGO_TARGET_DIR)/aarch64-apple-ios-sim/release";
+"OTHER_LDFLAGS[sdk=iphoneos*]" = "$(inherited) $(BEX_CARGO_TARGET_DIR)/aarch64-apple-ios/release/libagent_ffi.a -lAgentCore -framework Security -framework SystemConfiguration";
+"OTHER_LDFLAGS[sdk=iphonesimulator*]" = "$(inherited) $(BEX_CARGO_TARGET_DIR)/aarch64-apple-ios-sim/release/libagent_ffi.a -lAgentCore -framework Security -framework SystemConfiguration";
+OTHER_SWIFT_FLAGS = "$(inherited) -Xcc -fmodule-map-file=$(SRCROOT)/../../../target/agent-bindings/AgentCoreFFI.modulemap";}; name = Debug; };
+		A7100000000000000000003D = {isa = XCBuildConfiguration; buildSettings = {APPLICATION_EXTENSION_API_ONLY = YES;
+ARCHS = arm64;
+BEX_CARGO_TARGET_DIR = "$(SRCROOT)/../../../target";
+CODE_SIGN_STYLE = Automatic;
+CODE_SIGN_ENTITLEMENTS = ActivityExtension/ActivityExtension.entitlements;
+CURRENT_PROJECT_VERSION = 70;
+DEVELOPMENT_TEAM = K65K9J8686;
+GENERATE_INFOPLIST_FILE = NO;
+INFOPLIST_FILE = ActivityExtension/Info.plist;
+IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks @executable_path/../../Frameworks";
+MARKETING_VERSION = 1.0;
+PRODUCT_BUNDLE_IDENTIFIER = com.ttizze.b-codex.activity;
+PRODUCT_NAME = AgentActivityExtension;
+SDKROOT = iphoneos;
+SKIP_INSTALL = YES;
+SUPPORTED_PLATFORMS = "iphonesimulator iphoneos";
+SWIFT_VERSION = 5.0;
+TARGETED_DEVICE_FAMILY = "1,2";
+"SWIFT_INCLUDE_PATHS[sdk=iphoneos*]" = "$(inherited) $(BEX_CARGO_TARGET_DIR)/aarch64-apple-ios/release $(SRCROOT)/../../../target/agent-bindings";
+"SWIFT_INCLUDE_PATHS[sdk=iphonesimulator*]" = "$(inherited) $(BEX_CARGO_TARGET_DIR)/aarch64-apple-ios-sim/release $(SRCROOT)/../../../target/agent-bindings";
+"LIBRARY_SEARCH_PATHS[sdk=iphoneos*]" = "$(inherited) $(BEX_CARGO_TARGET_DIR)/aarch64-apple-ios/release";
+"LIBRARY_SEARCH_PATHS[sdk=iphonesimulator*]" = "$(inherited) $(BEX_CARGO_TARGET_DIR)/aarch64-apple-ios-sim/release";
+"OTHER_LDFLAGS[sdk=iphoneos*]" = "$(inherited) $(BEX_CARGO_TARGET_DIR)/aarch64-apple-ios/release/libagent_ffi.a -lAgentCore -framework Security -framework SystemConfiguration";
+"OTHER_LDFLAGS[sdk=iphonesimulator*]" = "$(inherited) $(BEX_CARGO_TARGET_DIR)/aarch64-apple-ios-sim/release/libagent_ffi.a -lAgentCore -framework Security -framework SystemConfiguration";
+OTHER_SWIFT_FLAGS = "$(inherited) -Xcc -fmodule-map-file=$(SRCROOT)/../../../target/agent-bindings/AgentCoreFFI.modulemap";}; name = Release; };
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -414,6 +501,7 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Debug;
 		};
+		A71000000000000000000029 = {isa = XCConfigurationList; buildConfigurations = (A7100000000000000000003C, A7100000000000000000003D, ); defaultConfigurationIsVisible = 0; defaultConfigurationName = Debug; };
 /* End XCConfigurationList section */
 	};
 	rootObject = A10000000000000000000050 /* Project object */;

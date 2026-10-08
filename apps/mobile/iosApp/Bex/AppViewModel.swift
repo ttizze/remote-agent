@@ -46,6 +46,7 @@ final class BexAppViewModel: ObservableObject {
     var connection: Task<Void, Never>?
     private var pending: [(Intent, (Result<Outcome, Error>) -> Void)] = []
     private var operations: [UUID: Task<Void, Never>] = [:]
+    private let usageWidget = UsageWidgetPublisher()
 
     init() {
         do { profiles = try HostProfile.load() } catch { notice = error.localizedDescription }
@@ -335,6 +336,8 @@ extension BexAppViewModel {
         }
         let threadChanged = snapshot.selectedThreadId() != next.selectedThreadId()
         snapshot = next
+        do { try usageWidget.publish(next.subscriptionUsageWidgetJson(nowMs: 0, maxWindows: 6)) }
+        catch { notice = error.localizedDescription }
         if threadChanged {
             threadView = nil
             showScrollToEnd = false
