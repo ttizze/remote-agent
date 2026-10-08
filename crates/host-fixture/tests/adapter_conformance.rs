@@ -682,31 +682,6 @@ async fn title_lists_stop_after_visible_sections_and_merge_provider_pages_in_ord
     assert!(listing.has_more_chats);
     assert!(listing.provider_errors.is_none());
     assert_eq!(page_reads(), 1, "initial list must not fetch all 20 pages");
-    assert!(
-        list_reads()
-            .iter()
-            .all(|entry| entry["ancestorThreadId"].is_null()),
-        "the task list must not enumerate descendant fleets"
-    );
-    let observed = listing.data[1].id.clone().unwrap();
-    let agents = local
-        .peer
-        .call(&op::ListAgents {
-            thread_id: observed.clone(),
-        })
-        .await
-        .unwrap();
-    assert!(agents.is_empty());
-    let descendant_roots = list_reads()
-        .iter()
-        .filter_map(|entry| entry["ancestorThreadId"].as_str().map(str::to_owned))
-        .collect::<Vec<_>>();
-    assert_eq!(
-        descendant_roots,
-        [observed.id],
-        "only the explicitly observed fleet reads descendants"
-    );
-
     let expanded = local
         .peer
         .call(&op::ListSessions::new(agent_protocol::models::ListQuery {
@@ -819,13 +794,11 @@ async fn title_lists_stop_after_visible_sections_and_merge_provider_pages_in_ord
         15,
         "expand only the requested project before stopping"
     );
-    assert_eq!(
+    assert!(
         list_reads()
             .iter()
-            .filter(|entry| !entry["ancestorThreadId"].is_null())
-            .count(),
-        1,
-        "pagination and search must not read additional descendant fleets"
+            .all(|entry| entry["ancestorThreadId"].is_null()),
+        "root lists and searches must not read native descendants"
     );
     local.close().await;
     host.close().await.unwrap();

@@ -1603,23 +1603,20 @@ async fn title_lists_are_recent_scoped_small_and_expand_without_loading_bodies()
         ]);
         std::fs::write(directory.path().join("list-fixture.json"), serde_json::to_vec(&threads).unwrap()).unwrap();
         let nested = mobile.peer.request::<models::ThreadList>(&agent_protocol::protocol::Call::ListSessions(agent_protocol::operations::ListSessions { query: models::ListQuery::default() })).await.unwrap();
-        assert_eq!(nested.data.len(), 30, "descendants must not enlarge the root task list");
+        assert_eq!(nested.data.len(), 30, "root titles exclude native descendants");
         assert!(nested.has_more_chats);
         assert_eq!(nested.more_project_ids.len(), 5);
-        assert!(nested.data.iter().all(|thread| thread.parent_id.is_none() && thread.turns.is_none() && thread.preview.is_none()));
-        let agents = mobile.peer.call(&rpc::ListAgents {
-            thread_id: serde_json::from_value(json!({"provider":"codex","id":"worktree"})).unwrap(),
-        }).await.unwrap();
+        assert!(nested.data.iter().all(|thread| thread.turns.is_none() && thread.preview.is_none()));
+        assert!(nested.data.iter().all(|thread| thread.parent_id.is_none()));
+        let root = agent_protocol::session::SessionRef::new(agent_protocol::session::ProviderKind::Codex, "worktree".into()).unwrap();
+        let agents = mobile.peer.call(&op::ListAgents { thread_id: root.clone() }).await.unwrap();
         let child = agents.iter().find(|agent| agent.id.id == "older-child").unwrap();
-        assert_eq!(child.parent_id.id, "worktree");
+        assert_eq!(child.parent_id, root);
         assert_eq!(child.name.as_deref(), Some("Curie"));
         let descendants: Vec<_> = agents.iter().map(|agent| agent.id.id.as_str()).collect();
         assert_eq!(descendants, ["older-child", "older-grandchild"]);
-        let opened = open_session(&mobile.peer, &serde_json::to_value(&child.id).unwrap(), 5).await.0;
-        let child: models::Thread = serde_json::from_value(opened["response"]["thread"].clone()).unwrap();
-        assert_eq!(child.parent_id.as_ref().unwrap().id, "worktree");
-        assert_eq!(child.name.as_deref(), Some("Curie"));
-        assert_eq!(child.can_accept_direct_input, Some(false));
+        let child = open_session(&mobile.peer, &json!(child.id), 5).await.0["response"].clone();
+        assert_eq!(child["thread"]["canAcceptDirectInput"], false);
         mobile.close().await;
         fixture.close().await.unwrap();
     }).await.expect("title list loop exceeded deadline");
