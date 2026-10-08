@@ -576,7 +576,16 @@ pub struct DeviceEventLogEntry {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum DeviceInputKind {
     Touch { phase: DeviceTouchPhase, x: f32, y: f32 },
-    Key { code: String, down: bool },
+    /// Physical code and the platform's actual key value travel together.
+    /// iOS uses the code for HID; Android uses the key value so shifted and
+    /// non-ASCII input is preserved without client-side guessing.
+    Key {
+        code: String,
+        key: String,
+        down: bool,
+        meta: bool,
+        ctrl: bool,
+    },
     HardwareButton(DeviceHardwareButton),
     Rotate,
     SetOrientation(DeviceOrientation),
@@ -616,8 +625,10 @@ impl DeviceInput {
             DeviceInputKind::Touch { x, y, .. } if !x.is_finite() || !y.is_finite() || !(0.0..=1.0).contains(x) || !(0.0..=1.0).contains(y) => {
                 Err("device touch coordinates must be finite and normalized".into())
             }
-            DeviceInputKind::Key { code, .. } if code.trim().is_empty() || code.len() > 64 => {
-                Err("device key code is invalid".into())
+            DeviceInputKind::Key { code, key, .. }
+                if code.trim().is_empty() || code.len() > 64 || key.is_empty() || key.len() > 128 =>
+            {
+                Err("device key code or key value is invalid".into())
             }
             DeviceInputKind::Fold { command } | DeviceInputKind::Duo { command }
                 if command.trim().is_empty() || command.len() > 64 => Err("device fold command is invalid".into()),
@@ -840,5 +851,32 @@ mod tests {
         png.extend_from_slice(&640u32.to_be_bytes());
         assert_eq!(png_dimensions(&png), (320, 640));
         assert_eq!(png_dimensions(&[0, 1, 2]), (0, 0));
+    }
+
+    #[test]
+    fn keyboard_input_validates_actual_key_value() {
+        let valid = DeviceActionInput {
+            host_id: None,
+            device_id: "emulator-1".into(),
+            action: DeviceActionKind::Input(DeviceInputKind::Key {
+                code: "Digit1".into(),
+                key: "!".into(),
+                down: true,
+                meta: false,
+                ctrl: false,
+            }),
+        };
+        assert!(valid.validate().is_ok());
+        let empty = DeviceActionInput {
+            action: DeviceActionKind::Input(DeviceInputKind::Key {
+                code: "KeyA".into(),
+                key: String::new(),
+                down: true,
+                meta: false,
+                ctrl: false,
+            }),
+            ..valid.clone()
+        };
+        assert!(empty.validate().is_err());
     }
 }

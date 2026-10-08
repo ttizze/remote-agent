@@ -4177,26 +4177,6 @@ fn android_keycode(code: &str) -> Option<u16> {
     Some(match code { "ArrowUp" => 19, "ArrowDown" => 20, "ArrowLeft" => 21, "ArrowRight" => 22, "Tab" => 61, "Enter" => 66, "Backspace" => 67, "Delete" => 112, "Home" => 122, "End" => 123, "PageUp" => 92, "PageDown" => 93, _ => return None })
 }
 
-fn key_code_text(code: &str) -> Option<String> {
-    code.strip_prefix("Key").filter(|value| value.len() == 1).map(|value| value.to_ascii_lowercase())
-        .or_else(|| code.strip_prefix("Digit").filter(|value| value.len() == 1).map(str::to_owned))
-        .or_else(|| Some(match code {
-            "Space" => " ",
-            "Minus" => "-",
-            "Equal" => "=",
-            "BracketLeft" => "[",
-            "BracketRight" => "]",
-            "Backslash" => "\\",
-            "Semicolon" => ";",
-            "Quote" => "'",
-            "Backquote" => "`",
-            "Comma" => ",",
-            "Period" => ".",
-            "Slash" => "/",
-            _ => return None,
-        }.to_owned()))
-}
-
 fn button_wire(button: DeviceHardwareButton, ios: bool) -> &'static str {
     match button {
         DeviceHardwareButton::Home => "home",
@@ -4236,7 +4216,7 @@ async fn hub_input(
             let phase = match phase { DeviceTouchPhase::Begin => "begin", DeviceTouchPhase::Move => "move", DeviceTouchPhase::End => "end" };
             async_tungstenite::tungstenite::Message::binary([vec![0x03], serde_json::to_vec(&serde_json::json!({"type": phase, "x": x, "y": y})).map_err(|error| error.to_string())?].concat())
         }
-        (DevicePlatform::Ios, DeviceInputKind::Key { code, down }) => {
+        (DevicePlatform::Ios, DeviceInputKind::Key { code, down, .. }) => {
             let usage = ios_hid_usage(code).ok_or_else(|| format!("unsupported iOS keyboard code {code}"))?;
             async_tungstenite::tungstenite::Message::binary([vec![0x06], serde_json::to_vec(&serde_json::json!({"type": if *down { "down" } else { "up" }, "usage": usage})).map_err(|error| error.to_string())?].concat())
         }
@@ -4244,11 +4224,11 @@ async fn hub_input(
             let action = match phase { DeviceTouchPhase::Begin => "down", DeviceTouchPhase::Move => "move", DeviceTouchPhase::End => "up" };
             async_tungstenite::tungstenite::Message::Text(serde_json::json!({"type":"touch", "action": action, "x": x, "y": y}).to_string().into())
         }
-        (DevicePlatform::Android, DeviceInputKind::Key { code, .. }) => {
-            if code == "Escape" { async_tungstenite::tungstenite::Message::Text(serde_json::json!({"type":"back"}).to_string().into()) }
-            else if let Some(keycode) = android_keycode(code) { async_tungstenite::tungstenite::Message::Text(serde_json::json!({"type":"key", "keycode": keycode}).to_string().into()) }
-            else if let Some(text) = key_code_text(code) { async_tungstenite::tungstenite::Message::Text(serde_json::json!({"type":"text", "text": text}).to_string().into()) }
-            else { return Err(format!("unsupported Android keyboard code {code}")); }
+        (DevicePlatform::Android, DeviceInputKind::Key { key, meta, ctrl, .. }) => {
+            if key == "Escape" { async_tungstenite::tungstenite::Message::Text(serde_json::json!({"type":"back"}).to_string().into()) }
+            else if let Some(keycode) = android_keycode(key) { async_tungstenite::tungstenite::Message::Text(serde_json::json!({"type":"key", "keycode": keycode}).to_string().into()) }
+            else if key.encode_utf16().count() == 1 && !meta && !ctrl { async_tungstenite::tungstenite::Message::Text(serde_json::json!({"type":"text", "text": key}).to_string().into()) }
+            else { return Err(format!("unsupported Android keyboard key {key}")); }
         }
         (DevicePlatform::Ios, DeviceInputKind::HardwareButton(button)) => async_tungstenite::tungstenite::Message::binary([vec![0x04], serde_json::to_vec(&serde_json::json!({"button": button_wire(*button, true)})).map_err(|error| error.to_string())?].concat()),
         (_, DeviceInputKind::HardwareButton(button)) => async_tungstenite::tungstenite::Message::Text(serde_json::json!({"type": button_wire(*button, false)}).to_string().into()),
@@ -5075,7 +5055,13 @@ mod tests {
             port,
             DevicePlatform::Android,
             "emu",
-            &DeviceInputKind::Key { code: "ArrowLeft".into(), down: true },
+            &DeviceInputKind::Key {
+                code: "ArrowLeft".into(),
+                key: "ArrowLeft".into(),
+                down: true,
+                meta: false,
+                ctrl: false,
+            },
             0,
         )
         .await

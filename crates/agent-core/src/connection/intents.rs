@@ -145,7 +145,9 @@ fn device_action(action: DeviceActionIntent) -> Result<d::DeviceActionKind, Peer
             payload: serde_json::from_str(&payload).map_err(|_| invalid("Push payload must be JSON"))?,
         },
         DeviceActionIntent::Touch { phase, x, y } => d::DeviceActionKind::Input(d::DeviceInputKind::Touch { phase: device_touch_phase(&phase)?, x, y }),
-        DeviceActionIntent::Key { code, down } => d::DeviceActionKind::Input(d::DeviceInputKind::Key { code, down }),
+        DeviceActionIntent::Key { code, key, down, meta, ctrl } => {
+            d::DeviceActionKind::Input(d::DeviceInputKind::Key { code, key, down, meta, ctrl })
+        }
         DeviceActionIntent::HardwareButton { button } => d::DeviceActionKind::Input(d::DeviceInputKind::HardwareButton(device_hardware_button(&button)?)),
         DeviceActionIntent::Rotate => d::DeviceActionKind::Input(d::DeviceInputKind::Rotate),
         DeviceActionIntent::Fold { command } => d::DeviceActionKind::Input(d::DeviceInputKind::Fold { command }),

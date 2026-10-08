@@ -54,6 +54,13 @@ import java.io.File
 
 private data class StreamKey(val hostId: String, val deviceId: String, val screenId: Int)
 
+private data class DeviceKeyFacts(
+    val code: String,
+    val key: String,
+    val meta: Boolean,
+    val ctrl: Boolean,
+)
+
 /** Native device picker, setup and live frame surface for a conversation. */
 @Composable
 internal fun DeviceScreen(model: AndroidAppModel, threadId: String) {
@@ -527,25 +534,47 @@ private fun Modifier.deviceTouchInput(
 
 private fun Modifier.deviceKeyInput(model: AndroidAppModel, hostId: String, deviceId: String): Modifier =
     focusable().onPreviewKeyEvent { event ->
-        val code = when (event.nativeKeyEvent.keyCode) {
-            AndroidKeyEvent.KEYCODE_DPAD_UP -> "ArrowUp"
-            AndroidKeyEvent.KEYCODE_DPAD_DOWN -> "ArrowDown"
-            AndroidKeyEvent.KEYCODE_DPAD_LEFT -> "ArrowLeft"
-            AndroidKeyEvent.KEYCODE_DPAD_RIGHT -> "ArrowRight"
-            AndroidKeyEvent.KEYCODE_ENTER -> "Enter"
-            AndroidKeyEvent.KEYCODE_DEL -> "Backspace"
-            AndroidKeyEvent.KEYCODE_TAB -> "Tab"
-            AndroidKeyEvent.KEYCODE_ESCAPE -> "Escape"
-            in AndroidKeyEvent.KEYCODE_A..AndroidKeyEvent.KEYCODE_Z -> "Key${('A'.code + event.nativeKeyEvent.keyCode - AndroidKeyEvent.KEYCODE_A).toChar()}"
-            in AndroidKeyEvent.KEYCODE_0..AndroidKeyEvent.KEYCODE_9 -> "Digit${(event.nativeKeyEvent.keyCode - AndroidKeyEvent.KEYCODE_0)}"
-            else -> return@onPreviewKeyEvent false
-        }
+        val facts = deviceKeyFacts(event.nativeKeyEvent) ?: return@onPreviewKeyEvent false
         model.perform(
             Intent.DeviceAction(
                 hostId,
                 deviceId,
-                DeviceActionIntent.Key(code, event.type == KeyEventType.KeyDown),
+                DeviceActionIntent.Key(
+                    facts.code,
+                    facts.key,
+                    event.type == KeyEventType.KeyDown,
+                    facts.meta,
+                    facts.ctrl,
+                ),
             ),
         )
         true
     }
+
+private fun deviceKeyFacts(event: AndroidKeyEvent): DeviceKeyFacts? {
+    val key = when (event.keyCode) {
+        AndroidKeyEvent.KEYCODE_DPAD_UP -> "ArrowUp"
+        AndroidKeyEvent.KEYCODE_DPAD_DOWN -> "ArrowDown"
+        AndroidKeyEvent.KEYCODE_DPAD_LEFT -> "ArrowLeft"
+        AndroidKeyEvent.KEYCODE_DPAD_RIGHT -> "ArrowRight"
+        AndroidKeyEvent.KEYCODE_ENTER -> "Enter"
+        AndroidKeyEvent.KEYCODE_DEL -> "Backspace"
+        AndroidKeyEvent.KEYCODE_FORWARD_DEL -> "Delete"
+        AndroidKeyEvent.KEYCODE_TAB -> "Tab"
+        AndroidKeyEvent.KEYCODE_ESCAPE -> "Escape"
+        AndroidKeyEvent.KEYCODE_MOVE_HOME -> "Home"
+        AndroidKeyEvent.KEYCODE_MOVE_END -> "End"
+        AndroidKeyEvent.KEYCODE_PAGE_UP -> "PageUp"
+        AndroidKeyEvent.KEYCODE_PAGE_DOWN -> "PageDown"
+        else -> {
+            val unicode = event.unicodeChar
+            if (!Character.isValidCodePoint(unicode) || unicode == 0) return null
+            String(Character.toChars(unicode))
+        }
+    }
+    return DeviceKeyFacts(
+        code = AndroidKeyEvent.keyCodeToString(event.keyCode),
+        key = key,
+        meta = event.isMetaPressed,
+        ctrl = event.isCtrlPressed,
+    )
