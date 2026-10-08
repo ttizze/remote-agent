@@ -428,7 +428,8 @@ private object DeviceStreamSections {
             .forEach { screen ->
                 item(
                     key =
-                        "screen-${screen.hostId}-${screen.deviceId}-${screen.screenId?.toInt() ?: 0}-${screen.sessionEpoch}"
+                        "screen-${screen.hostId}-${screen.deviceId}-${screen.screenId?.toInt() ?: 0}" +
+                            "-${screen.sessionEpoch}"
                 ) {
                     Text(
                         "Screen ${screen.screenId?.toInt() ?: 0}: ${screen.width}×${screen.height} · " +

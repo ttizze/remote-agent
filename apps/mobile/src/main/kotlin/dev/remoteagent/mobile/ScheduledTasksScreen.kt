@@ -318,11 +318,16 @@ private fun ScheduledTaskScheduleFields(current: ScheduledTaskDraft, onChange: (
     Row(Modifier.padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         FilterChip(
             selected = !interval,
-            onClick = {
-                onChange(
-                    current.copy(schedule = ScheduledTaskScheduleDraft.FixedTime("09:00", byteArrayOf(1, 2, 3, 4, 5)))
-                )
-            },
+            // Weekday IDs are fixed protocol values, so keep this suppression at the
+            // expression that declares the Monday-through-Friday schedule.
+            onClick =
+                @Suppress("MagicNumber") {
+                    onChange(
+                        current.copy(
+                            schedule = ScheduledTaskScheduleDraft.FixedTime("09:00", byteArrayOf(1, 2, 3, 4, 5))
+                        )
+                    )
+                },
             label = { Text("Fixed time") },
         )
         FilterChip(
