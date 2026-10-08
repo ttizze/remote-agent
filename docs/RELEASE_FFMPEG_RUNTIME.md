@@ -1,7 +1,10 @@
 # Release FFmpeg runtime
 
-Preview recording uses the `libvpx-vp9` encoder. Every Host and native desktop
-artifact therefore carries an FFmpeg executable beside the product executable:
+Preview recording uses the `libvpx-vp9` encoder. The shared Host/Desktop
+runtime also supports H.264 and MJPEG decode, MJPEG encode, pixel conversion,
+pipe I/O, and WebM/image muxing for the native preview and device paths. Every
+Host and native desktop artifact therefore carries an FFmpeg executable beside
+the product executable:
 
 ```text
 host-daemon
@@ -12,10 +15,15 @@ FFMPEG-RUNTIME.txt
 FFMPEG-LICENSE-*       # deterministic license/copyright inventory
 ```
 
-The Host and desktop launchers find this sibling executable before falling back
-to `PATH`. `AGENT_FFMPEG_EXECUTABLE` and `AGENT_FFMPEG_LICENSE_DIR` remain
-available for development and isolated tests. A shipped artifact does not
-require Nix, Homebrew, or an externally installed FFmpeg.
+Browser recording, native device decoding, and any desktop transcode consumer use
+the shared `host-daemon::ffmpeg` resolver. It checks
+`AGENT_FFMPEG_EXECUTABLE`, then the running executable's sibling, then the
+platform `ffmpeg` name for PATH lookup. The Desktop Preview UI currently
+decodes Host JPEG frames directly, while native desktop/device decoder callers
+use the same resolver when they launch FFmpeg. `AGENT_FFMPEG_EXECUTABLE` and
+`AGENT_FFMPEG_LICENSE_DIR` remain available for development and isolated tests.
+A shipped artifact does not require Nix, Homebrew, or an externally installed
+FFmpeg.
 
 Dynamic Linux builds keep the kernel interpreter out of the archive's ELF
 `PT_INTERP`: `ffmpeg` invokes the copied loader with an explicit relative
@@ -25,12 +33,16 @@ would overwrite different files fail packaging instead of silently changing
 the closure.
 
 Linux and macOS release jobs resolve the small, lockfile-pinned FFmpeg output
-declared in `flake.nix`. It enables only the FFmpeg libraries needed for the
-`libvpx-vp9` encoder and keeps the shared closure small enough to review. The
-component inventory is reviewed against the exact Nixpkgs revision in
+declared in `flake.nix`. The staging helper queries the actual binary and
+requires `h264`/`mjpeg` decoders, `mjpeg`/`libvpx-vp9` encoders,
+`h264`/`image2pipe`/`matroska,webm` demuxers,
+`image2pipe`/`mpjpeg`/`matroska,webm`/`null` muxers, the `pipe` protocol, and the
+`scale` filter. `buildSwscale=true` is part of the pinned configuration because
+H.264/MJPEG frames can require pixel-format and size conversion. The component
+inventory is reviewed against the exact Nixpkgs revision in
 `flake.lock`, including the Linux glibc loader and GCC runtime when the
 platform's dynamic closure contains them.
-staging helper checks that the binary advertises `libvpx-vp9`, copies its
+staging helper checks that the binary advertises every required capability, copies its
 non-system shared-library closure, and rewrites the Linux or macOS loader paths
 to the sibling `lib` directory. The macOS app puts the same layout in
 `Contents/MacOS`, so both `Bex` and its Host children see the same runtime.

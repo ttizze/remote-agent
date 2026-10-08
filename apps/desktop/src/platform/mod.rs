@@ -415,7 +415,7 @@ fn start_host(location: &LocalHost, isolated: bool) -> anyhow::Result<std::proce
                     .unwrap_or(bundled)
             })
         })?;
-    let mut command = Command::new(executable);
+    let mut command = Command::new(&executable);
     command
         .arg("--state-dir")
         .arg(directory)

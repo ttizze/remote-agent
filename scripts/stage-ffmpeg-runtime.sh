@@ -145,11 +145,54 @@ version_output=$({ "$source" -hide_banner -version 2>&1 || true; } | sed -n '1p'
 }
 ffmpeg_version=${version_output#ffmpeg version }
 ffmpeg_version=${ffmpeg_version%% *}
-encoder_output=$({ "$source" -hide_banner -loglevel error -encoders 2>&1 || true; })
-grep -Fq 'libvpx-vp9' <<< "$encoder_output" || {
-    echo "FFmpeg at $source does not provide the required libvpx-vp9 encoder" >&2
-    exit 1
+
+# Keep the release contract tied to the binary that is actually staged. Nix
+# options describe intent, but codec and format registration can still change
+# with the pinned FFmpeg source or a platform-specific build. These queries
+# only read FFmpeg's capability tables; they do not decode or encode media.
+capability_output() {
+    local table=$1 output
+    output=$("$source" -hide_banner -loglevel error "-$table" 2>&1) || {
+        echo "FFmpeg at $source could not report its $table table" >&2
+        exit 1
+    }
+    printf '%s\n' "$output"
 }
+has_named_capability() {
+    local table=$1 name=$2 output=$3
+    if [[ $table == protocols ]]; then
+        grep -Eq "^[[:space:]]*$name([[:space:]]|$)" <<< "$output"
+    else
+        awk -v wanted="$name" '$2 == wanted { found = 1 } END { exit !found }' <<< "$output"
+    fi
+}
+require_capability() {
+    local table=$1 name=$2 output=$3
+    has_named_capability "$table" "$name" "$output" || {
+        echo "FFmpeg at $source lacks required $table entry: $name" >&2
+        exit 1
+    }
+}
+
+decoder_output=$(capability_output decoders)
+encoder_output=$(capability_output encoders)
+demuxer_output=$(capability_output demuxers)
+muxer_output=$(capability_output muxers)
+protocol_output=$(capability_output protocols)
+filter_output=$(capability_output filters)
+
+required_decoders=(h264 mjpeg)
+required_encoders=(mjpeg libvpx-vp9)
+required_demuxers=(h264 image2pipe 'matroska,webm')
+required_muxers=(image2pipe mpjpeg 'matroska,webm' null)
+required_protocols=(pipe)
+required_filters=(scale)
+for capability in "${required_decoders[@]}"; do require_capability decoders "$capability" "$decoder_output"; done
+for capability in "${required_encoders[@]}"; do require_capability encoders "$capability" "$encoder_output"; done
+for capability in "${required_demuxers[@]}"; do require_capability demuxers "$capability" "$demuxer_output"; done
+for capability in "${required_muxers[@]}"; do require_capability muxers "$capability" "$muxer_output"; done
+for capability in "${required_protocols[@]}"; do require_capability protocols "$capability" "$protocol_output"; done
+for capability in "${required_filters[@]}"; do require_capability filters "$capability" "$filter_output"; done
 
 sha256() {
     if command -v sha256sum >/dev/null 2>&1; then
@@ -431,7 +474,19 @@ executable_name=ffmpeg
 [[ $platform == windows ]] && executable_name+=.exe
 {
     printf 'version=%s\n' "$ffmpeg_version"
-    printf 'encoder=libvpx-vp9\n'
+    printf 'decoder='
+    (IFS=,; printf '%s' "${required_decoders[*]}")
+    printf '\nencoder='
+    (IFS=,; printf '%s' "${required_encoders[*]}")
+    printf '\ndemuxer='
+    (IFS=,; printf '%s' "${required_demuxers[*]}")
+    printf '\nmuxer='
+    (IFS=,; printf '%s' "${required_muxers[*]}")
+    printf '\nprotocol='
+    (IFS=,; printf '%s' "${required_protocols[*]}")
+    printf '\nfilter='
+    (IFS=,; printf '%s' "${required_filters[*]}")
+    printf '\n'
     printf 'source_sha256=%s\n' "$source_digest"
     printf 'executable=%s\n' "$executable_name"
     printf 'launcher=%s\n' "$launcher_type"

@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
+use tokio_util::sync::CancellationToken;
 
 /// Matches the settlement sweep cadence so every sweep reads fresh state.
 const PR_LOOKUP_CACHE_TTL: Duration = Duration::from_secs(60);
@@ -390,15 +391,26 @@ pub(crate) async fn find_open_pr(
     context: &HeadContext,
     host: Option<&str>,
 ) -> Result<Option<PullRequestRecord>> {
+    find_open_pr_with_cancel(github, cwd, context, host, None).await
+}
+
+pub(crate) async fn find_open_pr_with_cancel(
+    github: &GitHubCli,
+    cwd: &Path,
+    context: &HeadContext,
+    host: Option<&str>,
+    cancel: Option<&CancellationToken>,
+) -> Result<Option<PullRequestRecord>> {
     for selector in probeable_selectors(context) {
         let rows = github
-            .list_pull_requests_by_head(
+            .list_pull_requests_by_head_with_cancel(
                 cwd,
                 selector,
                 PullRequestListState::Open,
                 HEAD_BRANCH_PROBE_LIMIT,
                 host,
                 context.head_repository_name_with_owner.as_deref(),
+                cancel,
             )
             .await
             .map_err(|error| provider_error("listChangeRequests", &error))?;

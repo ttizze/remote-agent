@@ -11,10 +11,15 @@ use agent_protocol::vcs::{VcsStatusLocal, VcsStatusRemote, VcsStatusStreamEvent}
 use agent_protocol::workspace::VcsStatus;
 use anyhow::Result;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, AtomicUsize, Ordering},
+};
 use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
+use tokio::sync::Notify;
 use tokio_util::task::AbortOnDropHandle;
+use tokio_util::sync::CancellationToken;
 
 pub(crate) const DEFAULT_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 const REFRESH_FAILURE_BASE_DELAY: Duration = Duration::from_secs(30);
@@ -69,11 +74,91 @@ struct Inner {
     /// older poll cannot overwrite a fresher explicit refresh.
     write_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     fetch_interval: Arc<dyn Fn() -> Duration + Send + Sync>,
+    actions: ActionOwner,
 }
 
 #[derive(Clone)]
 pub(crate) struct VcsStatusBroadcaster {
     inner: Arc<Inner>,
+}
+
+/// Owns stacked Git actions for the Host lifetime. The permit remains held
+/// until the mutation task finishes, even when its progress stream closes.
+#[derive(Clone)]
+struct ActionOwner {
+    state: Arc<ActionOwnerState>,
+}
+
+struct ActionOwnerState {
+    active: AtomicUsize,
+    stopping: AtomicBool,
+    stop: CancellationToken,
+    changed: Notify,
+}
+
+/// Admission for one detached Git mutation. Dropping it marks the mutation
+/// complete for handoff and shutdown accounting.
+pub(crate) struct ActionPermit {
+    state: Arc<ActionOwnerState>,
+    cancellation: CancellationToken,
+}
+
+impl ActionOwner {
+    fn new() -> Self {
+        Self {
+            state: Arc::new(ActionOwnerState {
+                active: AtomicUsize::new(0),
+                stopping: AtomicBool::new(false),
+                stop: CancellationToken::new(),
+                changed: Notify::new(),
+            }),
+        }
+    }
+
+    fn admit(&self) -> Option<ActionPermit> {
+        if self.state.stopping.load(Ordering::Acquire) {
+            return None;
+        }
+        self.state.active.fetch_add(1, Ordering::AcqRel);
+        if self.state.stopping.load(Ordering::Acquire) {
+            self.state.active.fetch_sub(1, Ordering::AcqRel);
+            self.state.changed.notify_waiters();
+            return None;
+        }
+        Some(ActionPermit {
+            state: self.state.clone(),
+            cancellation: self.state.stop.child_token(),
+        })
+    }
+
+    fn has_active(&self) -> bool {
+        self.state.active.load(Ordering::Acquire) != 0
+    }
+
+    async fn shutdown(&self) {
+        self.state.stopping.store(true, Ordering::Release);
+        self.state.stop.cancel();
+        loop {
+            let changed = self.state.changed.notified();
+            if self.state.active.load(Ordering::Acquire) == 0 {
+                return;
+            }
+            changed.await;
+        }
+    }
+}
+
+impl ActionPermit {
+    pub(crate) fn cancellation(&self) -> CancellationToken {
+        self.cancellation.clone()
+    }
+}
+
+impl Drop for ActionPermit {
+    fn drop(&mut self) {
+        self.state.active.fetch_sub(1, Ordering::AcqRel);
+        self.state.changed.notify_waiters();
+    }
 }
 
 /// Keeps a checkout's remote poller alive while held.
@@ -124,8 +209,25 @@ impl VcsStatusBroadcaster {
                 pollers: Default::default(),
                 write_locks: Default::default(),
                 fetch_interval,
+                actions: ActionOwner::new(),
             }),
         }
+    }
+
+    /// Admit one stacked Git mutation. Release handoff calls this owner's
+    /// activity probe before accepting an update.
+    pub(crate) fn admit_action(&self) -> Option<ActionPermit> {
+        self.inner.actions.admit()
+    }
+
+    /// True while any stacked Git mutation still owns its admission permit.
+    pub(crate) fn has_active_actions(&self) -> bool {
+        self.inner.actions.has_active()
+    }
+
+    /// Cancel and await every admitted stacked Git mutation.
+    pub(crate) async fn shutdown_actions(&self) {
+        self.inner.actions.shutdown().await;
     }
 
     pub(crate) fn github(&self) -> Option<&GitHubCli> {
@@ -528,5 +630,57 @@ mod tests {
             Duration::from_secs(300)
         );
         assert_eq!(remote_refresh_failure_delay(20, second), Duration::from_secs(900));
+    }
+
+    #[tokio::test]
+    async fn handoff_waits_for_a_fake_git_mutation_to_release_its_permit() {
+        let owner = ActionOwner::new();
+        let permit = owner.admit().expect("fake Git mutation is admitted");
+        let shutdown = tokio::spawn({
+            let owner = owner.clone();
+            async move { owner.shutdown().await }
+        });
+
+        tokio::task::yield_now().await;
+        assert!(owner.has_active());
+        assert!(!shutdown.is_finished());
+
+        drop(permit);
+        tokio::time::timeout(Duration::from_secs(1), shutdown)
+            .await
+            .expect("handoff waits only for the mutation permit")
+            .expect("handoff task");
+        assert!(!owner.has_active());
+        assert!(owner.admit().is_none());
+    }
+
+    #[tokio::test]
+    async fn shutdown_cancels_a_fake_git_mutation_before_waiting_for_completion() {
+        let owner = ActionOwner::new();
+        let permit = owner.admit().expect("fake Git mutation is admitted");
+        let cancellation = permit.cancellation();
+        let (observed, received) = tokio::sync::oneshot::channel();
+        tokio::spawn({
+            let cancellation = cancellation.clone();
+            async move {
+                cancellation.cancelled().await;
+                let _ = observed.send(());
+            }
+        });
+        let shutdown = tokio::spawn({
+            let owner = owner.clone();
+            async move { owner.shutdown().await }
+        });
+
+        tokio::time::timeout(Duration::from_secs(1), received)
+            .await
+            .expect("shutdown cancels the admitted mutation")
+            .expect("mutation cancellation observer");
+        assert!(!shutdown.is_finished());
+        drop(permit);
+        tokio::time::timeout(Duration::from_secs(1), shutdown)
+            .await
+            .expect("shutdown completes after cancellation")
+            .expect("shutdown task");
     }
 }

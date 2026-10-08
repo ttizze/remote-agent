@@ -38,8 +38,20 @@ valid_version "$version" || {
     echo 'macOS desktop bundle is missing its FFmpeg runtime manifest' >&2
     exit 1
 }
-grep -Fq 'encoder=libvpx-vp9' "$app_path/Contents/MacOS/FFMPEG-RUNTIME.txt" || {
-    echo 'macOS desktop bundle FFmpeg does not declare libvpx-vp9' >&2
+grep -Fq 'encoder=mjpeg,libvpx-vp9' "$app_path/Contents/MacOS/FFMPEG-RUNTIME.txt" || {
+    echo 'macOS desktop bundle FFmpeg does not declare the required encoders' >&2
+    exit 1
+}
+grep -Fq 'decoder=h264,mjpeg' "$app_path/Contents/MacOS/FFMPEG-RUNTIME.txt" || {
+    echo 'macOS desktop bundle FFmpeg does not declare the required decoders' >&2
+    exit 1
+}
+grep -Fq 'filter=scale' "$app_path/Contents/MacOS/FFMPEG-RUNTIME.txt" || {
+    echo 'macOS desktop bundle FFmpeg does not declare the scale filter' >&2
+    exit 1
+}
+grep -Fq 'muxer=image2pipe,mpjpeg,matroska,webm,null' "$app_path/Contents/MacOS/FFMPEG-RUNTIME.txt" || {
+    echo 'macOS desktop bundle FFmpeg does not declare the required muxers' >&2
     exit 1
 }
 mkdir -p "$output_dir"

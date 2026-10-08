@@ -3,11 +3,13 @@
 //! retaining the tool's output, which can carry tokens.
 use serde::Deserialize;
 use serde_json::Value;
+use crate::vcs::process::{CommandCancelled, CommandTimedOut, execute_program};
 pub(crate) use agent_protocol::vcs::{ChangeRequestState, RepositoryVisibility};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 use tokio::io::AsyncReadExt;
+use tokio_util::sync::CancellationToken;
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_MAX_OUTPUT_BYTES: usize = 1_000_000;
@@ -67,6 +69,8 @@ pub(crate) enum GhError {
     Command { exit_code: Option<i32> },
     #[error("GitHub CLI timed out after {0:?}.")]
     Timeout(Duration),
+    #[error("GitHub CLI request cancelled.")]
+    Cancelled,
     #[error("{0}")]
     Decode(&'static str),
 }
@@ -719,6 +723,66 @@ impl GitHubCli {
         Ok(output)
     }
 
+    /// Runs `gh` with the process runner owned by the caller. Cancellation
+    /// kills and waits for the child and joins both bounded pipe readers
+    /// before this future resolves.
+    async fn run_with_host_cancel(
+        &self,
+        cwd: &Path,
+        args: &[&str],
+        budget: Budget,
+        host: Option<&str>,
+        cancel: Option<&CancellationToken>,
+    ) -> Result<Output, GhError> {
+        let mut env = vec![
+            ("GH_PROMPT_DISABLED", "1"),
+            ("GH_NO_UPDATE_NOTIFIER", "1"),
+        ];
+        if let Some(host) = host
+            .map(str::trim)
+            .filter(|host| !host.is_empty() && !host.eq_ignore_ascii_case("github.com"))
+        {
+            env.push(("GH_HOST", host));
+        }
+        let output = execute_program(
+            &self.program,
+            cwd,
+            args,
+            &env,
+            Some(budget.timeout),
+            budget.max_output_bytes,
+            cancel.cloned(),
+        )
+        .await
+        .map_err(|error| {
+            if error.downcast_ref::<CommandCancelled>().is_some() {
+                GhError::Cancelled
+            } else if let Some(timeout) = error.downcast_ref::<CommandTimedOut>() {
+                GhError::Timeout(timeout.timeout)
+            } else if error
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+            {
+                GhError::Unavailable
+            } else {
+                GhError::Command { exit_code: None }
+            }
+        })?;
+        if !output.ok() {
+            return Err(classify_failure(&output.stderr, Some(output.code)));
+        }
+        let mut stdout = output.stdout;
+        if output.stdout_truncated {
+            stdout.push_str(OUTPUT_TRUNCATED_MARKER);
+        }
+        Ok(Output {
+            stdout,
+            stderr: output.stderr,
+            stdout_truncated: output.stdout_truncated,
+            stdout_invalid_utf8: output.stdout_invalid_utf8,
+        })
+    }
+
     pub(crate) async fn run(
         &self,
         cwd: &Path,
@@ -796,6 +860,28 @@ impl GitHubCli {
         host: Option<&str>,
         repository: Option<&str>,
     ) -> Result<Vec<PullRequestRecord>, GhError> {
+        self.list_pull_requests_by_head_with_cancel(
+            cwd,
+            head_selector,
+            state,
+            limit,
+            host,
+            repository,
+            None,
+        )
+        .await
+    }
+
+    pub(crate) async fn list_pull_requests_by_head_with_cancel(
+        &self,
+        cwd: &Path,
+        head_selector: &str,
+        state: PullRequestListState,
+        limit: u32,
+        host: Option<&str>,
+        repository: Option<&str>,
+        cancel: Option<&CancellationToken>,
+    ) -> Result<Vec<PullRequestRecord>, GhError> {
         let limit = limit.clamp(1, 100).to_string();
         let mut args = vec!["pr", "list"];
         let repository_arg = repository.map(|repository| scoped_repository(host, repository));
@@ -813,7 +899,7 @@ impl GitHubCli {
             PULL_REQUEST_FIELDS,
         ]);
         let output = self
-            .run_with_host(cwd, &args, Budget::default(), host)
+            .run_with_host_cancel(cwd, &args, Budget::default(), host, cancel)
             .await?;
         decode_pull_request_list(&output.stdout)
     }
@@ -850,6 +936,30 @@ impl GitHubCli {
         repository: Option<&str>,
         host: Option<&str>,
     ) -> Result<(), GhError> {
+        self.create_pull_request_with_cancel(
+            cwd,
+            base_branch,
+            head_selector,
+            title,
+            body_file,
+            repository,
+            host,
+            None,
+        )
+        .await
+    }
+
+    pub(crate) async fn create_pull_request_with_cancel(
+        &self,
+        cwd: &Path,
+        base_branch: &str,
+        head_selector: &str,
+        title: &str,
+        body_file: &Path,
+        repository: Option<&str>,
+        host: Option<&str>,
+        cancel: Option<&CancellationToken>,
+    ) -> Result<(), GhError> {
         let body_path = body_file.to_string_lossy();
         let repository_arg = repository.map(|repository| scoped_repository(host, repository));
         let mut args = vec!["pr", "create"];
@@ -866,7 +976,7 @@ impl GitHubCli {
             "--body-file",
             body_path.as_ref(),
         ]);
-        self.run_with_host(cwd, &args, Budget::default(), host)
+        self.run_with_host_cancel(cwd, &args, Budget::default(), host, cancel)
             .await
             .map(|_| ())
     }
@@ -878,11 +988,22 @@ impl GitHubCli {
         repository: &str,
         host: Option<&str>,
     ) -> Result<Option<String>, GhError> {
+        self.default_branch_with_cancel(cwd, repository, host, None)
+            .await
+    }
+
+    pub(crate) async fn default_branch_with_cancel(
+        &self,
+        cwd: &Path,
+        repository: &str,
+        host: Option<&str>,
+        cancel: Option<&CancellationToken>,
+    ) -> Result<Option<String>, GhError> {
         let repository = scoped_repository(host, repository);
         let mut args = vec!["repo", "view", &repository];
         args.extend(["--json", "defaultBranchRef", "--jq", ".defaultBranchRef.name"]);
         let output = self
-            .run_with_host(cwd, &args, Budget::default(), host)
+            .run_with_host_cancel(cwd, &args, Budget::default(), host, cancel)
             .await?;
         Ok(trimmed(Some(&output.stdout)))
     }

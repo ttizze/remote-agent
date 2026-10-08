@@ -23,7 +23,17 @@ cat > "$ffmpeg_root/bin/ffmpeg" <<'EOF'
 #!/usr/bin/env bash
 case " $* " in
     *' -version '*) printf '%s\n' 'ffmpeg version 9.0.2-fixture' ;;
-    *' -encoders '*) printf '%s\n' ' V..... libvpx-vp9           libvpx VP9' ;;
+    *' -decoders '*)
+        [[ ${MISSING_FEATURE:-0} == 1 ]] || printf '%s\n' ' V..... h264                 H.264 / AVC / MPEG-4 AVC / MPEG-4 part 10'
+        printf '%s\n' ' V..... mjpeg                MJPEG (Motion JPEG)' ;;
+    *' -encoders '*)
+        printf '%s\n' ' V..... mjpeg                MJPEG (Motion JPEG)'
+        [[ ${MISSING_FEATURE:-0} == 1 ]] || printf '%s\n' ' V..... libvpx-vp9           libvpx VP9' ;;
+    *' -demuxers '*) printf '%s\n' ' D..... h264                 raw H.264 video' ' D..... image2pipe            piped image2 sequence' ' D..... matroska,webm         Matroska / WebM' ;;
+    *' -muxers '*) printf '%s\n' ' E..... image2pipe            piped image2 sequence' ' E..... mpjpeg                MIME multipart JPEG' ' E..... matroska,webm         Matroska / WebM' ' E..... null                  raw null video' ;;
+    *' -protocols '*) printf '%s\n' 'Input:' ' pipe' 'Output:' ' pipe' ;;
+    *' -filters '*)
+        [[ ${MISSING_FEATURE:-0} == 1 ]] || printf '%s\n' ' ... scale             V->V       Scale the input video size and convert the image format.' ;;
     *) printf '%s\n' "fixture ffmpeg $*" ;;
 esac
 EOF
@@ -146,6 +156,21 @@ if UNKNOWN=1 \
     PATH="$tools:$PATH" \
     "$root/scripts/stage-ffmpeg-runtime.sh" linux "$unknown_out" >/dev/null 2>&1; then
     echo 'FFmpeg staging accepted an unknown unlicensed component' >&2
+    exit 1
+fi
+
+missing_feature_out="$temporary/missing-feature-out"
+mkdir -p "$missing_feature_out"
+if MISSING_FEATURE=1 \
+    FIXTURE_LOADER="$ffmpeg_root/lib/ld-linux-fixture" \
+    PATCHELF_LOG="$temporary/missing-feature-patchelf.log" \
+    AGENT_FFMPEG_EXECUTABLE="$ffmpeg_root/bin/ffmpeg" \
+    AGENT_FFMPEG_RUNTIME_DIR="$ffmpeg_root" \
+    AGENT_FFMPEG_LICENSE_DIR="$license_dir" \
+    AGENT_FFMPEG_LICENSE_INVENTORY="$license_dir/components.tsv" \
+    PATH="$tools:$PATH" \
+    "$root/scripts/stage-ffmpeg-runtime.sh" linux "$missing_feature_out" >/dev/null 2>&1; then
+    echo 'FFmpeg staging accepted a binary missing a required capability' >&2
     exit 1
 fi
 
