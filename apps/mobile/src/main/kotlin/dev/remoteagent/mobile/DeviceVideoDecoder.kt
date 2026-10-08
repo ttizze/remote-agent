@@ -1,10 +1,15 @@
 package dev.remoteagent.mobile
 
+import android.content.Context
+import android.graphics.Canvas
+import android.graphics.Paint
+import android.graphics.RectF
 import android.media.MediaCodec
 import android.media.MediaFormat
 import android.graphics.SurfaceTexture
 import android.view.Surface
 import android.view.TextureView
+import android.view.View
 import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer
 import java.util.ArrayDeque
@@ -205,6 +210,34 @@ internal class DeviceVideoDecoder : TextureView.SurfaceTextureListener {
     private companion object {
         const val MAX_PENDING_FRAMES = 8
         const val MAX_INPUT_SIZE = 8 * 1024 * 1024
+    }
+}
+
+/** Native sibling overlay so accessibility bounds stay above a TextureView. */
+internal class DeviceAccessibilityOverlayView(context: Context) : View(context) {
+    private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = android.graphics.Color.rgb(79, 140, 255)
+        style = Paint.Style.STROKE
+        strokeWidth = 2f
+    }
+
+    var rects: List<RectF> = emptyList()
+        set(value) {
+            field = value
+            invalidate()
+        }
+
+    override fun onDraw(canvas: Canvas) {
+        super.onDraw(canvas)
+        rects.forEach { rect ->
+            canvas.drawRect(
+                rect.left * width,
+                rect.top * height,
+                (rect.left + rect.width()) * width,
+                (rect.top + rect.height()) * height,
+                paint,
+            )
+        }
     }
 }
 
