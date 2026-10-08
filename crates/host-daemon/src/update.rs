@@ -1347,6 +1347,18 @@ async fn ensure_real_directory(path: &Path) -> Result<()> {
         }
         Err(error) => return Err(error.into()),
     }
+    let mut current = Some(path);
+    while let Some(path) = current {
+        if path.as_os_str().is_empty() {
+            break;
+        }
+        let metadata = fs::symlink_metadata(path).await?;
+        anyhow::ensure!(
+            metadata.is_dir() && !metadata.file_type().is_symlink(),
+            "update path traverses a symlink"
+        );
+        current = path.parent();
+    }
     Ok(())
 }
 
