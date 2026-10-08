@@ -167,7 +167,7 @@ impl SidebarItem for SidebarSection {
                         .flex_shrink_0()
                         .pl_2()
                         .text_xs()
-                        .text_color(cx.theme().sidebar_foreground.opacity(0.7))
+                        .text_color(cx.theme().sidebar_foreground)
                         .child(div().flex_1().child(self.label))
                         .when_some(self.add_project, |header, (desktop, enabled)| {
                             header.child(
@@ -209,13 +209,13 @@ impl Desktop {
         .flex_1()
         .min_h_0()
         .border_r_0()
-        .bg(rgb(0x242424));
+        .bg(rgb(appearance::SIDEBAR));
         v_flex()
             .debug_selector(|| "desktop-sidebar-shell".into())
             .w(px(272.))
             .h_full()
             .flex_shrink_0()
-            .bg(rgb(0x242424))
+            .bg(rgb(appearance::SIDEBAR))
             .border_r_1()
             .border_color(cx.theme().sidebar_border)
             .child(sidebar_header(true, cx))
@@ -508,7 +508,7 @@ mod tests {
             .build()
             .unwrap();
         cx.update(|cx| {
-            gpui_kit::init(cx);
+            crate::appearance::init(cx);
             cx.set_global(Runtime {
                 handle: runtime.handle().clone(),
                 connections: Arc::default(),
@@ -638,7 +638,7 @@ mod tests {
         });
         let store = session.store.clone();
         cx.update(|cx| {
-            gpui_kit::init(cx);
+            crate::appearance::init(cx);
             cx.set_global(app_runtime);
         });
         let (view, window) = cx.add_window_view(|window, cx| {

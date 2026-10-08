@@ -114,12 +114,18 @@ impl Desktop {
             .debug_selector(|| "settings-page-heading".into())
             .gap_2()
             .child(div().text_size(px(26.)).font_semibold().child(title))
-            .child(div().text_sm().text_color(rgb(0x949ca8)).child(subtitle));
-        let mut body = v_flex()
-            .w_full()
-            .max_w(px(960.))
-            .gap_7()
-            .child(heading.pb_6().border_b_1().border_color(rgb(0x2b2f35)));
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(rgb(appearance::MUTED))
+                    .child(subtitle),
+            );
+        let mut body = v_flex().w_full().max_w(px(960.)).gap_7().child(
+            heading
+                .pb_6()
+                .border_b_1()
+                .border_color(rgb(appearance::BORDER)),
+        );
         if !self.error.is_empty() {
             body = body.child(
                 h_flex()
@@ -167,7 +173,7 @@ impl Desktop {
                                     div()
                                         .pt_7()
                                         .border_t_1()
-                                        .border_color(rgb(0x2b2f35))
+                                        .border_color(rgb(appearance::BORDER))
                                         .child(hosts.clone()),
                                 )
                         })
@@ -191,12 +197,16 @@ impl Desktop {
                         header.child(sidebar_header(false, cx)).pr_8()
                     })
                     .text_xs()
-                    .child(div().text_color(rgb(0x949ca8)).child("設定の適用先"))
+                    .child(
+                        div()
+                            .text_color(rgb(appearance::MUTED))
+                            .child("設定の適用先"),
+                    )
                     .child(environment)
-                    .child(div().text_color(rgb(0x949ca8)).child("／"))
+                    .child(div().text_color(rgb(appearance::MUTED)).child("／"))
                     .child(projects)
                     .border_b_1()
-                    .border_color(rgb(0x2b2f35)),
+                    .border_color(rgb(appearance::BORDER)),
             )
             .child(
                 div()
@@ -265,7 +275,7 @@ impl Desktop {
                 .child(h_flex().gap_5().items_center()
                     .child(v_flex().flex_1().min_w_0().gap_1()
                         .child("ワークツリーで開始")
-                        .child(div().text_sm().text_color(rgb(0x949ca8)).child("元の作業フォルダと分けて、新しい会話を進めます。")))
+                        .child(div().text_sm().text_color(rgb(appearance::MUTED)).child("元の作業フォルダと分けて、新しい会話を進めます。")))
                     .child(switch::Switch::new("worktree-create")
                         .accessibility_label("新規セッションをワークツリーで開始")
                         .checked(settings.is_some_and(|settings| settings.create_on_new_session))
@@ -277,8 +287,8 @@ impl Desktop {
                 .child(v_flex().gap_2()
                     .child(div().text_sm().child("保存先"))
                     .child(Input::new(&self.worktree_directory).aria_label("ワークツリーの保存先").disabled(disabled))
-                    .child(div().text_xs().text_color(rgb(0x949ca8)).child("空欄の場合は、元のリポジトリ内の .worktree に保存します。指定先には「セッション名/リポジトリ名」の構成で作ります。"))))
-            .child(v_flex().gap_5().pt_6().border_t_1().border_color(rgb(0x2b2f35))
+                    .child(div().text_xs().text_color(rgb(appearance::MUTED)).child("空欄の場合は、元のリポジトリ内の .worktree に保存します。指定先には「セッション名/リポジトリ名」の構成で作ります。"))))
+            .child(v_flex().gap_5().pt_6().border_t_1().border_color(rgb(appearance::BORDER))
                 .child(h_flex().gap_5().items_center()
                     .child(section_heading("ファイルの引き継ぎ", "作成時に、指定したファイルを元のリポジトリからコピーします。")
                         .flex_1().min_w_0())
@@ -293,9 +303,9 @@ impl Desktop {
                 .child(v_flex().gap_2()
                     .child(div().text_sm().child("コピーするファイル"))
                     .child(Textarea::new(&self.worktree_copy_paths).aria_label("コピー対象").readonly(disabled))
-                    .child(div().text_xs().text_color(rgb(0x949ca8)).child("リポジトリからの相対パスを1行に1つ入力します。例: .env.local、config/local。存在しないパスはスキップし、シンボリックリンクはコピーしません。")))
-                .child(div().text_xs().text_color(rgb(0x949ca8)).child("最初のメッセージ送信時に作成・コピーします。指定ファイルはコピー元の内容で置き換え、既存セッションでは再実行しません。")))
-            .child(h_flex().gap_5().items_center().pt_6().border_t_1().border_color(rgb(0x2b2f35))
+                    .child(div().text_xs().text_color(rgb(appearance::MUTED)).child("リポジトリからの相対パスを1行に1つ入力します。例: .env.local、config/local。存在しないパスはスキップし、シンボリックリンクはコピーしません。")))
+                .child(div().text_xs().text_color(rgb(appearance::MUTED)).child("最初のメッセージ送信時に作成・コピーします。指定ファイルはコピー元の内容で置き換え、既存セッションでは再実行しません。")))
+            .child(h_flex().gap_5().items_center().pt_6().border_t_1().border_color(rgb(appearance::BORDER))
                 .child(section_heading("マージ済みを自動削除", "main に取り込まれた作業場所を毎分確認します。実行中・回答待ち・ターミナル使用中・ローカル変更ありの場合は保留し、後で再確認します。ブランチと会話履歴は残ります。")
                     .flex_1().min_w_0())
                 .child(switch::Switch::new("worktree-delete-merged")
@@ -306,8 +316,8 @@ impl Desktop {
                         s.save_worktree_settings(Some(WorktreeToggle::DeleteMerged(*checked)), cx);
                         cx.notify();
                     }))))
-            .child(div().text_xs().text_color(rgb(0x949ca8)).child(if self.worktree_saved { "保存しました" } else { "変更は自動で保存されます。既存のワークツリーは移動しません。" }))
-            .child(div().pt_6().border_t_1().border_color(rgb(0x2b2f35)).child(self.managed_worktrees(cx)))
+            .child(div().text_xs().text_color(rgb(appearance::MUTED)).child(if self.worktree_saved { "保存しました" } else { "変更は自動で保存されます。既存のワークツリーは移動しません。" }))
+            .child(div().pt_6().border_t_1().border_color(rgb(appearance::BORDER)).child(self.managed_worktrees(cx)))
             .into_any_element()
     }
     pub(super) fn workspace_card(&self, cx: &Context<Self>) -> AnyElement {
@@ -331,7 +341,7 @@ impl Desktop {
             sources = sources.child(
                 div()
                     .text_sm()
-                    .text_color(rgb(0x909090))
+                    .text_color(rgb(appearance::MUTED))
                     .py_2()
                     .child("添付ファイルがここに表示されます"),
             );
@@ -348,14 +358,14 @@ impl Desktop {
                     .gap_2()
                     .p_4()
                     .rounded(px(18.))
-                    .bg(rgb(0x282828))
+                    .bg(rgb(appearance::RAISED))
                     .child(
                         h_flex()
                             .child(
                                 div()
                                     .flex_1()
                                     .text_sm()
-                                    .text_color(rgb(0xa3a3a3))
+                                    .text_color(rgb(appearance::MUTED))
                                     .child("ワークスペース"),
                             )
                             .child(
@@ -399,14 +409,18 @@ impl Desktop {
                             .is_some_and(|review| !review.branch.is_empty()),
                         |body| {
                             body.child(
-                                div().pl_2().text_sm().text_color(rgb(0x999999)).child(
-                                    self.snapshot
-                                        .workspace
-                                        .review
-                                        .as_ref()
-                                        .map(|review| review.branch.clone())
-                                        .unwrap_or_default(),
-                                ),
+                                div()
+                                    .pl_2()
+                                    .text_sm()
+                                    .text_color(rgb(appearance::MUTED))
+                                    .child(
+                                        self.snapshot
+                                            .workspace
+                                            .review
+                                            .as_ref()
+                                            .map(|review| review.branch.clone())
+                                            .unwrap_or_default(),
+                                    ),
                             )
                         },
                     )
@@ -433,14 +447,14 @@ impl Desktop {
                         .w_full()
                         .disabled(!enabled),
                     )
-                    .child(div().h(px(1.)).my_2().bg(rgb(0x3a3a3a)))
+                    .child(div().h(px(1.)).my_2().bg(rgb(appearance::BORDER)))
                     .child(
                         h_flex()
                             .child(
                                 div()
                                     .flex_1()
                                     .text_sm()
-                                    .text_color(rgb(0xa3a3a3))
+                                    .text_color(rgb(appearance::MUTED))
                                     .child("ソース"),
                             )
                             .child(
@@ -501,9 +515,9 @@ impl Desktop {
                     .p_4()
                     .rounded(px(8.))
                     .border_1()
-                    .border_color(rgb(0x2b2f35))
+                    .border_color(rgb(appearance::BORDER))
                     .text_sm()
-                    .text_color(rgb(0x949ca8))
+                    .text_color(rgb(appearance::MUTED))
                     .child("Bexで作成したワークツリーはありません。"),
             );
         }
@@ -519,7 +533,7 @@ impl Desktop {
                 .gap_2()
                 .rounded(px(12.))
                 .border_1()
-                .border_color(rgb(0x2b2f35))
+                .border_color(rgb(appearance::BORDER))
                 .child(
                     h_flex()
                         .justify_between()
@@ -546,7 +560,7 @@ impl Desktop {
                 .child(
                     div()
                         .text_sm()
-                        .text_color(rgb(0xaaaaaa))
+                        .text_color(rgb(appearance::MUTED))
                         .child(worktree.path.clone()),
                 );
             for (thread_index, thread) in worktree.threads.iter().enumerate() {
@@ -570,7 +584,7 @@ impl Desktop {
                 entry = entry.child(
                     div()
                         .text_sm()
-                        .text_color(rgb(0xaaaaaa))
+                        .text_color(rgb(appearance::MUTED))
                         .child(reason.to_owned()),
                 );
             }

@@ -6,7 +6,7 @@ mod hosts;
 mod selection;
 mod view;
 
-use crate::{Runtime, diff::DiffView, platform, store_session::StoreSession};
+use crate::{Runtime, appearance, diff::DiffView, platform, store_session::StoreSession};
 use agent_core::{
     presentation::conversation::{ActivityExpansion, ConversationRowContent},
     state::{Attachment, Draft, DraftKey, Intent, ModelDefaultsScope, PendingSubmission, Snapshot},
@@ -1837,7 +1837,7 @@ mod composer_tests {
     use gpui_kit::{EntityInputHandler, TestAppContext};
     #[gpui::test]
     fn enter_submits_only_committed_text_at_the_end(cx: &mut TestAppContext) {
-        cx.update(gpui_kit::init);
+        cx.update(crate::appearance::init);
         let input = cx.add_window(TextareaState::new);
         input
             .update(cx, |input, window, cx| {
@@ -1923,7 +1923,7 @@ mod completion_tests {
             .build()
             .unwrap();
         cx.update(|cx| {
-            gpui_kit::init(cx);
+            crate::appearance::init(cx);
             cx.set_global(crate::Runtime {
                 handle: runtime.handle().clone(),
                 connections: Arc::new(crate::platform::Connections::default()),

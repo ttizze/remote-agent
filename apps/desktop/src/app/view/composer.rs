@@ -278,7 +278,7 @@ impl Desktop {
                             )
                             .debug_selector(|| "conversation-latest".into())
                             .rounded_full()
-                            .bg(rgb(0x303030))
+                            .bg(rgb(appearance::RAISED))
                             .size(px(36.)),
                         ),
                 );
@@ -339,7 +339,7 @@ impl Desktop {
                 h_flex()
                     .gap_2()
                     .child(file.name.clone())
-                    .child(remove.size(px(28.)).bg(rgb(0x222222)))
+                    .child(remove.size(px(28.)).bg(rgb(appearance::RAISED)))
                     .into_any_element()
             });
         }
@@ -381,7 +381,7 @@ impl Desktop {
             )
         };
         let microphone = Button::new("dictation-toggle")
-            .icon(Icon::default().path("bex/microphone.svg").size(px(23.)))
+            .icon(Icon::default().path("bex/microphone.svg").size(px(20.)))
             .ghost()
             .w(px(40.))
             .h(px(40.))
@@ -430,19 +430,19 @@ impl Desktop {
             .max_w(px(CHAT_WIDTH))
             .p(px(7.))
             .gap_2()
-            .rounded(px(30.))
+            .rounded(px(22.))
             .child(self.completion_menu(cx))
             .when(!attachments.is_empty(), |composer| composer.child(files))
-            .bg(rgb(0x2b2b2b))
+            .bg(rgb(appearance::SURFACE))
             .border_1()
-            .border_color(rgb(0x363636))
+            .border_color(rgb(appearance::BORDER))
             .when(phase.is_none(), |composer| {
                 composer.child(
                     div().px_2().pt(px(10.)).pb_1().child(
                         Textarea::new(&self.composer)
                             .appearance(false)
                             .bordered(false)
-                            .text_size(px(18.))
+                            .text_size(px(14.))
                             .aria_label("AI に依頼する")
                             .readonly(!self.snapshot.connected),
                     ),
@@ -477,7 +477,7 @@ impl Desktop {
                         .child(self.model_menu(cx))
                         .child(self.effort_control("model-effort", false, cx))
                         .child(microphone)
-                        .child(send.large().rounded(px(22.)).w(px(44.)).h(px(44.)).ghost()),
+                        .child(send.large().rounded_full().w(px(40.)).h(px(40.)).primary()),
                 )
             })
             .when(phase.is_some(), |composer| {
