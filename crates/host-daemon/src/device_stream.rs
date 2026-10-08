@@ -879,11 +879,25 @@ impl<'a> BitReader<'a> {
 mod tests {
     use super::*;
 
+    const OPENH264_STATIC: &[u8] = include_bytes!("fixtures/openh264/Static.264");
+
+    fn fixture_nal(nal_type: u8) -> Vec<u8> {
+        split_annex_b(OPENH264_STATIC)
+            .expect("OpenH264 fixture must contain Annex-B NAL units")
+            .into_iter()
+            .find(|nal| nal.first().is_some_and(|byte| byte & 0x1f == nal_type))
+            .unwrap_or_else(|| panic!("OpenH264 fixture is missing NAL type {nal_type}"))
+    }
+
+    fn annex_b(nal: &[u8]) -> Vec<u8> {
+        let mut bytes = vec![0, 0, 0, 1];
+        bytes.extend_from_slice(nal);
+        bytes
+    }
+
     fn valid_description() -> Vec<u8> {
-        // SPS/PPS from WebRTC's checked-in H264BitstreamChunk fixture:
-        // https://webrtc.googlesource.com/src/+/839b657b184b1afa563f6456b6caeac7c25dcb23/common_video/h264/h264_bitstream_parser_unittest.cc
-        let sps = [0x67, 0x42, 0x80, 0x20, 0xda, 0x01, 0x40, 0x16, 0xe8, 0x06, 0xd0, 0xa1, 0x35, 0x00];
-        let pps = [0x68, 0xce, 0x06, 0xe2];
+        let sps = fixture_nal(7);
+        let pps = fixture_nal(8);
         let mut description = vec![1, sps[1], sps[2], sps[3], 0xff, 0xe1];
         description.extend_from_slice(&(sps.len() as u16).to_be_bytes());
         description.extend_from_slice(&sps);
@@ -894,13 +908,11 @@ mod tests {
     }
 
     fn keyframe() -> Vec<u8> {
-        // kH264BitstreamChunk's IDR NAL from the same WebRTC fixture.
-        vec![0, 0, 0, 1, 0x65, 0xb8, 0x40, 0xf0, 0x8c, 0x03, 0xf2, 0x75, 0x67, 0xad, 0x41, 0x64, 0x24, 0x0e, 0xa0, 0xb2, 0x12, 0x1e, 0xf8]
+        annex_b(&fixture_nal(5))
     }
 
     fn delta() -> Vec<u8> {
-        // kH264BitstreamNextImageSliceChunk's P NAL from the same fixture.
-        vec![0, 0, 0, 1, 0x41, 0xe2, 0x01, 0x16, 0x0e, 0x3e, 0x2b, 0x86]
+        annex_b(&fixture_nal(1))
     }
 
     #[derive(Debug)]
@@ -1052,6 +1064,16 @@ mod tests {
     }
 
     #[test]
+    fn openh264_fixture_contains_complete_reference_access_units() {
+        assert_eq!(OPENH264_STATIC.len(), 9_125);
+        let nals = split_annex_b(OPENH264_STATIC).unwrap();
+        assert_eq!(nals.len(), 12);
+        assert!(fixture_nal(5).len() > 1_000);
+        assert!(fixture_nal(1).len() > 700);
+        assert_eq!(sps_dimensions(&fixture_nal(7)), Some((152, 212)));
+    }
+
+    #[test]
     fn semu_metadata_and_annex_b_keyframes_are_preserved() {
         let mut packet = b"SEMU".to_vec();
         packet.extend_from_slice(&[1, 1, 0, 0]);
@@ -1098,7 +1120,7 @@ mod tests {
         let mdat_payload = &bytes[mdat.start + 8..mdat.start + mdat.size];
         assert_eq!(samples.iter().map(|sample| sample.size as usize).sum::<usize>(), mdat_payload.len());
         assert_eq!(sample_nal_types(mdat_payload, 0, &samples).unwrap(), [vec![6, 5], vec![6, 1]]);
-        assert_eq!(sps_dimensions(&valid_description()[8..22]), Some((1280, 720)));
+        assert_eq!(sps_dimensions(&fixture_nal(7)), Some((152, 212)));
     }
 
     #[test]
