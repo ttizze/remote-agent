@@ -6,9 +6,23 @@
 //! the caller remains on the stale/observed-power contract instead of
 //! inferring suspend from elapsed time.
 
-#[cfg(target_os = "linux")]
 use std::time::Duration;
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
+
+const LIFECYCLE_BUFFER: usize = 8;
+
+#[cfg(target_os = "macos")]
+const MAC_MESSAGE_CAN_SLEEP: u32 = 0xe000_0270;
+#[cfg(target_os = "macos")]
+const MAC_MESSAGE_WILL_SLEEP: u32 = 0xe000_0280;
+#[cfg(target_os = "macos")]
+const MAC_MESSAGE_HAS_POWERED_ON: u32 = 0xe000_0300;
+
+#[cfg(target_os = "macos")]
+fn mac_notification_id(message_argument: *mut std::ffi::c_void) -> isize {
+    message_argument as isize
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SuspendLifecycleEvent {
@@ -22,57 +36,127 @@ impl SuspendLifecycleEvent {
     }
 }
 
-pub(crate) async fn next_suspend_lifecycle_event(
-    stop: &CancellationToken,
-) -> Option<SuspendLifecycleEvent> {
+pub(crate) struct SuspendLifecycleSource {
+    events: mpsc::Receiver<SuspendLifecycleEvent>,
+    stop: CancellationToken,
+    task: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl SuspendLifecycleSource {
+    pub(crate) fn start(owner_stop: &CancellationToken) -> Self {
+        let (sender, events) = mpsc::channel(LIFECYCLE_BUFFER);
+        let stop = CancellationToken::new();
+        let task_stop = stop.clone();
+        let owner_stop = owner_stop.clone();
+        let task = tokio::spawn(async move {
+            let run = run_platform_source(sender, task_stop.clone());
+            tokio::pin!(run);
+            tokio::select! {
+                _ = owner_stop.cancelled() => {
+                    task_stop.cancel();
+                    let _ = run.await;
+                }
+                _ = &mut run => {}
+            }
+        });
+        Self {
+            events,
+            stop,
+            task: Some(task),
+        }
+    }
+
+    pub(crate) async fn recv(&mut self) -> Option<SuspendLifecycleEvent> {
+        self.events.recv().await
+    }
+
+    pub(crate) async fn shutdown(&mut self) {
+        self.stop.cancel();
+        if let Some(task) = self.task.take() {
+            let _ = task.await;
+        }
+    }
+}
+
+impl Drop for SuspendLifecycleSource {
+    fn drop(&mut self) {
+        self.stop.cancel();
+    }
+}
+
+async fn run_platform_source(sender: mpsc::Sender<SuspendLifecycleEvent>, stop: CancellationToken) {
     #[cfg(target_os = "linux")]
     {
-        return next_linux_suspend_lifecycle_event(stop).await;
+        run_linux_suspend_lifecycle_source(sender, stop).await;
+        return;
     }
 
     #[cfg(target_os = "macos")]
     {
-        return next_macos_suspend_lifecycle_event(stop).await;
+        run_macos_suspend_lifecycle_source(sender, stop).await;
+        return;
     }
 
     #[cfg(target_os = "windows")]
     {
-        return next_windows_suspend_lifecycle_event(stop).await;
+        run_windows_suspend_lifecycle_source(sender, stop).await;
+        return;
     }
 
     #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     {
         stop.cancelled().await;
-        None
+    }
+}
+
+async fn send_lifecycle_event(
+    sender: &mpsc::Sender<SuspendLifecycleEvent>,
+    stop: &CancellationToken,
+    event: SuspendLifecycleEvent,
+    last: &mut Option<SuspendLifecycleEvent>,
+) -> bool {
+    if *last == Some(event) {
+        return true;
+    }
+    if tokio::select! {
+        _ = stop.cancelled() => false,
+        result = sender.send(event) => result.is_ok(),
+    } {
+        *last = Some(event);
+        true
+    } else {
+        false
     }
 }
 
 #[cfg(target_os = "linux")]
-async fn next_linux_suspend_lifecycle_event(
-    stop: &CancellationToken,
-) -> Option<SuspendLifecycleEvent> {
+async fn run_linux_suspend_lifecycle_source(
+    sender: mpsc::Sender<SuspendLifecycleEvent>,
+    stop: CancellationToken,
+) {
     use futures_util::StreamExt;
 
     const RETRY: Duration = Duration::from_secs(30);
+    let mut last = None;
     loop {
         if stop.is_cancelled() {
-            return None;
+            return;
         }
         let connection = tokio::select! {
-            _ = stop.cancelled() => return None,
+            _ = stop.cancelled() => return,
             connection = zbus::Connection::system() => match connection {
                 Ok(connection) => connection,
                 Err(error) => {
                     tracing::debug!(target: "bex", operation = "background.power.lifecycle.connect", message = %error);
                     tokio::select! {
-                        _ = stop.cancelled() => return None,
+                        _ = stop.cancelled() => return,
                         _ = tokio::time::sleep(RETRY) => continue,
                     }
                 }
             },
         };
         let proxy = match tokio::select! {
-            _ = stop.cancelled() => return None,
+            _ = stop.cancelled() => return,
             proxy = zbus::Proxy::new(
                 &connection,
                 "org.freedesktop.login1",
@@ -84,84 +168,78 @@ async fn next_linux_suspend_lifecycle_event(
             Err(error) => {
                 tracing::debug!(target: "bex", operation = "background.power.lifecycle.proxy", message = %error);
                 tokio::select! {
-                    _ = stop.cancelled() => return None,
+                    _ = stop.cancelled() => return,
                     _ = tokio::time::sleep(RETRY) => continue,
                 }
             }
         };
         let mut signals = match tokio::select! {
-            _ = stop.cancelled() => return None,
+            _ = stop.cancelled() => return,
             signals = proxy.receive_signal("PrepareForSleep") => signals,
         } {
             Ok(signals) => signals,
             Err(error) => {
                 tracing::debug!(target: "bex", operation = "background.power.lifecycle.subscribe", message = %error);
                 tokio::select! {
-                    _ = stop.cancelled() => return None,
+                    _ = stop.cancelled() => return,
                     _ = tokio::time::sleep(RETRY) => continue,
                 }
             }
         };
         loop {
             tokio::select! {
-                _ = stop.cancelled() => return None,
+                _ = stop.cancelled() => return,
                 signal = signals.next() => match signal {
-                    Some(Ok(signal)) => match signal.body().deserialize::<bool>() {
-                        Ok(true) => return Some(SuspendLifecycleEvent::Suspended),
-                        Ok(false) => return Some(SuspendLifecycleEvent::Resumed),
+                    Some(signal) => match signal.body().deserialize::<bool>() {
+                        Ok(suspended) => {
+                            let event = if suspended {
+                                SuspendLifecycleEvent::Suspended
+                            } else {
+                                SuspendLifecycleEvent::Resumed
+                            };
+                            if !send_lifecycle_event(&sender, &stop, event, &mut last).await {
+                                return;
+                            }
+                        }
                         Err(error) => tracing::debug!(target: "bex", operation = "background.power.lifecycle.decode", message = %error),
                     },
-                    Some(Err(error)) => {
-                        tracing::debug!(target: "bex", operation = "background.power.lifecycle.stream", message = %error);
-                        break;
-                    }
                     None => break,
                 },
             }
+        }
+        tokio::select! {
+            _ = stop.cancelled() => return,
+            _ = tokio::time::sleep(Duration::from_secs(1)) => {}
         }
     }
 }
 
 #[cfg(target_os = "macos")]
-async fn next_macos_suspend_lifecycle_event(
-    stop: &CancellationToken,
-) -> Option<SuspendLifecycleEvent> {
-    // The IOKit callback runs on a short-lived run-loop worker.  It is
-    // recreated after each notification so dropping/cancelling the async
-    // owner always tears down the notification port and root power object.
-    use std::sync::mpsc;
-
-    let (event_tx, event_rx) = mpsc::channel();
-    let (stop_tx, stop_rx) = mpsc::channel();
-    let watcher = tokio::task::spawn_blocking(move || {
-        run_macos_power_watcher(event_tx, stop_rx);
-    });
-    let receive = tokio::task::spawn_blocking(move || event_rx.recv().ok());
-    let event = tokio::select! {
-        _ = stop.cancelled() => {
-            let _ = stop_tx.send(());
-            let _ = watcher.await;
-            None
+async fn run_macos_suspend_lifecycle_source(
+    sender: mpsc::Sender<SuspendLifecycleEvent>,
+    stop: CancellationToken,
+) {
+    const RETRY: Duration = Duration::from_secs(30);
+    loop {
+        if stop.is_cancelled() {
+            return;
         }
-        result = receive => result.ok().flatten(),
-    };
-    let _ = stop_tx.send(());
-    let _ = watcher.await;
-    event.map(|suspended| {
-        if suspended {
-            SuspendLifecycleEvent::Suspended
-        } else {
-            SuspendLifecycleEvent::Resumed
+        let watcher_stop = stop.clone();
+        let watcher_sender = sender.clone();
+        let watcher = tokio::task::spawn_blocking(move || {
+            run_macos_power_watcher(watcher_sender, watcher_stop);
+        });
+        let _ = watcher.await;
+        tokio::select! {
+            _ = stop.cancelled() => return,
+            _ = tokio::time::sleep(RETRY) => {}
         }
-    })
+    }
 }
 
 #[cfg(target_os = "macos")]
-fn run_macos_power_watcher(
-    event_tx: std::sync::mpsc::Sender<bool>,
-    stop_rx: std::sync::mpsc::Receiver<()>,
-) {
-    use std::{ffi::c_void, ptr, sync::mpsc::TryRecvError};
+fn run_macos_power_watcher(event_tx: mpsc::Sender<SuspendLifecycleEvent>, stop: CancellationToken) {
+    use std::{ffi::c_void, ptr};
 
     type IoObject = u32;
     type IoConnect = u32;
@@ -170,14 +248,11 @@ fn run_macos_power_watcher(
     type RunLoopSource = *mut c_void;
     type StringRef = *const c_void;
 
-    const MESSAGE_CAN_SLEEP: u32 = 0x0000_0200;
-    const MESSAGE_WILL_SLEEP: u32 = 0x0000_0100;
-    const MESSAGE_HAS_POWERED_ON: u32 = 0x0000_0800;
-
     #[repr(C)]
     struct CallbackContext {
-        event_tx: std::sync::mpsc::Sender<bool>,
+        event_tx: mpsc::Sender<SuspendLifecycleEvent>,
         root_port: IoConnect,
+        last_event: Option<SuspendLifecycleEvent>,
     }
 
     unsafe extern "C" fn callback(
@@ -188,15 +263,25 @@ fn run_macos_power_watcher(
     ) {
         let context = &mut *(refcon.cast::<CallbackContext>());
         match message_type {
-            MESSAGE_CAN_SLEEP | MESSAGE_WILL_SLEEP => {
-                if message_type == MESSAGE_WILL_SLEEP {
-                    let _ = context.event_tx.send(true);
+            MAC_MESSAGE_CAN_SLEEP | MAC_MESSAGE_WILL_SLEEP => {
+                if message_type == MAC_MESSAGE_WILL_SLEEP {
+                    let event = SuspendLifecycleEvent::Suspended;
+                    if context.last_event != Some(event)
+                        && context.event_tx.blocking_send(event).is_ok()
+                    {
+                        context.last_event = Some(event);
+                    }
                 }
                 let _ =
-                    IOAllowPowerChange(context.root_port, message_argument.cast::<isize>().read());
+                    IOAllowPowerChange(context.root_port, mac_notification_id(message_argument));
             }
-            MESSAGE_HAS_POWERED_ON => {
-                let _ = context.event_tx.send(false);
+            MAC_MESSAGE_HAS_POWERED_ON => {
+                let event = SuspendLifecycleEvent::Resumed;
+                if context.last_event != Some(event)
+                    && context.event_tx.blocking_send(event).is_ok()
+                {
+                    context.last_event = Some(event);
+                }
             }
             _ => {}
         }
@@ -208,6 +293,7 @@ fn run_macos_power_watcher(
         let context = Box::new(CallbackContext {
             event_tx,
             root_port: 0,
+            last_event: None,
         });
         let context_ptr = Box::into_raw(context);
         let root_port = IORegisterForSystemPower(
@@ -217,11 +303,14 @@ fn run_macos_power_watcher(
             &mut notifier,
         );
         if root_port == 0 || notify_port.is_null() {
+            if notifier != 0 {
+                let _ = IODeregisterForSystemPower(&mut notifier);
+            }
+            if root_port != 0 {
+                let _ = IOServiceClose(root_port);
+            }
             if !notify_port.is_null() {
                 IONotificationPortDestroy(notify_port);
-            }
-            if notifier != 0 {
-                let _ = IOObjectRelease(notifier);
             }
             drop(Box::from_raw(context_ptr));
             return;
@@ -229,24 +318,27 @@ fn run_macos_power_watcher(
         (*context_ptr).root_port = root_port;
         let run_loop = CFRunLoopGetCurrent();
         let source = IONotificationPortGetRunLoopSource(notify_port);
-        if !source.is_null() {
-            CFRunLoopAddSource(run_loop, source, kCFRunLoopDefaultMode);
-        }
-        loop {
-            match stop_rx.try_recv() {
-                Ok(()) | Err(TryRecvError::Disconnected) => break,
-                Err(TryRecvError::Empty) => {}
+        if source.is_null() {
+            if notifier != 0 {
+                let _ = IODeregisterForSystemPower(&mut notifier);
             }
+            let _ = IOServiceClose(root_port);
+            IONotificationPortDestroy(notify_port);
+            drop(Box::from_raw(context_ptr));
+            return;
+        }
+        CFRunLoopAddSource(run_loop, source, kCFRunLoopDefaultMode);
+        while !stop.is_cancelled() {
             let _ = CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.25, 1);
         }
         if !source.is_null() {
             CFRunLoopRemoveSource(run_loop, source, kCFRunLoopDefaultMode);
         }
+        if notifier != 0 {
+            let _ = IODeregisterForSystemPower(&mut notifier);
+        }
         let _ = IOServiceClose(root_port);
         IONotificationPortDestroy(notify_port);
-        if notifier != 0 {
-            let _ = IOObjectRelease(notifier);
-        }
         drop(Box::from_raw(context_ptr));
     }
 
@@ -260,9 +352,9 @@ fn run_macos_power_watcher(
         ) -> IoConnect;
         fn IONotificationPortGetRunLoopSource(port: NotificationPort) -> RunLoopSource;
         fn IONotificationPortDestroy(port: NotificationPort);
+        fn IODeregisterForSystemPower(notifier: *mut IoObject) -> i32;
         fn IOAllowPowerChange(root_port: IoConnect, notification_id: isize) -> i32;
         fn IOServiceClose(root_port: IoConnect) -> i32;
-        fn IOObjectRelease(object: IoObject) -> i32;
     }
 
     #[link(name = "CoreFoundation", kind = "framework")]
@@ -276,41 +368,37 @@ fn run_macos_power_watcher(
 }
 
 #[cfg(target_os = "windows")]
-async fn next_windows_suspend_lifecycle_event(
-    stop: &CancellationToken,
-) -> Option<SuspendLifecycleEvent> {
-    use std::sync::mpsc;
-
-    let (event_tx, event_rx) = mpsc::channel();
-    let (stop_tx, stop_rx) = mpsc::channel();
-    let stop_notify = stop_tx.clone();
-    let watcher = tokio::task::spawn_blocking(move || {
-        run_windows_power_watcher(event_tx, stop_rx, stop_notify);
-    });
-    let receive = tokio::task::spawn_blocking(move || event_rx.recv().ok());
-    let event = tokio::select! {
-        _ = stop.cancelled() => {
-            let _ = stop_tx.send(());
-            let _ = watcher.await;
-            None
+async fn run_windows_suspend_lifecycle_source(
+    sender: mpsc::Sender<SuspendLifecycleEvent>,
+    stop: CancellationToken,
+) {
+    const RETRY: Duration = Duration::from_secs(30);
+    loop {
+        if stop.is_cancelled() {
+            return;
         }
-        result = receive => result.ok().flatten(),
-    };
-    let _ = stop_tx.send(());
-    let _ = watcher.await;
-    event
+        let watcher_stop = stop.clone();
+        let watcher_sender = sender.clone();
+        let watcher = tokio::task::spawn_blocking(move || {
+            run_windows_power_watcher(watcher_sender, watcher_stop);
+        });
+        let _ = watcher.await;
+        tokio::select! {
+            _ = stop.cancelled() => return,
+            _ = tokio::time::sleep(RETRY) => {}
+        }
+    }
 }
 
 #[cfg(target_os = "windows")]
 fn run_windows_power_watcher(
-    event_tx: std::sync::mpsc::Sender<bool>,
-    stop_rx: std::sync::mpsc::Receiver<()>,
-    stop_notify: std::sync::mpsc::Sender<()>,
+    event_tx: mpsc::Sender<SuspendLifecycleEvent>,
+    stop: CancellationToken,
 ) {
     // The worker owns a message-only HWND and registers that HWND with the
     // power manager.  The message loop is the documented Windows power
     // notification source; no idle-frequency heuristic is involved.
-    use std::{mem, ptr};
+    use std::{mem, ptr, time::Duration};
     use windows_sys::Win32::{
         Foundation::{GetLastError, HINSTANCE, LPARAM, LRESULT, WPARAM},
         System::{
@@ -329,7 +417,8 @@ fn run_windows_power_watcher(
     };
 
     struct WindowContext {
-        event_tx: std::sync::mpsc::Sender<bool>,
+        event_tx: mpsc::Sender<SuspendLifecycleEvent>,
+        last_event: Option<SuspendLifecycleEvent>,
     }
     const CLASS_NAME: [u16; 17] = [
         82, 101, 109, 111, 116, 101, 65, 103, 101, 110, 116, 80, 111, 119, 101, 114, 0,
@@ -354,9 +443,19 @@ fn run_windows_power_watcher(
                 _ => None,
             };
             if let Some(event) = event {
-                let context = GetWindowLongPtrW(window, GWLP_USERDATA) as *const WindowContext;
+                let context = GetWindowLongPtrW(window, GWLP_USERDATA) as *mut WindowContext;
                 if !context.is_null() {
-                    let _ = (&*context).event_tx.send(event);
+                    let event = if event {
+                        SuspendLifecycleEvent::Suspended
+                    } else {
+                        SuspendLifecycleEvent::Resumed
+                    };
+                    let context = &mut *context;
+                    if context.last_event != Some(event)
+                        && context.event_tx.blocking_send(event).is_ok()
+                    {
+                        context.last_event = Some(event);
+                    }
                 }
             }
             return 1;
@@ -383,7 +482,10 @@ fn run_windows_power_watcher(
             ..mem::zeroed()
         };
         let _ = RegisterClassW(&class);
-        let context = Box::new(WindowContext { event_tx });
+        let context = Box::new(WindowContext {
+            event_tx,
+            last_event: None,
+        });
         let window = CreateWindowExW(
             0,
             CLASS_NAME.as_ptr(),
@@ -412,14 +514,15 @@ fn run_windows_power_watcher(
         let mut message = MSG::default();
         PeekMessageW(&mut message, ptr::null_mut(), 0, 0, PM_NOREMOVE);
         let stop_thread = std::thread::spawn(move || {
-            let _ = stop_rx.recv();
+            while !stop.is_cancelled() {
+                std::thread::sleep(Duration::from_millis(10));
+            }
             let _ = PostThreadMessageW(thread_id, WM_QUIT, 0, 0);
         });
         while GetMessageW(&mut message, ptr::null_mut(), 0, 0) > 0 {
             TranslateMessage(&message);
             DispatchMessageW(&message);
         }
-        let _ = stop_notify.send(());
         let _ = stop_thread.join();
         UnregisterSuspendResumeNotification(registration);
         DestroyWindow(window);
@@ -438,10 +541,61 @@ mod tests {
         assert!(!SuspendLifecycleEvent::Resumed.suspended());
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mac_power_constants_and_notification_ids_match_iokit() {
+        assert_eq!(MAC_MESSAGE_CAN_SLEEP, 0xe000_0270);
+        assert_eq!(MAC_MESSAGE_WILL_SLEEP, 0xe000_0280);
+        assert_eq!(MAC_MESSAGE_HAS_POWERED_ON, 0xe000_0300);
+        let raw = 0x1234usize as *mut std::ffi::c_void;
+        assert_eq!(mac_notification_id(raw), 0x1234isize);
+    }
+
     #[tokio::test]
-    async fn canceled_watcher_does_not_leave_a_platform_subscription() {
+    async fn lifecycle_channel_coalesces_duplicates_without_dropping_wake() {
+        let (sender, mut events) = mpsc::channel(2);
+        let mut last = None;
+        assert!(
+            send_lifecycle_event(
+                &sender,
+                &CancellationToken::new(),
+                SuspendLifecycleEvent::Suspended,
+                &mut last,
+            )
+            .await
+        );
+        assert!(
+            send_lifecycle_event(
+                &sender,
+                &CancellationToken::new(),
+                SuspendLifecycleEvent::Suspended,
+                &mut last,
+            )
+            .await
+        );
+        assert!(
+            send_lifecycle_event(
+                &sender,
+                &CancellationToken::new(),
+                SuspendLifecycleEvent::Resumed,
+                &mut last,
+            )
+            .await
+        );
+        assert_eq!(events.recv().await, Some(SuspendLifecycleEvent::Suspended));
+        assert_eq!(events.recv().await, Some(SuspendLifecycleEvent::Resumed));
+    }
+
+    #[tokio::test]
+    async fn canceled_source_closes_after_its_worker_stops() {
         let stop = CancellationToken::new();
+        let mut source = SuspendLifecycleSource::start(&stop);
         stop.cancel();
-        assert!(next_suspend_lifecycle_event(&stop).await.is_none());
+        assert!(
+            tokio::time::timeout(Duration::from_secs(2), source.shutdown())
+                .await
+                .is_ok()
+        );
+        assert!(source.recv().await.is_none());
     }
 }

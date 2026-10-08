@@ -1,6 +1,6 @@
 //! Host-owned background policy, power probes, local resource samples, and
 //! trace diagnostics.  The domain crate supplies all decisions and views.
-use crate::power_events::next_suspend_lifecycle_event;
+use crate::power_events::SuspendLifecycleSource;
 use agent_domain::{
     BackgroundActivityPolicy, BackgroundPolicySnapshot, BackgroundScope, BackgroundBooleanState,
     HostPowerSnapshot, HostPowerSource, ResourceAggregate,
@@ -1750,30 +1750,36 @@ impl BackgroundOwner {
             let mut interval = tokio::time::interval(Duration::from_secs(15));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             let mut next_power_sample_ms = now().millis();
-            let mut suspend_event = Box::pin(next_suspend_lifecycle_event(&stop));
+            let mut suspend_events = SuspendLifecycleSource::start(&stop);
             loop {
                 tokio::select! {
                     _ = stop.cancelled() => {
                         probe_stop.cancel();
+                        suspend_events.shutdown().await;
                         return;
                     },
-                    event = &mut suspend_event => {
+                    event = suspend_events.recv() => {
                         let Some(owner) = owner.upgrade() else {
                             probe_stop.cancel();
+                            suspend_events.shutdown().await;
                             return;
                         };
                         let Some(event) = event else {
                             probe_stop.cancel();
+                            suspend_events.shutdown().await;
                             return;
                         };
                         let _mutation = owner.mutation.lock().await;
                         if owner.power.report_lifecycle(event.suspended()).await {
                             let _ = owner.publish().await;
                         }
-                        suspend_event = Box::pin(next_suspend_lifecycle_event(&stop));
                     },
                     _ = interval.tick() => {
-                        let Some(owner) = owner.upgrade() else { return; };
+                        let Some(owner) = owner.upgrade() else {
+                            probe_stop.cancel();
+                            suspend_events.shutdown().await;
+                            return;
+                        };
                         let (leases_changed, interval_ms, current_ms) = {
                             let _mutation = owner.mutation.lock().await;
                             let current = now();
@@ -1801,6 +1807,7 @@ impl BackgroundOwner {
                             tokio::select! {
                                 _ = stop.cancelled() => {
                                     probe_stop.cancel();
+                                    suspend_events.shutdown().await;
                                     return;
                                 }
                                 changed = owner.publish_power_sample() => changed,
