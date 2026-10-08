@@ -4,6 +4,10 @@ use crate::{
     view::{
         settings::{SettingsScope, SettingsView},
         sidebar::{SidebarDraftRow, SidebarItem, SidebarOptions, SidebarSection, SidebarThreadRow},
+        thread_list::{
+            PendingTaskKind, PendingTaskRow, ThreadListItem, ThreadListOptions, ThreadRow,
+        },
+        thread_menu::{ThreadMenuAction, ThreadMenuChild, ThreadMenuItem},
     },
 };
 use agent_protocol::models::{
@@ -519,6 +523,57 @@ pub struct EnvironmentUsageSnapshot {
     pub configured_provider_kinds: Vec<ProviderKind>,
 }
 
+/// A project row in the client-wide project picker. The project id is scoped
+/// to the environment that owns it, so two Hosts may expose the same local id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct EnvironmentProjectRow {
+    pub environment_id: String,
+    pub environment_label: String,
+    pub project_id: String,
+    pub title: String,
+    pub subtitle: String,
+}
+
+/// A thread row together with the Host that must receive its next action.
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct EnvironmentThreadListRow {
+    pub environment_id: String,
+    pub environment_label: String,
+    pub row: ThreadRow,
+}
+
+/// A queued or draft task together with its owning Host.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct EnvironmentPendingTaskRow {
+    pub environment_id: String,
+    pub environment_label: String,
+    pub task: PendingTaskRow,
+}
+
+/// Mobile clients render these rows with their existing Host-local components.
+/// Shelves are intentionally omitted here: the rows already carry their
+/// lifecycle variant and the combined list must not duplicate a shelf header
+/// for every environment.
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct EnvironmentThreadListView {
+    pub rows: Vec<EnvironmentThreadListRow>,
+    pub pending_tasks: Vec<EnvironmentPendingTaskRow>,
+    pub has_threads: bool,
+}
+
+/// Settings for one Host, retaining the environment id used to route edits.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct EnvironmentSettingsEntryView {
+    pub environment_id: String,
+    pub environment_label: String,
+    pub settings: SettingsView,
+}
+
 #[derive(Debug, Clone)]
 struct EnvironmentEntry {
     snapshot: Arc<Snapshot>,
@@ -772,6 +827,131 @@ impl EnvironmentRegistry {
         EnvironmentSettingsView { entries }
     }
 
+    /// Projects from every registered Host, ordered by environment and then
+    /// the Host's project picker order. A scoped id is the only identifier
+    /// clients should retain for a selection.
+    pub fn project_rows(&self, query: &str) -> Vec<EnvironmentProjectRow> {
+        let mut rows = Vec::new();
+        for summary in self.summaries() {
+            let Some(entry) = self.entries.get(&summary.descriptor.environment_id) else {
+                continue;
+            };
+            rows.extend(
+                entry
+                    .snapshot
+                    .project_picker(query.to_owned())
+                    .rows
+                    .into_iter()
+                    .filter_map(|row| {
+                        let project_id = scoped_key(
+                            &summary.descriptor.environment_id,
+                            &row.project_id,
+                        )?;
+                        Some(EnvironmentProjectRow {
+                            environment_id: summary.descriptor.environment_id.clone(),
+                            environment_label: summary.descriptor.label.clone(),
+                            project_id,
+                            title: row.title,
+                            subtitle: row.subtitle,
+                        })
+                    }),
+            );
+        }
+        rows
+    }
+
+    /// Combines the mobile thread rows from every Host. The snapshots are
+    /// cloned only to apply the aggregate query and scoped selection; all
+    /// rendering and lifecycle decisions still come from the Host-owned core
+    /// view function.
+    pub fn thread_list(
+        &self,
+        now_ms: i64,
+        options: ThreadListOptions,
+        query: &str,
+        selected_project: Option<&str>,
+        selected_thread: Option<&str>,
+    ) -> EnvironmentThreadListView {
+        let mut rows = Vec::new();
+        let mut pending_tasks = Vec::new();
+        let mut has_threads = false;
+        for summary in self.summaries() {
+            let Some(entry) = self.entries.get(&summary.descriptor.environment_id) else {
+                continue;
+            };
+            let environment_id = summary.descriptor.environment_id.as_str();
+            let mut local = entry.snapshot.as_ref().clone();
+            local.search = query.to_owned();
+            local.search_matches.clear();
+            local.search_request = None;
+            local.selected_project = selected_project
+                .and_then(parse_scoped_project_key)
+                .filter(|reference| reference.environment_id == environment_id)
+                .map(|reference| reference.project_id);
+            if selected_project.is_some() && local.selected_project.is_none() {
+                continue;
+            }
+            local.selected_thread = selected_thread
+                .and_then(parse_scoped_thread_key)
+                .filter(|reference| reference.environment_id == environment_id)
+                .and_then(|reference| reference.thread_id.parse().ok());
+            let view = local.thread_list(now_ms, options);
+            has_threads |= view.has_threads;
+            for item in view.items {
+                match item {
+                    ThreadListItem::Thread { mut row } => {
+                        let local_id = row.id.clone();
+                        row.id = scoped_key(environment_id, &local_id).unwrap_or(local_id);
+                        row.key = scoped_key(environment_id, &row.key).unwrap_or(row.key);
+                        row.project_id =
+                            scoped_key(environment_id, &row.project_id).unwrap_or_default();
+                        scope_thread_menu(environment_id, &mut row.menu);
+                        rows.push(EnvironmentThreadListRow {
+                            environment_id: environment_id.to_owned(),
+                            environment_label: summary.descriptor.label.clone(),
+                            row,
+                        });
+                    }
+                    ThreadListItem::PendingTask { mut task } => {
+                        task.key = scoped_key(environment_id, &task.key).unwrap_or(task.key);
+                        task.project_id =
+                            scoped_key(environment_id, &task.project_id).unwrap_or_default();
+                        task.kind = scope_pending_task(environment_id, task.kind);
+                        pending_tasks.push(EnvironmentPendingTaskRow {
+                            environment_id: environment_id.to_owned(),
+                            environment_label: summary.descriptor.label.clone(),
+                            task,
+                        });
+                    }
+                    ThreadListItem::WorkingShelf { .. }
+                    | ThreadListItem::SnoozedShelf { .. }
+                    | ThreadListItem::SettledShelf { .. } => {}
+                }
+            }
+        }
+        EnvironmentThreadListView {
+            rows,
+            pending_tasks,
+            has_threads,
+        }
+    }
+
+    /// Settings entries retain the same rows each Host exposes while adding
+    /// the environment identity needed to route an edit.
+    pub fn settings_entries(&self) -> Vec<EnvironmentSettingsEntryView> {
+        self.summaries()
+            .into_iter()
+            .filter_map(|summary| {
+                let entry = self.entries.get(&summary.descriptor.environment_id)?;
+                Some(EnvironmentSettingsEntryView {
+                    environment_id: summary.descriptor.environment_id,
+                    environment_label: summary.descriptor.label,
+                    settings: entry.snapshot.settings(SettingsScope::Host),
+                })
+            })
+            .collect()
+    }
+
     /// Returns one immutable usage input per registered Host. Native clients
     /// can concatenate these records and pass the account/provider values to a
     /// shared usage widget builder without re-deriving Host state themselves.
@@ -856,6 +1036,64 @@ impl EnvironmentRegistry {
     }
 }
 
+fn scope_pending_task(environment_id: &str, kind: PendingTaskKind) -> PendingTaskKind {
+    match kind {
+        PendingTaskKind::Queued {
+            command_id,
+            thread_id,
+        } => PendingTaskKind::Queued {
+            command_id,
+            thread_id: scoped_key(environment_id, &thread_id).unwrap_or(thread_id),
+        },
+        PendingTaskKind::Draft { draft_key } => PendingTaskKind::Draft {
+            draft_key: scoped_key(environment_id, &draft_key).unwrap_or(draft_key),
+        },
+    }
+}
+
+fn scope_thread_menu(environment_id: &str, items: &mut [ThreadMenuItem]) {
+    for item in items {
+        item.action = item
+            .action
+            .take()
+            .map(|action| scope_thread_menu_action(environment_id, action));
+        for child in &mut item.children {
+            scope_thread_menu_child(environment_id, child);
+        }
+    }
+}
+
+fn scope_thread_menu_child(environment_id: &str, child: &mut ThreadMenuChild) {
+    child.action = scope_thread_menu_action(environment_id, child.action.clone());
+}
+
+fn scope_thread_menu_action(environment_id: &str, action: ThreadMenuAction) -> ThreadMenuAction {
+    match action {
+        ThreadMenuAction::Thread { action } => ThreadMenuAction::Thread { action },
+        ThreadMenuAction::FilterProject { project_id } => ThreadMenuAction::FilterProject {
+            project_id: project_id.and_then(|id| scoped_key(environment_id, &id)),
+        },
+        ThreadMenuAction::NewThreadOnBranch {
+            project_id,
+            branch,
+            worktree_path,
+        } => ThreadMenuAction::NewThreadOnBranch {
+            project_id: scoped_key(environment_id, &project_id).unwrap_or(project_id),
+            branch,
+            worktree_path,
+        },
+        ThreadMenuAction::OpenProjectSettings { project_id } => {
+            ThreadMenuAction::OpenProjectSettings {
+                project_id: scoped_key(environment_id, &project_id).unwrap_or(project_id),
+            }
+        }
+        ThreadMenuAction::CopyThreadId { thread_id } => ThreadMenuAction::CopyThreadId {
+            thread_id: scoped_key(environment_id, &thread_id).unwrap_or(thread_id),
+        },
+        other => other,
+    }
+}
+
 fn provider_kind(provider: &ProviderInstance) -> ProviderKind {
     match provider.driver {
         agent_domain::Driver::Codex => ProviderKind::Codex,
@@ -866,6 +1104,9 @@ fn provider_kind(provider: &ProviderInstance) -> ProviderKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sync::ShellCache;
+    use agent_domain::ThreadId;
+    use agent_protocol::conversation::ShellSnapshot;
     use agent_protocol::models::{
         EnvironmentCapabilities, EnvironmentFileAttachments, EnvironmentInstallation,
         EnvironmentPlatform, ProviderInstance, ProviderStatus,
@@ -1212,6 +1453,70 @@ mod tests {
         assert_eq!(
             registry.snapshot("z").unwrap().environment_display_label(),
             Some("Shared")
+        );
+    }
+
+    #[test]
+    fn aggregate_row_actions_preserve_their_environment_namespace() {
+        let action = scope_thread_menu_action(
+            "host-a",
+            ThreadMenuAction::NewThreadOnBranch {
+                project_id: "same-project".into(),
+                branch: "main".into(),
+                worktree_path: None,
+            },
+        );
+        assert_eq!(
+            action,
+            ThreadMenuAction::NewThreadOnBranch {
+                project_id: "host-a:same-project".into(),
+                branch: "main".into(),
+                worktree_path: None,
+            }
+        );
+        assert_eq!(
+            scope_pending_task(
+                "host-b",
+                PendingTaskKind::Queued {
+                    command_id: "command".into(),
+                    thread_id: "same-thread".into(),
+                }
+            ),
+            PendingTaskKind::Queued {
+                command_id: "command".into(),
+                thread_id: "host-b:same-thread".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn aggregate_thread_rows_scope_duplicate_local_ids_per_host() {
+        let snapshot = |environment_id: &str| {
+            let mut thread = agent_domain::shell(&crate::sync::fixtures::thread_state("same"))
+                .expect("fixture shell row");
+            thread.id = ThreadId::new("same-thread").unwrap();
+            Arc::new(Snapshot {
+                environment: Some(descriptor(environment_id, environment_id)),
+                connected: true,
+                shell: Arc::new(ShellCache::from_cache(ShellSnapshot {
+                    snapshot_sequence: 1,
+                    projects: vec![],
+                    threads: vec![thread],
+                })),
+                ..Snapshot::default()
+            })
+        };
+        let mut registry = EnvironmentRegistry::default();
+        registry.update(snapshot("host-a"));
+        registry.update(snapshot("host-b"));
+        let rows = registry
+            .thread_list(0, ThreadListOptions::default(), "", None, None)
+            .rows;
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.row.id.as_str())
+                .collect::<Vec<_>>(),
+            ["host-a:same-thread", "host-b:same-thread"]
         );
     }
 }

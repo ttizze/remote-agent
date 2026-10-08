@@ -14,6 +14,8 @@ final class BexAppViewModel: ObservableObject {
     @Published var notice: String?
     @Published var profiles: [HostProfile] = []
     @Published private(set) var environments: [EnvironmentRow] = []
+    /// Latest immutable core snapshot for each saved environment.
+    @Published private(set) var environmentSnapshots: [String: AgentCore.Snapshot] = [:]
     @Published private(set) var selectedProfileId: String?
     @Published var composerText = ""
     /// Counts requests to focus the composer with the cursor at the end of the draft.
@@ -127,6 +129,7 @@ final class BexAppViewModel: ObservableObject {
             let background = backgroundOwners.removeValue(forKey: id)
             backgroundTasks.removeValue(forKey: id)?.cancel()
             environments.removeAll { $0.profileId == id }
+            environmentSnapshots.removeValue(forKey: id)
             try DeviceIdentity.remove(id)
             if selectedProfileId == id {
                 connection?.cancel()
@@ -288,8 +291,10 @@ final class BexAppViewModel: ObservableObject {
     }
 
     private func publishEnvironment(_ profile: HostProfile, _ next: AgentCore.Snapshot) {
+        environmentSnapshots[profile.id] = next
         let row = EnvironmentRow(
             profileId: profile.id,
+            environmentId: next.environmentId() ?? profile.id,
             label: next.environmentLabel() ?? profile.name,
             state: next.environmentConnectionState() ?? "connecting",
             platform: next.environmentPlatform(),
@@ -373,6 +378,17 @@ final class BexAppViewModel: ObservableObject {
     }
 
     func perform(_ intent: Intent, completion: @escaping (Result<Outcome, Error>) -> Void = { _ in }) {
+        let (routed, profile) = routeIntent(intent)
+        if let profile, profile != selectedProfileId {
+            selectProfile(profile)
+            pending.append((routed, completion))
+            return
+        }
+        performOnCurrent(routed, completion: completion)
+    }
+
+    private func performOnCurrent(_ intent: Intent,
+                                  completion: @escaping (Result<Outcome, Error>) -> Void = { _ in }) {
         guard let owner = store else {
             if initialization != nil {
                 pending.append((intent, completion))
@@ -402,6 +418,77 @@ final class BexAppViewModel: ObservableObject {
                 }
             }
         } catch { completion(.failure(error)) }
+    }
+
+    private func scopedValue(_ value: String?) -> (String?, String?) {
+        guard let value, let separator = value.firstIndex(of: ":"), separator != value.startIndex else {
+            return (value, nil)
+        }
+        let environmentId = String(value[..<separator])
+        guard let profile = environments.first(where: { $0.environmentId == environmentId })?.profileId else {
+            return (value, nil)
+        }
+        let local = String(value[value.index(after: separator)...])
+        guard !local.isEmpty else { return (value, nil) }
+        return (local, profile)
+    }
+
+    private func routeIntent(_ intent: Intent) -> (Intent, String?) {
+        switch intent {
+        case let .openThread(threadId):
+            let (local, profile) = scopedValue(threadId)
+            return (.openThread(threadId: local ?? threadId), profile)
+        case let .newThread(projectId):
+            let (local, profile) = scopedValue(projectId)
+            return (.newThread(projectId: local), profile)
+        case let .thread(threadId, action):
+            let (local, profile) = scopedValue(threadId)
+            return (.thread(threadId: local ?? threadId, action: action), profile)
+        case let .moveThread(threadId, section, destination):
+            let (local, profile) = scopedValue(threadId)
+            return (.moveThread(threadId: local ?? threadId, section: section, destination: destination), profile)
+        case let .filterProject(projectId):
+            let (local, profile) = scopedValue(projectId)
+            return (.filterProject(projectId: local), profile)
+        case let .newThreadOnBranch(projectId, branch, worktreePath):
+            let (local, profile) = scopedValue(projectId)
+            return (.newThreadOnBranch(projectId: local ?? projectId, branch: branch,
+                                       worktreePath: worktreePath), profile)
+        case let .resetProjectSettings(projectId):
+            let (local, profile) = scopedValue(projectId)
+            return (.resetProjectSettings(projectId: local ?? projectId), profile)
+        default:
+            return (intent, nil)
+        }
+    }
+
+    /// Selects the profile that owns a scoped project before opening settings.
+    @discardableResult
+    func selectScopedValue(_ value: String?) -> String? {
+        let (local, profile) = scopedValue(value)
+        if let profile, profile != selectedProfileId {
+            selectProfile(profile)
+        }
+        return local
+    }
+
+    func environmentSnapshotsForCore() -> [AgentCore.Snapshot] {
+        Array(environmentSnapshots.values)
+    }
+
+    func environmentProjects(_ query: String) -> [EnvironmentProjectRow] {
+        AgentCore.environmentProjectRows(snapshots: environmentSnapshotsForCore(), query: query)
+    }
+
+    func environmentSettings() -> [EnvironmentSettingsEntryView] {
+        AgentCore.environmentSettings(snapshots: environmentSnapshotsForCore())
+    }
+
+    func environmentThreadList(nowMs: Int64, options: ThreadListOptions, query: String,
+                               selectedProject: String?, selectedThread: String?) -> EnvironmentThreadListView {
+        AgentCore.environmentThreadList(snapshots: environmentSnapshotsForCore(), nowMs: nowMs, options: options,
+                                        query: query, selectedProject: selectedProject,
+                                        selectedThread: selectedThread)
     }
 }
 
