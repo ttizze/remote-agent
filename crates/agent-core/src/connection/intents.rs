@@ -2827,9 +2827,9 @@ impl Owner {
                 Next::Done
             }
             Intent::UnsubscribeDevice => {
-                if let Some(thread) = &self.state.selected_thread {
-                    self.release_device_inputs(thread);
-                    self.close_stream(&super::owner::StreamKey::Device(thread.clone()));
+                if let Some(thread) = self.state.selected_thread.clone() {
+                    self.release_device_inputs(&thread);
+                    self.close_stream(&super::owner::StreamKey::Device(thread));
                 }
                 Next::Done
             }

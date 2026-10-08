@@ -8,7 +8,7 @@ use super::{
 };
 use crate::{
     models::HostSettings,
-    state::{Draft, Intent, Snapshot},
+    state::{Draft, Snapshot},
     view::models::{
         catalog,
         picker::{ModelPickerOptions, ModelPickerView, build_model_picker, trigger},
@@ -364,14 +364,17 @@ pub(super) const SECTION: Section = Section {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::view::{
-        settings::{
-            clear_project_overrides,
-            fixtures::{find, project, same},
-            new_worktrees_start_from_origin, plan_settings_update, setting_reset_intent,
-            settings_view,
+    use crate::{
+        state::Intent,
+        view::{
+            settings::{
+                clear_project_overrides,
+                fixtures::{find, project, same},
+                new_worktrees_start_from_origin, plan_settings_update, setting_reset_intent,
+                settings_view,
+            },
+            time::TimestampFormat,
         },
-        time::TimestampFormat,
     };
 
     // contracts settings.test.ts "defaults start-from-origin on" and "accepts

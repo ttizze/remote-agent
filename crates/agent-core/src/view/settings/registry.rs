@@ -10,7 +10,7 @@ use crate::{
     state::{Intent, Snapshot},
     view::time::TimestampFormat,
 };
-use agent_protocol::models::{ProjectSettingsOverrides, WorktreeSettings};
+use agent_protocol::models::ProjectSettingsOverrides;
 
 /// What the Host page's rows are built from.
 pub(super) struct Context<'a> {
@@ -158,6 +158,7 @@ mod tests {
             fixtures::{find, host_with, ids, project, same},
         },
     };
+    use agent_protocol::models::WorktreeSettings;
 
     #[test]
     fn each_row_belongs_to_exactly_one_section() {

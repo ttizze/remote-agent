@@ -417,19 +417,18 @@ impl Owner {
             }
             return;
         }
-        let sender = self.sender.clone();
-        let network = match self.network() {
-            Ok(network) => network,
-            Err(error) => {
-                self.state.device.clear_input_state(&target);
-                if let Some(complete) = complete {
-                    self.state.error = Some(error.to_string());
-                    let _ = complete.send(Err(error));
-                }
-                return;
+        let connected = self.state.connected;
+        let Some(network) = self.network.as_mut().filter(|_| connected) else {
+            self.state.device.clear_input_state(&target);
+            let error = invalid("Connect to the Host");
+            if let Some(complete) = complete {
+                self.state.error = Some(error.to_string());
+                let _ = complete.send(Err(error));
             }
+            return;
         };
         let (peer, epoch) = (network.peer.clone(), network.epoch);
+        let sender = self.sender.clone();
         let queue = self.device_input_queue.clone();
         let ticket = self.next_device_input_ticket;
         self.next_device_input_ticket = self.next_device_input_ticket.saturating_add(1);
@@ -1008,25 +1007,10 @@ impl Owner {
             Reply::PreviewList(result) => self.state.preview.apply_list(result),
             Reply::PreviewSession(session) => self.state.preview.upsert(session),
             Reply::PreviewRecordingStatus(status) => {
-                self.state.preview.last_recordings.remove(&status.tab_id);
-                self.state
-                    .preview
-                    .recordings
-                    .insert(status.tab_id.clone(), status);
+                self.state.preview.apply_recording_status(status)
             }
             Reply::PreviewRecordingArtifact(artifact) => {
-                self.state.preview.recordings.insert(
-                    artifact.tab_id.clone(),
-                    agent_protocol::preview::PreviewRecordingStatus {
-                        tab_id: artifact.tab_id.clone(),
-                        recording: false,
-                        started_at: None,
-                    },
-                );
-                self.state
-                    .preview
-                    .last_recordings
-                    .insert(artifact.tab_id.clone(), artifact);
+                self.state.preview.apply_recording_artifact(artifact)
             }
             Reply::Environment(environment) => {
                 self.state.host_name = Some(environment.label.clone());
