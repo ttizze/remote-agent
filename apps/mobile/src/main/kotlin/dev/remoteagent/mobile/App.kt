@@ -33,6 +33,7 @@ import dev.remoteagent.core.environmentSettings as buildEnvironmentSettings
 import dev.remoteagent.core.environmentThreadList as buildEnvironmentThreadList
 import dev.remoteagent.core.generateIdentity
 import dev.remoteagent.core.notificationEvents as buildNotificationEvents
+import dev.remoteagent.core.notificationBadgeCount as buildNotificationBadgeCount
 import dev.remoteagent.core.parseInvitation
 import dev.remoteagent.core.subscriptionUsageWidgetsJson
 import dev.remoteagent.core.validateInvitation
@@ -174,6 +175,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
         private set
 
     var notice by mutableStateOf<String?>(null)
+    var notificationThreadRoute by mutableStateOf<String?>(null)
     var invitation by mutableStateOf<Invitation?>(null)
         private set
 
@@ -328,6 +330,13 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
     }
 
     fun environmentSnapshotsForCore(): List<Snapshot> = environmentSnapshots.values.toList()
+
+    /** Core computes each Host's attention count; the native badge aggregates
+     * those independent counts across every connected environment. */
+    fun notificationBadgeCount(): UInt =
+        environmentSnapshots.values.fold(0u) { total, snapshot ->
+            total + buildNotificationBadgeCount(snapshot)
+        }
 
     fun environmentProjects(query: String): List<EnvironmentProjectRow> =
         buildEnvironmentProjectRows(environmentSnapshotsForCore(), query)
@@ -636,6 +645,32 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
         val host = profileId ?: return null
         val thread = route as? Route.Thread ?: return null
         return "remoteagent://threads/${android.net.Uri.encode(host)}/${android.net.Uri.encode(thread.id)}"
+    }
+
+    fun openNotificationThread() {
+        val route = notificationThreadRoute ?: return
+        val (local, profile) = scopedValue(route)
+        // Keep an environment-scoped route until its owner has been
+        // published. Opening the same thread id on the selected Host would
+        // silently target the wrong environment.
+        if (route.contains(':') && profile == null) {
+            notice = "Connecting to the notification environment…"
+            return
+        }
+        perform(Intent.OpenThread(route)) { result ->
+            if (result.isSuccess) {
+                notificationThreadRoute = null
+                notice = null
+                openThread(local ?: route)
+            } else {
+                notice = result.exceptionOrNull()?.message ?: "The notification thread could not be opened."
+            }
+        }
+    }
+
+    fun openNotificationRoute(route: String) {
+        notificationThreadRoute = route
+        openNotificationThread()
     }
 
     fun back() {
@@ -1043,9 +1078,17 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
 
     private fun deliverAttentionEvents(previous: Snapshot, current: Snapshot) {
         val appActive = !appInBackground
+        val badgeCount = if (appActive) 0u else notificationBadgeCount()
+        if (appActive) LocalNotifications.clearDelivered(context)
         val attentionEvents = buildNotificationEvents(previous, current, appActive, appActive)
         attentionEvents.forEach { event ->
-            if (event.inApp) notice = event.body
+            if (event.inApp) {
+                notice = "${event.kind}: ${event.body}"
+                notificationThreadRoute = event.deepLink.substringAfter(
+                    "remote-agent://thread/",
+                    event.threadId,
+                )
+            }
             if (event.operatingSystem) {
                 LocalNotifications.deliver(
                     context = context,
@@ -1053,14 +1096,16 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
                     body = event.body,
                     sound = event.sound,
                     threadId = event.threadId,
-                    badge = event.badge,
+                    deepLink = event.deepLink,
+                    badgeCount = badgeCount,
                     kind = event.kind.toString(),
                     soundKind = event.soundKind.toString(),
                 )
             } else if (event.sound) {
-                LocalNotifications.playSound(context)
+                LocalNotifications.playSound(context, event.soundKind.toString())
             }
         }
+        LocalNotifications.updateBadge(context, badgeCount)
     }
 
     /** Saves the model preferences every Host shares; the store writes its own state. */

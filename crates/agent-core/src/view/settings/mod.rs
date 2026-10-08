@@ -93,6 +93,8 @@ pub enum SettingId {
     SnapshotFlash,
     SnapshotAnimations,
     BrowserDefaultViewport,
+    BrowserDefaultViewportWidth,
+    BrowserDefaultViewportHeight,
     BrowserDefaultZoom,
     BrowserDefaultAppearance,
     BrowserRecordingFrameRate,
@@ -101,6 +103,7 @@ pub enum SettingId {
     BrowserLinkTarget,
     BrowserAutoShowFloatingPreview,
     BrowserDefaultProfile,
+    BrowserProfiles,
 }
 
 /// Where a project page's value comes from.
@@ -151,6 +154,12 @@ pub enum SettingControl {
     Text {
         value: String,
         placeholder: Option<String>,
+    },
+    /// Built-in and custom browser identities. Built-ins are rendered as
+    /// read-only; native owners use the profile intents for custom edits.
+    BrowserProfiles {
+        profiles: Vec<crate::view::browser::BrowserProfile>,
+        default_profile_id: String,
     },
 }
 

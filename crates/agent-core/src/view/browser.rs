@@ -19,6 +19,7 @@ pub const BROWSER_PROFILE_ID_MAX_LENGTH: usize = 64;
 pub const BROWSER_PROFILE_MAX_COUNT: usize = 24;
 pub const DEFAULT_BROWSER_PROFILE_ID: &str = "default";
 pub const INCOGNITO_BROWSER_PROFILE_ID: &str = "incognito";
+pub const DEFAULT_NEW_BROWSER_PROFILE_NAME: &str = "New profile";
 
 /// Whether Chromium retains a profile's cookies between Host restarts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -190,7 +191,7 @@ pub fn validate_browser_profile_id(id: &str) -> Result<(), String> {
     if id.trim() != id || id.is_empty() {
         return Err("browser profile ids must be non-empty and trimmed".into());
     }
-    if id.chars().count() > BROWSER_PROFILE_ID_MAX_LENGTH {
+    if id.encode_utf16().count() > BROWSER_PROFILE_ID_MAX_LENGTH {
         return Err(format!(
             "browser profile ids are limited to {BROWSER_PROFILE_ID_MAX_LENGTH} characters"
         ));
@@ -206,12 +207,127 @@ fn validate_profile(profile: &BrowserProfile) -> Result<(), String> {
     if profile.name.trim() != profile.name || profile.name.is_empty() {
         return Err("browser profile names must be non-empty and trimmed".into());
     }
-    if profile.name.chars().count() > BROWSER_PROFILE_NAME_MAX_LENGTH {
+    if profile.name.encode_utf16().count() > BROWSER_PROFILE_NAME_MAX_LENGTH {
         return Err(format!(
             "browser profile names are limited to {BROWSER_PROFILE_NAME_MAX_LENGTH} characters"
         ));
     }
     Ok(())
+}
+
+/// Trims a name using the same UTF-16 length unit as the web/native clients.
+/// Keeping character boundaries intact avoids creating an invalid Rust string
+/// when an astral Unicode scalar falls on the JavaScript slice boundary.
+pub fn normalize_browser_profile_name(name: &str) -> Option<String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let mut result = String::new();
+    let mut units = 0;
+    for character in trimmed.chars() {
+        let character_units = character.len_utf16();
+        if units + character_units > BROWSER_PROFILE_NAME_MAX_LENGTH {
+            break;
+        }
+        result.push(character);
+        units += character_units;
+    }
+    (!result.is_empty()).then_some(result)
+}
+
+/// Builds the next custom profile without touching persistence or randomness.
+/// Callers supply the UUID so the owner of UUID generation remains the native
+/// client, while collision naming stays one shared pure decision.
+pub fn create_browser_profile(
+    profiles: &[BrowserProfile],
+    profile_id: String,
+    requested_name: Option<&str>,
+) -> Result<BrowserProfile, String> {
+    if profiles.len() >= BROWSER_PROFILE_MAX_COUNT {
+        return Err(format!(
+            "browser profiles are limited to {BROWSER_PROFILE_MAX_COUNT} custom profiles"
+        ));
+    }
+    validate_browser_profile_id(&profile_id)?;
+    if is_built_in_browser_profile_id(&profile_id)
+        || profiles.iter().any(|profile| profile.id == profile_id)
+    {
+        return Err("browser profile id is already in use".into());
+    }
+    let base = normalize_browser_profile_name(
+        requested_name.unwrap_or(DEFAULT_NEW_BROWSER_PROFILE_NAME),
+    )
+    .ok_or_else(|| "browser profile names must be non-empty".to_owned())?;
+    let names = resolve_browser_profiles(profiles)
+        .into_iter()
+        .map(|profile| profile.name)
+        .collect::<BTreeSet<_>>();
+    let mut name = base.clone();
+    let mut suffix = 2u32;
+    while names.contains(&name) {
+        let suffix_text = format!(" {suffix}");
+        let available = BROWSER_PROFILE_NAME_MAX_LENGTH
+            .saturating_sub(suffix_text.encode_utf16().count());
+        let prefix = base
+            .chars()
+            .scan(0usize, |units, character| {
+                let next = *units + character.len_utf16();
+                (next <= available).then(|| {
+                    *units = next;
+                    character
+                })
+            })
+            .collect::<String>();
+        name = format!("{prefix}{suffix_text}");
+        suffix = suffix.saturating_add(1);
+    }
+    Ok(BrowserProfile {
+        id: profile_id,
+        name,
+        kind: BrowserProfileKind::Persistent,
+    })
+}
+
+/// Renames a custom profile after applying the source-compatible trim/limit.
+pub fn rename_browser_profile(
+    profiles: &[BrowserProfile],
+    profile_id: &str,
+    requested_name: &str,
+) -> Result<Vec<BrowserProfile>, String> {
+    if is_built_in_browser_profile_id(profile_id) {
+        return Err("built-in browser profiles cannot be renamed".into());
+    }
+    let name = normalize_browser_profile_name(requested_name)
+        .ok_or_else(|| "browser profile names must be non-empty".to_owned())?;
+    let mut updated = profiles.to_vec();
+    let profile = updated
+        .iter_mut()
+        .find(|profile| profile.id == profile_id)
+        .ok_or_else(|| "browser profile was not found".to_owned())?;
+    profile.name = name;
+    profile.kind = BrowserProfileKind::Persistent;
+    Ok(updated)
+}
+
+/// Removes a custom profile. Data clearing is deliberately owned by Preview;
+/// callers invoke this only after every connected environment reports success.
+pub fn remove_browser_profile(
+    profiles: &[BrowserProfile],
+    profile_id: &str,
+) -> Result<Vec<BrowserProfile>, String> {
+    if is_built_in_browser_profile_id(profile_id) {
+        return Err("built-in browser profiles cannot be removed".into());
+    }
+    let original_len = profiles.len();
+    let updated = profiles
+        .iter()
+        .filter(|profile| profile.id != profile_id)
+        .cloned()
+        .collect::<Vec<_>>();
+    (updated.len() != original_len)
+        .then_some(updated)
+        .ok_or_else(|| "browser profile was not found".to_owned())
 }
 
 pub fn validate_browser_viewport(viewport: &PreviewViewportSetting) -> Result<(), String> {
@@ -345,5 +461,46 @@ mod tests {
             ..Default::default()
         };
         assert!(settings.validate().is_err());
+    }
+
+    #[test]
+    fn profile_limits_use_utf16_units_and_names_are_normalized() {
+        let name = "😀".repeat(BROWSER_PROFILE_NAME_MAX_LENGTH / 2);
+        assert_eq!(name.encode_utf16().count(), BROWSER_PROFILE_NAME_MAX_LENGTH);
+        assert!(normalize_browser_profile_name(&name).is_some());
+        assert_eq!(
+            normalize_browser_profile_name(&format!("{name}😀"))
+                .expect("the complete scalar prefix remains valid")
+                .encode_utf16()
+                .count(),
+            BROWSER_PROFILE_NAME_MAX_LENGTH
+        );
+        let overlong_id = "😀".repeat(BROWSER_PROFILE_ID_MAX_LENGTH / 2 + 1);
+        assert!(validate_browser_profile_id(&overlong_id).is_err());
+    }
+
+    #[test]
+    fn profile_operations_keep_builtins_immutable_and_names_unique() {
+        let first = create_browser_profile(&[], "profile-a".into(), Some("New profile"))
+            .expect("first profile");
+        assert_eq!(first.name, "New profile");
+        let second = create_browser_profile(
+            std::slice::from_ref(&first),
+            "profile-b".into(),
+            Some(" New profile "),
+        )
+        .expect("collision profile");
+        assert_eq!(second.name, "New profile 2");
+        let renamed = rename_browser_profile(
+            &[first.clone(), second.clone()],
+            &first.id,
+            "  Work  ",
+        )
+        .expect("rename");
+        assert_eq!(renamed[0].name, "Work");
+        assert!(rename_browser_profile(&renamed, DEFAULT_BROWSER_PROFILE_ID, "x").is_err());
+        let removed = remove_browser_profile(&renamed, &second.id).expect("remove");
+        assert_eq!(removed, vec![first]);
+        assert!(remove_browser_profile(&removed, INCOGNITO_BROWSER_PROFILE_ID).is_err());
     }
 }

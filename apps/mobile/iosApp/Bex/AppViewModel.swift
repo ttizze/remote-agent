@@ -31,6 +31,7 @@ final class BexAppViewModel: ObservableObject {
     @Published var pairingError: String?
     @Published var pairingInvitation: Invitation?
     @Published var notice: String?
+    @Published var notificationThreadRoute: String? = nil
     @Published var profiles: [HostProfile] = []
     @Published private(set) var environments: [EnvironmentRow] = []
     /// Latest immutable core snapshot for each saved environment.
@@ -293,6 +294,16 @@ final class BexAppViewModel: ObservableObject {
             return
         }
         if url.host == "thread", let threadId = url.pathComponents.dropFirst().first {
+            // A scoped route must be resolved through the environment owner.
+            // If background connection publication has not caught up yet,
+            // keep the route for the notification banner instead of opening
+            // a same-named thread on the selected Host.
+            if threadId.contains(":") && scopedValue(threadId).1 == nil {
+                notificationThreadRoute = url.absoluteString
+                notice = "Connecting to the notification environment…"
+                screen = .threads
+                return
+            }
             openThread(threadId)
             return
         }
@@ -914,6 +925,16 @@ final class BexAppViewModel: ObservableObject {
         Array(environmentSnapshots.values)
     }
 
+    /// Core computes attention per Host; native badges represent the sum for
+    /// every saved environment rather than a boolean for the selected Host.
+    func notificationBadgeCount() -> UInt32 {
+        environmentSnapshots.values.reduce(UInt32(0)) { total, snapshot in
+            total.addingReportingOverflow(
+                AgentCore.notificationBadgeCount(snapshot: snapshot)
+            ).partialValue
+        }
+    }
+
     func environmentProjects(_ query: String) -> [EnvironmentProjectRow] {
         AgentCore.environmentProjectRows(snapshots: environmentSnapshotsForCore(), query: query)
     }
@@ -1087,9 +1108,12 @@ extension BexAppViewModel {
             appVisible: appActive,
             appFocused: appActive
         )
+        let badgeCount = appActive ? 0 : notificationBadgeCount()
+        if appActive { LocalNotifications.clearDelivered() }
         for event in attentionEvents {
             if event.inApp {
-                notice = event.body
+                notice = "\(event.kind): \(event.body)"
+                notificationThreadRoute = event.deepLink
             }
             if event.operatingSystem {
                 LocalNotifications.deliver(
@@ -1097,14 +1121,29 @@ extension BexAppViewModel {
                     body: event.body,
                     sound: event.sound,
                     threadId: event.threadId,
-                    badge: event.badge,
+                    deepLink: event.deepLink,
+                    badgeCount: badgeCount,
                     kind: String(describing: event.kind),
                     soundKind: String(describing: event.soundKind)
                 )
             } else if event.sound {
-                LocalNotifications.playSound()
+                LocalNotifications.playSound(soundKind: String(describing: event.soundKind))
             }
         }
+        LocalNotifications.updateBadge(badgeCount)
+    }
+
+    func openNotificationThread() {
+        guard let route = notificationThreadRoute, let url = URL(string: route) else { return }
+        // `handleSurfaceURL` deliberately leaves unresolved environment
+        // routes queued. Clear the banner only after the route is known.
+        if let thread = url.host == "thread" ? url.pathComponents.dropFirst().first : nil,
+           thread.contains(":") && scopedValue(thread).1 == nil {
+            return
+        }
+        notificationThreadRoute = nil
+        notice = nil
+        handleSurfaceURL(url)
     }
 
     /// Saves the model preferences every Host shares; the store writes its own state.

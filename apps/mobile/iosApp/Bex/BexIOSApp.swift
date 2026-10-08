@@ -16,12 +16,13 @@ struct BexIOSApp: App {
                     if notification.userInfo?["type"] as? String == "new-thread" { model.handleShortcut() }
                 }
                 .onReceive(NotificationCenter.default.publisher(for: .remoteAgentNotificationThread)) { notification in
-                    guard let threadId = notification.userInfo?["threadId"] as? String,
-                          let url = URL(string: "remote-agent://thread/\(threadId)") else { return }
+                    guard let deepLink = notification.userInfo?["deeplink"] as? String,
+                          let url = URL(string: deepLink) else { return }
                     model.handleSurfaceURL(url)
                 }
                 .onAppear {
                     LocalNotifications.refreshAuthorization()
+                    LocalNotifications.clearDelivered()
                     model.ingestIncomingShareHandoffs()
                     if AgentPushCenter.takePendingShortcut() == "new-thread" { model.handleShortcut() }
                     model.setActivityUpdater { [weak pushCenter] states in
@@ -69,10 +70,12 @@ struct BexIOSApp: App {
                         }
                     case .active where wasBackgrounded:
                         wasBackgrounded = false
+                        LocalNotifications.clearDelivered()
                         model.ingestIncomingShareHandoffs()
                         pushCenter.refreshPreferences(activityStates: model.activityContentStatesForPush())
                         model.connect(afterForeground: true)
                     case .active:
+                        LocalNotifications.clearDelivered()
                         model.ingestIncomingShareHandoffs()
                         pushCenter.refreshPreferences(activityStates: model.activityContentStatesForPush())
                     default:

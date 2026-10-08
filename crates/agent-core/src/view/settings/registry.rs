@@ -202,6 +202,7 @@ mod tests {
                         SettingId::BrowserLinkTarget,
                         SettingId::BrowserAutoShowFloatingPreview,
                         SettingId::BrowserDefaultProfile,
+                        SettingId::BrowserProfiles,
                     ]
                 ),
                 (
@@ -325,6 +326,7 @@ mod tests {
                         SettingId::BrowserLinkTarget,
                         SettingId::BrowserAutoShowFloatingPreview,
                         SettingId::BrowserDefaultProfile,
+                        SettingId::BrowserProfiles,
                     ]
                 ),
                 (

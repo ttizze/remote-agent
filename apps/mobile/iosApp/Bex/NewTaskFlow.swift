@@ -12,6 +12,7 @@ struct NewTaskFlow: View {
     @State private var query = ""
     @State private var adding = false
     @State private var projectPath = ""
+    @State private var folderPickerPresented = false
 
     var body: some View {
         NavigationStack(path: $path) {
@@ -84,11 +85,20 @@ struct NewTaskFlow: View {
         .alert("Add project", isPresented: $adding) {
             TextField(configuredProjectBaseDirectory() ?? "Absolute path on the environment", text: $projectPath)
                 .textInputAutocapitalization(.never).autocorrectionDisabled()
+            Button("Choose folder") { folderPickerPresented = true }
             Button("Add") {
                 model.perform(.addProject(path: projectPath))
                 projectPath = ""
             }
             Button("Cancel", role: .cancel) {}
+        }
+        .fileImporter(
+            isPresented: $folderPickerPresented,
+            allowedContentTypes: [.folder],
+            allowsMultipleSelection: false
+        ) { result in
+            guard case let .success(urls) = result, let url = urls.first else { return }
+            projectPath = url.path
         }
     }
 

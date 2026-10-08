@@ -149,6 +149,21 @@ private struct WorkspaceRoot: View {
             .presentationDetents([.fraction(0.92)])
         }
         .onChange(of: model.selectedThreadId) { _, _ in routes = [] }
+        .overlay(alignment: .bottom) {
+            if let notice = model.notice {
+                HStack(spacing: 12) {
+                    Text(notice).lineLimit(2).frame(maxWidth: .infinity, alignment: .leading)
+                    if model.notificationThreadRoute != nil {
+                        Button("Open") { model.openNotificationThread() }
+                    }
+                    Button("Dismiss") { model.notice = nil }
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 12)
+                .background(AppTheme.groupedCard, in: RoundedRectangle(cornerRadius: 16))
+                .padding(12)
+            }
+        }
     }
 
     private func list(sidebar: Bool) -> some View {

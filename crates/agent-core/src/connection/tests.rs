@@ -2236,6 +2236,53 @@ fn browser_preferences_validate_persist_and_project_a_safe_default() {
 }
 
 #[test]
+fn browser_profile_intents_share_naming_and_reset_default_after_removal() {
+    let mut owner = owner(Snapshot::default());
+    owner
+        .prepare(Intent::CreateBrowserProfile {
+            profile_id: "profile-a".into(),
+            requested_name: Some("New profile".into()),
+        })
+        .unwrap();
+    owner
+        .prepare(Intent::CreateBrowserProfile {
+            profile_id: "profile-b".into(),
+            requested_name: Some("New profile".into()),
+        })
+        .unwrap();
+    assert_eq!(
+        owner.state.preferences.browser.profiles[1].name,
+        "New profile 2"
+    );
+    owner
+        .prepare(Intent::SetBrowserDefaultProfile {
+            profile_id: "profile-b".into(),
+        })
+        .unwrap();
+    owner
+        .prepare(Intent::RenameBrowserProfile {
+            profile_id: "profile-b".into(),
+            name: "  Work  ".into(),
+        })
+        .unwrap();
+    owner
+        .prepare(Intent::RemoveBrowserProfile {
+            profile_id: "profile-b".into(),
+        })
+        .unwrap();
+    assert_eq!(
+        owner.state.preferences.browser.default_profile_id,
+        crate::view::browser::DEFAULT_BROWSER_PROFILE_ID
+    );
+    assert!(owner
+        .prepare(Intent::RenameBrowserProfile {
+            profile_id: crate::view::browser::DEFAULT_BROWSER_PROFILE_ID.into(),
+            name: "Nope".into(),
+        })
+        .is_err());
+}
+
+#[test]
 fn a_saved_staged_model_takes_the_options_it_was_last_given() {
     use crate::view::models::{
         fixtures::{host_instance, host_model},

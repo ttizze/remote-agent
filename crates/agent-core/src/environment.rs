@@ -680,6 +680,15 @@ impl EnvironmentRegistry {
             .map(|entry| entry.snapshot.clone())
     }
 
+    /// Returns the latest immutable Host snapshots for aggregate client
+    /// projections such as the native notification badge.
+    pub fn snapshots(&self) -> Vec<Arc<Snapshot>> {
+        self.entries
+            .values()
+            .map(|entry| entry.snapshot.clone())
+            .collect()
+    }
+
     pub fn summaries(&self) -> Vec<EnvironmentSummary> {
         let mut summaries: Vec<_> = self
             .entries

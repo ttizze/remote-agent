@@ -1595,130 +1595,6 @@ pub(crate) async fn play_snapshot_sound(
     }
 }
 
-/// The native command used for one local attention event. Keeping the
-/// payload as separate arguments lets tests inspect the exact command without
-/// invoking an operating-system notification service.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct NativeNotificationCommand {
-    pub(crate) program: &'static str,
-    pub(crate) args: Vec<String>,
-}
-
-pub(crate) fn native_notification_command(
-    thread_id: &str,
-    title: &str,
-    body: &str,
-    badge: bool,
-) -> NativeNotificationCommand {
-    let deep_link = format!("remote-agent://thread/{thread_id}");
-    let badge = if badge { "1" } else { "0" };
-    #[cfg(target_os = "macos")]
-    {
-        return NativeNotificationCommand {
-            program: "osascript",
-            args: vec![
-                "-e".into(),
-                r#"on run argv
-display notification (item 2 of argv) with title (item 1 of argv) subtitle (item 3 of argv)
-end run"#
-                    .into(),
-                title.into(),
-                body.into(),
-                deep_link,
-                badge.into(),
-            ],
-        };
-    }
-    #[cfg(target_os = "linux")]
-    {
-        return NativeNotificationCommand {
-            program: "notify-send",
-            args: vec![
-                "--app-name".into(),
-                "Remote Agent".into(),
-                "--wait".into(),
-                "--action=default=Open".into(),
-                "--hint".into(),
-                format!("string:x-remote-agent-deeplink:{deep_link}"),
-                "--hint".into(),
-                format!("int:x-remote-agent-badge:{badge}"),
-                title.into(),
-                body.into(),
-            ],
-        };
-    }
-    #[cfg(target_os = "windows")]
-    {
-        return NativeNotificationCommand {
-            program: "powershell",
-            args: vec![
-                "-NoProfile".into(),
-                "-NonInteractive".into(),
-                "-Command".into(),
-                r#"$xml = New-Object Windows.Data.Xml.Dom.XmlDocument
-$launch = [System.Security.SecurityElement]::Escape($args[2])
-$tag = [System.Security.SecurityElement]::Escape($args[3])
-$xml.LoadXml("<toast launch='$launch' tag='$tag'><visual><binding template='ToastGeneric'><text>$([System.Security.SecurityElement]::Escape($args[0]))</text><text>$([System.Security.SecurityElement]::Escape($args[1]))</text></binding></visual></toast>")
-$toast = [Windows.UI.Notifications.ToastNotification]::new($xml)
-[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('Remote Agent').Show($toast)"#
-                    .into(),
-                "--".into(),
-                title.into(),
-                body.into(),
-                deep_link,
-                badge.into(),
-            ],
-        };
-    }
-}
-
-/// Delivers one already-decided OS notification. Permission prompts and
-/// policy decisions stay in the client/core layers; this function only runs
-/// the platform adapter selected for the current desktop target.
-pub(crate) async fn send_native_notification(
-    thread_id: &str,
-    title: &str,
-    body: &str,
-    badge: bool,
-) -> Result<(), String> {
-    let command = native_notification_command(thread_id, title, body, badge);
-    let mut child = tokio::process::Command::new(command.program)
-        .args(command.args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .kill_on_drop(true)
-        .spawn()
-        .map_err(|error| format!("native notification could not start: {error}"))?;
-    let output = tokio::time::timeout(Duration::from_secs(5), child.wait_with_output())
-        .await
-        .map_err(|_| "native notification timed out".to_owned())?
-        .map_err(|error| format!("native notification did not report its status: {error}"))?;
-    if !output.status.success() {
-        return Err(format!("native notification exited with {}", output.status));
-    }
-    #[cfg(target_os = "linux")]
-    if output.stdout.starts_with(b"default") {
-        let deep_link = format!("remote-agent://thread/{thread_id}");
-        let mut opener = tokio::process::Command::new("xdg-open")
-            .arg(deep_link)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .kill_on_drop(true)
-            .spawn()
-            .map_err(|error| format!("notification route could not start: {error}"))?;
-        let status = tokio::time::timeout(Duration::from_secs(5), opener.wait())
-            .await
-            .map_err(|_| "notification route timed out".to_owned())?
-            .map_err(|error| format!("notification route did not report its status: {error}"))?;
-        if !status.success() {
-            return Err(format!("notification route exited with {status}"));
-        }
-    }
-    Ok(())
-}
-
 pub(crate) async fn play_notification_sound(
     kind: agent_core::view::notifications::NotificationSoundKind,
 ) -> Result<(), String> {
@@ -1736,8 +1612,8 @@ pub(crate) async fn play_notification_sound(
 #[cfg(test)]
 mod tests {
     use super::{
-        SNAPSHOT_MAX_OUTPUT_BYTES, decode_snapshot_accessibility, native_notification_command,
-        read_snapshot_output, valid_snapshot_id,
+        SNAPSHOT_MAX_OUTPUT_BYTES, decode_snapshot_accessibility, read_snapshot_output,
+        valid_snapshot_id,
     };
 
     #[test]
@@ -1782,18 +1658,4 @@ mod tests {
         assert_eq!(output.len(), SNAPSHOT_MAX_OUTPUT_BYTES);
     }
 
-    #[test]
-    fn native_notification_command_keeps_user_text_out_of_the_script() {
-        let command = native_notification_command("thread-1", "Thread $HOME", "Approval; required", true);
-        assert!(!command.args.is_empty());
-        assert!(command.args.iter().any(|arg| arg == "Thread $HOME"));
-        assert!(command.args.iter().any(|arg| arg == "Approval; required"));
-        assert!(command.args.iter().any(|arg| arg.contains("thread-1")));
-        #[cfg(target_os = "linux")]
-        assert_eq!(command.program, "notify-send");
-        #[cfg(target_os = "macos")]
-        assert_eq!(command.program, "osascript");
-        #[cfg(target_os = "windows")]
-        assert_eq!(command.program, "powershell");
-    }
 }

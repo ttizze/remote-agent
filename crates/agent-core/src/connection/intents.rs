@@ -1204,6 +1204,46 @@ impl Owner {
                 self.state.preferences.browser = browser;
                 Next::Done
             }
+            Intent::CreateBrowserProfile {
+                profile_id,
+                requested_name,
+            } => {
+                let browser = &mut self.state.preferences.browser;
+                let profile = crate::view::browser::create_browser_profile(
+                    &browser.profiles,
+                    profile_id,
+                    requested_name.as_deref(),
+                )
+                .map_err(invalid)?;
+                browser.profiles.push(profile);
+                browser.validate().map_err(invalid)?;
+                Next::Done
+            }
+            Intent::RenameBrowserProfile { profile_id, name } => {
+                let browser = &mut self.state.preferences.browser;
+                browser.profiles = crate::view::browser::rename_browser_profile(
+                    &browser.profiles,
+                    &profile_id,
+                    &name,
+                )
+                .map_err(invalid)?;
+                browser.validate().map_err(invalid)?;
+                Next::Done
+            }
+            Intent::RemoveBrowserProfile { profile_id } => {
+                let browser = &mut self.state.preferences.browser;
+                browser.profiles = crate::view::browser::remove_browser_profile(
+                    &browser.profiles,
+                    &profile_id,
+                )
+                .map_err(invalid)?;
+                if browser.default_profile_id == profile_id {
+                    browser.default_profile_id =
+                        crate::view::browser::DEFAULT_BROWSER_PROFILE_ID.into();
+                }
+                browser.validate().map_err(invalid)?;
+                Next::Done
+            }
             Intent::SetBrowserDefaultProfile { profile_id } => {
                 crate::view::browser::validate_browser_profile_id(&profile_id).map_err(invalid)?;
                 self.state.preferences.browser.default_profile_id = profile_id;

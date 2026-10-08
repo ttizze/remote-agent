@@ -9,7 +9,8 @@ use crate::{
 };
 use agent_protocol::preview::{
     BrowserLinkTarget, PreviewAppearance, PreviewViewportPreset, PreviewViewportSetting,
-    PreviewZoom, PREVIEW_VIEWPORT_PRESETS,
+    PreviewZoom, PREVIEW_VIEWPORT_MAX_DIMENSION, PREVIEW_VIEWPORT_MIN_DIMENSION,
+    PREVIEW_VIEWPORT_PRESETS,
 };
 
 const RESPONSIVE_VIEWPORT_ID: &str = "responsive";
@@ -178,6 +179,8 @@ fn row_with_reset(
 pub(super) const SECTION: Section = Section {
     ids: &[
         SettingId::BrowserDefaultViewport,
+        SettingId::BrowserDefaultViewportWidth,
+        SettingId::BrowserDefaultViewportHeight,
         SettingId::BrowserDefaultZoom,
         SettingId::BrowserDefaultAppearance,
         SettingId::BrowserRecordingFrameRate,
@@ -186,105 +189,147 @@ pub(super) const SECTION: Section = Section {
         SettingId::BrowserLinkTarget,
         SettingId::BrowserAutoShowFloatingPreview,
         SettingId::BrowserDefaultProfile,
+        SettingId::BrowserProfiles,
     ],
     host: |context: &Context| {
         let browser = &context.snapshot.preferences.browser;
         let resolved = browser.resolved();
         let defaults = Preferences::default().browser;
         let default_resolved = defaults.resolved();
-        Some(section(
-            "browser",
-            "Browser",
-            vec![
+        let mut rows = vec![row_with_reset(
+            SettingId::BrowserDefaultViewport,
+            "Default browser viewport",
+            Some("The size used by newly opened Preview tabs."),
+            SettingControl::Choice {
+                choices: viewport_choices(),
+                selected: Some(viewport_id(&browser.viewport)),
+            },
+            browser.viewport != defaults.viewport,
+        )];
+        if let PreviewViewportSetting::Freeform { width, height } = browser.viewport {
+            rows.extend([
                 row_with_reset(
-                    SettingId::BrowserDefaultViewport,
-                    "Default browser viewport",
-                    Some("The size used by newly opened Preview tabs."),
-                    SettingControl::Choice {
-                        choices: viewport_choices(),
-                        selected: Some(viewport_id(&browser.viewport)),
+                    SettingId::BrowserDefaultViewportWidth,
+                    "Responsive viewport width",
+                    Some("The width used by newly opened responsive Preview tabs."),
+                    SettingControl::Number {
+                        value: width,
+                        min: PREVIEW_VIEWPORT_MIN_DIMENSION,
+                        max: PREVIEW_VIEWPORT_MAX_DIMENSION,
                     },
                     browser.viewport != defaults.viewport,
                 ),
                 row_with_reset(
-                    SettingId::BrowserDefaultZoom,
-                    "Default browser zoom",
-                    Some("The page scale used by newly opened Preview tabs."),
-                    SettingControl::Choice {
-                        choices: zoom_choices(),
-                        selected: Some(zoom_id(browser.zoom)),
+                    SettingId::BrowserDefaultViewportHeight,
+                    "Responsive viewport height",
+                    Some("The height used by newly opened responsive Preview tabs."),
+                    SettingControl::Number {
+                        value: height,
+                        min: PREVIEW_VIEWPORT_MIN_DIMENSION,
+                        max: PREVIEW_VIEWPORT_MAX_DIMENSION,
                     },
-                    browser.zoom != defaults.zoom,
+                    browser.viewport != defaults.viewport,
                 ),
-                row_with_reset(
-                    SettingId::BrowserDefaultAppearance,
-                    "Default browser appearance",
-                    Some("The color scheme pages are told to prefer."),
-                    SettingControl::Choice {
-                        choices: appearance_choices(),
-                        selected: Some(appearance_id(browser.appearance).into()),
-                    },
-                    browser.appearance != defaults.appearance,
+            ]);
+        }
+        rows.extend([
+            row_with_reset(
+                SettingId::BrowserDefaultZoom,
+                "Default browser zoom",
+                Some("The page scale used by newly opened Preview tabs."),
+                SettingControl::Choice {
+                    choices: zoom_choices(),
+                    selected: Some(zoom_id(browser.zoom)),
+                },
+                browser.zoom != defaults.zoom,
+            ),
+            row_with_reset(
+                SettingId::BrowserDefaultAppearance,
+                "Default browser appearance",
+                Some("The color scheme pages are told to prefer."),
+                SettingControl::Choice {
+                    choices: appearance_choices(),
+                    selected: Some(appearance_id(browser.appearance).into()),
+                },
+                browser.appearance != defaults.appearance,
+            ),
+            row_with_reset(
+                SettingId::BrowserRecordingFrameRate,
+                "Browser recording frame rate",
+                Some("30 fps saves CPU and storage; 60 fps is smoother."),
+                SettingControl::Choice {
+                    choices: vec![choice("30", "30 fps", None), choice("60", "60 fps", None)],
+                    selected: Some(browser.recording_frame_rate.to_string()),
+                },
+                browser.recording_frame_rate != defaults.recording_frame_rate,
+            ),
+            row_with_reset(
+                SettingId::BrowserRecordingShowKeyPresses,
+                "Show key presses in recordings",
+                Some("Show pressed keys and shortcuts in new recordings."),
+                SettingControl::Switch {
+                    on: browser.recording_show_key_presses,
+                },
+                browser.recording_show_key_presses != defaults.recording_show_key_presses,
+            ),
+            row_with_reset(
+                SettingId::BrowserRecordingShowMousePresses,
+                "Show mouse presses in recordings",
+                Some("Highlight mouse presses and held buttons in new recordings."),
+                SettingControl::Switch {
+                    on: browser.recording_show_mouse_presses,
+                },
+                browser.recording_show_mouse_presses != defaults.recording_show_mouse_presses,
+            ),
+            row_with_reset(
+                SettingId::BrowserLinkTarget,
+                "Open links in",
+                Some("Choose the operating system browser or the in-app Preview surface."),
+                SettingControl::Choice {
+                    choices: link_target_choices(),
+                    selected: Some(link_target_id(browser.link_target).into()),
+                },
+                browser.link_target != defaults.link_target,
+            ),
+            row_with_reset(
+                SettingId::BrowserAutoShowFloatingPreview,
+                "Auto-show floating Preview",
+                Some("Show agent-opened Preview tabs without requiring a manual reveal."),
+                SettingControl::Switch {
+                    on: browser.auto_show_floating_preview,
+                },
+                browser.auto_show_floating_preview != defaults.auto_show_floating_preview,
+            ),
+            row_with_reset(
+                SettingId::BrowserDefaultProfile,
+                "Default browser profile",
+                Some("The persistent profile used by newly opened Preview tabs."),
+                SettingControl::Choice {
+                    choices: profile_choices(browser),
+                    selected: Some(resolved.profile_id.clone()),
+                },
+                browser.default_profile_id != defaults.default_profile_id
+                    || resolved.profile_id != default_resolved.profile_id,
                 ),
-                row_with_reset(
-                    SettingId::BrowserRecordingFrameRate,
-                    "Browser recording frame rate",
-                    Some("30 fps saves CPU and storage; 60 fps is smoother."),
-                    SettingControl::Choice {
-                        choices: vec![choice("30", "30 fps", None), choice("60", "60 fps", None)],
-                        selected: Some(browser.recording_frame_rate.to_string()),
-                    },
-                    browser.recording_frame_rate != defaults.recording_frame_rate,
-                ),
-                row_with_reset(
-                    SettingId::BrowserRecordingShowKeyPresses,
-                    "Show key presses in recordings",
-                    Some("Show pressed keys and shortcuts in new recordings."),
-                    SettingControl::Switch {
-                        on: browser.recording_show_key_presses,
-                    },
-                    browser.recording_show_key_presses != defaults.recording_show_key_presses,
-                ),
-                row_with_reset(
-                    SettingId::BrowserRecordingShowMousePresses,
-                    "Show mouse presses in recordings",
-                    Some("Highlight mouse presses and held buttons in new recordings."),
-                    SettingControl::Switch {
-                        on: browser.recording_show_mouse_presses,
-                    },
-                    browser.recording_show_mouse_presses != defaults.recording_show_mouse_presses,
-                ),
-                row_with_reset(
-                    SettingId::BrowserLinkTarget,
-                    "Open links in",
-                    Some("Choose the operating system browser or the in-app Preview surface."),
-                    SettingControl::Choice {
-                        choices: link_target_choices(),
-                        selected: Some(link_target_id(browser.link_target).into()),
-                    },
-                    browser.link_target != defaults.link_target,
-                ),
-                row_with_reset(
-                    SettingId::BrowserAutoShowFloatingPreview,
-                    "Auto-show floating Preview",
-                    Some("Show agent-opened Preview tabs without requiring a manual reveal."),
-                    SettingControl::Switch {
-                        on: browser.auto_show_floating_preview,
-                    },
-                    browser.auto_show_floating_preview != defaults.auto_show_floating_preview,
-                ),
-                row_with_reset(
-                    SettingId::BrowserDefaultProfile,
-                    "Default browser profile",
-                    Some("The persistent profile used by newly opened Preview tabs."),
-                    SettingControl::Choice {
-                        choices: profile_choices(browser),
-                        selected: Some(resolved.profile_id),
-                    },
-                    browser.default_profile_id != defaults.default_profile_id
-                        || resolved.profile_id != default_resolved.profile_id,
-                ),
-            ],
+            row(
+                SettingId::BrowserProfiles,
+                "Browser profiles",
+                Some("Create, rename, clear, and remove persistent browser identities."),
+                SettingControl::BrowserProfiles {
+                    profiles: resolved
+                        .profiles
+                        .iter()
+                        .filter(|profile| profile.kind == BrowserProfileKind::Persistent)
+                        .cloned()
+                        .collect(),
+                    default_profile_id: resolved.profile_id.clone(),
+                },
+            ),
+        ]);
+        Some(section(
+            "browser",
+            "Browser",
+            rows,
             Some("Browser profiles are device-local; Default and Incognito are always available."),
         ))
     },
@@ -297,6 +342,34 @@ pub(super) const SECTION: Section = Section {
             (SettingId::BrowserDefaultViewport, SettingValue::Choice { id }) => {
                 viewport_from_id(id, &snapshot.preferences.browser.viewport)
                     .map(|viewport| Intent::SetBrowserViewport { viewport })
+            }
+            (SettingId::BrowserDefaultViewportWidth, SettingValue::Number { value }) => {
+                match snapshot.preferences.browser.viewport {
+                    PreviewViewportSetting::Freeform { height, .. } => {
+                        let viewport = PreviewViewportSetting::Freeform {
+                            width: *value,
+                            height,
+                        };
+                        crate::view::browser::validate_browser_viewport(&viewport)
+                            .ok()
+                            .map(|_| Intent::SetBrowserViewport { viewport })
+                    }
+                    _ => None,
+                }
+            }
+            (SettingId::BrowserDefaultViewportHeight, SettingValue::Number { value }) => {
+                match snapshot.preferences.browser.viewport {
+                    PreviewViewportSetting::Freeform { width, .. } => {
+                        let viewport = PreviewViewportSetting::Freeform {
+                            width,
+                            height: *value,
+                        };
+                        crate::view::browser::validate_browser_viewport(&viewport)
+                            .ok()
+                            .map(|_| Intent::SetBrowserViewport { viewport })
+                    }
+                    _ => None,
+                }
             }
             (SettingId::BrowserDefaultZoom, SettingValue::Choice { id }) => {
                 zoom_from_id(id).map(|zoom| Intent::SetBrowserZoom { zoom })
@@ -335,6 +408,18 @@ pub(super) const SECTION: Section = Section {
                         profile_id: profile.id.clone(),
                     })
             }
+            (SettingId::BrowserProfiles, SettingValue::Choice { id }) => snapshot
+                .preferences
+                .browser
+                .resolved()
+                .profiles
+                .iter()
+                .find(|profile| {
+                    profile.id == *id && profile.kind == BrowserProfileKind::Persistent
+                })
+                .map(|profile| Intent::SetBrowserDefaultProfile {
+                    profile_id: profile.id.clone(),
+                }),
             _ => None,
         }
     },
@@ -344,6 +429,11 @@ pub(super) const SECTION: Section = Section {
             SettingId::BrowserDefaultViewport => Some(Intent::SetBrowserViewport {
                 viewport: defaults.viewport,
             }),
+            SettingId::BrowserDefaultViewportWidth | SettingId::BrowserDefaultViewportHeight => {
+                Some(Intent::SetBrowserViewport {
+                    viewport: defaults.viewport,
+                })
+            }
             SettingId::BrowserDefaultZoom => Some(Intent::SetBrowserZoom { zoom: defaults.zoom }),
             SettingId::BrowserDefaultAppearance => Some(Intent::SetBrowserAppearance {
                 appearance: defaults.appearance,
@@ -372,6 +462,7 @@ pub(super) const SECTION: Section = Section {
             SettingId::BrowserDefaultProfile => Some(Intent::SetBrowserDefaultProfile {
                 profile_id: defaults.resolved().profile_id,
             }),
+            SettingId::BrowserProfiles => Some(Intent::SetBrowserProfiles { profiles: vec![] }),
             _ => None,
         }
     },
@@ -391,7 +482,7 @@ mod tests {
         snapshot.preferences.browser.link_target = BrowserLinkTarget::App;
         let view = settings_view(&snapshot, None, &SettingsScope::Host, TimestampFormat::Locale);
         let section = view.sections.iter().find(|section| section.id == "browser").unwrap();
-        assert_eq!(section.rows.len(), 9);
+        assert_eq!(section.rows.len(), 10);
         assert_eq!(
             section.rows[1].control,
             SettingControl::Choice {
@@ -419,5 +510,45 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    #[test]
+    fn responsive_viewport_exposes_bounded_dimensions() {
+        let mut snapshot = Snapshot::default();
+        snapshot.preferences.browser.viewport = PreviewViewportSetting::Freeform {
+            width: 1_024,
+            height: 768,
+        };
+        let view = settings_view(&snapshot, None, &SettingsScope::Host, TimestampFormat::Locale);
+        let section = view.sections.iter().find(|section| section.id == "browser").unwrap();
+        assert!(matches!(
+            section.rows[1].control,
+            SettingControl::Number {
+                value: 1_024,
+                min: PREVIEW_VIEWPORT_MIN_DIMENSION,
+                max: PREVIEW_VIEWPORT_MAX_DIMENSION,
+            }
+        ));
+        assert!(matches!(
+            (SECTION.intent)(
+                &snapshot,
+                &SettingsScope::Host,
+                SettingId::BrowserDefaultViewportWidth,
+                &SettingValue::Number { value: 1_200 },
+            ),
+            Some(Intent::SetBrowserViewport {
+                viewport: PreviewViewportSetting::Freeform {
+                    width: 1_200,
+                    height: 768,
+                }
+            })
+        ));
+        assert!((SECTION.intent)(
+            &snapshot,
+            &SettingsScope::Host,
+            SettingId::BrowserDefaultViewportWidth,
+            &SettingValue::Number { value: 10 },
+        )
+        .is_none());
     }
 }

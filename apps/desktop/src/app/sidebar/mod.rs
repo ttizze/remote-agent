@@ -404,7 +404,10 @@ impl Desktop {
 
     fn render_thread_list(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let views = self.views.clone();
-        if views.environment_sidebar.sections.len() > 1 && self.snapshot.search.trim().is_empty() {
+        if (views.environment_sidebar.sections.len() > 1
+            || !views.environment_sidebar.activities.is_empty())
+            && self.snapshot.search.trim().is_empty()
+        {
             return self.render_environment_thread_list(views.environment_sidebar.clone(), cx);
         }
         let sidebar = &views.sidebar;

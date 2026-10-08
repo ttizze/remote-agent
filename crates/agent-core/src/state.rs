@@ -2404,6 +2404,22 @@ pub enum Intent {
     SetBrowserProfiles {
         profiles: Vec<crate::view::browser::BrowserProfile>,
     },
+    /// Creates a persistent browser profile after the shared pure naming
+    /// decision. The native owner supplies the UUID; persistence stays here.
+    CreateBrowserProfile {
+        profile_id: String,
+        requested_name: Option<String>,
+    },
+    /// Renames one custom profile. Built-ins are rejected by the core owner.
+    RenameBrowserProfile {
+        profile_id: String,
+        name: String,
+    },
+    /// Removes one custom profile after Preview has cleared its data on every
+    /// connected environment.
+    RemoveBrowserProfile {
+        profile_id: String,
+    },
     /// Selects the profile used for newly opened Preview tabs.
     SetBrowserDefaultProfile {
         profile_id: String,

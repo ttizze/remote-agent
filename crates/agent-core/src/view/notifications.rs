@@ -84,7 +84,6 @@ pub struct NotificationDecision {
     pub in_app: bool,
     pub operating_system: bool,
     pub sound: bool,
-    pub badge: bool,
 }
 
 /// One attention event folded from two consecutive snapshots. The delivery
@@ -93,6 +92,12 @@ pub struct NotificationDecision {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct NotificationEvent {
+    /// The Host environment that owns this thread, used by clients to route
+    /// a click back through the selected profile instead of another Host.
+    pub environment_id: Option<String>,
+    /// A fully qualified client route; native surfaces pass this through
+    /// without reconstructing environment identity.
+    pub deep_link: String,
     pub thread_id: String,
     pub title: String,
     pub body: String,
@@ -101,7 +106,47 @@ pub struct NotificationEvent {
     pub in_app: bool,
     pub operating_system: bool,
     pub sound: bool,
-    pub badge: bool,
+    pub badge_count: u32,
+}
+
+pub fn notification_deep_link(environment_id: Option<&str>, thread_id: &str) -> String {
+    environment_id.map_or_else(
+        || agent_domain::ACTIVITY_OVERVIEW_DEEP_LINK.to_owned(),
+        |environment| format!("remote-agent://thread/{environment}:{thread_id}"),
+    )
+}
+
+fn notification_badge_count(threads: impl Iterator<Item = NotificationThread>) -> u32 {
+    threads
+        .filter(|thread| {
+            matches!(
+                thread.status,
+                ThreadNotificationStatus::Input
+                    | ThreadNotificationStatus::Approval
+                    | ThreadNotificationStatus::Failed
+                    | ThreadNotificationStatus::Limited
+            )
+        })
+        .count()
+        .try_into()
+        .unwrap_or(u32::MAX)
+}
+
+/// Returns the current aggregate attention count for a Host snapshot.
+///
+/// Clients call this after every snapshot publication so selecting a thread or
+/// clearing attention also clears the native badge; an event is not required
+/// for those state changes.
+pub fn badge_count(snapshot: &Snapshot) -> u32 {
+    if !snapshot.preferences.notification_mode.has_notifications() {
+        return 0;
+    }
+    let selected_thread = snapshot.selected_thread.as_ref().map(ToString::to_string);
+    notification_badge_count(
+        notification_threads(snapshot)
+            .into_values()
+            .filter(move |thread| selected_thread.as_deref() != Some(thread.id.as_str())),
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -218,6 +263,8 @@ pub fn between(
         return vec![];
     }
     let previous_threads = notification_threads(previous);
+    let aggregate_badge_count = badge_count(current);
+    let environment_id = current.context_environment_id().map(str::to_owned);
     let selected_thread = current.selected_thread.as_ref().map(ToString::to_string);
     let mut events = vec![];
     for (id, thread) in notification_threads(current) {
@@ -246,6 +293,8 @@ pub fn between(
             continue;
         };
         events.push(NotificationEvent {
+            environment_id: environment_id.clone(),
+            deep_link: notification_deep_link(environment_id.as_deref(), &thread.id),
             thread_id: thread.id,
             title: notification_title(thread.status).to_owned(),
             body: if thread.title.trim().is_empty() {
@@ -258,7 +307,7 @@ pub fn between(
             in_app: decision.in_app,
             operating_system: decision.operating_system,
             sound: decision.sound,
-            badge: decision.badge,
+            badge_count: aggregate_badge_count,
         });
     }
     events
@@ -317,7 +366,6 @@ pub fn decide(
         in_app,
         operating_system,
         sound,
-        badge: operating_system,
     })
 }
 
@@ -335,7 +383,7 @@ fn sound_kind(kind: NotificationEventKind) -> NotificationSoundKind {
 mod tests {
     use super::*;
     use crate::view::search::fixtures;
-    use agent_domain::{RunId, RunStatus, Timestamp};
+    use agent_domain::{RunId, RunStatus, ThreadId, Timestamp};
 
     fn thread(
         id: &str,
@@ -389,6 +437,8 @@ mod tests {
                             .map_or(true, |previous| thread.completed_at > Some(previous)),
                 )?;
                 Some(NotificationEvent {
+                    environment_id: None,
+                    deep_link: notification_deep_link(None, &thread.id),
                     thread_id: thread.id.clone(),
                     title: thread.title.clone(),
                     body: thread.title.clone(),
@@ -397,7 +447,7 @@ mod tests {
                     in_app: decision.in_app,
                     operating_system: decision.operating_system,
                     sound: decision.sound,
-                    badge: decision.badge,
+                    badge_count: notification_badge_count(current.iter().cloned()),
                 })
             })
             .collect()
@@ -413,6 +463,36 @@ mod tests {
         assert!(NotificationMode::Sound.has_sound());
         assert!(NotificationMode::NotificationsAndSound.has_notifications());
         assert!(NotificationMode::NotificationsAndSound.has_sound());
+    }
+
+    #[test]
+    fn deep_links_keep_the_owning_environment_and_badges_count_attention() {
+        assert_eq!(
+            notification_deep_link(Some("host-a"), "thread-1"),
+            "remote-agent://thread/host-a:thread-1"
+        );
+        assert_eq!(
+            notification_deep_link(None, "thread-1"),
+            agent_domain::ACTIVITY_OVERVIEW_DEEP_LINK
+        );
+        let threads = [
+            thread("input", ThreadNotificationStatus::Input, None),
+            thread("approval", ThreadNotificationStatus::Approval, None),
+            thread("done", ThreadNotificationStatus::Completed, Some(1)),
+        ];
+        assert_eq!(notification_badge_count(threads.into_iter()), 2);
+    }
+
+    #[test]
+    fn selected_attention_is_removed_from_the_aggregate_badge() {
+        let mut row = fixtures::row("input", "project", "needs input");
+        row.latest_run = Some(RunId::new("run-1").unwrap());
+        row.status = Some(RunStatus::Failed);
+        let mut snapshot = fixtures::snapshot(vec![], vec![row]);
+        snapshot.preferences.notification_mode = NotificationMode::Notifications;
+        assert_eq!(badge_count(&snapshot), 1);
+        snapshot.selected_thread = Some(ThreadId::new("input").unwrap());
+        assert_eq!(badge_count(&snapshot), 0);
     }
 
     #[test]
@@ -434,9 +514,9 @@ mod tests {
         let decision = decide(
             NotificationMode::NotificationsAndSound,
             true,
-                true,
-                true,
-                false,
+            true,
+            true,
+            false,
             None,
             Some("input:input"),
             ThreadNotificationStatus::Input,
@@ -444,7 +524,6 @@ mod tests {
         )
         .unwrap();
         assert!(decision.in_app && !decision.operating_system && decision.sound);
-        assert!(!decision.badge);
     }
 
     #[test]
@@ -461,7 +540,7 @@ mod tests {
             false,
         )
         .unwrap();
-        assert!(!decision.in_app && decision.operating_system && decision.badge);
+        assert!(!decision.in_app && decision.operating_system);
         assert_eq!(
             decide(
                 NotificationMode::Notifications,
@@ -546,7 +625,7 @@ mod tests {
         assert_eq!(events[0].thread_id, "done");
         assert_eq!(events[0].kind, NotificationEventKind::Completion);
         assert_eq!(events[0].sound_kind, NotificationSoundKind::Completion);
-        assert!(events[0].operating_system && events[0].sound && events[0].badge);
+        assert!(events[0].operating_system && events[0].sound);
         assert!(fold(
             &current,
             &current,
@@ -609,6 +688,29 @@ mod tests {
         let mut current = fixtures::snapshot(vec![], vec![row]);
         current.preferences.notification_mode = NotificationMode::Notifications;
         assert!(between(&previous, &current, false, false).is_empty());
+    }
+
+    #[test]
+    fn emitted_routes_keep_the_current_host_identity() {
+        let mut previous_row = fixtures::row("thread", "project", "needs input");
+        previous_row.latest_run = Some(RunId::new("run-1").unwrap());
+        let mut previous = fixtures::snapshot(vec![], vec![previous_row]);
+        previous.preferences.notification_mode = NotificationMode::Notifications;
+
+        let mut current_row = fixtures::row("thread", "project", "needs input");
+        current_row.latest_run = Some(RunId::new("run-1").unwrap());
+        current_row.status = Some(RunStatus::Failed);
+        let mut current = fixtures::snapshot(vec![], vec![current_row]);
+        current.preferences.notification_mode = NotificationMode::Notifications;
+        current.environment = Some(agent_protocol::models::EnvironmentDescriptor {
+            environment_id: "host-a".into(),
+            ..Default::default()
+        });
+
+        let events = between(&previous, &current, false, false);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].environment_id.as_deref(), Some("host-a"));
+        assert_eq!(events[0].deep_link, "remote-agent://thread/host-a:thread");
     }
 
     #[test]

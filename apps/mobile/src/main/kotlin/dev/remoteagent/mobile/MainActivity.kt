@@ -43,11 +43,16 @@ class MainActivity : ComponentActivity() {
         super.onResume()
         localNetworkGranted =
             checkSelfPermission(Manifest.permission.ACCESS_LOCAL_NETWORK) == PackageManager.PERMISSION_GRANTED
-        LocalNotifications.permissionResult(
-            this,
+        // A not-determined permission is still being requested (or may be
+        // requested below). Do not treat that state as a denial: doing so
+        // would clear events queued while Android owns the permission sheet.
+        if (
             android.os.Build.VERSION.SDK_INT < 33 ||
-                checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED,
-        )
+                checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
+        ) {
+            LocalNotifications.permissionResult(this, true)
+        }
+        LocalNotifications.clearDelivered(this)
         requestNotificationPermissionIfNeeded()
         // Reconcile notification permission changes made in system settings and
         // replay every retained Host registration after a background interval.
@@ -138,7 +143,10 @@ class MainActivity : ComponentActivity() {
             Intent.ACTION_VIEW if intent.data?.scheme == "remote-agent" -> {
                 when (intent.data?.host) {
                     "new" -> model.newThreadFromShortcut()
-                    "thread" -> intent.data?.pathSegments?.firstOrNull()?.let(model::openThread)
+                    "thread" -> intent.data?.let { uri ->
+                        LocalNotifications.acknowledge(uri.toString())
+                        model.openNotificationRoute(uri.toString())
+                    }
                     "share" -> {
                         val uri = intent.data ?: return
                         val text = uri.getQueryParameter("text").orEmpty()

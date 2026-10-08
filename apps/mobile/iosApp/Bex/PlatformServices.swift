@@ -9,14 +9,16 @@ import UserNotifications
 
 enum LocalNotifications {
     private static var authorized: Bool?
+    private static var authorizationRequestInFlight = false
     private struct Pending {
         let title: String
         let body: String
         let sound: Bool
         let threadId: String?
+        let deepLink: String?
+        let badgeCount: UInt32
         let kind: String?
         let soundKind: String?
-        let badge: Bool
     }
     private static var pending: [Pending] = []
 
@@ -25,12 +27,14 @@ enum LocalNotifications {
         content.title = pendingRequest.title
         content.body = pendingRequest.body
         content.sound = pendingRequest.sound ? .default : nil
-        content.badge = pendingRequest.badge ? 1 : nil
+        content.badge = NSNumber(value: pendingRequest.badgeCount)
         if let threadId = pendingRequest.threadId {
-            content.threadIdentifier = threadId
+            // Keep same-named threads from different Hosts in separate
+            // notification groups; the deep link carries the owning route.
+            content.threadIdentifier = pendingRequest.deepLink ?? threadId
             var userInfo: [AnyHashable: Any] = [
                 "threadId": threadId,
-                "deeplink": "remote-agent://thread/\(threadId)"
+                "deeplink": pendingRequest.deepLink ?? "remote-agent://thread/\(threadId)"
             ]
             if let kind = pendingRequest.kind { userInfo["kind"] = kind }
             if let soundKind = pendingRequest.soundKind { userInfo["soundKind"] = soundKind }
@@ -48,25 +52,37 @@ enum LocalNotifications {
         body: String,
         sound: Bool,
         threadId: String? = nil,
-        badge: Bool = true,
+        deepLink: String? = nil,
+        badgeCount: UInt32 = 0,
         kind: String? = nil,
         soundKind: String? = nil
     ) {
         let request = Pending(
             title: title, body: body, sound: sound, threadId: threadId,
-            kind: kind, soundKind: soundKind, badge: badge
+            deepLink: deepLink, badgeCount: badgeCount, kind: kind, soundKind: soundKind
         )
         if authorized == true {
             schedule(request)
             return
         }
-        pending.removeAll { $0.threadId == threadId }
+        guard authorized != false else {
+            pending.removeAll()
+            return
+        }
+        if let deepLink {
+            pending.removeAll { $0.deepLink == deepLink }
+        } else {
+            pending.removeAll { $0.threadId == threadId }
+        }
         pending.append(request)
-        guard authorized == nil else { return }
+        guard authorized == nil, !authorizationRequestInFlight else { return }
+        authorizationRequestInFlight = true
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) {
             granted, _ in
             DispatchQueue.main.async {
+                Self.authorizationRequestInFlight = false
                 Self.authorized = granted
+                if !granted { Self.pending.removeAll() }
                 Self.flushPendingIfAuthorized()
             }
         }
@@ -75,7 +91,21 @@ enum LocalNotifications {
     static func refreshAuthorization() {
         UNUserNotificationCenter.current().getNotificationSettings { settings in
             DispatchQueue.main.async {
-                Self.authorized = settings.authorizationStatus == .authorized
+                switch settings.authorizationStatus {
+                case .authorized, .provisional:
+                    Self.authorized = true
+                case .denied:
+                    Self.authorized = false
+                    Self.pending.removeAll()
+                case .notDetermined:
+                    // The permission sheet may still be visible. Keep
+                    // queued events until the request completion reports a
+                    // real grant or denial.
+                    if Self.authorized != true { Self.authorized = nil }
+                @unknown default:
+                    Self.authorized = false
+                    Self.pending.removeAll()
+                }
                 Self.flushPendingIfAuthorized()
             }
         }
@@ -88,8 +118,22 @@ enum LocalNotifications {
         requests.forEach(schedule)
     }
 
-    static func playSound() {
-        AudioServicesPlaySystemSound(1007)
+    /// Applies the aggregate core attention count even when focus/selection
+    /// cleared it without producing a new notification event.
+    static func updateBadge(_ count: UInt32) {
+        UIApplication.shared.applicationIconBadgeNumber = Int(count)
+    }
+
+    static func clearDelivered() {
+        UNUserNotificationCenter.current().removeAllDeliveredNotifications()
+        updateBadge(0)
+    }
+
+    static func playSound(soundKind: String? = nil) {
+        // The foreground path has no UNNotificationContent to carry the
+        // event's sound kind, so select the corresponding system cue here.
+        let kind = soundKind?.split(separator: ".").last.map(String.init)?.uppercased()
+        AudioServicesPlaySystemSound(kind == "COMPLETION" ? 1004 : 1007)
     }
 }
 
