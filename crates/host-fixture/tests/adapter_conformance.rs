@@ -199,7 +199,7 @@ async fn scenarios(provider: ProviderKind) {
         // Codex's fixture loads archived native state from this file;
         // Claude's fixture writes its native transcript during the first run.
         std::fs::write(root.join("list-fixture.json"), serde_json::json!([{
-            "id":session.id,"cwd":root,"historyMode":"paginated","status":{"type":"notLoaded"},
+            "id":session.id,"cwd":root,"model":"fixture-model","historyMode":"paginated","status":{"type":"notLoaded"},
             "turns":[{"id":"archived-turn","status":"completed","items":[
                 {"id":"archived-user","type":"userMessage","content":[{"type":"text","text":"first input"}]},
                 {"id":"archived-answer","type":"agentMessage","text":"saved reply","phase":"final_answer"}
@@ -214,6 +214,15 @@ async fn scenarios(provider: ProviderKind) {
         .await
         .unwrap();
     let (history, mut events) = open(&local.peer, &session).await;
+    if provider == ProviderKind::Codex {
+        assert_eq!(
+            history.response.model,
+            Some(agent_protocol::models::ModelRef {
+                provider,
+                id: "fixture-model".into(),
+            })
+        );
+    }
     assert!(history.response.thread.turns.iter().flatten().any(|turn| {
         turn.items.iter().flatten().any(|item| {
         matches!(item.body(), ItemBody::UserMessage { content, .. } if content.iter().any(|part| {
