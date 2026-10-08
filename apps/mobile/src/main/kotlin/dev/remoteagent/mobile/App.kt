@@ -153,7 +153,9 @@ internal enum class WorkspaceTab {
 internal class AndroidAppModel(private val context: Context) : ViewModel() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val repository = AndroidMobileRepository(context)
-    private var clientPreferences = repository.modelPreferences()
+    private val clientPreferencesResult = repository.modelPreferences()
+    private val clientPreferencesLoadError = clientPreferencesResult.exceptionOrNull()?.message
+    private var clientPreferences = clientPreferencesResult.getOrDefault(byteArrayOf())
     private var clientPreferencesGeneration = 0L
     var snapshot by mutableStateOf(Snapshot.empty(clientPreferences))
         private set
@@ -252,7 +254,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
         )
         runCatching { profiles = repository.profiles() }.onFailure { notice = it.message }
         val recoveryNotice = snapshot.error()
-        if (clientPreferences.isNotEmpty()) {
+        if (clientPreferences.isNotEmpty() || clientPreferencesLoadError != null) {
             runCatching { snapshot.serializeModelPreferences() }
                 .onSuccess { canonical ->
                     if (!clientPreferences.contentEquals(canonical)) {
@@ -266,6 +268,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
         repository.selected?.takeIf { id -> profiles.any { it.id == id } }?.let(::selectProfile)
             ?: startBackgroundProfiles(null)
         if (recoveryNotice != null) notice = recoveryNotice
+        clientPreferencesLoadError?.let { notice = it }
     }
 
     fun perform(intent: Intent, complete: (Result<Outcome>) -> Unit = {}) {
@@ -979,6 +982,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
             try {
                 while (isActive && profiles.any { it.id == profile.id } && profile.id != profileId) {
                     var createdStore: AgentStore? = null
+                    var activeStore: AgentStore? = null
                     try {
                         val store =
                             backgroundOwners.getOrPut(profile.id) {
@@ -991,6 +995,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
                                 createdStore = created
                                 created
                             }
+                        activeStore = store
                         applyCurrentClientPreferences(store)
                         if (!ownsBackground(profile, store, generation)) {
                             throw CancellationException("background owner changed")
@@ -1032,7 +1037,14 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
                         // The supervision loop retries the current canonical
                         // payload for this still-owned Store.
                     } catch (error: Exception) {
-                        notice = notice ?: "${profile.name}: ${error.message}"
+                        if (isActive &&
+                            backgroundJobGenerations[profile.id] == generation &&
+                            profiles.any { it.id == profile.id } &&
+                            profile.id != profileId &&
+                            backgroundOwners[profile.id] === activeStore
+                        ) {
+                            notice = notice ?: "${profile.name}: ${error.message}"
+                        }
                     }
                     if (isActive && profile.id != profileId) {
                         delay(delayMillis)

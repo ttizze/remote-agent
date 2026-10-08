@@ -115,7 +115,7 @@ pub(in crate::app) fn render(view: &Desktop, cx: &mut Context<Desktop>) -> AnyEl
                             },
                         ));
                     }
-                    for reference in refs {
+                    for reference in &refs {
                         let owner = branch_owner.clone();
                         let cwd = cwd.clone();
                         let name = reference.name.clone();

@@ -11,6 +11,7 @@ import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -21,6 +22,54 @@ import org.robolectric.annotation.Config
 @RunWith(RobolectricTestRunner::class)
 @Config(manifest = Config.NONE, sdk = [35])
 class AndroidAppModelTest {
+    @Test
+    fun modelPreferencesKeepsEmptyStorageEmptyAndReportsDecodeFailures() {
+        val context = RuntimeEnvironment.getApplication()
+        val preferences = context.getSharedPreferences("agent-hosts", 0)
+        val repository = AndroidMobileRepository(context)
+        try {
+            preferences.edit().putString("orchestration-model-defaults", "").commit()
+            assertTrue(repository.modelPreferences().getOrThrow().isEmpty())
+
+            preferences.edit().putString("orchestration-model-defaults", "%not-base64").commit()
+            val failure = repository.modelPreferences().exceptionOrNull()
+            assertNotNull(failure)
+            assertEquals(
+                "Saved model preferences could not be read; defaults were restored.",
+                failure?.message,
+            )
+        } finally {
+            preferences.edit().remove("orchestration-model-defaults").commit()
+        }
+    }
+
+    @Test
+    fun corruptModelPreferencesAreRewrittenByCoreAndKeepTheStorageNotice() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        val context = RuntimeEnvironment.getApplication()
+        val preferences = context.getSharedPreferences("agent-hosts", 0)
+        preferences.edit().clear().putString("orchestration-model-defaults", "%not-base64").commit()
+        val repository = AndroidMobileRepository(context)
+        val model = AndroidAppModel(context)
+        val viewModels = ViewModelStore().apply { put("corrupt-preferences", model) }
+        try {
+            val persisted = repository.modelPreferences().getOrThrow()
+            assertTrue(persisted.isNotEmpty())
+            assertTrue(model.snapshot.serializeModelPreferences().contentEquals(persisted))
+            assertEquals(
+                "Saved model preferences could not be read; defaults were restored.",
+                model.notice,
+            )
+        } finally {
+            viewModels.clear()
+            runCurrent()
+            Thread.sleep(20)
+            runCurrent()
+            preferences.edit().clear().commit()
+            Dispatchers.resetMain()
+        }
+    }
+
     @Test
     fun damagedStateRecoversWithoutRemovingTheHost() = runTest {
         Dispatchers.setMain(StandardTestDispatcher(testScheduler))

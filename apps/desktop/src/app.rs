@@ -52,7 +52,6 @@ use gpui_kit::{
         notification::Notification,
         v_flex,
     },
-    prelude::FluentBuilder,
     *,
 };
 use hosts::{HostEvent, Hosts};
@@ -848,7 +847,7 @@ impl Desktop {
                     result,
                 },
                 move |snapshot| Update::EnvironmentSnapshot {
-                    profile_id: snapshot_profile,
+                    profile_id: snapshot_profile.clone(),
                     snapshot,
                 },
                 Some(client_preferences.clone()),

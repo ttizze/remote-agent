@@ -10,6 +10,9 @@ import kotlinx.serialization.json.Json
 
 @Serializable internal data class HostProfile(val id: String, val name: String, val ticket: String)
 
+private class ModelPreferencesReadException(cause: IllegalArgumentException) :
+    Exception("Saved model preferences could not be read; defaults were restored.", cause)
+
 /** Platform persistence owns profile metadata and the shared model preferences; core writes each Host's state. */
 internal class AndroidMobileRepository(context: Context) {
     private val directory = context.filesDir
@@ -33,9 +36,16 @@ internal class AndroidMobileRepository(context: Context) {
     /** The shell and thread snapshots core keeps for a warm start. */
     fun cacheDirectory(id: String): String = File(directory, "conversation-cache/${encodedId(id)}").absolutePath
 
-    fun modelPreferences(): ByteArray =
-        preferences.getString("orchestration-model-defaults", null)?.let { Base64.getDecoder().decode(it) }
-            ?: byteArrayOf()
+    fun modelPreferences(): Result<ByteArray> {
+        val encoded =
+            preferences.getString("orchestration-model-defaults", null) ?: return Result.success(byteArrayOf())
+        if (encoded.isEmpty()) return Result.success(byteArrayOf())
+        return try {
+            Result.success(Base64.getDecoder().decode(encoded))
+        } catch (error: IllegalArgumentException) {
+            Result.failure(ModelPreferencesReadException(error))
+        }
+    }
 
     fun saveModelPreferences(bytes: ByteArray) {
         preferences.edit().putString("orchestration-model-defaults", Base64.getEncoder().encodeToString(bytes)).apply()
