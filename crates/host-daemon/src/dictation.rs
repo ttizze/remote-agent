@@ -1050,7 +1050,14 @@ mod tests {
                 if api_key {
                     transcribe_recording(&token, RecordingService::OpenAi, &[1, 0, 255, 127], &recording_url).await
                 } else {
-                    let prepared = pending_preparation.then(|| Prepared::new("delayed".into(), std::future::pending()));
+                    let prepared = pending_preparation.then(|| Prepared::new("delayed".into(), async move {
+                        // Exercise an unrelated HTTP probe before the delayed
+                        // handshake without consuming a provider attempt.
+                        let mut probe = tokio::net::TcpStream::connect(address).await.unwrap();
+                        probe.write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").await.unwrap();
+                        probe.read_to_end(&mut Vec::new()).await.unwrap();
+                        std::future::pending().await
+                    }));
                     transcribe_authenticated(&token, "isolated-codex/1.0", &[1, 0, 255, 127], &stream_url, &recording_url, prepared).await
                 }
             };
