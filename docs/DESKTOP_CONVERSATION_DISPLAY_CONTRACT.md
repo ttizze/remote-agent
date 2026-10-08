@@ -495,6 +495,8 @@ providers. An existing draft keeps its saved model and settings until the user
 changes them; a new draft selects an available default. iOS exposes the model
 catalog without requiring a Codex account. Codex exit fails its active turn but
 leaves the Host connection and Claude approvals/conversations usable.
+Send waits until core resolves a provider for the draft, including while a new
+connection loads its model catalog and account selection.
 
 
 The September 2026 test consolidation preserves the assertions above. Full and

@@ -226,6 +226,7 @@ extension ThreadScreen {
                         .buttonStyle(ComposerSendButtonStyle())
                         .accessibilityLabel(dictation.isRecording ? "文字起こしして送信" : "送信")
                         .disabled(!model.isConnected || (!model.isNewThread && conversation == nil) || model
+                            .snapshot.modelProviderForDraft(threadId: model.coreDraftKey) == nil || model
                             .sending || model.transferring || preparingMedia || dictation.requestingPermission || model
                             .transcribing ||
                             (!dictation.isRecording && model.draft.trimmingCharacters(in: .whitespacesAndNewlines)

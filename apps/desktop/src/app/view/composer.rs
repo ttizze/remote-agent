@@ -362,6 +362,10 @@ impl Desktop {
             })
             .disabled(
                 !self.snapshot.connected
+                    || self
+                        .snapshot
+                        .model_provider_for_draft(self.snapshot.navigation.draft_key.clone())
+                        .is_none()
                     || self.busy > 0
                     || empty
                     || self

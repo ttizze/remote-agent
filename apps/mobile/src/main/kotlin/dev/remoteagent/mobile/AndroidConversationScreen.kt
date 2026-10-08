@@ -238,7 +238,8 @@ internal fun ThreadComposer(
                     perform(Intent.Submit(navigation.threadId, UUID.randomUUID().toString())) { sending = false }
                 },
                 enabled =
-                    inputUnavailable == null && !sending && (draft.text.isNotBlank() || draft.attachments.isNotEmpty()),
+                    snapshot.modelProviderForDraft(navigation.draftKey) != null &&
+                        inputUnavailable == null && !sending && (draft.text.isNotBlank() || draft.attachments.isNotEmpty()),
             ) {
                 Text("送信")
             }
