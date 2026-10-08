@@ -1589,7 +1589,7 @@ async fn title_lists_are_recent_scoped_small_and_expand_without_loading_bodies()
         std::fs::write(directory.path().join("list-fixture.json"), serde_json::to_vec(&threads).unwrap()).unwrap();
         let nested = mobile.peer.request::<models::ThreadList>(&agent_protocol::protocol::Call::ListSessions(agent_protocol::operations::ListSessions { query: models::ListQuery::default() })).await.unwrap();
         assert_eq!(nested.data.len(), 32, "older descendants accompany visible roots only");
-        assert_eq!(nested.has_more_chats, true);
+        assert!(nested.has_more_chats);
         assert_eq!(nested.more_project_ids.len(), 5);
         let child = nested.data.iter().find(|thread| thread.id.as_ref().is_some_and(|id| id.id == "older-child")).unwrap();
         assert_eq!(child.parent_id.as_ref().unwrap().id, "worktree");
