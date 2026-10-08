@@ -29,7 +29,6 @@ import dev.remoteagent.core.ScheduledTaskDraft
 import dev.remoteagent.core.ScheduledTaskScheduleDraft
 import dev.remoteagent.core.ScheduledTaskWorkspaceDraft
 import dev.remoteagent.core.Snapshot
-import dev.remoteagent.core.RuntimeMode
 
 @Composable
 internal fun ScheduledTasksScreen(model: AndroidAppModel) {
@@ -193,24 +192,6 @@ private fun ScheduledTaskEditor(
                         modifier = Modifier.padding(horizontal = 16.dp, vertical = 2.dp),
                     )
                 }
-            }
-        }
-        Text("Runtime", modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
-        Row(
-            Modifier.padding(horizontal = 16.dp),
-            horizontalArrangement = Arrangement.spacedBy(4.dp),
-        ) {
-            listOf(
-                RuntimeMode.APPROVAL_REQUIRED to "Ask",
-                RuntimeMode.AUTO_ACCEPT_EDITS to "Edits",
-                RuntimeMode.AUTO to "Auto",
-                RuntimeMode.FULL_ACCESS to "Full access",
-            ).forEach { (mode, label) ->
-                FilterChip(
-                    selected = current.runtimeMode == mode,
-                    onClick = { onChange(current.copy(runtimeMode = mode)) },
-                    label = { Text(label) },
-                )
             }
         }
         val interval = current.schedule is ScheduledTaskScheduleDraft.Interval

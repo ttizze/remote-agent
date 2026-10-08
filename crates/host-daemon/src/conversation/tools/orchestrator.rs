@@ -701,8 +701,27 @@ impl AgentTools {
             .map_err(|error| failure("orchestration_error", error))
     }
 
+    /// MCP mutations and reads that belong to the orchestrator toolkit are
+    /// available only to the active provider turn that owns this session.
+    /// Keeping this check at the tool boundary matches the provider-session
+    /// scope used by delegation and prevents a stale token from operating on
+    /// scheduled tasks after its turn has ended.
+    fn require_capability(&self, scope: Scope<'_>, parent: &State) -> Result<(), ToolError> {
+        if latest_active_run(parent)
+            .is_some_and(|run| run.attempt.is_some() && run.selection.instance == scope.instance)
+        {
+            Ok(())
+        } else {
+            Err(failure(
+                "parent_not_active",
+                "Scheduled task tools require an active run owned by this MCP provider session.",
+            ))
+        }
+    }
+
     pub(crate) async fn capabilities(&self, scope: Scope<'_>) -> Outcome {
         let parent = self.load_caller(scope).await?;
+        self.require_capability(scope, &parent)?;
         let thread = parent.thread.as_ref().expect("loaded");
         let providers = self.providers().await?;
         Ok(json!({
@@ -766,6 +785,7 @@ impl AgentTools {
     pub(crate) async fn schedule_task(&self, scope: Scope<'_>, input: &Value) -> Outcome {
         let input: ScheduleTaskInput = decode(input)?;
         let parent = self.load_caller(scope).await?;
+        self.require_capability(scope, &parent)?;
         let thread = parent.thread.as_ref().expect("loaded");
         let prompt = trimmed("prompt", &input.prompt, Some(120_000))?;
         validate_scheduled_schedule(&input.schedule)?;
@@ -808,6 +828,7 @@ impl AgentTools {
 
     pub(crate) async fn list_scheduled_tasks(&self, scope: Scope<'_>) -> Outcome {
         let parent = self.load_caller(scope).await?;
+        self.require_capability(scope, &parent)?;
         let project = parent.thread.as_ref().expect("loaded").project.clone();
         let tasks = self
             .backend
@@ -830,6 +851,7 @@ impl AgentTools {
     ) -> Outcome {
         let input: UpdateScheduledTaskInput = decode(input)?;
         let parent = self.load_caller(scope).await?;
+        self.require_capability(scope, &parent)?;
         let thread = parent.thread.as_ref().expect("loaded");
         let id = trimmed("scheduledTaskId", &input.scheduled_task_id, Some(256))?;
         let existing = self.scoped_scheduled_task(&thread.project, &id).await?;
@@ -886,6 +908,7 @@ impl AgentTools {
     ) -> Outcome {
         let input: ScheduledTaskRefInput = decode(input)?;
         let parent = self.load_caller(scope).await?;
+        self.require_capability(scope, &parent)?;
         let project = parent.thread.as_ref().expect("loaded").project.clone();
         let id = trimmed("scheduledTaskId", &input.scheduled_task_id, Some(256))?;
         let existing = self.scoped_scheduled_task(&project, &id).await?;

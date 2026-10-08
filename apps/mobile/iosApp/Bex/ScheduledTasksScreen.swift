@@ -123,12 +123,6 @@ private struct ScheduledTaskEditor: View {
                     Image(systemName: "chevron.up.chevron.down")
                 }
             }
-            Picker("Runtime", selection: $draft.runtimeMode) {
-                Text("Ask before changes").tag(RuntimeMode.approvalRequired)
-                Text("Auto accept edits").tag(RuntimeMode.autoAcceptEdits)
-                Text("Automatic").tag(RuntimeMode.auto)
-                Text("Full access").tag(RuntimeMode.fullAccess)
-            }
         }
         Section("Schedule") {
             Picker("Type", selection: Binding(
