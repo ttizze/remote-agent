@@ -364,11 +364,15 @@ fn resolve_settings(
     let auto_settle = overrides
         .and_then(|project| project.auto_settle)
         .unwrap_or(saved.auto_settle);
+    let auto_settle_on_merge = overrides
+        .and_then(|project| project.auto_settle_on_merge)
+        .unwrap_or(saved.auto_settle_on_merge);
     ConversationSettings {
         auto_settle_after_days: match auto_settle {
             AutoSettle::Never => None,
             AutoSettle::AfterDays(days) => Some(days.into()),
         },
+        auto_settle_on_merge,
         continue_after_restart: overrides
             .and_then(|project| project.continue_after_restart)
             .unwrap_or(saved.continue_after_restart),
@@ -421,6 +425,7 @@ mod settings_tests {
             "opted-in".into(),
             ProjectConversationSettings {
                 auto_settle: Some(AutoSettle::AfterDays(2)),
+                auto_settle_on_merge: Some(false),
                 continue_after_restart: Some(true),
                 branch_naming_mode: Some(BranchNamingMode::Custom),
                 branch_name_prefix: None,
@@ -431,9 +436,11 @@ mod settings_tests {
         saved.branch_name_prefix = " team/ ".into();
         let inherited = resolve_settings(&saved, "other");
         assert_eq!(inherited.auto_settle_after_days, None);
+        assert!(inherited.auto_settle_on_merge);
         assert!(!inherited.continue_after_restart && inherited.auto_resume_limited_threads);
         let opted_in = resolve_settings(&saved, "opted-in");
         assert_eq!(opted_in.auto_settle_after_days, Some(2));
+        assert!(!opted_in.auto_settle_on_merge);
         assert!(opted_in.continue_after_restart);
         assert_eq!(
             resolve_branch_naming(&saved, "other"),
@@ -479,7 +486,7 @@ impl HostOperations for HostIo {
         resolve_settings(&self.worktrees.conversation(), project)
     }
     fn pull_request_merged(&self, _thread: &ThreadId, project: &str) -> Result<bool, String> {
-        Ok(self.settings(project).auto_settle_after_days.is_some())
+        Ok(self.settings(project).auto_settle_on_merge)
     }
     fn branch_naming(&self, project: &str) -> BranchNaming {
         resolve_branch_naming(&self.worktrees.conversation(), project)

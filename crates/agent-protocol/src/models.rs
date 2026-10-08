@@ -251,6 +251,8 @@ pub enum AutoSettle {
 #[serde(default, rename_all = "camelCase")]
 pub struct ProjectConversationSettings {
     pub auto_settle: Option<AutoSettle>,
+    /// Settle a thread when its linked pull request is merged.
+    pub auto_settle_on_merge: Option<bool>,
     pub continue_after_restart: Option<bool>,
     pub new_worktrees_start_from_origin: Option<bool>,
     pub branch_naming_mode: Option<agent_domain::BranchNamingMode>,
@@ -270,6 +272,7 @@ pub enum OverrideChange<T> {
 #[serde(default, rename_all = "camelCase")]
 pub struct ProjectConversationSettingsPatch {
     pub auto_settle: Option<OverrideChange<AutoSettle>>,
+    pub auto_settle_on_merge: Option<OverrideChange<bool>>,
     pub continue_after_restart: Option<OverrideChange<bool>>,
     pub new_worktrees_start_from_origin: Option<OverrideChange<bool>>,
     pub branch_naming_mode: Option<OverrideChange<agent_domain::BranchNamingMode>>,
@@ -291,6 +294,10 @@ impl ProjectConversationSettings {
     fn patched(&self, patch: &ProjectConversationSettingsPatch) -> Self {
         Self {
             auto_settle: patched_override(&self.auto_settle, &patch.auto_settle),
+            auto_settle_on_merge: patched_override(
+                &self.auto_settle_on_merge,
+                &patch.auto_settle_on_merge,
+            ),
             continue_after_restart: patched_override(
                 &self.continue_after_restart,
                 &patch.continue_after_restart,
@@ -320,6 +327,8 @@ impl ProjectConversationSettings {
 #[serde(default, rename_all = "camelCase")]
 pub struct ConversationSettings {
     pub auto_settle: AutoSettle,
+    /// Settle a thread when its linked pull request is merged.
+    pub auto_settle_on_merge: bool,
     /// Continue turns a Host restart cut.
     pub continue_after_restart: bool,
     pub snooze_limited_threads: bool,
@@ -337,6 +346,7 @@ impl Default for ConversationSettings {
         let naming = agent_domain::BranchNaming::default();
         Self {
             auto_settle: AutoSettle::AfterDays(3),
+            auto_settle_on_merge: true,
             continue_after_restart: false,
             snooze_limited_threads: false,
             auto_resume_limited_threads: false,
@@ -354,6 +364,7 @@ impl Default for ConversationSettings {
 #[serde(default, rename_all = "camelCase")]
 pub struct ConversationSettingsPatch {
     pub auto_settle: Option<AutoSettle>,
+    pub auto_settle_on_merge: Option<bool>,
     pub continue_after_restart: Option<bool>,
     pub new_worktrees_start_from_origin: Option<bool>,
     pub snooze_limited_threads: Option<bool>,
@@ -372,6 +383,7 @@ impl ConversationSettings {
         let mut next = self.clone();
         let ConversationSettingsPatch {
             auto_settle,
+            auto_settle_on_merge,
             continue_after_restart,
             new_worktrees_start_from_origin,
             snooze_limited_threads,
@@ -383,6 +395,9 @@ impl ConversationSettings {
         } = patch.clone();
         if let Some(value) = auto_settle {
             next.auto_settle = value;
+        }
+        if let Some(value) = auto_settle_on_merge {
+            next.auto_settle_on_merge = value;
         }
         if let Some(value) = continue_after_restart {
             next.continue_after_restart = value;
@@ -535,6 +550,39 @@ mod tests {
         let wide = format!("{}.png", "\u{1f600}".repeat(510));
         assert!(project_favicon_path(&wide).is_ok());
         assert!(project_favicon_path(&format!("\u{1f600}{wide}")).is_err());
+    }
+
+    #[test]
+    fn merged_settlement_setting_is_independent_of_inactivity_settlement() {
+        let defaults = ConversationSettings::default();
+        assert_eq!(defaults.auto_settle, AutoSettle::AfterDays(3));
+        assert!(defaults.auto_settle_on_merge);
+
+        let disabled = defaults.patched(&ConversationSettingsPatch {
+            auto_settle: Some(AutoSettle::Never),
+            auto_settle_on_merge: Some(false),
+            ..Default::default()
+        });
+        assert_eq!(disabled.auto_settle, AutoSettle::Never);
+        assert!(!disabled.auto_settle_on_merge);
+
+        let enabled = defaults.patched(&ConversationSettingsPatch {
+            auto_settle: Some(AutoSettle::Never),
+            project_overrides: [(
+                "project".into(),
+                Some(ProjectConversationSettingsPatch {
+                    auto_settle_on_merge: Some(OverrideChange::Value(true)),
+                    ..Default::default()
+                }),
+            )]
+            .into(),
+            ..Default::default()
+        });
+        assert_eq!(enabled.auto_settle, AutoSettle::Never);
+        assert_eq!(
+            enabled.project_overrides["project"].auto_settle_on_merge,
+            Some(true)
+        );
     }
 }
 
