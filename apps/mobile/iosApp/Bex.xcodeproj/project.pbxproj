@@ -441,7 +441,7 @@
 				ARCHS = arm64;
 				BEX_CARGO_TARGET_DIR = "$(SRCROOT)/../../../target";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 72;
+				CURRENT_PROJECT_VERSION = 73;
 				DEVELOPMENT_TEAM = K65K9J8686;
 				"SWIFT_INCLUDE_PATHS[sdk=iphoneos*]" = "$(inherited) $(BEX_CARGO_TARGET_DIR)/aarch64-apple-ios/release $(SRCROOT)/../../../target/agent-bindings";
 				"SWIFT_INCLUDE_PATHS[sdk=iphonesimulator*]" = "$(inherited) $(BEX_CARGO_TARGET_DIR)/aarch64-apple-ios-sim/release $(SRCROOT)/../../../target/agent-bindings";
@@ -471,7 +471,7 @@
 				ARCHS = arm64;
 				BEX_CARGO_TARGET_DIR = "$(SRCROOT)/../../../target";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 72;
+				CURRENT_PROJECT_VERSION = 73;
 				DEVELOPMENT_TEAM = K65K9J8686;
 				"SWIFT_INCLUDE_PATHS[sdk=iphoneos*]" = "$(inherited) $(BEX_CARGO_TARGET_DIR)/aarch64-apple-ios/release $(SRCROOT)/../../../target/agent-bindings";
 				"SWIFT_INCLUDE_PATHS[sdk=iphonesimulator*]" = "$(inherited) $(BEX_CARGO_TARGET_DIR)/aarch64-apple-ios-sim/release $(SRCROOT)/../../../target/agent-bindings";
@@ -533,7 +533,7 @@
 				APPLICATION_EXTENSION_API_ONLY = YES;
 				ARCHS = arm64;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 72;
+				CURRENT_PROJECT_VERSION = 73;
 				DEVELOPMENT_TEAM = K65K9J8686;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = TaskActivity/Info.plist;
@@ -556,7 +556,7 @@
 				APPLICATION_EXTENSION_API_ONLY = YES;
 				ARCHS = arm64;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 72;
+				CURRENT_PROJECT_VERSION = 73;
 				DEVELOPMENT_TEAM = K65K9J8686;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = TaskActivity/Info.plist;
