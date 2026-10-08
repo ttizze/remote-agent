@@ -19,6 +19,7 @@ internal class DeviceVideoDecoder : TextureView.SurfaceTextureListener {
     )
 
     private var textureView: TextureView? = null
+    private var surfaceTexture: SurfaceTexture? = null
     private var surface: Surface? = null
     private var codec: MediaCodec? = null
     private var streamKey: String? = null
@@ -78,6 +79,9 @@ internal class DeviceVideoDecoder : TextureView.SurfaceTextureListener {
     }
 
     override fun onSurfaceTextureAvailable(surface: SurfaceTexture, width: Int, height: Int) {
+        if (surfaceTexture === surface && this.surface != null) return
+        this.surface?.release()
+        surfaceTexture = surface
         this.surface = Surface(surface)
         configureCodecIfPossible()
         drainPending()
@@ -89,6 +93,7 @@ internal class DeviceVideoDecoder : TextureView.SurfaceTextureListener {
         closeCodec()
         this.surface?.release()
         this.surface = null
+        this.surfaceTexture = null
         return true
     }
 
@@ -99,6 +104,7 @@ internal class DeviceVideoDecoder : TextureView.SurfaceTextureListener {
         textureView = null
         surface?.release()
         surface = null
+        surfaceTexture = null
         closeCodec()
         pending.clear()
         codecDescription = null
