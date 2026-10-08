@@ -35,6 +35,8 @@ pub(super) enum Reply {
     Invitation(m::Invitation),
     PreviewList(agent_protocol::preview::PreviewListResult),
     PreviewSession(agent_protocol::preview::PreviewSessionSnapshot),
+    PreviewRecordingStatus(agent_protocol::preview::PreviewRecordingStatus),
+    PreviewRecordingArtifact(agent_protocol::preview::PreviewRecordingArtifact),
     ContentSearch(agent_protocol::workspace::ContentSearch),
     Transcription(String),
     ConversationSettings(m::ConversationSettings),
@@ -90,6 +92,12 @@ async fn execute(peer: &Peer, call: &Call) -> Result<Reply, PeerError> {
         | Call::PreviewResize(_)
         | Call::PreviewSetAppearance(_)
         | Call::PreviewSetZoom(_) => Reply::PreviewSession(peer.request(call).await?),
+        Call::PreviewRecordingStart(_) => {
+            Reply::PreviewRecordingStatus(peer.request(call).await?)
+        }
+        Call::PreviewRecordingStop(_) => {
+            Reply::PreviewRecordingArtifact(peer.request(call).await?)
+        }
         Call::PreviewReportStatus(_) | Call::PreviewClose(_) | Call::PreviewRefresh(_) => {
             let _: m::Empty = peer.request(call).await?;
             Reply::Done
@@ -500,6 +508,18 @@ impl Owner {
             Reply::Invitation(invitation) => self.state.invitation = Some(invitation),
             Reply::PreviewList(result) => self.state.preview.apply_list(result),
             Reply::PreviewSession(session) => self.state.preview.upsert(session),
+            Reply::PreviewRecordingStatus(status) => {
+                self.state.preview.recording = Some(status);
+                self.state.preview.last_recording = None;
+            }
+            Reply::PreviewRecordingArtifact(artifact) => {
+                self.state.preview.recording = Some(agent_protocol::preview::PreviewRecordingStatus {
+                    tab_id: artifact.tab_id.clone(),
+                    recording: false,
+                    started_at: None,
+                });
+                self.state.preview.last_recording = Some(artifact);
+            }
             Reply::ConversationSettings(settings) => {
                 self.state.conversation_settings = Some(settings)
             }

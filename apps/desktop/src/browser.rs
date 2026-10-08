@@ -1,4 +1,4 @@
-use agent_core::{connection::Store, state::Intent};
+use agent_core::{connection::Store, state::{Intent, LocalFile}};
 use agent_protocol::browser::{browser_url, BrowserAction, BrowserFrame, BrowserRequest};
 use agent_protocol::preview::{
     PreviewAppearance, PreviewViewportSetting, PreviewZoom,
@@ -473,6 +473,103 @@ impl HostBrowser {
         .detach();
     }
 
+    fn save_recording(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(artifact) = self
+            .store
+            .snapshot()
+            .preview
+            .last_recording
+            .clone()
+            .filter(|artifact| self.frame.as_ref().is_some_and(|frame| frame.tab_id == artifact.tab_id))
+        else {
+            self.error = "No finished Preview recording is available.".into();
+            cx.notify();
+            return;
+        };
+        let store = self.store.clone();
+        let file_name = format!("{}.webm", artifact.id);
+        let source = artifact.path;
+        cx.spawn_in(window, async move |view, cx| {
+            let result = async {
+                let file_name_for_dialog = file_name.clone();
+                let destination = tokio::task::spawn_blocking(move || {
+                    rfd::FileDialog::new()
+                        .set_file_name(file_name_for_dialog)
+                        .save_file()
+                })
+                .await
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "Saving the recording was cancelled.".to_owned())?;
+                store
+                    .download_file(source, destination.to_string_lossy().into_owned())
+                    .await
+                    .map_err(|error| error.to_string())
+            }
+            .await;
+            let _ = view.update_in(cx, |view, _, cx| {
+                if let Err(error) = result {
+                    view.error = error;
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn attach_recording(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(artifact) = self
+            .store
+            .snapshot()
+            .preview
+            .last_recording
+            .clone()
+            .filter(|artifact| self.frame.as_ref().is_some_and(|frame| frame.tab_id == artifact.tab_id))
+        else {
+            self.error = "No finished Preview recording is available.".into();
+            cx.notify();
+            return;
+        };
+        let store = self.store.clone();
+        let draft_key = self.thread_id.clone();
+        let local_path = std::env::temp_dir()
+            .join("bex-preview-recordings")
+            .join(format!("{}.webm", artifact.id));
+        cx.spawn_in(window, async move |view, cx| {
+            let result = async {
+                if let Some(parent) = local_path.parent() {
+                    tokio::fs::create_dir_all(parent)
+                        .await
+                        .map_err(|error| error.to_string())?;
+                }
+                store
+                    .download_file(artifact.path, local_path.to_string_lossy().into_owned())
+                    .await
+                    .map_err(|error| error.to_string())?;
+                store
+                    .dispatch(Intent::AttachFiles {
+                        draft_key,
+                        files: vec![LocalFile {
+                            path: local_path.to_string_lossy().into_owned(),
+                            name: format!("{}.webm", artifact.id),
+                            mime_type: artifact.mime_type,
+                        }],
+                    })
+                    .await
+                    .map_err(|error| error.to_string())?
+                    .map_err(|error| error.to_string())?;
+                Ok::<(), String>(())
+            }
+            .await;
+            let _ = view.update_in(cx, |view, _, cx| {
+                if let Err(error) = result {
+                    view.error = error;
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     fn apply_frame(&mut self, frame: BrowserFrame, window: &mut Window, cx: &mut Context<Self>) {
         self.error.clear();
         if self
@@ -678,6 +775,13 @@ impl Render for HostBrowser {
         // of frame requests. Read its immutable snapshot during render so
         // local server cards and recent URLs follow that live subscription.
         let preview = self.store.snapshot().preview.clone();
+        let recording = frame
+            .map(|frame| frame.tab_id.as_str())
+            .and_then(|tab_id| preview.recording_for(tab_id))
+            .is_some_and(|status| status.recording);
+        let recording_artifact = frame
+            .and_then(|frame| preview.last_recording.as_ref().filter(|artifact| artifact.tab_id == frame.tab_id))
+            .is_some();
         let local_servers = preview.local_servers;
         let recent_urls = preview.recent_urls;
         v_flex()
@@ -856,8 +960,49 @@ impl Render for HostBrowser {
                             .ghost()
                             .tooltip("Open")
                             .accessibility_label("Open")
-                            .on_click(cx.listener(|s, _, window, cx| s.navigate(window, cx))),
-                    ),
+                            .on_click(cx.listener(|s, _, window, cx| s.navigate(window, cx)))
+                    )
+                    .child(
+                        Button::new("preview-recording")
+                            .label(if recording { "Stop recording" } else { "Record" })
+                            .small()
+                            .ghost()
+                            .disabled(frame.is_none())
+                            .tooltip(if recording { "Stop Preview recording" } else { "Start Preview recording" })
+                            .accessibility_label(if recording { "Stop Preview recording" } else { "Start Preview recording" })
+                            .on_click(cx.listener(move |s, _, window, cx| {
+                                let Some(tab_id) = s.frame.as_ref().map(|frame| frame.tab_id.clone()) else { return };
+                                s.request(
+                                    HostBrowserRequest::Intent(if recording {
+                                        Intent::PreviewRecordingStop { tab_id }
+                                    } else {
+                                        Intent::PreviewRecordingStart { tab_id }
+                                    }),
+                                    window,
+                                    cx,
+                                );
+                            })),
+                    )
+                    .child(
+                        Button::new("preview-save-recording")
+                            .label("Save")
+                            .small()
+                            .ghost()
+                            .disabled(!recording_artifact)
+                            .tooltip("Save Preview recording")
+                            .accessibility_label("Save Preview recording")
+                            .on_click(cx.listener(|s, _, window, cx| s.save_recording(window, cx))),
+                    )
+                    .child(
+                        Button::new("preview-attach-recording")
+                            .label("Attach")
+                            .small()
+                            .ghost()
+                            .disabled(!recording_artifact)
+                            .tooltip("Attach Preview recording to chat")
+                            .accessibility_label("Attach Preview recording to chat")
+                            .on_click(cx.listener(|s, _, window, cx| s.attach_recording(window, cx))),
+                    )
             )
             .when(!self.error.is_empty(), |body| {
                 body.child(

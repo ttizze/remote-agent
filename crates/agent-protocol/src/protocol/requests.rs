@@ -121,5 +121,7 @@ contracts! {
     PreviewReportStatus, "host/preview/reportStatus" => (crate::preview::PreviewReportStatus, crate::models::Empty) [clone],
     PreviewClose, "host/preview/close" => (crate::preview::PreviewClose, crate::models::Empty) [clone],
     PreviewRefresh, "host/preview/refresh" => (crate::preview::PreviewTab, crate::models::Empty) [clone],
+    PreviewRecordingStart, "host/preview/recording/start" => (crate::preview::PreviewRecordingStart, crate::preview::PreviewRecordingStatus) [clone],
+    PreviewRecordingStop, "host/preview/recording/stop" => (crate::preview::PreviewRecordingStop, crate::preview::PreviewRecordingArtifact) [clone],
     ConnectionPerformance, "host/diagnostics/connection" => (crate::diagnostics::ConnectionPerformance, m::Empty) [clone],
 }

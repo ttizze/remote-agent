@@ -11,6 +11,8 @@ pub const CONFIGURED_LOCAL_SERVER_URLS_MAX_ITEMS: usize = 32;
 pub const PREVIEW_VIEWPORT_MIN_DIMENSION: u32 = 240;
 pub const PREVIEW_VIEWPORT_MAX_DIMENSION: u32 = 3_840;
 pub const PREVIEW_VIEWPORT_MAX_AREA: u64 = 3_840 * 2_160;
+pub const PREVIEW_RECORDING_MAX_BYTES: u64 = 50 * 1024 * 1024;
+pub const PREVIEW_RECORDING_MAX_DURATION_SECONDS: u64 = 120;
 
 pub const COMMON_DEV_PORTS: &[u16] = &[
     3000, 3001, 3333, 4173, 4200, 4321, 5000, 5173, 5174, 5175, 5500, 8000, 8080, 8081, 8888,
@@ -373,6 +375,49 @@ pub struct PreviewList {
     pub thread_id: agent_domain::ThreadId,
     pub configured_urls: Vec<String>,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewRecordingStart {
+    pub thread_id: agent_domain::ThreadId,
+    pub tab_id: String,
+}
+impl PreviewRecordingStart {
+    pub fn validate(&self) -> Result<(), String> {
+        validate_tab_id(&self.tab_id)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewRecordingStop {
+    pub thread_id: agent_domain::ThreadId,
+    pub tab_id: String,
+}
+impl PreviewRecordingStop {
+    pub fn validate(&self) -> Result<(), String> {
+        validate_tab_id(&self.tab_id)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewRecordingStatus {
+    pub tab_id: String,
+    pub recording: bool,
+    pub started_at: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewRecordingArtifact {
+    pub id: String,
+    pub tab_id: String,
+    pub path: String,
+    pub mime_type: String,
+    pub size_bytes: u64,
+    pub created_at: String,
+}
 impl PreviewList {
     pub fn validate(&self) -> Result<(), String> {
         if self.configured_urls.len() > CONFIGURED_LOCAL_SERVER_URLS_MAX_ITEMS {
@@ -646,6 +691,17 @@ mod tests {
     fn measured_fill_dimensions_are_positive_without_using_selectable_preset_bounds() {
         assert!(PreviewRenderedViewportSize { width: 1, height: 1 }.validate().is_ok());
         assert!(PreviewRenderedViewportSize { width: 0, height: 1 }.validate().is_err());
+    }
+
+    #[test]
+    fn recording_requests_require_a_tab_id() {
+        let thread_id = agent_domain::ThreadId::new("thread").unwrap();
+        assert!(PreviewRecordingStart { thread_id: thread_id.clone(), tab_id: "tab".into() }
+            .validate()
+            .is_ok());
+        assert!(PreviewRecordingStop { thread_id, tab_id: String::new() }
+            .validate()
+            .is_err());
     }
 
     #[test]

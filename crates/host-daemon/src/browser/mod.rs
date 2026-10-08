@@ -1,5 +1,6 @@
 //! Owns the persistent BEX profile and conversation-scoped shared pages.
 mod cdp;
+mod recording;
 pub mod mcp;
 
 use agent_protocol::browser::{
@@ -15,6 +16,7 @@ use std::{
     sync::{Arc, OnceLock},
 };
 use tokio::sync::Mutex;
+use tokio_util::sync::CancellationToken;
 
 struct Page {
     tabs: Vec<String>,
@@ -63,10 +65,16 @@ struct State {
     pages: HashMap<String, Page>,
 }
 
+struct ActiveRecording {
+    cancel: CancellationToken,
+    task: tokio::task::JoinHandle<Result<agent_protocol::preview::PreviewRecordingArtifact, String>>,
+}
+
 pub struct Browser {
     profile: PathBuf,
     executable: PathBuf,
-    state: Mutex<State>,
+    state: Arc<Mutex<State>>,
+    recordings: Arc<Mutex<HashMap<(String, String), ActiveRecording>>>,
     stop: tokio_util::sync::CancellationToken,
     bridge_directory: tempfile::TempDir,
     preview: OnceLock<Arc<crate::preview::PreviewManager>>,
@@ -102,7 +110,8 @@ impl Browser {
             profile,
             executable,
             bridge_directory,
-            state: Mutex::new(State::default()),
+            state: Arc::new(Mutex::new(State::default())),
+            recordings: Arc::new(Mutex::new(HashMap::new())),
             stop: Default::default(),
             preview: OnceLock::new(),
             preview_ports: OnceLock::new(),
@@ -127,6 +136,115 @@ impl Browser {
             .set(terminals)
             .map_err(|_| "terminal metadata already configured".to_owned())
     }
+
+    pub async fn start_preview_recording(
+        &self,
+        thread: &str,
+        tab_id: &str,
+    ) -> Result<agent_protocol::preview::PreviewRecordingStatus, String> {
+        let (endpoint, width, height) = {
+            let mut state = self.state.lock().await;
+            self.ensure(&mut state, thread).await?;
+            let page = state
+                .pages
+                .get(thread)
+                .ok_or_else(|| "preview thread was not found".to_owned())?;
+            if !page.preview_tabs.contains(tab_id) {
+                return Err("preview tab was not found".into());
+            }
+            let dimensions = page.viewport_for(tab_id);
+            let endpoint = state
+                .chrome
+                .as_ref()
+                .ok_or_else(|| "browser is unavailable".to_owned())?
+                .endpoint()
+                .to_owned();
+            (endpoint, dimensions.0, dimensions.1)
+        };
+        let key = (thread.to_owned(), tab_id.to_owned());
+        let mut recordings = self.recordings.lock().await;
+        if let Some(((_, active_tab), _)) = recordings.iter().next() {
+            return Err(format!(
+                "recording conflict: tab {tab_id} cannot be recorded while tab {active_tab} is already being recorded"
+            ));
+        }
+        let cancel = CancellationToken::new();
+        let started = recording::start(
+            endpoint,
+            tab_id.to_owned(),
+            self.bridge_directory.path().join("recordings"),
+            width,
+            height,
+            cancel.clone(),
+            self.stop.clone(),
+        )?;
+        let started_at = started.started_at.clone();
+        recordings.insert(
+            key.clone(),
+            ActiveRecording {
+                cancel,
+                task: started.task,
+            },
+        );
+        drop(recordings);
+        if let Err(error) = recording::await_startup(started.startup).await {
+            if let Some(mut active) = self.recordings.lock().await.remove(&key) {
+                active.cancel.cancel();
+                if tokio::time::timeout(std::time::Duration::from_secs(5), &mut active.task)
+                    .await
+                    .is_err()
+                {
+                    active.task.abort();
+                }
+            }
+            return Err(format!("recording failed for tab {tab_id}: {error}"));
+        }
+        Ok(agent_protocol::preview::PreviewRecordingStatus {
+            tab_id: tab_id.to_owned(),
+            recording: true,
+            started_at: Some(started_at),
+        })
+    }
+
+    pub async fn stop_preview_recording(
+        &self,
+        thread: &str,
+        tab_id: &str,
+    ) -> Result<agent_protocol::preview::PreviewRecordingArtifact, String> {
+        let key = (thread.to_owned(), tab_id.to_owned());
+        let active = self
+            .recordings
+            .lock()
+            .await
+            .remove(&key)
+            .ok_or_else(|| format!("recording is not active for preview tab {tab_id}"))?;
+        active.cancel.cancel();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(
+                agent_protocol::preview::PREVIEW_RECORDING_MAX_DURATION_SECONDS,
+            ),
+            active.task,
+        )
+        .await
+        .map_err(|_| format!("recording stop timeout for tab {tab_id} after 120000ms"))?
+        .map_err(|error| format!("recording cleanup failed for tab {tab_id}: {error}"))?;
+        result
+    }
+
+    pub async fn preview_active_tab(&self, thread: &str) -> Result<String, String> {
+        let mut state = self.state.lock().await;
+        self.ensure(&mut state, thread).await?;
+        let page = state
+            .pages
+            .get(thread)
+            .ok_or_else(|| "preview thread was not found".to_owned())?;
+        if page.preview_tabs.contains(&page.active) {
+            Ok(page.active.clone())
+        } else {
+            Err("preview tab is not open".to_owned())
+        }
+    }
+
     pub fn provider_config(&self, thread: &str) -> Result<serde_json::Value, String> {
         Ok(
             serde_json::json!({"command":std::env::current_exe().map_err(|e| e.to_string())?,
@@ -138,6 +256,16 @@ impl Browser {
     }
     pub async fn shutdown(&self) {
         self.stop.cancel();
+        let active = std::mem::take(&mut *self.recordings.lock().await);
+        for (_, mut recording) in active {
+            recording.cancel.cancel();
+            if tokio::time::timeout(std::time::Duration::from_secs(10), &mut recording.task)
+                .await
+                .is_err()
+            {
+                recording.task.abort();
+            }
+        }
         if let Some(chrome) = self.state.lock().await.chrome.take() {
             chrome.shutdown().await;
         }
@@ -387,6 +515,7 @@ impl Browser {
     }
 
     pub async fn close_preview_tab(&self, thread: &str, tab_id: &str) -> Result<(), String> {
+        let _ = self.stop_preview_recording(thread, tab_id).await;
         let mut state = self.state.lock().await;
         self.ensure(&mut state, thread).await?;
         {

@@ -443,6 +443,10 @@ pub struct PreviewState {
     pub scanner_revision: u64,
     pub configured_urls: Vec<String>,
     #[serde(skip)]
+    pub recording: Option<agent_protocol::preview::PreviewRecordingStatus>,
+    #[serde(skip)]
+    pub last_recording: Option<agent_protocol::preview::PreviewRecordingArtifact>,
+    #[serde(skip)]
     closed_tabs: BTreeSet<String>,
 }
 impl PreviewState {
@@ -530,14 +534,32 @@ impl PreviewState {
             if self.active_tab.as_deref() == Some(tab_id) {
                 self.active_tab = self.sessions.keys().next().cloned();
             }
+            if self.recording.as_ref().is_some_and(|recording| recording.tab_id == tab_id) {
+                self.recording = None;
+            }
+            if self
+                .last_recording
+                .as_ref()
+                .is_some_and(|artifact| artifact.tab_id == tab_id)
+            {
+                self.last_recording = None;
+            }
         } else {
             self.closed_tabs.extend(self.sessions.keys().cloned());
             self.sessions.clear();
             self.active_tab = None;
+            self.recording = None;
+            self.last_recording = None;
         }
     }
     pub fn session(&self, tab_id: &str) -> Option<&agent_protocol::preview::PreviewSessionSnapshot> {
         self.sessions.get(tab_id)
+    }
+
+    pub fn recording_for(&self, tab_id: &str) -> Option<&agent_protocol::preview::PreviewRecordingStatus> {
+        self.recording
+            .as_ref()
+            .filter(|recording| recording.tab_id == tab_id)
     }
 }
 
@@ -624,6 +646,27 @@ mod preview_state_tests {
         state.close(Some("tab"));
         state.upsert(session);
         assert!(state.sessions.is_empty());
+    }
+
+    #[test]
+    fn closing_the_recorded_tab_discards_ephemeral_recording_state() {
+        let mut state = PreviewState::default();
+        state.recording = Some(agent_protocol::preview::PreviewRecordingStatus {
+            tab_id: "tab".into(),
+            recording: true,
+            started_at: Some("2026-01-01T00:00:00Z".into()),
+        });
+        state.last_recording = Some(agent_protocol::preview::PreviewRecordingArtifact {
+            id: "browser-recording-test".into(),
+            tab_id: "tab".into(),
+            path: "/tmp/browser-recording-test.webm".into(),
+            mime_type: "video/webm".into(),
+            size_bytes: 1,
+            created_at: "2026-01-01T00:00:01Z".into(),
+        });
+        state.close(Some("tab"));
+        assert!(state.recording.is_none());
+        assert!(state.last_recording.is_none());
     }
 }
 
@@ -1133,6 +1176,12 @@ pub enum Intent {
         tab_id: Option<String>,
     },
     PreviewSelectTab {
+        tab_id: String,
+    },
+    PreviewRecordingStart {
+        tab_id: String,
+    },
+    PreviewRecordingStop {
         tab_id: String,
     },
 

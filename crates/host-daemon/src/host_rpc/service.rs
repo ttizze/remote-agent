@@ -1003,6 +1003,34 @@ impl HostRpcService {
                         .map_err(|error| Failure::new("preview_refresh_failed", error))?;
                     agent_protocol::models::Empty {}.into()
                 }
+                Call::PreviewRecordingStart(params) => {
+                    params
+                        .validate()
+                        .map_err(|error| Failure::new("invalid_params", error))?;
+                    let browser = resources
+                        .browser
+                        .get()
+                        .ok_or_else(|| Failure::new("browser_unavailable", "browser unavailable"))?;
+                    browser
+                        .start_preview_recording(&params.thread_id.to_string(), &params.tab_id)
+                        .await
+                        .map_err(|error| Failure::new("preview_recording_start_failed", error))?
+                        .into()
+                }
+                Call::PreviewRecordingStop(params) => {
+                    params
+                        .validate()
+                        .map_err(|error| Failure::new("invalid_params", error))?;
+                    let browser = resources
+                        .browser
+                        .get()
+                        .ok_or_else(|| Failure::new("browser_unavailable", "browser unavailable"))?;
+                    browser
+                        .stop_preview_recording(&params.thread_id.to_string(), &params.tab_id)
+                        .await
+                        .map_err(|error| Failure::new("preview_recording_stop_failed", error))?
+                        .into()
+                }
                 Call::ConnectionPerformance(params) => {
                     let params = params.clone();
                     tokio::task::spawn_blocking(move || {
