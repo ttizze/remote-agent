@@ -13,6 +13,12 @@ checksums, and update URL. Metadata does not claim publication before the
 GitHub release command succeeds. `scripts/release-update-check.mjs` consumes
 that manifest as a pure comparison and does not contact GitHub.
 
+Host archives embed the lockfile-pinned Agent SDK and bridge, but do not copy a
+Nix-store Node executable into the artifact. The runtime requires Node.js 18 or
+newer, available as `node` in `PATH` or beside the Host executable. Each Host
+archive contains `NODE-RUNTIME-REQUIREMENT.txt` with this requirement and the
+Node version observed by the packaging job.
+
 The signed mobile and Apple distribution paths require repository secrets. The
 workflow intentionally fails with a named missing input when a scheduled run
 cannot prepare a keystore, signing certificate, provisioning profile, or

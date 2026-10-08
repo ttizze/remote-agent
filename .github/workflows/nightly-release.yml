@@ -156,13 +156,13 @@ jobs:
           cmd-format: nix develop .#native --command {0}
           key: release-linux-${{ hashFiles('flake.lock', 'Cargo.lock') }}
       - name: Build pinned Host binaries
-        run: nix develop .#native --command cargo build --locked --release -p host-daemon -p bex-process -p agent-cli -p bex-desktop
-      - name: Stage Host runtime resources
-        run: nix develop .#native --command node scripts/install-claude-sdk.mjs target/release
+        run: nix develop .#native --command cargo build --locked --release -p host-daemon -p bex-process -p bex-desktop
+      - name: Stage Host license
+        run: cp crates/host-daemon/src/claude/sdk/SDK-LICENSE.md target/release/Claude-Agent-SDK-LICENSE.md
       - name: Package Host artifact
         run: |
-          scripts/package-host.sh linux x86_64 release-assets target
-          scripts/package-native-desktop.sh linux x86_64 release-assets target
+          nix develop .#native --command scripts/package-host.sh linux x86_64 release-assets target
+          nix develop .#native --command scripts/package-native-desktop.sh linux x86_64 release-assets target
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: release-assets-linux
@@ -190,9 +190,11 @@ jobs:
         with:
           key: release-windows-${{ hashFiles('Cargo.lock') }}
       - name: Build pinned Host and desktop binaries
-        run: cargo build --locked --release -p host-daemon -p bex-process -p agent-cli -p bex-desktop
-      - name: Stage Host runtime resources
-        run: node scripts/install-claude-sdk.mjs target/release
+        run: cargo build --locked --release -p host-daemon -p bex-process -p bex-desktop
+      - name: Stage Host license
+        run: cp crates/host-daemon/src/claude/sdk/SDK-LICENSE.md target/release/Claude-Agent-SDK-LICENSE.md
+      - name: Verify external Node runtime requirement
+        run: node --version
       - name: Package Host artifact
         run: |
           scripts/package-host.sh windows x86_64 release-assets target
@@ -207,6 +209,7 @@ jobs:
   host_macos_desktop:
     name: Host and desktop macOS
     needs: resolve
+    if: github.ref == 'refs/heads/main'
     runs-on: macos-26
     timeout-minutes: 90
     env:
@@ -248,7 +251,7 @@ jobs:
           RELEASE_VERSION: ${{ needs.resolve.outputs.version }}
         run: |
           set -euo pipefail
-          scripts/package-host.sh macos arm64 release-assets target
+          nix develop . --command scripts/package-host.sh macos arm64 release-assets target
           scripts/package-macos-desktop.sh "$RELEASE_VERSION" release-assets target/Bex.app
       - name: Require notarization credentials for published builds
         if: needs.resolve.outputs.publish == 'true'

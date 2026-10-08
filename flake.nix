@@ -83,7 +83,7 @@
             ANDROID_HOME = "${androidSdk}/libexec/android-sdk";
             ANDROID_SDK_ROOT = "${androidSdk}/libexec/android-sdk";
             shellHook = pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isDarwin ''
-              export DEVELOPER_DIR="''${BEX_XCODE_DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}"
+              export DEVELOPER_DIR="''${APP_XCODE_DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}"
             '';
           };
           kani = pkgs.mkShell {
