@@ -1002,8 +1002,10 @@ mod tests {
     #[test]
     fn keyboard_input_validates_actual_key_value() {
         let valid = DeviceActionInput {
+            thread_id: ThreadId::new("thread").unwrap(),
             host_id: None,
             device_id: "emulator-1".into(),
+            session_epoch: "epoch".into(),
             action: DeviceActionKind::Input(DeviceInputKind::Key {
                 code: "Digit1".into(),
                 key: "!".into(),
