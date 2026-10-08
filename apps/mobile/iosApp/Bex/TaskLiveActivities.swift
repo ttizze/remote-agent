@@ -2,6 +2,7 @@ import ActivityKit
 import AgentCore
 import Foundation
 import OSLog
+import UIKit
 
 @MainActor
 final class TaskLiveActivities {
@@ -62,14 +63,19 @@ final class TaskLiveActivities {
 
     func registrationFinished(activityID: String, token: Data?, enabled: Bool) {
         guard let token, tokens[activityID] == token else { return }
+        guard remote.contains(activityID) != enabled else { return }
         if enabled {
             remote.insert(activityID)
         } else {
             remote.remove(activityID)
         }
+        previous = nil
     }
 
     private func register(_ activity: Activity<TaskActivityAttributes>, token: Data) {
+        if tokens[activity.id] != token, remote.remove(activity.id) != nil {
+            previous = nil
+        }
         tokens[activity.id] = token
         let identity = activity.attributes
         let environment: PushEnvironment = Bundle.main
@@ -209,8 +215,9 @@ final class TaskLiveActivities {
 
     private func content(_ state: TaskActivityAttributes.ContentState, foreground: Bool, remote: Bool = false)
         -> ActivityContent<TaskActivityAttributes.ContentState> {
-        ActivityContent(state: state, staleDate: foreground ? nil : .now.addingTimeInterval(remote ? 120 : 30),
-                        relevanceScore: state.status == "waiting" ? 100 : 50)
+        let staleDate: Date? = remote ? .now.addingTimeInterval(120) : foreground ? nil : .now.addingTimeInterval(30)
+        return ActivityContent(state: state, staleDate: staleDate,
+                               relevanceScore: state.status == "waiting" ? 100 : 50)
     }
 }
 
@@ -232,11 +239,13 @@ extension BexAppViewModel {
                     Task { [weak self] in
                         guard let outcome = try? await receipt.wait(),
                               case let .liveActivityRegistered(enabled) = outcome else { return }
-                        self?.liveActivities.registrationFinished(
+                        guard let self else { return }
+                        liveActivities.registrationFinished(
                             activityID: request.activityID,
                             token: request.token,
                             enabled: enabled
                         )
+                        synchronizeLiveActivities(foreground: UIApplication.shared.applicationState == .active)
                     }
                 } catch {
                     // Registration retries with the current token after reconnecting.
