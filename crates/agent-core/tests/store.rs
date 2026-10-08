@@ -386,6 +386,28 @@ async fn browser_frames_are_ephemeral_and_pending_reads_end_with_the_connection(
     );
 }
 
+fn authenticated_snapshot() -> Snapshot {
+    Snapshot {
+        models: Arc::new(
+            serde_json::from_value(json!([{
+                "id":"fixture","model":{"provider":"codex","id":"fixture"},"displayName":"Fixture",
+                "isDefault":true,"defaultReasoningEffort":"","supportedReasoningEfforts":[]
+            }]))
+            .unwrap(),
+        ),
+        account: Arc::new(agent_core::state::AccountState {
+            accounts: Some(Arc::new(
+                serde_json::from_value(json!({
+                    "accounts":[{"id":"account","provider":"codex"}],"selected":{"codex":"account"}
+                }))
+                .unwrap(),
+            )),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
 async fn connected(snapshot: Snapshot) -> (Arc<Store>, host_fixture::Reader, host_fixture::Writer) {
     let (peer, reader, writer) = host_fixture::connect(&snapshot).await;
     (Arc::new(Store::new(peer, snapshot)), reader, writer)
@@ -405,7 +427,7 @@ async fn setup(snapshot: Snapshot) -> (Arc<Store>, host_fixture::Reader, host_fi
         let result = match request["method"].as_str().unwrap() {
             "host/session/list" => snapshot.threads.as_ref().map(|threads| json!(threads))
                 .unwrap_or_else(|| json!({"data":[],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false})),
-            "host/account/list" => json!({"accounts":[],"selected":{}}),
+            "host/account/list" => snapshot.account.accounts.as_ref().map(|accounts| json!(accounts)).unwrap_or_else(|| json!({"accounts":[],"selected":{}})),
             "host/model/list" => json!({"data":snapshot.models,"nextCursor":null}),
             "host/session/open" => json!({"thread": snapshot.conversations[snapshot.navigation.thread_id.as_ref().unwrap()]}),
             "host/workspace/review" => { assert_eq!(request["params"]["cwd"], cwd); review() },
@@ -961,7 +983,7 @@ async fn snapshot_notification_can_reenter_store_synchronously() {
 
 #[tokio::test]
 async fn new_conversation_moves_draft_to_pending_before_creation_reply() {
-    let (store, mut reader, mut writer) = setup(Snapshot::default()).await;
+    let (store, mut reader, mut writer) = setup(authenticated_snapshot()).await;
     new_chat(&store, &mut reader, &mut writer, "/fixture").await;
     let key = store.snapshot().navigation.draft_key.clone();
     store
@@ -1118,7 +1140,7 @@ async fn successful_submission_does_not_erase_a_newer_draft() {
 #[tokio::test]
 async fn new_submission_keeps_edits_and_navigation_while_creation_is_pending() {
     for navigate_away in [false, true] {
-        let (store, mut reader, mut writer) = setup(Snapshot::default()).await;
+        let (store, mut reader, mut writer) = setup(authenticated_snapshot()).await;
         new_chat(&store, &mut reader, &mut writer, "/fixture").await;
         let key = store.snapshot().navigation.draft_key.clone();
         store
@@ -1216,7 +1238,7 @@ async fn new_submission_keeps_edits_and_navigation_while_creation_is_pending() {
 #[tokio::test]
 async fn failed_new_submission_keeps_retry_at_the_last_successful_step() {
     for fail_creation in [false, true] {
-        let (store, mut reader, mut writer) = setup(Snapshot::default()).await;
+        let (store, mut reader, mut writer) = setup(authenticated_snapshot()).await;
         new_chat(&store, &mut reader, &mut writer, "/fixture").await;
         store
             .dispatch(Intent::SetDraft {
@@ -1423,7 +1445,7 @@ async fn transcription_preserves_newer_input_and_restores_audio_text_on_send_fai
 #[tokio::test]
 async fn new_chat_dictation_preserves_text_and_images_for_draft_and_direct_send() {
     for direct in [false, true] {
-        let (store, mut reader, mut writer) = setup(Snapshot::default()).await;
+        let (store, mut reader, mut writer) = setup(authenticated_snapshot()).await;
         store
             .dispatch(Intent::NewChat { cwd: String::new() })
             .await
@@ -2243,7 +2265,7 @@ async fn creating_a_chat_refreshes_the_loaded_thread_list_with_its_query() {
     let (store, mut reader, writer) = setup(Snapshot {
         threads: Some(Arc::new(serde_json::from_value(json!({"data":[],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false})).unwrap())),
         list_query: Arc::new(agent_protocol::models::ListQuery { search_term:"created".into(), ..Default::default() }),
-        ..Default::default()
+        ..authenticated_snapshot()
     }).await;
     let server = tokio::spawn(async move {
         while let Some(request) =
@@ -2688,7 +2710,7 @@ async fn concurrent_account_listing_preserves_login_and_cancellation_ignores_lat
 
 #[tokio::test]
 async fn disconnected_store_keeps_editing_and_persisting_drafts() {
-    let (store, reader, writer) = setup(Snapshot::default()).await;
+    let (store, reader, writer) = setup(authenticated_snapshot()).await;
     wait_for(&store, |s| s.connected).await;
     drop((reader, writer));
     wait_for(&store, |s| !s.connected).await;
@@ -3340,7 +3362,9 @@ async fn opening_a_draft_during_initial_catalog_reads_retries_and_selects_a_mode
                 "id":"fresh","model":{"provider": "codex", "id": "fresh"},"displayName":"Fresh model",
                 "isDefault":true,"defaultReasoningEffort":"medium","supportedReasoningEfforts":[]
             }]}),
-            "host/account/list" => json!({"accounts":[],"selected":{}}),
+            "host/account/list" => {
+                json!(authenticated_snapshot().account.accounts.as_ref().unwrap())
+            }
             method => panic!("unexpected retry: {method}"),
         };
         writer
@@ -3863,7 +3887,7 @@ async fn overloaded_catalog_prefetch_finishes_loading_and_can_be_retried() {
 
 #[tokio::test]
 async fn composer_catalog_prefetch_and_refresh_keep_candidates_available() {
-    let (store, mut reader, writer) = setup(Snapshot::default()).await;
+    let (store, mut reader, writer) = setup(authenticated_snapshot()).await;
     reader.script_composer_catalog();
     let navigation = store.dispatch(Intent::NewChat {
         cwd: "/project".into(),
@@ -3993,7 +4017,7 @@ async fn composer_catalog_prefetch_and_refresh_keep_candidates_available() {
 
 #[tokio::test]
 async fn composer_catalog_ignores_replies_from_previous_directories_and_accounts() {
-    let (store, mut reader, writer) = setup(Snapshot::default()).await;
+    let (store, mut reader, writer) = setup(authenticated_snapshot()).await;
     reader.script_composer_catalog();
     let mut pending = Vec::new();
     for cwd in ["/first", "/second"] {
@@ -4099,7 +4123,7 @@ async fn selected_invocations_reach_submission_and_return_after_failure() {
     use agent_core::composer::insert_invocation;
     use agent_protocol::composer::Invocation;
     use agent_protocol::composer::InvocationKind;
-    let (store, mut reader, mut writer) = setup(Snapshot::default()).await;
+    let (store, mut reader, mut writer) = setup(authenticated_snapshot()).await;
     new_chat(&store, &mut reader, &mut writer, "/fixture").await;
     let key = store.snapshot().navigation.draft_key.clone();
     let invocation = Invocation {

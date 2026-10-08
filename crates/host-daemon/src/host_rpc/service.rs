@@ -1577,10 +1577,7 @@ mod tests {
         };
         let directory = tempfile::tempdir().unwrap();
         let service = HostRpcService::new(
-            [Backend::unavailable(
-                ProviderKind::Codex,
-                "provider is offline",
-            )],
+            [crate::adapters::codex::Codex::new(Err("provider is offline".into())).into()],
             ProjectStore::new(directory.path().join("projects.json")),
         );
         let connection = service.open_session();
