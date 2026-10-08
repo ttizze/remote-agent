@@ -80,6 +80,72 @@ fn opened(state: agent_domain::State) -> Owner {
     owner.thread_update(&thread_id(), ThreadUpdate::Synchronized);
     owner
 }
+
+#[test]
+fn an_incoming_share_appends_to_the_draft_being_edited() {
+    let mut owner = opened(thread_state("Thread"));
+    owner.state.drafts.insert(
+        thread_id().to_string(),
+        Draft {
+            text: "typed before handoff".into(),
+            ..draft()
+        },
+    );
+
+    owner.intent(
+        Intent::ImportShare {
+            content: crate::view::share::ShareContent {
+                text: "shared context".into(),
+                urls: vec!["https://example.test/context".into()],
+            },
+        },
+        oneshot::channel().0,
+    );
+
+    assert_eq!(
+        owner.state.current_draft().text,
+        "typed before handoff\n\nshared context\nhttps://example.test/context"
+    );
+}
+
+#[test]
+fn an_incoming_share_targets_the_thread_selected_at_arrival() {
+    let mut owner = opened(thread_state("Thread"));
+    let selected = thread_id();
+    let other = ThreadId::new("other").unwrap();
+    owner.state.drafts.insert(
+        selected.to_string(),
+        Draft {
+            text: "selected draft".into(),
+            ..draft()
+        },
+    );
+    owner.state.drafts.insert(
+        other.to_string(),
+        Draft {
+            text: "other draft".into(),
+            ..draft()
+        },
+    );
+
+    owner.select_thread(Some(other.clone()));
+    owner.intent(
+        Intent::ImportShare {
+            content: crate::view::share::ShareContent {
+                text: "incoming text".into(),
+                urls: vec![],
+            },
+        },
+        oneshot::channel().0,
+    );
+
+    assert_eq!(
+        owner.state.drafts.get(selected.as_str()).unwrap().text,
+        "selected draft"
+    );
+    assert_eq!(owner.state.current_draft().text, "other draft\n\nincoming text");
+}
+
 fn committed(sequence: u64, reply: Reply) -> Delivered {
     Delivered::Committed(Committed {
         reply,
@@ -93,6 +159,30 @@ fn commands(next: Next) -> Vec<crate::commands::outbox::PendingCommand> {
         panic!("outbox commands")
     };
     entries
+}
+
+#[test]
+fn reset_credit_intent_writes_the_selected_source_and_credit() {
+    let mut owner = owner(Snapshot::default());
+    let Next::Call(call, None) = owner
+        .prepare(Intent::ConsumeResetCredit {
+            provider: agent_protocol::provider::ProviderKind::Claude,
+            account_id: "source-account".into(),
+            credit_id: Some("credit-1".into()),
+        })
+        .unwrap()
+    else {
+        panic!("reset credit request")
+    };
+    let crate::protocol::Call::ConsumeResetCredit(request) = *call else {
+        panic!("reset credit request")
+    };
+    assert_eq!(
+        request.provider,
+        agent_protocol::provider::ProviderKind::Claude
+    );
+    assert_eq!(request.account_id, "source-account");
+    assert_eq!(request.credit_id.as_deref(), Some("credit-1"));
 }
 
 #[test]
@@ -184,12 +274,15 @@ fn a_running_thread_queues_follow_ups_and_the_alternate_steers() {
 #[test]
 fn a_launch_opens_its_thread_once_the_shell_shows_it() {
     let mut owner = owner(Snapshot {
-        default_draft: Draft {
-            text: "Fix the bug".into(),
-            ..draft()
-        },
+        default_draft: draft(),
         ..Snapshot::default()
     });
+    owner
+        .prepare(Intent::EditDraft {
+            text: "Fix the bug".into(),
+            base_text: None,
+        })
+        .unwrap();
     let (sender, mut receipt) = oneshot::channel();
     owner.intent(Intent::Send { alternate: false }, sender);
     let entry = owner.state.outbox.entries[0].clone();
@@ -230,12 +323,15 @@ fn a_launch_opens_its_thread_once_the_shell_shows_it() {
 #[test]
 fn a_late_launch_does_not_navigate_away_from_another_thread() {
     let mut owner = owner(Snapshot {
-        default_draft: Draft {
-            text: "Launch".into(),
-            ..draft()
-        },
+        default_draft: draft(),
         ..Snapshot::default()
     });
+    owner
+        .prepare(Intent::EditDraft {
+            text: "Launch".into(),
+            base_text: None,
+        })
+        .unwrap();
     owner.intent(Intent::Send { alternate: false }, oneshot::channel().0);
     let entry = owner.state.outbox.entries[0].clone();
     let other = ThreadId::new("other").unwrap();
@@ -1903,6 +1999,122 @@ fn new_thread_defaults_change_without_touching_the_open_thread() {
 }
 
 #[test]
+fn default_model_and_permissions_keep_only_user_defaults() {
+    use crate::view::projects::selection::ThreadWorkspaceMode;
+
+    let mut state = Snapshot {
+        default_draft: draft(),
+        ..Snapshot::default()
+    };
+    state.default_draft.text = "stale task text".into();
+    state.default_draft.context = Some(agent_domain::MessageContext {
+        version: 1,
+        records: vec![],
+    });
+    state.default_draft.workspace = Some(DraftWorkspace {
+        mode: ThreadWorkspaceMode::Worktree,
+        branch: Some("stale".into()),
+        worktree_path: None,
+        start_from_origin: true,
+        start_from_origin_choice: Some(true),
+    });
+    state.default_draft.project_id = Some("stale-project".into());
+    state.default_draft.project_selected_at_ms = Some(1);
+    state.default_draft.created_at_ms = Some(2);
+
+    let mut owner = owner(state);
+    owner
+        .prepare(Intent::SetDefaultModel {
+            instance_id: "claude".into(),
+            driver: agent_domain::Driver::Claude,
+            model: "sonnet".into(),
+            options: vec![],
+        })
+        .unwrap();
+    let defaults = &owner.state.default_draft;
+    assert!(defaults.text.is_empty());
+    assert!(defaults.attachments.is_empty());
+    assert!(defaults.context.is_none());
+    assert!(defaults.workspace.is_none());
+    assert!(defaults.project_id.is_none());
+    assert!(defaults.project_selected_at_ms.is_none());
+    assert!(defaults.created_at_ms.is_none());
+
+    owner.state.default_draft.text = "stale again".into();
+    owner.state.default_draft.workspace = Some(DraftWorkspace {
+        mode: ThreadWorkspaceMode::Local,
+        branch: None,
+        worktree_path: None,
+        start_from_origin: false,
+        start_from_origin_choice: None,
+    });
+    owner
+        .prepare(Intent::SetDefaultRuntimeMode {
+            mode: agent_domain::RuntimeMode::ApprovalRequired,
+        })
+        .unwrap();
+    assert!(owner.state.default_draft.text.is_empty());
+    assert!(owner.state.default_draft.workspace.is_none());
+    assert_eq!(
+        owner.state.default_draft.runtime_mode,
+        agent_domain::RuntimeMode::ApprovalRequired
+    );
+}
+
+#[test]
+fn provider_instance_edit_writes_one_validated_host_settings_patch() {
+    let mut owner = owner(Snapshot {
+        host_settings: Some(agent_protocol::models::HostSettings::default()),
+        ..Snapshot::default()
+    });
+    let config = agent_protocol::models::ProviderInstanceConfig {
+        driver: agent_domain::Driver::Codex,
+        display_name: "Build".into(),
+        binary_path: Some("/opt/codex".into()),
+        environment: BTreeMap::from([("PROFILE".into(), "work".into())]),
+        custom_models: vec![agent_protocol::models::ProviderCustomModel {
+            slug: "reasoning".into(),
+            name: "Reasoning".into(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let map = BTreeMap::from([("build".into(), config.clone())]);
+    let next = owner
+        .prepare(Intent::SetProviderInstances {
+            provider_instances_json: serde_json::to_string(&map).unwrap(),
+        })
+        .unwrap();
+    let Next::Call(call, _) = next else {
+        panic!("provider edits must be sent to the Host");
+    };
+    let crate::protocol::Call::UpdateSettings(patch) = *call else {
+        panic!("provider edits must use host/settings/update");
+    };
+    assert_eq!(patch.provider_instances, Some(map));
+    assert_eq!(patch.provider_instances.as_ref().unwrap()["build"], config);
+}
+
+#[test]
+fn provider_instance_edit_rejects_invalid_environment_before_dispatch() {
+    let mut owner = owner(Snapshot {
+        host_settings: Some(agent_protocol::models::HostSettings::default()),
+        ..Snapshot::default()
+    });
+    let next = owner.prepare(Intent::SetProviderInstances {
+        provider_instances_json: serde_json::to_string(&BTreeMap::from([(
+            "build".into(),
+            agent_protocol::models::ProviderInstanceConfig {
+                environment: BTreeMap::from([("bad-name".into(), "x".into())]),
+                ..Default::default()
+            },
+        )]))
+        .unwrap(),
+    });
+    assert!(next.is_err());
+}
+
+#[test]
 fn preferences_change_on_the_device_and_survive_a_restart() {
     let mut owner = owner(Snapshot::default());
     for intent in [
@@ -2337,6 +2549,62 @@ fn each_new_thread_navigation_mints_an_independent_draft() {
 }
 
 #[test]
+fn changing_a_task_model_does_not_seed_the_next_task_with_task_state() {
+    use crate::view::projects::selection::ThreadWorkspaceMode;
+
+    let mut owner = owner(Snapshot {
+        default_draft: draft(),
+        ..Snapshot::default()
+    });
+    owner
+        .prepare(Intent::NewThread {
+            project_id: Some("first".into()),
+        })
+        .unwrap();
+    let first_key = owner.state.new_thread_draft_key();
+    let first = owner.state.drafts.get_mut(&first_key).unwrap();
+    first.text = "keep this task".into();
+    first.context = Some(agent_domain::MessageContext {
+        version: 1,
+        records: vec![],
+    });
+    first.workspace = Some(DraftWorkspace {
+        mode: ThreadWorkspaceMode::Worktree,
+        branch: Some("feature".into()),
+        worktree_path: None,
+        start_from_origin: true,
+        start_from_origin_choice: Some(true),
+    });
+
+    owner
+        .prepare(Intent::SetModel {
+            instance_id: "claude".into(),
+            driver: agent_domain::Driver::Claude,
+            model: "sonnet".into(),
+            options: vec![],
+        })
+        .unwrap();
+    assert_eq!(owner.state.drafts[&first_key].text, "keep this task");
+    assert!(owner.state.drafts[&first_key].context.is_some());
+    assert!(owner.state.drafts[&first_key].workspace.is_some());
+
+    owner
+        .prepare(Intent::NewThread {
+            project_id: Some("second".into()),
+        })
+        .unwrap();
+    let next = owner.state.current_draft();
+    assert_eq!(next.model, "sonnet");
+    assert_eq!(next.project_id.as_deref(), Some("second"));
+    assert!(next.text.is_empty());
+    assert!(next.attachments.is_empty());
+    assert!(next.context.is_none());
+    assert!(next.workspace.is_none());
+    assert!(next.project_selected_at_ms.is_some());
+    assert!(next.created_at_ms.is_none());
+}
+
+#[test]
 fn the_initial_new_thread_composer_gets_a_draft_identity_before_editing() {
     let mut owner = owner(Snapshot::default());
     owner
@@ -2535,15 +2803,15 @@ fn only_applies_the_start_from_origin_default_to_new_worktree_drafts() {
         .unwrap();
     assert!(!owner.state.new_thread_workspace().start_from_origin);
 
-    let mut settings = crate::models::ConversationSettings::default();
+    let mut settings = crate::models::HostSettings::default();
     settings.project_overrides.insert(
         "app".into(),
-        crate::models::ProjectConversationSettings {
+        crate::models::ProjectSettingsOverrides {
             new_worktrees_start_from_origin: Some(false),
             ..Default::default()
         },
     );
-    owner.state.conversation_settings = Some(settings);
+    owner.state.host_settings = Some(settings);
     owner
         .set_new_thread_workspace(ThreadWorkspaceMode::Worktree)
         .unwrap();
@@ -2852,6 +3120,7 @@ fn a_truncated_diff_with_its_file_list_is_read_file_by_file() {
     let preview = |owner: &mut Owner, millis: i64, source: w::DiffSource| {
         owner.state.sources.diff_preview = Some(DiffPreviewEntry {
             request: request.clone(),
+            active_cwd: request.cwd.clone(),
             result: None,
             error: None,
         });

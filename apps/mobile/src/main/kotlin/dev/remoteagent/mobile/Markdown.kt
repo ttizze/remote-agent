@@ -108,7 +108,7 @@ internal fun MarkdownText(
                     else Paragraph(block, color, contextChips, onOpenContext, actions.open)
                 is MarkdownBlock.Visualization ->
                     Text(block.path, style = AppTheme.caption, color = AppTheme.colors.foregroundMuted)
-                is MarkdownBlock.Table -> MarkdownTable(block, index)
+                is MarkdownBlock.Table -> MarkdownTable(block, index, contextChips, onOpenContext)
                 is MarkdownBlock.ArtifactTemplate -> ArtifactTemplateCard(block.template, onUseArtifactTemplate)
             }
         }
@@ -224,8 +224,7 @@ private fun Paragraph(
                         textRuns,
                         AppTheme.colors.mdLink,
                         open = { href ->
-                            val id = href.substringAfterLast('/')
-                            val chip = contextChips.firstOrNull { it.contextId == id }
+                            val chip = markdownContextChip(href, contextChips)
                             if (chip != null) onOpenContext(chip) else open(href)
                         },
                         header = block.style.header != null,
@@ -256,6 +255,7 @@ private fun CodeBlock(code: String) {
                     fontFamily = AppTheme.mono,
                     fontSize = AppTheme.markdownCodeFontSize.sp,
                     lineHeight = AppTheme.markdownCodeLineHeight.sp,
+                    softWrap = true,
                     color = AppTheme.colors.foreground,
                 )
             else
@@ -265,6 +265,7 @@ private fun CodeBlock(code: String) {
                     fontFamily = AppTheme.mono,
                     fontSize = AppTheme.markdownCodeFontSize.sp,
                     lineHeight = AppTheme.markdownCodeLineHeight.sp,
+                    softWrap = false,
                     color = AppTheme.colors.foreground,
                 )
         }
@@ -272,33 +273,64 @@ private fun CodeBlock(code: String) {
 }
 
 @Composable
-private fun MarkdownTable(table: MarkdownBlock.Table, index: Int) {
+private fun MarkdownTable(
+    table: MarkdownBlock.Table,
+    index: Int,
+    contextChips: List<ContextChip>,
+    onOpenContext: (ContextChip) -> Unit,
+) {
     val width = 220.dp * LocalDensity.current.fontScale
     val actions = LocalMarkdownActions.current
-    SelectionContainer {
-        Column(Modifier.horizontalScroll(rememberScrollState()).testTag("markdown.table.$index")) {
-            table.rows.forEachIndexed { row, cells ->
-                Row(Modifier.background(if (row == 0) AppTheme.colors.subtleStrong else Color.Transparent)) {
-                    cells.forEachIndexed { column, cell ->
-                        Text(
-                            markdownText(cell.runs, AppTheme.colors.mdLink, open = actions.open),
-                            Modifier.width(width).padding(10.dp).testTag("markdown.cell.$index.$row.$column"),
-                            style = AppTheme.caption,
-                            color = AppTheme.colors.foreground,
-                            textAlign =
-                                when (table.columns.getOrNull(column)) {
-                                    MarkdownAlignment.CENTER -> TextAlign.Center
-                                    MarkdownAlignment.RIGHT -> TextAlign.Right
-                                    else -> TextAlign.Left
-                                },
-                        )
+    BoxWithConstraints(Modifier.fillMaxWidth()) {
+        val wrapping = AppTheme.codeWordWrap
+        val cellWidth =
+            if (wrapping) maxWidth / table.columns.size.coerceAtLeast(1).toFloat()
+            else width
+        val tableWidth = if (wrapping) maxWidth else width * table.columns.size
+        SelectionContainer {
+            Column(
+                Modifier.then(if (wrapping) Modifier else Modifier.horizontalScroll(rememberScrollState()))
+                    .testTag("markdown.table.$index")
+            ) {
+                table.rows.forEachIndexed { row, cells ->
+                    Row(Modifier.background(if (row == 0) AppTheme.colors.subtleStrong else Color.Transparent)) {
+                        cells.forEachIndexed { column, cell ->
+                            Text(
+                                markdownText(
+                                    cell.runs,
+                                    AppTheme.colors.mdLink,
+                                    open = { href ->
+                                        val chip = markdownContextChip(href, contextChips)
+                                        if (chip != null) onOpenContext(chip) else actions.open(href)
+                                    },
+                                ),
+                                Modifier.width(cellWidth).padding(10.dp)
+                                    .testTag("markdown.cell.$index.$row.$column"),
+                                style = AppTheme.caption,
+                                color = AppTheme.colors.foreground,
+                                softWrap = wrapping,
+                                textAlign =
+                                    when (table.columns.getOrNull(column)) {
+                                        MarkdownAlignment.CENTER -> TextAlign.Center
+                                        MarkdownAlignment.RIGHT -> TextAlign.Right
+                                        else -> TextAlign.Left
+                                    },
+                            )
+                        }
                     }
+                    HorizontalDivider(Modifier.width(tableWidth), color = AppTheme.colors.mdHr)
                 }
-                HorizontalDivider(Modifier.width(width * table.columns.size), color = AppTheme.colors.mdHr)
             }
         }
     }
 }
+
+internal fun markdownContextChip(href: String, contextChips: List<ContextChip>): ContextChip? {
+    val id = markdownContextId(href)
+    return contextChips.firstOrNull { it.contextId == id }
+}
+
+internal fun markdownContextId(href: String): String = href.substringAfterLast('/')
 
 private fun markdownText(
     runs: List<MarkdownRun>,

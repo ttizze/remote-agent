@@ -22,21 +22,9 @@ pub enum ThreadRelationship {
     /// A delegated or provider-spawned child.
     Subagent,
 }
-/// A pull request linked to a thread. Pull request sync arrives in stage 6;
-/// until then the list is empty.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PullRequestLink {
-    pub host: String,
-    pub repository: String,
-    pub number: u64,
-    pub url: String,
-    /// `manual`, `created`, `agent`, `stack` or `stack-dismissed`.
-    pub source: String,
-    pub linked_at: Timestamp,
-}
 /// Version of the `ThreadShell` encoding and of how `shell` derives it.
 /// Stored rows with another value are rebuilt from facts.
-pub const SHELL_FORMAT: u32 = 1;
+pub const SHELL_FORMAT: u32 = 2;
 /// Message bodies stay in the thread detail; unread state is derived by
 /// clients from `last_visited_at` and the latest completion.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -83,7 +71,7 @@ pub struct ThreadShell {
     pub usage_limit_reset_at: Option<Timestamp>,
     pub limit_recovery: Option<LimitRecovery>,
     pub linked_pull_request: Option<LinkedPullRequest>,
-    pub pull_requests: Vec<PullRequestLink>,
+    pub pull_requests: Vec<crate::pull_requests::PullRequestLink>,
     pub pending_request: Option<PendingRequestSummary>,
     pub latest_user_message_at: Option<Timestamp>,
     pub latest_user_authored_message_at: Option<Timestamp>,
@@ -214,8 +202,15 @@ pub fn shell(state: &State) -> Option<ThreadShell> {
             .and_then(|(.., reset_at)| reset_at.clone()),
         last_error_class: failure.and_then(|(_, class, _)| class),
         limit_recovery: thread.limit_recovery.clone(),
-        linked_pull_request: thread.linked_pull_request.clone(),
-        pull_requests: vec![],
+        linked_pull_request: thread
+            .linked_pull_request
+            .clone()
+            .or_else(|| {
+                resolve_current_pull_request(&state.pull_requests)
+                    .as_ref()
+                    .map(crate::pull_requests::linked_pull_request)
+            }),
+        pull_requests: visible_pull_requests(&state.pull_requests),
         pending_request: state
             .requests
             .iter()

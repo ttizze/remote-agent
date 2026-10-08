@@ -7,6 +7,7 @@ extern crate self as agent_core;
 pub mod client;
 pub mod commands;
 pub mod connection;
+pub mod environment;
 mod js_text;
 mod ordering;
 pub mod persistence;

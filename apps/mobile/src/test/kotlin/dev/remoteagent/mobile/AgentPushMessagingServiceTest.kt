@@ -44,4 +44,10 @@ class AgentPushMessagingServiceTest {
         assertFalse(presentation.active)
         assertNull(parseActivityPresentation("x".repeat(4_097)))
     }
+
+    @Test
+    fun activityPresentationRejectsWrongJsonTypesWithoutThrowing() {
+        assertNull(parseActivityPresentation("""{"activeCount":{},"activities":[]}"""))
+        assertNull(parseActivityPresentation("""{"activeCount":1,"activities":{}}"""))
+    }
 }

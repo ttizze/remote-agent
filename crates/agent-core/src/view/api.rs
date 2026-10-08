@@ -1,12 +1,13 @@
 //! The conversation views apps render. Each getter calls one `view` function
 //! with the device state the snapshot holds.
 use crate::commands::build::FollowUpBehavior;
-use crate::state::{DraftAttachment, Snapshot};
+use crate::state::{Draft, DraftAttachment, ScheduledTaskDraft, Snapshot};
 use crate::view::{
     archived::{ArchivedOptions, ArchivedView, archived_view},
     attachments::{AttachmentAdmission, AttachmentCandidate},
     checkpoints::{DiffPanelSelection, DiffPanelView, checkpoint_summaries, diff_panel},
     composer::{
+        controls::{RuntimeModeChoice, runtime_mode_choices},
         menu::{ComposerMenuView, composer_menu},
         stash::{StashEntryView, stash_menu},
         view::ComposerOptions,
@@ -16,7 +17,7 @@ use crate::view::{
         ordering::FavoriteModel,
         picker::{ModelPickerOptions, ModelPickerView, PickerRail, model_picker},
         staging::{self, StagedModel},
-        traits::{TraitsView, traits},
+        traits::{TraitsView, select_trait, toggle_trait, traits},
     },
     new_thread::{NewThreadView, new_thread_view},
     projects::{
@@ -25,6 +26,7 @@ use crate::view::{
         picker::{ProjectPickerView, project_picker},
         scripts::{ProjectScriptsView, project_scripts},
     },
+    preview::PreviewView,
     search::{SearchOptions, SearchView, search_view},
     scheduled_tasks::{
         ScheduledTaskBranchView, ScheduledTaskListView, branch_view as scheduled_task_branch_view,
@@ -43,10 +45,15 @@ use crate::view::{
     thread::{ThreadView, ThreadViewOptions, selected_thread_view, thread_view},
     thread_arrangement::{ArrangementDrop, ArrangementOptions},
     thread_list::{ThreadListHolds, ThreadListOptions, ThreadListView, thread_list},
+    pull_requests::{
+        PullRequestDetailView, PullRequestDiffView, PullRequestListView,
+        PullRequestPanelOptions, pull_request_detail, pull_request_diff, pull_request_list,
+    },
     thread_menu::{ThreadMenuOptions, ThreadMenuView, thread_menu},
     time::TimestampFormat,
     timeline::mobile_follow::{LiveFollowEvent, StreamHaptic, StreamingMessageMark},
     timeline::rows::{TimelineRow, TimelineUpdate},
+    workspace_search::ContentSearchView,
 };
 use agent_domain::{Attachment, MessageContext, ThreadId};
 use chrono::{Local, TimeZone};
@@ -78,9 +85,35 @@ pub struct PreferencesView {
     pub working_section: bool,
     pub diff_ignore_whitespace: bool,
     pub follow_up: FollowUpBehavior,
+    pub notification_mode: crate::view::notifications::NotificationMode,
+    pub in_app_notifications_enabled: bool,
 }
 
 impl Snapshot {
+    pub fn pull_request_list(&self, options: PullRequestPanelOptions) -> PullRequestListView {
+        pull_request_list(self, &options)
+    }
+
+    pub fn pull_request_detail(
+        &self,
+        key: agent_domain::PullRequestKey,
+    ) -> Option<PullRequestDetailView> {
+        pull_request_detail(self, &key)
+    }
+
+    pub fn pull_request_diff(
+        &self,
+        key: agent_domain::PullRequestKey,
+    ) -> Option<PullRequestDiffView> {
+        pull_request_diff(self, &key)
+    }
+
+    pub fn preview(&self) -> PreviewView {
+        crate::view::preview::preview(self)
+    }
+    pub fn content_search(&self) -> ContentSearchView {
+        crate::view::workspace_search::content_search(self)
+    }
     fn picker_options(
         &self,
         query: String,
@@ -130,6 +163,34 @@ impl Snapshot {
     ) -> ScheduledTaskBranchView {
         scheduled_task_branch_view(self, &project_id, &selected_branch)
     }
+
+    pub fn usage_preferences(&self) -> crate::view::usage::UsagePreferences {
+        self.preferences.usage.clone()
+    }
+
+    pub fn usage_page(&self) -> crate::view::usage::UsagePageView {
+        crate::view::usage::usage_page(self)
+    }
+
+    pub fn usage_limits(&self) -> Vec<crate::view::usage::UsageLimitAccount> {
+        crate::view::usage::usage_limits(self.accounts.as_ref())
+    }
+
+    pub fn composer_usage_limits(
+        &self,
+        provider: crate::provider::ProviderKind,
+    ) -> Option<crate::view::usage::ComposerUsageLimits> {
+        crate::view::usage::composer_usage_limits(self.accounts.as_ref(), provider)
+    }
+
+    pub fn device(&self) -> crate::view::device::DeviceView {
+        crate::view::device::device_view(self)
+    }
+
+    pub fn usage_limit_pools(&self, now_ms: i64) -> Vec<crate::view::usage::UsageLimitPool> {
+        crate::view::usage::usage_limit_pools(self.accounts.as_ref(), now_ms)
+    }
+
     pub fn sidebar(&self, now_ms: i64, options: SidebarOptions) -> SidebarView {
         sidebar(
             self,
@@ -224,7 +285,7 @@ impl Snapshot {
     pub fn settings(&self, scope: SettingsScope) -> SettingsView {
         settings_view(
             self,
-            self.conversation_settings.as_ref(),
+            self.host_settings.as_ref(),
             &scope,
             self.preferences.timestamp_format,
         )
@@ -275,6 +336,73 @@ impl Snapshot {
         options: crate::view::models::catalog_sheet::CatalogSheetOptions,
     ) -> crate::view::models::catalog_sheet::CatalogSheetView {
         crate::view::models::catalog_sheet::catalog_sheet(self, &options)
+    }
+    fn scheduled_task_draft_as_composer(draft: &ScheduledTaskDraft) -> Draft {
+        Draft {
+            text: draft.prompt.clone(),
+            instance_id: draft.instance_id.clone(),
+            driver: draft.driver,
+            model: draft.model.clone(),
+            options: draft.options.clone(),
+            runtime_mode: draft.runtime_mode,
+            interaction_mode: draft.interaction_mode,
+            ..Draft::default()
+        }
+    }
+    /// The model option controls for a scheduled task draft.
+    pub fn scheduled_task_traits(&self, draft: ScheduledTaskDraft) -> TraitsView {
+        let composer = Self::scheduled_task_draft_as_composer(&draft);
+        traits(self, &composer, false)
+    }
+    /// Applies a model select option in a scheduled task draft.
+    pub fn select_scheduled_task_trait(
+        &self,
+        mut draft: ScheduledTaskDraft,
+        descriptor_id: String,
+        choice: String,
+    ) -> ScheduledTaskDraft {
+        let composer = Self::scheduled_task_draft_as_composer(&draft);
+        if let Some(change) = select_trait(
+            &catalog(self),
+            &composer,
+            false,
+            &descriptor_id,
+            &choice,
+        ) {
+            if let Some(options) = change.options {
+                draft.options = options;
+            }
+            if let Some(prompt) = change.text {
+                draft.prompt = prompt;
+            }
+        }
+        draft
+    }
+    /// Applies a model toggle option in a scheduled task draft.
+    pub fn toggle_scheduled_task_trait(
+        &self,
+        mut draft: ScheduledTaskDraft,
+        descriptor_id: String,
+        on: bool,
+    ) -> ScheduledTaskDraft {
+        let composer = Self::scheduled_task_draft_as_composer(&draft);
+        if let Some(change) = toggle_trait(&catalog(self), &composer, &descriptor_id, on) {
+            if let Some(options) = change.options {
+                draft.options = options;
+            }
+        }
+        draft
+    }
+    /// Runtime modes advertised by the selected provider for a scheduled task.
+    pub fn scheduled_task_runtime_modes(
+        &self,
+        draft: ScheduledTaskDraft,
+    ) -> Vec<RuntimeModeChoice> {
+        let catalog = catalog(self);
+        let supported = catalog
+            .instance(&draft.instance_id)
+            .map_or(&[][..], |instance| instance.supported_runtime_modes.as_slice());
+        runtime_mode_choices(supported)
     }
     pub fn traits(&self) -> TraitsView {
         traits(self, &self.current_draft(), true)
@@ -379,6 +507,8 @@ impl Snapshot {
             working_section: preferences.working_section,
             diff_ignore_whitespace: preferences.diff_ignore_whitespace,
             follow_up: self.follow_up,
+            notification_mode: preferences.notification_mode,
+            in_app_notifications_enabled: preferences.in_app_notifications_enabled,
         }
     }
     /// The project's icon; `None` shows its initials. Clients cache the image
@@ -401,8 +531,8 @@ impl Snapshot {
             .and_then(|entry| entry.icon.as_ref())
             .map(|icon| icon.hash.clone())
     }
-    pub fn conversation_settings_loaded(&self) -> bool {
-        self.conversation_settings.is_some()
+    pub fn host_settings_loaded(&self) -> bool {
+        self.host_settings.is_some()
     }
     /// The files of one draft, such as a question answer's.
     pub fn draft_attachments(&self, draft_key: String) -> Vec<DraftAttachment> {
@@ -598,6 +728,12 @@ pub fn markdown_line_target(line: u64, line_count: u64) -> Option<u64> {
     crate::presentation::markdown::links::markdown_line_target(line, line_count)
 }
 
+/// Whether a Host resource path should open in the PDF viewer.
+#[cfg_attr(feature = "bindings", uniffi::export)]
+pub fn is_pdf_file(path: String) -> bool {
+    crate::presentation::markdown::links::is_pdf_file(&path)
+}
+
 /// Defaults for the mobile-only appearance controls.
 #[cfg_attr(feature = "bindings", uniffi::export)]
 pub fn mobile_appearance_default() -> crate::view::appearance::MobileAppearance {
@@ -662,6 +798,22 @@ pub fn markdown_image_source(
     crate::view::work_log::media_source::classify_markdown_image_source(
         Some(&href),
         workspace_root.as_deref(),
+    )
+}
+
+/// Fits image or document pixels inside explicit rendering bounds.
+#[cfg_attr(feature = "bindings", uniffi::export)]
+pub fn fit_image_display_size(
+    source_width: f64,
+    source_height: f64,
+    max_width: f64,
+    max_height: f64,
+) -> Option<crate::presentation::markdown::image_size::ImageDisplaySize> {
+    crate::presentation::markdown::image_size::fit_image_display_size(
+        source_width,
+        source_height,
+        max_width,
+        max_height,
     )
 }
 

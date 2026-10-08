@@ -67,6 +67,7 @@ export async function runBridge(sdk, program, input, output) {
         query = sdk.query({ prompt: messages(), options: {
           ...options,
           pathToClaudeCodeExecutable: program,
+          executableArgs: process.argv.slice(3),
           cwd: process.cwd(),
           systemPrompt: { type: "preset", preset: "claude_code", append: body.appendSystemPrompt ?? "" },
           stderr: (text) => process.stderr.write(text),

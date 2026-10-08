@@ -3,6 +3,7 @@
 //! committed thread state.
 mod backend;
 mod catalog;
+mod diagnostics;
 mod orchestrator;
 mod project;
 mod read;
@@ -16,6 +17,7 @@ pub(crate) use catalog::read_only_tools;
 pub(crate) use catalog::tools;
 
 use agent_domain::{CommandId, Reply, State, ThreadId};
+use agent_protocol::device as device_protocol;
 use agent_protocol::models::ProviderInstance;
 use agent_transport::peer::{JsonlError, JsonlReader, JsonlWriter};
 use backend::Orchestration;
@@ -439,6 +441,7 @@ pub(crate) struct AgentTools {
     /// Serializes the destructive workspace handoff for each calling thread;
     /// two provider requests must not create competing unbound checkouts.
     handoffs: Arc<Mutex<HashSet<String>>>,
+    devices: Arc<crate::device::DeviceService>,
 }
 
 impl AgentTools {
@@ -446,7 +449,15 @@ impl AgentTools {
         Self {
             backend,
             handoffs: Arc::default(),
+            devices: crate::device::DeviceService::new(
+                std::env::temp_dir().join("remote-agent-device-tools"),
+            ),
         }
+    }
+
+    pub(crate) fn with_devices(mut self, devices: Arc<crate::device::DeviceService>) -> Self {
+        self.devices = devices;
+        self
     }
 
     /// One tool call as an MCP `CallToolResult`.
@@ -498,6 +509,15 @@ impl AgentTools {
             "worktree_list" => self.worktree_list(scope, &input).await,
             "worktree_status" => self.worktree_status(scope).await,
             "worktree_handoff" => self.worktree_handoff(scope, &input).await,
+            "background_status" => self.background_status(scope).await,
+            "host_resources" => self.host_resources(scope).await,
+            "process_diagnostics" => self.process_diagnostics(scope).await,
+            "process_resource_history" => self.process_resource_history(scope, &input).await,
+            "trace_diagnostics" => self.trace_diagnostics(scope, &input).await,
+            "device_list" => self.device_list(scope, &input).await,
+            "device_open" => self.device_open(scope, &input).await,
+            "device_screenshot" => self.device_screenshot(scope, &input).await,
+            "device_close" => self.device_close(scope, &input).await,
             _ => {
                 return error_content(&format!("Tool {name} not found"));
             }
@@ -507,6 +527,213 @@ impl AgentTools {
 
     async fn state(&self, thread: &ThreadId) -> Result<Arc<State>, String> {
         self.backend.state(thread).await
+    }
+
+    async fn device_list(&self, scope: Scope<'_>, input: &Value) -> Outcome {
+        let host_id = input.get("hostId").and_then(Value::as_str).map(str::to_owned);
+        let current = self.devices.state_async().await;
+        if current.host_status == device_protocol::DeviceHostStatus::Disabled {
+            return Err(failure(
+                "device_unavailable",
+                "Device support is off. Enable it in the Device panel first.",
+            ));
+        }
+        if !current.agent_access_enabled {
+            return Err(failure(
+                "device_unavailable",
+                "Agent device access is off. Enable it in the Device panel first.",
+            ));
+        }
+        let state = self
+            .devices
+            .list(device_protocol::DeviceListInput::default())
+            .await
+            .map_err(|error| failure("device_list_failed", error))?;
+        let open = state
+            .sessions
+            .iter()
+            .filter(|session| session.thread_id == *scope.thread)
+            .map(|session| json!({"hostId": session.host_id, "deviceId": session.device_id}))
+            .collect::<Vec<_>>();
+        Ok(json!({
+            "hostStatuses": state.host_statuses.iter().filter(|(id, _)| host_id.as_ref().is_none_or(|host| host == *id)).map(|(id, status)| (id.clone(), json!({"status": device_host_status_name(status.status), "detail": status.detail}))).collect::<serde_json::Map<_, _>>(),
+            "hosts": state.hosts.iter().filter(|host| host_id.as_ref().is_none_or(|id| id == &host.id)).map(device_host_json).collect::<Vec<_>>(),
+            "devices": state.devices.iter().filter(|device| host_id.as_ref().is_none_or(|id| id == &device.host_id)).map(device_summary_json).collect::<Vec<_>>(),
+            "open": open,
+        }))
+    }
+
+    async fn device_open(&self, scope: Scope<'_>, input: &Value) -> Outcome {
+        let host_id = input
+            .get("hostId")
+            .and_then(Value::as_str)
+            .unwrap_or(device_protocol::LOCAL_DEVICE_HOST_ID)
+            .to_owned();
+        let requested_device = input.get("deviceId").and_then(Value::as_str);
+        let requested_platform = input.get("platform").and_then(Value::as_str);
+        let current = self.devices.state_async().await;
+        if current.host_status == device_protocol::DeviceHostStatus::Disabled {
+            return Err(failure(
+                "device_unavailable",
+                "Device support is off. Enable it in the Device panel first.",
+            ));
+        }
+        if !current.agent_access_enabled {
+            return Err(failure(
+                "device_unavailable",
+                "Agent device access is off. Enable it in the Device panel first.",
+            ));
+        }
+        let state = self
+            .devices
+            .list(device_protocol::DeviceListInput::default())
+            .await
+            .map_err(|error| failure("device_list_failed", error))?;
+        let platform = requested_platform.map(parse_device_platform).transpose()?;
+        let candidates = state
+            .devices
+            .iter()
+            .filter(|device| {
+                device.host_id == host_id
+                    && requested_device.is_none_or(|id| id == device.id)
+                    && platform.is_none_or(|platform| platform == device.platform)
+            })
+            .collect::<Vec<_>>();
+        if candidates.is_empty() {
+            return Err(failure(
+                "device_unavailable",
+                format!("No matching device was found on host {host_id}. Call device_list for current ids."),
+            ));
+        }
+        if requested_device.is_none() && platform.is_none() {
+            let platforms = candidates
+                .iter()
+                .map(|device| device.platform)
+                .collect::<std::collections::BTreeSet<_>>();
+            if platforms.len() > 1 {
+                return Err(invalid("Both iOS and Android devices are available; pass platform or deviceId."));
+            }
+        }
+        let target = candidates
+            .iter()
+            .find(|device| device.booted)
+            .copied()
+            .unwrap_or(candidates[0]);
+        // Resolve consent and the helper endpoint before booting. This keeps
+        // a missing agent installation from powering up a device that cannot
+        // be driven by the tool result.
+        let agent = match self
+            .devices
+            .agent_device_target(target.host_id.as_str(), scope.thread, target.id.as_str())
+            .await
+        {
+            Ok(Some(agent)) => agent,
+            Ok(None) => {
+                return Err(failure(
+                    "device_agent_unavailable",
+                    format!("Agent device access is not bootstrapped for host {}.", target.host_id),
+                ));
+            }
+            Err(error) => return Err(failure("device_agent_unavailable", error)),
+        };
+        let session = self
+            .devices
+            .open(device_protocol::DeviceOpenInput {
+                thread_id: scope.thread.clone(),
+                host_id: Some(target.host_id.clone()),
+                device_id: target.id.clone(),
+                platform: target.platform,
+                boot: true,
+            })
+            .await
+            .map_err(|error| failure("device_open_failed", error))?;
+        let device = self
+            .devices
+            .state_async()
+            .await
+            .devices
+            .into_iter()
+            .find(|device| device.host_id == session.host_id && device.id == session.device_id)
+            .unwrap_or_else(|| (*target).clone());
+        let mut target_args = device_protocol::agent_device_target_args(&device);
+        target_args.extend(agent.target_args.iter().cloned());
+        Ok(json!({
+            "device": device_summary_json(&device),
+            "agentDevice": {"command": agent.command, "targetArgs": target_args},
+            "quickStart": device_quick_start(&device, &target_args, &agent.command),
+        }))
+    }
+
+    async fn device_screenshot(&self, scope: Scope<'_>, input: &Value) -> Outcome {
+        let state = self.devices.state_async().await;
+        if state.host_status == device_protocol::DeviceHostStatus::Disabled {
+            return Err(failure(
+                "device_unavailable",
+                "Device support is off. Enable it in the Device panel first.",
+            ));
+        }
+        if !state.agent_access_enabled {
+            return Err(failure(
+                "device_unavailable",
+                "Agent device access is off. Enable it in the Device panel first.",
+            ));
+        }
+        let host_id = input.get("hostId").and_then(Value::as_str);
+        let device_id = input.get("deviceId").and_then(Value::as_str);
+        let target = if let Some(device_id) = device_id {
+            (host_id.unwrap_or(device_protocol::LOCAL_DEVICE_HOST_ID), device_id.to_owned())
+        } else {
+            let sessions = self.devices.sessions_for_thread(scope.thread).await;
+            let session = sessions
+                .iter()
+                .rev()
+                .find(|session| host_id.is_none_or(|host| host == session.host_id))
+                .ok_or_else(|| failure("device_unavailable", "No device is open in this thread. Call device_open first."))?;
+            (session.host_id.as_str(), session.device_id.clone())
+        };
+        let shot = self
+            .devices
+            .screenshot(device_protocol::DeviceScreenshotInput {
+                host_id: Some(target.0.to_owned()),
+                device_id: target.1,
+            })
+            .await
+            .map_err(|error| failure("device_screenshot_failed", error))?;
+        Ok(json!({
+            "device": device_summary_json(&shot.device),
+            "screenshot": {
+                "mimeType": "image/png",
+                "data": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, shot.png),
+                "width": shot.width,
+                "height": shot.height,
+            }
+        }))
+    }
+
+    async fn device_close(&self, scope: Scope<'_>, input: &Value) -> Outcome {
+        let state = self.devices.state_async().await;
+        if state.host_status == device_protocol::DeviceHostStatus::Disabled {
+            return Err(failure(
+                "device_unavailable",
+                "Device support is off. Enable it in the Device panel first.",
+            ));
+        }
+        if !state.agent_access_enabled {
+            return Err(failure(
+                "device_unavailable",
+                "Agent device access is off. Enable it in the Device panel first.",
+            ));
+        }
+        self.devices
+            .close(device_protocol::DeviceCloseInput {
+                thread_id: scope.thread.clone(),
+                host_id: input.get("hostId").and_then(Value::as_str).map(str::to_owned),
+                device_id: input.get("deviceId").and_then(Value::as_str).map(str::to_owned),
+                shutdown: input.get("shutdown").and_then(Value::as_bool).unwrap_or(false),
+            })
+            .await
+            .map_err(|error| failure("device_close_failed", error))?;
+        Ok(json!({}))
     }
     /// A command already handled replays its receipt whatever it now carries: a
     /// retry resolves its dispatch mode or target run from the current state,
@@ -533,4 +760,118 @@ impl AgentTools {
             _ => Ok(dispatched.sequence),
         }
     }
+}
+
+fn parse_device_platform(value: &str) -> Result<device_protocol::DevicePlatform, ToolError> {
+    match value {
+        "ios" => Ok(device_protocol::DevicePlatform::Ios),
+        "android" => Ok(device_protocol::DevicePlatform::Android),
+        _ => Err(invalid("platform must be ios or android")),
+    }
+}
+
+fn device_platform_name(platform: device_protocol::DevicePlatform) -> &'static str {
+    match platform {
+        device_protocol::DevicePlatform::Ios => "ios",
+        device_protocol::DevicePlatform::Android => "android",
+    }
+}
+
+fn device_host_kind_name(kind: device_protocol::DeviceHostKind) -> &'static str {
+    match kind {
+        device_protocol::DeviceHostKind::Local => "local",
+        device_protocol::DeviceHostKind::Ssh => "ssh",
+    }
+}
+
+fn device_host_status_name(status: device_protocol::DeviceHostStatus) -> &'static str {
+    match status {
+        device_protocol::DeviceHostStatus::Disabled => "disabled",
+        device_protocol::DeviceHostStatus::Idle => "idle",
+        device_protocol::DeviceHostStatus::Installing => "installing",
+        device_protocol::DeviceHostStatus::Starting => "starting",
+        device_protocol::DeviceHostStatus::Ready => "ready",
+        device_protocol::DeviceHostStatus::Failed => "failed",
+    }
+}
+
+fn device_summary_json(device: &device_protocol::DeviceSummary) -> Value {
+    json!({
+        "hostId": device.host_id,
+        "id": device.id,
+        "platform": device_platform_name(device.platform),
+        "name": device.name,
+        "version": device.version,
+        "booted": device.booted,
+        "physical": device.physical,
+    })
+}
+
+fn device_host_json(host: &device_protocol::DeviceHostSummary) -> Value {
+    json!({
+        "id": host.id,
+        "kind": device_host_kind_name(host.kind),
+        "label": host.label,
+        "platforms": host.platforms.iter().map(|platform| json!({
+            "platform": device_platform_name(platform.platform),
+            "available": platform.available,
+            "reason": platform.reason,
+        })).collect::<Vec<_>>(),
+        "tools": host.tools.as_ref().map(|tools| json!({
+            "hub": device_tool_version_json(&tools.hub),
+            "agent": device_tool_version_json(&tools.agent),
+        })),
+        "toolInspectionError": host.tool_inspection_error,
+        "hubInstalled": host.hub_installed,
+        "agentDeviceInstalled": host.agent_device_installed,
+    })
+}
+
+fn device_tool_version_json(version: &device_protocol::DeviceToolVersion) -> Value {
+    json!({
+        "requiredVersion": version.required_version,
+        "installedVersions": version.installed_versions,
+        "runningVersion": version.running_version,
+    })
+}
+
+fn device_quick_start(device: &device_protocol::DeviceSummary, target_args: &[String], command: &str) -> String {
+    let quote = |value: &str| {
+        if value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._/:-".contains(&byte))
+        {
+            value.to_owned()
+        } else {
+            format!("'{}'", value.replace('\'', "'\\''"))
+        }
+    };
+    let executable = quote(command);
+    let target = target_args.iter().map(|arg| quote(arg)).collect::<Vec<_>>().join(" ");
+    let platform_note = match device.platform {
+        device_protocol::DevicePlatform::Ios => "First use builds an XCTest runner and can take a couple of minutes; later commands are fast.",
+        device_protocol::DevicePlatform::Android => "The Android snapshot helper installs itself on first use.",
+    };
+    format!(
+        "The user is watching {} ({}).\nDrive it with {}. Use this exact executable path; login shells may reset PATH. Always pass {}.\nTypical loop:\n  {} open <bundle-or-package-id> {}     # or: open <app> <deep-link-url>\n  {} snapshot -i {}                     # accessibility tree with @eN refs\n  {} click @e3 {}\n  {} fill @e5 \"text\" {}\n  {} screenshot /tmp/shot.png {}        # or call device_screenshot\n  {} install <app> <path-to-.app-or-.apk> {}\nPrefer snapshot refs over coordinates. Run {} help for workflow guides and {} <command> --help for flags.\nPrefer agent-device for driving this device. simctl, adb, and xcrun remain available for anything it does not cover.\nFor remote hosts, arrange builds, app installation, and any Metro reverse forwarding yourself. The host provides discovery, streaming, and control only.\nKeep the returned --config and --session flags on every command. Other hosts can be used concurrently; opening one does not switch these commands.\n{}",
+        device.name,
+        device.version,
+        executable,
+        target,
+        executable,
+        target,
+        executable,
+        target,
+        executable,
+        target,
+        executable,
+        target,
+        executable,
+        target,
+        executable,
+        target,
+        executable,
+        executable,
+        platform_note,
+    )
 }

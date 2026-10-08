@@ -45,6 +45,7 @@ impl Owner {
             }
             StreamKey::Thread(_) => tokio::spawn(follow(target, call, Payload::Thread)),
             StreamKey::Setup(_) => tokio::spawn(follow(target, call, Payload::Setup)),
+            StreamKey::Preview(_) => tokio::spawn(follow(target, call, Payload::Preview)),
             StreamKey::TerminalMetadata => {
                 tokio::spawn(follow(target, call, Payload::TerminalMetadata))
             }
@@ -56,6 +57,9 @@ impl Owner {
             StreamKey::ScheduledTasks => {
                 tokio::spawn(follow(target, call, Payload::ScheduledTasks))
             }
+            StreamKey::Awareness => tokio::spawn(follow(target, call, Payload::Awareness)),
+            StreamKey::Background => tokio::spawn(follow(target, call, Payload::Background)),
+            StreamKey::Device(_) => tokio::spawn(follow(target, call, Payload::Device)),
         };
         let failures = network
             .streams
@@ -114,6 +118,7 @@ impl Owner {
                     Call::SubscribeThread(request),
                 );
                 self.subscribe_setup(thread);
+                self.subscribe_preview(thread);
             }
             None => self.close_thread_streams(thread),
         }
@@ -124,6 +129,20 @@ impl Owner {
             StreamKey::Setup(thread.clone()),
             Call::SetupStream(SubscribeSetup {
                 thread_id: thread.clone(),
+            }),
+        );
+    }
+
+    /// The selected thread's Host-owned Preview tabs and local-server cards.
+    pub(super) fn subscribe_preview(&mut self, thread: &ThreadId) {
+        if !self.connected() {
+            return;
+        }
+        self.open_stream(
+            StreamKey::Preview(thread.clone()),
+            Call::PreviewSubscribe(agent_protocol::preview::PreviewSubscribe {
+                thread_id: thread.clone(),
+                configured_urls: self.state.preview.configured_urls.clone(),
             }),
         );
     }
@@ -203,6 +222,41 @@ impl Owner {
         );
     }
 
+    /// The authenticated Host's live activity for threads running there.
+    pub(super) fn subscribe_awareness(&mut self) {
+        if !self.connected() {
+            return;
+        }
+        self.open_stream(
+            StreamKey::Awareness,
+            Call::Awareness(agent_protocol::models::Empty {}),
+        );
+    }
+
+    /// The Host's background policy and power snapshot, followed by semantic
+    /// lease or power changes.
+    pub(super) fn subscribe_background(&mut self) {
+        if !self.connected() {
+            return;
+        }
+        self.open_stream(
+            StreamKey::Background,
+            Call::SubscribeBackground(agent_protocol::models::Empty {}),
+        );
+    }
+
+    pub(super) fn subscribe_device(&mut self, thread: &ThreadId) {
+        if !self.connected() {
+            return;
+        }
+        self.open_stream(
+            StreamKey::Device(thread.clone()),
+            Call::DeviceSubscribe(agent_protocol::device::DeviceSubscribeInput {
+                thread_id: thread.clone(),
+            }),
+        );
+    }
+
     fn terminal_metadata(&mut self, event: agent_protocol::operations::TerminalMetadataEvent) {
         use agent_protocol::operations::TerminalMetadataEvent as Metadata;
         let terminals = &mut self.state.terminal_metadata;
@@ -236,6 +290,8 @@ impl Owner {
     fn close_thread_streams(&mut self, thread: &ThreadId) {
         self.close_stream(&StreamKey::Thread(thread.clone()));
         self.close_stream(&StreamKey::Setup(thread.clone()));
+        self.close_stream(&StreamKey::Preview(thread.clone()));
+        self.close_stream(&StreamKey::Device(thread.clone()));
     }
 
     /// The archive is subscribed only while it is shown.
@@ -323,6 +379,8 @@ impl Owner {
         }
         self.subscribe_git_statuses();
         self.subscribe_scheduled_tasks();
+        self.subscribe_background();
+        self.refresh_accounts_if_due(super::owner::now_ms());
     }
 
     pub(super) fn subscribe_git_statuses(&mut self) {
@@ -396,11 +454,23 @@ impl Owner {
                     self.subscribe_setup(&thread);
                 }
             }
+            StreamKey::Preview(thread) => {
+                if self.state.selected_thread.as_ref() == Some(&thread) {
+                    self.subscribe_preview(&thread);
+                }
+            }
             StreamKey::TerminalMetadata => self.subscribe_terminal_metadata(),
             StreamKey::Keybindings => self.subscribe_keybindings(),
             StreamKey::VcsStatus(cwd) => self.subscribe_vcs_status(cwd),
             StreamKey::GitAction(_) => {}
             StreamKey::ScheduledTasks => self.subscribe_scheduled_tasks(),
+            StreamKey::Awareness => self.subscribe_awareness(),
+            StreamKey::Background => self.subscribe_background(),
+            StreamKey::Device(thread) => {
+                if self.state.selected_thread.as_ref() == Some(&thread) {
+                    self.subscribe_device(&thread);
+                }
+            }
         }
     }
 
@@ -435,6 +505,10 @@ impl Owner {
                 self.healthy(&StreamKey::Setup(thread.clone()));
                 self.setup_update(&thread, setup);
             }
+            (StreamKey::Preview(thread), Payload::Preview(snapshot)) => {
+                self.healthy(&StreamKey::Preview(thread));
+                self.state.preview.apply_list(snapshot);
+            }
             (StreamKey::TerminalMetadata, Payload::TerminalMetadata(event)) => {
                 self.healthy(&StreamKey::TerminalMetadata);
                 self.terminal_metadata(event);
@@ -459,9 +533,22 @@ impl Owner {
                 if terminal {
                     self.close_stream(&key);
                 }
+            }
             (StreamKey::ScheduledTasks, Payload::ScheduledTasks(list)) => {
                 self.healthy(&StreamKey::ScheduledTasks);
                 self.state.scheduled_tasks = list.tasks;
+            }
+            (StreamKey::Awareness, Payload::Awareness(snapshot)) => {
+                self.healthy(&StreamKey::Awareness);
+                self.state.awareness = Some(snapshot);
+            }
+            (StreamKey::Background, Payload::Background(snapshot)) => {
+                self.healthy(&StreamKey::Background);
+                self.state.background_policy = Some(snapshot);
+            }
+            (StreamKey::Device(thread), Payload::Device(event)) => {
+                self.healthy(&StreamKey::Device(thread));
+                self.state.device.apply_event(event);
             }
             _ => {}
         }
@@ -492,8 +579,12 @@ impl Owner {
                 | StreamKey::TerminalMetadata
                 | StreamKey::Keybindings
                 | StreamKey::VcsStatus(_)
-                | StreamKey::GitAction(_) => {}
-                | StreamKey::ScheduledTasks => {}
+                | StreamKey::GitAction(_)
+                | StreamKey::Preview(_)
+                | StreamKey::ScheduledTasks
+                | StreamKey::Awareness
+                | StreamKey::Background
+                | StreamKey::Device(_) => {}
             }
             self.schedule_resubscribe(key);
             return;
@@ -515,9 +606,38 @@ impl Owner {
         update: ThreadUpdate,
     ) -> Option<bool> {
         let failed = matches!(update, ThreadUpdate::Failed(_));
-        let sync = self.state.threads.get_mut(thread)?;
-        let applied = Arc::make_mut(sync).apply(vec![update]);
+        let (applied, state_after) = {
+            let sync = self.state.threads.get_mut(thread)?;
+            let applied = Arc::make_mut(sync).apply(vec![update]);
+            (applied, sync.state.clone())
+        };
         let deleted = applied.deleted;
+        let should_publish = failed
+            || self.state.selected_thread.as_ref() != Some(thread)
+            || crate::view::streaming::should_publish(
+                self.state.host_settings.as_ref().map_or(
+                    agent_protocol::models::ResponseStreamingMode::Paragraph,
+                    |host| {
+                        let project = self
+                            .state
+                            .threads
+                            .get(thread)
+                            .and_then(|sync| sync.state.as_ref())
+                            .and_then(|state| state.thread.as_ref())
+                            .map(|thread| thread.project.as_str());
+                        crate::view::settings::resolve_project_settings(host, project)
+                            .response_streaming_mode
+                            .0
+                    },
+                ),
+                state_after.as_deref(),
+            );
+        self.stream_publish_deferred = !should_publish;
+        if should_publish {
+            self.stream_publish_pending = false;
+        } else {
+            self.stream_publish_pending = true;
+        }
         self.thread_applied(thread, applied);
         failed.then_some(deleted)
     }
@@ -531,6 +651,7 @@ impl Owner {
         if !applied.changed {
             return;
         }
+        self.reconcile_pull_request_links(location);
         if location == ShellLocation::Active
             && let Some(snapshot) = &self.state.shell.snapshot
         {
@@ -543,6 +664,35 @@ impl Owner {
         if location == ShellLocation::Active {
             self.refresh_project_icons();
             self.ensure_selected_vcs_status();
+        }
+    }
+
+    /// Shell rows are the durable projection seen by every native surface.
+    /// Keep the client operation cache aligned with them so a restarted client
+    /// can render link/watch controls before its next explicit RPC.
+    fn reconcile_pull_request_links(&mut self, location: ShellLocation) {
+        let rows = match location {
+            ShellLocation::Active => self
+                .state
+                .shell
+                .snapshot
+                .as_ref()
+                .map(|snapshot| snapshot.threads.clone()),
+            ShellLocation::Archived => self
+                .state
+                .archived
+                .as_ref()
+                .and_then(|cache| cache.snapshot.as_ref())
+                .map(|snapshot| snapshot.threads.clone()),
+        };
+        let Some(rows) = rows else {
+            return;
+        };
+        for row in rows {
+            self.state
+                .pull_requests
+                .links_by_thread
+                .insert(row.id, row.pull_requests);
         }
     }
 

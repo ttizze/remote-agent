@@ -10,7 +10,10 @@ use crate::{
     ShellSubscription, SqliteOutbox, Store, SystemClock, ThreadSubscribe, ThreadSubscription,
     ThreadView, TranscriptFs, WorkerOptions, WorkspaceFence, with_runtime_handlers,
 };
-use agent_domain::{Command, CommandId, Input, RecoveryTrigger, ResolvedPlan, ThreadId};
+use agent_domain::{
+    Command, CommandId, Input, PullRequestState, RecoveryTrigger, Reply, ResolvedPlan, State,
+    ThreadId,
+};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -105,6 +108,44 @@ pub struct Runtime {
     lifecycle: tokio::sync::Mutex<()>,
     background: Mutex<Background>,
     sweeps: crate::sweep::Sweeps,
+}
+
+fn merged_link_transition(before: Option<&State>, link: &agent_domain::PullRequestLink) -> bool {
+    if link
+        .snapshot
+        .as_ref()
+        .is_none_or(|summary| summary.state != PullRequestState::Merged)
+    {
+        return false;
+    }
+    before
+        .and_then(|state| {
+            state
+                .pull_requests
+                .iter()
+                .find(|candidate| candidate.key() == link.key())
+        })
+        .and_then(|candidate| candidate.snapshot.as_ref())
+        .is_none_or(|summary| summary.state != PullRequestState::Merged)
+}
+
+fn merged_pull_request_transition(
+    before: &Option<Arc<State>>,
+    command: &Command,
+) -> bool {
+    let before = before.as_deref();
+    match command {
+        Command::SyncPullRequests { links } => links
+            .iter()
+            .any(|link| merged_link_transition(before, link)),
+        Command::LinkPullRequest { link } | Command::SyncPullRequestLink { link } => {
+            merged_link_transition(before, link)
+        }
+        Command::ResolveBranchPullRequest { link: Some(link) } => {
+            merged_link_transition(before, link)
+        }
+        _ => false,
+    }
 }
 
 impl Runtime {
@@ -367,6 +408,73 @@ impl Runtime {
         self.registry()
             .dispatch(&thread, id, command, CommandOrigin::Client)
             .await
+    }
+
+    /// A Host-owned command. Provider reactors and durable sync services use
+    /// this path for commands that clients must never be able to forge.
+    pub async fn dispatch_host(
+        &self,
+        thread: ThreadId,
+        id: CommandId,
+        command: Command,
+    ) -> Result<Committed, RuntimeError> {
+        let _admitted = self.admit().await?;
+        let merge_command_id = id.clone();
+        let merge_transition = merged_pull_request_transition(
+            &self.registry().state(&thread).await.ok(),
+            &command,
+        );
+        let committed = self
+            .registry()
+            .dispatch(&thread, id, command, CommandOrigin::Internal)
+            .await?;
+        if merge_transition && matches!(committed.reply, Reply::Accepted) {
+            let project = self
+                .registry()
+                .state(&thread)
+                .await
+                .ok()
+                .and_then(|state| state.thread.as_ref().map(|thread| thread.project.clone()));
+            if let Some(project) = project {
+                match self.executors.ops.pull_request_merged(&thread, &project) {
+                    Ok(true) => {
+                        let snapshot_at = self
+                            .registry()
+                            .state(&thread)
+                            .await
+                            .ok()
+                            .and_then(|state| state.thread.as_ref().map(|thread| thread.updated_at.clone()));
+                        if let Some(snapshot_at) = snapshot_at {
+                            let settle_id = CommandId::new(format!(
+                                "{}:merged-settle",
+                                merge_command_id
+                            ))
+                            .expect("merged settlement command ids are nonempty");
+                            if let Err(error) = self
+                                .registry()
+                                .dispatch(
+                                    &thread,
+                                    settle_id,
+                                    Command::SettleAutomatically {
+                                        snapshot_at,
+                                        settled_at: None,
+                                    },
+                                    CommandOrigin::Internal,
+                                )
+                                .await
+                            {
+                                tracing::warn!(%thread, %error, "merged pull request settlement failed");
+                            }
+                        }
+                    }
+                    Ok(false) => {}
+                    Err(error) => {
+                        tracing::warn!(%thread, %project, %error, "merged pull request settlement check failed");
+                    }
+                }
+            }
+        }
+        Ok(committed)
     }
 
     /// Facts the state machine of one thread cannot read itself: another

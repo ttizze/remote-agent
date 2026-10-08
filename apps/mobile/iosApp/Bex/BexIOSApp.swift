@@ -1,5 +1,6 @@
 import AgentCore
 import SwiftUI
+import UIKit
 
 @main
 struct BexIOSApp: App {
@@ -11,20 +12,28 @@ struct BexIOSApp: App {
     var body: some Scene {
         WindowGroup {
             BexSwiftUIRoot(model: model)
+                .onReceive(NotificationCenter.default.publisher(for: .remoteAgentShortcut)) { notification in
+                    if notification.userInfo?["type"] as? String == "new-thread" { model.handleShortcut() }
+                }
                 .onAppear {
-                    model.setActivityUpdater { [weak pushCenter] contentState in
+                    model.ingestIncomingShareHandoffs()
+                    if AgentPushCenter.takePendingShortcut() == "new-thread" { model.handleShortcut() }
+                    model.setActivityUpdater { [weak pushCenter] states in
                         guard #available(iOS 16.1, *) else { return }
                         Task { @MainActor in
-                            await pushCenter?.reconcileActivity(contentState: contentState)
+                            await pushCenter?.reconcileActivities(states: states)
                         }
                     }
                     pushCenter.configure(
-                        register: { [weak model] registration in model?.registerPush(registration) },
-                        setActive: { [weak model] deviceId, active in
-                            model?.setPushActive(deviceId: deviceId, active: active)
+                        register: { [weak model] hostId, registration in
+                            model?.registerPush(hostId: hostId, registration: registration)
                         },
+                        setActive: { [weak model] hostId, deviceId, active in
+                            model?.setPushActive(hostId: hostId, deviceId: deviceId, active: active)
+                        },
+                        hostIds: { [weak model] in model?.pushHostIds() ?? [] },
                         visibleThread: { [weak model] in model?.visiblePushThreadDeepLink() },
-                        preferences: { [weak model] in model?.pushPreferences() ?? .default }
+                        preferences: { [weak model] hostId in model?.pushPreferences(hostId: hostId) ?? .default },
                     )
                 }
                 .onChange(of: scenePhase) { _, phase in
@@ -35,21 +44,26 @@ struct BexIOSApp: App {
                         let application = UIApplication.shared
                         var backgroundTask: UIBackgroundTaskIdentifier = .invalid
                         backgroundTask = application.beginBackgroundTask {
-                            if backgroundTask !=
-                                .invalid {
-                                application.endBackgroundTask(backgroundTask); backgroundTask = .invalid
+                            if backgroundTask != .invalid {
+                                application.endBackgroundTask(backgroundTask)
+                                backgroundTask = .invalid
                             }
                         }
                         Task {
                             await model.persistBeforeBackground()
-                            if backgroundTask !=
-                                .invalid {
-                                application.endBackgroundTask(backgroundTask); backgroundTask = .invalid
+                            if backgroundTask != .invalid {
+                                application.endBackgroundTask(backgroundTask)
+                                backgroundTask = .invalid
                             }
                         }
                     case .active where wasBackgrounded:
                         wasBackgrounded = false
+                        model.ingestIncomingShareHandoffs()
+                        pushCenter.refreshPreferences()
                         model.connect(afterForeground: true)
+                    case .active:
+                        model.ingestIncomingShareHandoffs()
+                        pushCenter.refreshPreferences()
                     default:
                         break
                     }

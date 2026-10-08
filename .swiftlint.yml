@@ -1,5 +1,8 @@
 included:
   - apps/mobile/iosApp/Bex
+  - apps/mobile/iosApp/Shared
+  - apps/mobile/iosApp/ActivityExtension
+  - apps/mobile/iosApp/ShareExtension
 
 strict: true
 check_for_updates: false

@@ -148,12 +148,20 @@ struct EnvironmentScopeMenu: View {
 
     var body: some View {
         Menu {
-            ForEach(model.profiles) { profile in
-                Button { model.selectProfile(profile.id) } label: {
-                    if profile.id == model.selectedProfileId {
-                        Label(profile.name, systemImage: "checkmark")
+            ForEach(model.environmentSettings(), id: \.environmentId) { environment in
+                Button {
+                    if let profile = model.environments.first(where: {
+                        $0.environmentId == environment.environmentId
+                    }) {
+                        model.selectProfile(profile.profileId)
+                    }
+                } label: {
+                    if model.environments.first(where: {
+                        $0.environmentId == environment.environmentId
+                    })?.profileId == model.selectedProfileId {
+                        Label(environment.environmentLabel, systemImage: "checkmark")
                     } else {
-                        Text(profile.name)
+                        Text(environment.environmentLabel)
                     }
                 }
             }

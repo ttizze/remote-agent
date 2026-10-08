@@ -39,10 +39,22 @@ class MainActivity : ComponentActivity() {
             model.refreshPushRegistration()
         }
 
+    internal fun requestNotificationPermissionIfNeeded() {
+        if (
+            android.os.Build.VERSION.SDK_INT >= 33 &&
+                model.notificationsEnabled() &&
+                checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) !=
+                    PackageManager.PERMISSION_GRANTED
+        ) {
+            requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1001)
+        }
+    }
+
     override fun onResume() {
         super.onResume()
         localNetworkGranted =
             checkSelfPermission(Manifest.permission.ACCESS_LOCAL_NETWORK) == PackageManager.PERMISSION_GRANTED
+        requestNotificationPermissionIfNeeded()
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
@@ -52,6 +64,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        handleSurfaceIntent(intent)
         continueOverInternet = savedInstanceState?.getBoolean("continueOverInternet") ?: false
         intent?.let(model::openPushDeepLink)
         setContent {
@@ -96,5 +109,32 @@ class MainActivity : ComponentActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         intent.let(model::openPushDeepLink)
+        handleSurfaceIntent(intent)
+    }
+
+    private fun handleSurfaceIntent(intent: Intent) {
+        when (intent.action) {
+            Intent.ACTION_SEND -> {
+                val text = intent.getStringExtra(Intent.EXTRA_TEXT) ?: intent.dataString.orEmpty()
+                val urls = buildList {
+                    intent.getStringExtra(Intent.EXTRA_STREAM)?.let(::add)
+                    intent.clipData?.let { clip ->
+                        repeat(clip.itemCount) { index -> clip.getItemAt(index).uri?.toString()?.let(::add) }
+                    }
+                }
+                model.importShare(text, urls)
+            }
+            Intent.ACTION_VIEW if intent.data?.scheme == "remote-agent" -> {
+                when (intent.data?.host) {
+                    "new" -> model.newThreadFromShortcut()
+                    "share" -> {
+                        val uri = intent.data ?: return
+                        val text = uri.getQueryParameter("text").orEmpty()
+                        val url = uri.getQueryParameter("url")
+                        model.importShare(text, listOfNotNull(url))
+                    }
+                }
+            }
+        }
     }
 }

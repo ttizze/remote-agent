@@ -1,7 +1,9 @@
 //! Device-owned state core keeps in one file per Host: drafts, navigation,
-//! settings and commands the Host has not confirmed. Host data lives in the
-//! disk cache.
+//! settings, commands the Host has not confirmed, and the last Host identity
+//! needed to render environment views while offline. Conversation data lives
+//! in the disk cache.
 use crate::commands::{build::FollowUpBehavior, outbox::Outbox};
+use crate::models::EnvironmentDescriptor;
 use crate::state::{Draft, PendingRollback, Preferences, Shared, Snapshot};
 use crate::view::composer::stash::PromptStash;
 use agent_domain::{CommandId, ThreadId};
@@ -31,12 +33,15 @@ struct LocalState {
     rollbacks: BTreeMap<CommandId, PendingRollback>,
     preferences: Preferences,
     stash: PromptStash,
+    /// The last authenticated Host identity, retained for offline environment views.
+    #[serde(default)]
+    environment: Option<EnvironmentDescriptor>,
 }
 
 pub(crate) fn encode(snapshot: &Snapshot) -> Result<Vec<u8>, serde_json::Error> {
     serde_json::to_vec(&LocalState {
         drafts: (*snapshot.drafts).clone(),
-        default_draft: snapshot.default_draft.clone(),
+        default_draft: snapshot.default_draft.user_defaults(),
         follow_up: snapshot.follow_up,
         selected_thread: snapshot.selected_thread.clone(),
         selected_project: snapshot.selected_project.clone(),
@@ -45,6 +50,7 @@ pub(crate) fn encode(snapshot: &Snapshot) -> Result<Vec<u8>, serde_json::Error> 
         rollbacks: snapshot.rollbacks.clone(),
         preferences: snapshot.preferences.clone(),
         stash: (*snapshot.stash).clone(),
+        environment: snapshot.environment.clone(),
     })
 }
 
@@ -56,7 +62,7 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<Snapshot, serde_json::Error> {
     };
     Ok(Snapshot {
         drafts: local.drafts.into(),
-        default_draft: local.default_draft,
+        default_draft: local.default_draft.user_defaults(),
         follow_up: local.follow_up,
         selected_thread: local.selected_thread,
         selected_project: local.selected_project,
@@ -65,12 +71,13 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<Snapshot, serde_json::Error> {
         rollbacks: local.rollbacks,
         preferences: local.preferences,
         stash: local.stash.into(),
+        environment: local.environment,
         ..Snapshot::default()
     })
 }
 
 pub fn encode_model_preferences(snapshot: &Snapshot) -> Result<Vec<u8>, serde_json::Error> {
-    serde_json::to_vec(&snapshot.default_draft)
+    serde_json::to_vec(&snapshot.default_draft.user_defaults())
 }
 
 /// The device state saved at `path` with the model `defaults` every Host
@@ -123,7 +130,7 @@ fn recover(saved: Option<&[u8]>, defaults: &[u8]) -> Snapshot {
         });
     if !defaults.is_empty() {
         match serde_json::from_slice(defaults) {
-            Ok(draft) => state.default_draft = draft,
+            Ok(draft) => state.default_draft = draft.user_defaults(),
             Err(_) => {
                 state.error =
                     Some("Saved model preferences could not be read. Choose a model again.".into())
@@ -138,7 +145,6 @@ fn recover(saved: Option<&[u8]>, defaults: &[u8]) -> Snapshot {
             }
         }
     }
-    state.default_draft.attachments.clear();
     state.stash.settle_pending_images();
     state
 }
@@ -156,6 +162,7 @@ struct Saved {
     open_new_thread_draft: Option<String>,
     rollbacks: BTreeMap<CommandId, PendingRollback>,
     preferences: Preferences,
+    environment: Option<EnvironmentDescriptor>,
 }
 impl Saved {
     fn of(snapshot: &Snapshot) -> Self {
@@ -163,13 +170,14 @@ impl Saved {
             drafts: snapshot.drafts.clone(),
             outbox: snapshot.outbox.clone(),
             stash: snapshot.stash.clone(),
-            default_draft: snapshot.default_draft.clone(),
+            default_draft: snapshot.default_draft.user_defaults(),
             follow_up: snapshot.follow_up,
             selected_thread: snapshot.selected_thread.clone(),
             selected_project: snapshot.selected_project.clone(),
             open_new_thread_draft: snapshot.open_new_thread_draft.clone(),
             rollbacks: snapshot.rollbacks.clone(),
             preferences: snapshot.preferences.clone(),
+            environment: snapshot.environment.clone(),
         }
     }
     fn same(&self, other: &Self) -> bool {
@@ -183,6 +191,7 @@ impl Saved {
             && self.open_new_thread_draft == other.open_new_thread_draft
             && self.rollbacks == other.rollbacks
             && self.preferences == other.preferences
+            && self.environment == other.environment
     }
 }
 
@@ -351,6 +360,42 @@ mod tests {
         );
     }
 
+    fn environment_descriptor() -> EnvironmentDescriptor {
+        EnvironmentDescriptor {
+            environment_id: "environment-id".into(),
+            label: "Offline Host".into(),
+            cwd: "/workspace/project".into(),
+            platform: crate::models::EnvironmentPlatform {
+                os: "linux".into(),
+                arch: "x64".into(),
+                machine: Some("desktop".into()),
+            },
+            server_version: "1.2.3".into(),
+            orchestration_protocol_version: Some(2),
+            capabilities: crate::models::EnvironmentCapabilities {
+                usage_limit_sources: true,
+                environment_icon: true,
+                ..Default::default()
+            },
+        }
+    }
+
+    #[test]
+    fn environment_identity_roundtrips_for_offline_views() {
+        let mut state = Snapshot::default();
+        state.environment = Some(environment_descriptor());
+
+        let restored = decode(&encode(&state).unwrap()).unwrap();
+
+        assert_eq!(restored.environment, state.environment);
+        let mut registry = crate::environment::EnvironmentRegistry::default();
+        assert_eq!(
+            registry.update(Arc::new(restored)),
+            Some("environment-id".into())
+        );
+        assert_eq!(registry.summaries()[0].descriptor, environment_descriptor());
+    }
+
     fn queued(id: &str) -> PendingCommand {
         let thread = ThreadId::new("thread").unwrap();
         PendingCommand::new(
@@ -402,6 +447,19 @@ mod tests {
         writer.written(false, 300);
         assert!(writer.changed());
         assert_eq!(writer.next_due(), Some(300 + STATE_RETRY_MS));
+    }
+
+    #[test]
+    fn environment_identity_changes_schedule_a_device_state_write() {
+        let mut state = Snapshot::default();
+        let mut writer = StateWriter::restored(&state);
+        writer.observe(&state, 0);
+        assert_eq!(writer.next_due(), None);
+
+        state.environment = Some(environment_descriptor());
+        writer.observe(&state, 100);
+
+        assert_eq!(writer.next_due(), Some(100 + STATE_WRITE_DELAY_MS));
     }
 
     #[test]

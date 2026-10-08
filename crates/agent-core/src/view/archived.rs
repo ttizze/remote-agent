@@ -331,7 +331,7 @@ pub fn archived_view(snapshot: &Snapshot, now_ms: i64, options: &ArchivedOptions
                 || (cache.status == ShellStatus::Empty && cache.error.is_none())
         }
     };
-    let environment_label = snapshot.host_name.as_deref();
+    let environment_label = snapshot.environment_display_label();
     let groups: Vec<_> = cache
         .and_then(|cache| cache.snapshot.as_ref())
         .map(|shell| {

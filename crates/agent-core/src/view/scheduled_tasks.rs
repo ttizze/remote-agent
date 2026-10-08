@@ -14,6 +14,7 @@ use agent_protocol::{
     scheduled_tasks::{ScheduledTask, UpsertScheduledTask},
 };
 use super::new_thread::{branch_badge, BranchChoice};
+use super::models::default_model;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
@@ -191,32 +192,41 @@ pub fn branch_view(
     }
 }
 
+fn provider_can_run(provider: &crate::models::ProviderInstance) -> bool {
+    provider.enabled
+        && provider.installed
+        && provider.unavailable_reason.is_none()
+        && !matches!(
+            provider.status,
+            crate::models::ProviderStatus::Error | crate::models::ProviderStatus::Disabled
+        )
+}
+
+fn selectable_selection(snapshot: &Snapshot, selection: &ModelSelection) -> bool {
+    snapshot.providers.as_ref().is_some_and(|providers| {
+        providers.iter().any(|provider| {
+            provider.instance == selection.instance
+                && provider.driver == selection.driver
+                && provider_can_run(provider)
+                && provider
+                    .models
+                    .iter()
+                    .any(|model| model.slug == selection.model)
+        })
+    })
+}
+
 fn selection(snapshot: &Snapshot, task: Option<&ScheduledTask>) -> ModelSelection {
     if let Some(task) = task {
         return task.selection.clone();
     }
-    if let Ok(selection) = snapshot.default_draft.selection() {
+    if let Ok(selection) = snapshot.default_draft.selection()
+        && selectable_selection(snapshot, &selection)
+    {
         return selection;
     }
-    snapshot
-        .providers
-        .as_ref()
-        .into_iter()
-        .flat_map(|providers| providers.iter())
-        .filter(|provider| provider.enabled)
-        .flat_map(|provider| provider.models.iter().map(move |model| (provider, model)))
-        .find(|(_, model)| model.is_default)
-        .or_else(|| {
-            snapshot
-                .providers
-                .as_ref()
-                .into_iter()
-                .flat_map(|providers| providers.iter())
-                .filter(|provider| provider.enabled)
-                .flat_map(|provider| provider.models.iter().map(move |model| (provider, model)))
-                .next()
-        })
-        .map_or(
+
+    snapshot.providers.as_deref().and_then(default_model).map_or(
             ModelSelection {
                 instance: String::new(),
                 driver: Driver::Codex,
@@ -610,6 +620,34 @@ mod tests {
                 weekdays: vec![1, 2, 3, 4, 5],
             }
         );
+    }
+
+    #[test]
+    fn a_new_task_ignores_a_disabled_default_provider() {
+        use crate::view::models::fixtures::{host_instance, host_model};
+
+        let mut disabled = host_instance(
+            "codex_disabled",
+            Driver::Codex,
+            vec![host_model("gpt-disabled", "Disabled")],
+        );
+        disabled.enabled = false;
+        let available = host_instance(
+            "codex_available",
+            Driver::Codex,
+            vec![host_model("gpt-available", "Available")],
+        );
+        let mut snapshot = Snapshot {
+            providers: Some(vec![disabled, available]),
+            ..Snapshot::default()
+        };
+        snapshot.default_draft.instance_id = "codex_disabled".into();
+        snapshot.default_draft.driver = Driver::Codex;
+        snapshot.default_draft.model = "gpt-disabled".into();
+
+        let draft = draft(&snapshot, None);
+        assert_eq!(draft.instance_id, "codex_available");
+        assert_eq!(draft.model, "gpt-available");
     }
 
     #[test]

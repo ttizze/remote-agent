@@ -5,6 +5,7 @@ import UIKit
 struct BexSwiftUIRoot: View {
     @ObservedObject var model: BexAppViewModel
     @State private var appearanceRevision = 0
+    @State private var showingUsage = false
 
     var body: some View {
         _ = appearanceRevision
@@ -13,7 +14,7 @@ struct BexSwiftUIRoot: View {
                 NavigationStack { pairingScreen }
             } else if model.screen == .profiles || model.screen == .pairing {
                 NavigationStack {
-                    ProfilesScreen(profiles: model.profiles, notice: model.notice,
+                    ProfilesScreen(profiles: model.profiles, environments: model.environments, notice: model.notice,
                                    select: model.selectProfile, remove: model.removeProfile, add: model.openPairing)
                 }
                 .sheet(isPresented: Binding(
@@ -40,7 +41,25 @@ struct BexSwiftUIRoot: View {
             guard let deepLink = notification.object as? String else { return }
             openPushDeepLink(deepLink)
         }
-        .onOpenURL { openPushDeepLink($0.absoluteString) }
+        .onOpenURL {
+            let value = $0.absoluteString
+            if AgentPushCenter.isUsageDeepLink(value) {
+                model.openUsageDeepLink()
+            } else if let target = AgentPushCenter.threadTarget(from: value) {
+                model.openPushThread(hostId: target.hostId, threadId: target.threadId)
+            } else {
+                model.handleSurfaceURL($0)
+            }
+        }
+        .onChange(of: model.usageDeepLinkRequests) { _, count in
+            if count > 0 { showingUsage = true }
+        }
+        .sheet(isPresented: $showingUsage) {
+            NavigationStack {
+                UsageScreen(model: model, initialTab: .limits)
+                    .onAppear { model.consumeUsageDeepLinkRequest() }
+            }
+        }
         .sheet(isPresented: $model.isScanning) {
             QRScannerSheet { model.scanned($0) }
                 .interactiveDismissDisabled()
@@ -71,6 +90,7 @@ struct BexSwiftUIRoot: View {
 /// Screens pushed over a thread.
 enum ThreadRoute: Hashable {
     case thread
+    case device
     case terminal(String?, UUID)
     case files
     case review
@@ -120,7 +140,10 @@ private struct WorkspaceRoot: View {
     }
 
     private func list(sidebar: Bool) -> some View {
-        ThreadListScreen(model: model, sidebar: sidebar, openSettings: { showingSettings = true }, newTask: newTask,
+        ThreadListScreen(model: model, sidebar: sidebar, openSettings: { projectId in
+            _ = model.selectScopedValue(projectId)
+            showingSettings = true
+        }, newTask: newTask,
                          showNewTaskDraft: showNewTaskDraft)
     }
 
@@ -144,7 +167,8 @@ private struct WorkspaceRoot: View {
         ThreadScreen(model: model, routes: ThreadRoutes(
             terminal: { routes.append(.terminal($0, UUID())) },
             files: { routes.append(.files) },
-            review: { routes.append(.review) }
+            review: { routes.append(.review) },
+            device: { routes.append(.device) }
         ))
     }
 
@@ -167,6 +191,10 @@ private struct WorkspaceRoot: View {
         switch route {
         case .thread:
             threadScreen
+        case .device:
+            if let threadId = model.selectedThreadId {
+                DeviceScreen(model: model, threadId: threadId)
+            }
         case let .terminal(terminal, _):
             if let thread = model.selectedThreadId {
                 TerminalScreen(model: model, threadId: thread, terminalId: terminal)

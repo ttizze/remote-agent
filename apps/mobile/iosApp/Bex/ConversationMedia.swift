@@ -62,7 +62,7 @@ enum MarkdownLinkURL {
             guard let root, let links else { return .handled }
             Haptics.selection()
             let target = FileTarget(path: (root as NSString).appendingPathComponent(path), displayPath: path, line: line)
-            if path.lowercased().hasSuffix(".pdf"), let openPDF = links.openPDF {
+            if isPdfFile(path: path), let openPDF = links.openPDF {
                 openPDF(target)
             } else {
                 links.openFile(target)
@@ -71,7 +71,7 @@ enum MarkdownLinkURL {
             guard let links else { return .handled }
             Haptics.selection()
             let target = FileTarget(path: path, displayPath: path, line: line)
-            if path.lowercased().hasSuffix(".pdf"), let openPDF = links.openPDF {
+            if isPdfFile(path: path), let openPDF = links.openPDF {
                 openPDF(target)
             } else {
                 links.openFile(target)
@@ -256,8 +256,9 @@ struct ThreadFileSheet: View {
 
     private func source(_ text: String) -> some View {
         let lines = text.components(separatedBy: "\n")
+        let wrapping = AppTheme.codeWordWrap
         return ScrollViewReader { reader in
-            ScrollView([.vertical, .horizontal]) {
+            ScrollView(wrapping ? .vertical : [.vertical, .horizontal]) {
                 LazyVStack(alignment: .leading, spacing: 0) {
                     ForEach(Array(lines.enumerated()), id: \.offset) { index, line in
                         HStack(alignment: .top, spacing: 12) {
@@ -265,10 +266,11 @@ struct ThreadFileSheet: View {
                                 .foregroundStyle(AppTheme.tertiary)
                                 .frame(minWidth: 36, alignment: .trailing)
                             Text(line.isEmpty ? " " : line).font(AppTheme.mono(13)).foregroundStyle(AppTheme.text)
-                                .fixedSize()
+                                .fixedSize(horizontal: !wrapping, vertical: false)
+                                .frame(maxWidth: wrapping ? .infinity : nil, alignment: .leading)
                         }
                         .padding(.horizontal, 12).padding(.vertical, 1)
-                        .frame(minHeight: AppTheme.codeLineHeight, alignment: .top)
+                        .frame(maxWidth: wrapping ? .infinity : nil, minHeight: AppTheme.codeLineHeight, alignment: .top)
                         .background(UInt64(index + 1) == target.line ? AppTheme.primary.opacity(0.12) : .clear)
                         .id(index + 1)
                     }

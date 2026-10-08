@@ -633,6 +633,9 @@ struct BranchRename {
 async fn rename_branch(context: ExecutorContext, thread: ThreadId, rename: BranchRename) {
     let renamed = async {
         let naming = context.ops.branch_naming(&rename.project);
+        let generation = context
+            .ops
+            .text_generation_settings(&rename.project, "generateBranchName");
         let raw = context
             .ops
             .generate_text(TextGenerationRequest {
@@ -641,6 +644,8 @@ async fn rename_branch(context: ExecutorContext, thread: ThreadId, rename: Branc
                 cwd: rename.worktree.clone(),
                 prompt: branch_name_prompt(&naming, &rename.text, &rename.attachments),
                 attachments: rename.attachments.clone(),
+                model: generation.model,
+                instructions: generation.instructions,
                 output_schema: branch_name_output_schema(),
             })
             .await?;

@@ -124,7 +124,10 @@ impl ClaudeProgram {
                 include_str!("sdk/bridge.mjs").into(),
                 path.to_string_lossy().into_owned(),
                 self.program.to_string_lossy().into_owned(),
-            ],
+            ]
+            .into_iter()
+            .chain(self.launch_args.iter().cloned())
+            .collect(),
             env: self.environment(credentials_home),
             clear_env: true,
             cwd: cwd.to_owned(),

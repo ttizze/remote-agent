@@ -6,7 +6,8 @@ use super::{
 };
 use crate::{peer::PeerError, protocol::Call, state::*};
 use agent_protocol::{
-    conversation as c, models as m, operations as op, scheduled_tasks as st, workspace as w,
+    background as bg, conversation as c, device as d, models as m, operations as op,
+    pull_requests as pr, scheduled_tasks as st, workspace as w,
 };
 use std::sync::Arc;
 use tokio::sync::oneshot;
@@ -31,13 +32,24 @@ pub(super) enum Reply {
     WorktreeSettings(m::WorktreeSettings),
     Worktrees(Vec<m::Worktree>),
     Accounts(op::Accounts),
+    UsageSummary(agent_protocol::usage::Summary),
+    UsagePricing(agent_protocol::usage::Pricing),
     Login(op::AccountLogin),
     HostStatus(m::HostStatus),
+    UpdateStatus(m::UpdateState),
+    NativeUpdate(m::NativeUpdateState),
     Remotes(Vec<m::RemoteHost>),
     Remote(m::RemoteHost),
     Invitation(m::Invitation),
+    PreviewList(agent_protocol::preview::PreviewListResult),
+    PreviewSession(agent_protocol::preview::PreviewSessionSnapshot),
+    PreviewRecordingStatus(agent_protocol::preview::PreviewRecordingStatus),
+    PreviewRecordingArtifact(agent_protocol::preview::PreviewRecordingArtifact),
+    ContentSearch(agent_protocol::workspace::ContentSearch),
+    Environment(m::EnvironmentDescriptor),
+    AwarenessRegistration(m::AwarenessRegistrationResult),
     Transcription(String),
-    ConversationSettings(m::ConversationSettings),
+    HostSettings(m::HostSettings),
     SessionScan(c::SessionScan),
     ProviderCommands(w::ProviderCommands),
     EntrySearch(w::EntrySearch),
@@ -49,6 +61,19 @@ pub(super) enum Reply {
     ResolvedPullRequest(agent_protocol::vcs::ResolvedPullRequestResult),
     PreparedPullRequestThread(agent_protocol::vcs::PreparedPullRequestThread),
     PublishedRepository(agent_protocol::vcs::PublishedRepository),
+    PullRequestList(pr::PullRequestList),
+    PullRequestDetail(agent_domain::PullRequestDetail),
+    PullRequestDiff(pr::PullRequestDiff),
+    PullRequestDiffFileContents(pr::PullRequestDiffFileContents),
+    PullRequestFile(pr::PullRequestFile),
+    PullRequestViewedFiles(pr::PullRequestViewedFiles),
+    PullRequestOperation(pr::PullRequestOperation),
+    PullRequestAuth(pr::SourceControlAuth),
+    PullRequestDiscovery(pr::SourceControlDiscovery),
+    DeviceState(d::DeviceServiceState),
+    DeviceSession(d::DeviceSession),
+    DeviceDetail(d::DeviceDetail),
+    DeviceScreenshot(d::DeviceScreenshot),
     SetupCancelled(c::SetupCancelled),
     ProjectIcon(Option<m::ProjectFavicon>),
     SwitchedRef(w::SwitchedRef),
@@ -56,6 +81,11 @@ pub(super) enum Reply {
     ScheduledTasks(st::ScheduledTaskList),
     ScheduledTask(st::ScheduledTask),
     ScheduledTaskRef(st::ScheduledTaskRef),
+    Background(bg::BackgroundPolicySnapshot),
+    HostResources(bg::HostResourcesSnapshot),
+    ProcessDiagnostics(bg::ProcessDiagnosticsResult),
+    ProcessResourceHistory(bg::ProcessResourceHistoryResult),
+    TraceDiagnostics(bg::TraceDiagnosticsResult),
     Done,
 }
 
@@ -72,8 +102,8 @@ async fn execute(peer: &Peer, call: &Call) -> Result<Reply, PeerError> {
             Reply::WorktreeSettings(peer.request(call).await?)
         }
         Call::ListWorktrees(_) => Reply::Worktrees(peer.request(call).await?),
-        Call::ReadConversationSettings(_) | Call::UpdateConversationSettings(_) => {
-            Reply::ConversationSettings(peer.request(call).await?)
+        Call::ReadSettings(_) | Call::UpdateSettings(_) => {
+            Reply::HostSettings(peer.request(call).await?)
         }
         Call::ScanAgentSessions(_) => Reply::SessionScan(peer.request(call).await?),
         Call::ProviderCommands(_) => Reply::ProviderCommands(peer.request(call).await?),
@@ -94,17 +124,74 @@ async fn execute(peer: &Peer, call: &Call) -> Result<Reply, PeerError> {
         Call::RunStackedAction(_) | Call::SubscribeVcsStatus(_) => Reply::Done,
         Call::ListRefs(_) => Reply::Refs(peer.request(call).await?),
         Call::DiffPreview(_) => Reply::DiffPreview(peer.request(call).await?),
+        Call::ListPullRequests(_) => Reply::PullRequestList(peer.request(call).await?),
+        Call::GetPullRequest(_) => Reply::PullRequestDetail(peer.request(call).await?),
+        Call::GetPullRequestDiff(_) => Reply::PullRequestDiff(peer.request(call).await?),
+        Call::GetPullRequestDiffFileContents(_) => {
+            Reply::PullRequestDiffFileContents(peer.request(call).await?)
+        }
+        Call::GetPullRequestFile(_) => Reply::PullRequestFile(peer.request(call).await?),
+        Call::GetPullRequestViewedFiles(_) | Call::SetPullRequestFilesViewed(_) => {
+            Reply::PullRequestViewedFiles(peer.request(call).await?)
+        }
+        Call::LinkPullRequest(_)
+        | Call::UnlinkPullRequest(_)
+        | Call::SetPullRequestWatch(_)
+        | Call::PullRequestAction(_)
+        | Call::SubmitPullRequestReview(_) => Reply::PullRequestOperation(peer.request(call).await?),
+        Call::SourceControlAuth(_) => Reply::PullRequestAuth(peer.request(call).await?),
+        Call::SourceControlDiscovery(_) => Reply::PullRequestDiscovery(peer.request(call).await?),
+        Call::DeviceList(_) | Call::DeviceConfigure(_) | Call::DeviceHosts(_) => {
+            Reply::DeviceState(peer.request(call).await?)
+        }
+        Call::DeviceOpen(_) => Reply::DeviceSession(peer.request(call).await?),
+        Call::DeviceDetail(_) | Call::DeviceAction(_) => {
+            Reply::DeviceDetail(peer.request(call).await?)
+        }
+        Call::DeviceScreenshot(_) => Reply::DeviceScreenshot(peer.request(call).await?),
+        Call::DeviceClose(_) | Call::DeviceShutdown(_) => {
+            let _: m::Empty = peer.request(call).await?;
+            Reply::Done
+        }
+        Call::DeviceSubscribe(_) => unreachable!("device subscriptions use the stream owner"),
         Call::ProjectFavicon(_) => Reply::ProjectIcon(peer.request(call).await?),
         Call::SwitchRef(_) | Call::CreateRef(_) => Reply::SwitchedRef(peer.request(call).await?),
         Call::UpsertKeybinding(_) | Call::RemoveKeybinding(_) => {
             Reply::Keybindings(peer.request(call).await?)
         }
         Call::ListAccounts(_) => Reply::Accounts(peer.request(call).await?),
+        Call::ReadUsageSummary(_) => Reply::UsageSummary(peer.request(call).await?),
+        Call::RefreshUsageRates(_) => Reply::UsagePricing(peer.request(call).await?),
         Call::StartAccountLogin(_) => Reply::Login(peer.request(call).await?),
         Call::HostStatus(_) => Reply::HostStatus(peer.request(call).await?),
+        Call::ReadUpdateStatus(_)
+        | Call::CheckUpdate(_)
+        | Call::DownloadUpdate(_)
+        | Call::InstallUpdate(_)
+        | Call::SetUpdateChannel(_) => Reply::UpdateStatus(peer.request(call).await?),
+        Call::ReadNativeUpdate(_) => Reply::NativeUpdate(peer.request(call).await?),
         Call::ListRemotes(_) => Reply::Remotes(peer.request(call).await?),
         Call::RegisterRemote(_) => Reply::Remote(peer.request(call).await?),
         Call::Invite(_) => Reply::Invitation(peer.request(call).await?),
+        Call::PreviewList(_) => Reply::PreviewList(peer.request(call).await?),
+        Call::PreviewOpen(_)
+        | Call::PreviewNavigate(_)
+        | Call::PreviewResize(_)
+        | Call::PreviewSetAppearance(_)
+        | Call::PreviewSetZoom(_) => Reply::PreviewSession(peer.request(call).await?),
+        Call::PreviewRecordingStart(_) => {
+            Reply::PreviewRecordingStatus(peer.request(call).await?)
+        }
+        Call::PreviewRecordingStop(_) => {
+            Reply::PreviewRecordingArtifact(peer.request(call).await?)
+        }
+        Call::PreviewReportStatus(_) | Call::PreviewClose(_) | Call::PreviewRefresh(_) => {
+            let _: m::Empty = peer.request(call).await?;
+            Reply::Done
+        }
+        Call::SearchContents(_) => Reply::ContentSearch(peer.request(call).await?),
+        Call::Environment(_) => Reply::Environment(peer.request(call).await?),
+        Call::RegisterAwareness(_) => Reply::AwarenessRegistration(peer.request(call).await?),
         Call::Transcribe(_) => {
             Reply::Transcription(peer.request::<op::Transcription>(call).await?.text)
         }
@@ -124,6 +211,20 @@ async fn execute(peer: &Peer, call: &Call) -> Result<Reply, PeerError> {
         }
         Call::ListScheduledTasks(_) => Reply::ScheduledTasks(peer.request(call).await?),
         Call::DeleteScheduledTask(_) => Reply::ScheduledTaskRef(peer.request(call).await?),
+        Call::ReadBackground(_)
+        | Call::UpdateBackgroundPolicy(_)
+        | Call::ReportClientActivity(_)
+        | Call::RemoveClientActivity(_) => Reply::Background(peer.request(call).await?),
+        Call::ReportHostPowerState(_) => {
+            let _: m::Empty = peer.request(call).await?;
+            Reply::Done
+        }
+        Call::ReadHostResources(_) => Reply::HostResources(peer.request(call).await?),
+        Call::ReadProcessDiagnostics(_) => Reply::ProcessDiagnostics(peer.request(call).await?),
+        Call::ReadProcessResourceHistory(_) => {
+            Reply::ProcessResourceHistory(peer.request(call).await?)
+        }
+        Call::ReadTraceDiagnostics(_) => Reply::TraceDiagnostics(peer.request(call).await?),
         _ => {
             let _: m::Empty = peer.request(call).await?;
             Reply::Done
@@ -140,13 +241,15 @@ pub fn turn_review(diff: c::TurnDiff) -> crate::models::WorkspaceReview {
 
 impl Owner {
     pub(super) fn refresh(&mut self) {
-        for call in [
-            Call::ListProviders(m::Empty {}),
-            Call::ListAccounts(m::Empty {}),
-            Call::ReadConversationSettings(m::Empty {}),
-        ] {
-            self.job(call, None, None);
-        }
+        self.job(Call::ListProviders(m::Empty {}), None, None);
+        self.job(Call::ReadSettings(m::Empty {}), None, None);
+        self.refresh_accounts_if_due(super::owner::now_ms());
+    }
+
+    /// A replacement Network keeps the five-minute quota attempt throttle; a
+    /// first connection still refreshes immediately because no attempt exists.
+    pub(super) fn refresh_after_attach(&mut self) {
+        self.refresh();
     }
 
     pub(super) fn job(
@@ -155,6 +258,18 @@ impl Owner {
         complete: Option<Waiter>,
         sent: Option<(String, Draft)>,
     ) {
+        let account_request = matches!(&call, Call::ListAccounts(_));
+        let previous_attempt = self.usage_refresh_last_attempt_ms;
+        if account_request {
+            if self.accounts_refresh_in_flight() {
+                if let Some(complete) = complete {
+                    let _ = complete.send(Err(invalid("Account refresh already in progress")));
+                }
+                return;
+            }
+            self.accounts_refresh_in_flight_epoch = Some(self.epoch);
+            self.usage_refresh_last_attempt_ms = Some(super::owner::now_ms());
+        }
         let diff_generation = matches!(&call, Call::DiffPreview(_))
             .then_some(self.state.sources.diff_generation);
         let sender = self.sender.clone();
@@ -170,6 +285,11 @@ impl Owner {
         let network = match self.network() {
             Ok(network) => network,
             Err(error) => {
+                self.preview_recording_failed(&call);
+                if account_request {
+                    self.accounts_refresh_in_flight_epoch = None;
+                    self.usage_refresh_last_attempt_ms = previous_attempt;
+                }
                 if let Some(complete) = complete {
                     self.state.error = Some(error.to_string());
                     let _ = complete.send(Err(error));
@@ -253,10 +373,10 @@ impl Owner {
         };
         let peer = network.peer.clone();
         network.spawn(async move {
-            let result = match request.validate() {
-                Ok(()) => peer.request(&Call::Browser(request)).await,
-                Err(error) => Err(invalid(error)),
-            };
+            // The Host validates pointer coordinates against the page's
+            // resource-owned viewport. Client-side fixed-size validation would
+            // reject valid device presets before the Host sees them.
+            let result = peer.request(&Call::Browser(request)).await;
             let _ = complete.send(result);
         });
     }
@@ -427,6 +547,7 @@ impl Owner {
         };
         let outcome = match result {
             Err(error) => {
+                self.preview_recording_failed(&call);
                 if !cancelled
                     && (complete.is_some()
                         || matches!(
@@ -438,6 +559,26 @@ impl Owner {
                         &error.to_string(),
                     ));
                 }
+                if matches!(call, Call::ReadUsageSummary(_) | Call::RefreshUsageRates(_)) {
+                    self.state.usage_loading = false;
+                    self.state.usage_error = Some(error.to_string());
+                }
+                if matches!(
+                    call,
+                    Call::DeviceList(_)
+                        | Call::DeviceConfigure(_)
+                        | Call::DeviceHosts(_)
+                        | Call::DeviceOpen(_)
+                        | Call::DeviceClose(_)
+                        | Call::DeviceShutdown(_)
+                        | Call::DeviceDetail(_)
+                        | Call::DeviceAction(_)
+                        | Call::DeviceScreenshot(_)
+                ) {
+                    self.state.device.error = Some(
+                        crate::presentation::error::error_message(&error.to_string()),
+                    );
+                }
                 match &call {
                     Call::ProviderCommands(request) => {
                         self.provider_commands_finished(request, Err(&error))
@@ -447,9 +588,17 @@ impl Owner {
                         self.diff_file_finished(request, Err(&error), diff_generation)
                     }
                     Call::DiffPreview(request) => {
-                        self.diff_preview_finished(request, Err(&error), diff_generation)
+                        self.diff_preview_finished(request, Err(&error), diff_generation);
+                        self.retry_diff_preview_at_environment_cwd(request, &error);
                     }
                     Call::Search(params) => self.search_finished(&params.query, None),
+                    Call::ListPullRequests(request) => {
+                        self.state
+                            .pull_requests
+                            .list_requested
+                            .remove(&request.project_id);
+                    }
+                    Call::SearchContents(request) => self.content_search_finished(request, Err(&error)),
                     Call::CancelSetup(_) => self.work_locally = None,
                     Call::ProjectFavicon(request) => self.project_icon_read(request, Err(())),
                     _ => {}
@@ -486,6 +635,28 @@ impl Owner {
         if let Some(complete) = complete {
             let _ = complete.send(outcome);
         }
+        if matches!(&call, Call::ListAccounts(_)) {
+            self.account_refresh_finished();
+        }
+    }
+
+    fn preview_recording_failed(&mut self, call: &Call) {
+        let (tab_id, clear_artifact) = match call {
+            Call::PreviewRecordingStart(request) => (&request.tab_id, true),
+            Call::PreviewRecordingStop(request) => (&request.tab_id, false),
+            _ => return,
+        };
+        self.state.preview.recordings.insert(
+            tab_id.clone(),
+            agent_protocol::preview::PreviewRecordingStatus {
+                tab_id: tab_id.clone(),
+                recording: false,
+                started_at: None,
+            },
+        );
+        if clear_artifact {
+            self.state.preview.last_recordings.remove(tab_id);
+        }
     }
 
     fn reply(
@@ -498,13 +669,33 @@ impl Owner {
         let workspace = &mut self.state.workspace;
         match reply {
             Reply::Providers(providers) => {
-                if self.state.default_draft.model.is_empty()
+                let current_available = providers.iter().any(|instance| {
+                    instance.instance == self.state.default_draft.instance_id
+                        && instance.driver == self.state.default_draft.driver
+                        && instance.enabled
+                        && instance.installed
+                        && instance.unavailable_reason.is_none()
+                        && !matches!(
+                            instance.status,
+                            crate::models::ProviderStatus::Error
+                                | crate::models::ProviderStatus::Disabled
+                        )
+                        && instance
+                            .models
+                            .iter()
+                            .any(|model| model.slug == self.state.default_draft.model)
+                });
+                if (!current_available || self.state.default_draft.model.is_empty())
                     && let Some((instance, model)) = crate::view::models::default_model(&providers)
                 {
+                    let runtime_mode = self.state.default_draft.runtime_mode;
+                    let interaction_mode = self.state.default_draft.interaction_mode;
                     self.state.default_draft = Draft {
                         instance_id: instance.instance.clone(),
                         driver: instance.driver,
                         model: model.slug.clone(),
+                        runtime_mode,
+                        interaction_mode,
                         ..Draft::default()
                     };
                 }
@@ -579,18 +770,89 @@ impl Owner {
             Reply::WorktreeSettings(settings) => workspace.worktree_settings = Some(settings),
             Reply::Worktrees(worktrees) => workspace.worktrees = worktrees,
             Reply::Accounts(accounts) => self.state.accounts = Some(accounts),
+            Reply::UsageSummary(summary) => {
+                self.state.usage_loading = false;
+                self.state.usage_error = None;
+                self.state.usage_pricing = Some(summary.pricing.clone());
+                self.state.usage_summary = Some(summary);
+            }
+            Reply::UsagePricing(pricing) => {
+                self.state.usage_loading = false;
+                self.state.usage_pricing = Some(pricing);
+            }
             Reply::Login(login) => self.state.account_login = Some(login),
             Reply::HostStatus(status) => self.state.host_status = Some(status),
+            Reply::UpdateStatus(status) => {
+                self.state.updates.insert(status.target, status);
+            }
+            Reply::NativeUpdate(status) => self.state.native_update = Some(status),
             Reply::Remotes(remotes) => self.state.remote_hosts = remotes,
             Reply::Remote(host) => {
                 self.state.remote_hosts.retain(|old| old.id != host.id);
                 self.state.remote_hosts.push(host);
             }
             Reply::Invitation(invitation) => self.state.invitation = Some(invitation),
-            Reply::ConversationSettings(settings) => {
-                self.state.conversation_settings = Some(settings)
+            Reply::PreviewList(result) => self.state.preview.apply_list(result),
+            Reply::PreviewSession(session) => self.state.preview.upsert(session),
+            Reply::PreviewRecordingStatus(status) => {
+                self.state
+                    .preview
+                    .last_recordings
+                    .remove(&status.tab_id);
+                self.state
+                    .preview
+                    .recordings
+                    .insert(status.tab_id.clone(), status);
+            }
+            Reply::PreviewRecordingArtifact(artifact) => {
+                self.state.preview.recordings.insert(
+                    artifact.tab_id.clone(),
+                    agent_protocol::preview::PreviewRecordingStatus {
+                        tab_id: artifact.tab_id.clone(),
+                        recording: false,
+                        started_at: None,
+                    },
+                );
+                self.state
+                    .preview
+                    .last_recordings
+                    .insert(artifact.tab_id.clone(), artifact);
+            }
+            Reply::Environment(environment) => {
+                self.state.host_name = Some(environment.label.clone());
+                self.state.environment = Some(environment);
+            }
+            Reply::AwarenessRegistration(_) => {}
+            Reply::HostSettings(settings) => {
+                self.state.default_draft.runtime_mode = settings.default_runtime_mode;
+                if let Some(selection) = &settings.default_model_selection {
+                    self.state.default_draft.instance_id = selection.instance.clone();
+                    self.state.default_draft.driver = selection.driver;
+                    self.state.default_draft.model = selection.model.clone();
+                    self.state.default_draft.options = selection
+                        .options
+                        .iter()
+                        .map(|(key, value)| ModelOption {
+                            key: key.clone(),
+                            value: value.clone(),
+                        })
+                        .collect();
+                }
+                self.state.host_settings = Some(settings);
+                if matches!(call, Call::UpdateSettings(_)) {
+                    self.job(Call::ListProviders(m::Empty {}), None, None);
+                }
             }
             Reply::Keybindings(config) => self.state.keybindings = Some(Arc::new(config)),
+            Reply::Background(snapshot) => self.state.background_policy = Some(snapshot),
+            Reply::HostResources(resources) => self.state.host_resources = Some(resources),
+            Reply::ProcessDiagnostics(processes) => {
+                self.state.process_diagnostics = Some(processes)
+            }
+            Reply::ProcessResourceHistory(history) => {
+                self.state.process_resource_history = Some(history)
+            }
+            Reply::TraceDiagnostics(trace) => self.state.trace_diagnostics = Some(trace),
             Reply::SessionScan(scan) => {
                 let import = &mut self.state.session_import;
                 import.scan_pending = false;
@@ -615,6 +877,11 @@ impl Owner {
             Reply::EntrySearch(found) => {
                 if let Call::SearchEntries(request) = call {
                     self.entries_found(request, found);
+                }
+            }
+            Reply::ContentSearch(found) => {
+                if let Call::SearchContents(request) = call {
+                    self.content_search_finished(request, Ok(found));
                 }
             }
             Reply::VcsStatus(status) => {
@@ -648,6 +915,115 @@ impl Owner {
                         self.show_diff_preview();
                     }
                 }
+            }
+            Reply::PullRequestList(list) => {
+                if let Call::ListPullRequests(request) = call {
+                    self.state
+                        .pull_requests
+                        .list_requested
+                        .remove(&request.project_id);
+                    self.state
+                        .pull_requests
+                        .by_project
+                        .insert(request.project_id.clone(), list.entries);
+                    self.state.pull_requests.selected_project = Some(request.project_id.clone());
+                }
+            }
+            Reply::PullRequestDetail(detail) => {
+                if let Call::GetPullRequest(request) = call {
+                    self.state
+                        .pull_requests
+                        .details
+                        .insert(request.reference.key().canonical(), detail);
+                }
+            }
+            Reply::PullRequestDiff(diff) => {
+                let key = diff.reference.key().canonical();
+                let append = matches!(call, Call::GetPullRequestDiff(request) if request.cursor.is_some());
+                if append {
+                    if let Some(previous) = self.state.pull_requests.diffs.get_mut(&key) {
+                        previous.files.extend(diff.files);
+                        previous.patch.push_str(&diff.patch);
+                        previous.truncated |= diff.truncated;
+                        previous.next_cursor = diff.next_cursor;
+                        if let Some(stats) = diff.omitted_file_stats {
+                            previous
+                                .omitted_file_stats
+                                .get_or_insert_with(Vec::new)
+                                .extend(stats);
+                        }
+                    } else {
+                        self.state.pull_requests.diffs.insert(key, diff);
+                    }
+                } else {
+                    let prefix = format!("{key}\0");
+                    self.state
+                        .pull_requests
+                        .diff_file_contents
+                        .retain(|context_key, _| !context_key.starts_with(&prefix));
+                    self.state.pull_requests.diffs.insert(key, diff);
+                }
+            }
+            Reply::PullRequestDiffFileContents(contents) => {
+                if let Call::GetPullRequestDiffFileContents(request) = call {
+                    let key = pull_request_diff_context_key(
+                        &request.reference.key(),
+                        &request.old_path,
+                        &request.new_path,
+                    );
+                    self.state
+                        .pull_requests
+                        .diff_file_contents
+                        .insert(key, contents);
+                }
+            }
+            Reply::PullRequestFile(file) => {
+                self.state
+                    .pull_requests
+                    .files
+                    .insert(format!("{}:{}", file.reference.key().canonical(), file.path), file);
+            }
+            Reply::PullRequestViewedFiles(viewed) => {
+                self.state
+                    .pull_requests
+                    .viewed_files
+                    .insert(viewed.reference.key().canonical(), viewed);
+            }
+            Reply::PullRequestOperation(operation) => {
+                if let Some(thread) = pull_request_operation_thread(call) {
+                    self.state
+                        .pull_requests
+                        .links_by_thread
+                        .insert(thread, operation.linked.clone());
+                }
+                if let Some(detail) = operation.detail {
+                    self.state
+                        .pull_requests
+                        .details
+                        .insert(operation.reference.key().canonical(), detail);
+                }
+            }
+            Reply::PullRequestAuth(auth) => self.state.pull_requests.auth = Some(auth),
+            Reply::PullRequestDiscovery(discovery) => {
+                self.state.pull_requests.discovery = Some(discovery)
+            }
+            Reply::DeviceState(service) => self.state.device.apply_event(d::DeviceEvent::State(service)),
+            Reply::DeviceSession(session) => {
+                self.state.device.sessions.retain(|existing| {
+                    !(existing.thread_id == session.thread_id
+                        && existing.host_id == session.host_id
+                        && existing.device_id == session.device_id)
+                });
+                self.state.device.sessions.push(session);
+            }
+            Reply::DeviceDetail(detail) => {
+                self.state
+                    .device
+                    .details
+                    .insert((detail.host_id.clone(), detail.device_id.clone()), detail);
+            }
+            Reply::DeviceScreenshot(screenshot) => {
+                self.state.device.last_screenshot = Some(screenshot);
             }
             Reply::SwitchedRef(switched) => match call {
                 Call::SwitchRef(request) => {
@@ -709,6 +1085,7 @@ impl Owner {
                     terminal.phase = TerminalPhase::Detached;
                 }
             }
+            Call::PreviewClose(params) => self.state.preview.close(params.tab_id.as_deref()),
             Call::SelectAccount(_)
             | Call::SubmitAccountLogin(_)
             | Call::CancelAccountLogin(_)
@@ -716,4 +1093,14 @@ impl Owner {
             _ => {}
         }
     }
+}
+
+fn pull_request_operation_thread(call: &Call) -> Option<agent_domain::ThreadId> {
+    let thread = match call {
+        Call::LinkPullRequest(request) => &request.thread_id,
+        Call::UnlinkPullRequest(request) => &request.thread_id,
+        Call::SetPullRequestWatch(request) => &request.thread_id,
+        _ => return None,
+    };
+    agent_domain::ThreadId::new(thread.clone()).ok()
 }

@@ -14,7 +14,7 @@ struct SettingsScreen: View {
                 VStack(alignment: .leading, spacing: 20) {
                     SettingsGroup(title: "Connections") {
                         SettingsLink(symbol: "point.3.connected.trianglepath.dotted", label: "Environments",
-                                     value: "\(model.profiles.count)") {
+                                     value: "\(model.environmentSettings().count)") {
                             ConnectionsScreen(model: model, close: { dismiss() })
                         }
                     }
@@ -24,11 +24,14 @@ struct SettingsScreen: View {
                     }
                     SettingsGroup(title: "Projects & threads") {
                         SettingsLink(symbol: "text.bubble", label: "Thread behavior") {
-                            ConversationSettingsPage(model: model, title: "Thread behavior",
-                                                     sections: ["usage-limits", "auto-settle", "behavior"])
+                            HostSettingsPage(model: model, title: "Thread behavior",
+                                                     sections: ["usage-limits", "auto-settle", "behavior", "maintenance"])
+                        }
+                        SettingsLink(symbol: "bell", label: "Notifications") {
+                            HostSettingsPage(model: model, title: "Notifications", sections: ["notifications"])
                         }
                         SettingsLink(symbol: "arrow.turn.left.up", label: "Follow-ups") {
-                            ConversationSettingsPage(model: model, title: "Follow-ups", sections: ["follow-ups"])
+                            HostSettingsPage(model: model, title: "Follow-ups", sections: ["follow-ups"])
                         }
                         SettingsLink(symbol: "archivebox", label: "Archived Threads") {
                             ArchivedScreen(model: model)
@@ -38,17 +41,35 @@ struct SettingsScreen: View {
                         SettingsLink(symbol: "calendar.badge.clock", label: "Scheduled tasks") {
                             ScheduledTasksScreen(model: model)
                         }
+                        SettingsLink(symbol: "chart.bar.xaxis", label: "Usage") {
+                            UsageScreen(model: model)
+                        }
                         SettingsLink(symbol: "person.crop.circle", label: "Provider accounts") {
                             ProviderAccountsPage(model: model)
                         }
                         SettingsLink(symbol: "plus.bubble", label: "New threads") {
-                            ConversationSettingsPage(model: model, title: "New threads", sections: ["new-threads"])
+                            HostSettingsPage(model: model, title: "New threads", sections: ["new-threads"])
+                        }
+                        SettingsLink(symbol: "gearshape.2", label: "Agent") {
+                            HostSettingsPage(model: model, title: "Agent", sections: ["agent"])
+                        }
+                        SettingsLink(symbol: "arrow.triangle.branch", label: "Source control") {
+                            HostSettingsPage(model: model, title: "Source control", sections: ["source-control"])
                         }
                         SettingsLink(symbol: "arrow.triangle.branch", label: "Worktrees") {
                             WorktreeSettingsScreen(model: model).id(model.selectedProfileId)
                         }
+                        SettingsLink(symbol: "internaldrive", label: "Storage") {
+                            HostSettingsPage(model: model, title: "Storage", sections: ["storage"])
+                        }
+                        SettingsLink(symbol: "waveform.path.ecg", label: "Background activity") {
+                            BackgroundDiagnosticsPage(model: model)
+                        }
                     }
                     SettingsGroup(title: "App") {
+                        SettingsLink(symbol: "arrow.down.circle", label: "App updates") {
+                            NativeUpdatePage(model: model)
+                        }
                         PrivacyPolicyButton().font(AppTheme.font(18)).padding(16)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
@@ -60,8 +81,9 @@ struct SettingsScreen: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
             .onAppear {
-                model.perform(.loadConversationSettings)
+                model.perform(.loadSettings)
                 model.perform(.loadWorktreeSettings)
+                model.perform(.loadBackgroundPolicy)
             }
         }
         .tint(AppTheme.color("mobilePrimaryText"))
@@ -231,6 +253,168 @@ private struct ToggleRow: View {
     }
 }
 
+private struct NativeUpdatePage: View {
+    @ObservedObject var model: BexAppViewModel
+
+    private func buildSetting(_ key: String) -> String? {
+        guard let value = Bundle.main.object(forInfoDictionaryKey: key) as? String,
+              !value.isEmpty,
+              !value.contains("$(") else {
+            return nil
+        }
+        return value
+    }
+
+    private var currentVersion: String {
+        buildSetting("APP_UPDATE_VERSION")
+            ?? buildSetting("CFBundleShortVersionString")
+            ?? "0.0.0"
+    }
+
+    private var updateChannel: UpdateChannel {
+        switch buildSetting("APP_RELEASE_CHANNEL") {
+        case "nightly": .nightly
+        case "preview": .preview
+        default: .stable
+        }
+    }
+
+    var body: some View {
+        List {
+            Section("App updates") {
+                if let update = model.snapshot.nativeUpdate() {
+                    Text(
+                        update.updateAvailable
+                            ? "Version \(update.latestVersion ?? "new") is available"
+                            : update.message ?? "Up to date"
+                    )
+                    if update.updateAvailable,
+                       let storeURL = update.storeUrl,
+                       let url = URL(string: storeURL),
+                       url.scheme == "https" {
+                        Link("Open TestFlight", destination: url)
+                    }
+                } else {
+                    ProgressView("Checking for updates…")
+                }
+            }
+        }
+        .scrollContentBackground(.hidden)
+        .background(AppTheme.sheet)
+        .navigationTitle("App updates")
+        .navigationBarTitleDisplayMode(.inline)
+        .onAppear {
+            model.perform(.loadNativeUpdate(request: NativeUpdateRequest(
+                platform: .ios,
+                currentVersion: currentVersion,
+                channel: updateChannel
+            )))
+        }
+    }
+}
+
+private struct BackgroundDiagnosticsPage: View {
+    @ObservedObject var model: BexAppViewModel
+
+    private let profiles = ["balanced", "performance", "battery-saver"]
+
+    var body: some View {
+        let rows = model.snapshot.backgroundRows()
+        let selected = rows.first(where: { $0.key == "profile" })?.value.lowercased()
+        let gitFetchSeconds = backgroundIntervalSeconds(rows, key: "automaticGitFetchIntervalMs")
+        let providerHealthSeconds = backgroundIntervalSeconds(rows, key: "providerHealthRefreshIntervalMs")
+        List {
+            Section {
+                Button("Refresh diagnostics") {
+                    model.perform(.loadDiagnostics(traceFilePath: ""))
+                }
+                ForEach(rows, id: \.key) { row in
+                    if row.key != "profile" &&
+                        row.key != "automaticGitFetchIntervalMs" &&
+                        row.key != "providerHealthRefreshIntervalMs" {
+                        HStack {
+                            Text(row.key)
+                            Spacer()
+                            Text(row.value).foregroundStyle(AppTheme.muted)
+                        }
+                    }
+                }
+            } header: {
+                Text("Host policy")
+            }
+            Section("Profile") {
+                ForEach(profiles, id: \.self) { profile in
+                    Button {
+                        model.perform(.setBackgroundProfile(profile: profile))
+                    } label: {
+                        HStack {
+                            Text(profile.replacingOccurrences(of: "-", with: " ").capitalized)
+                                .foregroundStyle(AppTheme.text)
+                            Spacer()
+                            if selected == profile { Image(systemName: "checkmark") }
+                        }
+                    }
+                }
+            }
+            Section("Intervals") {
+                Picker(
+                    "Git fetch interval",
+                    selection: Binding(get: { gitFetchSeconds }, set: { value in
+                        model.perform(.setAutomaticGitFetchInterval(seconds: UInt32(value)))
+                    }),
+                ) {
+                    ForEach([0, 15, 30, 60, 300, 900], id: \.self) { value in
+                        Text(value == 0 ? "Disabled" : "\(value) seconds").tag(value)
+                    }
+                }
+                Picker(
+                    "Provider health interval",
+                    selection: Binding(get: { providerHealthSeconds }, set: { value in
+                        model.perform(.setProviderHealthRefreshInterval(seconds: UInt32(value)))
+                    }),
+                ) {
+                    ForEach([0, 60, 300, 900, 1800], id: \.self) { value in
+                        Text(value == 0 ? "Disabled" : "\(value) seconds").tag(value)
+                    }
+                }
+            }
+            DiagnosticRows(title: "Host resources", rows: model.snapshot.hostResourceRows())
+            DiagnosticRows(title: "Processes", rows: model.snapshot.processRows())
+            DiagnosticRows(title: "Process history", rows: model.snapshot.processHistoryRows())
+            DiagnosticRows(title: "Traces", rows: model.snapshot.traceRows())
+        }
+        .scrollContentBackground(.hidden)
+        .background(AppTheme.sheet)
+        .navigationTitle("Background activity")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+private func backgroundIntervalSeconds(_ rows: [DiagnosticRow], key: String) -> Int {
+    guard let value = rows.first(where: { $0.key == key })?.value,
+          let milliseconds = Int(value) else {
+        return 0
+    }
+    return max(0, milliseconds / 1_000)
+}
+
+private struct DiagnosticRows: View {
+    let title: String
+    let rows: [DiagnosticRow]
+
+    var body: some View {
+        Section(title) {
+            ForEach(rows, id: \.key) { row in
+                HStack {
+                    Text(row.key)
+                    Spacer()
+                    Text(row.value).foregroundStyle(AppTheme.muted)
+                }
+            }
+        }
+    }
+}
+
 struct SettingsGroup<Content: View>: View {
     let title: String
     @ViewBuilder let content: () -> Content
@@ -339,7 +523,7 @@ private struct KeyboardSettingsPage: View {
 }
 
 /// Rows of the conversation settings sections core builds.
-private struct ConversationSettingsPage: View {
+private struct HostSettingsPage: View {
     @ObservedObject var model: BexAppViewModel
     let title: String
     let sections: [String]
@@ -347,7 +531,7 @@ private struct ConversationSettingsPage: View {
     var body: some View {
         let view = model.snapshot.settings(scope: .host)
         List {
-            if !model.snapshot.conversationSettingsLoaded() {
+            if !model.snapshot.hostSettingsLoaded() {
                 ProgressView().frame(maxWidth: .infinity)
             }
             ForEach(view.sections.filter { sections.contains($0.id) }, id: \.id) { section in
@@ -431,12 +615,27 @@ private struct ProviderAccountsPage: View {
     @State private var code = ""
 
     var body: some View {
+        let usageLimits = model.snapshot.usageLimits()
         List {
             Section("Provider accounts") {
                 ForEach(model.snapshot.accounts()?.accounts ?? [], id: \.id) { account in
+                    let limits = usageLimits.first {
+                        $0.sourceAccountIds.contains(account.id)
+                    }
                     VStack(alignment: .leading, spacing: 8) {
                         AccountIdentityView(account: account)
-                        AccountUsageView(usage: account.usage)
+                        AccountUsageView(limits: limits) {
+                            let sourceId = limits?.resetCreditAccountId ?? account.id
+                            let source = model.snapshot.accounts()?.accounts.first {
+                                $0.id == sourceId
+                            }
+                            model.perform(.consumeResetCredit(
+                                provider: source?.provider ?? account.provider,
+                                accountId: sourceId,
+                                creditId: limits?.nextCreditId
+                            ))
+                            model.perform(.loadAccounts)
+                        }
                         HStack {
                             Button("Select") {
                                 model.perform(.selectAccount(provider: account.provider, id: account.id))

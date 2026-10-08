@@ -347,7 +347,7 @@ impl Owner {
             .cloned()
             .unwrap_or_else(|| match ThreadId::new(restore.draft_key.clone()) {
                 Ok(thread) => self.state.draft_for_thread(&thread),
-                Err(_) => self.state.default_draft.clone(),
+                Err(_) => self.state.default_draft.user_defaults(),
             });
         draft.restore(
             &restore.text,

@@ -53,15 +53,22 @@ struct ConversationMarkdown: View {
                         }
                     }
                 case let .table(_, rows):
-                    ScrollView(.horizontal) {
+                    let wrapping = AppTheme.codeWordWrap
+                    ScrollView(wrapping ? .vertical : .horizontal) {
                         Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 10) {
                             ForEach(Array(rows.enumerated()), id: \.offset) { _, cells in
-                                GridRow { ForEach(Array(cells.enumerated()), id: \.offset) { _, cell in Text(attributed(
-                                    cell.runs,
-                                    header: nil
-                                )).font(AppTheme.font(12)).textSelection(.enabled) } }
+                                GridRow {
+                                    ForEach(Array(cells.enumerated()), id: \.offset) { _, cell in
+                                        Text(attributed(cell.runs, header: nil))
+                                            .font(AppTheme.font(12)).textSelection(.enabled)
+                                            .fixedSize(horizontal: !wrapping, vertical: false)
+                                            .frame(maxWidth: wrapping ? .infinity : nil, alignment: .leading)
+                                    }
+                                }
                             }
-                        }.padding(12).background(AppTheme.card, in: RoundedRectangle(cornerRadius: 8))
+                        }
+                        .frame(maxWidth: wrapping ? .infinity : nil, alignment: .leading)
+                        .padding(12).background(AppTheme.card, in: RoundedRectangle(cornerRadius: 8))
                     }
                 case let .visualization(path):
                     Text(path).font(AppTheme.font(12)).foregroundStyle(AppTheme.tertiary)
@@ -95,6 +102,7 @@ struct ConversationMarkdown: View {
                     .font(AppTheme.markdownMono())
                     .lineSpacing(max(0, AppTheme.markdownCodeLineHeight - AppTheme.markdownCodeFontSize * 1.2))
                     .textSelection(.enabled)
+                    .fixedSize(horizontal: true, vertical: false)
             }
         }
     }

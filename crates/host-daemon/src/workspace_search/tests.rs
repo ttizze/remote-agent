@@ -206,3 +206,88 @@ async fn finds_a_path_after_the_first_twenty_five_thousand_entries() {
     assert_eq!(paths(&result), ["z/needle.rs"]);
     assert!(!result.truncated);
 }
+
+#[tokio::test]
+async fn searches_text_with_ranges_case_and_whole_word_filters() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("src/words.ts"),
+        "note notes denote\nfootnote NOTE\n",
+    )
+    .unwrap();
+    let result = WorkspaceSearch::default()
+        .search_contents(SearchContents {
+            cwd: root.to_string_lossy().into_owned(),
+            query: "note".into(),
+            limit: 100,
+            case_sensitive: false,
+            whole_word: true,
+            use_regex: false,
+        })
+        .await
+        .unwrap();
+    assert_eq!(result.matches.len(), 2);
+    assert_eq!(result.matches[0].line_number, 1);
+    assert_eq!(result.matches[0].match_ranges, [ContentMatchRange { start: 0, end: 4 }]);
+    assert_eq!(result.matches[1].line_number, 2);
+    assert_eq!(result.matches[1].match_ranges, [ContentMatchRange { start: 9, end: 13 }]);
+}
+
+#[tokio::test]
+async fn content_search_honors_gitignore_and_reports_invalid_regex() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    git(root, &["init", "--quiet"]);
+    std::fs::write(root.join(".gitignore"), "ignored.txt\n").unwrap();
+    std::fs::write(root.join("kept.txt"), "needle\n").unwrap();
+    std::fs::write(root.join("ignored.txt"), "needle\n").unwrap();
+    let result = WorkspaceSearch::default()
+        .search_contents(SearchContents {
+            cwd: root.to_string_lossy().into_owned(),
+            query: "needle".into(),
+            limit: 100,
+            case_sensitive: true,
+            whole_word: false,
+            use_regex: false,
+        })
+        .await
+        .unwrap();
+    assert_eq!(result.matches.iter().map(|item| item.path.as_str()).collect::<Vec<_>>(), ["kept.txt"]);
+    let invalid = WorkspaceSearch::default()
+        .search_contents(SearchContents {
+            cwd: root.to_string_lossy().into_owned(),
+            query: "(".into(),
+            limit: 100,
+            case_sensitive: false,
+            whole_word: false,
+            use_regex: true,
+        })
+        .await
+        .unwrap();
+    assert!(invalid.matches.is_empty());
+    assert!(invalid.regex_fallback_error.is_some());
+}
+
+#[tokio::test]
+async fn content_search_caps_dense_files_before_scanning_the_next_file() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    std::fs::write(root.join("dense.txt"), "needle\n".repeat(150)).unwrap();
+    std::fs::write(root.join("other.txt"), "needle\n").unwrap();
+    let result = WorkspaceSearch::default()
+        .search_contents(SearchContents {
+            cwd: root.to_string_lossy().into_owned(),
+            query: "needle".into(),
+            limit: 110,
+            case_sensitive: true,
+            whole_word: false,
+            use_regex: false,
+        })
+        .await
+        .unwrap();
+    assert_eq!(result.matches.len(), 101);
+    assert!(result.matches.iter().any(|item| item.path == "other.txt"));
+    assert!(result.truncated);
+}

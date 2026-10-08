@@ -5,7 +5,8 @@ use crate::commands::outbox::Outbox;
 use crate::sync::{ShellCache, ShellStatus, ThreadSync};
 use agent_domain::{
     Attachment, AttachmentKind, CheckpointId, Driver, InteractionMode, MessageContext,
-    ModelSelection, RunId, RuntimeMode, State, ThreadId, ThreadShell, WorktreeSetupSnapshot,
+    ModelSelection, PullRequestDetail, PullRequestLink, PullRequestSummary, RunId, RuntimeMode,
+    State, ThreadId, ThreadShell, WorktreeSetupSnapshot,
 };
 use agent_protocol::conversation::{SearchMatch, ShellSnapshot};
 use serde::{Deserialize, Serialize};
@@ -180,6 +181,20 @@ fn attachment_error(code: &str) -> String {
     .into()
 }
 impl Draft {
+    /// Copies only the values that seed a fresh task. Content, context,
+    /// workspace and identity belong to the draft that supplied them.
+    pub fn user_defaults(&self) -> Self {
+        Self {
+            instance_id: self.instance_id.clone(),
+            driver: self.driver,
+            model: self.model.clone(),
+            options: self.options.clone(),
+            runtime_mode: self.runtime_mode,
+            interaction_mode: self.interaction_mode,
+            ..Self::default()
+        }
+    }
+
     pub fn is_empty(&self) -> bool {
         self.text.trim().is_empty() && self.attachments.is_empty()
     }
@@ -416,12 +431,74 @@ pub struct SearchRequest {
 }
 
 #[derive(Debug, Clone, Default)]
+pub struct PullRequestClientState {
+    pub by_project: BTreeMap<String, Vec<PullRequestSummary>>,
+    pub list_requested: BTreeSet<String>,
+    pub links_by_thread: BTreeMap<ThreadId, Vec<PullRequestLink>>,
+    pub details: BTreeMap<String, PullRequestDetail>,
+    pub diffs: BTreeMap<String, agent_protocol::pull_requests::PullRequestDiff>,
+    pub diff_file_contents:
+        BTreeMap<String, agent_protocol::pull_requests::PullRequestDiffFileContents>,
+    pub files: BTreeMap<String, agent_protocol::pull_requests::PullRequestFile>,
+    pub viewed_files:
+        BTreeMap<String, agent_protocol::pull_requests::PullRequestViewedFiles>,
+    pub auth: Option<agent_protocol::pull_requests::SourceControlAuth>,
+    pub discovery: Option<agent_protocol::pull_requests::SourceControlDiscovery>,
+    pub selected_project: Option<String>,
+}
+
+/// A collision-free in-memory key for one file's old/new content within a
+/// pull-request diff. Git paths cannot contain NUL, so it is also a stable
+/// prefix for clearing all cached contexts when a fresh diff replaces it.
+pub(crate) fn pull_request_diff_context_key(
+    reference: &agent_domain::PullRequestKey,
+    old_path: &str,
+    new_path: &str,
+) -> String {
+    let canonical = reference.canonical();
+    format!(
+        "{canonical}\0{}:{old_path}\0{}:{new_path}",
+        old_path.len(),
+        new_path.len()
+    )
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct PullRequestViewedFileInput {
+    pub path: String,
+    pub viewed: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
+#[serde(rename_all = "kebab-case")]
+pub enum PullRequestDiffChangeTypeInput {
+    Change,
+    RenamePure,
+    RenameChanged,
+    New,
+    Deleted,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct PullRequestStackHeadInput {
+    pub number: u64,
+    pub head_sha: String,
+}
+
+#[derive(Debug, Clone, Default)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Object))]
 pub struct Snapshot {
     pub store_id: String,
     pub revision: u64,
     pub connected: bool,
     pub host_name: Option<String>,
+    /// Identity, platform and capabilities of the connected Host.
+    pub environment: Option<crate::models::EnvironmentDescriptor>,
+    /// Live activity published by the authenticated Host.
+    pub awareness: Option<crate::models::AwarenessSnapshot>,
     pub error: Option<String>,
     pub shell: Arc<ShellCache>,
     /// Open only while the archive is shown.
@@ -452,22 +529,41 @@ pub struct Snapshot {
     pub sources: WorkspaceSources,
     /// Git status subscriptions and action progress.
     pub git: GitState,
+    pub pull_requests: PullRequestClientState,
     /// By project id.
     pub project_icons: BTreeMap<String, ProjectIconEntry>,
     /// What the Host's terminal metadata stream reports for every thread's
     /// terminals, by thread and terminal id.
     pub terminal_metadata:
         BTreeMap<(ThreadId, String), agent_protocol::operations::TerminalSummary>,
+    /// Host-owned preview sessions and discovered local servers.
+    pub preview: PreviewState,
     pub accounts: Option<agent_protocol::operations::Accounts>,
     pub account_login: Option<agent_protocol::operations::AccountLogin>,
+    /// The last Host usage report and its loading error, if any.
+    pub usage_summary: Option<agent_protocol::usage::Summary>,
+    pub usage_pricing: Option<agent_protocol::usage::Pricing>,
+    pub usage_loading: bool,
+    pub usage_error: Option<String>,
     pub host_status: Option<crate::models::HostStatus>,
+    /// The Host's current background activity and power policy snapshot.
+    pub background_policy: Option<agent_protocol::background::BackgroundPolicySnapshot>,
+    /// The shared Host or desktop update transaction state.
+    pub updates: BTreeMap<crate::models::UpdateTarget, crate::models::UpdateState>,
+    /// The native app's store update surface, when a configured release link exists.
+    pub native_update: Option<crate::models::NativeUpdateState>,
+    pub host_resources: Option<agent_protocol::background::HostResourcesSnapshot>,
+    pub process_diagnostics: Option<agent_protocol::background::ProcessDiagnosticsResult>,
+    pub process_resource_history:
+        Option<agent_protocol::background::ProcessResourceHistoryResult>,
+    pub trace_diagnostics: Option<agent_protocol::background::TraceDiagnosticsResult>,
     pub remote_hosts: Vec<crate::models::RemoteHost>,
     pub invitation: Option<crate::models::Invitation>,
     pub preferences: Preferences,
     pub inbox_returns: crate::view::inbox::InboxReturns,
     pub thread_order: Option<ThreadOrderHold>,
     /// The Host's conversation settings once read.
-    pub conversation_settings: Option<crate::models::ConversationSettings>,
+    pub host_settings: Option<crate::models::HostSettings>,
     /// Resume-compaction offers dismissed with "Keep full history" in this
     /// session, by thread and context snapshot.
     pub resume_compaction_dismissals: BTreeSet<String>,
@@ -487,11 +583,321 @@ pub struct Snapshot {
     pub thread_undo: crate::commands::undo::ThreadUndo,
     /// Timeline rows already built; every snapshot of the store shares them.
     pub timelines: Arc<std::sync::Mutex<crate::view::timeline::rows::TimelineCache>>,
+    /// Host-owned simulator and emulator state for the Device surface.
+    pub device: DeviceState,
+}
+
+/// The device's fold of Host preview metadata. Pixels remain in the browser
+/// panel; this state only describes tabs, server cards and ordering.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PreviewState {
+    pub sessions: BTreeMap<String, agent_protocol::preview::PreviewSessionSnapshot>,
+    pub local_servers: Vec<agent_protocol::preview::DiscoveredLocalServer>,
+    pub recent_urls: Vec<String>,
+    pub active_tab: Option<String>,
+    pub server_epoch: Option<String>,
+    pub revision: u64,
+    pub scanner_epoch: Option<String>,
+    pub scanner_revision: u64,
+    pub configured_urls: Vec<String>,
+    #[serde(skip)]
+    pub recordings: BTreeMap<String, agent_protocol::preview::PreviewRecordingStatus>,
+    #[serde(skip)]
+    pub last_recordings: BTreeMap<String, agent_protocol::preview::PreviewRecordingArtifact>,
+    #[serde(skip)]
+    closed_tabs: BTreeSet<String>,
+}
+impl PreviewState {
+    pub fn apply_list(&mut self, result: agent_protocol::preview::PreviewListResult) {
+        let server_epoch_changed = !result.server_epoch.is_empty()
+            && self
+                .server_epoch
+                .as_deref()
+                .is_some_and(|epoch| epoch != result.server_epoch.as_str());
+        let same_server_epoch = self
+            .server_epoch
+            .as_deref()
+            .is_some_and(|epoch| epoch == result.server_epoch.as_str());
+        let scanner_is_newer = !result.scanner_epoch.is_empty()
+            && (self.scanner_epoch.as_deref() != Some(result.scanner_epoch.as_str())
+                || result.scanner_revision > self.scanner_revision);
+        if same_server_epoch && result.revision <= self.revision {
+            if scanner_is_newer {
+                self.local_servers = result.local_servers;
+                self.scanner_epoch = Some(result.scanner_epoch);
+                self.scanner_revision = result.scanner_revision;
+            }
+            return;
+        }
+        self.sessions = result
+            .sessions
+            .into_iter()
+            .map(|session| (session.tab_id.clone(), session))
+            .collect();
+        self.recordings = result
+            .recordings
+            .into_iter()
+            .map(|status| (status.tab_id.clone(), status))
+            .collect();
+        if server_epoch_changed {
+            self.last_recordings.clear();
+        } else {
+            self.last_recordings
+                .retain(|tab_id, _| self.sessions.contains_key(tab_id));
+        }
+        self.closed_tabs
+            .retain(|tab_id| !self.sessions.contains_key(tab_id));
+        for session in self.sessions.values() {
+            if matches!(
+                &session.nav_status,
+                agent_protocol::preview::PreviewNavStatus::Idle
+            ) {
+                continue;
+            }
+            let url = match &session.nav_status {
+                agent_protocol::preview::PreviewNavStatus::Loading { url, .. }
+                | agent_protocol::preview::PreviewNavStatus::Success { url, .. }
+                | agent_protocol::preview::PreviewNavStatus::LoadFailed { url, .. } => url,
+                agent_protocol::preview::PreviewNavStatus::Idle => unreachable!(),
+            };
+            self.recent_urls.retain(|recent| recent != url);
+            self.recent_urls.insert(0, url.clone());
+        }
+        self.recent_urls.truncate(12);
+        self.local_servers = result.local_servers;
+        if !result.server_epoch.is_empty() {
+            self.server_epoch = Some(result.server_epoch);
+        }
+        self.revision = result.revision;
+        if result.scanner_epoch.is_empty() {
+            self.scanner_epoch = None;
+            self.scanner_revision = 0;
+        } else {
+            self.scanner_epoch = Some(result.scanner_epoch);
+            self.scanner_revision = result.scanner_revision;
+        }
+        if self
+            .active_tab
+            .as_ref()
+            .is_none_or(|tab| !self.sessions.contains_key(tab))
+        {
+            self.active_tab = self.sessions.keys().next().cloned();
+        }
+    }
+    pub fn upsert(&mut self, session: agent_protocol::preview::PreviewSessionSnapshot) {
+        if self.closed_tabs.contains(&session.tab_id) {
+            return;
+        }
+        self.active_tab = Some(session.tab_id.clone());
+        if let Some(url) = match &session.nav_status {
+            agent_protocol::preview::PreviewNavStatus::Loading { url, .. }
+            | agent_protocol::preview::PreviewNavStatus::Success { url, .. }
+            | agent_protocol::preview::PreviewNavStatus::LoadFailed { url, .. } => Some(url),
+            agent_protocol::preview::PreviewNavStatus::Idle => None,
+        } {
+            self.recent_urls.retain(|recent| recent != url);
+            self.recent_urls.insert(0, url.clone());
+            self.recent_urls.truncate(12);
+        }
+        self.sessions.insert(session.tab_id.clone(), session);
+    }
+    pub fn close(&mut self, tab_id: Option<&str>) {
+        if let Some(tab_id) = tab_id {
+            self.closed_tabs.insert(tab_id.to_owned());
+            self.sessions.remove(tab_id);
+            if self.active_tab.as_deref() == Some(tab_id) {
+                self.active_tab = self.sessions.keys().next().cloned();
+            }
+            self.recordings.remove(tab_id);
+            self.last_recordings.remove(tab_id);
+        } else {
+            self.closed_tabs.extend(self.sessions.keys().cloned());
+            self.sessions.clear();
+            self.active_tab = None;
+            self.recordings.clear();
+            self.last_recordings.clear();
+        }
+    }
+    pub fn session(&self, tab_id: &str) -> Option<&agent_protocol::preview::PreviewSessionSnapshot> {
+        self.sessions.get(tab_id)
+    }
+
+    pub fn recording_for(&self, tab_id: &str) -> Option<&agent_protocol::preview::PreviewRecordingStatus> {
+        self.recordings.get(tab_id)
+    }
+
+    pub fn last_recording_for(&self, tab_id: &str) -> Option<&agent_protocol::preview::PreviewRecordingArtifact> {
+        self.last_recordings.get(tab_id)
+    }
+}
+
+#[cfg(test)]
+mod preview_state_tests {
+    use super::PreviewState;
+    use agent_domain::ThreadId;
+    use agent_protocol::preview::{PreviewListResult, PreviewViewportSetting};
+
+    fn list(epoch: &str, revision: u64, tab_id: &str) -> PreviewListResult {
+        PreviewListResult {
+            sessions: vec![agent_protocol::preview::PreviewSessionSnapshot {
+                thread_id: ThreadId::new("thread").unwrap(),
+                tab_id: tab_id.into(),
+                nav_status: agent_protocol::preview::PreviewNavStatus::Idle,
+                can_go_back: false,
+                can_go_forward: false,
+                viewport: PreviewViewportSetting::Fill,
+                zoom: agent_protocol::preview::PreviewZoom::X100,
+                appearance: agent_protocol::preview::PreviewAppearance::System,
+                updated_at: String::new(),
+            }],
+            recordings: vec![],
+            local_servers: vec![],
+            scanned_at: String::new(),
+            server_epoch: epoch.into(),
+            revision,
+            scanner_epoch: "scanner".into(),
+            scanner_revision: revision,
+        }
+    }
+
+    #[test]
+    fn ignores_stale_snapshot_within_the_same_host_epoch() {
+        let mut state = PreviewState::default();
+        state.apply_list(list("epoch", 4, "new"));
+        state.apply_list(list("epoch", 4, "old"));
+        state.apply_list(list("epoch", 3, "older"));
+        assert!(state.sessions.contains_key("new"));
+        assert!(!state.sessions.contains_key("old"));
+        assert!(!state.sessions.contains_key("older"));
+    }
+
+    #[test]
+    fn accepts_a_new_host_epoch_even_when_its_revision_is_lower() {
+        let mut state = PreviewState::default();
+        state.apply_list(list("old", 18, "old-tab"));
+        state.last_recordings.insert(
+            "old-tab".into(),
+            agent_protocol::preview::PreviewRecordingArtifact {
+                id: "browser-recording-old".into(),
+                tab_id: "old-tab".into(),
+                path: "/tmp/browser-recording-old.webm".into(),
+                mime_type: "video/webm".into(),
+                size_bytes: 1,
+                created_at: "2026-01-01T00:00:00Z".into(),
+            },
+        );
+        state.apply_list(list("new", 1, "new-tab"));
+        assert_eq!(state.server_epoch.as_deref(), Some("new"));
+        assert!(state.sessions.contains_key("new-tab"));
+        assert!(!state.sessions.contains_key("old-tab"));
+        assert!(state.last_recordings.is_empty());
+    }
+
+    #[test]
+    fn applies_new_scanner_data_without_replacing_same_revision_sessions() {
+        let mut state = PreviewState::default();
+        state.apply_list(list("epoch", 4, "tab"));
+        let mut next = list("epoch", 4, "tab");
+        next.scanner_revision = 5;
+        next.local_servers = vec![agent_protocol::preview::DiscoveredLocalServer {
+            host: "localhost".into(),
+            port: 5173,
+            url: "http://localhost:5173/".into(),
+            process_name: Some("node".into()),
+            pid: Some(42),
+            terminal: None,
+        }];
+        state.apply_list(next);
+        assert_eq!(state.local_servers.len(), 1);
+        assert!(state.sessions.contains_key("tab"));
+        assert_eq!(state.scanner_revision, 5);
+
+        let mut stale = list("epoch", 4, "tab");
+        stale.scanner_revision = 3;
+        state.apply_list(stale);
+        assert_eq!(state.local_servers.len(), 1);
+        assert_eq!(state.scanner_revision, 5);
+    }
+
+    #[test]
+    fn applies_independent_recording_slots_for_each_preview_tab() {
+        let mut state = PreviewState::default();
+        let mut result = list("epoch", 1, "tab-a");
+        result.sessions.push(agent_protocol::preview::PreviewSessionSnapshot {
+            thread_id: ThreadId::new("thread").unwrap(),
+            tab_id: "tab-b".into(),
+            nav_status: agent_protocol::preview::PreviewNavStatus::Idle,
+            can_go_back: false,
+            can_go_forward: false,
+            viewport: PreviewViewportSetting::Fill,
+            zoom: agent_protocol::preview::PreviewZoom::X100,
+            appearance: agent_protocol::preview::PreviewAppearance::System,
+            updated_at: String::new(),
+        });
+        result.recordings = vec![
+            agent_protocol::preview::PreviewRecordingStatus {
+                tab_id: "tab-a".into(),
+                recording: true,
+                started_at: Some("2026-01-01T00:00:00Z".into()),
+            },
+            agent_protocol::preview::PreviewRecordingStatus {
+                tab_id: "tab-b".into(),
+                recording: true,
+                started_at: Some("2026-01-01T00:00:01Z".into()),
+            },
+        ];
+        state.apply_list(result);
+        assert!(state.recording_for("tab-a").is_some_and(|status| status.recording));
+        assert!(state.recording_for("tab-b").is_some_and(|status| status.recording));
+    }
+
+    #[test]
+    fn ignores_a_late_session_reply_after_a_local_close() {
+        let mut state = PreviewState::default();
+        state.apply_list(list("epoch", 1, "tab"));
+        let session = state.sessions.get("tab").cloned().unwrap();
+        state.close(Some("tab"));
+        state.upsert(session);
+        assert!(state.sessions.is_empty());
+    }
+
+    #[test]
+    fn closing_the_recorded_tab_discards_ephemeral_recording_state() {
+        let mut state = PreviewState::default();
+        state.recordings.insert("tab".into(), agent_protocol::preview::PreviewRecordingStatus {
+            tab_id: "tab".into(),
+            recording: true,
+            started_at: Some("2026-01-01T00:00:00Z".into()),
+        });
+        state.last_recordings.insert("tab".into(), agent_protocol::preview::PreviewRecordingArtifact {
+            id: "browser-recording-test".into(),
+            tab_id: "tab".into(),
+            path: "/tmp/browser-recording-test.webm".into(),
+            mime_type: "video/webm".into(),
+            size_bytes: 1,
+            created_at: "2026-01-01T00:00:01Z".into(),
+        });
+        state.close(Some("tab"));
+        assert!(state.recordings.is_empty());
+        assert!(state.last_recordings.is_empty());
+    }
 }
 
 impl Snapshot {
     pub fn accepts_after(&self, previous: &Snapshot) -> bool {
         self.store_id != previous.store_id || self.revision >= previous.revision
+    }
+    pub fn environment_display_label(&self) -> Option<&str> {
+        self.environment
+            .as_ref()
+            .map(|environment| environment.label.as_str())
+            .or(self.host_name.as_deref())
+    }
+    pub fn context_environment_id(&self) -> Option<&str> {
+        self.environment
+            .as_ref()
+            .map(|environment| environment.environment_id.as_str())
+            .or(self.host_name.as_deref())
     }
     pub fn terminal_available(&self) -> bool {
         self.connected && !self.cwd().is_empty()
@@ -545,7 +951,7 @@ impl Snapshot {
         project_id: Option<String>,
         selected_at_ms: i64,
     ) {
-        let mut draft = self.default_draft.clone();
+        let mut draft = self.default_draft.user_defaults();
         draft.project_id = Some(
             project_id
                 .clone()
@@ -621,10 +1027,70 @@ impl Snapshot {
             .cloned()
             .unwrap_or_else(|| {
                 self.selected_thread.as_ref().map_or_else(
-                    || self.default_draft.clone(),
+                    || self.new_thread_default_draft(),
                     |id| self.draft_for_thread(id),
                 )
             })
+    }
+    /// The new-thread defaults after applying the selected project's overrides.
+    /// A draft explicitly saved for that project still wins over this fallback.
+    pub fn new_thread_default_draft(&self) -> Draft {
+        let mut draft = self.default_draft.clone();
+        let Some(host) = &self.host_settings else {
+            return draft;
+        };
+        let overrides = self
+            .selected_project
+            .as_deref()
+            .and_then(|project| host.project_overrides.get(project));
+        if let Some(mode) = overrides.and_then(|project| project.default_runtime_mode) {
+            draft.runtime_mode = mode;
+        }
+        if let Some(agent_protocol::models::Nullable::Value(selection)) =
+            overrides.and_then(|project| project.default_model_selection.as_ref())
+        {
+            draft = draft.with_selection(selection);
+        }
+        if self.preferences.load_balancing_enabled {
+            let providers = self.providers.as_deref().unwrap_or(&[]);
+            let candidates = providers
+                .iter()
+                .map(|provider| crate::view::load_balancing::Candidate {
+                    instance_id: provider.instance.clone(),
+                    driver: provider.driver,
+                    ready: provider.enabled
+                        && provider.status == agent_protocol::models::ProviderStatus::Ready,
+                })
+                .collect::<Vec<_>>();
+            let seed = crate::view::load_balancing::seed(
+                self.selected_project.as_deref().unwrap_or(CHATS_PROJECT),
+            );
+            if let Some(instance) = crate::view::load_balancing::select_instance(
+                &candidates,
+                draft.driver,
+                &self.preferences.load_balancing_weights,
+                seed,
+            ) {
+                if let Some(provider) = providers
+                    .iter()
+                    .find(|provider| provider.instance == instance)
+                {
+                    let model = provider
+                        .models
+                        .iter()
+                        .find(|model| model.slug == draft.model)
+                        .or_else(|| provider.models.iter().find(|model| model.is_default))
+                        .or_else(|| provider.models.first());
+                    if let Some(model) = model {
+                        draft.instance_id = provider.instance.clone();
+                        draft.driver = provider.driver;
+                        draft.model = model.slug.clone();
+                        draft.options.clear();
+                    }
+                }
+            }
+        }
+        draft
     }
     /// A thread's draft, or one with the thread's model and modes.
     pub fn draft_for_thread(&self, id: &ThreadId) -> Draft {
@@ -645,7 +1111,7 @@ impl Snapshot {
                 interaction_mode,
                 ..Draft::default().with_selection(selection)
             },
-            None => self.default_draft.clone(),
+            None => self.default_draft.user_defaults(),
         }
     }
     /// A fork or merge back from this thread is waiting for the Host.
@@ -738,17 +1204,33 @@ impl Snapshot {
             }
             return workspace;
         }
-        let worktree = self.new_thread_project_root().is_some()
-            && self
-                .workspace
-                .worktree_settings
-                .as_ref()
-                .is_some_and(|settings| settings.create_on_new_session);
-        let mode = if worktree {
-            ThreadWorkspaceMode::Worktree
-        } else {
-            ThreadWorkspaceMode::Local
-        };
+        let mode = self
+            .host_settings
+            .as_ref()
+            .and_then(|host| {
+                self.selected_project
+                    .as_deref()
+                    .and_then(|project| host.project_overrides.get(project))
+                    .and_then(|project| project.default_thread_env_mode)
+                    .or(host.default_thread_env_mode)
+            })
+            .map(|mode| match mode {
+                agent_protocol::models::ThreadEnvMode::Local => ThreadWorkspaceMode::Local,
+                agent_protocol::models::ThreadEnvMode::Worktree => ThreadWorkspaceMode::Worktree,
+            })
+            .unwrap_or_else(|| {
+                let worktree = self.new_thread_project_root().is_some()
+                    && self
+                        .workspace
+                        .worktree_settings
+                        .as_ref()
+                        .is_some_and(|settings| settings.create_on_new_session);
+                if worktree {
+                    ThreadWorkspaceMode::Worktree
+                } else {
+                    ThreadWorkspaceMode::Local
+                }
+            });
         let (branch, worktree_path) = match mode {
             ThreadWorkspaceMode::Local => self.new_thread_local_selection(),
             ThreadWorkspaceMode::Worktree => (None, None),
@@ -769,8 +1251,8 @@ impl Snapshot {
     ) -> bool {
         mode == crate::view::projects::selection::ThreadWorkspaceMode::Worktree
             && crate::view::settings::new_worktrees_start_from_origin(
-                self.conversation_settings.as_ref(),
-                self.new_thread_project_id(),
+                self.host_settings.as_ref(),
+                self.selected_project.as_deref(),
             )
     }
     /// Where a thread's files and terminals open: its worktree or checkout,
@@ -1065,6 +1547,35 @@ pub struct PushDeviceRegistration {
     pub live_activities_enabled: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct DeviceHostInput {
+    pub id: String,
+    pub label: String,
+    pub target: String,
+    pub identity_file: Option<String>,
+    pub port: Option<u16>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
+pub enum DeviceActionIntent {
+    SetAppearance { dark: bool },
+    SetTextSize { size: String },
+    SetToggle { setting: String, value: bool },
+    SetLiquidGlass { value: String },
+    SetColorFilter { filter: String },
+    SetOrientation { orientation: String },
+    SetLocation { latitude: f64, longitude: f64 },
+    ClearLocation,
+    SetPermission { app_id: String, permission: String, decision: String },
+    OpenUrl { url: String },
+    LaunchApp { app_id: String },
+    TerminateApp { app_id: String },
+    Shake,
+    SendPush { app_id: String, payload: String },
+}
+
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum Intent {
@@ -1094,6 +1605,152 @@ pub enum Intent {
         project_id: Option<String>,
     },
     Refresh,
+
+    // Pull requests and source control.
+    LoadPullRequests {
+        project_id: String,
+        repository: Option<String>,
+        query: Option<String>,
+        include_closed: bool,
+    },
+    LoadPullRequest {
+        project_id: String,
+        host: Option<String>,
+        repository: String,
+        number: u64,
+    },
+    LoadPullRequestDiff {
+        project_id: String,
+        host: Option<String>,
+        repository: String,
+        number: u64,
+        cursor: Option<String>,
+        commit: Option<String>,
+    },
+    LoadPullRequestDiffFileContents {
+        project_id: String,
+        host: Option<String>,
+        repository: String,
+        number: u64,
+        commit: Option<String>,
+        change_type: PullRequestDiffChangeTypeInput,
+        old_path: String,
+        new_path: String,
+    },
+    LoadPullRequestViewedFiles {
+        project_id: String,
+        host: Option<String>,
+        repository: String,
+        number: u64,
+    },
+    SetPullRequestFilesViewed {
+        project_id: String,
+        host: Option<String>,
+        repository: String,
+        number: u64,
+        files: Vec<PullRequestViewedFileInput>,
+    },
+    PullRequestAction {
+        project_id: String,
+        host: Option<String>,
+        repository: String,
+        number: u64,
+        action: String,
+        stack_number: Option<u64>,
+        expected_stack_heads: Vec<PullRequestStackHeadInput>,
+        merge_method: Option<String>,
+    },
+    SubmitPullRequestReview {
+        project_id: String,
+        host: Option<String>,
+        repository: String,
+        number: u64,
+        verdict: String,
+        body: String,
+    },
+    LinkPullRequest {
+        thread_id: String,
+        project_id: String,
+        host: String,
+        repository: String,
+        number: u64,
+        url: String,
+    },
+    UnlinkPullRequest {
+        thread_id: String,
+        project_id: String,
+        host: String,
+        repository: String,
+        number: u64,
+    },
+    SetPullRequestWatch {
+        thread_id: String,
+        project_id: String,
+        host: String,
+        repository: String,
+        number: u64,
+        url: String,
+        enabled: bool,
+    },
+    LoadSourceControlAuth {
+        cwd: Option<String>,
+    },
+    LoadSourceControlDiscovery {
+        cwd: String,
+    },
+
+    // Host-owned web preview.
+    PreviewList {
+        configured_urls: Vec<String>,
+    },
+    PreviewOpen {
+        url: Option<String>,
+        viewport: agent_protocol::preview::PreviewViewportSetting,
+        appearance: agent_protocol::preview::PreviewAppearance,
+        zoom: agent_protocol::preview::PreviewZoom,
+    },
+    PreviewNavigate {
+        tab_id: String,
+        url: String,
+    },
+    PreviewResize {
+        tab_id: String,
+        viewport: agent_protocol::preview::PreviewViewportSetting,
+        rendered_width: Option<u32>,
+        rendered_height: Option<u32>,
+    },
+    PreviewSetAppearance {
+        tab_id: String,
+        appearance: agent_protocol::preview::PreviewAppearance,
+    },
+    PreviewSetZoom {
+        tab_id: String,
+        zoom: agent_protocol::preview::PreviewZoom,
+    },
+    PreviewRefresh {
+        tab_id: String,
+    },
+    PreviewClose {
+        tab_id: Option<String>,
+    },
+    PreviewSelectTab {
+        tab_id: String,
+    },
+    PreviewRecordingStart {
+        tab_id: String,
+    },
+    PreviewRecordingStop {
+        tab_id: String,
+    },
+
+    SearchContents {
+        cwd: String,
+        query: String,
+        limit: u32,
+        case_sensitive: bool,
+        whole_word: bool,
+        use_regex: bool,
+    },
 
     // Composer.
     EditDraft {
@@ -1512,6 +2169,44 @@ pub enum Intent {
     SetWorkingSection {
         enabled: bool,
     },
+    /// The local device notification presentation mode.
+    SetNotificationMode {
+        mode: crate::view::notifications::NotificationMode,
+    },
+    /// Whether foreground attention events appear as in-app notices.
+    SetInAppNotificationsEnabled {
+        enabled: bool,
+    },
+    /// Enables weighted routing of new threads across provider instances.
+    SetLoadBalancingEnabled {
+        enabled: bool,
+    },
+    /// Sets one provider instance's local routing weight from 0 to 100.
+    SetLoadBalancingWeight {
+        instance_id: String,
+        weight: u8,
+    },
+    SetSnapshotCaptureEnabled {
+        enabled: bool,
+    },
+    SetSnapshotIncludeAccessibility {
+        enabled: bool,
+    },
+    SetSnapshotShortcut {
+        shortcut: crate::view::snapshot_capture::SnapshotShortcut,
+    },
+    SetSnapshotPlaySound {
+        enabled: bool,
+    },
+    SetSnapshotSound {
+        sound: crate::view::snapshot_capture::SnapshotSound,
+    },
+    SetSnapshotFlash {
+        enabled: bool,
+    },
+    SetSnapshotAnimations {
+        enabled: bool,
+    },
     /// The model new threads start with; an open thread keeps its own.
     SetDefaultModel {
         instance_id: String,
@@ -1522,6 +2217,13 @@ pub enum Intent {
     /// The permissions new threads start with; an open thread keeps its own.
     SetDefaultRuntimeMode {
         mode: RuntimeMode,
+    },
+    /// Replaces the Host-owned provider instance map atomically.
+    SetProviderInstances {
+        /// JSON for the complete map. The native layer uses the protocol's
+        /// serde shape while the binding-safe intent keeps the config types
+        /// out of the generated mobile enum.
+        provider_instances_json: String,
     },
     ToggleFavoriteModel {
         instance_id: String,
@@ -1544,10 +2246,27 @@ pub enum Intent {
     RemoveKeybinding {
         rule: crate::view::keybindings::KeybindingTarget,
     },
-    LoadConversationSettings,
-    UpdateConversationSettings {
+    /// Adds content received through a native share surface to the current draft.
+    ImportShare {
+        content: crate::view::share::ShareContent,
+    },
+    LoadSettings,
+    UpdateSettings {
         scope: crate::view::settings::SettingsScope,
-        change: crate::view::settings::ConversationSettingChange,
+        change: crate::view::settings::SettingChange,
+    },
+    LoadBackgroundPolicy,
+    LoadDiagnostics {
+        trace_file_path: String,
+    },
+    SetBackgroundProfile {
+        profile: String,
+    },
+    SetAutomaticGitFetchInterval {
+        seconds: u32,
+    },
+    SetProviderHealthRefreshInterval {
+        seconds: u32,
     },
     ResetProjectSettings {
         project_id: String,
@@ -1616,6 +2335,19 @@ pub enum Intent {
 
     // Accounts and Hosts.
     LoadAccounts,
+    LoadUsageSummary {
+        input: crate::view::usage::UsageSummaryInput,
+    },
+    SetUsagePreferences {
+        preferences: crate::view::usage::UsagePreferences,
+    },
+    RefreshUsageRates,
+    ConsumeResetCredit {
+        provider: crate::provider::ProviderKind,
+        account_id: String,
+        credit_id: Option<String>,
+    },
+    LoadProviders,
     SelectAccount {
         provider: crate::provider::ProviderKind,
         id: String,
@@ -1637,6 +2369,25 @@ pub enum Intent {
         id: String,
     },
     LoadHostStatus,
+    LoadUpdateStatus {
+        target: crate::models::UpdateTarget,
+    },
+    CheckUpdate {
+        request: crate::models::UpdateCheckRequest,
+    },
+    DownloadUpdate {
+        target: crate::models::UpdateTarget,
+    },
+    InstallUpdate {
+        target: crate::models::UpdateTarget,
+    },
+    SetUpdateChannel {
+        target: crate::models::UpdateTarget,
+        channel: crate::models::UpdateChannel,
+    },
+    LoadNativeUpdate {
+        request: crate::models::NativeUpdateRequest,
+    },
     LoadRemoteHosts,
     LoadHostManagement,
     PairRemoteHost {
@@ -1650,6 +2401,43 @@ pub enum Intent {
     RevokeDevice {
         id: String,
     },
+
+    // Device panel and Host-owned simulator/emulator control.
+    LoadDevices,
+    ConfigureDevices {
+        enabled: Option<bool>,
+        agent_access_enabled: Option<bool>,
+        onboarding_completed: Option<bool>,
+    },
+    UpdateDeviceHosts {
+        hosts: Vec<DeviceHostInput>,
+    },
+    OpenDevice {
+        host_id: Option<String>,
+        device_id: String,
+        platform: String,
+        boot: bool,
+    },
+    CloseDevice {
+        host_id: Option<String>,
+        device_id: Option<String>,
+        shutdown: bool,
+    },
+    LoadDeviceDetail {
+        host_id: Option<String>,
+        device_id: String,
+    },
+    DeviceAction {
+        host_id: Option<String>,
+        device_id: String,
+        action: DeviceActionIntent,
+    },
+    CaptureDeviceScreenshot {
+        host_id: Option<String>,
+        device_id: String,
+    },
+    SubscribeDevice,
+    UnsubscribeDevice,
 }
 
 #[cfg(test)]
@@ -1682,6 +2470,61 @@ mod tests {
             "typed\n\nsent"
         );
         assert_eq!(merge_restored_text("sent", "sent"), "sent");
+    }
+
+    #[test]
+    fn user_defaults_drop_content_context_workspace_and_identity() {
+        let source = Draft {
+            text: "task-specific text".into(),
+            attachments: vec![DraftAttachment {
+                id: "attachment".into(),
+                remote_id: None,
+                name: "note.txt".into(),
+                mime_type: "text/plain".into(),
+                kind: "file".into(),
+                size_bytes: 4,
+                local_path: "/tmp/note.txt".into(),
+                status: "ready".into(),
+                error: None,
+            }],
+            instance_id: "claude".into(),
+            driver: agent_domain::Driver::Claude,
+            model: "sonnet".into(),
+            options: vec![ModelOption {
+                key: "effort".into(),
+                value: "high".into(),
+            }],
+            runtime_mode: agent_domain::RuntimeMode::ApprovalRequired,
+            interaction_mode: agent_domain::InteractionMode::Plan,
+            context: Some(MessageContext {
+                version: 1,
+                records: vec![],
+            }),
+            workspace: Some(DraftWorkspace {
+                mode: crate::view::projects::selection::ThreadWorkspaceMode::Worktree,
+                branch: Some("feature".into()),
+                worktree_path: Some("/trees/feature".into()),
+                start_from_origin: true,
+                start_from_origin_choice: Some(true),
+            }),
+            project_id: Some("project".into()),
+            project_selected_at_ms: Some(1),
+            created_at_ms: Some(2),
+        };
+        let defaults = source.user_defaults();
+        assert_eq!(defaults.instance_id, "claude");
+        assert_eq!(defaults.driver, agent_domain::Driver::Claude);
+        assert_eq!(defaults.model, "sonnet");
+        assert_eq!(defaults.options, source.options);
+        assert_eq!(defaults.runtime_mode, agent_domain::RuntimeMode::ApprovalRequired);
+        assert_eq!(defaults.interaction_mode, agent_domain::InteractionMode::Plan);
+        assert!(defaults.text.is_empty());
+        assert!(defaults.attachments.is_empty());
+        assert!(defaults.context.is_none());
+        assert!(defaults.workspace.is_none());
+        assert!(defaults.project_id.is_none());
+        assert!(defaults.project_selected_at_ms.is_none());
+        assert!(defaults.created_at_ms.is_none());
     }
 
     fn skills(start: usize, count: usize) -> (String, MessageContext) {
@@ -1782,6 +2625,118 @@ mod tests {
                 ..draft
             }
         );
+    }
+
+    #[test]
+    fn selected_project_defaults_apply_to_a_new_thread_fallback() {
+        let mut host = crate::models::HostSettings::default();
+        host.project_overrides.insert(
+            "project".into(),
+            agent_protocol::models::ProjectSettingsOverrides {
+                default_runtime_mode: Some(RuntimeMode::ApprovalRequired),
+                default_thread_env_mode: Some(agent_protocol::models::ThreadEnvMode::Local),
+                default_model_selection: Some(agent_protocol::models::Nullable::Value(
+                    ModelSelection {
+                        instance: "claude".into(),
+                        driver: Driver::Claude,
+                        model: "sonnet".into(),
+                        options: Default::default(),
+                    },
+                )),
+                ..Default::default()
+            },
+        );
+        let snapshot = Snapshot {
+            selected_project: Some("project".into()),
+            host_settings: Some(host),
+            default_draft: Draft {
+                instance_id: "codex".into(),
+                driver: Driver::Codex,
+                model: "gpt".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let draft = snapshot.new_thread_default_draft();
+        assert_eq!(draft.runtime_mode, RuntimeMode::ApprovalRequired);
+        assert_eq!(draft.instance_id, "claude");
+        assert_eq!(draft.model, "sonnet");
+        assert_eq!(
+            snapshot.new_thread_workspace().mode,
+            crate::view::projects::selection::ThreadWorkspaceMode::Local
+        );
+    }
+
+    #[test]
+    fn load_balancing_routes_a_new_thread_to_the_weighted_ready_instance() {
+        let mut snapshot = Snapshot {
+            selected_project: Some("project".into()),
+            host_settings: Some(crate::models::HostSettings::default()),
+            default_draft: Draft {
+                instance_id: "codex".into(),
+                driver: Driver::Codex,
+                model: "shared".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        snapshot.preferences.load_balancing_enabled = true;
+        snapshot
+            .preferences
+            .load_balancing_weights
+            .insert("codex-build".into(), 100);
+        snapshot.providers = Some(vec![
+            crate::models::ProviderInstance {
+                instance: "codex".into(),
+                driver: Driver::Codex,
+                display_name: "Codex".into(),
+                accent_color: None,
+                enabled: true,
+                installed: true,
+                version: None,
+                status: crate::models::ProviderStatus::Ready,
+                message: None,
+                unavailable_reason: None,
+                show_interaction_mode_toggle: true,
+                reports_context_window: true,
+                supported_runtime_modes: vec![],
+                models: vec![crate::models::Model {
+                    slug: "shared".into(),
+                    name: "Shared".into(),
+                    aliases: vec![],
+                    badge: None,
+                    is_default: true,
+                    is_legacy: false,
+                    option_descriptors: vec![],
+                }],
+            },
+            crate::models::ProviderInstance {
+                instance: "codex-build".into(),
+                driver: Driver::Codex,
+                display_name: "Build Codex".into(),
+                accent_color: None,
+                enabled: true,
+                installed: true,
+                version: None,
+                status: crate::models::ProviderStatus::Ready,
+                message: None,
+                unavailable_reason: None,
+                show_interaction_mode_toggle: true,
+                reports_context_window: true,
+                supported_runtime_modes: vec![],
+                models: vec![crate::models::Model {
+                    slug: "shared".into(),
+                    name: "Shared".into(),
+                    aliases: vec![],
+                    badge: None,
+                    is_default: true,
+                    is_legacy: false,
+                    option_descriptors: vec![],
+                }],
+            },
+        ]);
+        let draft = snapshot.new_thread_default_draft();
+        assert_eq!(draft.instance_id, "codex-build");
     }
 
     #[test]

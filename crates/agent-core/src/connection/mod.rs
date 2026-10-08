@@ -138,6 +138,25 @@ impl Store {
         receiver
     }
 
+    /// Publishes the desktop's locally sampled host power state through the
+    /// same ordered owner queue as user initiated Host calls.
+    pub fn report_host_power(
+        &self,
+        snapshot: agent_protocol::background::HostPowerSnapshot,
+    ) -> Receipt {
+        let (sender, receiver) = oneshot::channel();
+        if let Err(error) = self
+            .inner
+            .intents
+            .send(Event::ReportHostPower(snapshot, sender))
+        {
+            if let Event::ReportHostPower(_, complete) = error.0 {
+                let _ = complete.send(Err(invalid("Host connection is unavailable")));
+            }
+        }
+        receiver
+    }
+
     /// The app returned to the foreground: resume the subscriptions from their
     /// cursors.
     pub fn app_became_active(&self) {
@@ -160,13 +179,24 @@ impl Store {
         if let Some(invitation) = invitation {
             peer.call(&op::Pair { invitation }).await?;
         }
+        let environment = peer
+            .request::<m::EnvironmentDescriptor>(&Call::Environment(m::Empty {}))
+            .await?;
         let host_name = peer.request::<String>(&Call::HostName(m::Empty {})).await?;
+        let awareness_registration = m::AwarenessRegistration {
+            device_id: endpoint.node_id().to_string(),
+            label: "agent-client".into(),
+            platform: std::env::consts::OS.into(),
+            app_version: Some(env!("CARGO_PKG_VERSION").into()),
+        };
         let (complete, receiver) = oneshot::channel();
         self.inner
             .sender
             .send(Event::Attach {
                 peer: peer.clone(),
                 host_name,
+                environment,
+                awareness_registration,
                 ticket: ticket.clone(),
                 session,
                 events: Box::new(events),

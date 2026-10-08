@@ -557,17 +557,31 @@ private fun WorkDetail(model: AndroidAppModel, detail: dev.remoteagent.core.Work
         border = BorderStroke(1.dp, AppTheme.colors.border),
     ) {
         SelectionContainer {
-            Text(
-                text,
-                Modifier.heightIn(max = 256.dp)
-                    .verticalScroll(rememberScrollState())
-                    .horizontalScroll(rememberScrollState())
-                    .padding(10.dp),
-                fontFamily = AppTheme.mono,
-                fontSize = AppTheme.codeFontSize.sp,
-                lineHeight = AppTheme.codeLineHeight.sp,
-                color = AppTheme.colors.foreground,
-            )
+            if (AppTheme.codeWordWrap)
+                Text(
+                    text,
+                    Modifier.fillMaxWidth().heightIn(max = 256.dp)
+                        .verticalScroll(rememberScrollState())
+                        .padding(10.dp),
+                    fontFamily = AppTheme.mono,
+                    fontSize = AppTheme.codeFontSize.sp,
+                    lineHeight = AppTheme.codeLineHeight.sp,
+                    softWrap = true,
+                    color = AppTheme.colors.foreground,
+                )
+            else
+                Text(
+                    text,
+                    Modifier.heightIn(max = 256.dp)
+                        .verticalScroll(rememberScrollState())
+                        .horizontalScroll(rememberScrollState())
+                        .padding(10.dp),
+                    fontFamily = AppTheme.mono,
+                    fontSize = AppTheme.codeFontSize.sp,
+                    lineHeight = AppTheme.codeLineHeight.sp,
+                    softWrap = false,
+                    color = AppTheme.colors.foreground,
+                )
         }
     }
 }

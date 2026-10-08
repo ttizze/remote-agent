@@ -14,8 +14,9 @@ use crate::{
         composer::{
             chips::{format_context_reference, insert_inline_context_references},
             commands::{
-                ComposerTrigger, TOO_MANY_CONTEXT_ITEMS, ThreadContextAttachment,
-                detect_composer_trigger, resolve_composer_command_selection,
+                ComposerCommandTarget, ComposerTrigger, TOO_MANY_CONTEXT_ITEMS,
+                ThreadContextAttachment, detect_composer_trigger, pull_request_context_id,
+                pull_request_context_record, resolve_composer_command_selection,
             },
             menu::composer_menu_items,
             stash::{StashImages, evicted_entry_warning, new_stash_entry, restore_stash_entry},
@@ -124,8 +125,42 @@ impl Owner {
                 .map_err(invalid)?;
         draft.text = selection.text;
         if let Some(attachment) = selection.attach_thread {
-            let environment = self.state.host_name.clone().unwrap_or_default();
+            let environment = self
+                .state
+                .context_environment_id()
+                .unwrap_or_default()
+                .to_owned();
             push_context_record(&mut draft, attachment.record(&environment));
+        }
+        if let ComposerCommandTarget::PullRequest {
+            host,
+            repository,
+            number,
+            url,
+            title,
+            state,
+            is_draft,
+            head_branch,
+            base_branch,
+        } = &item.target
+        {
+            let context_id = pull_request_context_id(host, repository, *number);
+            if !context_ids.iter().any(|id| id == &context_id) {
+                push_context_record(
+                    &mut draft,
+                    pull_request_context_record(
+                        host,
+                        repository,
+                        *number,
+                        url,
+                        title,
+                        state,
+                        *is_draft,
+                        head_branch,
+                        base_branch,
+                    ),
+                );
+            }
         }
         if let Some(mode) = selection.interaction_mode {
             draft.interaction_mode = mode;
@@ -181,7 +216,11 @@ impl Owner {
             .iter()
             .filter_map(|record| context_id(record).map(str::to_owned))
             .collect();
-        let environment = self.state.host_name.clone().unwrap_or_default();
+        let environment = self
+            .state
+            .context_environment_id()
+            .unwrap_or_default()
+            .to_owned();
         let mut references = vec![];
         for thread_id in thread_ids {
             let Some(title) = ThreadId::new(thread_id.clone())
@@ -286,7 +325,9 @@ impl Owner {
                 &draft.options,
             );
             let selection = draft.selection().map_err(invalid)?;
-            self.state.default_draft.options = draft.options.clone();
+            let mut defaults = self.state.default_draft.user_defaults();
+            defaults.options = draft.options.clone();
+            self.state.default_draft = defaults;
             if let Some(thread) = self.state.selected_thread.clone() {
                 next = Next::Commands(vec![self.command(thread, select_model_command(selection))]);
             }

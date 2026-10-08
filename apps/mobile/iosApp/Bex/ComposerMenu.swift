@@ -118,6 +118,7 @@ extension ComposerCommandTarget {
         case .skill: "square.grid.2x2"
         case .path: "folder"
         case .thread: "text.bubble"
+        case .pullRequest: "arrow.triangle.pull"
         }
     }
 

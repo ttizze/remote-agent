@@ -106,7 +106,7 @@ To remove a saved PC on iPhone, open **タスク一覧 → PC一覧 → 接続�
 ## Build the clients
 
 ```sh
-# Mac (requires a signing certificate; BEX_CODE_SIGN_IDENTITY selects it)
+# Mac (requires a signing certificate; APP_CODE_SIGN_IDENTITY selects it)
 scripts/dev-env.sh just build-desktop-macos && open target/Bex.app
 
 # iPhone (iOS 26): build Simulator libraries, then open Xcode

@@ -73,10 +73,12 @@ import dev.remoteagent.core.ComposerMenuView
 import dev.remoteagent.core.ComposerPrimaryAction
 import dev.remoteagent.core.ComposerTriggerKind
 import dev.remoteagent.core.ComposerView
+import dev.remoteagent.core.Driver
 import dev.remoteagent.core.FollowUpBehavior
 import dev.remoteagent.core.Intent
 import dev.remoteagent.core.MobileSendIcon
 import dev.remoteagent.core.Outcome
+import dev.remoteagent.core.ProviderKind
 import dev.remoteagent.core.QueueAction
 import dev.remoteagent.core.SkillSourceKind
 import dev.remoteagent.core.TimelineLayout
@@ -217,6 +219,15 @@ internal fun Composer(model: AndroidAppModel, composer: ComposerView, onOpenSett
                         ) {
                             AttachmentButton(model, composer.draftKey, enabled = !composer.editor.disabled)
                             ModelControl(composer, onOpenSettings)
+                            composer.controls.model?.driver?.let { driver ->
+                                val provider = when (driver) {
+                                    Driver.CODEX -> ProviderKind.CODEX
+                                    Driver.CLAUDE -> ProviderKind.CLAUDE
+                                }
+                                model.snapshot.composerUsageLimits(provider)?.let { limits ->
+                                    UsageLimitsRow(limits) { model.navigate(Route.Usage) }
+                                }
+                            }
                             Spacer(Modifier.weight(1f))
                             trailing()
                         }
@@ -293,6 +304,7 @@ private fun menuItemIcon(item: ComposerCommandItem): ImageVector =
         is ComposerCommandTarget.Path ->
             if (target.directory) Icons.Outlined.Folder else Icons.AutoMirrored.Outlined.InsertDriveFile
         is ComposerCommandTarget.Thread -> Icons.Outlined.ChatBubbleOutline
+        is ComposerCommandTarget.PullRequest -> Icons.Outlined.CallMerge
     }
 
 private const val SLASH_SKILL_PREFIX = "skill:"

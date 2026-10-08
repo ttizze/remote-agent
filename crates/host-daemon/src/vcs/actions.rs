@@ -2,7 +2,10 @@
 //! progress records; clients only render those records.
 use super::process::{Execute, NON_INTERACTIVE_ENV, Progress, execute};
 use super::pull_requests::{branch_head_context, find_open_pr};
-use super::{VcsStatusBroadcaster, default_branch, git, primary_remote, remote_names, split_remote_ref, stdout};
+use super::{
+    VcsStatusBroadcaster, default_branch, git, github_scope, primary_remote, remote_names,
+    split_remote_ref, stdout,
+};
 use crate::conversation::TextGenerator;
 use crate::text_generation::{
     GeneratedCommitMessage, GeneratedPrContent, commit_message_prompt, commit_message_schema,
@@ -164,7 +167,7 @@ async fn run(
         !index.ok()
     } else {
         false
-    }
+    };
     let mut generated = if has_staged_changes {
         Some(
             commit_message(&request, &text)
@@ -564,14 +567,18 @@ async fn pull_request(
     if upstream.is_none() {
         return Err(ActionError::at(ActionPhase::Pr, "Push the branch with an upstream before creating a pull request."));
     }
-    let default = github
-        .default_branch(cwd)
-        .await
-        .map_err(|error| ActionError::at(ActionPhase::Pr, error))?
-        .or_else(|| default_branch(cwd, &primary_remote(cwd).unwrap_or_else(|| "origin".into())))
-        .unwrap_or_else(|| "main".into());
     let context = branch_head_context(cwd, &branch, upstream.as_deref(), None);
-    if let Some(existing) = find_open_pr(github, cwd, &context)
+    let (repository, host) = github_scope(cwd);
+    let default = match repository.as_deref() {
+        Some(repository) => github
+            .default_branch(cwd, repository, host.as_deref())
+            .await
+            .map_err(|error| ActionError::at(ActionPhase::Pr, error))?,
+        None => None,
+    }
+    .or_else(|| default_branch(cwd, &primary_remote(cwd).unwrap_or_else(|| "origin".into())))
+    .unwrap_or_else(|| "main".into());
+    if let Some(existing) = find_open_pr(github, cwd, &context, host.as_deref())
         .await
         .map_err(|error| ActionError::at(ActionPhase::Pr, error))?
     {
@@ -616,10 +623,18 @@ async fn pull_request(
     std::fs::write(body.path(), &content.body)
         .map_err(|error| ActionError::at(ActionPhase::Pr, error))?;
     github
-        .create_pull_request(cwd, &default, &branch, &content.title, body.path())
+        .create_pull_request(
+            cwd,
+            &default,
+            &branch,
+            &content.title,
+            body.path(),
+            repository.as_deref(),
+            host.as_deref(),
+        )
         .await
         .map_err(|error| ActionError::at(ActionPhase::Pr, error))?;
-    let created = find_open_pr(github, cwd, &context)
+    let created = find_open_pr(github, cwd, &context, host.as_deref())
         .await
         .map_err(|error| ActionError::at(ActionPhase::Pr, error))?
         .ok_or_else(|| ActionError::at(ActionPhase::Pr, "GitHub did not return the created pull request."))?;

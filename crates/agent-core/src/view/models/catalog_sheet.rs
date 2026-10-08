@@ -1,7 +1,7 @@
 //! The mobile thread settings sheet's model catalogue: one section per
 //! provider instance, primary and selected providers open, legacy models behind
 //! the "Show legacy models" switch, favorites first.
-use super::{ProviderInstance, ordering::provider_model_key};
+use super::{ProviderInstance, ProviderStatus, ordering::provider_model_key};
 use crate::state::Snapshot;
 use agent_domain::Driver;
 
@@ -118,7 +118,12 @@ pub fn catalog_sheet(snapshot: &Snapshot, options: &CatalogSheetOptions) -> Cata
     let listed: Vec<&ProviderInstance> = catalog
         .instances
         .iter()
-        .filter(|instance| instance.enabled && instance.installed && instance.available)
+        .filter(|instance| {
+            instance.enabled
+                && instance.installed
+                && instance.available
+                && !matches!(instance.status, ProviderStatus::Error | ProviderStatus::Disabled)
+        })
         .collect();
     let query = options.query.trim().to_lowercase();
     let narrowed = options.filter != CatalogFilter::All || !query.is_empty();

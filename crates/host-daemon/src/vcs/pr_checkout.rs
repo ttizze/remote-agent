@@ -40,8 +40,14 @@ async fn resolve_record(
         return Err(anyhow!("A pull request number or URL is required."));
     }
     let reference = reference.strip_prefix('#').unwrap_or(reference);
+    let (repository, host) = super::github_scope(Path::new(&request.cwd));
     github
-        .pull_request(Path::new(&request.cwd), reference)
+        .pull_request(
+            Path::new(&request.cwd),
+            reference,
+            repository.as_deref(),
+            host.as_deref(),
+        )
         .await
         .map_err(|error| provider_error("resolvePullRequest", error))
 }
@@ -122,6 +128,7 @@ async fn restore_pull_request_upstream(
     record: &PullRequestRecord,
     branch: &str,
 ) {
+    let (_, host) = super::github_scope(cwd);
     let (remote, remote_url) = if record.is_cross_repository == Some(true) {
         let Some(repository) = record
             .head_repository_name_with_owner
@@ -131,7 +138,10 @@ async fn restore_pull_request_upstream(
         else {
             return;
         };
-        let urls = match github.repository_clone_urls(cwd, repository).await {
+        let urls = match github
+            .repository_clone_urls(cwd, repository, host.as_deref())
+            .await
+        {
             Ok(urls) => urls,
             Err(error) => {
                 tracing::warn!(
@@ -302,8 +312,9 @@ pub(crate) async fn publish(
     }
     let github = github.ok_or_else(|| anyhow!("GitHub CLI is unavailable."))?;
     let cwd = Path::new(&request.cwd);
+    let (_, host) = super::github_scope(cwd);
     let urls = github
-        .create_repository(cwd, &request.repository, request.visibility)
+        .create_repository(cwd, &request.repository, request.visibility, host.as_deref())
         .await
         .map_err(|error| provider_error("publishRepository", error))?;
     let remote_name = request.remote_name.as_deref().unwrap_or("origin");

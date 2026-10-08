@@ -56,74 +56,83 @@ import dev.remoteagent.core.addProjectInitialQuery
 internal fun ChooseProjectScreen(model: AndroidAppModel) {
     val colors = AppTheme.colors
     var query by remember { mutableStateOf("") }
-    val view by rememberView(model.snapshot, query) { it.projectPicker(query) }
+    val projects = model.environmentProjects(query)
     ScreenScaffold(
         "Choose project",
         onBack = model::back,
         actions = {
-            if (view?.canAddProject == true)
+            if (model.environmentSnapshots.isNotEmpty())
                 HeaderIconButton(Icons.Outlined.Add, "Add project") { model.navigate(Route.AddProject) }
         },
     ) {
-        val current = view ?: return@ScreenScaffold
         Column(Modifier.fillMaxSize()) {
-            if (current.empty == null)
+            if (projects.isNotEmpty() || query.isNotEmpty())
                 SettingsField(
                     query,
                     { query = it },
                     "Search projects",
                     Modifier.padding(start = 16.dp, end = 16.dp, top = 4.dp),
                 )
-            val empty = current.empty
-            if (empty != null) {
-                ProjectsEmpty(model, empty)
+            if (projects.isEmpty() && query.isNotBlank()) {
+                Column(
+                    Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 32.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Text(
+                        "No matching projects",
+                        style = AppTheme.headline,
+                        fontWeight = FontWeight.Bold,
+                        color = colors.foreground,
+                        textAlign = TextAlign.Center,
+                    )
+                    Text(
+                        "Try a different project name or workspace path.",
+                        style = AppTheme.footnote,
+                        color = colors.foregroundMuted,
+                        textAlign = TextAlign.Center,
+                    )
+                }
+                return@Column
+            }
+            if (projects.isEmpty()) {
+                ProjectsEmpty(
+                    model,
+                    ProjectPickerEmpty(
+                        title = "No projects yet",
+                        detail = "Add a project on any connected environment.",
+                        loading = model.environmentSnapshots.isEmpty(),
+                        addProject = true,
+                        startWithoutProject = true,
+                    ),
+                )
                 return@Column
             }
             LazyColumn(contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                if (current.noProject)
-                    item(key = "no-project") {
-                        ListCard {
-                            ListRow(
-                                "No project",
-                                "Start a task without a project",
-                                leading = { RowIcon(Icons.AutoMirrored.Outlined.Chat) },
-                            ) {
-                                model.chooseProject(null)
-                            }
-                        }
-                    }
-                if (current.noMatches)
-                    item(key = "no-matches") {
-                        Column(
-                            Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 32.dp),
-                            horizontalAlignment = Alignment.CenterHorizontally,
-                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                item(key = "no-project") {
+                    ListCard {
+                        ListRow(
+                            "No project",
+                            "Start a task without a project",
+                            leading = { RowIcon(Icons.AutoMirrored.Outlined.Chat) },
                         ) {
-                            Text(
-                                "No matching projects",
-                                style = AppTheme.headline,
-                                fontWeight = FontWeight.Bold,
-                                color = colors.foreground,
-                                textAlign = TextAlign.Center,
-                            )
-                            Text(
-                                "Try a different project name or workspace path.",
-                                style = AppTheme.footnote,
-                                color = colors.foregroundMuted,
-                                textAlign = TextAlign.Center,
-                            )
+                            model.chooseProject(null)
                         }
                     }
-                if (current.rows.isNotEmpty())
-                    item(key = "projects") {
-                        ListCard {
-                            current.rows.forEach { row ->
-                                ListRow(row.title, row.subtitle, leading = { ProjectFavicon(row.projectId, 24.dp) }) {
-                                    model.chooseProject(row.projectId)
-                                }
+                }
+                item(key = "projects") {
+                    ListCard {
+                        projects.forEach { row ->
+                            ListRow(
+                                "${row.environmentLabel} · ${row.title}",
+                                row.subtitle,
+                                leading = { RowIcon(Icons.Outlined.Folder) },
+                            ) {
+                                model.chooseProject(row.projectId)
                             }
                         }
                     }
+                }
             }
         }
     }

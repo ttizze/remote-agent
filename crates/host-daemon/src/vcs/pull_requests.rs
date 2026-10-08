@@ -388,6 +388,7 @@ pub(crate) async fn find_open_pr(
     github: &GitHubCli,
     cwd: &Path,
     context: &HeadContext,
+    host: Option<&str>,
 ) -> Result<Option<PullRequestRecord>> {
     for selector in probeable_selectors(context) {
         let rows = github
@@ -396,6 +397,8 @@ pub(crate) async fn find_open_pr(
                 selector,
                 PullRequestListState::Open,
                 HEAD_BRANCH_PROBE_LIMIT,
+                host,
+                context.head_repository_name_with_owner.as_deref(),
             )
             .await
             .map_err(|error| provider_error("listChangeRequests", &error))?;
@@ -419,6 +422,7 @@ async fn find_latest_pr(
     cwd: &Path,
     context: &HeadContext,
 ) -> Result<Option<PullRequestRecord>> {
+    let (_, host) = super::github_scope(cwd);
     let mut by_number: HashMap<u64, PullRequestRecord> = HashMap::new();
     for selector in probeable_selectors(context) {
         let rows = github
@@ -427,6 +431,8 @@ async fn find_latest_pr(
                 selector,
                 PullRequestListState::All,
                 HEAD_BRANCH_PROBE_LIMIT,
+                host.as_deref(),
+                context.head_repository_name_with_owner.as_deref(),
             )
             .await
             .map_err(|error| provider_error("listChangeRequests", &error))?;

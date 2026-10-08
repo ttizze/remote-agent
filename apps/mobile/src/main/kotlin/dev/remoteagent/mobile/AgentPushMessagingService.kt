@@ -1,13 +1,16 @@
 package dev.remoteagent.mobile
 
+import android.net.Uri
 import com.google.firebase.messaging.FirebaseMessagingService
 import com.google.firebase.messaging.RemoteMessage
+import dev.remoteagent.core.agentActivityWidgetJson
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
-import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.put
 
 internal data class ActivityPresentation(
     val title: String,
@@ -16,67 +19,99 @@ internal data class ActivityPresentation(
     val deepLink: String?,
 )
 
-private data class ActivityRow(
-    val phase: String,
-    val text: String,
-    val deepLink: String?,
-)
+private const val ACTIVITY_STATE_PREFERENCES = "push-activity-state"
+private const val ACTIVITY_MAX_BYTES = 64 * 1024
+private const val ACTIVITY_MAX_HOSTS = 64
 
-/** Pure presentation of the bounded aggregate used by the ongoing Android notification. */
+/**
+ * Parses the core-owned display projection. Android does not choose priority,
+ * colors, urgency, or rows; those decisions come from agent-core's shared
+ * activity widget helper.
+ */
 internal fun parseActivityPresentation(value: String): ActivityPresentation? {
-    if (value.length > 4_096) return null
-    val root = runCatching { Json.parseToJsonElement(value).jsonObject }.getOrNull() ?: return null
-    val title = (root["title"] as? JsonPrimitive)?.content?.trim()?.takeIf(String::isNotEmpty)
-        ?: return null
-    val subtitle = (root["subtitle"] as? JsonPrimitive)?.content?.trim().orEmpty()
-    val activeCount = (root["activeCount"] as? JsonPrimitive)?.intOrNull?.coerceAtLeast(0) ?: 0
-    val rows = (root["activities"] as? JsonArray)?.take(5).orEmpty().mapNotNull { row ->
-        val fields = row as? JsonObject ?: return@mapNotNull null
-        val phase = (fields["phase"] as? JsonPrimitive)?.content?.trim().orEmpty()
-        val status = (fields["status"] as? JsonPrimitive)?.content?.trim().orEmpty()
-        val thread = (fields["threadTitle"] as? JsonPrimitive)?.content?.trim().orEmpty()
-        val project = (fields["projectTitle"] as? JsonPrimitive)?.content?.trim().orEmpty()
-        val deepLink = (fields["deepLink"] as? JsonPrimitive)?.content?.trim()
-            ?.takeIf(String::isNotEmpty)
-        if (thread.isEmpty() && project.isEmpty()) null else {
-            ActivityRow(
-                phase,
-                listOf(status.take(40), thread.take(120), project.take(120))
-                    .filter(String::isNotEmpty)
-                    .joinToString(" · "),
-                deepLink,
-            )
+    if (value.toByteArray(Charsets.UTF_8).size > ACTIVITY_MAX_BYTES) return null
+    val input = activityState(value) ?: return null
+    val activeCount = (input["activeCount"] as? JsonPrimitive)?.content?.toIntOrNull()?.coerceAtLeast(0) ?: return null
+    val projected = runCatching {
+        agentActivityWidgetJson(value, stale = false, light = false, monochrome = false, reduced = false)
+    }.getOrNull() ?: return null
+    val display = runCatching { Json.parseToJsonElement(projected).jsonObject }.getOrNull() ?: return null
+    val title = (display["headline"] as? JsonPrimitive)?.content?.trim()?.takeIf(String::isNotEmpty) ?: return null
+    val rows = display["rows"]?.let { element ->
+        (element as? JsonArray)?.mapNotNull { row ->
+            val object = row as? JsonObject ?: return@mapNotNull null
+            val project = (object["project"] as? JsonPrimitive)?.content?.trim().orEmpty()
+            val thread = (object["title"] as? JsonPrimitive)?.content?.trim().orEmpty()
+            val status = (object["status"] as? JsonPrimitive)?.content?.trim().orEmpty()
+            listOf(project, thread, status).filter(String::isNotEmpty).joinToString(" · ").takeIf(String::isNotEmpty)
         }
-    }
-    val orderedRows = rows.sortedBy(::activityRowPriority)
-    val attentionCount = orderedRows.count {
-        it.phase == "waiting_for_approval" || it.phase == "waiting_for_input"
-    }
-    val failed = orderedRows.any { it.phase == "failed" }
-    val activityTitle = if (activeCount > 0) {
-        "$activeCount active agent${if (activeCount == 1) "" else "s"}" +
-            if (attentionCount > 0) " · $attentionCount need${if (attentionCount == 1) "s" else ""} attention" else ""
-    } else if (failed) {
-        "Agent work failed"
-    } else {
-        "Agent work completed"
-    }
-    val body = orderedRows.takeIf { it.isNotEmpty() }?.joinToString("\n") { it.text } ?: subtitle
-    return ActivityPresentation(
-        activityTitle.take(120),
-        body.take(512),
-        activeCount > 0,
-        orderedRows.firstOrNull()?.deepLink,
-    )
+    }.orEmpty()
+    val body = rows.takeIf { it.isNotEmpty() }?.joinToString("\n")
+        ?: (display["summary"] as? JsonPrimitive)?.content?.trim().orEmpty()
+    val deepLink = (display["deepLink"] as? JsonPrimitive)?.content?.takeIf(String::isNotBlank)
+    return ActivityPresentation(title, body, activeCount > 0, deepLink)
 }
 
-private fun activityRowPriority(row: ActivityRow): Int =
-    when (row.phase) {
-        "waiting_for_approval", "waiting_for_input" -> 0
-        "failed" -> 1
-        "starting", "running" -> 2
-        else -> 3
+private fun activityState(value: String): JsonObject? {
+    if (value.toByteArray(Charsets.UTF_8).size > ACTIVITY_MAX_BYTES) return null
+    val root = runCatching { Json.parseToJsonElement(value).jsonObject }.getOrNull() ?: return null
+    return runCatching {
+        val activities = root["activities"] as? JsonArray ?: return@runCatching null
+        if (activities.size > 64) return@runCatching null
+        val activeCount = (root["activeCount"] as? JsonPrimitive)?.content?.toIntOrNull()?.coerceAtLeast(0)
+            ?: return@runCatching null
+        val title = (root["title"] as? JsonPrimitive)?.content?.trim().orEmpty()
+        val subtitle = (root["subtitle"] as? JsonPrimitive)?.content?.trim().orEmpty()
+        val updatedAt = (root["updatedAt"] as? JsonPrimitive)?.content?.trim().orEmpty()
+        buildJsonObject {
+            put("title", title)
+            put("subtitle", subtitle)
+            put("activeCount", activeCount)
+            put("updatedAt", updatedAt)
+            put("activities", activities)
+        }
+    }.getOrNull()
+}
+
+/** Stores one Host state and returns the serialized cross-Host aggregate. */
+private fun mergeActivityState(context: android.content.Context, hostId: String, value: String): String? {
+    if (hostId.isBlank() || hostId.toByteArray(Charsets.UTF_8).size > 256) return null
+    val state = activityState(value) ?: return null
+    val preferences = context.getSharedPreferences(ACTIVITY_STATE_PREFERENCES, android.content.Context.MODE_PRIVATE)
+    val next = preferences.all
+        .filterKeys { it.startsWith("host:") }
+        .mapNotNull { (key, raw) ->
+            val json = raw as? String ?: return@mapNotNull null
+            val parsed = activityState(json) ?: return@mapNotNull null
+            key.removePrefix("host:") to parsed
+        }
+        .toMutableMap()
+    next[hostId] = state
+    val retained = next.toList().sortedByDescending {
+        (it.second["updatedAt"] as? JsonPrimitive)?.content.orEmpty()
     }
+        .take(ACTIVITY_MAX_HOSTS)
+    val editor = preferences.edit().clear()
+    retained.forEach { (id, parsed) -> editor.putString("host:$id", Json.encodeToString(JsonObject.serializer(), parsed)) }
+    editor.apply()
+
+    val allRows = retained.flatMap { (_, parsed) -> (parsed["activities"] as? JsonArray).orEmpty() }.take(64)
+    val activeCount = retained.sumOf { (_, parsed) ->
+        (parsed["activeCount"] as? JsonPrimitive)?.content?.toIntOrNull()?.coerceAtLeast(0) ?: 0
+    }
+    val title = (retained.firstOrNull()?.second?.get("title") as? JsonPrimitive)?.content?.takeIf(String::isNotBlank)
+        ?: "Agent activity"
+    val subtitle = (retained.firstOrNull()?.second?.get("subtitle") as? JsonPrimitive)?.content.orEmpty()
+    val updatedAt = retained.maxOfOrNull { (_, parsed) -> (parsed["updatedAt"] as? JsonPrimitive)?.content.orEmpty() }.orEmpty()
+    val aggregate = buildJsonObject {
+        put("title", title)
+        put("subtitle", subtitle)
+        put("activeCount", activeCount)
+        put("updatedAt", updatedAt)
+        put("activities", JsonArray(allRows))
+    }
+    return Json.encodeToString(JsonObject.serializer(), aggregate)
+}
 
 internal class AgentPushMessagingService : FirebaseMessagingService() {
     override fun onNewToken(token: String) {
@@ -90,15 +125,14 @@ internal class AgentPushMessagingService : FirebaseMessagingService() {
         val data = message.data
         val deepLink = data["deepLink"]?.takeIf(String::isNotBlank)
             ?: threadDeepLink(data["environmentId"], data["threadId"])
-        val title =
-            message.notification?.title ?: data["alertTitle"] ?: data["headline"] ?: "Agent activity"
-        val body =
-            message.notification?.body
-                ?: data["alertBody"]
-                ?: data["detail"]
-                ?: data["threadTitle"]
-                ?: "Agent update"
-        val activity = data["activity"]?.let(::parseActivityPresentation)
+        val title = message.notification?.title ?: data["alertTitle"] ?: data["headline"] ?: "Agent activity"
+        val body = message.notification?.body ?: data["alertBody"] ?: data["detail"] ?: data["threadTitle"] ?: "Agent update"
+        val hostId = data["environmentId"]?.takeIf(String::isNotBlank)
+        val activityJson = data["activity"]
+        val aggregate = if (hostId != null && activityJson != null) {
+            mergeActivityState(this, hostId, activityJson)
+        } else null
+        val activity = aggregate?.let(::parseActivityPresentation)
         if (activity == null) {
             PushNotificationCenter.show(this, title, body, deepLink)
         } else {

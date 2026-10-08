@@ -14,7 +14,7 @@ use crate::{
     protocol::Call,
     state::{
         DiffFilePatch, DiffFilesEntry, DiffPreviewEntry, DraftWorkspace, EntryQuery,
-        PROVIDER_COMMANDS_RETRY_MS, RefScope, RefsEntry, SearchRequest,
+        ContentSearchQuery, PROVIDER_COMMANDS_RETRY_MS, RefScope, RefsEntry, SearchRequest,
     },
     view::{
         checkpoints::DiffSelection,
@@ -25,8 +25,20 @@ use crate::{
     },
 };
 use agent_domain::{MessageId, Role, ThreadId};
-use agent_protocol::{conversation as c, workspace as w};
+use agent_protocol::{conversation as c, pull_requests as pr, workspace as w};
 use std::sync::Arc;
+
+fn should_retry_diff_preview_at_environment_cwd(
+    request: &w::DiffPreview,
+    active_cwd: &str,
+    environment_cwd: Option<&str>,
+    error_message: &str,
+) -> bool {
+    request.file.is_none()
+        && request.cwd == active_cwd
+        && environment_cwd.is_some_and(|cwd| !cwd.is_empty() && cwd != active_cwd)
+        && error_message.contains("configured workspace root")
+}
 
 /// How long the composer waits after typing before searching paths, and how
 /// many it asks for.
@@ -51,6 +63,34 @@ impl Owner {
             self.ensure_provider_commands(&draft.instance_id, &cwd);
         }
         let trigger = detect_composer_trigger(text, cursor);
+        if trigger
+            .as_ref()
+            .is_some_and(|trigger| trigger.kind == ComposerTriggerKind::PullRequest)
+        {
+            self.state.sources.entries.wanted = None;
+            self.state.sources.entries.due_at_ms = None;
+            if let Some(project_id) = self.state.selected_project.clone()
+                && self.state.connected
+                && !self.state.pull_requests.list_requested.contains(&project_id)
+            {
+                self.state.pull_requests.list_requested.insert(project_id.clone());
+                self.job(
+                    Call::ListPullRequests(pr::ListPullRequests {
+                        project_id,
+                        repository: None,
+                        host: None,
+                        state: pr::PullRequestListState::All,
+                        query: None,
+                        limit: 100,
+                        cursor: None,
+                        fresh: true,
+                    }),
+                    None,
+                    None,
+                );
+            }
+            return;
+        }
         let query = trigger
             .filter(|trigger| trigger.kind == ComposerTriggerKind::Path)
             .map(|trigger| trigger.query.trim().to_owned())
@@ -254,6 +294,35 @@ impl Owner {
         }
     }
 
+    pub(super) fn content_search_finished(
+        &mut self,
+        request: &w::SearchContents,
+        result: Result<w::ContentSearch, &PeerError>,
+    ) {
+        let query = ContentSearchQuery {
+            cwd: request.cwd.clone(),
+            query: request.query.clone(),
+            limit: request.limit,
+            case_sensitive: request.case_sensitive,
+            whole_word: request.whole_word,
+            use_regex: request.use_regex,
+        };
+        let state = &mut self.state.sources.content_search;
+        if state.wanted.as_ref() != Some(&query) {
+            return;
+        }
+        state.in_flight = false;
+        match result {
+            Ok(found) => {
+                state.error = None;
+                state.result = Some((query, found));
+            }
+            Err(error) => {
+                state.error = Some(crate::presentation::error::error_message(&error.to_string()));
+            }
+        }
+    }
+
     /// Lists a checkout's branches for a picker.
     pub(super) fn load_refs(&mut self, cwd: String, scope: RefScope, query: String) {
         if cwd.is_empty() || !self.connected() {
@@ -379,6 +448,16 @@ impl Owner {
         base_ref: Option<String>,
         ignore_whitespace: bool,
     ) -> Call {
+        self.load_diff_preview_for_active_cwd(cwd.clone(), cwd, base_ref, ignore_whitespace)
+    }
+
+    fn load_diff_preview_for_active_cwd(
+        &mut self,
+        cwd: String,
+        active_cwd: String,
+        base_ref: Option<String>,
+        ignore_whitespace: bool,
+    ) -> Call {
         self.state.sources.diff_generation = self.state.sources.diff_generation.wrapping_add(1);
         let request = w::DiffPreview {
             cwd,
@@ -387,8 +466,12 @@ impl Owner {
             file: None,
         };
         self.state.sources.diff_files = None;
+        let previous = self.state.sources.diff_preview.take();
         self.state.sources.diff_preview = Some(DiffPreviewEntry {
-            result: None,
+            result: previous
+                .filter(|entry| entry.request == request)
+                .and_then(|entry| entry.result),
+            active_cwd,
             request: request.clone(),
             error: None,
         });
@@ -428,6 +511,52 @@ impl Owner {
                 ))
             }
         }
+    }
+
+    /// The web client retries a branch or working-tree preview at the
+    /// environment's configured cwd when the selected checkout is rejected as
+    /// outside that root. Keep the retry bounded to the original request and
+    /// only run it while that checkout remains selected.
+    pub(super) fn retry_diff_preview_at_environment_cwd(
+        &mut self,
+        request: &w::DiffPreview,
+        error: &PeerError,
+    ) {
+        let Some(entry) = self
+            .state
+            .sources
+            .diff_preview
+            .as_ref()
+            .filter(|entry| &entry.request == request)
+        else {
+            return;
+        };
+        let active_cwd = entry.active_cwd.clone();
+        let environment_cwd = self
+            .state
+            .environment
+            .as_ref()
+            .map(|environment| environment.cwd.trim())
+            .filter(|cwd| !cwd.is_empty())
+            .map(str::to_owned);
+        let message = crate::presentation::error::error_message(&error.to_string());
+        if active_cwd != self.state.cwd()
+            || !should_retry_diff_preview_at_environment_cwd(
+                request,
+                &active_cwd,
+                environment_cwd.as_deref(),
+                &message,
+            )
+        {
+            return;
+        }
+        let call = self.load_diff_preview_for_active_cwd(
+            environment_cwd.expect("environment cwd checked by retry predicate"),
+            active_cwd,
+            request.base_ref.clone(),
+            request.ignore_whitespace,
+        );
+        self.job(call, None, None);
     }
 
     /// Keeps the per-file patches on the shown source: a truncated source
@@ -649,7 +778,7 @@ impl Owner {
             .sources
             .diff_preview
             .as_ref()
-            .filter(|entry| entry.request.cwd == self.state.cwd())
+            .filter(|entry| entry.active_cwd == self.state.cwd())
             .and_then(|entry| Some((entry.request.clone(), entry.result.clone()?)))
         else {
             return;
@@ -930,7 +1059,7 @@ impl Owner {
             .drafts
             .get(&key)
             .cloned()
-            .unwrap_or_else(|| self.state.default_draft.clone());
+            .unwrap_or_else(|| self.state.new_thread_default_draft());
         change(&mut draft);
         self.state.drafts.insert(key, draft);
     }
@@ -968,5 +1097,58 @@ impl Owner {
             self.load_vcs_status(root.clone());
             self.load_refs(root, RefScope::All, query);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_retry_diff_preview_at_environment_cwd;
+    use agent_protocol::workspace::DiffPreview;
+
+    fn request(file: bool) -> DiffPreview {
+        DiffPreview {
+            cwd: "/stale/project".into(),
+            base_ref: None,
+            ignore_whitespace: false,
+            file: file.then_some(agent_protocol::workspace::DiffPreviewFile {
+                path: "README.md".into(),
+                previous_path: None,
+                source: agent_protocol::workspace::DiffSourceKind::WorkingTree,
+            }),
+        }
+    }
+
+    #[test]
+    fn retries_only_a_current_checkout_root_failure() {
+        assert!(should_retry_diff_preview_at_environment_cwd(
+            &request(false),
+            "/stale/project",
+            Some("/configured/project"),
+            "configured workspace root rejected",
+        ));
+        assert!(!should_retry_diff_preview_at_environment_cwd(
+            &request(false),
+            "/other/project",
+            Some("/configured/project"),
+            "configured workspace root rejected",
+        ));
+        assert!(!should_retry_diff_preview_at_environment_cwd(
+            &request(false),
+            "/stale/project",
+            Some("/stale/project"),
+            "configured workspace root rejected",
+        ));
+        assert!(!should_retry_diff_preview_at_environment_cwd(
+            &request(false),
+            "/stale/project",
+            Some("/configured/project"),
+            "not a repository",
+        ));
+        assert!(!should_retry_diff_preview_at_environment_cwd(
+            &request(true),
+            "/stale/project",
+            Some("/configured/project"),
+            "configured workspace root rejected",
+        ));
     }
 }

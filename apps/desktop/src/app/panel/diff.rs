@@ -92,6 +92,25 @@ impl Desktop {
         Some((thread.clone(), self.snapshot.diff(thread)))
     }
 
+    /// Refreshes checkout diffs after the window returns to the foreground so
+    /// a preview does not remain stale while another process edits the tree.
+    pub(super) fn refresh_diff_on_window_activation(&mut self, cx: &mut Context<Desktop>) {
+        if !self.panel_shows(PanelTab::Diff) {
+            return;
+        }
+        let Some((_, panel)) = self.diff_panel() else {
+            return;
+        };
+        if !matches!(
+            panel.request,
+            Some(DiffRequest::Branch { .. } | DiffRequest::Unstaged { .. })
+        ) {
+            return;
+        }
+        self.panels.diff.loaded = None;
+        self.sync_diff(cx);
+    }
+
     /// Loads the selected patch when the Diff tab shows a selection it has not
     /// asked for yet, and keeps the view on the received patch.
     pub(super) fn sync_diff(&mut self, cx: &mut Context<Self>) {

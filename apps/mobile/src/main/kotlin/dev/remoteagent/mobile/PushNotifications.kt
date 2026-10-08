@@ -13,6 +13,7 @@ import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import com.google.firebase.FirebaseApp
 import com.google.firebase.FirebaseOptions
+import java.security.MessageDigest
 import java.util.UUID
 
 internal const val ACTION_PUSH_TOKEN_UPDATED = "dev.remoteagent.mobile.PUSH_TOKEN_UPDATED"
@@ -73,11 +74,22 @@ internal object PushRegistrationStore {
     private const val DEVICE_ID = "device-id"
     private const val TOKEN = "fcm-token"
 
-    fun deviceId(context: Context): String {
+    fun baseDeviceId(context: Context): String {
         val preferences = context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE)
         return preferences.getString(DEVICE_ID, null)?.takeIf(String::isNotBlank) ?: UUID.randomUUID().toString().also {
             preferences.edit().putString(DEVICE_ID, it).apply()
         }
+    }
+
+    /** Each Host gets a stable principal so its registration cannot overwrite another Host. */
+    fun deviceId(context: Context, hostId: String): String {
+        val base = baseDeviceId(context)
+        val candidate = "$base:$hostId"
+        if (candidate.toByteArray(Charsets.UTF_8).size <= 128) return candidate
+        val digest = MessageDigest.getInstance("SHA-256")
+            .digest(hostId.toByteArray(Charsets.UTF_8))
+            .joinToString("") { byte -> "%02x".format(byte) }
+        return "$base:$digest"
     }
 
     fun token(context: Context): String? =
@@ -85,6 +97,15 @@ internal object PushRegistrationStore {
 
     fun saveToken(context: Context, token: String) {
         context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE).edit().putString(TOKEN, token).apply()
+    }
+
+    fun liveActivitiesEnabled(context: Context): Boolean =
+        context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE).getBoolean("ongoing-enabled", true)
+
+    fun setLiveActivitiesEnabled(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE).edit()
+            .putBoolean("ongoing-enabled", enabled)
+            .apply()
     }
 }
 

@@ -926,6 +926,7 @@ impl AgentTools {
     ) -> Outcome {
         let input: RunScheduledTaskInput = decode(input)?;
         let parent = self.load_caller(scope).await?;
+        self.require_capability(scope, &parent)?;
         let thread = parent.thread.as_ref().expect("loaded");
         if thread.archived_at.is_some()
             || thread.deleted_at.is_some()
