@@ -573,7 +573,7 @@ mod tests {
                     let trust = Trust { allowed: [identity.node_id()].into(), ..Default::default() };
                     let host = Endpoint::bind(Identity::generate(), Relays::Disabled).await.unwrap();
                     let connection = || Connection {
-                        ticket: host.ticket().to_string(), identity: identity.to_bytes().to_vec(),
+                        ticket: host.local_ticket().to_string(), identity: identity.to_bytes().to_vec(),
                         invitation: None, use_relays: false,
                     };
                     let snapshot = Snapshot {

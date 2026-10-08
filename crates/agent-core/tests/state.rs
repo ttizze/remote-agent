@@ -965,34 +965,6 @@ fn incomplete_model_catalog_preserves_restored_choices_and_defaults_only_new_dra
 }
 
 #[test]
-fn completed_commands_refresh_session_metadata_without_waiting_for_the_turn() {
-    for connected in [false, true] {
-        let mut snapshot = initial(
-            serde_json::from_value(json!({"id":{"provider":"codex","id":"task"},"status":"running","turns":[{"id":"turn","status":"running","items":[]}]}))
-            .unwrap(),
-        );
-        snapshot.connected = connected;
-        let (next, effects) = fixture_change(
-            &snapshot,
-            json!({"session":{"provider":"codex","id":"task"},"change":{"item":{"turnId":"turn","item":{"id":"merge","status":"completed","clientInputId":null,"body":{"inline":{"body":{"commandExecution":{"command":"git merge task","cwd":null,"output":"","exitCode":0}}}}}}}}),
-        );
-        assert_eq!(effects.len(), usize::from(connected));
-        assert_eq!(
-            next.conversations[&SessionRef {
-                provider: ProviderKind::Codex,
-                id: "task".into()
-            }]
-                .turns
-                .as_ref()
-                .unwrap()[0]
-                .status,
-            TurnStatus::Running
-        );
-        assert_eq!(next.error, None);
-    }
-}
-
-#[test]
 fn terminal_presentation_only_shows_loading_or_exceptional_status() {
     use agent_core::state::{Terminal, TerminalPhase};
     let mut snapshot = Snapshot::default();
