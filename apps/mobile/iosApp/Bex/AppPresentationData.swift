@@ -32,6 +32,7 @@ struct EnvironmentActivityRow: Identifiable {
 
 struct EnvironmentRow: Identifiable {
     let profileId: String
+    let environmentId: String
     let label: String
     let state: String
     let platform: String?

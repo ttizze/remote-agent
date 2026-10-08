@@ -95,6 +95,14 @@ internal fun HomeScreen(model: AndroidAppModel) {
         )
     val list by
         rememberView(snapshot, now / MINUTE_MILLIS, options) { it.threadList(System.currentTimeMillis(), options) }
+    val aggregate = model.environmentThreadList(
+        System.currentTimeMillis(),
+        options,
+        search,
+        snapshot.selectedProjectId()?.let { snapshot.scopedProjectId(it) },
+        snapshot.selectedThreadId()?.let { snapshot.scopedThreadId(it) },
+    )
+    val acrossEnvironments = model.environmentSnapshots.size > 1
     val drivers by rememberView(snapshot) { instanceDrivers(it) }
     val environment = snapshot.hostName()
     fun closeSearch() {
@@ -136,7 +144,47 @@ internal fun HomeScreen(model: AndroidAppModel) {
             Box(Modifier.fillMaxSize()) {
                 val current = list
                 val empty = current?.empty
-                if (current != null && empty != null) EmptyList(empty)
+                if (acrossEnvironments) {
+                    if (!aggregate.hasThreads && aggregate.rows.isEmpty() && aggregate.pendingTasks.isEmpty()) {
+                        EmptyList(
+                            ThreadListEmpty(
+                                "No threads yet",
+                                "Choose an environment or create a new task.",
+                                false,
+                            )
+                        )
+                    } else {
+                        LazyColumn(
+                            state = listState,
+                            contentPadding = PaddingValues(top = 14.dp, bottom = 160.dp),
+                        ) {
+                            items(aggregate.rows, key = { it.row.key }) { item ->
+                                ThreadListRow(
+                                    item.row,
+                                    item.environmentLabel,
+                                    rowDrivers(item.row, drivers.orEmpty()),
+                                    rowActions,
+                                )
+                            }
+                            items(aggregate.pendingTasks, key = { it.task.key }) { item ->
+                                val actions = pendingTaskActions(item.task.kind, item.task.projectId)
+                                PendingTaskListRow(
+                                    item.task,
+                                    status = actions.status,
+                                    isDraft = actions.isDraft,
+                                    onOpen = {
+                                        when (val open = actions.open) {
+                                            is Intent.OpenThread -> model.navigate(Route.Thread(open.threadId), open)
+                                            is Intent.NewThread -> model.navigate(Route.NewTask, open)
+                                            else -> Unit
+                                        }
+                                    },
+                                    onDelete = { model.perform(actions.discard) },
+                                )
+                            }
+                        }
+                    }
+                } else if (current != null && empty != null) EmptyList(empty)
                 else
                     LazyColumn(state = listState, contentPadding = PaddingValues(top = 14.dp, bottom = 160.dp)) {
                         items(current?.items.orEmpty(), key = ::itemKey) { item ->
@@ -294,7 +342,7 @@ private fun EmptyList(empty: ThreadListEmpty) {
 private fun HomeFabs(model: AndroidAppModel, expanded: Boolean, modifier: Modifier) {
     val colors = AppTheme.colors
     var filter by remember { mutableStateOf(false) }
-    val selected = model.snapshot.selectedProjectId()
+    val selected = model.snapshot.selectedProjectId()?.let { model.snapshot.scopedProjectId(it) }
     Column(
         modifier.padding(end = 20.dp, bottom = 32.dp),
         horizontalAlignment = Alignment.End,
@@ -325,12 +373,12 @@ private fun HomeFabs(model: AndroidAppModel, expanded: Boolean, modifier: Modifi
                     },
                 )
                 HorizontalDivider(color = colors.border)
-                model.snapshot.projects().forEach { project ->
+                model.environmentProjects("").forEach { project ->
                     DropdownMenuItem(
-                        text = { Text(checked(project.name, selected == project.id), style = AppTheme.footnote) },
+                        text = { Text(checked("${project.environmentLabel} · ${project.title}", selected == project.projectId), style = AppTheme.footnote) },
                         onClick = {
                             filter = false
-                            model.perform(Intent.FilterProject(project.id))
+                            model.perform(Intent.FilterProject(project.projectId))
                         },
                     )
                 }

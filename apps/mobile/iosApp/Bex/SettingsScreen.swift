@@ -13,7 +13,7 @@ struct SettingsScreen: View {
                 VStack(alignment: .leading, spacing: 20) {
                     SettingsGroup(title: "Connections") {
                         SettingsLink(symbol: "point.3.connected.trianglepath.dotted", label: "Environments",
-                                     value: "\(model.profiles.count)") {
+                                     value: "\(model.environmentSettings().count)") {
                             ConnectionsScreen(model: model, close: { dismiss() })
                         }
                     }

@@ -100,7 +100,10 @@ private struct WorkspaceRoot: View {
     }
 
     private func list(sidebar: Bool) -> some View {
-        ThreadListScreen(model: model, sidebar: sidebar, openSettings: { showingSettings = true }, newTask: newTask,
+        ThreadListScreen(model: model, sidebar: sidebar, openSettings: { projectId in
+            _ = model.selectScopedValue(projectId)
+            showingSettings = true
+        }, newTask: newTask,
                          showNewTaskDraft: showNewTaskDraft)
     }
 

@@ -2,8 +2,13 @@
 //! `sync` and `commands` results.
 use super::{AgentError, error};
 use crate::{
+    environment::{
+        EnvironmentProjectRow, EnvironmentRegistry, EnvironmentSettingsEntryView,
+        EnvironmentThreadListView,
+    },
     models::{FileContent, FileList, Project, WorktreeSettings},
     state::{Draft, Snapshot},
+    view::thread_list::ThreadListOptions,
 };
 use agent_protocol::{
     models::AgentActivityPhase,
@@ -35,6 +40,55 @@ fn awareness_phase_name(phase: &AgentActivityPhase) -> String {
         AgentActivityPhase::Stale => "stale",
     }
     .into()
+}
+
+/// Projects from all supplied Host snapshots. Each returned id is scoped by
+/// the environment that owns it and can be passed back to native routing.
+#[uniffi::export]
+pub fn environment_project_rows(
+    snapshots: Vec<Arc<Snapshot>>,
+    query: String,
+) -> Vec<EnvironmentProjectRow> {
+    let mut registry = EnvironmentRegistry::default();
+    for snapshot in snapshots {
+        registry.update(snapshot);
+    }
+    registry.project_rows(&query)
+}
+
+/// Thread rows from all supplied Host snapshots. Core applies the query,
+/// project scope, selection and id scoping before native clients render them.
+#[uniffi::export]
+pub fn environment_thread_list(
+    snapshots: Vec<Arc<Snapshot>>,
+    now_ms: i64,
+    options: ThreadListOptions,
+    query: String,
+    selected_project: Option<String>,
+    selected_thread: Option<String>,
+) -> EnvironmentThreadListView {
+    let mut registry = EnvironmentRegistry::default();
+    for snapshot in snapshots {
+        registry.update(snapshot);
+    }
+    registry.thread_list(
+        now_ms,
+        options,
+        &query,
+        selected_project.as_deref(),
+        selected_thread.as_deref(),
+    )
+}
+
+/// Host settings with their environment ids, so a native edit is dispatched
+/// to the correct Store even when multiple Hosts expose identical local data.
+#[uniffi::export]
+pub fn environment_settings(snapshots: Vec<Arc<Snapshot>>) -> Vec<EnvironmentSettingsEntryView> {
+    let mut registry = EnvironmentRegistry::default();
+    for snapshot in snapshots {
+        registry.update(snapshot);
+    }
+    registry.settings_entries()
 }
 
 #[uniffi::export]

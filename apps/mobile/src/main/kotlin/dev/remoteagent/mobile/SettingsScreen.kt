@@ -71,7 +71,10 @@ internal fun SettingsScreen(model: AndroidAppModel, projectId: String?) {
             if (projectId == null)
                 item {
                     SectionCard("Connections") {
-                        NavigationRow(Icons.Outlined.Computer, "Environments") { model.showHosts() }
+                        NavigationRow(
+                            Icons.Outlined.Computer,
+                            "Environments (${model.environmentSettings().size})",
+                        ) { model.showHosts() }
                     }
                 }
             if (projectId == null)

@@ -11,10 +11,17 @@ import dev.remoteagent.core.BrowserFrame
 import dev.remoteagent.core.BrowserRequest
 import dev.remoteagent.core.Connection
 import dev.remoteagent.core.DictationPreparation
+import dev.remoteagent.core.EnvironmentProjectRow
+import dev.remoteagent.core.EnvironmentSettingsEntryView
+import dev.remoteagent.core.EnvironmentThreadListView
 import dev.remoteagent.core.Intent
 import dev.remoteagent.core.Invitation
 import dev.remoteagent.core.Outcome
 import dev.remoteagent.core.Snapshot
+import dev.remoteagent.core.ThreadListOptions
+import dev.remoteagent.core.environmentProjectRows as buildEnvironmentProjectRows
+import dev.remoteagent.core.environmentSettings as buildEnvironmentSettings
+import dev.remoteagent.core.environmentThreadList as buildEnvironmentThreadList
 import dev.remoteagent.core.generateIdentity
 import dev.remoteagent.core.parseInvitation
 import dev.remoteagent.core.validateInvitation
@@ -43,6 +50,7 @@ internal data class EnvironmentActivityRow(
 
 internal data class EnvironmentRow(
     val profileId: String,
+    val environmentId: String,
     val label: String,
     val state: String,
     val platform: String?,
@@ -113,6 +121,10 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
     var environments by mutableStateOf(emptyList<EnvironmentRow>())
         private set
 
+    /** Latest immutable core snapshot for every saved environment. */
+    var environmentSnapshots by mutableStateOf(emptyMap<String, Snapshot>())
+        private set
+
     var profileId by mutableStateOf<String?>(null)
         private set
 
@@ -159,6 +171,16 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
     }
 
     fun perform(intent: Intent, complete: (Result<Outcome>) -> Unit = {}) {
+        val (routed, profile) = routeIntent(intent)
+        if (profile != null && profile != profileId) {
+            selectProfile(profile)
+            pending.addLast(routed to complete)
+            return
+        }
+        performOnCurrent(routed, complete)
+    }
+
+    private fun performOnCurrent(intent: Intent, complete: (Result<Outcome>) -> Unit = {}) {
         val store = owner
         if (store == null) {
             if (initialization != null) pending.addLast(intent to complete)
@@ -190,6 +212,75 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
         operations.add(operation)
         operation.start()
     }
+
+    private fun routeIntent(intent: Intent): Pair<Intent, String?> {
+        fun route(value: String?): Pair<String?, String?> = scopedValue(value)
+        return when (intent) {
+            is Intent.OpenThread -> {
+                val (id, profile) = route(intent.threadId)
+                Intent.OpenThread(id ?: intent.threadId) to profile
+            }
+            is Intent.NewThread -> {
+                val (id, profile) = route(intent.projectId)
+                Intent.NewThread(id) to profile
+            }
+            is Intent.Thread -> {
+                val (id, profile) = route(intent.threadId)
+                Intent.Thread(id ?: intent.threadId, intent.action) to profile
+            }
+            is Intent.MoveThread -> {
+                val (id, profile) = route(intent.threadId)
+                Intent.MoveThread(id ?: intent.threadId, intent.section, intent.destination) to profile
+            }
+            is Intent.FilterProject -> {
+                val (id, profile) = route(intent.projectId)
+                Intent.FilterProject(id) to profile
+            }
+            is Intent.NewThreadOnBranch -> {
+                val (id, profile) = route(intent.projectId)
+                Intent.NewThreadOnBranch(id ?: intent.projectId, intent.branch, intent.worktreePath) to profile
+            }
+            is Intent.ResetProjectSettings -> {
+                val (id, profile) = route(intent.projectId)
+                Intent.ResetProjectSettings(id ?: intent.projectId) to profile
+            }
+            else -> intent to null
+        }
+    }
+
+    private fun scopedValue(value: String?): Pair<String?, String?> {
+        val raw = value ?: return null to null
+        val separator = raw.indexOf(':')
+        if (separator <= 0 || separator == raw.lastIndex) return value to null
+        val environmentId = raw.substring(0, separator)
+        val profile = environments.firstOrNull { it.environmentId == environmentId }?.profileId
+            ?: return value to null
+        return raw.substring(separator + 1) to profile
+    }
+
+    fun environmentSnapshotsForCore(): List<Snapshot> = environmentSnapshots.values.toList()
+
+    fun environmentProjects(query: String): List<EnvironmentProjectRow> =
+        buildEnvironmentProjectRows(environmentSnapshotsForCore(), query)
+
+    fun environmentSettings(): List<EnvironmentSettingsEntryView> =
+        buildEnvironmentSettings(environmentSnapshotsForCore())
+
+    fun environmentThreadList(
+        nowMs: Long,
+        options: ThreadListOptions,
+        query: String,
+        selectedProject: String?,
+        selectedThread: String?,
+    ): EnvironmentThreadListView =
+        buildEnvironmentThreadList(
+            environmentSnapshotsForCore(),
+            nowMs,
+            options,
+            query,
+            selectedProject,
+            selectedThread,
+        )
 
     private fun follow(outcome: Outcome) {
         if (outcome is Outcome.StartedThread && route == Route.NewTask) {
@@ -232,6 +323,12 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
             Route.NewTask -> {
                 draftEdits.reset()
                 perform(selection ?: Intent.NewThread(snapshot.selectedProjectId()))
+            }
+            is Route.Settings -> {
+                val (projectId, profile) = scopedValue(next.projectId)
+                if (profile != null && profile != profileId) selectProfile(profile)
+                stack = stack + Route.Settings(projectId)
+                return
             }
             Route.Archived -> perform(Intent.ShowArchived(true))
             else -> Unit
@@ -414,8 +511,10 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
     }
 
     private fun publishEnvironment(profile: HostProfile, next: Snapshot) {
+        environmentSnapshots = environmentSnapshots + (profile.id to next)
         val row = EnvironmentRow(
             profileId = profile.id,
+            environmentId = next.environmentId() ?: profile.id,
             label = next.environmentLabel() ?: profile.name,
             state = next.environmentConnectionState() ?: "connecting",
             platform = next.environmentPlatform(),
@@ -451,6 +550,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
                 }
                 profiles = profiles.filterNot { it.id == id }
                 environments = environments.filterNot { it.profileId == id }
+                environmentSnapshots = environmentSnapshots - id
                 repository.saveProfiles(profiles)
                 File(repository.cacheDirectory(id)).deleteRecursively()
                 if (profiles.isEmpty()) stack = listOf(Route.Pairing)
