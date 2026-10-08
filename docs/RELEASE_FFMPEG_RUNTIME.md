@@ -18,8 +18,10 @@ FFMPEG-LICENSE-*       # deterministic license/copyright inventory
 The Host recording consumer resolves this sibling executable before falling
 back to `PATH`; the pure lookup is tested next to the consumer. The desktop
 Preview UI decodes the Host's JPEG frames directly and therefore does not need
-to launch FFmpeg itself, while the same sibling runtime is present for native
-desktop/device transcode consumers. `AGENT_FFMPEG_EXECUTABLE` and
+to launch FFmpeg itself. When the Desktop launcher starts an installed Host,
+it passes that Host's sibling runtime as an explicit development-safe override;
+the Host performs the same sibling check itself. The same runtime is present
+for native desktop/device transcode consumers. `AGENT_FFMPEG_EXECUTABLE` and
 `AGENT_FFMPEG_LICENSE_DIR` remain available for development and isolated tests.
 A shipped artifact does not require Nix, Homebrew, or an externally installed
 FFmpeg.

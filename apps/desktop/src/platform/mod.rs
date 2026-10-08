@@ -8,7 +8,7 @@ use anyhow::Context;
 use host_daemon::local_host::{LocalHost, LocalHostRegistry, LocalHostState};
 use std::{
     io::Write,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::Arc,
     thread,
@@ -415,7 +415,8 @@ fn start_host(location: &LocalHost, isolated: bool) -> anyhow::Result<std::proce
                     .unwrap_or(bundled)
             })
         })?;
-    let mut command = Command::new(executable);
+    let packaged_ffmpeg = packaged_ffmpeg_candidate(&executable).filter(|path| path.is_file());
+    let mut command = Command::new(&executable);
     command
         .arg("--state-dir")
         .arg(directory)
@@ -426,6 +427,9 @@ fn start_host(location: &LocalHost, isolated: bool) -> anyhow::Result<std::proce
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    if let Some(path) = packaged_ffmpeg {
+        command.env("AGENT_FFMPEG_EXECUTABLE", path);
+    }
     if isolated {
         command.arg("--isolated");
     }
@@ -434,6 +438,12 @@ fn start_host(location: &LocalHost, isolated: bool) -> anyhow::Result<std::proce
     }
     os::prepare_host(&mut command);
     command.spawn().map_err(Into::into)
+}
+
+fn packaged_ffmpeg_candidate(executable: &Path) -> Option<PathBuf> {
+    executable.parent().map(|directory| {
+        directory.join(format!("ffmpeg{}", std::env::consts::EXE_SUFFIX))
+    })
 }
 
 /// Resolve a verified executable installed by the Host update owner. A
@@ -858,6 +868,21 @@ mod update_handoff_tests {
         write_desktop_handoff_attempt,
     };
     use std::{fs, path::PathBuf};
+
+    #[test]
+    fn packaged_ffmpeg_candidate_uses_the_host_executable_directory() {
+        let executable = PathBuf::from(format!(
+            "/opt/remote-agent/host-daemon{}",
+            std::env::consts::EXE_SUFFIX
+        ));
+        assert_eq!(
+            super::packaged_ffmpeg_candidate(&executable),
+            Some(PathBuf::from(format!(
+                "/opt/remote-agent/ffmpeg{}",
+                std::env::consts::EXE_SUFFIX
+            )))
+        );
+    }
 
     #[test]
     fn selects_verified_installed_host_after_a_completed_install() {
