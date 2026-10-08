@@ -32,7 +32,7 @@ to the trusted scheduled path or an explicitly requested manual run from
 ## Update transactions
 
 `scripts/release-update-check.mjs` is the shared update contract for Host and
-desktop consumers. It validates release metadata, selects the platform asset,
+desktop consumers. It validates release metadata delivered over HTTPS, selects the platform asset,
 bounds release notes, and keeps pure check/download/install state transitions
 separate from network, filesystem, archive, and restart effects. The effectful
 helpers accept injected effects so contract tests never contact GitHub or
@@ -40,6 +40,14 @@ replace a running process. A download is accepted only after both the manifest
 size and SHA-256 match; installation extracts into a private version directory
 and returns `restart_required` for the owning supervisor to decide when to hand
 off.
+
+Rust Host builds receive `APP_RELEASE_METADATA_URL` and
+`APP_RELEASE_CHANNEL`, and the channel version in `APP_UPDATE_VERSION` from the trusted release workflow. Local builds leave
+the URL unset and report updates as disabled until an operator supplies an
+explicit HTTPS manifest configuration. This avoids a local build claiming a
+release that has not been published. Verified transaction state is kept under
+the Host's private update directory so an interrupted download can be retried
+after a Host restart.
 
 The CLI supports local metadata (`--metadata`) and a configured HTTPS manifest
 (`--metadata-url`), with optional `--download` and `--install-dir` staging. It

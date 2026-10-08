@@ -1,6 +1,7 @@
 //! Settings: the navigation that replaces the sidebar, and its pages
 //! (Project, General, Appearance, Keybindings, Providers, Connections,
 //! Archive).
+mod about;
 mod add_project;
 mod appearance;
 mod archived;
@@ -39,11 +40,12 @@ pub(crate) enum SettingsPage {
     Providers,
     Connections,
     Archived,
+    About,
 }
 
 impl SettingsPage {
     /// The navigation entries in their order.
-    fn sections() -> [SettingsPage; 7] {
+    fn sections() -> [SettingsPage; 8] {
         [
             SettingsPage::Projects { project_id: None },
             SettingsPage::General,
@@ -52,6 +54,7 @@ impl SettingsPage {
             SettingsPage::Providers,
             SettingsPage::Connections,
             SettingsPage::Archived,
+            SettingsPage::About,
         ]
     }
     fn label(&self) -> &'static str {
@@ -63,6 +66,7 @@ impl SettingsPage {
             SettingsPage::Providers => "Providers",
             SettingsPage::Connections => "Connections",
             SettingsPage::Archived => "Archive",
+            SettingsPage::About => "About",
         }
     }
     fn icon(&self) -> &'static str {
@@ -74,6 +78,7 @@ impl SettingsPage {
             SettingsPage::Providers => "bot",
             SettingsPage::Connections => "link-2",
             SettingsPage::Archived => "archive",
+            SettingsPage::About => "info",
         }
     }
     fn same_section(&self, other: &SettingsPage) -> bool {
@@ -248,6 +253,7 @@ impl Desktop {
                 page_container(1024., vec![self.hosts.clone().into_any_element()])
             }
             SettingsPage::Archived => self.render_archived(window, cx),
+            SettingsPage::About => self.render_about(cx),
         };
         v_flex()
             .id("settings")
@@ -385,6 +391,24 @@ impl Desktop {
             SettingsPage::Projects { .. } => self.perform(Intent::LoadConversationSettings),
             SettingsPage::Providers => self.perform(Intent::LoadAccounts),
             SettingsPage::Connections => self.hosts.update(cx, |hosts, _| hosts.refresh()),
+            SettingsPage::About => {
+                self.perform(Intent::LoadUpdateStatus {
+                    target: agent_protocol::models::UpdateTarget::Host,
+                });
+                self.perform(Intent::LoadUpdateStatus {
+                    target: agent_protocol::models::UpdateTarget::Desktop,
+                });
+                let request = super::about::check_request(
+                    agent_protocol::models::UpdateTarget::Host,
+                    super::about::default_channel(),
+                );
+                self.perform(Intent::CheckUpdate { request });
+                let request = super::about::check_request(
+                    agent_protocol::models::UpdateTarget::Desktop,
+                    super::about::default_channel(),
+                );
+                self.perform(Intent::CheckUpdate { request });
+            }
             SettingsPage::Archived | SettingsPage::Appearance | SettingsPage::Keybindings => {}
         }
     }

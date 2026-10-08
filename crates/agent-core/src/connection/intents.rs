@@ -1392,6 +1392,25 @@ impl Owner {
                 None,
             ),
             Intent::LoadHostStatus => Next::call(Call::HostStatus(m::Empty {}), None),
+            Intent::LoadUpdateStatus { target } => Next::call(
+                Call::ReadUpdateStatus(m::UpdateStatusRequest { target }),
+                None,
+            ),
+            Intent::CheckUpdate { request } => Next::call(Call::CheckUpdate(request), None),
+            Intent::DownloadUpdate { target } => Next::call(
+                Call::DownloadUpdate(m::UpdateActionRequest { target }),
+                None,
+            ),
+            Intent::InstallUpdate { target } => {
+                Next::call(Call::InstallUpdate(m::UpdateActionRequest { target }), None)
+            }
+            Intent::SetUpdateChannel { target, channel } => Next::call(
+                Call::SetUpdateChannel(m::UpdateChannelRequest { target, channel }),
+                None,
+            ),
+            Intent::LoadNativeUpdate { request } => {
+                Next::call(Call::ReadNativeUpdate(request), None)
+            }
             Intent::LoadRemoteHosts => Next::call(Call::ListRemotes(m::Empty {}), None),
             Intent::LoadHostManagement => {
                 self.job(Call::HostStatus(m::Empty {}), None, None);

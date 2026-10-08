@@ -30,6 +30,8 @@ pub(super) enum Reply {
     Accounts(op::Accounts),
     Login(op::AccountLogin),
     HostStatus(m::HostStatus),
+    UpdateStatus(m::UpdateState),
+    NativeUpdate(m::NativeUpdateState),
     Remotes(Vec<m::RemoteHost>),
     Remote(m::RemoteHost),
     Invitation(m::Invitation),
@@ -78,6 +80,12 @@ async fn execute(peer: &Peer, call: &Call) -> Result<Reply, PeerError> {
         Call::ListAccounts(_) => Reply::Accounts(peer.request(call).await?),
         Call::StartAccountLogin(_) => Reply::Login(peer.request(call).await?),
         Call::HostStatus(_) => Reply::HostStatus(peer.request(call).await?),
+        Call::ReadUpdateStatus(_)
+        | Call::CheckUpdate(_)
+        | Call::DownloadUpdate(_)
+        | Call::InstallUpdate(_)
+        | Call::SetUpdateChannel(_) => Reply::UpdateStatus(peer.request(call).await?),
+        Call::ReadNativeUpdate(_) => Reply::NativeUpdate(peer.request(call).await?),
         Call::ListRemotes(_) => Reply::Remotes(peer.request(call).await?),
         Call::RegisterRemote(_) => Reply::Remote(peer.request(call).await?),
         Call::Invite(_) => Reply::Invitation(peer.request(call).await?),
@@ -477,6 +485,10 @@ impl Owner {
             Reply::Accounts(accounts) => self.state.accounts = Some(accounts),
             Reply::Login(login) => self.state.account_login = Some(login),
             Reply::HostStatus(status) => self.state.host_status = Some(status),
+            Reply::UpdateStatus(status) => {
+                self.state.updates.insert(status.target, status);
+            }
+            Reply::NativeUpdate(status) => self.state.native_update = Some(status),
             Reply::Remotes(remotes) => self.state.remote_hosts = remotes,
             Reply::Remote(host) => {
                 self.state.remote_hosts.retain(|old| old.id != host.id);

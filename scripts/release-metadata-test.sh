@@ -12,6 +12,8 @@ scripts/release-metadata.sh \
     --run-number 42 \
     --sha abcdef1234567890 \
     --repository example/remote-agent \
+    --android-store-url 'https://play.google.com/store/apps/details?id=dev.remoteagent.mobile' \
+    --ios-store-url https://testflight.apple.com/join/example \
     --build-time 2026-10-08T00:00:00Z \
     --output "$temporary/nightly.json"
 jq -e '
@@ -22,7 +24,9 @@ jq -e '
     .tag == "v0.1.0-nightly.20261008.42" and
     .short_commit == "abcdef123456" and
     .manifest == "nightly.json" and
-    .update_url == "https://github.com/example/remote-agent/releases/download/v0.1.0-nightly.20261008.42/nightly.json"
+    .update_url == "https://github.com/example/remote-agent/releases/download/v0.1.0-nightly.20261008.42/nightly.json" and
+    .native_updates.android.url == "https://play.google.com/store/apps/details?id=dev.remoteagent.mobile" and
+    .native_updates.ios.url == "https://testflight.apple.com/join/example"
 ' "$temporary/nightly.json" >/dev/null
 
 scripts/release-metadata.sh \

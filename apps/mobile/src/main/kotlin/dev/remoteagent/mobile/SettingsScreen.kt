@@ -44,12 +44,15 @@ import dev.remoteagent.core.ArchivedLayout
 import dev.remoteagent.core.ArchivedOptions
 import dev.remoteagent.core.ArchivedSortOrder
 import dev.remoteagent.core.Intent
+import dev.remoteagent.core.NativeUpdatePlatform
+import dev.remoteagent.core.NativeUpdateRequest
 import dev.remoteagent.core.ProviderKind
 import dev.remoteagent.core.SettingControl
 import dev.remoteagent.core.SettingValue
 import dev.remoteagent.core.SettingsRow
 import dev.remoteagent.core.SettingsScope
 import dev.remoteagent.core.ThreadMenuConfirmation
+import dev.remoteagent.core.UpdateChannel
 import dev.remoteagent.core.accountErrorMessage
 import dev.remoteagent.core.privacyPolicy
 
@@ -63,6 +66,15 @@ internal fun SettingsScreen(model: AndroidAppModel, projectId: String?) {
         if (projectId == null) {
             model.perform(Intent.LoadAccounts)
             model.perform(Intent.LoadWorktreeSettings)
+            model.perform(
+                Intent.LoadNativeUpdate(
+                    NativeUpdateRequest(
+                        NativeUpdatePlatform.Android,
+                        BuildConfig.VERSION_NAME,
+                        UpdateChannel.Stable,
+                    )
+                )
+            )
         }
     }
     val view = model.snapshot.settings(scope)
@@ -130,8 +142,39 @@ internal fun SettingsScreen(model: AndroidAppModel, projectId: String?) {
                 }
             }
             if (projectId == null) item { AccountsSection(model) }
+            if (projectId == null) item { NativeUpdateSection(model) }
             if (projectId == null)
                 item { Text(privacyPolicy(), style = AppTheme.caption, color = AppTheme.colors.foregroundMuted) }
+        }
+    }
+}
+
+@Composable
+private fun NativeUpdateSection(model: AndroidAppModel) {
+    val context = LocalContext.current
+    val update = model.snapshot.nativeUpdate()
+    SectionCard("App updates") {
+        Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text(
+                when {
+                    update == null -> "Checking for updates…"
+                    update.updateAvailable -> "Version ${update.latestVersion ?: "new"} is available"
+                    update.message != null -> update.message!!
+                    else -> "Up to date"
+                },
+                style = AppTheme.body,
+                color = AppTheme.colors.foreground,
+            )
+            update?.takeIf { it.updateAvailable }?.storeUrl?.let { url ->
+                TextButton(onClick = {
+                    val uri = Uri.parse(url)
+                    if (uri.scheme == "https") {
+                        context.startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW, uri))
+                    }
+                }) {
+                    Text("Open Play Store", color = AppTheme.colors.primaryText)
+                }
+            }
         }
     }
 }

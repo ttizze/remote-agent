@@ -44,6 +44,9 @@ struct SettingsScreen: View {
                         }
                     }
                     SettingsGroup(title: "App") {
+                        SettingsLink(symbol: "arrow.down.circle", label: "App updates") {
+                            NativeUpdatePage(model: model)
+                        }
                         PrivacyPolicyButton().font(AppTheme.font(18)).padding(16)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
@@ -60,6 +63,47 @@ struct SettingsScreen: View {
             }
         }
         .tint(AppTheme.color("mobilePrimaryText"))
+    }
+}
+
+private struct NativeUpdatePage: View {
+    @ObservedObject var model: BexAppViewModel
+
+    private var currentVersion: String {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.0.0"
+    }
+
+    var body: some View {
+        List {
+            Section("App updates") {
+                if let update = model.snapshot.nativeUpdate() {
+                    Text(
+                        update.updateAvailable
+                            ? "Version \(update.latestVersion ?? "new") is available"
+                            : update.message ?? "Up to date"
+                    )
+                    if update.updateAvailable,
+                       let storeURL = update.storeUrl,
+                       let url = URL(string: storeURL),
+                       url.scheme == "https" {
+                        Link("Open TestFlight", destination: url)
+                    }
+                } else {
+                    ProgressView("Checking for updates…")
+                }
+            }
+        }
+        .scrollContentBackground(.hidden)
+        .background(AppTheme.sheet)
+        .navigationTitle("App updates")
+        .navigationBarTitleDisplayMode(.inline)
+        .onAppear {
+            model.perform(.loadNativeUpdate(request: NativeUpdateRequest(
+                platform: .ios,
+                currentVersion: currentVersion,
+                channel: .stable
+            )))
+        }
     }
 }
 

@@ -16,6 +16,7 @@ pub mod platform;
 mod projects;
 mod repository;
 mod terminals;
+mod update;
 mod vcs;
 mod workspace_files;
 mod workspace_review;
@@ -29,6 +30,7 @@ pub use host_identity::{CredentialStore, FileKeyStore, HostCredentials, load_loc
 
 pub use host_rpc::service::ConversationSettings;
 pub use host_rpc::{HostRpcService, HostSession, SessionId};
+pub(crate) use update::UpdateManager;
 pub use projects::ProjectStore;
 
 mod visualize;

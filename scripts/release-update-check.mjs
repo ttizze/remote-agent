@@ -196,24 +196,34 @@ function assetUrl(metadata, asset) {
 }
 
 function nativeUpdate(metadata, currentVersion, target) {
+  validateMetadata(metadata);
   assertNativeTarget(target);
   parseVersion(currentVersion);
   const configured = metadata.native_updates?.[target];
+  const versionAvailable = compareVersions(currentVersion, metadata.version) < 0;
   return {
     target,
     channel: metadata.channel,
     current_version: currentVersion,
     latest_version: metadata.version,
-    update_available: compareVersions(currentVersion, metadata.version) < 0,
+    update_available: versionAvailable && Boolean(configured?.url),
     // Store links are metadata supplied by trusted release configuration. An
     // absent link remains unavailable instead of inventing a published state.
     store_url: configured?.url ?? null,
     release_notes: normalizeReleaseNotes(metadata),
     checked_at: null,
+    message: versionAvailable && !configured?.url ? `A newer ${target} build exists, but no store link is configured.` : null,
   };
 }
 
-function initialUpdateState({ target = "host", currentVersion, channel = "nightly", enabled = true }) {
+function initialUpdateState({
+  target = "host",
+  currentVersion,
+  channel = "nightly",
+  enabled = true,
+  platform = process.platform,
+  architecture = process.arch,
+}) {
   assertTarget(target);
   parseVersion(currentVersion);
   assertChannel(channel);
@@ -222,6 +232,8 @@ function initialUpdateState({ target = "host", currentVersion, channel = "nightl
     status: enabled ? "idle" : "disabled",
     target,
     channel,
+    platform,
+    architecture,
     current_version: currentVersion,
     available_version: null,
     downloaded_version: null,
@@ -245,7 +257,7 @@ function updateStateAfterCheck(state, metadata, checkedAt = new Date().toISOStri
     throw new Error(`metadata channel '${metadata.channel}' does not match '${state.channel}'`);
   }
   const available = compareVersions(state.current_version, metadata.version) < 0;
-  const name = assetName({ target: state.target });
+  const name = assetName({ target: state.target, platform: state.platform, architecture: state.architecture });
   const asset = findAsset(metadata, name);
   const downloaded = state.downloaded_version === metadata.version;
   const notes = normalizeReleaseNotes(metadata);
@@ -298,14 +310,14 @@ function transitionUpdateState(state, event) {
     case "download-failure":
       return { ...state, status: state.available_version ? "available" : "error", message: event.message, error_context: "download", can_retry: Boolean(state.available_version), download_percent: null };
     case "install-start":
-      if (state.downloaded_version === null) throw new Error("cannot install without a downloaded update");
+      if (state.status !== "downloaded" || state.downloaded_version === null || state.restart_required) throw new Error("cannot install without a downloaded update");
       return { ...state, status: "installing", message: null, error_context: null, can_retry: false };
     case "install-success":
       return { ...state, status: "downloaded", restart_required: true, message: null, error_context: null, can_retry: true };
     case "install-failure":
       return { ...state, status: "downloaded", message: event.message, error_context: "install", can_retry: true };
     case "clear":
-      return initialUpdateState({ target: state.target, currentVersion: state.current_version, channel: state.channel, enabled: state.enabled });
+      return initialUpdateState({ target: state.target, currentVersion: state.current_version, channel: state.channel, enabled: state.enabled, platform: state.platform, architecture: state.architecture });
     default:
       throw new Error(`unknown update event: ${event.type}`);
   }
@@ -340,6 +352,7 @@ async function fetchMetadata(url, fetchImpl = globalThis.fetch) {
   if (typeof fetchImpl !== "function") throw new Error("fetch is unavailable; pass a fetch implementation");
   const response = await fetchImpl(url, { headers: { accept: "application/json" } });
   if (!response?.ok) throw new Error(`release metadata request failed: HTTP ${response?.status ?? "unknown"}`);
+  if (response.url) assertHttpsUrl(response.url, "metadata redirect URL");
   let metadata;
   try {
     metadata = await response.json();
@@ -383,6 +396,7 @@ async function downloadArtifact(metadata, {
   if (typeof fetchImpl !== "function") throw new Error("fetch is unavailable; pass a fetch implementation");
   const response = await fetchImpl(url, { headers: { accept: "application/octet-stream" } });
   if (!response?.ok) throw new Error(`artifact request failed: HTTP ${response?.status ?? "unknown"}`);
+  if (response.url) assertHttpsUrl(response.url, "artifact redirect URL");
   const bytes = Buffer.from(await response.arrayBuffer());
   if (bytes.length !== asset.size) throw new Error(`artifact size mismatch for ${asset.name}`);
   const digest = bytesHash(bytes);
@@ -455,7 +469,13 @@ function checkUpdate(metadata, currentVersion, channel = metadata.channel, optio
   };
   if (Object.keys(options).length === 0) return result;
   const target = options.target ?? "host";
-  const state = updateStateAfterCheck(initialUpdateState({ target, currentVersion, channel }), metadata, options.checkedAt);
+  const state = updateStateAfterCheck(initialUpdateState({
+    target,
+    currentVersion,
+    channel,
+    platform: options.platform,
+    architecture: options.architecture,
+  }), metadata, options.checkedAt);
   return { ...result, ...state };
 }
 
@@ -464,8 +484,10 @@ function checkUpdateState(metadata, {
   currentVersion,
   channel = metadata.channel,
   checkedAt = new Date().toISOString(),
+  platform = process.platform,
+  architecture = process.arch,
 } = {}) {
-  return updateStateAfterCheck(initialUpdateState({ target, currentVersion, channel }), metadata, checkedAt);
+  return updateStateAfterCheck(initialUpdateState({ target, currentVersion, channel, platform, architecture }), metadata, checkedAt);
 }
 
 function argument(name, fallback = undefined) {

@@ -82,6 +82,7 @@ pub struct HostRpcService {
 struct ServiceInner {
     resources: Arc<HostResources>,
     connections: Connections,
+    updater: crate::UpdateManager,
     started: AtomicBool,
 }
 struct HostResources {
@@ -124,6 +125,7 @@ impl HostRpcService {
         codex: Result<Arc<CodexAppServer>, String>,
         projects: ProjectStore,
     ) -> anyhow::Result<Self> {
+        let update_dir = projects.path().with_file_name("updates");
         let connections = Connections::new();
         let terminal_history = projects.path().with_file_name("terminals");
         let keybindings = Arc::new(crate::keybindings::Keybindings::new(
@@ -160,6 +162,7 @@ impl HostRpcService {
             inner: Arc::new(ServiceInner {
                 resources,
                 connections,
+                updater: crate::UpdateManager::new(update_dir),
                 started: AtomicBool::new(false),
             }),
         })
@@ -419,6 +422,39 @@ impl HostRpcService {
             return Ok(self.keybindings(cancel).await);
         }
         Ok(Response::from_result(self.request(session, call).await).into())
+    }
+
+    pub(crate) async fn update(&self, call: &Call) -> Result<Body, Failure> {
+        let updater = &self.inner.updater;
+        match call {
+            Call::ReadUpdateStatus(request) => Ok(updater.status(request).await.into()),
+            Call::CheckUpdate(request) => updater
+                .check(request)
+                .await
+                .map(Into::into)
+                .map_err(|error| Failure::new("update_check_failed", error)),
+            Call::DownloadUpdate(request) => updater
+                .download(request)
+                .await
+                .map(Into::into)
+                .map_err(|error| Failure::new("update_download_failed", error)),
+            Call::InstallUpdate(request) => updater
+                .install(request)
+                .await
+                .map(Into::into)
+                .map_err(|error| Failure::new("update_install_failed", error)),
+            Call::SetUpdateChannel(request) => updater
+                .set_channel(request)
+                .await
+                .map(Into::into)
+                .map_err(|error| Failure::new("update_channel_failed", error)),
+            Call::ReadNativeUpdate(request) => updater
+                .native(request)
+                .await
+                .map(Into::into)
+                .map_err(|error| Failure::new("native_update_check_failed", error)),
+            _ => Err(Failure::new("invalid_method", "not an update request")),
+        }
     }
     /// The keybindings in effect, then each change; a subscriber that fell
     /// behind gets the latest.

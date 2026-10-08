@@ -150,6 +150,10 @@ jobs:
     needs: resolve
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    env:
+      APP_RELEASE_CHANNEL: ${{ needs.resolve.outputs.channel }}
+      APP_UPDATE_VERSION: ${{ needs.resolve.outputs.version }}
+      APP_RELEASE_METADATA_URL: https://github.com/${{ github.repository }}/releases/download/${{ needs.resolve.outputs.tag }}/${{ needs.resolve.outputs.manifest }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -180,6 +184,10 @@ jobs:
     needs: [resolve, toolchain]
     runs-on: windows-2025
     timeout-minutes: 60
+    env:
+      APP_RELEASE_CHANNEL: ${{ needs.resolve.outputs.channel }}
+      APP_UPDATE_VERSION: ${{ needs.resolve.outputs.version }}
+      APP_RELEASE_METADATA_URL: https://github.com/${{ github.repository }}/releases/download/${{ needs.resolve.outputs.tag }}/${{ needs.resolve.outputs.manifest }}
     defaults:
       run:
         shell: bash
@@ -218,6 +226,9 @@ jobs:
     runs-on: macos-26
     timeout-minutes: 90
     env:
+      APP_RELEASE_CHANNEL: ${{ needs.resolve.outputs.channel }}
+      APP_UPDATE_VERSION: ${{ needs.resolve.outputs.version }}
+      APP_RELEASE_METADATA_URL: https://github.com/${{ github.repository }}/releases/download/${{ needs.resolve.outputs.tag }}/${{ needs.resolve.outputs.manifest }}
       APP_XCODE_DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
       DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
       MACOS_SIGNING_CERTIFICATE_BASE64: ${{ secrets.MACOS_SIGNING_CERTIFICATE_BASE64 }}

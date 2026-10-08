@@ -10,6 +10,7 @@ import {
   checkUpdateState,
   compareVersions,
   downloadArtifact,
+  fetchMetadata,
   initialUpdateState,
   installArtifact,
   nativeUpdate,
@@ -121,6 +122,18 @@ test("downloads only the selected platform asset and verifies its size and check
   }
 });
 
+test("rejects an HTTPS metadata request that redirects to HTTP", async () => {
+  await assert.rejects(
+    fetchMetadata("https://example.invalid/channel.json", async () => ({
+      ok: true,
+      status: 200,
+      url: "http://example.invalid/channel.json",
+      json: async () => ({ schema: 1, channel: "nightly", version: "1.0.0" }),
+    })),
+    /HTTPS URL/,
+  );
+});
+
 test("installs into a versioned staging directory and exposes native store links only when configured", async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "release-install-test-"));
   try {
@@ -138,10 +151,18 @@ test("installs into a versioned staging directory and exposes native store links
     assert.equal(await fs.readFile(path.join(installed.install_path, "host-daemon"), "utf8"), "binary");
 
     const base = { schema: 1, channel: "nightly", version: "0.1.0-nightly.20261008.42", update_url: null };
-    assert.equal(nativeUpdate(base, "0.1.0-nightly.20261008.41", "android").store_url, null);
+    const unconfigured = nativeUpdate(base, "0.1.0-nightly.20261008.41", "android");
+    assert.equal(unconfigured.store_url, null);
+    assert.equal(unconfigured.update_available, false);
+    assert.match(unconfigured.message, /no store link/);
+    const androidLink = "https://play.google.com/store/apps/details?id=dev.remoteagent.mobile";
     assert.equal(
-      nativeUpdate({ ...base, native_updates: { android: { url: "https://play.google.com/store/apps/details?id=dev.remoteagent.mobile" } } }, "0.1.0-nightly.20261008.41", "android").store_url,
-      "https://play.google.com/store/apps/details?id=dev.remoteagent.mobile",
+      nativeUpdate({ ...base, native_updates: { android: { url: androidLink } } }, "0.1.0-nightly.20261008.41", "android").store_url,
+      androidLink,
+    );
+    assert.equal(
+      nativeUpdate({ ...base, native_updates: { android: { url: androidLink } } }, "0.1.0-nightly.20261008.41", "android").update_available,
+      true,
     );
   } finally {
     await fs.rm(directory, { recursive: true, force: true });
