@@ -152,6 +152,7 @@ impl Owner {
             StreamKey::Device(thread.clone()),
             Call::DeviceSubscribe(agent_protocol::device::DeviceSubscribeInput {
                 thread_id: thread.clone(),
+                prefer_mjpeg: true,
             }),
         );
     }

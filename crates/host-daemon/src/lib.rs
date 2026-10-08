@@ -6,6 +6,7 @@ mod codex_accounts;
 pub mod conversation;
 mod dictation;
 pub mod device;
+mod device_stream;
 mod favicon;
 mod git;
 mod host_identity;

@@ -375,6 +375,10 @@ pub enum DeviceActionKind {
         app_id: String,
         payload: serde_json::Value,
     },
+    /// Input and display controls are sent through the Host-owned helper
+    /// connection. They are explicit variants so clients cannot tunnel an
+    /// arbitrary hub route or shell command.
+    Input(DeviceInputKind),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -442,6 +446,12 @@ impl DeviceActionInput {
             {
                 Err("device push payload is invalid".into())
             }
+            DeviceActionKind::Input(input) => DeviceInput {
+                host_id: None,
+                device_id: self.device_id.clone(),
+                input: input.clone(),
+            }
+            .validate(),
             _ => Ok(()),
         }
     }
@@ -479,15 +489,217 @@ pub struct DeviceFrame {
     pub sequence: u64,
 }
 
+/// A frame emitted by the device helper's live transport.  `png` frames are
+/// retained for still-image capture; live clients must use `payload` and the
+/// encoding metadata so H.264/AVCC/SEMU/MJPEG streams are not reduced to
+/// screenshots at the Host boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DeviceFrameEncoding {
+    AvccDescription,
+    H264,
+    Mjpeg,
+    Jpeg,
+    Png,
+    Semu,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceVideoFrame {
+    pub thread_id: ThreadId,
+    pub device: DeviceSummary,
+    #[serde(with = "crate::protocol::bytes")]
+    pub payload: Vec<u8>,
+    pub encoding: DeviceFrameEncoding,
+    pub width: u32,
+    pub height: u32,
+    pub sequence: u64,
+    pub timestamp_us: Option<u64>,
+    pub keyframe: bool,
+    pub screen_id: Option<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DeviceScreenConfig {
+    pub thread_id: Option<ThreadId>,
+    pub host_id: Option<String>,
+    pub device_id: Option<String>,
+    pub width: u32,
+    pub height: u32,
+    pub orientation: DeviceOrientation,
+    pub screen_id: Option<u8>,
+    pub supports_hinge_angle: bool,
+    pub supports_physical_orientation: bool,
+    pub hinge_angle: Option<f32>,
+    pub hinge_pose: Option<String>,
+    pub table_mode: bool,
+    pub table_mode_available: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DeviceAccessibilityElement {
+    pub id: String,
+    pub label: String,
+    pub role: String,
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DeviceAccessibilityTree {
+    pub host_id: String,
+    pub device_id: String,
+    pub elements: Vec<DeviceAccessibilityElement>,
+    pub errors: Vec<String>,
+    pub read_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceForegroundUpdate {
+    pub host_id: String,
+    pub device_id: String,
+    pub app: Option<DeviceForegroundApp>,
+    pub received_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceEventLogEntry {
+    pub host_id: String,
+    pub device_id: String,
+    pub id: u64,
+    pub timestamp: String,
+    pub kind: String,
+    pub summary: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum DeviceInputKind {
+    Touch { phase: DeviceTouchPhase, x: f32, y: f32 },
+    Key { code: String, down: bool },
+    HardwareButton(DeviceHardwareButton),
+    Rotate,
+    SetOrientation(DeviceOrientation),
+    Fold { command: String },
+    Duo { command: String },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DeviceTouchPhase {
+    Begin,
+    Move,
+    End,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DeviceHardwareButton {
+    Home,
+    Back,
+    Recents,
+    Power,
+    AppSwitcher,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DeviceInput {
+    pub host_id: Option<String>,
+    pub device_id: String,
+    pub input: DeviceInputKind,
+}
+
+impl DeviceInput {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.device_id.trim().is_empty() || self.device_id.len() > 256 {
+            return Err("device id is invalid".into());
+        }
+        match &self.input {
+            DeviceInputKind::Touch { x, y, .. } if !x.is_finite() || !y.is_finite() || !(0.0..=1.0).contains(x) || !(0.0..=1.0).contains(y) => {
+                Err("device touch coordinates must be finite and normalized".into())
+            }
+            DeviceInputKind::Key { code, .. } if code.trim().is_empty() || code.len() > 64 => {
+                Err("device key code is invalid".into())
+            }
+            DeviceInputKind::Fold { command } | DeviceInputKind::Duo { command }
+                if command.trim().is_empty() || command.len() > 64 => Err("device fold command is invalid".into()),
+            _ => Ok(()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceAccessibilityInput {
+    pub host_id: Option<String>,
+    pub device_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceEventLogInput {
+    pub host_id: Option<String>,
+    pub device_id: String,
+    pub limit: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DeviceRecordingFormat {
+    RawFrames,
+    Mjpeg,
+    Avcc,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceRecordingStartInput {
+    pub thread_id: ThreadId,
+    pub host_id: Option<String>,
+    pub device_id: String,
+    pub format: DeviceRecordingFormat,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceRecordingStopInput {
+    pub thread_id: ThreadId,
+    pub host_id: Option<String>,
+    pub device_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceRecordingStatus {
+    pub thread_id: ThreadId,
+    pub host_id: String,
+    pub device_id: String,
+    pub format: DeviceRecordingFormat,
+    pub active: bool,
+    pub started_at: String,
+    pub frame_count: u64,
+    pub byte_count: u64,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceRecording {
+    pub status: DeviceRecordingStatus,
+    #[serde(with = "crate::protocol::bytes")]
+    pub bytes: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum DeviceEvent {
     State(DeviceServiceState),
     Frame(DeviceFrame),
+    Video(DeviceVideoFrame),
+    Screen(DeviceScreenConfig),
+    Accessibility(DeviceAccessibilityTree),
+    Foreground(DeviceForegroundUpdate),
+    EventLog(DeviceEventLogEntry),
+    Recording(DeviceRecordingStatus),
+    RecordingComplete(DeviceRecording),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeviceSubscribeInput {
     pub thread_id: ThreadId,
+    /// Native clients request a JPEG transport because they do not share the
+    /// browser WebCodecs decoder used by the reference web panel.
+    pub prefer_mjpeg: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

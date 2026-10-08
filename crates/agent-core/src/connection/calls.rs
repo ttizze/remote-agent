@@ -45,6 +45,10 @@ pub(super) enum Reply {
     DeviceSession(d::DeviceSession),
     DeviceDetail(d::DeviceDetail),
     DeviceScreenshot(d::DeviceScreenshot),
+    DeviceAccessibility(d::DeviceAccessibilityTree),
+    DeviceEventLog(Vec<d::DeviceEventLogEntry>),
+    DeviceRecordingStatus(d::DeviceRecordingStatus),
+    DeviceRecording(d::DeviceRecording),
     SetupCancelled(c::SetupCancelled),
     ProjectIcon(Option<m::ProjectFavicon>),
     SwitchedRef(w::SwitchedRef),
@@ -82,6 +86,11 @@ async fn execute(peer: &Peer, call: &Call) -> Result<Reply, PeerError> {
             Reply::DeviceDetail(peer.request(call).await?)
         }
         Call::DeviceScreenshot(_) => Reply::DeviceScreenshot(peer.request(call).await?),
+        Call::DeviceInput(_) => { let _: m::Empty = peer.request(call).await?; Reply::Done }
+        Call::DeviceAccessibility(_) => Reply::DeviceAccessibility(peer.request(call).await?),
+        Call::DeviceEventLog(_) => Reply::DeviceEventLog(peer.request(call).await?),
+        Call::DeviceRecordingStart(_) => Reply::DeviceRecordingStatus(peer.request(call).await?),
+        Call::DeviceRecordingStop(_) => Reply::DeviceRecording(peer.request(call).await?),
         Call::DeviceClose(_) | Call::DeviceShutdown(_) => {
             let _: m::Empty = peer.request(call).await?;
             Reply::Done
@@ -370,6 +379,11 @@ impl Owner {
                         | Call::DeviceDetail(_)
                         | Call::DeviceAction(_)
                         | Call::DeviceScreenshot(_)
+                        | Call::DeviceInput(_)
+                        | Call::DeviceAccessibility(_)
+                        | Call::DeviceEventLog(_)
+                        | Call::DeviceRecordingStart(_)
+                        | Call::DeviceRecordingStop(_)
                 ) {
                     self.state.device.error = Some(
                         crate::presentation::error::error_message(&error.to_string()),
@@ -586,6 +600,21 @@ impl Owner {
             }
             Reply::DeviceScreenshot(screenshot) => {
                 self.state.device.last_screenshot = Some(screenshot);
+            }
+            Reply::DeviceAccessibility(tree) => {
+                self.state.device.apply_event(d::DeviceEvent::Accessibility(tree));
+            }
+            Reply::DeviceEventLog(entries) => {
+                for entry in entries {
+                    self.state.device.apply_event(d::DeviceEvent::EventLog(entry));
+                }
+            }
+            Reply::DeviceRecordingStatus(status) => {
+                self.state.device.apply_event(d::DeviceEvent::Recording(status));
+            }
+            Reply::DeviceRecording(recording) => {
+                self.state.device.apply_event(d::DeviceEvent::Recording(recording.status.clone()));
+                self.state.device.last_recording = Some(recording);
             }
             Reply::SwitchedRef(switched) => match call {
                 Call::SwitchRef(request) => self.switched_ref(request, switched),

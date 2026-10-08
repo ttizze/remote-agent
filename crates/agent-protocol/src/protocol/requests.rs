@@ -119,6 +119,11 @@ contracts! {
     DeviceDetail, "host/device/detail" => (d::DeviceDetailInput, d::DeviceDetail) [clone],
     DeviceAction, "host/device/action" => (d::DeviceActionInput, d::DeviceDetail) [clone],
     DeviceScreenshot, "host/device/screenshot" => (d::DeviceScreenshotInput, d::DeviceScreenshot) [clone],
+    DeviceInput, "host/device/input" => (d::DeviceInput, m::Empty) [clone],
+    DeviceAccessibility, "host/device/accessibility" => (d::DeviceAccessibilityInput, d::DeviceAccessibilityTree) [clone],
+    DeviceEventLog, "host/device/event-log" => (d::DeviceEventLogInput, Vec<d::DeviceEventLogEntry>) [clone],
+    DeviceRecordingStart, "host/device/recording/start" => (d::DeviceRecordingStartInput, d::DeviceRecordingStatus) [clone],
+    DeviceRecordingStop, "host/device/recording/stop" => (d::DeviceRecordingStopInput, d::DeviceRecording) [clone],
     DeviceSubscribe, "host/device/subscribe" => (d::DeviceSubscribeInput, d::DeviceEvent),
     ConnectionPerformance, "host/diagnostics/connection" => (crate::diagnostics::ConnectionPerformance, m::Empty) [clone],
 }
