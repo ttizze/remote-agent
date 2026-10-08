@@ -2276,6 +2276,7 @@ impl HostRpcService {
                             params.appearance,
                             params.zoom,
                             params.rendered_size,
+                            params.profile_id.clone(),
                         )
                         .await
                         .map_err(|error| Failure::new("preview_open_failed", error))?;
@@ -2288,6 +2289,7 @@ impl HostRpcService {
                             params.viewport,
                             params.appearance,
                             params.zoom,
+                            params.profile_id.clone(),
                         )
                         .map_err(|error| Failure::new("preview_open_failed", error))?;
                     browser.report_preview_frame(&params.thread_id.to_string(), &frame);
@@ -2493,7 +2495,11 @@ impl HostRpcService {
                         .get()
                         .ok_or_else(|| Failure::new("browser_unavailable", "browser unavailable"))?;
                     browser
-                        .start_preview_recording(&params.thread_id.to_string(), &params.tab_id)
+                        .start_preview_recording(
+                            &params.thread_id.to_string(),
+                            &params.tab_id,
+                            params.options,
+                        )
                         .await
                         .map_err(|error| Failure::new("preview_recording_start_failed", error))?
                         .into()

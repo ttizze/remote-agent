@@ -19,9 +19,9 @@ use std::{
     process::{Output, Stdio},
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc,
+        Arc, Mutex,
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
@@ -36,11 +36,251 @@ const ENCODER_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 const CDP_COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
 const ENCODER_COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_ENCODER_OUTPUT_BYTES: usize = 64 * 1024;
-const OUTPUT_FPS: f64 = 30.0;
-const MAX_ENCODED_FRAMES: u64 = PREVIEW_RECORDING_MAX_DURATION_SECONDS * 30;
 const MAX_ENCODED_INPUT_BYTES: u64 = PREVIEW_RECORDING_MAX_BYTES * 4;
 
 pub(crate) const MIME_TYPE: &str = "video/webm;codecs=vp9";
+
+#[derive(Clone, Debug)]
+pub(crate) enum InputEvent {
+    Key { label: String, down: bool },
+    Pointer {
+        phase: PointerPhase,
+        x: f64,
+        y: f64,
+        width: u32,
+        height: u32,
+    },
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum PointerPhase {
+    Down,
+    Move,
+    Up,
+    Click,
+}
+
+#[derive(Clone, Debug)]
+struct KeyOverlay {
+    label: String,
+    expires_at: Option<Instant>,
+}
+
+#[derive(Clone, Debug)]
+struct PointerOverlay {
+    x: f64,
+    y: f64,
+    width: u32,
+    height: u32,
+    held: bool,
+    released_at: Option<Instant>,
+}
+
+#[derive(Default, Debug)]
+struct OverlayState {
+    key: Option<KeyOverlay>,
+    pointer: Option<PointerOverlay>,
+}
+
+pub(crate) type OverlayHandle = Arc<Mutex<OverlayState>>;
+
+pub(crate) fn new_overlay() -> OverlayHandle {
+    Arc::new(Mutex::new(OverlayState::default()))
+}
+
+pub(crate) fn apply_input(overlay: &OverlayHandle, event: InputEvent) {
+    let Ok(mut state) = overlay.lock() else { return };
+    let now = Instant::now();
+    match event {
+        InputEvent::Key { label, down } => {
+            state.key = (!label.is_empty()).then_some(KeyOverlay {
+                label,
+                expires_at: (!down).then_some(now + Duration::from_millis(900)),
+            });
+        }
+        InputEvent::Pointer { phase, x, y, width, height } => match phase {
+            PointerPhase::Down => {
+                state.pointer = Some(PointerOverlay {
+                    x,
+                    y,
+                    width,
+                    height,
+                    held: true,
+                    released_at: None,
+                });
+            }
+            PointerPhase::Move => {
+                if let Some(pointer) = state.pointer.as_mut() {
+                    pointer.x = x;
+                    pointer.y = y;
+                    pointer.width = width;
+                    pointer.height = height;
+                }
+            }
+            PointerPhase::Up => {
+                if let Some(pointer) = state.pointer.as_mut() {
+                    pointer.x = x;
+                    pointer.y = y;
+                    pointer.width = width;
+                    pointer.height = height;
+                    pointer.held = false;
+                    pointer.released_at = Some(now);
+                }
+            }
+            PointerPhase::Click => {
+                state.pointer = Some(PointerOverlay {
+                    x,
+                    y,
+                    width,
+                    height,
+                    held: false,
+                    released_at: Some(now),
+                });
+            }
+        },
+    }
+}
+
+fn decorate_jpeg(frame: &[u8], overlay: &OverlayHandle, options: agent_protocol::preview::PreviewRecordingOptions) -> Result<Vec<u8>, String> {
+    if !options.show_key_presses && !options.show_mouse_presses {
+        return Ok(frame.to_vec());
+    }
+    let image = image::load_from_memory_with_format(frame, image::ImageFormat::Jpeg)
+        .map_err(|error| format!("recording overlay could not decode browser frame: {error}"))?;
+    let mut image = image.to_rgb8();
+    let width = image.width();
+    let height = image.height();
+    let now = Instant::now();
+    let state = overlay
+        .lock()
+        .map_err(|_| "recording overlay state is unavailable".to_owned())?
+        .clone();
+    if options.show_mouse_presses
+        && let Some(pointer) = state.pointer
+        && (pointer.held
+            || pointer
+                .released_at
+                .is_some_and(|released| now.duration_since(released) < Duration::from_millis(600)))
+    {
+        let progress = pointer
+            .released_at
+            .map(|released| (now.duration_since(released).as_secs_f32() / 0.6).min(1.0))
+            .unwrap_or(0.0);
+        let cx = (pointer.x / f64::from(pointer.width.max(1)) * f64::from(width)) as i32;
+        let cy = (pointer.y / f64::from(pointer.height.max(1)) * f64::from(height)) as i32;
+        let radius = (20.0 * (1.0 + f64::from(progress) * 0.5)
+            * f64::from(width)
+            / f64::from(pointer.width.max(1))) as i32;
+        draw_ring(&mut image, cx, cy, radius.max(2), [88, 176, 255]);
+    }
+    if options.show_key_presses
+        && let Some(key) = state.key
+        && (key.expires_at.is_none() || key.expires_at.is_some_and(|expires| now < expires))
+    {
+        draw_key_badge(&mut image, &key.label);
+    }
+    let mut output = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut output, 80)
+        .encode_image(&image)
+        .map_err(|error| format!("recording overlay could not encode browser frame: {error}"))?;
+    Ok(output)
+}
+
+fn draw_ring(image: &mut image::RgbImage, cx: i32, cy: i32, radius: i32, color: [u8; 3]) {
+    let outer = radius * radius;
+    let inner = (radius - 2).max(0) * (radius - 2).max(0);
+    for y in (cy - radius - 1).max(0)..=(cy + radius + 1).min(image.height() as i32 - 1) {
+        for x in (cx - radius - 1).max(0)..=(cx + radius + 1).min(image.width() as i32 - 1) {
+            let distance = (x - cx) * (x - cx) + (y - cy) * (y - cy);
+            if inner < distance && distance <= outer {
+                image.put_pixel(x as u32, y as u32, image::Rgb(color));
+            }
+        }
+    }
+}
+
+fn draw_key_badge(image: &mut image::RgbImage, label: &str) {
+    let scale = (image.width().min(image.height()) / 360).max(1) as i32;
+    let glyph_width = 5 * scale;
+    let spacing = scale;
+    let text_width = label.chars().count() as i32 * (glyph_width + spacing);
+    let badge_width = (text_width + 18 * scale).min(image.width() as i32);
+    let badge_height = 13 * scale;
+    let left = ((image.width() as i32 - badge_width) / 2).max(0);
+    let top = (image.height() as i32 - badge_height - 10 * scale).max(0);
+    for y in top..(top + badge_height).min(image.height() as i32) {
+        for x in left..(left + badge_width).min(image.width() as i32) {
+            image.put_pixel(x as u32, y as u32, image::Rgb([32, 32, 34]));
+        }
+    }
+    let mut x = left + (badge_width - text_width) / 2;
+    for character in label.chars() {
+        draw_glyph(image, x, top + 3 * scale, character, scale);
+        x += glyph_width + spacing;
+    }
+}
+
+fn draw_glyph(image: &mut image::RgbImage, left: i32, top: i32, character: char, scale: i32) {
+    let pattern = glyph_pattern(character);
+    for (row, bits) in pattern.iter().enumerate() {
+        for column in 0..5 {
+            if bits & (1 << (4 - column)) != 0 {
+                for dy in 0..scale {
+                    for dx in 0..scale {
+                        let x = left + column * scale + dx;
+                        let y = top + row as i32 * scale + dy;
+                        if x >= 0 && y >= 0 && x < image.width() as i32 && y < image.height() as i32 {
+                            image.put_pixel(x as u32, y as u32, image::Rgb([255, 255, 255]));
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn glyph_pattern(character: char) -> [u8; 7] {
+    match character.to_ascii_uppercase() {
+        'A' => [0b01110, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001],
+        'B' => [0b11110, 0b10001, 0b10001, 0b11110, 0b10001, 0b10001, 0b11110],
+        'C' => [0b01111, 0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b01111],
+        'D' => [0b11110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b11110],
+        'E' => [0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b11111],
+        'F' => [0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b10000],
+        'G' => [0b01111, 0b10000, 0b10000, 0b10111, 0b10001, 0b10001, 0b01111],
+        'H' => [0b10001, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001],
+        'I' => [0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b11111],
+        'J' => [0b00111, 0b00010, 0b00010, 0b00010, 0b00010, 0b10010, 0b01100],
+        'K' => [0b10001, 0b10010, 0b10100, 0b11000, 0b10100, 0b10010, 0b10001],
+        'L' => [0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b11111],
+        'M' => [0b10001, 0b11011, 0b10101, 0b10101, 0b10001, 0b10001, 0b10001],
+        'N' => [0b10001, 0b11001, 0b10101, 0b10011, 0b10001, 0b10001, 0b10001],
+        'O' => [0b01110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110],
+        'P' => [0b11110, 0b10001, 0b10001, 0b11110, 0b10000, 0b10000, 0b10000],
+        'Q' => [0b01110, 0b10001, 0b10001, 0b10001, 0b10101, 0b10010, 0b01101],
+        'R' => [0b11110, 0b10001, 0b10001, 0b11110, 0b10100, 0b10010, 0b10001],
+        'S' => [0b01111, 0b10000, 0b10000, 0b01110, 0b00001, 0b00001, 0b11110],
+        'T' => [0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100],
+        'U' => [0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110],
+        'V' => [0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01010, 0b00100],
+        'W' => [0b10001, 0b10001, 0b10001, 0b10101, 0b10101, 0b11011, 0b10001],
+        'X' => [0b10001, 0b10001, 0b01010, 0b00100, 0b01010, 0b10001, 0b10001],
+        'Y' => [0b10001, 0b10001, 0b01010, 0b00100, 0b00100, 0b00100, 0b00100],
+        'Z' => [0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b10000, 0b11111],
+        '0' => [0b01110, 0b10001, 0b10011, 0b10101, 0b11001, 0b10001, 0b01110],
+        '1' => [0b00100, 0b01100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110],
+        '2' => [0b01110, 0b10001, 0b00001, 0b00010, 0b00100, 0b01000, 0b11111],
+        '3' => [0b11110, 0b00001, 0b00001, 0b01110, 0b00001, 0b00001, 0b11110],
+        '4' => [0b00010, 0b00110, 0b01010, 0b10010, 0b11111, 0b00010, 0b00010],
+        '5' => [0b11111, 0b10000, 0b10000, 0b11110, 0b00001, 0b00001, 0b11110],
+        '6' => [0b00110, 0b01000, 0b10000, 0b11110, 0b10001, 0b10001, 0b01110],
+        '7' => [0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b01000, 0b01000],
+        '8' => [0b01110, 0b10001, 0b10001, 0b01110, 0b10001, 0b10001, 0b01110],
+        '9' => [0b01110, 0b10001, 0b10001, 0b01111, 0b00001, 0b00010, 0b11100],
+        '-' => [0, 0, 0, 0b11111, 0, 0, 0],
+        _ => [0b11111, 0b10001, 0b10101, 0b10101, 0b10101, 0b10001, 0b11111],
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CaptureTermination {
@@ -73,6 +313,7 @@ pub(crate) struct StartResult {
     pub(crate) externally_detached: Arc<AtomicBool>,
     pub(crate) startup: oneshot::Receiver<Result<(), String>>,
     pub(crate) task: tokio::task::JoinHandle<Result<PreviewRecordingArtifact, String>>,
+    pub(crate) overlay: OverlayHandle,
 }
 
 pub(crate) fn start(
@@ -82,6 +323,7 @@ pub(crate) fn start(
     width: u32,
     height: u32,
     protected_paths: &[PathBuf],
+    options: agent_protocol::preview::PreviewRecordingOptions,
     cancel: tokio_util::sync::CancellationToken,
     stop: tokio_util::sync::CancellationToken,
 ) -> Result<StartResult, String> {
@@ -94,6 +336,7 @@ pub(crate) fn start(
     let started_at = chrono::Utc::now().to_rfc3339();
     let (startup_sender, startup) = oneshot::channel();
     let externally_detached = Arc::new(AtomicBool::new(false));
+    let overlay = new_overlay();
     let task = tokio::spawn(run(
         endpoint,
         tab_id,
@@ -101,6 +344,8 @@ pub(crate) fn start(
         id,
         width,
         height,
+        options,
+        overlay.clone(),
         cancel,
         stop,
         startup_sender,
@@ -112,6 +357,7 @@ pub(crate) fn start(
         externally_detached,
         startup,
         task,
+        overlay,
     })
 }
 
@@ -131,6 +377,8 @@ async fn run(
     id: String,
     width: u32,
     height: u32,
+    options: agent_protocol::preview::PreviewRecordingOptions,
+    overlay: OverlayHandle,
     cancel: tokio_util::sync::CancellationToken,
     stop: tokio_util::sync::CancellationToken,
     startup: oneshot::Sender<Result<(), String>>,
@@ -145,6 +393,8 @@ async fn run(
         &partial_path,
         width,
         height,
+        options,
+        overlay,
         cancel,
         stop,
         startup,
@@ -200,6 +450,8 @@ async fn run_capture(
     output: &Path,
     width: u32,
     height: u32,
+    options: agent_protocol::preview::PreviewRecordingOptions,
+    overlay: OverlayHandle,
     cancel: tokio_util::sync::CancellationToken,
     stop: tokio_util::sync::CancellationToken,
     startup: oneshot::Sender<Result<(), String>>,
@@ -258,7 +510,7 @@ async fn run_capture(
         notify_startup(&mut startup, Err(error.clone()));
         return Err(error);
     }
-    let mut encoder = match Encoder::start(output).await {
+    let mut encoder = match Encoder::start(output, options.frame_rate).await {
         Ok(encoder) => encoder,
         Err(error) => {
             cleanup_cdp(&mut socket, &mut next_id, tab_id, &session).await;
@@ -305,6 +557,8 @@ async fn run_capture(
     let mut frames = 0u64;
     let mut encoded_frames = 0u64;
     let mut encoded_input_bytes = 0u64;
+    let max_encoded_frames = PREVIEW_RECORDING_MAX_DURATION_SECONDS
+        .saturating_mul(u64::from(options.frame_rate));
     let mut first_timestamp = None;
     let mut detached = false;
     let mut deadline_reached = false;
@@ -340,14 +594,25 @@ async fn run_capture(
                 {
                     first_timestamp = timestamp;
                 }
-                let repeats = frame_repetition_count(first_timestamp, timestamp, encoded_frames);
-                if encoded_frames.saturating_add(repeats) > MAX_ENCODED_FRAMES {
+                let repeats = frame_repetition_count(
+                    first_timestamp,
+                    timestamp,
+                    encoded_frames,
+                    f64::from(options.frame_rate),
+                    max_encoded_frames,
+                );
+                if encoded_frames.saturating_add(repeats) > max_encoded_frames {
                     break Err("recording capture duration exceeds 120000ms".to_owned());
                 }
                 let added_bytes = (frame.len() as u64).saturating_mul(repeats);
                 if encoded_input_bytes.saturating_add(added_bytes) > MAX_ENCODED_INPUT_BYTES {
                     break Err("recording encoder input exceeds its bounded limit".to_owned());
                 }
+                let frame = if options.show_key_presses || options.show_mouse_presses {
+                    decorate_jpeg(&frame, &overlay, options)?
+                } else {
+                    frame
+                };
                 let mut push_error = None;
                 for _ in 0..repeats {
                     match tokio::time::timeout(ENCODER_WRITE_TIMEOUT, encoder.push(&frame)).await {
@@ -583,17 +848,19 @@ fn frame_repetition_count(
     first_timestamp: Option<f64>,
     timestamp: Option<f64>,
     encoded_frames: u64,
+    output_fps: f64,
+    max_encoded_frames: u64,
 ) -> u64 {
     let Some(first) = first_timestamp else { return 1; };
     let Some(timestamp) = timestamp.filter(|timestamp| timestamp.is_finite() && *timestamp >= first) else {
         return 1;
     };
-    let elapsed_frames = (timestamp - first) * OUTPUT_FPS;
+    let elapsed_frames = (timestamp - first) * output_fps;
     // Keep the value below the cast bound.  A finite CDP timestamp can still
     // be large enough that the float-to-u64 cast saturates, and adding one to
     // that result used to overflow before the duration cap was checked.
-    if !elapsed_frames.is_finite() || elapsed_frames >= MAX_ENCODED_FRAMES as f64 {
-        return MAX_ENCODED_FRAMES.saturating_add(1);
+    if !elapsed_frames.is_finite() || elapsed_frames >= max_encoded_frames as f64 {
+        return max_encoded_frames.saturating_add(1);
     }
     let target = elapsed_frames.round().max(0.0) as u64;
     target.saturating_add(1).saturating_sub(encoded_frames).max(1)
@@ -774,27 +1041,6 @@ struct Encoder {
     child: Child,
     input: Option<ChildStdin>,
     output: PathBuf,
-    executable: PathBuf,
-}
-
-fn ffmpeg_executable() -> PathBuf {
-    if let Some(path) = std::env::var_os("AGENT_FFMPEG_EXECUTABLE") {
-        return PathBuf::from(path);
-    }
-    let sibling_name = if cfg!(target_os = "windows") {
-        "ffmpeg.exe"
-    } else {
-        "ffmpeg"
-    };
-    if let Ok(executable) = std::env::current_exe()
-        && let Some(directory) = executable.parent()
-    {
-        let sibling = directory.join(sibling_name);
-        if sibling.is_file() {
-            return sibling;
-        }
-    }
-    PathBuf::from(sibling_name)
 }
 
 async fn read_bounded<R>(reader: R) -> Result<Vec<u8>, String>
@@ -857,8 +1103,8 @@ async fn run_bounded_command(mut command: Command) -> Result<Output, String> {
 }
 
 impl Encoder {
-    async fn start(output: &Path) -> Result<Self, String> {
-        let executable = ffmpeg_executable();
+    async fn start(output: &Path, frame_rate: u8) -> Result<Self, String> {
+        let executable = crate::ffmpeg::executable();
         let mut probe = Command::new(&executable);
         probe
             .args(["-hide_banner", "-loglevel", "error", "-encoders"])
@@ -892,7 +1138,7 @@ impl Encoder {
                 "image2pipe",
                 "-framerate",
             ])
-            .arg(OUTPUT_FPS.to_string())
+            .arg(frame_rate.to_string())
             .args([
                 "-vcodec",
                 "mjpeg",
@@ -1048,15 +1294,24 @@ mod tests {
 
     #[test]
     fn screencast_timestamps_expand_gaps_into_encoder_frames() {
-        assert_eq!(frame_repetition_count(None, Some(10.0), 0), 1);
-        assert_eq!(frame_repetition_count(Some(10.0), Some(10.1), 1), 3);
-        assert_eq!(frame_repetition_count(Some(10.0), Some(10.1), 4), 1);
-        assert_eq!(frame_repetition_count(Some(10.0), Some(9.0), 1), 1);
-        assert_eq!(frame_repetition_count(Some(10.0), None, 1), 1);
+        let max = PREVIEW_RECORDING_MAX_DURATION_SECONDS * 30;
+        assert_eq!(frame_repetition_count(None, Some(10.0), 0, 30.0, max), 1);
+        assert_eq!(frame_repetition_count(Some(10.0), Some(10.1), 1, 30.0, max), 3);
+        assert_eq!(frame_repetition_count(Some(10.0), Some(10.1), 4, 30.0, max), 1);
+        assert_eq!(frame_repetition_count(Some(10.0), Some(9.0), 1, 30.0, max), 1);
+        assert_eq!(frame_repetition_count(Some(10.0), None, 1, 30.0, max), 1);
         assert_eq!(
-            frame_repetition_count(Some(0.0), Some(f64::MAX), 0),
-            MAX_ENCODED_FRAMES + 1
+            frame_repetition_count(Some(0.0), Some(f64::MAX), 0, 60.0, 120 * 60),
+            120 * 60 + 1
         );
+    }
+
+    #[test]
+    fn recording_options_bound_frame_rate_and_overlay_preferences() {
+        use agent_protocol::preview::PreviewRecordingOptions;
+        assert!(PreviewRecordingOptions::default().validate().is_ok());
+        assert!(PreviewRecordingOptions { frame_rate: 60, show_key_presses: true, show_mouse_presses: true }.validate().is_ok());
+        assert!(PreviewRecordingOptions { frame_rate: 24, ..PreviewRecordingOptions::default() }.validate().is_err());
     }
 
     #[test]

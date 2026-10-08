@@ -302,6 +302,30 @@ enum HostBrowserRequest {
     Intent(Intent),
 }
 
+/// Resolved client browser settings captured when a Preview surface is
+/// created. Settings owners supply this value; the Host remains the owner of
+/// the resulting tab, profile context and recording task.
+#[derive(Clone)]
+pub(crate) struct PreviewDefaults {
+    pub(crate) viewport: PreviewViewportSetting,
+    pub(crate) appearance: PreviewAppearance,
+    pub(crate) zoom: PreviewZoom,
+    pub(crate) profile_id: Option<String>,
+    pub(crate) recording_options: agent_protocol::preview::PreviewRecordingOptions,
+}
+
+impl Default for PreviewDefaults {
+    fn default() -> Self {
+        Self {
+            viewport: PreviewViewportSetting::Fill,
+            appearance: PreviewAppearance::System,
+            zoom: PreviewZoom::X100,
+            profile_id: None,
+            recording_options: agent_protocol::preview::PreviewRecordingOptions::default(),
+        }
+    }
+}
+
 /// Renders frames from the Host-owned Preview browser. The image and every
 /// input action share the Host tab identity, so a panel switch never creates a
 /// second local page behind the user's visible Preview.
@@ -316,6 +340,7 @@ pub(crate) struct HostBrowser {
     focus: FocusHandle,
     frame_bounds: Bounds<Pixels>,
     last_fill_size: Option<(u32, u32)>,
+    defaults: PreviewDefaults,
     request_generation: u64,
     error: String,
     _subscription: Subscription,
@@ -325,14 +350,17 @@ impl HostBrowser {
     pub(crate) fn new(
         store: Arc<Store>,
         thread_id: String,
+        defaults: PreviewDefaults,
         window: &mut Window,
         cx: &mut App,
     ) -> Entity<Self> {
         let address = cx.new(|cx| InputState::new(window, cx).placeholder("Enter preview URL"));
         let freeform_width = cx.new(|cx| InputState::new(window, cx).placeholder("Width"));
         let freeform_height = cx.new(|cx| InputState::new(window, cx).placeholder("Height"));
-        freeform_width.update(cx, |input, cx| input.set_value("1024", window, cx));
-        freeform_height.update(cx, |input, cx| input.set_value("768", window, cx));
+        if let Some((width, height)) = defaults.viewport.dimensions() {
+            freeform_width.update(cx, |input, cx| input.set_value(width.to_string(), window, cx));
+            freeform_height.update(cx, |input, cx| input.set_value(height.to_string(), window, cx));
+        }
         cx.new(|cx: &mut Context<Self>| {
             let subscription = cx.subscribe_in(&address, window, |view, _, event, window, cx| {
                 if matches!(event, InputEvent::PressEnter { .. }) {
@@ -350,6 +378,7 @@ impl HostBrowser {
                 focus: cx.focus_handle(),
                 frame_bounds: Bounds::default(),
                 last_fill_size: None,
+                defaults,
                 request_generation: 0,
                 error: String::new(),
                 _subscription: subscription,
@@ -455,8 +484,9 @@ impl HostBrowser {
         let store = self.store.clone();
         let thread_id = self.thread_id.clone();
         let frame = self.frame.clone();
+        let defaults = self.defaults.clone();
         cx.spawn_in(window, async move |view, cx| {
-            let result = host_browser_request(store, thread_id, frame, request).await;
+            let result = host_browser_request(store, thread_id, frame, defaults, request).await;
             let _ = view.update_in(cx, |view, window, cx| {
                 if view.request_generation != request_generation {
                     return;
@@ -670,6 +700,7 @@ async fn host_browser_request(
     store: Arc<Store>,
     thread_id: String,
     frame: Option<BrowserFrame>,
+    defaults: PreviewDefaults,
     request: HostBrowserRequest,
 ) -> Result<BrowserFrame, String> {
     let tab_id = frame.as_ref().map(|frame| frame.tab_id.clone()).unwrap_or_default();
@@ -683,9 +714,10 @@ async fn host_browser_request(
                 &store,
                 Intent::PreviewOpen {
                     url: None,
-                    viewport: PreviewViewportSetting::Fill,
-                    appearance: PreviewAppearance::System,
-                    zoom: PreviewZoom::X100,
+                    viewport: defaults.viewport,
+                    appearance: defaults.appearance,
+                    zoom: defaults.zoom,
+                    profile_id: defaults.profile_id,
                 },
             )
             .await?;
@@ -1009,7 +1041,10 @@ impl Render for HostBrowser {
                                     HostBrowserRequest::Intent(if recording {
                                         Intent::PreviewRecordingStop { tab_id }
                                     } else {
-                                        Intent::PreviewRecordingStart { tab_id }
+                                        Intent::PreviewRecordingStart {
+                                            tab_id,
+                                            options: s.defaults.recording_options,
+                                        }
                                     }),
                                     window,
                                     cx,

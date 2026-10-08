@@ -4,6 +4,7 @@ pub(crate) mod ports;
 use agent_protocol::preview::{
     normalize_preview_url, PreviewAppearance, PreviewEvent, PreviewListResult, PreviewNavStatus,
     PreviewRecordingStatus, PreviewSessionSnapshot, PreviewViewportSetting, PreviewZoom,
+    validate_profile_id,
 };
 use agent_domain::ThreadId;
 use std::{collections::BTreeMap, sync::Mutex};
@@ -55,8 +56,12 @@ impl PreviewManager {
         viewport: PreviewViewportSetting,
         appearance: PreviewAppearance,
         zoom: PreviewZoom,
+        profile_id: Option<String>,
     ) -> Result<PreviewSessionSnapshot, String> {
         viewport.validate()?;
+        if let Some(profile_id) = &profile_id {
+            validate_profile_id(profile_id)?;
+        }
         let nav_status = match url {
             Some(url) => PreviewNavStatus::Loading {
                 url: normalize_preview_url(url)?,
@@ -73,6 +78,7 @@ impl PreviewManager {
             viewport,
             zoom,
             appearance,
+            profile_id,
             updated_at: now(),
         };
         snapshot.validate()?;
@@ -394,8 +400,8 @@ mod tests {
     #[test]
     fn revisions_are_monotonic_and_list_is_thread_scoped() {
         let manager = PreviewManager::new();
-        let first = manager.open(thread("one"), "tab-a".into(), None, PreviewViewportSetting::Fill, PreviewAppearance::System, PreviewZoom::X100).unwrap();
-        manager.open(thread("two"), "tab-b".into(), None, PreviewViewportSetting::Fill, PreviewAppearance::System, PreviewZoom::X100).unwrap();
+        let first = manager.open(thread("one"), "tab-a".into(), None, PreviewViewportSetting::Fill, PreviewAppearance::System, PreviewZoom::X100, None).unwrap();
+        manager.open(thread("two"), "tab-b".into(), None, PreviewViewportSetting::Fill, PreviewAppearance::System, PreviewZoom::X100, None).unwrap();
         assert_eq!(manager.list(&thread("one")).sessions, vec![first.clone()]);
         let before = manager.list(&thread("one")).revision;
         manager.resize(&thread("one"), "tab-a", PreviewViewportSetting::Freeform { width: 390, height: 844 }).unwrap();
@@ -415,8 +421,8 @@ mod tests {
     fn closing_one_tab_keeps_the_other_tab() {
         let manager = PreviewManager::new();
         let id = thread("one");
-        manager.open(id.clone(), "a".into(), None, PreviewViewportSetting::Fill, PreviewAppearance::System, PreviewZoom::X100).unwrap();
-        manager.open(id.clone(), "b".into(), None, PreviewViewportSetting::Fill, PreviewAppearance::System, PreviewZoom::X100).unwrap();
+        manager.open(id.clone(), "a".into(), None, PreviewViewportSetting::Fill, PreviewAppearance::System, PreviewZoom::X100, None).unwrap();
+        manager.open(id.clone(), "b".into(), None, PreviewViewportSetting::Fill, PreviewAppearance::System, PreviewZoom::X100, None).unwrap();
         assert_eq!(manager.close(&id, Some("a")), vec!["a"]);
         assert_eq!(manager.list(&id).sessions.iter().map(|s| s.tab_id.as_str()).collect::<Vec<_>>(), vec!["b"]);
     }
@@ -433,6 +439,7 @@ mod tests {
                 PreviewViewportSetting::Fill,
                 PreviewAppearance::System,
                 PreviewZoom::X100,
+                None,
             )
             .unwrap();
         let mut events = manager.subscribe();
@@ -470,6 +477,7 @@ mod tests {
                 PreviewViewportSetting::Fill,
                 PreviewAppearance::System,
                 PreviewZoom::X100,
+                None,
             )
             .unwrap();
         let before = manager.list(&id).revision;
@@ -493,6 +501,7 @@ mod tests {
                 PreviewViewportSetting::Fill,
                 PreviewAppearance::System,
                 PreviewZoom::X100,
+                None,
             )
             .unwrap();
         let before = manager.list(&id).revision;
@@ -525,6 +534,7 @@ mod tests {
                 PreviewViewportSetting::Fill,
                 PreviewAppearance::System,
                 PreviewZoom::X100,
+                None,
             )
             .unwrap();
         manager.recording_artifact_removed(&id, "tab");
@@ -554,6 +564,7 @@ mod tests {
                 PreviewViewportSetting::Fill,
                 PreviewAppearance::System,
                 PreviewZoom::X100,
+                None,
             )
             .unwrap();
         manager

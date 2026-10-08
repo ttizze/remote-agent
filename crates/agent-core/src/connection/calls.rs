@@ -599,6 +599,13 @@ impl Owner {
                         crate::presentation::error::error_message(&error.to_string()),
                     );
                 }
+                if let Call::DeviceInput(request) = &call
+                    && let Some(thread_id) = self.state.selected_thread.clone()
+                {
+                    self.state
+                        .device
+                        .fail_duo_for_input(&thread_id, request, error.to_string());
+                }
                 match &call {
                     Call::ProviderCommands(request) => {
                         self.provider_commands_finished(request, Err(&error))
@@ -1100,7 +1107,24 @@ impl Owner {
                     .scheduled_tasks
                     .retain(|existing| existing.id != task.id);
             }
-            Reply::Done => {}
+            Reply::Done => {
+                if let Call::DeviceInput(request) = call
+                    && let Some(thread_id) = self.state.selected_thread.clone()
+                    && let Some(next) = self.state.device.complete_duo_for_input(&thread_id, request)
+                {
+                    self.job(
+                        Call::DeviceInput(d::DeviceInput {
+                            host_id: next.host_id,
+                            device_id: next.device_id,
+                            input: d::DeviceInputKind::Duo {
+                                command: super::intents::device_duo_command(next.command),
+                            },
+                        }),
+                        None,
+                        None,
+                    );
+                }
+            }
         }
         match call {
             Call::RemoveRemote(params) => {

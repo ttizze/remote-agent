@@ -124,7 +124,7 @@ fn device_duo_orientation(value: DeviceDuoOrientationIntent) -> d::DeviceOrienta
         DeviceDuoOrientationIntent::LandscapeRight => d::DeviceOrientation::LandscapeRight,
     }
 }
-fn device_duo_command(value: DeviceDuoCommandIntent) -> d::DeviceDuoCommand {
+pub(super) fn device_duo_command(value: DeviceDuoCommandIntent) -> d::DeviceDuoCommand {
     match value {
         DeviceDuoCommandIntent::Angle { value } => d::DeviceDuoCommand::Angle { value },
         DeviceDuoCommandIntent::Pose { value } => d::DeviceDuoCommand::Pose { value: device_duo_pose(value) },
@@ -2238,6 +2238,27 @@ impl Owner {
                 device_id,
                 action,
             } => {
+                if let DeviceActionIntent::Duo { command } = &action {
+                    let thread_id = self.selected()?;
+                    let request = self
+                        .state
+                        .device
+                        .enqueue_duo(thread_id.clone(), host_id.clone(), device_id.clone(), command.clone())
+                        .map_err(invalid)?;
+                    let Some(request) = request else {
+                        return Ok(Next::Done);
+                    };
+                    return Ok(Next::call(
+                        Call::DeviceInput(d::DeviceInput {
+                            host_id: request.host_id,
+                            device_id: request.device_id,
+                            input: d::DeviceInputKind::Duo {
+                                command: device_duo_command(request.command),
+                            },
+                        }),
+                        None,
+                    ));
+                }
                 let action = device_action(action)?;
                 match action {
                     d::DeviceActionKind::Input(input) => Next::call(
@@ -2303,6 +2324,7 @@ impl Owner {
                 viewport,
                 appearance,
                 zoom,
+                profile_id,
             } => {
                 let request = agent_protocol::preview::PreviewOpen {
                     thread_id: self.selected()?,
@@ -2311,6 +2333,7 @@ impl Owner {
                     appearance,
                     zoom,
                     rendered_size: None,
+                    profile_id,
                 };
                 request.validate().map_err(invalid)?;
                 Next::call(Call::PreviewOpen(request), None)
@@ -2380,10 +2403,11 @@ impl Owner {
                 request.validate().map_err(invalid)?;
                 Next::call(Call::PreviewClose(request), None)
             }
-            Intent::PreviewRecordingStart { tab_id } => {
+            Intent::PreviewRecordingStart { tab_id, options } => {
                 let request = agent_protocol::preview::PreviewRecordingStart {
                     thread_id: self.selected()?,
                     tab_id,
+                    options,
                 };
                 request.validate().map_err(invalid)?;
                 Next::call(Call::PreviewRecordingStart(request), None)

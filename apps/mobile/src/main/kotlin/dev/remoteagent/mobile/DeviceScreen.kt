@@ -165,6 +165,12 @@ internal fun DeviceScreen(model: AndroidAppModel, threadId: String) {
                 val foreground = view.foreground.firstOrNull {
                     it.hostId == session.hostId && it.deviceId == session.deviceId
                 }?.appId ?: detail?.foregroundApp
+                val duo = view.duoControls.firstOrNull {
+                    it.threadId == threadId &&
+                        it.hostId == session.hostId &&
+                        it.deviceId == session.deviceId &&
+                        it.sessionEpoch == session.sessionEpoch
+                }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Button(onClick = {
                         model.perform(
@@ -347,17 +353,47 @@ internal fun DeviceScreen(model: AndroidAppModel, threadId: String) {
                     }) { Text("Power off") }
                 }
                 foreground?.let { app -> Text("Foreground: " + app) }
+                duo?.let { control ->
+                    when {
+                        control.pending -> Text(
+                            "Duo control pending" +
+                                (control.requested?.let { ": $it" } ?: ""),
+                        )
+                        control.error != null -> Text("Duo control failed: ${control.error}")
+                    }
+                }
             }
             view.screens
-                .filter { it.threadId == threadId }
+                .filter { screen ->
+                    screen.threadId == threadId &&
+                        threadSessions.any { session ->
+                            session.hostId == screen.hostId &&
+                                session.deviceId == screen.deviceId &&
+                                session.sessionEpoch == screen.sessionEpoch
+                        }
+                }
                 .sortedBy { it.screenId ?: 0 }
                 .forEach { screen ->
-                    item(key = "screen-${screen.hostId}-${screen.deviceId}-${screen.screenId ?: 0}") {
+                    item(key = "screen-${screen.hostId}-${screen.deviceId}-${screen.screenId ?: 0}-${screen.sessionEpoch}") {
                         Text(
                             "Screen ${screen.screenId ?: 0}: ${screen.width}×${screen.height} · " +
                                 "${screen.orientation}" +
                                 (screen.hingeAngle?.let { " · hinge ${it.toInt()}°" } ?: ""),
                         )
+                        if (screen.hingePose != null || screen.tableModeAvailable) {
+                            Text(
+                                "Duo readback: " +
+                                    listOfNotNull(
+                                        screen.hingePose?.let { "pose $it" },
+                                        screen.hingeAngle?.let { "angle ${it.toInt()}°" },
+                                        if (screen.tableModeAvailable) {
+                                            "table ${if (screen.tableMode) "on" else "off"}"
+                                        } else {
+                                            null
+                                        },
+                                    ).joinToString(" · "),
+                            )
+                        }
                         if (screen.tableModeAvailable) {
                             Text(if (screen.tableMode) "Table mode on" else "Table mode off")
                         }

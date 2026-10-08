@@ -147,7 +147,12 @@ async fn bridge_request(
                 None => browser.preview_active_tab(&thread).await?,
             };
             browser
-                .start_preview_recording_with_cancel(&thread, &tab_id, request_cancel)
+                .start_preview_recording_with_cancel(
+                    &thread,
+                    &tab_id,
+                    agent_protocol::preview::PreviewRecordingOptions::default(),
+                    request_cancel,
+                )
             .await
             .map(BridgeResponse::PreviewRecordingStatus)
         }

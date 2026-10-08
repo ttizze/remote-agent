@@ -134,79 +134,6 @@ pub struct DeviceScreenView {
     pub table_mode_available: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
-pub struct DeviceTouchPoint {
-    pub x: f32,
-    pub y: f32,
-}
-
-/// Projects a native pointer through a centered `ContentScale.Fit` surface.
-/// Points in the letterbox bars are ignored so clients cannot send touches
-/// outside the device framebuffer.
-pub fn project_touch_point(
-    x: f32,
-    y: f32,
-    viewport_width: f32,
-    viewport_height: f32,
-    content_width: f32,
-    content_height: f32,
-) -> Option<DeviceTouchPoint> {
-    if !x.is_finite()
-        || !y.is_finite()
-        || !viewport_width.is_finite()
-        || !viewport_height.is_finite()
-        || !content_width.is_finite()
-        || !content_height.is_finite()
-        || viewport_width <= 0.0
-        || viewport_height <= 0.0
-        || content_width <= 0.0
-        || content_height <= 0.0
-    {
-        return None;
-    }
-    // Keep the fit calculation in f64. With finite f32 inputs, the ratio can
-    // underflow to zero before the rendered size is calculated.
-    let viewport_width = viewport_width as f64;
-    let viewport_height = viewport_height as f64;
-    let content_width = content_width as f64;
-    let content_height = content_height as f64;
-    let x = x as f64;
-    let y = y as f64;
-    let scale = (viewport_width / content_width).min(viewport_height / content_height);
-    let rendered_width = content_width * scale;
-    let rendered_height = content_height * scale;
-    if !scale.is_finite()
-        || scale <= 0.0
-        || !rendered_width.is_finite()
-        || !rendered_height.is_finite()
-        || rendered_width <= 0.0
-        || rendered_height <= 0.0
-    {
-        return None;
-    }
-    let left = (viewport_width - rendered_width) / 2.0;
-    let top = (viewport_height - rendered_height) / 2.0;
-    if !left.is_finite()
-        || !top.is_finite()
-        || x < left
-        || x > left + rendered_width
-        || y < top
-        || y > top + rendered_height
-    {
-        return None;
-    }
-    let normalized_x = ((x - left) / rendered_width).clamp(0.0, 1.0);
-    let normalized_y = ((y - top) / rendered_height).clamp(0.0, 1.0);
-    if !normalized_x.is_finite() || !normalized_y.is_finite() {
-        return None;
-    }
-    Some(DeviceTouchPoint {
-        x: normalized_x as f32,
-        y: normalized_y as f32,
-    })
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct DeviceRecordingView {
@@ -250,6 +177,8 @@ pub struct DeviceDetailView {
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct DeviceView {
     pub revision: u64,
+    /// Changes for every accepted frame/video event and stream prune.
+    pub frame_revision: u64,
     pub status: String,
     pub status_detail: Option<String>,
     pub enabled: bool,
@@ -269,6 +198,19 @@ pub struct DeviceView {
     pub screens: Vec<DeviceScreenView>,
     pub recordings: Vec<DeviceRecordingView>,
     pub last_recording: Option<DeviceRecordingView>,
+    pub duo_controls: Vec<DeviceDuoControlView>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct DeviceDuoControlView {
+    pub thread_id: String,
+    pub host_id: String,
+    pub device_id: String,
+    pub session_epoch: String,
+    pub pending: bool,
+    pub requested: Option<String>,
     pub error: Option<String>,
 }
 
@@ -277,6 +219,7 @@ pub fn device_view(snapshot: &Snapshot) -> DeviceView {
     let service = state.service();
     DeviceView {
         revision: service.revision,
+        frame_revision: state.frame_revision,
         status: status_name(service.host_status).into(),
         status_detail: service.host_status_detail,
         enabled: service.host_status != agent_protocol::device::DeviceHostStatus::Disabled,
@@ -494,7 +437,48 @@ pub fn device_view(snapshot: &Snapshot) -> DeviceView {
             error: recording.status.error.clone(),
             bytes: recording.bytes.clone(),
         }),
+        duo_controls: state
+            .duo_controls
+            .iter()
+            .map(|((thread_id, host_id, device_id, session_epoch), control)| DeviceDuoControlView {
+                thread_id: thread_id.clone(),
+                host_id: host_id.clone(),
+                device_id: device_id.clone(),
+                session_epoch: session_epoch.clone(),
+                pending: control.pending,
+                requested: control.requested.as_ref().map(device_duo_command_name),
+                error: control.error.clone(),
+            })
+            .collect(),
         error: state.error.clone(),
+    }
+}
+
+fn video_frame_view(frame: &agent_protocol::device::DeviceVideoFrame) -> DeviceVideoFrameView {
+    DeviceVideoFrameView {
+        thread_id: frame.thread_id.to_string(),
+        session_epoch: frame.session_epoch.clone(),
+        host_id: frame.device.host_id.clone(),
+        device_id: frame.device.id.clone(),
+        platform: platform_name(frame.device.platform).into(),
+        payload: frame.payload.clone(),
+        encoding: video_encoding_name(frame.encoding).into(),
+        width: frame.width,
+        height: frame.height,
+        sequence: frame.sequence,
+        timestamp_us: frame.timestamp_us,
+        keyframe: frame.keyframe,
+        screen_id: frame.screen_id,
+    }
+}
+
+fn device_duo_command_name(command: &crate::state::DeviceDuoCommandIntent) -> String {
+    match command {
+        crate::state::DeviceDuoCommandIntent::Angle { value } => format!("angle:{value:.1}"),
+        crate::state::DeviceDuoCommandIntent::Pose { value } => format!("pose:{value:?}"),
+        crate::state::DeviceDuoCommandIntent::Table { value } => format!("table:{value}"),
+        crate::state::DeviceDuoCommandIntent::Physical { value } => format!("physical:{value:?}"),
+        crate::state::DeviceDuoCommandIntent::Orientation { value } => format!("orientation:{value:?}"),
     }
 }
 
@@ -532,24 +516,6 @@ fn video_encoding_name(encoding: agent_protocol::device::DeviceFrameEncoding) ->
     }
 }
 
-fn video_frame_view(frame: &agent_protocol::device::DeviceVideoFrame) -> DeviceVideoFrameView {
-    DeviceVideoFrameView {
-        thread_id: frame.thread_id.to_string(),
-        session_epoch: frame.session_epoch.clone(),
-        host_id: frame.device.host_id.clone(),
-        device_id: frame.device.id.clone(),
-        platform: platform_name(frame.device.platform).into(),
-        payload: frame.payload.clone(),
-        encoding: video_encoding_name(frame.encoding).into(),
-        width: frame.width,
-        height: frame.height,
-        sequence: frame.sequence,
-        timestamp_us: frame.timestamp_us,
-        keyframe: frame.keyframe,
-        screen_id: frame.screen_id,
-    }
-}
-
 fn orientation_name(orientation: agent_protocol::device::DeviceOrientation) -> &'static str {
     match orientation {
         agent_protocol::device::DeviceOrientation::Portrait => "portrait",
@@ -575,26 +541,5 @@ mod tests {
         assert_eq!(view.status, "disabled");
         assert!(!view.enabled);
         assert!(view.hosts.is_empty());
-    }
-
-    #[test]
-    fn touch_projection_rejects_letterbox_and_keeps_extreme_dimensions_finite() {
-        assert_eq!(project_touch_point(f32::NAN, 0.0, 100.0, 100.0, 100.0, 100.0), None);
-        assert_eq!(project_touch_point(50.0, 100.0, 1000.0, 1000.0, 1000.0, 500.0), None);
-        assert_eq!(
-            project_touch_point(250.0, 500.0, 1000.0, 1000.0, 1000.0, 500.0),
-            Some(DeviceTouchPoint { x: 0.25, y: 0.5 }),
-        );
-        let extreme = project_touch_point(
-            f32::MAX / 2.0,
-            0.0,
-            f32::MAX,
-            f32::MIN_POSITIVE,
-            f32::MIN_POSITIVE,
-            f32::MAX,
-        )
-        .expect("finite extreme dimensions should remain projectable");
-        assert!(extreme.x.is_finite() && extreme.y.is_finite());
-        assert!((0.0..=1.0).contains(&extreme.x) && (0.0..=1.0).contains(&extreme.y));
     }
 }

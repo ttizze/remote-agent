@@ -5,13 +5,89 @@ use crate::view::{
     models::ordering::FavoriteModel, requests::QuestionDraft, thread_order::PendingThreadOrder,
     time::TimestampFormat,
 };
-use agent_domain::CommandId;
+use agent_domain::{CommandId, ThreadId};
 use agent_protocol::conversation::SessionScan;
 use agent_protocol::device::{DeviceAccessibilityTree, DeviceDetail, DeviceEvent, DeviceEventLogEntry, DeviceForegroundUpdate, DeviceFrame, DeviceRecording, DeviceScreenshot, DeviceScreenConfig, DeviceServiceState, DeviceSession, DeviceVideoFrame};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-const MAX_VIDEO_EVENTS_PER_STREAM: usize = 32;
+const MAX_VIDEO_EVENTS_PER_STREAM: usize = 64;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct DeviceProjectedPoint {
+    pub x: f32,
+    pub y: f32,
+}
+
+/// Project a point through the actual frame rectangle. Letterbox points are
+/// rejected so a gesture can end at its last valid device coordinate.
+#[cfg_attr(feature = "bindings", uniffi::export)]
+pub fn project_device_point(
+    view_width: f32,
+    view_height: f32,
+    frame_width: f32,
+    frame_height: f32,
+    point_x: f32,
+    point_y: f32,
+) -> Option<DeviceProjectedPoint> {
+    if ![view_width, view_height, frame_width, frame_height, point_x, point_y]
+        .iter()
+        .all(|value| value.is_finite() && *value > 0.0)
+    {
+        return None;
+    }
+    // Keep the fit arithmetic in f64. Valid finite f32 dimensions can have
+    // ratios below f32's subnormal range; doing the division in f32 would
+    // collapse the rendered rectangle to zero and produce NaN coordinates.
+    let view_width = f64::from(view_width);
+    let view_height = f64::from(view_height);
+    let frame_width = f64::from(frame_width);
+    let frame_height = f64::from(frame_height);
+    let point_x = f64::from(point_x);
+    let point_y = f64::from(point_y);
+    let scale = (view_width / frame_width).min(view_height / frame_height);
+    let rendered_width = frame_width * scale;
+    let rendered_height = frame_height * scale;
+    if !scale.is_finite()
+        || !rendered_width.is_finite()
+        || !rendered_height.is_finite()
+        || rendered_width <= 0.0
+        || rendered_height <= 0.0
+    {
+        return None;
+    }
+    let offset_x = (view_width - rendered_width) / 2.0;
+    let offset_y = (view_height - rendered_height) / 2.0;
+    let x = (point_x - offset_x) / rendered_width;
+    let y = (point_y - offset_y) / rendered_height;
+    if !x.is_finite() || !y.is_finite() || !(0.0..=1.0).contains(&x) || !(0.0..=1.0).contains(&y) {
+        return None;
+    }
+    Some(DeviceProjectedPoint {
+        x: x as f32,
+        y: y as f32,
+    })
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DeviceDuoControlState {
+    pub pending: bool,
+    pub requested: Option<crate::state::DeviceDuoCommandIntent>,
+    pub error: Option<String>,
+    queued: Option<crate::state::DeviceDuoCommandIntent>,
+    active_request_id: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DeviceDuoRequest {
+    pub thread_id: ThreadId,
+    pub host_id: Option<String>,
+    pub device_id: String,
+    pub session_epoch: String,
+    pub request_id: u64,
+    pub command: crate::state::DeviceDuoCommandIntent,
+}
 
 /// Settings this device keeps across launches.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -122,6 +198,9 @@ pub struct SessionImport {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct DeviceState {
     pub service: Option<DeviceServiceState>,
+    /// Service revisions describe discovery/configuration. This revision is
+    /// advanced by accepted frame events and stream pruning for native redraws.
+    pub frame_revision: u64,
     pub sessions: Vec<DeviceSession>,
     pub details: BTreeMap<(String, String), DeviceDetail>,
     pub frames: BTreeMap<(String, String, String), DeviceFrame>,
@@ -134,12 +213,213 @@ pub struct DeviceState {
     pub foreground: BTreeMap<(String, String), DeviceForegroundUpdate>,
     pub screens: BTreeMap<(String, String, String, u8), DeviceScreenConfig>,
     pub recordings: BTreeMap<(String, String, String), agent_protocol::device::DeviceRecordingStatus>,
+    pub duo_controls: BTreeMap<(String, String, String, String), DeviceDuoControlState>,
+    duo_request_sequence: u64,
     pub last_recording: Option<DeviceRecording>,
     pub last_screenshot: Option<DeviceScreenshot>,
     pub error: Option<String>,
 }
 
 impl DeviceState {
+    pub fn enqueue_duo(
+        &mut self,
+        thread_id: ThreadId,
+        host_id: Option<String>,
+        device_id: String,
+        command: crate::state::DeviceDuoCommandIntent,
+    ) -> Result<Option<DeviceDuoRequest>, String> {
+        let effective_host = host_id
+            .as_deref()
+            .unwrap_or(agent_protocol::device::LOCAL_DEVICE_HOST_ID);
+        let session = self
+            .sessions
+            .iter()
+            .find(|session| {
+                session.thread_id == thread_id
+                    && session.host_id == effective_host
+                    && session.device_id == device_id
+            })
+            .cloned()
+            .ok_or_else(|| "device session is not open".to_owned())?;
+        let key = (
+            thread_id.to_string(),
+            effective_host.to_owned(),
+            device_id.clone(),
+            session.session_epoch.clone(),
+        );
+        if self.duo_controls.get(&key).is_some_and(|control| control.pending) {
+            self.duo_controls
+                .get_mut(&key)
+                .expect("Duo control state exists")
+                .queued = Some(command);
+            return Ok(None);
+        }
+        self.duo_request_sequence = self.duo_request_sequence.saturating_add(1).max(1);
+        let request_id = self.duo_request_sequence;
+        let control = self.duo_controls.entry(key).or_insert_with(|| DeviceDuoControlState {
+            pending: false,
+            requested: None,
+            error: None,
+            queued: None,
+            active_request_id: None,
+        });
+        control.error = None;
+        control.pending = true;
+        control.requested = Some(command.clone());
+        control.active_request_id = Some(request_id);
+        Ok(Some(DeviceDuoRequest {
+            thread_id,
+            host_id,
+            device_id,
+            session_epoch: session.session_epoch,
+            request_id,
+            command,
+        }))
+    }
+
+    pub fn complete_duo(
+        &mut self,
+        request: &DeviceDuoRequest,
+        accepted: bool,
+        error: Option<String>,
+    ) -> Option<DeviceDuoRequest> {
+        let key = (
+            request.thread_id.to_string(),
+            request
+                .host_id
+                .as_deref()
+                .unwrap_or(agent_protocol::device::LOCAL_DEVICE_HOST_ID)
+                .to_owned(),
+            request.device_id.clone(),
+            request.session_epoch.clone(),
+        );
+        let queued = {
+            let control = self.duo_controls.get_mut(&key)?;
+            if control.active_request_id != Some(request.request_id) {
+                return None;
+            }
+            if !accepted {
+                control.pending = false;
+                control.requested = None;
+                control.queued = None;
+                control.active_request_id = None;
+                control.error = Some(error.unwrap_or_else(|| "device Duo control failed".into()));
+                return None;
+            }
+            control.queued.take()
+        };
+        if let Some(command) = queued {
+            self.duo_request_sequence = self.duo_request_sequence.saturating_add(1).max(1);
+            let request_id = self.duo_request_sequence;
+            let control = self.duo_controls.get_mut(&key).expect("Duo control state exists");
+            control.requested = Some(command.clone());
+            control.active_request_id = Some(request_id);
+            return Some(DeviceDuoRequest {
+                thread_id: request.thread_id.clone(),
+                host_id: request.host_id.clone(),
+                device_id: request.device_id.clone(),
+                session_epoch: request.session_epoch.clone(),
+                request_id,
+                command,
+            });
+        }
+        self.duo_controls.remove(&key);
+        None
+    }
+
+    pub fn complete_duo_for_input(
+        &mut self,
+        thread_id: &ThreadId,
+        input: &agent_protocol::device::DeviceInput,
+    ) -> Option<DeviceDuoRequest> {
+        if !matches!(input.input, agent_protocol::device::DeviceInputKind::Duo { .. }) {
+            return None;
+        }
+        let effective_host = input
+            .host_id
+            .as_deref()
+            .unwrap_or(agent_protocol::device::LOCAL_DEVICE_HOST_ID);
+        let key = self.duo_controls.keys().find(|(thread, host, device, _)| {
+            thread == &thread_id.to_string() && host == effective_host && device == &input.device_id
+        })?.clone();
+        let (command, request_id) = {
+            let control = self.duo_controls.get(&key)?;
+            (control.requested.clone()?, control.active_request_id?)
+        };
+        self.complete_duo(
+            &DeviceDuoRequest {
+                thread_id: thread_id.clone(),
+                host_id: input.host_id.clone(),
+                device_id: input.device_id.clone(),
+                session_epoch: key.3,
+                request_id,
+                command,
+            },
+            true,
+            None,
+        )
+    }
+
+    pub fn fail_duo_for_input(
+        &mut self,
+        thread_id: &ThreadId,
+        input: &agent_protocol::device::DeviceInput,
+        error: impl Into<String>,
+    ) {
+        if !matches!(input.input, agent_protocol::device::DeviceInputKind::Duo { .. }) {
+            return;
+        }
+        let effective_host = input
+            .host_id
+            .as_deref()
+            .unwrap_or(agent_protocol::device::LOCAL_DEVICE_HOST_ID);
+        let Some(key) = self
+            .duo_controls
+            .keys()
+            .find(|(thread, host, device, _)| {
+                thread == &thread_id.to_string() && host == effective_host && device == &input.device_id
+            })
+            .cloned()
+        else {
+            return;
+        };
+        let Some(control) = self.duo_controls.get(&key).cloned() else {
+            return;
+        };
+        let Some(request_id) = control.active_request_id else {
+            return;
+        };
+        self.fail_duo(
+            &DeviceDuoRequest {
+                thread_id: thread_id.clone(),
+                host_id: input.host_id.clone(),
+                device_id: input.device_id.clone(),
+                session_epoch: key.3,
+                request_id,
+                command: control
+                    .requested
+                    .unwrap_or(crate::state::DeviceDuoCommandIntent::Table { value: false }),
+            },
+            error,
+        );
+    }
+
+    pub fn fail_duo(&mut self, request: &DeviceDuoRequest, error: impl Into<String>) {
+        let _ = self.complete_duo(request, false, Some(error.into()));
+    }
+
+    pub fn clear_duo_for_closed_sessions(&mut self) {
+        let sessions = self.sessions.clone();
+        self.duo_controls.retain(|(thread, host, device, epoch), _| {
+            sessions.iter().any(|session| {
+                session.thread_id.to_string() == *thread
+                    && session.host_id == *host
+                    && session.device_id == *device
+                    && session.session_epoch == *epoch
+            })
+        });
+    }
+
     fn accepts_thread_event(&self, thread_id: &agent_domain::ThreadId, host_id: &str, device_id: &str, epoch: &str) -> bool {
         self.sessions.iter().any(|session| {
             &session.thread_id == thread_id
@@ -160,6 +440,7 @@ impl DeviceState {
             DeviceEvent::State(service) => {
                 self.sessions = service.sessions.clone();
                 self.service = Some(service);
+                let mut frame_stream_changed = false;
                 let active = self
                     .sessions
                     .iter()
@@ -168,38 +449,44 @@ impl DeviceState {
                             session.thread_id.to_string(),
                             session.host_id.clone(),
                             session.device_id.clone(),
+                            session.session_epoch.clone(),
                         )
                     })
                     .collect::<std::collections::BTreeSet<_>>();
                 self.frames.retain(|key, frame| {
-                    active.contains(key)
-                        && self.sessions.iter().any(|session| {
-                            session.thread_id.to_string() == key.0
-                                && session.host_id == key.1
-                                && session.device_id == key.2
-                                && session.session_epoch == frame.session_epoch
-                        })
+                    let keep = active.contains(&(
+                        key.0.clone(),
+                        key.1.clone(),
+                        key.2.clone(),
+                        frame.session_epoch.clone(),
+                    ));
+                    frame_stream_changed |= !keep;
+                    keep
                 });
                 self.video_frames.retain(|key, frame| {
-                    active.contains(&(key.0.clone(), key.1.clone(), key.2.clone()))
-                        && self.sessions.iter().any(|session| {
-                            session.thread_id.to_string() == key.0
-                                && session.host_id == key.1
-                                && session.device_id == key.2
-                                && session.session_epoch == frame.session_epoch
-                        })
+                    let keep = active.contains(&(
+                        key.0.clone(),
+                        key.1.clone(),
+                        key.2.clone(),
+                        frame.session_epoch.clone(),
+                    ));
+                    frame_stream_changed |= !keep;
+                    keep
                 });
                 self.video_events.retain(|key, events| {
-                    active.contains(&(key.0.clone(), key.1.clone(), key.2.clone()))
-                        && !events.is_empty()
-                        && events.iter().all(|frame| {
-                            self.sessions.iter().any(|session| {
-                                session.thread_id.to_string() == key.0
-                                    && session.host_id == key.1
-                                    && session.device_id == key.2
-                                    && session.session_epoch == frame.session_epoch
-                            })
-                        })
+                    events.retain(|frame| {
+                        let keep = active.contains(&(
+                            key.0.clone(),
+                            key.1.clone(),
+                            key.2.clone(),
+                            frame.session_epoch.clone(),
+                        ));
+                        frame_stream_changed |= !keep;
+                        keep
+                    });
+                    let keep = !events.is_empty();
+                    frame_stream_changed |= !keep;
+                    keep
                 });
                 let active_devices = self
                     .sessions
@@ -242,31 +529,33 @@ impl DeviceState {
                             .is_some_and(|epochs| epochs.contains(&update.session_epoch))
                 });
                 self.screens.retain(|key, screen| {
-                    active.contains(&(key.0.clone(), key.1.clone(), key.2.clone()))
-                        && self.sessions.iter().any(|session| {
-                            session.thread_id.to_string() == key.0
-                                && session.host_id == key.1
-                                && session.device_id == key.2
-                                && session.session_epoch == screen.session_epoch
-                        })
+                    active.contains(&(
+                        key.0.clone(),
+                        key.1.clone(),
+                        key.2.clone(),
+                        screen.session_epoch.clone(),
+                    ))
                 });
                 self.recordings.retain(|(thread, host, device), status| {
-                    active.contains(&(thread.clone(), host.clone(), device.clone()))
-                        && self.sessions.iter().any(|session| {
-                            session.thread_id.to_string() == thread.as_str()
-                                && session.host_id == host.as_str()
-                                && session.device_id == device.as_str()
-                                && session.session_epoch == status.session_epoch
-                        })
+                    active.iter().any(|(active_thread, active_host, active_device, active_epoch)| {
+                        active_thread == thread
+                            && active_host == host
+                            && active_device == device
+                            && active_epoch == &status.session_epoch
+                    })
                 });
                 if self.last_recording.as_ref().is_some_and(|recording| {
-                    !active.contains(&(
-                        recording.status.thread_id.to_string(),
-                        recording.status.host_id.clone(),
-                        recording.status.device_id.clone(),
-                    ))
+                    !active.iter().any(|(thread, host, device, _)| {
+                        thread == &recording.status.thread_id.to_string()
+                            && host == &recording.status.host_id
+                            && device == &recording.status.device_id
+                    })
                 }) {
                     self.last_recording = None;
+                }
+                self.clear_duo_for_closed_sessions();
+                if frame_stream_changed {
+                    self.frame_revision = self.frame_revision.saturating_add(1);
                 }
                 self.error = None;
             }
@@ -282,6 +571,7 @@ impl DeviceState {
                     ),
                     frame,
                 );
+                self.frame_revision = self.frame_revision.saturating_add(1);
             }
             DeviceEvent::Video(frame) => {
                 if !self.accepts_thread_event(&frame.thread_id, &frame.device.host_id, &frame.device.id, &frame.session_epoch) {
@@ -296,6 +586,13 @@ impl DeviceState {
                 if self
                     .video_frames
                     .get(&key)
+                    .is_some_and(|latest| latest.session_epoch != frame.session_epoch)
+                {
+                    self.video_events.remove(&key);
+                }
+                if self
+                    .video_frames
+                    .get(&key)
                     .is_some_and(|latest| frame.sequence <= latest.sequence)
                 {
                     return;
@@ -303,7 +600,10 @@ impl DeviceState {
                 self.video_frames.insert(key.clone(), frame.clone());
                 let events = self.video_events.entry(key).or_default();
                 events.push_back(frame);
-                retain_video_tail(events);
+                while events.len() > MAX_VIDEO_EVENTS_PER_STREAM {
+                    events.pop_front();
+                }
+                self.frame_revision = self.frame_revision.saturating_add(1);
             }
             DeviceEvent::Accessibility(tree) => {
                 if !self.accepts_device_event(&tree.host_id, &tree.device_id, &tree.session_epoch) {
@@ -320,6 +620,12 @@ impl DeviceState {
                     .event_log
                     .entry((entry.host_id.clone(), entry.device_id.clone()))
                     .or_default();
+                if log
+                    .first()
+                    .is_some_and(|existing| existing.session_epoch != entry.session_epoch)
+                {
+                    log.clear();
+                }
                 if !log.iter().any(|existing| existing.id == entry.id) {
                     log.push(entry);
                     log.sort_by_key(|entry| entry.id);
@@ -345,16 +651,12 @@ impl DeviceState {
             DeviceEvent::Recording(status) => {
                 let key = (status.thread_id.to_string(), status.host_id.clone(), status.device_id.clone());
                 if status.active {
-                    if self
-                        .sessions
-                        .iter()
-                        .find(|session| {
-                            session.thread_id == status.thread_id
-                                && session.host_id.as_str() == status.host_id.as_str()
-                                && session.device_id.as_str() == status.device_id.as_str()
-                        })
-                        .is_some_and(|session| session.session_epoch != status.session_epoch)
-                    {
+                    if !self.sessions.iter().any(|session| {
+                        session.thread_id == status.thread_id
+                            && session.host_id == status.host_id
+                            && session.device_id == status.device_id
+                            && session.session_epoch == status.session_epoch
+                    }) {
                         return;
                     }
                     if self
@@ -410,25 +712,6 @@ impl DeviceState {
             .iter()
             .rev()
             .find(|session| session.thread_id.as_str() == thread)
-    }
-}
-
-fn retain_video_tail(events: &mut VecDeque<DeviceVideoFrame>) {
-    while events.len() > MAX_VIDEO_EVENTS_PER_STREAM {
-        let latest_keyframe = events.iter().rposition(|frame| frame.keyframe);
-        match latest_keyframe {
-            Some(index) if index > 0 => {
-                for _ in 0..index {
-                    events.pop_front();
-                }
-            }
-            Some(_) if events.len() > 1 => {
-                events.remove(1);
-            }
-            _ => {
-                events.pop_front();
-            }
-        }
     }
 }
 
@@ -805,5 +1088,71 @@ mod tests {
         }));
         assert!(state.recordings.is_empty());
         assert_eq!(state.last_recording.as_ref().map(|recording| recording.bytes.clone()), Some(vec![2]));
+    }
+
+    #[test]
+    fn duo_controls_are_single_flight_and_epoch_scoped() {
+        let current = session("duo", "host", "device");
+        let mut state = DeviceState::default();
+        state.apply_event(DeviceEvent::State(DeviceServiceState {
+            sessions: vec![current.clone()],
+            ..DeviceServiceState::default()
+        }));
+
+        let first = state
+            .enqueue_duo(
+                current.thread_id.clone(),
+                Some(current.host_id.clone()),
+                current.device_id.clone(),
+                crate::state::DeviceDuoCommandIntent::Table { value: true },
+            )
+            .unwrap()
+            .expect("first Duo request is sent immediately");
+        assert!(state
+            .enqueue_duo(
+                current.thread_id.clone(),
+                Some(current.host_id.clone()),
+                current.device_id.clone(),
+                crate::state::DeviceDuoCommandIntent::Angle { value: 30.0 },
+            )
+            .unwrap()
+            .is_none());
+
+        let next = state
+            .complete_duo(&first, true, None)
+            .expect("queued Duo request is promoted after completion");
+        assert_eq!(
+            next.command,
+            crate::state::DeviceDuoCommandIntent::Angle { value: 30.0 }
+        );
+        assert!(state.complete_duo(&next, true, None).is_none());
+        assert!(state.duo_controls.is_empty());
+
+        let reopened = DeviceSession {
+            session_epoch: "new".into(),
+            ..current
+        };
+        state.apply_event(DeviceEvent::State(DeviceServiceState {
+            sessions: vec![reopened],
+            ..DeviceServiceState::default()
+        }));
+        assert!(state.duo_controls.is_empty());
+    }
+
+    #[test]
+    fn touch_projection_keeps_extreme_finite_dimensions_valid() {
+        let tiny = f32::from_bits(1);
+        let projected = project_device_point(
+            tiny,
+            tiny,
+            f32::MAX,
+            f32::MAX,
+            tiny,
+            tiny,
+        )
+        .expect("finite dimensions should produce a finite fit");
+        assert!(projected.x.is_finite() && projected.y.is_finite());
+        assert!((0.0..=1.0).contains(&projected.x));
+        assert!((0.0..=1.0).contains(&projected.y));
     }
 }

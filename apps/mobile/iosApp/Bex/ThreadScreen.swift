@@ -25,9 +25,6 @@ struct ThreadScreen: View {
     @State private var showingSettings = false
     @State private var forkingRun: String?
     @State private var openedFile: FileTarget?
-    @State private var openedPDF: FileTarget?
-    @State private var contextPreview: ContextChip?
-    @State private var touchingDevice: String?
     private let endId = "feed-end"
 
     var body: some View {
@@ -53,23 +50,8 @@ struct ThreadScreen: View {
         .sheet(isPresented: $showingQueue) { QueueSheet(model: model) }
         .sheet(isPresented: $showingAgents) { AgentsSheet(model: model) }
         .sheet(item: $openedFile) { ThreadFileSheet(model: model, target: $0) }
-        .sheet(item: $openedPDF) { ThreadPDFSheet(model: model, target: $0) }
-        .sheet(isPresented: Binding(
-            get: { contextPreview != nil },
-            set: { if !$0 { contextPreview = nil } }
-        )) {
-            if let contextPreview {
-                ContextPreviewSheet(chip: contextPreview, openTerminal: {
-                    openContextTerminal(contextPreview.terminalId)
-                    self.contextPreview = nil
-                })
-            }
-        }
         .environment(\.markdownLinks, MarkdownLinkOpener(
-            workspaceRoot: model.cwd.isEmpty ? nil : model.cwd,
-            openFile: { openedFile = $0 },
-            openPDF: { openedPDF = $0 },
-            loadFile: model.download
+            workspaceRoot: model.cwd.isEmpty ? nil : model.cwd, openFile: { openedFile = $0 }, loadFile: model.download
         ))
         .sheet(isPresented: $showingSettings) {
             if let controls = model.threadView?.composer.controls {
@@ -140,7 +122,7 @@ struct ThreadScreen: View {
                 setupCard(view)
             }
             ForEach(Array(rows.enumerated()), id: \.element.id) { index, row in
-                FeedRowView(row: row, actions: actions(view), forking: forkingRun != nil)
+                FeedRowView(row: row, actions: actions(view), forking: forkingRun != nil).equatable()
                 if index == firstUserMessage {
                     setupCard(view)
                 }
@@ -213,18 +195,8 @@ struct ThreadScreen: View {
                 }
             },
             openThread: { model.openThread($0) },
-            openTerminal: openContextTerminal,
-            showContextPreview: { contextPreview = $0 },
-            download: model.downloadAttachment,
-            useArtifactTemplate: { model.useArtifactTemplate($0) }
+            download: model.downloadAttachment
         )
-    }
-
-    private func openContextTerminal(_ terminalId: String?) {
-        let resolved = terminalId
-            .flatMap { id in model.threadView?.terminals.first { $0.terminalId == id }?.terminalId }
-            ?? model.threadView?.terminals.first?.terminalId
-        routes.terminal(resolved)
     }
 
     @ToolbarContentBuilder
@@ -239,13 +211,21 @@ struct ThreadScreen: View {
             }
         }
         ToolbarItemGroup(placement: .topBarTrailing) {
-            GitToolbarButton(
-                model: model,
-                cwd: header?.cwd ?? model.cwd,
-                review: routes.review,
-                mergeBack: { model.perform(.mergeBack) },
-                mergeBackAvailable: header?.actions.contains(where: { $0.kind == .mergeBack }) == true
-            )
+            Menu {
+                Button(action: routes.review) {
+                    Label("Review changes", systemImage: "text.bubble")
+                    Text("Turn diffs and worktree changes")
+                }
+                if header?.actions.contains(where: { $0.kind == .mergeBack }) == true {
+                    Button { model.perform(.mergeBack) } label: {
+                        Label("Merge back to source", systemImage: "arrow.triangle.merge")
+                        Text("Bring this thread's latest turn into its source")
+                    }
+                }
+            } label: {
+                Image(systemName: "point.topleft.down.curvedto.point.bottomright.up")
+            }
+            .accessibilityLabel("Git")
             Button(action: routes.device) {
                 Label("Device", systemImage: "iphone")
             }
@@ -323,12 +303,14 @@ struct DeviceScreen: View {
     @State private var exportingRecording = false
     @State private var recordingFileName = "device-recording"
     @State private var recordingContentType: UTType = .data
+    @State private var touchingHostId: String?
+    @State private var touchingDeviceId: String?
+    @State private var touchingPoint: CGPoint?
 
     var body: some View {
         let view = model.snapshot.device()
         let threadSessions = view.sessions.filter { $0.threadId == threadId }
         let threadSessionKey = threadSessions.map { "\($0.hostId):\($0.deviceId):\($0.sessionEpoch)" }.joined(separator: ",")
-        let sessionEpochs = Dictionary(uniqueKeysWithValues: threadSessions.map { ("\($0.hostId):\($0.deviceId)", $0.sessionEpoch) })
         let decodedFrames = deviceFrames.frames(for: threadId)
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
@@ -465,27 +447,36 @@ struct DeviceScreen: View {
                                     action: .rotate
                                 ))
                             }
-                            if session.platform == "ios" {
-                                Button("Book pose") {
-                                    model.perform(.deviceAction(
-                                        hostId: session.hostId,
-                                        deviceId: session.deviceId,
-                                        action: .duo(command: .pose(value: .book))
-                                    ))
-                                }
-                                Button("Table") {
-                                    model.perform(.deviceAction(
-                                        hostId: session.hostId,
-                                        deviceId: session.deviceId,
-                                        action: .duo(command: .table(value: true))
-                                    ))
-                                }
+                            Button("Book fold") {
+                                model.perform(.deviceAction(
+                                    hostId: session.hostId,
+                                    deviceId: session.deviceId,
+                                    action: .duo(command: .pose(value: .book))
+                                ))
+                            }
+                            Button("Table") {
+                                model.perform(.deviceAction(
+                                    hostId: session.hostId,
+                                    deviceId: session.deviceId,
+                                    action: .duo(command: .table(value: true))
+                                ))
                             }
                             Button("Record") {
                                 model.perform(.startDeviceRecording(hostId: session.hostId, deviceId: session.deviceId, format: "mp4"))
                             }
                             Button("Stop record") {
-                                model.perform(.stopDeviceRecording(hostId: session.hostId, deviceId: session.deviceId))
+                                if let recording = view.recordings.first(where: {
+                                    $0.threadId == threadId
+                                        && $0.hostId == session.hostId
+                                        && $0.deviceId == session.deviceId
+                                }) {
+                                    model.perform(.stopDeviceRecording(
+                                        hostId: session.hostId,
+                                        deviceId: session.deviceId,
+                                        recordingId: recording.recordingId,
+                                        sessionEpoch: recording.sessionEpoch
+                                    ))
+                                }
                             }
                             Button("Power off") {
                                 model.perform(.closeDevice(hostId: session.hostId, deviceId: session.deviceId, shutdown: true))
@@ -493,6 +484,13 @@ struct DeviceScreen: View {
                         }
                         if let app = detail?.foregroundApp {
                             Text("Foreground: \(app)").font(AppTheme.font(13)).foregroundStyle(AppTheme.muted)
+                        }
+                        if let duo = view.duoControls.first(where: {
+                            $0.threadId == threadId && $0.hostId == session.hostId && $0.deviceId == session.deviceId
+                        }), duo.pending || duo.error != nil {
+                            Text(duo.error ?? "Duo control pending")
+                                .font(AppTheme.font(12))
+                                .foregroundStyle(AppTheme.muted)
                         }
                         ForEach(Array(view.screens.filter {
                             $0.threadId == threadId && $0.hostId == session.hostId && $0.deviceId == session.deviceId
@@ -510,36 +508,26 @@ struct DeviceScreen: View {
                                 }
                                 .overlay {
                                     GeometryReader { proxy in
-                                    Color.clear
-                                        .contentShape(Rectangle())
-                                        .gesture(deviceTouchGesture(
-                                            hostId: frame.hostId,
-                                            deviceId: frame.deviceId,
-                                            screenId: frame.screenId,
-                                            size: proxy.size,
-                                        ))
+                                        Color.clear
+                                            .contentShape(Rectangle())
+                                            .gesture(deviceTouchGesture(hostId: frame.hostId, deviceId: frame.deviceId, size: proxy.size, frameSize: CGSize(width: CGFloat(frame.width), height: CGFloat(frame.height))))
                                     }
                                 }
                             }
                         }
                         .frame(maxWidth: .infinity)
                         .contentShape(Rectangle())
-                    } else if let frame = view.videoFrames.filter({ $0.threadId == threadId && ($0.encoding == "jpeg" || $0.encoding == "mjpeg") }).max(by: { $0.sequence < $1.sequence }),
-                              let image = UIImage(data: Data(frame.payload)) {
+                    } else if let frame = view.frames.filter({ $0.threadId == threadId }).max(by: { $0.sequence < $1.sequence }),
+                       let image = UIImage(data: Data(frame.png)) {
                         ZStack {
                             Image(uiImage: image).resizable().scaledToFit().frame(maxWidth: .infinity)
                             DeviceAccessibilityOverlay(view: view, deviceKey: "\(frame.hostId):\(frame.deviceId)")
                         }
                         .overlay {
                             GeometryReader { proxy in
-                                    Color.clear
-                                        .contentShape(Rectangle())
-                                        .gesture(deviceTouchGesture(
-                                            hostId: frame.hostId,
-                                            deviceId: frame.deviceId,
-                                            screenId: 0,
-                                            size: proxy.size,
-                                        ))
+                                Color.clear
+                                    .contentShape(Rectangle())
+                                    .gesture(deviceTouchGesture(hostId: frame.hostId, deviceId: frame.deviceId, size: proxy.size, frameSize: CGSize(width: CGFloat(frame.width), height: CGFloat(frame.height))))
                             }
                         }
                     } else {
@@ -564,32 +552,26 @@ struct DeviceScreen: View {
                                 .foregroundStyle(AppTheme.muted)
                             HStack(spacing: 8) {
                                 Button("Save recording") {
-                                    guard recording.error == nil,
-                                          !recording.bytes.isEmpty,
-                                          !recording.fileName.isEmpty,
-                                          !recording.mimeType.isEmpty else {
-                                        model.notice = "The Host did not return a playable device recording. Save is unavailable until recording finalization succeeds."
+                                    guard let file = deviceRecordingFileType(recording.fileName, recording.mimeType, recording.bytes) else {
+                                        model.notice = "The Host did not return a playable device recording."
                                         return
                                     }
                                     recordingDocument = DeviceRecordingDocument(data: Data(recording.bytes))
                                     recordingFileName = recording.fileName
-                                    recordingContentType = UTType(filenameExtension: URL(fileURLWithPath: recording.fileName).pathExtension) ?? .data
+                                    recordingContentType = file.type
                                     exportingRecording = true
                                 }
                             Button("Attach recording") {
                                 do {
                                     let directory = try AttachmentFiles.directory()
-                                    guard recording.error == nil,
-                                          !recording.bytes.isEmpty,
-                                          !recording.fileName.isEmpty,
-                                          !recording.mimeType.isEmpty else {
-                                        model.notice = "The Host did not return a playable device recording. Attach is unavailable until recording finalization succeeds."
+                                    guard let file = deviceRecordingFileType(recording.fileName, recording.mimeType, recording.bytes) else {
+                                        model.notice = "The Host did not return a playable device recording."
                                         return
                                     }
                                     let url = directory.appendingPathComponent(recording.fileName)
                                     try Data(recording.bytes).write(to: url, options: .atomic)
                                     model.perform(.attachFiles(draftKey: model.snapshot.currentDraftKey(), files: [
-                                        LocalFile(path: url.path, name: url.lastPathComponent, mimeType: recording.mimeType)
+                                        LocalFile(path: url.path, name: url.lastPathComponent, mimeType: file.mime)
                                     ]))
                                 } catch {
                                     model.notice = error.localizedDescription
@@ -608,24 +590,21 @@ struct DeviceScreen: View {
             model.perform(.openThread(threadId: threadId))
             model.perform(.loadDevices)
             model.perform(.subscribeDevice)
-            deviceFrames.consume(view.videoEvents, threadId: threadId, sessionEpochs: sessionEpochs)
+            deviceFrames.consume(view.videoEvents, threadId: threadId)
             for session in threadSessions {
                 model.perform(.loadDeviceDetail(hostId: session.hostId, deviceId: session.deviceId))
                 model.perform(.loadDeviceAccessibility(hostId: session.hostId, deviceId: session.deviceId))
                 model.perform(.loadDeviceEventLog(hostId: session.hostId, deviceId: session.deviceId, limit: 100))
             }
         }
-        .onChange(of: model.snapshot.device().revision) { _, _ in
+        .onChange(of: model.snapshot.device().frameRevision) { _, _ in
             let next = model.snapshot.device()
-            deviceFrames.consume(next.videoEvents, threadId: threadId, sessionEpochs: sessionEpochs)
+            deviceFrames.consume(next.videoEvents, threadId: threadId)
         }
         .onChange(of: threadSessionKey) { _, _ in
             deviceFrames.reset(threadId: threadId)
             let next = model.snapshot.device()
-            let nextEpochs = Dictionary(uniqueKeysWithValues: next.sessions
-                .filter { $0.threadId == threadId }
-                .map { ("\($0.hostId):\($0.deviceId)", $0.sessionEpoch) })
-            deviceFrames.consume(next.videoEvents, threadId: threadId, sessionEpochs: nextEpochs)
+            deviceFrames.consume(next.videoEvents, threadId: threadId)
             let sessions = model.snapshot.device().sessions
             for session in sessions where session.threadId == threadId {
                 model.perform(.loadDeviceDetail(hostId: session.hostId, deviceId: session.deviceId))
@@ -634,6 +613,7 @@ struct DeviceScreen: View {
             }
         }
         .onDisappear {
+            finishActiveTouch()
             deviceFrames.reset(threadId: threadId)
             model.perform(.unsubscribeDevice)
         }
@@ -647,31 +627,67 @@ struct DeviceScreen: View {
         }
     }
 
-    private func deviceTouchGesture(hostId: String, deviceId: String, screenId: Int, size: CGSize) -> some Gesture {
+    private func deviceTouchGesture(hostId: String, deviceId: String, size: CGSize, frameSize: CGSize) -> some Gesture {
         DragGesture(minimumDistance: 0)
             .onChanged { value in
-                let key = "\(hostId):\(deviceId):\(screenId)"
-                let phase = touchingDevice == key ? "move" : "begin"
-                touchingDevice = key
-                let x = value.location.x / max(size.width, 1)
-                let y = value.location.y / max(size.height, 1)
+                let phase = touchingHostId == hostId && touchingDeviceId == deviceId ? "move" : "begin"
+                guard let point = projectDevicePoint(value.location, viewSize: size, frameSize: frameSize) else {
+                    return
+                }
+                touchingHostId = hostId
+                touchingDeviceId = deviceId
+                touchingPoint = point
                 model.perform(.deviceAction(
                     hostId: hostId,
                     deviceId: deviceId,
-                    action: .touch(phase: phase, x: Float(x.clamped(to: 0...1)), y: Float(y.clamped(to: 0...1))),
+                    action: .touch(phase: phase, x: Float(point.x), y: Float(point.y)),
                 ))
             }
             .onEnded { value in
-                touchingDevice = nil
-                let x = value.location.x / max(size.width, 1)
-                let y = value.location.y / max(size.height, 1)
+                guard let point = projectDevicePoint(value.location, viewSize: size, frameSize: frameSize) else {
+                    finishActiveTouch()
+                    return
+                }
                 model.perform(.deviceAction(
                     hostId: hostId,
                     deviceId: deviceId,
-                    action: .touch(phase: "end", x: Float(x.clamped(to: 0...1)), y: Float(y.clamped(to: 0...1))),
+                    action: .touch(phase: "end", x: Float(point.x), y: Float(point.y)),
                 ))
+                touchingHostId = nil
+                touchingDeviceId = nil
+                touchingPoint = nil
             }
     }
+
+    private func finishActiveTouch() {
+        guard let hostId = touchingHostId,
+              let deviceId = touchingDeviceId,
+              let point = touchingPoint else { return }
+        model.perform(.deviceAction(
+            hostId: hostId,
+            deviceId: deviceId,
+            action: .touch(phase: "end", x: Float(point.x), y: Float(point.y)),
+        ))
+        touchingHostId = nil
+        touchingDeviceId = nil
+        touchingPoint = nil
+    }
+}
+
+/// Maps a panel point into the resource-owned device frame, preserving the
+/// frame's aspect ratio and rejecting letterbox margins.
+private func projectDevicePoint(_ point: CGPoint, viewSize: CGSize, frameSize: CGSize) -> CGPoint? {
+    guard let projected = AgentCore.projectDevicePoint(
+        viewWidth: Float(viewSize.width),
+        viewHeight: Float(viewSize.height),
+        frameWidth: Float(frameSize.width),
+        frameHeight: Float(frameSize.height),
+        pointX: Float(point.x),
+        pointY: Float(point.y)
+    ) else {
+        return nil
+    }
+    return CGPoint(x: CGFloat(projected.x), y: CGFloat(projected.y))
 }
 
 private struct DeviceRecordingDocument: FileDocument {
@@ -689,10 +705,10 @@ private struct DeviceRecordingDocument: FileDocument {
     }
 }
 
-private extension CGFloat {
-    func clamped(to range: ClosedRange<CGFloat>) -> CGFloat {
-        min(max(self, range.lowerBound), range.upperBound)
-    }
+private func deviceRecordingFileType(_ fileName: String, _ mimeType: String, _ bytes: [UInt8]) -> (extension: String, mime: String, type: UTType)? {
+    guard fileName.lowercased().hasSuffix(".mp4"), mimeType.lowercased() == "video/mp4",
+          bytes.count >= 12, Array(bytes[4..<8]) == Array("ftyp".utf8) else { return nil }
+    return ("mp4", mimeType, UTType(filenameExtension: "mp4") ?? .movie)
 }
 
 private struct DeviceAccessibilityOverlay: View {
