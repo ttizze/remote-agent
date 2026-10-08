@@ -111,6 +111,9 @@ results! {
     Transcription(crate::operations::Transcription),
     HostStatus(crate::models::HostStatus), Invitation(crate::models::Invitation),
     Remotes(Vec<crate::models::RemoteHost>), Remote(crate::models::RemoteHost),
+    ScheduledTasks(crate::scheduled_tasks::ScheduledTaskList),
+    ScheduledTask(crate::scheduled_tasks::ScheduledTask),
+    ScheduledTaskRef(crate::scheduled_tasks::ScheduledTaskRef),
     Unit(()), Text(String)
 }
 #[derive(Debug, Serialize, Deserialize)]
