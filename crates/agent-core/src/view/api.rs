@@ -204,7 +204,7 @@ impl Snapshot {
     pub fn settings(&self, scope: SettingsScope) -> SettingsView {
         settings_view(
             self,
-            self.conversation_settings.as_ref(),
+            self.host_settings.as_ref(),
             &scope,
             self.preferences.timestamp_format,
         )
@@ -381,8 +381,8 @@ impl Snapshot {
             .and_then(|entry| entry.icon.as_ref())
             .map(|icon| icon.hash.clone())
     }
-    pub fn conversation_settings_loaded(&self) -> bool {
-        self.conversation_settings.is_some()
+    pub fn host_settings_loaded(&self) -> bool {
+        self.host_settings.is_some()
     }
     /// The files of one draft, such as a question answer's.
     pub fn draft_attachments(&self, draft_key: String) -> Vec<DraftAttachment> {

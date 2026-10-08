@@ -378,11 +378,11 @@ impl Desktop {
     fn load_settings_page(&mut self, page: &SettingsPage, cx: &mut Context<Self>) {
         match page {
             SettingsPage::General => {
-                self.perform(Intent::LoadConversationSettings);
+                self.perform(Intent::LoadSettings);
                 self.perform(Intent::LoadWorktreeSettings);
                 self.perform(Intent::ListWorktrees);
             }
-            SettingsPage::Projects { .. } => self.perform(Intent::LoadConversationSettings),
+            SettingsPage::Projects { .. } => self.perform(Intent::LoadSettings),
             SettingsPage::Providers => self.perform(Intent::LoadAccounts),
             SettingsPage::Connections => self.hosts.update(cx, |hosts, _| hosts.refresh()),
             SettingsPage::Archived | SettingsPage::Appearance | SettingsPage::Keybindings => {}

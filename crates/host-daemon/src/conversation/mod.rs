@@ -124,7 +124,7 @@ impl Conversation {
     /// Recovers unfinished threads, then starts effects, import and the agent tools.
     pub(crate) async fn start(&self) -> anyhow::Result<()> {
         self.resources.projects.refresh().await?;
-        self.resources.worktrees.conversation_settings(None).await?;
+        self.resources.worktrees.host_settings(None).await?;
         self.runtime.start().await?;
         let _ = self
             .settled_terminals

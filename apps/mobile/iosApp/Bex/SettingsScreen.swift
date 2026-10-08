@@ -22,11 +22,11 @@ struct SettingsScreen: View {
                     }
                     SettingsGroup(title: "Projects & threads") {
                         SettingsLink(symbol: "text.bubble", label: "Thread behavior") {
-                            ConversationSettingsPage(model: model, title: "Thread behavior",
+                            HostSettingsPage(model: model, title: "Thread behavior",
                                                      sections: ["usage-limits", "auto-settle", "behavior"])
                         }
                         SettingsLink(symbol: "arrow.turn.left.up", label: "Follow-ups") {
-                            ConversationSettingsPage(model: model, title: "Follow-ups", sections: ["follow-ups"])
+                            HostSettingsPage(model: model, title: "Follow-ups", sections: ["follow-ups"])
                         }
                         SettingsLink(symbol: "archivebox", label: "Archived Threads") {
                             ArchivedScreen(model: model)
@@ -37,7 +37,7 @@ struct SettingsScreen: View {
                             ProviderAccountsPage(model: model)
                         }
                         SettingsLink(symbol: "plus.bubble", label: "New threads") {
-                            ConversationSettingsPage(model: model, title: "New threads", sections: ["new-threads"])
+                            HostSettingsPage(model: model, title: "New threads", sections: ["new-threads"])
                         }
                         SettingsLink(symbol: "arrow.triangle.branch", label: "Worktrees") {
                             WorktreeSettingsScreen(model: model).id(model.selectedProfileId)
@@ -55,7 +55,7 @@ struct SettingsScreen: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
             .onAppear {
-                model.perform(.loadConversationSettings)
+                model.perform(.loadSettings)
                 model.perform(.loadWorktreeSettings)
             }
         }
@@ -171,7 +171,7 @@ private struct KeyboardSettingsPage: View {
 }
 
 /// Rows of the conversation settings sections core builds.
-private struct ConversationSettingsPage: View {
+private struct HostSettingsPage: View {
     @ObservedObject var model: BexAppViewModel
     let title: String
     let sections: [String]
@@ -179,7 +179,7 @@ private struct ConversationSettingsPage: View {
     var body: some View {
         let view = model.snapshot.settings(scope: .host)
         List {
-            if !model.snapshot.conversationSettingsLoaded() {
+            if !model.snapshot.hostSettingsLoaded() {
                 ProgressView().frame(maxWidth: .infinity)
             }
             ForEach(view.sections.filter { sections.contains($0.id) }, id: \.id) { section in

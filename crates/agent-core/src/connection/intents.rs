@@ -19,7 +19,7 @@ use crate::{
             AttachmentCandidate, AttachmentFileKind, admit_attachments, image_preparation_error,
         },
         models::staging::remember_model_options,
-        settings::{ProjectSettingKey, clear_project_overrides, plan_conversation_settings_update},
+        settings::{ProjectSettingKey, clear_project_overrides, plan_settings_update},
     },
 };
 use agent_domain::{
@@ -505,24 +505,22 @@ impl Owner {
             Intent::RemoveKeybinding { rule } => {
                 Next::call(Call::RemoveKeybinding(rule.into()), None)
             }
-            Intent::LoadConversationSettings => {
-                Next::call(Call::ReadConversationSettings(m::Empty {}), None)
-            }
-            Intent::UpdateConversationSettings { scope, change } => {
-                match plan_conversation_settings_update(&scope, &change) {
-                    Some(patch) => Next::call(Call::UpdateConversationSettings(patch), None),
+            Intent::LoadSettings => Next::call(Call::ReadSettings(m::Empty {}), None),
+            Intent::UpdateSettings { scope, change } => {
+                match plan_settings_update(&scope, &change) {
+                    Some(patch) => Next::call(Call::UpdateSettings(Box::new(patch)), None),
                     None => Next::Done,
                 }
             }
             Intent::ResetProjectSettings { project_id } => Next::call(
-                Call::UpdateConversationSettings(clear_project_overrides(
+                Call::UpdateSettings(Box::new(clear_project_overrides(
                     &project_id,
                     &[
                         ProjectSettingKey::AutoSettle,
                         ProjectSettingKey::ContinueAfterRestart,
                         ProjectSettingKey::NewWorktreesStartFromOrigin,
                     ],
-                )),
+                ))),
                 None,
             ),
             Intent::UpdateProjectScripts {

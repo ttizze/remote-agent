@@ -1,11 +1,11 @@
 //! Auto-settle: sidebar threads with no activity settle on their own.
 use super::{
-    ConversationSettingChange, ProjectSettingKey, SettingControl, SettingId, SettingSource,
-    SettingValue, SettingsRow, SettingsScope, SettingsSection,
+    ProjectSettingKey, SettingChange, SettingControl, SettingId, SettingSource, SettingValue,
+    SettingsRow, SettingsScope, SettingsSection,
     registry::{Context, Section},
     row, section, update,
 };
-use crate::models::{AutoSettle, ConversationSettings};
+use crate::models::{AutoSettle, HostSettings};
 
 pub const MIN_AUTO_SETTLE_DAYS: u32 = 1;
 pub const MAX_AUTO_SETTLE_DAYS: u32 = 90;
@@ -30,7 +30,7 @@ fn auto_settle_days(value: AutoSettle) -> Option<u32> {
 fn auto_settle_section(value: AutoSettle, source: Option<SettingSource>) -> SettingsSection {
     let days = auto_settle_days(value);
     let mut rows = vec![SettingsRow {
-        resettable: value != ConversationSettings::default().auto_settle,
+        resettable: value != HostSettings::default().auto_settle,
         source,
         ..row(
             SettingId::AutoSettleInactiveThreads,
@@ -76,7 +76,7 @@ pub(super) const SECTION: Section = Section {
     intent: |_, scope, id, value| match (id, value) {
         (SettingId::AutoSettleInactiveThreads, SettingValue::Switch { on }) => Some(update(
             scope,
-            ConversationSettingChange::AutoSettle {
+            SettingChange::AutoSettle {
                 days: on.then_some(AUTO_SETTLE_DEFAULT_DAYS),
             },
         )),
@@ -85,7 +85,7 @@ pub(super) const SECTION: Section = Section {
         {
             Some(update(
                 scope,
-                ConversationSettingChange::AutoSettle { days: Some(*value) },
+                SettingChange::AutoSettle { days: Some(*value) },
             ))
         }
         _ => None,
@@ -93,8 +93,8 @@ pub(super) const SECTION: Section = Section {
     reset: |id| match id {
         SettingId::AutoSettleInactiveThreads | SettingId::AutoSettleDays => Some(update(
             &SettingsScope::Host,
-            ConversationSettingChange::AutoSettle {
-                days: auto_settle_days(ConversationSettings::default().auto_settle),
+            SettingChange::AutoSettle {
+                days: auto_settle_days(HostSettings::default().auto_settle),
             },
         )),
         _ => None,

@@ -1,15 +1,12 @@
 //! Test helpers the section tests share.
 use super::{SettingId, SettingsRow, SettingsScope, SettingsView};
 use crate::{
-    models::{ConversationSettings, ProjectConversationSettings},
+    models::{HostSettings, ProjectSettingsOverrides},
     state::Intent,
 };
 
-pub(super) fn host_with(
-    project: &str,
-    overrides: ProjectConversationSettings,
-) -> ConversationSettings {
-    let mut host = ConversationSettings::default();
+pub(super) fn host_with(project: &str, overrides: ProjectSettingsOverrides) -> HostSettings {
+    let mut host = HostSettings::default();
     host.project_overrides.insert(project.into(), overrides);
     host
 }

@@ -1,10 +1,10 @@
 //! Usage limits: what happens to threads a provider's usage limit stops.
 use super::{
-    ConversationSettingChange, SettingControl, SettingId, SettingValue, SettingsRow, SettingsScope,
+    SettingChange, SettingControl, SettingId, SettingValue, SettingsRow, SettingsScope,
     registry::{Context, Section},
     row, section, update,
 };
-use crate::models::ConversationSettings;
+use crate::models::HostSettings;
 
 pub(super) const SECTION: Section = Section {
     ids: &[
@@ -51,23 +51,21 @@ pub(super) const SECTION: Section = Section {
     intent: |_, scope, id, value| match (id, value) {
         (SettingId::AutoResumeLimitedThreads, SettingValue::Switch { on }) => Some(update(
             scope,
-            ConversationSettingChange::AutoResumeLimitedThreads { on: *on },
+            SettingChange::AutoResumeLimitedThreads { on: *on },
         )),
         (SettingId::SnoozeLimitedThreads, SettingValue::Switch { on }) => Some(update(
             scope,
-            ConversationSettingChange::SnoozeLimitedThreads { on: *on },
+            SettingChange::SnoozeLimitedThreads { on: *on },
         )),
         _ => None,
     },
     reset: |id| {
-        let defaults = ConversationSettings::default();
+        let defaults = HostSettings::default();
         let change = match id {
-            SettingId::AutoResumeLimitedThreads => {
-                ConversationSettingChange::AutoResumeLimitedThreads {
-                    on: defaults.auto_resume_limited_threads,
-                }
-            }
-            SettingId::SnoozeLimitedThreads => ConversationSettingChange::SnoozeLimitedThreads {
+            SettingId::AutoResumeLimitedThreads => SettingChange::AutoResumeLimitedThreads {
+                on: defaults.auto_resume_limited_threads,
+            },
+            SettingId::SnoozeLimitedThreads => SettingChange::SnoozeLimitedThreads {
                 on: defaults.snooze_limited_threads,
             },
             _ => return None,

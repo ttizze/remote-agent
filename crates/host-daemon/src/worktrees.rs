@@ -1,7 +1,5 @@
 use agent_domain::{WorktreeSetupStageId, WorktreeSetupStageStatus};
-use agent_protocol::models::{
-    ConversationSettings, ConversationSettingsPatch, Worktree, WorktreeSettings,
-};
+use agent_protocol::models::{HostSettings, HostSettingsPatch, Worktree, WorktreeSettings};
 use agent_runtime::{SetupEvent, SetupProgress};
 use anyhow::{Context as _, Result, anyhow};
 use serde::{Deserialize, Serialize};
@@ -18,7 +16,7 @@ use tokio_util::sync::CancellationToken;
 #[serde(default, rename_all = "camelCase")]
 struct State {
     settings: WorktreeSettings,
-    conversation: ConversationSettings,
+    host: HostSettings,
     workspace_roots: HashMap<String, String>,
     /// Each thread's checkout, recorded before it is created.
     threads: HashMap<String, ThreadCheckout>,
@@ -29,8 +27,8 @@ pub(crate) struct Worktrees {
     /// Held by the blocking work itself, so a caller that stops waiting never
     /// releases it while that work still reads or saves the state.
     lock: Arc<tokio::sync::Mutex<()>>,
-    /// The saved conversation settings, for synchronous reads.
-    conversation: std::sync::RwLock<ConversationSettings>,
+    /// The saved Host settings, for synchronous reads.
+    settings: std::sync::RwLock<HostSettings>,
 }
 
 impl Worktrees {
@@ -38,7 +36,7 @@ impl Worktrees {
         Self {
             path: project_state.with_file_name("bex-worktrees.json"),
             lock: Default::default(),
-            conversation: Default::default(),
+            settings: Default::default(),
         }
     }
 
@@ -57,34 +55,33 @@ impl Worktrees {
         .await?
     }
 
-    /// The conversation settings as last loaded or saved.
-    pub(crate) fn conversation(&self) -> ConversationSettings {
-        self.conversation
+    /// The Host settings as last loaded or saved.
+    pub(crate) fn latest_host_settings(&self) -> HostSettings {
+        self.settings
             .read()
             .unwrap_or_else(|error| error.into_inner())
             .clone()
     }
 
-    /// Reads, or replaces and saves, the conversation settings.
-    /// The conversation settings, after merging `update` into them.
-    pub(crate) async fn conversation_settings(
+    /// The Host settings, after merging `update` into them and saving.
+    pub(crate) async fn host_settings(
         &self,
-        update: Option<ConversationSettingsPatch>,
-    ) -> Result<ConversationSettings> {
+        update: Option<HostSettingsPatch>,
+    ) -> Result<HostSettings> {
         let settings = self
             .locked(move |path| {
                 let mut state = read(path)?;
                 if let Some(patch) = update {
-                    let settings = state.conversation.patched(&patch);
+                    let settings = state.host.patched(&patch);
                     settings.validate().map_err(|error| anyhow!(error))?;
-                    state.conversation = settings;
+                    state.host = settings;
                     save(path, &state)?;
                 }
-                Ok(state.conversation)
+                Ok(state.host)
             })
             .await?;
         *self
-            .conversation
+            .settings
             .write()
             .unwrap_or_else(|error| error.into_inner()) = settings.clone();
         Ok(settings)
@@ -2705,38 +2702,38 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn conversation_settings_persist_with_defaults_and_bounds() {
+    async fn host_settings_persist_with_defaults_and_bounds() {
         use agent_protocol::models::AutoSettle;
         let directory = tempfile::tempdir().unwrap();
         let state = directory.path().join("projects.json");
         let store = Worktrees::new(&state);
-        let defaults = store.conversation_settings(None).await.unwrap();
-        assert_eq!(defaults, ConversationSettings::default());
+        let defaults = store.host_settings(None).await.unwrap();
+        assert_eq!(defaults, HostSettings::default());
         assert_eq!(defaults.auto_settle, AutoSettle::AfterDays(3));
         let mut changed = defaults.clone();
         changed.auto_settle = AutoSettle::Never;
         changed.continue_after_restart = true;
         // Two devices change different settings from the same snapshot.
         for patch in [
-            ConversationSettingsPatch {
+            HostSettingsPatch {
                 auto_settle: Some(AutoSettle::Never),
                 ..Default::default()
             },
-            ConversationSettingsPatch {
+            HostSettingsPatch {
                 continue_after_restart: Some(true),
                 ..Default::default()
             },
         ] {
-            store.conversation_settings(Some(patch)).await.unwrap();
+            store.host_settings(Some(patch)).await.unwrap();
         }
-        assert_eq!(store.conversation(), changed);
+        assert_eq!(store.latest_host_settings(), changed);
         let reopened = Worktrees::new(&state);
-        assert_eq!(reopened.conversation_settings(None).await.unwrap(), changed);
-        let invalid = ConversationSettingsPatch {
+        assert_eq!(reopened.host_settings(None).await.unwrap(), changed);
+        let invalid = HostSettingsPatch {
             auto_settle: Some(AutoSettle::AfterDays(91)),
             ..Default::default()
         };
-        assert!(store.conversation_settings(Some(invalid)).await.is_err());
-        assert_eq!(store.conversation(), changed);
+        assert!(store.host_settings(Some(invalid)).await.is_err());
+        assert_eq!(store.latest_host_settings(), changed);
     }
 }

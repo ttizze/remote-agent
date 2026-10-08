@@ -1,13 +1,13 @@
 //! New threads: the model, permissions and workspace a new thread starts
 //! with, and whether a new worktree starts from origin.
 use super::{
-    ConversationSettingChange, ProjectSettingKey, SettingChoice, SettingControl, SettingId,
-    SettingSource, SettingValue, SettingsRow, SettingsScope, choice,
+    ProjectSettingKey, SettingChange, SettingChoice, SettingControl, SettingId, SettingSource,
+    SettingValue, SettingsRow, SettingsScope, choice,
     registry::{Context, Section},
     row, section, update,
 };
 use crate::{
-    models::ConversationSettings,
+    models::HostSettings,
     state::{Draft, Intent, Snapshot},
     view::models::{
         catalog,
@@ -63,7 +63,7 @@ fn runtime_mode_choices() -> Vec<SettingChoice> {
 
 fn start_from_origin_row(on: bool, source: Option<SettingSource>) -> SettingsRow {
     SettingsRow {
-        resettable: on != ConversationSettings::default().new_worktrees_start_from_origin,
+        resettable: on != HostSettings::default().new_worktrees_start_from_origin,
         source,
         ..row(
             SettingId::StartFromOrigin,
@@ -168,7 +168,7 @@ pub(super) const SECTION: Section = Section {
     intent: |snapshot, scope, id, value| match (id, value) {
         (SettingId::StartFromOrigin, SettingValue::Switch { on }) => Some(update(
             scope,
-            ConversationSettingChange::NewWorktreesStartFromOrigin { on: *on },
+            SettingChange::NewWorktreesStartFromOrigin { on: *on },
         )),
         (SettingId::DefaultPermissions, SettingValue::Choice { id }) => RUNTIME_MODES
             .into_iter()
@@ -193,8 +193,8 @@ pub(super) const SECTION: Section = Section {
     reset: |id| match id {
         SettingId::StartFromOrigin => Some(update(
             &SettingsScope::Host,
-            ConversationSettingChange::NewWorktreesStartFromOrigin {
-                on: ConversationSettings::default().new_worktrees_start_from_origin,
+            SettingChange::NewWorktreesStartFromOrigin {
+                on: HostSettings::default().new_worktrees_start_from_origin,
             },
         )),
         SettingId::DefaultPermissions => Some(Intent::SetDefaultRuntimeMode {
@@ -215,8 +215,8 @@ mod tests {
         settings::{
             clear_project_overrides,
             fixtures::{find, project, same},
-            new_worktrees_start_from_origin, plan_conversation_settings_update,
-            setting_reset_intent, settings_view,
+            new_worktrees_start_from_origin, plan_settings_update, setting_reset_intent,
+            settings_view,
         },
         time::TimestampFormat,
     };
@@ -226,19 +226,19 @@ mod tests {
     // project-scoped server settings.
     #[test]
     fn start_from_origin_defaults_on_and_a_project_can_override_it() {
-        let decoded: ConversationSettings = serde_json::from_str("{}").unwrap();
+        let decoded: HostSettings = serde_json::from_str("{}").unwrap();
         assert!(decoded.new_worktrees_start_from_origin);
         assert!(new_worktrees_start_from_origin(None, Some("p")));
-        let change = plan_conversation_settings_update(
+        let change = plan_settings_update(
             &SettingsScope::Host,
-            &ConversationSettingChange::NewWorktreesStartFromOrigin { on: false },
+            &SettingChange::NewWorktreesStartFromOrigin { on: false },
         )
         .unwrap();
         let host = decoded.patched(&change);
         assert!(!new_worktrees_start_from_origin(Some(&host), Some("p")));
-        let change = plan_conversation_settings_update(
+        let change = plan_settings_update(
             &project("p"),
-            &ConversationSettingChange::NewWorktreesStartFromOrigin { on: true },
+            &SettingChange::NewWorktreesStartFromOrigin { on: true },
         )
         .unwrap();
         let host = host.patched(&change);
@@ -260,9 +260,9 @@ mod tests {
         );
         same(
             setting_reset_intent(&project("p"), &row),
-            Some(Intent::UpdateConversationSettings {
+            Some(Intent::UpdateSettings {
                 scope: project("p"),
-                change: ConversationSettingChange::Inherit {
+                change: SettingChange::Inherit {
                     key: ProjectSettingKey::NewWorktreesStartFromOrigin,
                 },
             }),

@@ -1,21 +1,21 @@
 //! The settings page assembled from its sections, in display order.
 use super::{
-    ProjectOverridesHeader, ProjectSettingKey, ResolvedConversationSettings, SettingId,
-    SettingSource, SettingValue, SettingsRow, SettingsScope, SettingsSection, SettingsView,
-    auto_settle, behavior, beta, follow_ups, new_threads, patch, update, usage_limits,
+    ProjectOverridesHeader, ProjectSettingKey, ResolvedSettings, SettingId, SettingSource,
+    SettingValue, SettingsRow, SettingsScope, SettingsSection, SettingsView, auto_settle, behavior,
+    beta, follow_ups, new_threads, patch, update, usage_limits,
 };
 use crate::{
-    models::ConversationSettings,
+    models::HostSettings,
     state::{Intent, Snapshot},
     view::time::TimestampFormat,
 };
-use agent_protocol::models::ProjectConversationSettings;
+use agent_protocol::models::ProjectSettingsOverrides;
 
 /// What the Host page's rows are built from.
 pub(super) struct Context<'a> {
     pub snapshot: &'a Snapshot,
     /// The Host's conversation settings once read.
-    pub host: Option<&'a ConversationSettings>,
+    pub host: Option<&'a HostSettings>,
     pub timestamp_format: TimestampFormat,
 }
 
@@ -28,7 +28,7 @@ pub(super) struct Section {
     pub host: fn(&Context) -> Option<SettingsSection>,
     /// The section on a project page, showing the project's effective
     /// values; `None` for sections without project overrides.
-    pub project: fn(&ResolvedConversationSettings) -> Option<SettingsSection>,
+    pub project: fn(&ResolvedSettings) -> Option<SettingsSection>,
     /// What giving one of the section's rows a new value does; `None` when
     /// the value does not fit.
     pub intent: fn(&Snapshot, &SettingsScope, SettingId, &SettingValue) -> Option<Intent>,
@@ -59,7 +59,7 @@ fn owner(id: SettingId) -> &'static Section {
 /// project's effective auto-settle and restart continuation.
 pub fn settings_view(
     snapshot: &Snapshot,
-    host: Option<&ConversationSettings>,
+    host: Option<&HostSettings>,
     scope: &SettingsScope,
     timestamp_format: TimestampFormat,
 ) -> SettingsView {
@@ -98,9 +98,10 @@ pub fn settings_view(
                 project: Some(ProjectOverridesHeader {
                     project_id: project_id.clone(),
                     label,
-                    has_overrides: host.project_overrides.get(project_id).is_some_and(
-                        |overrides| overrides != &ProjectConversationSettings::default(),
-                    ),
+                    has_overrides: host
+                        .project_overrides
+                        .get(project_id)
+                        .is_some_and(|overrides| overrides != &ProjectSettingsOverrides::default()),
                 }),
                 sections: SECTIONS
                     .iter()
@@ -132,10 +133,7 @@ pub fn setting_reset_intent(scope: &SettingsScope, row: &SettingsRow) -> Option<
                 return None;
             }
             let key = (section.inherit)(row.id)?;
-            Some(update(
-                scope,
-                super::ConversationSettingChange::Inherit { key },
-            ))
+            Some(update(scope, super::SettingChange::Inherit { key }))
         }
         SettingsScope::Host => row.resettable.then(|| (section.reset)(row.id)).flatten(),
     }
@@ -148,7 +146,7 @@ mod tests {
         commands::build::FollowUpBehavior,
         models::{AutoSettle, WorktreeSettings},
         view::settings::{
-            ConversationSettingChange, SettingControl,
+            SettingChange, SettingControl,
             fixtures::{find, host_with, ids, project, same},
         },
     };
@@ -203,7 +201,7 @@ mod tests {
             create_on_new_session: true,
             ..Default::default()
         });
-        let host = ConversationSettings {
+        let host = HostSettings {
             snooze_limited_threads: true,
             ..Default::default()
         };
@@ -279,9 +277,9 @@ mod tests {
         let on = SettingValue::Switch { on: true };
         same(
             setting_intent(&snapshot, &host, SettingId::AutoSettleInactiveThreads, &on),
-            Some(Intent::UpdateConversationSettings {
+            Some(Intent::UpdateSettings {
                 scope: SettingsScope::Host,
-                change: ConversationSettingChange::AutoSettle { days: Some(3) },
+                change: SettingChange::AutoSettle { days: Some(3) },
             }),
         );
         same(
@@ -291,9 +289,9 @@ mod tests {
                 SettingId::AutoSettleDays,
                 &SettingValue::Number { value: 7 },
             ),
-            Some(Intent::UpdateConversationSettings {
+            Some(Intent::UpdateSettings {
                 scope: project("p"),
-                change: ConversationSettingChange::AutoSettle { days: Some(7) },
+                change: SettingChange::AutoSettle { days: Some(7) },
             }),
         );
         same(
@@ -378,7 +376,7 @@ mod tests {
             follow_up: FollowUpBehavior::Steer,
             ..Snapshot::default()
         };
-        let host = ConversationSettings {
+        let host = HostSettings {
             auto_settle: AutoSettle::Never,
             ..Default::default()
         };
@@ -393,9 +391,9 @@ mod tests {
                 &SettingsScope::Host,
                 &find(&view, SettingId::AutoSettleInactiveThreads),
             ),
-            Some(Intent::UpdateConversationSettings {
+            Some(Intent::UpdateSettings {
                 scope: SettingsScope::Host,
-                change: ConversationSettingChange::AutoSettle { days: Some(3) },
+                change: SettingChange::AutoSettle { days: Some(3) },
             }),
         );
         same(
@@ -413,7 +411,7 @@ mod tests {
         );
         let overridden = host_with(
             "p",
-            ProjectConversationSettings {
+            ProjectSettingsOverrides {
                 continue_after_restart: Some(true),
                 ..Default::default()
             },
@@ -426,9 +424,9 @@ mod tests {
         );
         same(
             setting_reset_intent(&project("p"), &find(&page, SettingId::ContinueAfterRestart)),
-            Some(Intent::UpdateConversationSettings {
+            Some(Intent::UpdateSettings {
                 scope: project("p"),
-                change: ConversationSettingChange::Inherit {
+                change: SettingChange::Inherit {
                     key: ProjectSettingKey::ContinueAfterRestart,
                 },
             }),
@@ -446,7 +444,7 @@ mod tests {
     fn a_project_page_shows_effective_values_with_their_source() {
         let host = host_with(
             "first-project",
-            ProjectConversationSettings {
+            ProjectSettingsOverrides {
                 auto_settle: Some(AutoSettle::Never),
                 ..Default::default()
             },

@@ -168,7 +168,7 @@ impl Desktop {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        if !self.snapshot.conversation_settings_loaded() {
+        if !self.snapshot.host_settings_loaded() {
             return page_container(
                 896.,
                 vec![notice(if self.snapshot.connected {

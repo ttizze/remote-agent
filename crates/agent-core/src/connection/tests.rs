@@ -2450,15 +2450,15 @@ fn only_applies_the_start_from_origin_default_to_new_worktree_drafts() {
         .unwrap();
     assert!(!owner.state.new_thread_workspace().start_from_origin);
 
-    let mut settings = crate::models::ConversationSettings::default();
+    let mut settings = crate::models::HostSettings::default();
     settings.project_overrides.insert(
         "app".into(),
-        crate::models::ProjectConversationSettings {
+        crate::models::ProjectSettingsOverrides {
             new_worktrees_start_from_origin: Some(false),
             ..Default::default()
         },
     );
-    owner.state.conversation_settings = Some(settings);
+    owner.state.host_settings = Some(settings);
     owner
         .set_new_thread_workspace(ThreadWorkspaceMode::Worktree)
         .unwrap();

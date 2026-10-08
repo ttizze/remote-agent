@@ -633,16 +633,16 @@ impl HostRpcService {
                     .map_err(|error| Failure::new("diagnostic_write_failed", error))?;
                     agent_protocol::models::Empty {}.into()
                 }
-                Call::ReadConversationSettings(_) | Call::UpdateConversationSettings(_) => {
+                Call::ReadSettings(_) | Call::UpdateSettings(_) => {
                     let update = match request {
-                        Call::UpdateConversationSettings(settings) => Some(settings.clone()),
+                        Call::UpdateSettings(settings) => Some((**settings).clone()),
                         _ => None,
                     };
                     let changed = update.is_some();
                     let settings = resources
                         .shared
                         .worktrees
-                        .conversation_settings(update)
+                        .host_settings(update)
                         .await
                         .map_err(|error| Failure::new("settings_update_failed", error))?;
                     if changed && let Ok(conversation) = self.conversation() {

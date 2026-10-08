@@ -357,7 +357,7 @@ impl PreparedRestore for Restore {
 
 /// A project's overrides over the Host's values.
 fn resolve_settings(
-    saved: &agent_protocol::models::ConversationSettings,
+    saved: &agent_protocol::models::HostSettings,
     project: &str,
 ) -> ConversationSettings {
     let overrides = saved.project_overrides.get(project);
@@ -378,14 +378,13 @@ fn resolve_settings(
 }
 
 /// The branch naming of `project`: its overrides, then the Host's settings.
-/// Text values are trimmed, as the reference decodes them.
 fn resolve_branch_naming(
-    saved: &agent_protocol::models::ConversationSettings,
+    saved: &agent_protocol::models::HostSettings,
     project: &str,
 ) -> BranchNaming {
     let overrides = saved.project_overrides.get(project);
     let text = |value: Option<&String>, inherited: &str| {
-        value.map_or(inherited, String::as_str).trim().to_owned()
+        value.map_or(inherited, String::as_str).to_owned()
     };
     BranchNaming {
         mode: overrides
@@ -406,11 +405,11 @@ fn resolve_branch_naming(
 mod settings_tests {
     use super::*;
     use agent_domain::BranchNamingMode;
-    use agent_protocol::models::ProjectConversationSettings;
+    use agent_protocol::models::ProjectSettingsOverrides;
 
     #[test]
     fn project_overrides_take_precedence_and_absent_values_inherit() {
-        let mut saved = agent_protocol::models::ConversationSettings::default();
+        let mut saved = agent_protocol::models::HostSettings::default();
         assert_eq!(
             resolve_settings(&saved, "any"),
             ConversationSettings::default()
@@ -419,16 +418,15 @@ mod settings_tests {
         saved.auto_resume_limited_threads = true;
         saved.project_overrides.insert(
             "opted-in".into(),
-            ProjectConversationSettings {
+            ProjectSettingsOverrides {
                 auto_settle: Some(AutoSettle::AfterDays(2)),
                 continue_after_restart: Some(true),
                 branch_naming_mode: Some(BranchNamingMode::Custom),
-                branch_name_prefix: None,
-                branch_name_instructions: Some(" Use ABC-123. ".into()),
-                new_worktrees_start_from_origin: None,
+                branch_name_instructions: Some("Use ABC-123.".into()),
+                ..Default::default()
             },
         );
-        saved.branch_name_prefix = " team/ ".into();
+        saved.branch_name_prefix = "team/".into();
         let inherited = resolve_settings(&saved, "other");
         assert_eq!(inherited.auto_settle_after_days, None);
         assert!(!inherited.continue_after_restart && inherited.auto_resume_limited_threads);
@@ -476,10 +474,10 @@ impl HostOperations for HostIo {
         self.projects.list()
     }
     fn settings(&self, project: &str) -> ConversationSettings {
-        resolve_settings(&self.worktrees.conversation(), project)
+        resolve_settings(&self.worktrees.latest_host_settings(), project)
     }
     fn branch_naming(&self, project: &str) -> BranchNaming {
-        resolve_branch_naming(&self.worktrees.conversation(), project)
+        resolve_branch_naming(&self.worktrees.latest_host_settings(), project)
     }
     fn rename_branch(
         &self,

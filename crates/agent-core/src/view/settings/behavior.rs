@@ -1,11 +1,11 @@
 //! Behavior: the clock format and restart continuation.
 use super::{
-    ConversationSettingChange, ProjectSettingKey, SettingControl, SettingId, SettingSource,
-    SettingValue, SettingsRow, SettingsScope, choice,
+    ProjectSettingKey, SettingChange, SettingControl, SettingId, SettingSource, SettingValue,
+    SettingsRow, SettingsScope, choice,
     registry::{Context, Section},
     row, section, update,
 };
-use crate::{models::ConversationSettings, state::Intent, view::time::TimestampFormat};
+use crate::{models::HostSettings, state::Intent, view::time::TimestampFormat};
 
 pub fn timestamp_format_id(format: TimestampFormat) -> &'static str {
     match format {
@@ -17,7 +17,7 @@ pub fn timestamp_format_id(format: TimestampFormat) -> &'static str {
 
 fn continue_row(on: bool, source: Option<SettingSource>) -> SettingsRow {
     SettingsRow {
-        resettable: on != ConversationSettings::default().continue_after_restart,
+        resettable: on != HostSettings::default().continue_after_restart,
         source,
         ..row(
             SettingId::ContinueAfterRestart,
@@ -68,7 +68,7 @@ pub(super) const SECTION: Section = Section {
     intent: |_, scope, id, value| match (id, value) {
         (SettingId::ContinueAfterRestart, SettingValue::Switch { on }) => Some(update(
             scope,
-            ConversationSettingChange::ContinueAfterRestart { on: *on },
+            SettingChange::ContinueAfterRestart { on: *on },
         )),
         (SettingId::TimeFormat, SettingValue::Choice { id }) => [
             TimestampFormat::Locale,
@@ -83,8 +83,8 @@ pub(super) const SECTION: Section = Section {
     reset: |id| match id {
         SettingId::ContinueAfterRestart => Some(update(
             &SettingsScope::Host,
-            ConversationSettingChange::ContinueAfterRestart {
-                on: ConversationSettings::default().continue_after_restart,
+            SettingChange::ContinueAfterRestart {
+                on: HostSettings::default().continue_after_restart,
             },
         )),
         SettingId::TimeFormat => Some(Intent::SetTimestampFormat {

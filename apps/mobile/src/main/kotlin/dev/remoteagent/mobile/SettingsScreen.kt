@@ -59,7 +59,7 @@ private const val PERCENT = 100f
 internal fun SettingsScreen(model: AndroidAppModel, projectId: String?) {
     val scope = projectId?.let { SettingsScope.Project(it) } ?: SettingsScope.Host
     LaunchedEffect(Unit) {
-        model.perform(Intent.LoadConversationSettings)
+        model.perform(Intent.LoadSettings)
         if (projectId == null) {
             model.perform(Intent.LoadAccounts)
             model.perform(Intent.LoadWorktreeSettings)

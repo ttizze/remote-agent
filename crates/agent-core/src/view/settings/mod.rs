@@ -1,10 +1,10 @@
-//! Conversation settings: usage-limit handling, auto-settle, follow-ups, the
-//! clock format, restart continuation and new-thread defaults, for the Host
-//! or one project's overrides.
+//! Settings: usage-limit handling, auto-settle, follow-ups, the clock
+//! format, restart continuation and new-thread defaults, for the Host or one
+//! project's overrides.
 //!
-//! Host values come from `ConversationSettings` (read with
-//! `ReadConversationSettings`) and the worktree settings; the follow-up
-//! behavior and new-thread draft are device settings.
+//! Host values come from `HostSettings` (read with `ReadSettings`) and the
+//! worktree settings; the follow-up behavior and new-thread draft are device
+//! settings.
 //!
 //! Each section lives in its own file and registers itself in `registry`,
 //! which assembles the page and routes a row's edits and resets to its owner.
@@ -25,9 +25,8 @@ pub use auto_settle::{
 pub use behavior::timestamp_format_id;
 pub use new_threads::{default_model_picker, runtime_mode_id};
 pub use patch::{
-    ConversationSettingChange, ProjectSettingKey, ResolvedConversationSettings,
-    clear_project_overrides, new_worktrees_start_from_origin, plan_conversation_settings_update,
-    resolve_project_settings,
+    ProjectSettingKey, ResolvedSettings, SettingChange, clear_project_overrides,
+    new_worktrees_start_from_origin, plan_settings_update, resolve_project_settings,
 };
 pub use registry::{setting_intent, setting_reset_intent, settings_view};
 
@@ -179,9 +178,9 @@ fn section(id: &str, title: &str, rows: Vec<SettingsRow>, footer: Option<&str>) 
     }
 }
 
-/// The edit of a conversation setting on the page of `scope`.
-fn update(scope: &SettingsScope, change: ConversationSettingChange) -> crate::state::Intent {
-    crate::state::Intent::UpdateConversationSettings {
+/// The edit of a Host setting on the page of `scope`.
+fn update(scope: &SettingsScope, change: SettingChange) -> crate::state::Intent {
+    crate::state::Intent::UpdateSettings {
         scope: scope.clone(),
         change,
     }

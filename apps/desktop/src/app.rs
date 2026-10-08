@@ -457,7 +457,7 @@ impl Desktop {
                 self.session = Some(session);
                 self.connecting = false;
                 self.perform(Intent::LoadAccounts);
-                self.perform(Intent::LoadConversationSettings);
+                self.perform(Intent::LoadSettings);
                 self.snapshot_changed(window, cx);
             }
             Update::Connected(Err(error)) => {

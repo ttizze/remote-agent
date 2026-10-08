@@ -34,7 +34,7 @@ pub(super) enum Reply {
     Remote(m::RemoteHost),
     Invitation(m::Invitation),
     Transcription(String),
-    ConversationSettings(m::ConversationSettings),
+    HostSettings(m::HostSettings),
     SessionScan(c::SessionScan),
     ProviderCommands(w::ProviderCommands),
     EntrySearch(w::EntrySearch),
@@ -61,8 +61,8 @@ async fn execute(peer: &Peer, call: &Call) -> Result<Reply, PeerError> {
             Reply::WorktreeSettings(peer.request(call).await?)
         }
         Call::ListWorktrees(_) => Reply::Worktrees(peer.request(call).await?),
-        Call::ReadConversationSettings(_) | Call::UpdateConversationSettings(_) => {
-            Reply::ConversationSettings(peer.request(call).await?)
+        Call::ReadSettings(_) | Call::UpdateSettings(_) => {
+            Reply::HostSettings(peer.request(call).await?)
         }
         Call::ScanAgentSessions(_) => Reply::SessionScan(peer.request(call).await?),
         Call::ProviderCommands(_) => Reply::ProviderCommands(peer.request(call).await?),
@@ -483,9 +483,7 @@ impl Owner {
                 self.state.remote_hosts.push(host);
             }
             Reply::Invitation(invitation) => self.state.invitation = Some(invitation),
-            Reply::ConversationSettings(settings) => {
-                self.state.conversation_settings = Some(settings)
-            }
+            Reply::HostSettings(settings) => self.state.host_settings = Some(settings),
             Reply::Keybindings(config) => self.state.keybindings = Some(Arc::new(config)),
             Reply::SessionScan(scan) => {
                 let import = &mut self.state.session_import;

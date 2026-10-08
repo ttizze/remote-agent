@@ -407,7 +407,7 @@ pub struct Snapshot {
     pub inbox_returns: crate::view::inbox::InboxReturns,
     pub thread_order: Option<ThreadOrderHold>,
     /// The Host's conversation settings once read.
-    pub conversation_settings: Option<crate::models::ConversationSettings>,
+    pub host_settings: Option<crate::models::HostSettings>,
     /// Resume-compaction offers dismissed with "Keep full history" in this
     /// session, by thread and context snapshot.
     pub resume_compaction_dismissals: BTreeSet<String>,
@@ -653,7 +653,7 @@ impl Snapshot {
     ) -> bool {
         mode == crate::view::projects::selection::ThreadWorkspaceMode::Worktree
             && crate::view::settings::new_worktrees_start_from_origin(
-                self.conversation_settings.as_ref(),
+                self.host_settings.as_ref(),
                 self.selected_project.as_deref(),
             )
     }
@@ -1270,10 +1270,10 @@ pub enum Intent {
     RemoveKeybinding {
         rule: crate::view::keybindings::KeybindingTarget,
     },
-    LoadConversationSettings,
-    UpdateConversationSettings {
+    LoadSettings,
+    UpdateSettings {
         scope: crate::view::settings::SettingsScope,
-        change: crate::view::settings::ConversationSettingChange,
+        change: crate::view::settings::SettingChange,
     },
     ResetProjectSettings {
         project_id: String,
