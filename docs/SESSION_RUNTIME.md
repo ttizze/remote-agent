@@ -46,8 +46,8 @@ Codex and Claude Code are the supported providers.
 ## Provider boundaries
 
 The task list reads root metadata, with one lookahead per displayed section.
-It does not enumerate descendants or calculate their Git status. Explicit search
-still includes matching children. Desktop observes `host/session/agents` only
+It does not enumerate descendants or calculate their Git status. Search also
+reads only root titles. Desktop observes `host/session/agents` only
 while the selected conversation's Agents panel is visible; core refreshes that
 fleet on connection and activity updates. Responses contain only identity,
 parent identity, name and status and update conversation metadata without

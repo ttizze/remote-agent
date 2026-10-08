@@ -628,7 +628,7 @@ impl Agent for Codex {
         cursor: Option<String>,
         ancestor: Option<&str>,
     ) -> Result<SessionPage, Failure> {
-        let value: Value = self
+        let page: Page<Value> = self
             .request(
                 "thread/list",
                 &ThreadListParams {
@@ -638,17 +638,8 @@ impl Agent for Codex {
                     use_state_db_only: true,
                     source_kinds: if ancestor.is_some() {
                         &["subAgentThreadSpawn"]
-                    } else if search.trim().is_empty() {
-                        &["cli", "vscode", "exec", "appServer", "unknown"]
                     } else {
-                        &[
-                            "cli",
-                            "vscode",
-                            "exec",
-                            "appServer",
-                            "unknown",
-                            "subAgentThreadSpawn",
-                        ]
+                        &["cli", "vscode", "exec", "appServer", "unknown"]
                     },
                     ancestor_thread_id: ancestor,
                     search_term: (!search.trim().is_empty()).then_some(search),
@@ -657,17 +648,15 @@ impl Agent for Codex {
             )
             .await?;
         Ok(SessionPage {
-            data: value["data"]
-                .as_array()
-                .ok_or_else(|| Failure::new("invalid_thread", "native session list is missing"))?
-                .iter()
-                .cloned()
+            data: page
+                .data
+                .into_iter()
                 .map(|value| {
                     let branch = value["gitInfo"]["branch"].as_str().map(str::to_owned);
                     native::parse_thread(value).map(|thread| SessionSummary { thread, branch })
                 })
                 .collect::<Result<_, _>>()?,
-            next_cursor: serde_json::from_value(value["nextCursor"].clone())?,
+            next_cursor: page.next_cursor,
         })
     }
     async fn open(

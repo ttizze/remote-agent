@@ -29,12 +29,11 @@ pub(super) fn notification(
                 .iter()
                 .any(|thread| thread.id.as_ref() == Some(&session))
         });
-        let mut effects =
-            if (child && previous.list_query.search_term.trim().is_empty()) || (active && listed) {
-                Vec::new()
-            } else {
-                refresh_list(previous)
-            };
+        let mut effects = if child || (active && listed) {
+            Vec::new()
+        } else {
+            refresh_list(previous)
+        };
         if !listed && !previous.conversations.contains_key(&session) {
             effects.extend(op::refresh_agents(
                 previous.connected,
@@ -58,12 +57,7 @@ pub(super) fn notification(
                 .get(&session)
                 .is_some_and(|thread| thread.parent_id.is_some())
             {
-                let mut effects =
-                    op::refresh_agents(previous.connected, previous.observed_agents.as_ref());
-                if !previous.list_query.search_term.trim().is_empty() {
-                    effects.extend(refresh_list(previous));
-                }
-                effects
+                op::refresh_agents(previous.connected, previous.observed_agents.as_ref())
             } else {
                 refresh_list(previous)
             };
@@ -180,9 +174,7 @@ pub(super) fn session_update(
     reconcile_pending(&mut next, id);
     let changed_metadata = matches!(&update.change, SessionChange::Item { item, .. } if matches!(item.body(), crate::models::ItemBody::UserMessage { .. }) || (matches!(item.body(), crate::models::ItemBody::CommandExecution { .. }) && item.status == crate::models::ItemStatus::Completed));
     let mut effects = details;
-    if (completed || changed_metadata)
-        && (current.parent_id.is_none() || !previous.list_query.search_term.trim().is_empty())
-    {
+    if (completed || changed_metadata) && current.parent_id.is_none() {
         effects.extend(refresh_list(previous));
     }
     if (previous.observed_agents.as_ref() == Some(id) || current.parent_id.is_some())

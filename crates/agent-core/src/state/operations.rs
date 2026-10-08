@@ -68,6 +68,7 @@ pub enum Intent {
     ListWorktrees(ListWorktrees),
     RemoveWorktree(RemoveWorktree),
     ListSessions(ListSessions),
+    ListAgents(ListAgents),
     WatchAgents {
         thread_id: Option<crate::session::SessionRef>,
     },

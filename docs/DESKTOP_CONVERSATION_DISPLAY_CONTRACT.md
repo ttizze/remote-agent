@@ -140,7 +140,7 @@ complete retrieval and reopening.
   `agents_are_scoped_to_the_selected_parent_and_keep_stable_identity`,
   `native_events_enrich_one_agent_without_reparenting_it`,
   `claude_activity_updates_the_same_row_without_a_native_child_session`,
-  `root_titles_exclude_children_but_search_preserves_child_matches`, and desktop
+  `root_titles_exclude_children_without_consuming_limits_including_search`, and desktop
   `agents_open_to_the_right_without_changing_parent_or_draft` and
   `pending_operations_do_not_block_task_navigation`.
 

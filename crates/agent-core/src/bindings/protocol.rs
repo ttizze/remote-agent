@@ -510,6 +510,10 @@ struct ListSessions {
     pub query: crate::models::ListQuery,
 }
 #[uniffi::remote(Record)]
+struct ListAgents {
+    pub thread_id: SessionRef,
+}
+#[uniffi::remote(Record)]
 struct ReadItem {
     pub thread_id: SessionRef,
     pub turn_id: agent_protocol::ids::TurnId,

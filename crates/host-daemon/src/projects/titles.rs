@@ -45,7 +45,7 @@ impl<'a> TitleList<'a> {
             .project_id
             .as_deref()
             .and_then(|id| self.known_projects.get(id).copied());
-        if thread.parent_id.is_some() && !self.searching {
+        if thread.parent_id.is_some() {
             return;
         }
         let target = if let Some(project_id) = project_id {
@@ -170,7 +170,7 @@ mod tests {
     use super::*;
     use serde_json::{Value, json};
     #[test]
-    fn root_titles_exclude_children_but_search_preserves_child_matches() {
+    fn root_titles_exclude_children_without_consuming_limits_including_search() {
         let query = ListQuery {
             chat_limit: 1,
             ..Default::default()
@@ -202,11 +202,12 @@ mod tests {
         };
         let mut list = TitleList::new(&[], &search);
         list.push(thread(json!({"id":{"provider":"codex","id":"child"},"parentId":{"provider":"codex","id":"root"},"name":"Matches"})));
-        assert_eq!(
-            list.finish().data.len(),
-            1,
-            "search matches remain visible without their parent"
-        );
+        list.push(thread(
+            json!({"id":{"provider":"codex","id":"root"},"name":"Matching root"}),
+        ));
+        let result = list.finish();
+        assert_eq!(result.data.len(), 1);
+        assert_eq!(result.data[0].id.as_ref().unwrap().id, "root");
     }
     fn thread(value: Value) -> Thread {
         serde_json::from_value(value).unwrap()

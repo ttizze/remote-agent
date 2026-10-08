@@ -445,6 +445,11 @@ impl Store {
             };
             let Some((connection, storage_scope)) = prepared else {
                 let snapshot = self.snapshot();
+                if let Some(thread_id) = &snapshot.observed_agents {
+                    drop(self.dispatch(Intent::ListAgents(op::ListAgents {
+                        thread_id: thread_id.clone(),
+                    })));
+                }
                 if let Some(id) = &snapshot.navigation.thread_id {
                     drop(self.dispatch(Intent::ReadThread(op::ReadThread::new(id.clone()))));
                 }
