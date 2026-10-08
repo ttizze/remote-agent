@@ -20,6 +20,7 @@ class DeviceVideoDecoderTest {
         val delta = gate.offer(2uL, "h264", keyframe = false, bytes = 4)
         assertNotNull(delta)
         assertNull(gate.offer(3uL, "h264", keyframe = false, bytes = 1))
+        assertNull(gate.offer(3uL, "h264", keyframe = true, bytes = 1))
 
         assertEquals(
             DeviceVideoIngressGate.Completion(current = true, resync = true),
