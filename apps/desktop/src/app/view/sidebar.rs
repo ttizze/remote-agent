@@ -165,15 +165,15 @@ impl SidebarItem for SidebarSection {
                     h_flex()
                         .h_8()
                         .flex_shrink_0()
-                        .px_2()
+                        .pl_2()
                         .text_xs()
                         .text_color(cx.theme().sidebar_foreground.opacity(0.7))
                         .child(div().flex_1().child(self.label))
                         .when_some(self.add_project, |header, (desktop, enabled)| {
                             header.child(
                                 Button::new("choose-project")
-                                    .icon(IconName::Plus)
-                                    .xsmall()
+                                    .icon(Icon::default().path("bex/folder-plus.svg"))
+                                    .small()
                                     .ghost()
                                     .tooltip("プロジェクトを追加")
                                     .accessibility_label("プロジェクトを追加")
