@@ -42,6 +42,10 @@ impl Operation for ListAccounts {
                 &snapshot.models,
                 &snapshot.model_errors,
                 Some(&output.selected),
+                &snapshot.navigation.draft_key,
+                &snapshot
+                    .model_defaults_for_cwd(&snapshot.navigation.cwd)
+                    .providers,
             );
         }
         Arc::make_mut(&mut snapshot.account).accounts = Some(Arc::new(output));

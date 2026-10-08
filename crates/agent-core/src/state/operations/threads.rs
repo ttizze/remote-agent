@@ -607,6 +607,10 @@ impl Operation for LoadModels {
                 .accounts
                 .as_ref()
                 .map(|accounts| &accounts.selected),
+            &snapshot.navigation.draft_key,
+            &snapshot
+                .model_defaults_for_cwd(&snapshot.navigation.cwd)
+                .providers,
         );
         snapshot.models = Arc::new(models);
         snapshot.model_errors = Arc::new(errors);

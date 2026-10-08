@@ -571,8 +571,26 @@ fn unavailable_provider_preset_falls_back_only_after_a_complete_catalog() {
 
 #[test]
 fn automatic_new_chat_waits_for_accounts_and_uses_an_authenticated_provider() {
+    let initial = Snapshot {
+        model_defaults: Arc::new(ModelDefaults {
+            providers: [(
+                ProviderKind::Claude,
+                ProviderModelDefaults {
+                    model: Some(ModelRef {
+                        provider: ProviderKind::Claude,
+                        id: "shared".into(),
+                    }),
+                    effort: Some("high".into()),
+                    service_tier: Some("fast".into()),
+                },
+            )]
+            .into(),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
     let mut snapshot = apply(
-        &Snapshot::default(),
+        &initial,
         Intent::NewChat {
             cwd: "/late".into(),
         },
@@ -607,6 +625,9 @@ fn automatic_new_chat_waits_for_accounts_and_uses_an_authenticated_provider() {
             .provider,
         ProviderKind::Claude
     );
+    let draft = &snapshot.drafts[&snapshot.navigation.draft_key];
+    assert_eq!(draft.effort.as_deref(), Some("high"));
+    assert_eq!(draft.service_tier.as_deref(), Some("fast"));
 }
 
 #[test]

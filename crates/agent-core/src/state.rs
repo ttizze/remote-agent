@@ -509,18 +509,16 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
         Intent::NewChat { cwd } => {
             next.epoch += 1;
             let key = DraftKey::Local { key: format!("new:{cwd}") };
-            if !previous.drafts.contains_key(&key) {
+            if previous.drafts.get(&key).is_none_or(|draft| draft.model.is_none()) {
                 let preferences = previous.model_defaults_for_cwd(&cwd);
                 let provider = preferences.new_chat_model.as_ref().map(|model| model.provider)
                     .or_else(|| previous.model_provider_for_draft(key.clone()));
                 let defaults = provider.and_then(|provider| preferences.providers.get(&provider))
                     .cloned().unwrap_or_default();
-                let mut draft = Draft {
-                    model: preferences.new_chat_model.or(defaults.model),
-                    effort: defaults.effort,
-                    service_tier: defaults.service_tier,
-                    ..Default::default()
-                };
+                let mut draft = previous.drafts.get(&key).map(|draft| (**draft).clone()).unwrap_or_default();
+                draft.model = preferences.new_chat_model.or(defaults.model);
+                draft.effort = draft.effort.or(defaults.effort);
+                draft.service_tier = draft.service_tier.or(defaults.service_tier);
                 if provider.is_some() && !previous.models.is_empty() {
                     let (model, effort, tier) = supported_settings(
                         draft.model.as_ref(), draft.effort.as_deref(), draft.service_tier.as_deref(),
@@ -933,26 +931,44 @@ pub(crate) fn normalized_model_drafts(
     models: &[crate::models::Model],
     errors: &serde_json::Map<String, serde_json::Value>,
     selected_accounts: Option<&std::collections::HashMap<crate::session::ProviderKind, String>>,
+    active_draft: &DraftKey,
+    provider_defaults: &HashMap<crate::session::ProviderKind, ProviderModelDefaults>,
 ) -> Arc<BTreeMap<DraftKey, Arc<Draft>>> {
     let mut next = drafts.clone();
     for (key, previous) in drafts.iter() {
-        let provider =
-            crate::presentation::model_settings::draft_provider(key, previous.model.as_ref())
-                .or_else(|| {
-                    crate::presentation::model_settings::automatic_provider(
-                        models,
-                        selected_accounts,
-                        errors,
-                    )
-                });
-        if provider.is_none() {
+        let selected_provider =
+            crate::presentation::model_settings::draft_provider(key, previous.model.as_ref());
+        if selected_provider.is_none() && key != active_draft {
             continue;
         }
+        let provider = selected_provider.or_else(|| {
+            crate::presentation::model_settings::automatic_provider(
+                models,
+                selected_accounts,
+                errors,
+            )
+        });
+        let Some(provider) = provider else {
+            continue;
+        };
+        let defaults = selected_provider
+            .is_none()
+            .then(|| provider_defaults.get(&provider))
+            .flatten();
         let (model, effort, tier) = supported_settings(
-            previous.model.as_ref(),
-            previous.effort.as_deref(),
-            previous.service_tier.as_deref(),
-            provider,
+            previous
+                .model
+                .as_ref()
+                .or_else(|| defaults.and_then(|defaults| defaults.model.as_ref())),
+            previous
+                .effort
+                .as_deref()
+                .or_else(|| defaults.and_then(|defaults| defaults.effort.as_deref())),
+            previous
+                .service_tier
+                .as_deref()
+                .or_else(|| defaults.and_then(|defaults| defaults.service_tier.as_deref())),
+            Some(provider),
             models,
             !errors.is_empty(),
         );

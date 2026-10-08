@@ -422,12 +422,21 @@ async fn setup(snapshot: Snapshot) -> (Arc<Store>, host_fixture::Reader, host_fi
     let cwd = selected.map_or(snapshot.navigation.cwd.as_str(), |thread| {
         thread.cwd.as_deref().unwrap_or_default()
     });
-    for _ in 0..3 + usize::from(selected.is_some()) + usize::from(!cwd.is_empty()) {
+    for _ in 0..3
+        + usize::from(selected.is_some())
+        + usize::from(!cwd.is_empty())
+        + snapshot
+            .account
+            .accounts
+            .as_ref()
+            .map_or(0, |accounts| accounts.accounts.len())
+    {
         let request = read(&mut reader).await;
         let result = match request["method"].as_str().unwrap() {
             "host/session/list" => snapshot.threads.as_ref().map(|threads| json!(threads))
                 .unwrap_or_else(|| json!({"data":[],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false})),
             "host/account/list" => snapshot.account.accounts.as_ref().map(|accounts| json!(accounts)).unwrap_or_else(|| json!({"accounts":[],"selected":{}})),
+            "host/account/usage" => json!({"windows":[],"fetchedAt":1,"error":null}),
             "host/model/list" => json!({"data":snapshot.models,"nextCursor":null}),
             "host/session/open" => json!({"thread": snapshot.conversations[snapshot.navigation.thread_id.as_ref().unwrap()]}),
             "host/workspace/review" => { assert_eq!(request["params"]["cwd"], cwd); review() },

@@ -949,11 +949,17 @@ fn incomplete_model_catalog_preserves_restored_choices_and_defaults_only_new_dra
         }]})).unwrap();
         op::LoadModels {}.apply(&mut state, catalog);
         assert_eq!(*state.drafts[&DraftKey::from("saved")], draft);
+        assert!(state.drafts[&automatic].model.is_none());
+        let explicit = state.navigation.draft_key.clone();
+        state = reduce(
+            &state,
+            Event::Intent(Intent::NewChat {
+                cwd: "/fresh".into(),
+            }),
+        )
+        .0;
         assert_eq!(state.drafts[&automatic].model, draft.model);
-        assert_eq!(
-            state.drafts[&state.navigation.draft_key].model.as_ref(),
-            Some(&claude)
-        );
+        assert_eq!(state.drafts[&explicit].model.as_ref(), Some(&claude));
         assert!(state.model_errors.is_empty());
     }
 }
