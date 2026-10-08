@@ -1196,6 +1196,7 @@ impl HostRpcService {
                             &browser_owner,
                             &params.thread_id.to_string(),
                             &params.tab_id,
+                            params.recording_id,
                             params.options,
                         )
                         .await
@@ -1214,6 +1215,7 @@ impl HostRpcService {
                             &browser_owner,
                             &params.thread_id.to_string(),
                             &params.tab_id,
+                            &params.recording_id,
                         )
                         .await
                         .map_err(|error| Failure::new("preview_recording_stop_failed", error))?

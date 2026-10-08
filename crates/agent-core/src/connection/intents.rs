@@ -224,6 +224,7 @@ fn device_action(action: DeviceActionIntent) -> Result<d::DeviceActionKind, Peer
         DeviceActionIntent::Key {
             code,
             key,
+            session_epoch: _,
             down,
             meta,
             ctrl,
@@ -1836,6 +1837,7 @@ impl Owner {
                 if let DeviceActionIntent::Key {
                     code,
                     key,
+                    session_epoch,
                     down,
                     meta,
                     ctrl,
@@ -1849,6 +1851,7 @@ impl Owner {
                         device_id,
                         code,
                         key,
+                        session_epoch,
                         down,
                         DeviceModifierFacts {
                             shift,
@@ -1954,6 +1957,7 @@ impl Owner {
             }
             Intent::UnsubscribeDevice => {
                 if let Some(thread) = &self.state.selected_thread {
+                    self.release_device_inputs(thread);
                     self.close_stream(&super::owner::StreamKey::Device(thread.clone()));
                 }
                 Next::Done
@@ -2072,15 +2076,23 @@ impl Owner {
                 let request = agent_protocol::preview::PreviewRecordingStart {
                     thread_id: self.selected()?,
                     tab_id,
+                    recording_id: format!("preview-recording-{}", uuid::Uuid::new_v4().simple()),
                     options,
                 };
                 request.validate().map_err(invalid)?;
                 Next::call(Call::PreviewRecordingStart(request), None)
             }
             Intent::PreviewRecordingStop { tab_id } => {
+                let recording_id = self
+                    .state
+                    .preview
+                    .recording_for(&tab_id)
+                    .map(|status| status.recording_id.clone())
+                    .ok_or_else(|| invalid("preview recording is not active"))?;
                 let request = agent_protocol::preview::PreviewRecordingStop {
                     thread_id: self.selected()?,
                     tab_id,
+                    recording_id,
                 };
                 request.validate().map_err(invalid)?;
                 Next::call(Call::PreviewRecordingStop(request), None)

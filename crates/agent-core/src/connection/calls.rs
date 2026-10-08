@@ -190,6 +190,16 @@ impl Owner {
         sent: Option<(String, Draft)>,
         duo_request: Option<DeviceDuoRequest>,
     ) {
+        if let Some(request) = duo_request.as_ref()
+            && !self.state.device.accepts_duo_request(request)
+        {
+            let error = invalid("Device Duo session changed before dispatch");
+            self.state.device.fail_duo(request, error.to_string());
+            if let Some(complete) = complete {
+                let _ = complete.send(Err(error));
+            }
+            return;
+        }
         let sender = self.sender.clone();
         let cancel = match &call {
             Call::Transcribe(params) => params
@@ -267,6 +277,14 @@ impl Owner {
             }
             return;
         };
+        if !self.state.device.accepts_input_target(&target) {
+            self.state.device.clear_input_state(&target);
+            let error = invalid("Device input session changed before dispatch");
+            if let Some(complete) = complete {
+                let _ = complete.send(Err(error));
+            }
+            return;
+        }
         let sender = self.sender.clone();
         let network = match self.network() {
             Ok(network) => network,
@@ -280,9 +298,10 @@ impl Owner {
             }
         };
         let (peer, epoch) = (network.peer.clone(), network.epoch);
-        let serial = self.device_input_serial.clone();
+        let queue = self.device_input_queue.clone();
+        let ticket = queue.ticket();
         network.spawn(async move {
-            let _serial_guard = serial.lock().await;
+            queue.wait_turn(ticket).await;
             let mut result = Ok(Reply::Done);
             for input in inputs {
                 let call = Call::DeviceInput(input);
@@ -291,6 +310,7 @@ impl Owner {
                     break;
                 }
             }
+            queue.complete(ticket);
             let _ = sender
                 .send(Event::Finished(
                     epoch,
@@ -588,12 +608,14 @@ impl Owner {
     }
 
     fn preview_recording_failed(&mut self, call: &Call) {
-        let (tab_id, starting) = match call {
-            Call::PreviewRecordingStart(request) => (&request.tab_id, true),
-            Call::PreviewRecordingStop(request) => (&request.tab_id, false),
+        let (tab_id, recording_id, starting) = match call {
+            Call::PreviewRecordingStart(request) => (&request.tab_id, &request.recording_id, true),
+            Call::PreviewRecordingStop(request) => (&request.tab_id, &request.recording_id, false),
             _ => return,
         };
-        self.state.preview.recording_failed(tab_id, starting);
+        self.state
+            .preview
+            .recording_failed(tab_id, recording_id, starting);
     }
 
     fn reply(&mut self, call: &Call, reply: Reply, sent: Option<(String, Draft)>) {

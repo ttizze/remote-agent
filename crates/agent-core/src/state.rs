@@ -452,6 +452,12 @@ pub struct PreviewState {
     closed_tabs: BTreeSet<String>,
     #[serde(skip)]
     invalidated_recordings: BTreeSet<String>,
+    /// The latest recording lifetime known for each live tab.  This survives
+    /// a Host snapshot that temporarily omits a finished recording while a
+    /// stop reply is still in flight, but is replaced only by a matching
+    /// status or a new tab lifetime.
+    #[serde(skip)]
+    recording_lifetimes: BTreeMap<String, String>,
 }
 impl PreviewState {
     pub fn apply_list(&mut self, result: agent_protocol::preview::PreviewListResult) {
@@ -478,6 +484,7 @@ impl PreviewState {
         if server_epoch_changed {
             self.invalidated_recordings
                 .extend(self.sessions.keys().cloned());
+            self.recording_lifetimes.clear();
         }
         self.sessions = result
             .sessions
@@ -492,15 +499,22 @@ impl PreviewState {
         for tab_id in result.invalidated_recordings {
             self.invalidated_recordings.insert(tab_id.clone());
             self.last_recordings.remove(&tab_id);
+            self.recording_lifetimes.remove(&tab_id);
         }
         let active_recording_tabs = self
             .recordings
             .values()
-            .filter(|status| status.recording)
-            .map(|status| status.tab_id.clone())
+            .map(|status| (status.tab_id.clone(), status.recording_id.clone()))
             .collect::<Vec<_>>();
-        for tab_id in active_recording_tabs {
-            self.invalidated_recordings.remove(&tab_id);
+        for (tab_id, recording_id) in active_recording_tabs {
+            self.recording_lifetimes.insert(tab_id.clone(), recording_id);
+            if self
+                .recordings
+                .get(&tab_id)
+                .is_some_and(|status| status.recording)
+            {
+                self.invalidated_recordings.remove(&tab_id);
+            }
         }
         if server_epoch_changed {
             self.last_recordings.clear();
@@ -510,6 +524,8 @@ impl PreviewState {
         }
         self.closed_tabs
             .retain(|tab_id| !self.sessions.contains_key(tab_id));
+        self.recording_lifetimes
+            .retain(|tab_id, _| self.sessions.contains_key(tab_id));
         for session in self.sessions.values() {
             if matches!(
                 &session.nav_status,
@@ -574,6 +590,7 @@ impl PreviewState {
             }
             self.recordings.remove(tab_id);
             self.last_recordings.remove(tab_id);
+            self.recording_lifetimes.remove(tab_id);
         } else {
             self.closed_tabs.extend(self.sessions.keys().cloned());
             self.invalidated_recordings
@@ -582,6 +599,7 @@ impl PreviewState {
             self.active_tab = None;
             self.recordings.clear();
             self.last_recordings.clear();
+            self.recording_lifetimes.clear();
         }
     }
     pub fn session(
@@ -608,9 +626,19 @@ impl PreviewState {
         {
             return;
         }
+        if self
+            .recording_lifetimes
+            .get(&status.tab_id)
+            .is_some_and(|recording_id| recording_id != &status.recording_id)
+            || (!status.recording && !self.recording_lifetimes.contains_key(&status.tab_id))
+        {
+            return;
+        }
         if status.recording {
             self.invalidated_recordings.remove(&status.tab_id);
         }
+        self.recording_lifetimes
+            .insert(status.tab_id.clone(), status.recording_id.clone());
         self.last_recordings.remove(&status.tab_id);
         self.recordings.insert(status.tab_id.clone(), status);
     }
@@ -622,13 +650,20 @@ impl PreviewState {
         if self.closed_tabs.contains(&artifact.tab_id)
             || !self.sessions.contains_key(&artifact.tab_id)
             || self.invalidated_recordings.contains(&artifact.tab_id)
+            || self
+                .recording_lifetimes
+                .get(&artifact.tab_id)
+                .is_none_or(|recording_id| recording_id != &artifact.recording_id)
         {
             return;
         }
+        self.recording_lifetimes
+            .insert(artifact.tab_id.clone(), artifact.recording_id.clone());
         self.recordings.insert(
             artifact.tab_id.clone(),
             agent_protocol::preview::PreviewRecordingStatus {
                 tab_id: artifact.tab_id.clone(),
+                recording_id: artifact.recording_id.clone(),
                 recording: false,
                 started_at: None,
             },
@@ -641,13 +676,21 @@ impl PreviewState {
     /// deliberately left active so the client can retry while the Host still
     /// owns the capture task; a transport error must not turn a live recorder
     /// into a false idle snapshot.
-    pub fn recording_failed(&mut self, tab_id: &str, starting: bool) {
+    pub fn recording_failed(&mut self, tab_id: &str, recording_id: &str, starting: bool) {
         if self.closed_tabs.contains(tab_id) || !self.sessions.contains_key(tab_id) {
+            return;
+        }
+        if self
+            .recording_lifetimes
+            .get(tab_id)
+            .is_none_or(|current| current != recording_id)
+        {
             return;
         }
         if starting {
             self.recordings.remove(tab_id);
             self.last_recordings.remove(tab_id);
+            self.recording_lifetimes.remove(tab_id);
         }
     }
 
@@ -697,6 +740,7 @@ mod preview_state_tests {
             "old".into(),
             agent_protocol::preview::PreviewRecordingArtifact {
                 id: "recording".into(),
+                recording_id: "recording".into(),
                 tab_id: "old".into(),
                 path: "/tmp/recording.webm".into(),
                 mime_type: "video/webm".into(),
@@ -729,6 +773,7 @@ mod preview_state_tests {
             "old-tab".into(),
             agent_protocol::preview::PreviewRecordingArtifact {
                 id: "browser-recording-old".into(),
+                recording_id: "browser-recording-old".into(),
                 tab_id: "old-tab".into(),
                 path: "/tmp/browser-recording-old.webm".into(),
                 mime_type: "video/webm".into(),
@@ -790,11 +835,13 @@ mod preview_state_tests {
         result.recordings = vec![
             agent_protocol::preview::PreviewRecordingStatus {
                 tab_id: "tab-a".into(),
+                recording_id: "recording-a".into(),
                 recording: true,
                 started_at: Some("2026-01-01T00:00:00Z".into()),
             },
             agent_protocol::preview::PreviewRecordingStatus {
                 tab_id: "tab-b".into(),
+                recording_id: "recording-b".into(),
                 recording: true,
                 started_at: Some("2026-01-01T00:00:01Z".into()),
             },
@@ -825,18 +872,18 @@ mod preview_state_tests {
     #[test]
     fn closing_the_recorded_tab_discards_ephemeral_recording_state() {
         let mut state = PreviewState::default();
-        state.recordings.insert(
-            "tab".into(),
-            agent_protocol::preview::PreviewRecordingStatus {
-                tab_id: "tab".into(),
-                recording: true,
-                started_at: Some("2026-01-01T00:00:00Z".into()),
-            },
-        );
+        state.apply_list(list("epoch", 1, "tab"));
+        state.apply_recording_status(agent_protocol::preview::PreviewRecordingStatus {
+            tab_id: "tab".into(),
+            recording_id: "recording".into(),
+            recording: true,
+            started_at: Some("2026-01-01T00:00:00Z".into()),
+        });
         state.last_recordings.insert(
             "tab".into(),
             agent_protocol::preview::PreviewRecordingArtifact {
                 id: "browser-recording-test".into(),
+                recording_id: "browser-recording-test".into(),
                 tab_id: "tab".into(),
                 path: "/tmp/browser-recording-test.webm".into(),
                 mime_type: "video/webm".into(),
@@ -855,6 +902,7 @@ mod preview_state_tests {
         state.apply_list(list("epoch", 1, "tab"));
         let artifact = || agent_protocol::preview::PreviewRecordingArtifact {
             id: "late-recording".into(),
+            recording_id: "late-recording".into(),
             tab_id: "tab".into(),
             path: "/tmp/late-recording.webm".into(),
             mime_type: "video/webm".into(),
@@ -873,20 +921,59 @@ mod preview_state_tests {
     }
 
     #[test]
+    fn late_stop_artifact_cannot_end_a_new_recording_lifetime() {
+        let mut state = PreviewState::default();
+        state.apply_list(list("epoch", 1, "tab"));
+        state.apply_recording_status(agent_protocol::preview::PreviewRecordingStatus {
+            tab_id: "tab".into(),
+            recording_id: "old-lifetime".into(),
+            recording: true,
+            started_at: Some("old".into()),
+        });
+
+        // The old stop is still in flight when the Host discards the tab's
+        // offered artifact and a new start reuses the same live tab.
+        let mut discarded = list("epoch", 2, "tab");
+        discarded.invalidated_recordings = vec!["tab".into()];
+        state.apply_list(discarded);
+        state.apply_recording_status(agent_protocol::preview::PreviewRecordingStatus {
+            tab_id: "tab".into(),
+            recording_id: "new-lifetime".into(),
+            recording: true,
+            started_at: Some("new".into()),
+        });
+
+        state.apply_recording_artifact(agent_protocol::preview::PreviewRecordingArtifact {
+            id: "old-artifact".into(),
+            recording_id: "old-lifetime".into(),
+            tab_id: "tab".into(),
+            path: "/tmp/old.webm".into(),
+            mime_type: "video/webm".into(),
+            size_bytes: 1,
+            created_at: "old".into(),
+        });
+
+        assert_eq!(
+            state.recording_for("tab").map(|status| status.recording_id.as_str()),
+            Some("new-lifetime")
+        );
+        assert!(state.recording_for("tab").is_some_and(|status| status.recording));
+        assert!(state.last_recording_for("tab").is_none());
+    }
+
+    #[test]
     fn recording_failures_clear_failed_starts_but_keep_a_live_stop_retryable() {
         let mut state = PreviewState::default();
         state.apply_list(list("epoch", 1, "tab"));
-        state.recordings.insert(
-            "tab".into(),
-            agent_protocol::preview::PreviewRecordingStatus {
-                tab_id: "tab".into(),
-                recording: true,
-                started_at: Some("0".into()),
-            },
-        );
-        state.recording_failed("tab", false);
+        state.apply_recording_status(agent_protocol::preview::PreviewRecordingStatus {
+            tab_id: "tab".into(),
+            recording_id: "recording".into(),
+            recording: true,
+            started_at: Some("0".into()),
+        });
+        state.recording_failed("tab", "recording", false);
         assert!(state.recording_for("tab").is_some_and(|status| status.recording));
-        state.recording_failed("tab", true);
+        state.recording_failed("tab", "recording", true);
         assert!(state.recording_for("tab").is_none());
     }
 }
@@ -1449,6 +1536,7 @@ pub enum DeviceActionIntent {
     Key {
         code: String,
         key: String,
+        session_epoch: String,
         down: bool,
         meta: bool,
         ctrl: bool,

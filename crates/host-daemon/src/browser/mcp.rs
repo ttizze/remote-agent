@@ -224,11 +224,13 @@ async fn bridge_request(
                 Some(tab_id) => tab_id,
                 None => browser.preview_active_tab_for_owner(owner, thread).await?,
             };
+            let recording_id = format!("browser-recording-{}", uuid::Uuid::new_v4().simple());
             browser
                 .start_preview_recording_with_cancel_for_owner(
                     owner,
                     thread,
                     &tab_id,
+                    recording_id,
                     options,
                     request_cancel,
                 )
@@ -236,19 +238,21 @@ async fn bridge_request(
                 .map(BridgeResponse::PreviewRecordingStatus)
         }
         BridgeRequest::PreviewRecordingStop { tab_id, .. } => {
-            let tab_id = match tab_id {
-                Some(tab_id) => tab_id,
-                None => {
-                    browser
-                        .active_recording_tab_for_owner(owner, thread)
-                        .await?
+            let (tab_id, recording_id) = match tab_id {
+                Some(tab_id) => {
+                    let recording_id = browser
+                        .recording_id_for_owner(owner, thread, &tab_id)
+                        .await?;
+                    (tab_id, recording_id)
                 }
+                None => browser.active_recording_for_owner(owner, thread).await?,
             };
             browser
                 .stop_preview_recording_with_cancel_for_owner(
                     owner,
                     thread,
                     &tab_id,
+                    &recording_id,
                     request_cancel,
                 )
                 .await

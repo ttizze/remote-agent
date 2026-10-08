@@ -396,6 +396,7 @@ enum ScreencastEvent {
 }
 
 pub(crate) struct StartResult {
+    pub(crate) recording_id: String,
     pub(crate) started_at: String,
     pub(crate) artifact_path: PathBuf,
     pub(crate) externally_detached: Arc<AtomicBool>,
@@ -407,6 +408,7 @@ pub(crate) struct StartResult {
 pub(crate) fn start(
     endpoint: String,
     tab_id: String,
+    recording_id: String,
     recording_directory: PathBuf,
     width: u32,
     height: u32,
@@ -418,8 +420,7 @@ pub(crate) fn start(
     std::fs::create_dir_all(&recording_directory)
         .map_err(|error| format!("recording storage is unavailable: {error}"))?;
     prune_directory(&recording_directory, protected_paths)?;
-    let id = format!("browser-recording-{}", uuid::Uuid::new_v4().simple());
-    let artifact_path = recording_directory.join(format!("{id}.webm"));
+    let artifact_path = recording_directory.join(format!("{recording_id}.webm"));
     let started_at = chrono::Utc::now().to_rfc3339();
     let (startup_sender, startup) = oneshot::channel();
     let externally_detached = Arc::new(AtomicBool::new(false));
@@ -428,7 +429,7 @@ pub(crate) fn start(
         endpoint,
         tab_id,
         recording_directory,
-        id,
+        recording_id.clone(),
         width,
         height,
         options,
@@ -439,6 +440,7 @@ pub(crate) fn start(
         externally_detached.clone(),
     ));
     Ok(StartResult {
+        recording_id,
         started_at,
         artifact_path,
         externally_detached,
@@ -494,7 +496,8 @@ async fn run(
                 .map_err(|error| format!("recording save-artifact failed: {error}"))?;
             partial_cleanup.disarm();
             Ok(PreviewRecordingArtifact {
-                id,
+                id: id.clone(),
+                recording_id: id,
                 tab_id,
                 path: final_path.to_string_lossy().into_owned(),
                 mime_type: MIME_TYPE.into(),

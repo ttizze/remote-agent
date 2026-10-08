@@ -484,11 +484,17 @@ impl DeviceState {
         device_id: String,
         code: String,
         key: String,
+        session_epoch: String,
         down: bool,
         modifiers: DeviceModifierFacts,
     ) -> Result<DeviceInputPlan, String> {
         let (target, platform) =
-            self.input_target(&thread_id, host_id.as_deref(), &device_id, None)?;
+            self.input_target(
+                &thread_id,
+                host_id.as_deref(),
+                &device_id,
+                Some(session_epoch.as_str()),
+            )?;
         let facts = canonical_device_key(&code, &key);
         let mut current_modifiers = modifiers;
         if is_modifier_code(&facts.code) {
@@ -589,8 +595,68 @@ impl DeviceState {
         self.input_state.remove(&Self::input_key(target));
     }
 
+    /// Builds releases for every native input owner in one thread before its
+    /// device subscription or thread view is torn down.  Session identity is
+    /// kept from the owned key, so a reconnect cannot redirect the cleanup to
+    /// a replacement session.
+    pub fn release_input_plans_for_thread(
+        &mut self,
+        thread_id: &ThreadId,
+    ) -> Vec<DeviceInputPlan> {
+        let thread_key = thread_id.to_string();
+        let targets = self
+            .input_state
+            .keys()
+            .filter(|(thread, _, _, _)| thread == &thread_key)
+            .map(|(_, host_id, device_id, session_epoch)| {
+                (host_id.clone(), device_id.clone(), session_epoch.clone())
+            })
+            .collect::<Vec<_>>();
+        targets
+            .into_iter()
+            .filter_map(|(host_id, device_id, session_epoch)| {
+                let state_key = (
+                    thread_key.clone(),
+                    host_id.clone(),
+                    device_id.clone(),
+                    session_epoch.clone(),
+                );
+                let plan = self.release_input_plan(
+                    thread_id.clone(),
+                    Some(host_id),
+                    device_id,
+                    Some(session_epoch),
+                );
+                match plan {
+                    Ok(plan) => plan,
+                    Err(_) => {
+                        // The Host may have closed the session before the
+                        // stream teardown reached the owner.  There is no
+                        // valid target left to release on the wire, but the
+                        // local ownership record must still be discarded.
+                        self.input_state.remove(&state_key);
+                        None
+                    }
+                }
+            })
+            .collect()
+    }
+
     pub fn clear_input_state_on_disconnect(&mut self) {
         self.input_state.clear();
+    }
+
+    /// Returns whether a planned native input still targets the live session
+    /// that owned it.  The connection owner checks this immediately before
+    /// admitting the wire job, so a thread switch or reconnect cannot send a
+    /// queued release or key to a replacement session.
+    pub fn accepts_input_target(&self, target: &DeviceInputTarget) -> bool {
+        self.sessions.iter().any(|session| {
+            session.thread_id == target.thread_id
+                && session.host_id == target.host_id
+                && session.device_id == target.device_id
+                && session.session_epoch == target.session_epoch
+        })
     }
 
     pub fn enqueue_duo(
@@ -672,6 +738,10 @@ impl DeviceState {
             request.device_id.clone(),
             request.session_epoch.clone(),
         );
+        if !self.accepts_duo_request(request) {
+            self.duo_controls.remove(&key);
+            return None;
+        }
         let queued = {
             let control = self.duo_controls.get_mut(&key)?;
             if control.active_request_id != Some(request.request_id) {
@@ -707,6 +777,23 @@ impl DeviceState {
         }
         self.duo_controls.remove(&key);
         None
+    }
+
+    /// Checks the immutable target captured when a Duo command was admitted.
+    /// Callers perform this check again immediately before dispatching a
+    /// queued command so a close or reconnect cannot send it to a replacement
+    /// session that happens to reuse the same device id.
+    pub fn accepts_duo_request(&self, request: &DeviceDuoRequest) -> bool {
+        let host_id = request
+            .host_id
+            .as_deref()
+            .unwrap_or(agent_protocol::device::LOCAL_DEVICE_HOST_ID);
+        self.accepts_thread_event(
+            &request.thread_id,
+            host_id,
+            &request.device_id,
+            &request.session_epoch,
+        )
     }
 
     pub fn fail_duo(&mut self, request: &DeviceDuoRequest, error: impl Into<String>) {
@@ -1327,6 +1414,7 @@ mod tests {
                 current.device_id.clone(),
                 "KeyA".into(),
                 "A".into(),
+                current.session_epoch.clone(),
                 true,
                 shifted,
             )
@@ -1426,6 +1514,31 @@ mod tests {
             Some("Duo control failed")
         );
         state.apply_event(DeviceEvent::State(DeviceServiceState::default()));
+        assert!(state.duo_controls.is_empty());
+    }
+
+    #[test]
+    fn promoted_duo_is_rejected_after_the_session_epoch_changes() {
+        let current = session("thread", "host", "device");
+        let mut state = DeviceState::default();
+        state.apply_event(DeviceEvent::State(DeviceServiceState {
+            sessions: vec![current.clone()],
+            ..DeviceServiceState::default()
+        }));
+        let request = state
+            .enqueue_duo(
+                current.thread_id.clone(),
+                Some(current.host_id.clone()),
+                current.device_id.clone(),
+                crate::state::DeviceDuoCommandIntent::Angle { value: 60.0 },
+            )
+            .unwrap()
+            .unwrap();
+        state.sessions[0].session_epoch = "reconnected".into();
+        assert!(!state.accepts_duo_request(&request));
+        // A queued command must never be sent to a replacement session that
+        // reused the same device id.
+        assert!(state.complete_duo(&request, true, None).is_none());
         assert!(state.duo_controls.is_empty());
     }
 

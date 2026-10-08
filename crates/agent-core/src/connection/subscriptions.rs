@@ -204,10 +204,20 @@ impl Owner {
     }
 
     fn close_thread_streams(&mut self, thread: &ThreadId) {
+        self.release_device_inputs(thread);
         self.close_stream(&StreamKey::Thread(thread.clone()));
         self.close_stream(&StreamKey::Setup(thread.clone()));
         self.close_stream(&StreamKey::Preview(thread.clone()));
         self.close_stream(&StreamKey::Device(thread.clone()));
+    }
+
+    /// Releases every key and modifier owned by the thread before its Host
+    /// device stream disappears.  The plans are admitted through the same
+    /// ordered input queue as ordinary events.
+    pub(super) fn release_device_inputs(&mut self, thread: &ThreadId) {
+        for plan in self.state.device.release_input_plans_for_thread(thread) {
+            self.job_device_inputs(plan.inputs, plan.target, None);
+        }
     }
 
     /// The archive is subscribed only while it is shown.

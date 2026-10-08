@@ -117,6 +117,7 @@ enum RecordingStartupState {
 struct ActiveRecording {
     cancel: CancellationToken,
     abort: tokio::task::AbortHandle,
+    recording_id: String,
     artifact_path: PathBuf,
     startup: watch::Sender<RecordingStartupState>,
     done: tokio::sync::watch::Sender<
@@ -341,33 +342,19 @@ impl Browser {
             .map_err(|_| "terminal metadata already configured".to_owned())
     }
 
-    pub async fn start_preview_recording(
-        &self,
-        thread: &str,
-        tab_id: &str,
-        options: agent_protocol::preview::PreviewRecordingOptions,
-    ) -> Result<agent_protocol::preview::PreviewRecordingStatus, String> {
-        self.start_preview_recording_with_cancel_for_owner(
-            "local",
-            thread,
-            tab_id,
-            options,
-            CancellationToken::new(),
-        )
-        .await
-    }
-
     pub(crate) async fn start_preview_recording_for_owner(
         &self,
         owner: &str,
         thread: &str,
         tab_id: &str,
+        recording_id: String,
         options: agent_protocol::preview::PreviewRecordingOptions,
     ) -> Result<agent_protocol::preview::PreviewRecordingStatus, String> {
         self.start_preview_recording_with_cancel_for_owner(
             owner,
             thread,
             tab_id,
+            recording_id,
             options,
             CancellationToken::new(),
         )
@@ -379,6 +366,7 @@ impl Browser {
         owner: &str,
         thread: &str,
         tab_id: &str,
+        recording_id: String,
         options: agent_protocol::preview::PreviewRecordingOptions,
         request_cancel: CancellationToken,
     ) -> Result<agent_protocol::preview::PreviewRecordingStatus, String> {
@@ -443,6 +431,7 @@ impl Browser {
         let started = recording::start(
             endpoint,
             tab_id.to_owned(),
+            recording_id,
             self.bridge_directory.path().join("recordings"),
             width,
             height,
@@ -452,6 +441,7 @@ impl Browser {
             self.stop.clone(),
         )?;
         let recording::StartResult {
+            recording_id,
             started_at,
             artifact_path,
             externally_detached,
@@ -471,6 +461,7 @@ impl Browser {
             ActiveRecording {
                 cancel,
                 abort,
+                recording_id: recording_id.clone(),
                 artifact_path,
                 startup: startup_state.clone(),
                 done: done.clone(),
@@ -489,6 +480,7 @@ impl Browser {
         let monitor_key = key.clone();
         let monitor_tab_id = tab_id.to_owned();
         let monitor_thread = thread.to_owned();
+        let monitor_recording_id = recording_id.clone();
         tokio::spawn(async move {
             let result = match task.await {
                 Ok(result) => result,
@@ -497,18 +489,33 @@ impl Browser {
             let mut paths_to_remove = Vec::new();
             let mut invalidated_recordings = Vec::new();
             if let Ok(artifact) = &result {
+                // Keep the artifact only while this monitor still owns the
+                // active lifetime.  A late completion after close or a new
+                // start on the same tab must not become the tab's artifact.
                 let mut artifacts = recording_artifacts.lock().await;
-                let entries = artifacts.entry(monitor_key.clone()).or_default();
-                entries.push(artifact.clone());
-                // One completed artifact per tab is enough for a duplicate
-                // stop or a client that is still displaying Save/Attach.
-                while entries.len() > 1 {
-                    paths_to_remove.push(PathBuf::from(entries.remove(0).path));
-                }
-                let evicted = prune_completed_recordings(&mut artifacts, MAX_RETAINED_RECORDINGS);
-                for (key, path) in evicted {
-                    invalidated_recordings.push(key);
-                    paths_to_remove.push(path);
+                let current_lifetime_matches = recordings
+                    .lock()
+                    .await
+                    .get(&monitor_key)
+                    .is_some_and(|active| {
+                        active.recording_id.as_str() == monitor_recording_id.as_str()
+                            && artifact.recording_id.as_str() == monitor_recording_id.as_str()
+                    });
+                if current_lifetime_matches {
+                    let entries = artifacts.entry(monitor_key.clone()).or_default();
+                    entries.push(artifact.clone());
+                    // One completed artifact per tab is enough for a duplicate
+                    // stop or a client that is still displaying Save/Attach.
+                    while entries.len() > 1 {
+                        paths_to_remove.push(PathBuf::from(entries.remove(0).path));
+                    }
+                    let evicted = prune_completed_recordings(&mut artifacts, MAX_RETAINED_RECORDINGS);
+                    for (key, path) in evicted {
+                        invalidated_recordings.push(key);
+                        paths_to_remove.push(path);
+                    }
+                } else {
+                    paths_to_remove.push(PathBuf::from(artifact.path.clone()));
                 }
             }
             drop(recording_artifacts);
@@ -532,7 +539,11 @@ impl Browser {
             if let Some(preview) = preview.as_ref()
                 && let Ok(thread_id) = agent_domain::ThreadId::new(monitor_thread.clone())
             {
-                preview.recording_finished(&thread_id, &monitor_tab_id);
+                preview.recording_finished(
+                    &thread_id,
+                    &monitor_tab_id,
+                    &monitor_recording_id,
+                );
             }
             if externally_detached
                 && let Some(preview) = preview.as_ref()
@@ -540,7 +551,15 @@ impl Browser {
             {
                 preview.close(&thread_id, Some(&monitor_tab_id));
             }
-            recordings.lock().await.remove(&monitor_key);
+            let mut recordings = recordings.lock().await;
+            if recordings
+                .get(&monitor_key)
+                .is_some_and(|active| {
+                    active.recording_id.as_str() == monitor_recording_id.as_str()
+                })
+            {
+                recordings.remove(&monitor_key);
+            }
         });
         let startup_future = recording::await_startup(startup);
         tokio::pin!(startup_future);
@@ -576,6 +595,7 @@ impl Browser {
         }
         let status = agent_protocol::preview::PreviewRecordingStatus {
             tab_id: tab_id.to_owned(),
+            recording_id: recording_id.clone(),
             recording: true,
             started_at: Some(started_at),
         };
@@ -610,7 +630,7 @@ impl Browser {
             }
             if !self.recordings.lock().await.contains_key(&key) {
                 if let Ok(thread_id) = agent_domain::ThreadId::new(thread.to_owned()) {
-                    preview.recording_finished(&thread_id, tab_id);
+                    preview.recording_finished(&thread_id, tab_id, &recording_id);
                 }
                 self.discard_recording_artifact_path(&key, &artifact_path_for_failure)
                     .await;
@@ -625,31 +645,18 @@ impl Browser {
         Ok(status)
     }
 
-    pub async fn stop_preview_recording(
-        &self,
-        thread: &str,
-        tab_id: &str,
-    ) -> Result<agent_protocol::preview::PreviewRecordingArtifact, String> {
-        self.stop_preview_recording_with_timeout_for_owner(
-            "local",
-            thread,
-            tab_id,
-            Duration::from_secs(agent_protocol::preview::PREVIEW_RECORDING_MAX_DURATION_SECONDS),
-            None,
-        )
-        .await
-    }
-
     pub(crate) async fn stop_preview_recording_for_owner(
         &self,
         owner: &str,
         thread: &str,
         tab_id: &str,
+        recording_id: &str,
     ) -> Result<agent_protocol::preview::PreviewRecordingArtifact, String> {
         self.stop_preview_recording_with_timeout_for_owner(
             owner,
             thread,
             tab_id,
+            Some(recording_id),
             Duration::from_secs(agent_protocol::preview::PREVIEW_RECORDING_MAX_DURATION_SECONDS),
             None,
         )
@@ -661,12 +668,14 @@ impl Browser {
         owner: &str,
         thread: &str,
         tab_id: &str,
+        recording_id: &str,
         request_cancel: CancellationToken,
     ) -> Result<agent_protocol::preview::PreviewRecordingArtifact, String> {
         self.stop_preview_recording_with_timeout_for_owner(
             owner,
             thread,
             tab_id,
+            Some(recording_id),
             Duration::from_secs(agent_protocol::preview::PREVIEW_RECORDING_MAX_DURATION_SECONDS),
             Some(request_cancel),
         )
@@ -678,6 +687,7 @@ impl Browser {
         owner: &str,
         thread: &str,
         tab_id: &str,
+        expected_recording_id: Option<&str>,
         timeout: Duration,
         request_cancel: Option<CancellationToken>,
     ) -> Result<agent_protocol::preview::PreviewRecordingArtifact, String> {
@@ -696,6 +706,13 @@ impl Browser {
             let mut recordings = self.recordings.lock().await;
             match recordings.get_mut(&key) {
                 Some(active) => {
+                    if expected_recording_id
+                        .is_some_and(|expected| expected != active.recording_id)
+                    {
+                        return Err(format!(
+                            "recording lifetime changed for preview tab {tab_id}"
+                        ));
+                    }
                     let initiate_stop = begin_recording_stop(&mut active.stopping);
                     Some((
                         active.cancel.clone(),
@@ -703,14 +720,16 @@ impl Browser {
                         active.done.subscribe(),
                         active.startup.subscribe(),
                         initiate_stop,
+                        active.recording_id.clone(),
                     ))
                 }
                 None => None,
             }
         };
-        let Some((cancel, abort, mut done, mut startup, initiate_stop)) = active else {
+        let Some((cancel, abort, mut done, mut startup, initiate_stop, recording_id)) = active
+        else {
             return self
-                .completed_recording(&key)
+                .completed_recording(&key, expected_recording_id)
                 .await
                 .ok_or_else(|| format!("recording is not active for preview tab {tab_id}"));
         };
@@ -764,15 +783,33 @@ impl Browser {
                 return Err(error);
             }
         }?;
-        result
+        if result.recording_id.as_str() != recording_id.as_str() {
+            return Err(format!(
+                "recording completion identity did not match preview tab {tab_id}"
+            ));
+        }
+        Ok(result)
     }
 
-    async fn completed_recording(&self, key: &RecordingKey) -> Option<RecordingArtifact> {
+    async fn completed_recording(
+        &self,
+        key: &RecordingKey,
+        expected_recording_id: Option<&str>,
+    ) -> Option<RecordingArtifact> {
         self.recording_artifacts
             .lock()
             .await
             .get(key)
-            .and_then(|artifacts| artifacts.last().cloned())
+            .and_then(|artifacts| {
+                artifacts
+                    .iter()
+                    .rev()
+                    .find(|artifact| {
+                        expected_recording_id
+                            .is_none_or(|expected| expected == artifact.recording_id)
+                    })
+                    .cloned()
+            })
     }
 
     async fn clear_recording_artifacts(&self, key: &RecordingKey) {
@@ -870,19 +907,15 @@ impl Browser {
         }
     }
 
-    pub async fn active_recording_tab(&self, thread: &str) -> Result<String, String> {
-        self.active_recording_tab_for_owner("local", thread).await
-    }
-
-    pub(crate) async fn active_recording_tab_for_owner(
+    pub(crate) async fn active_recording_for_owner(
         &self,
         owner: &str,
         thread: &str,
-    ) -> Result<String, String> {
+    ) -> Result<(String, String), String> {
         let state = self.state.lock().await;
         let recordings = self.recordings.lock().await;
         let mut tabs = recordings
-            .keys()
+            .iter()
             .filter(|(scope, tab_id)| {
                 scope == thread
                     && state
@@ -892,14 +925,36 @@ impl Browser {
                         .map(String::as_str)
                         == Some(owner)
             })
-            .map(|(_, tab)| tab.clone());
+            .map(|((_, tab), active)| (tab.clone(), active.recording_id.clone()));
         match (tabs.next(), tabs.next()) {
-            (Some(tab), None) => Ok(tab),
+            (Some(recording), None) => Ok(recording),
             (None, _) => Err("no Preview recording is active for this conversation".into()),
             (Some(_), Some(_)) => {
                 Err("multiple Preview recordings are active; specify tab_id".into())
             }
         }
+    }
+
+    pub(crate) async fn recording_id_for_owner(
+        &self,
+        owner: &str,
+        thread: &str,
+        tab_id: &str,
+    ) -> Result<String, String> {
+        let state = self.state.lock().await;
+        let page = state
+            .pages
+            .get(thread)
+            .ok_or_else(|| "preview thread was not found".to_owned())?;
+        if page.preview_profile_owners.get(tab_id).map(String::as_str) != Some(owner) {
+            return Err("Preview tab belongs to another Host session".into());
+        }
+        self.recordings
+            .lock()
+            .await
+            .get(&(thread.to_owned(), tab_id.to_owned()))
+            .map(|active| active.recording_id.clone())
+            .ok_or_else(|| format!("recording is not active for preview tab {tab_id}"))
     }
 
     pub async fn preview_active_tab(&self, thread: &str) -> Result<String, String> {
@@ -984,7 +1039,12 @@ impl Browser {
                 token.clone()
             } else {
                 let token = uuid::Uuid::new_v4().simple().to_string();
-                let owner = format!("mcp:{thread}");
+                // The provider browser is the collaborative browser surface
+                // for this conversation.  It must use the shared owner so
+                // the agent and human see the same tabs and cookie jar;
+                // client-local Preview profiles remain isolated by their
+                // profile owner when explicitly selected.
+                let owner = "local".to_owned();
                 scopes.insert(
                     token.clone(),
                     BrowserBridgeScope {
@@ -1655,12 +1715,19 @@ impl Browser {
             return Err(format!("closing Preview tab {tab_id} was cancelled"));
         }
         let key = (thread.to_owned(), tab_id.to_owned());
-        let stop_result = if self.recordings.lock().await.contains_key(&key) {
+        let active_recording_id = self
+            .recordings
+            .lock()
+            .await
+            .get(&key)
+            .map(|active| active.recording_id.clone());
+        let stop_result = if let Some(recording_id) = active_recording_id.as_deref() {
             let result = self
                 .stop_preview_recording_with_timeout_for_owner(
                     owner,
                     thread,
                     tab_id,
+                    Some(recording_id),
                     Duration::from_secs(
                         agent_protocol::preview::PREVIEW_RECORDING_MAX_DURATION_SECONDS,
                     ),
@@ -1930,6 +1997,7 @@ impl Browser {
             .map(
                 |((_, tab_id), active)| agent_protocol::preview::PreviewRecordingStatus {
                     tab_id: tab_id.clone(),
+                    recording_id: active.recording_id.clone(),
                     recording: true,
                     started_at: Some(active.started_at.clone()),
                 },
