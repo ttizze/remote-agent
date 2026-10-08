@@ -40,10 +40,12 @@ struct ThreadListScreen: View {
                     model.snapshot.scopedThreadId(threadId: $0)
                 }
             )
-            if model.environmentSnapshots.count > 1 {
-                aggregateContent(aggregate)
-            } else {
-                content(list, now: now)
+            Group {
+                if model.environmentSnapshots.count > 1 {
+                    aggregateContent(aggregate)
+                } else {
+                    content(list, now: now)
+                }
             }
             .task(id: list.nextSnoozeWakeAtMs) {
                 guard let wake = list.nextSnoozeWakeAtMs else { return }
@@ -147,7 +149,7 @@ struct ThreadListScreen: View {
                     .listRowBackground(Color.clear)
                 }
                 ForEach(list.pendingTasks, id: \.task.key) { item in
-                    let actions = pendingTaskActions(kind: item.task.kind, projectId: item.task.projectId)
+                    let actions = pendingTaskActions(kind: item.task.kind)
                     PendingTaskRowView(task: item.task, icon: nil, sidebar: sidebar,
                                        status: actions.status, isDraft: actions.isDraft)
                         .onTapGesture {
