@@ -7,7 +7,11 @@ use agent_protocol::usage::{
     Bucket, CategoryCost, CostSource, Provider, Resolution, SummaryInput, TokenTotals,
 };
 use chrono::{DateTime, FixedOffset, TimeZone, Utc};
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    fs,
+    path::{Component, Path, PathBuf},
+};
 
 #[derive(Debug, Default)]
 struct Mutable {
@@ -30,18 +34,231 @@ pub(crate) struct Stats {
     pub out_of_window: u64,
 }
 
-fn zone_offset(time_zone: &str) -> FixedOffset {
-    if time_zone.eq_ignore_ascii_case("utc") || time_zone == "Z" {
-        return FixedOffset::east_opt(0).unwrap();
-    }
-    let normalized = time_zone.strip_prefix("UTC").unwrap_or(time_zone);
-    let Ok(value) = normalized.parse::<chrono::FixedOffset>() else {
-        return FixedOffset::east_opt(0).unwrap();
-    };
-    value
+#[derive(Debug, Clone)]
+pub(crate) enum Zone {
+    Fixed(FixedOffset),
+    Iana(IanaZone),
 }
 
-pub(crate) fn in_window(input: &SummaryInput, timestamp_ms: i64) -> bool {
+#[derive(Debug, Clone)]
+pub(crate) struct IanaZone {
+    transitions: Vec<(i64, i32)>,
+    default_offset_seconds: i32,
+}
+
+impl Zone {
+    fn offset_seconds(&self, timestamp_ms: i64) -> i32 {
+        match self {
+            Self::Fixed(offset) => offset.local_minus_utc(),
+            Self::Iana(zone) => {
+                let seconds = timestamp_ms.div_euclid(1_000);
+                zone.transitions
+                    .iter()
+                    .take_while(|(at, _)| *at <= seconds)
+                    .last()
+                    .map(|(_, offset)| *offset)
+                    .unwrap_or(zone.default_offset_seconds)
+            }
+        }
+    }
+}
+
+const TZIF_HEADER_LENGTH: usize = 44;
+
+fn u32_at(bytes: &[u8], offset: usize) -> Option<u32> {
+    bytes
+        .get(offset..offset.checked_add(4)?)
+        .and_then(|bytes| bytes.try_into().ok())
+        .map(u32::from_be_bytes)
+}
+
+fn i32_at(bytes: &[u8], offset: usize) -> Option<i32> {
+    u32_at(bytes, offset).map(|value| value as i32)
+}
+
+fn i64_at(bytes: &[u8], offset: usize) -> Option<i64> {
+    bytes
+        .get(offset..offset.checked_add(8)?)
+        .and_then(|bytes| bytes.try_into().ok())
+        .map(i64::from_be_bytes)
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TzifHeader {
+    version: u8,
+    leap_count: usize,
+    time_count: usize,
+    type_count: usize,
+    abbreviation_count: usize,
+    standard_count: usize,
+    utc_count: usize,
+}
+
+fn tzif_header(bytes: &[u8], offset: usize) -> Option<TzifHeader> {
+    let header = bytes.get(offset..offset.checked_add(TZIF_HEADER_LENGTH)?)?;
+    (header.get(..4)? == b"TZif").then_some(TzifHeader {
+        version: header[4],
+        leap_count: u32_at(header, 28)? as usize,
+        time_count: u32_at(header, 32)? as usize,
+        type_count: u32_at(header, 36)? as usize,
+        abbreviation_count: u32_at(header, 40)? as usize,
+        standard_count: u32_at(header, 20)? as usize,
+        utc_count: u32_at(header, 24)? as usize,
+    })
+}
+
+fn tzif_block_length(header: TzifHeader, time_width: usize) -> Option<usize> {
+    header
+        .time_count
+        .checked_mul(time_width)?
+        .checked_add(header.time_count)?
+        .checked_add(header.type_count.checked_mul(6)?)?
+        .checked_add(header.abbreviation_count)?
+        .checked_add(header.leap_count.checked_mul(time_width.checked_add(4)?)?)?
+        .checked_add(header.standard_count)?
+        .checked_add(header.utc_count)
+}
+
+fn parse_tzif(bytes: &[u8]) -> Option<IanaZone> {
+    let first = tzif_header(bytes, 0)?;
+    let (header, block_offset, time_width) = if matches!(first.version, b'2' | b'3' | b'4') {
+        let first_block = tzif_block_length(first, 4)?;
+        let second_offset = TZIF_HEADER_LENGTH.checked_add(first_block)?;
+        (
+            tzif_header(bytes, second_offset)?,
+            second_offset + TZIF_HEADER_LENGTH,
+            8,
+        )
+    } else {
+        (first, TZIF_HEADER_LENGTH, 4)
+    };
+    if header.type_count == 0 {
+        return None;
+    }
+    let times_length = header.time_count.checked_mul(time_width)?;
+    let times_end = block_offset.checked_add(times_length)?;
+    let indices_end = times_end.checked_add(header.time_count)?;
+    let types_end = indices_end.checked_add(header.type_count.checked_mul(6)?)?;
+    let _block_end = types_end
+        .checked_add(header.abbreviation_count)?
+        .checked_add(header.leap_count.checked_mul(time_width.checked_add(4)?)?)?
+        .checked_add(header.standard_count)?
+        .checked_add(header.utc_count)?;
+    if _block_end > bytes.len() {
+        return None;
+    }
+    let mut offsets = Vec::with_capacity(header.type_count);
+    for index in 0..header.type_count {
+        offsets.push(i32_at(bytes, indices_end + index * 6)?);
+    }
+    let mut transitions = Vec::with_capacity(header.time_count);
+    for index in 0..header.time_count {
+        let at = if time_width == 8 {
+            i64_at(bytes, block_offset + index * 8)?
+        } else {
+            i32_at(bytes, block_offset + index * 4)? as i64
+        };
+        let type_index = *bytes.get(times_end + index)? as usize;
+        let offset = *offsets.get(type_index)?;
+        transitions.push((at, offset));
+    }
+    Some(IanaZone {
+        transitions,
+        default_offset_seconds: offsets[0],
+    })
+}
+
+fn valid_zone_name(name: &str) -> bool {
+    !name.is_empty()
+        && !Path::new(name).is_absolute()
+        && Path::new(name)
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
+        && !name.bytes().any(|byte| byte == 0)
+}
+
+fn zoneinfo_paths(name: &str) -> impl Iterator<Item = PathBuf> {
+    let mut paths = Vec::new();
+    if let Ok(directory) = std::env::var("TZDIR")
+        && !directory.is_empty()
+    {
+        paths.push(PathBuf::from(directory).join(name));
+    }
+    paths.extend([
+        PathBuf::from("/usr/share/zoneinfo").join(name),
+        PathBuf::from("/usr/share/lib/zoneinfo").join(name),
+        PathBuf::from("/etc/zoneinfo").join(name),
+    ]);
+    paths.into_iter()
+}
+
+pub(crate) fn parse_zone(time_zone: &str) -> Result<Zone, String> {
+    if time_zone.eq_ignore_ascii_case("utc") || time_zone == "Z" {
+        return Ok(Zone::Fixed(FixedOffset::east_opt(0).unwrap()));
+    }
+    let normalized = time_zone
+        .get(..3)
+        .filter(|prefix| prefix.eq_ignore_ascii_case("UTC") || prefix.eq_ignore_ascii_case("GMT"))
+        .map(|_| &time_zone[3..])
+        .unwrap_or(time_zone);
+    if let Some(offset) = parse_fixed_offset(normalized) {
+        return Ok(Zone::Fixed(offset));
+    }
+    if !valid_zone_name(time_zone) {
+        return Err(format!("サポートされていないタイムゾーンです: {time_zone}"));
+    }
+    for path in zoneinfo_paths(time_zone) {
+        if let Ok(bytes) = fs::read(path)
+            && let Some(zone) = parse_tzif(&bytes)
+        {
+            return Ok(Zone::Iana(zone));
+        }
+    }
+    Err(format!("タイムゾーンの定義を読み込めません: {time_zone}"))
+}
+
+fn parse_fixed_offset(value: &str) -> Option<FixedOffset> {
+    if value.is_empty() {
+        return FixedOffset::east_opt(0);
+    }
+    let sign = match value.as_bytes().first()? {
+        b'+' => 1,
+        b'-' => -1,
+        _ => return None,
+    };
+    let digits = &value[1..];
+    if !digits
+        .bytes()
+        .all(|byte| byte.is_ascii_digit() || byte == b':')
+    {
+        return None;
+    }
+    let (hours, minutes) = if let Some((hours, minutes)) = digits.split_once(':') {
+        (hours.parse::<i32>().ok()?, minutes.parse::<i32>().ok()?)
+    } else if digits.len() == 4 {
+        (
+            digits[..2].parse::<i32>().ok()?,
+            digits[2..].parse::<i32>().ok()?,
+        )
+    } else {
+        (digits.parse::<i32>().ok()?, 0)
+    };
+    if !(0..=23).contains(&hours) || !(0..=59).contains(&minutes) {
+        return None;
+    }
+    let seconds = sign * (hours * 3_600 + minutes * 60);
+    FixedOffset::east_opt(seconds)
+}
+
+fn day(timestamp_ms: i64, zone: &Zone) -> Option<String> {
+    let offset_ms = i64::from(zone.offset_seconds(timestamp_ms)).checked_mul(1_000)?;
+    let local_ms = timestamp_ms.checked_add(offset_ms)?;
+    Utc.timestamp_millis_opt(local_ms)
+        .single()
+        .map(|value| value.format("%Y-%m-%d").to_string())
+}
+
+pub(crate) fn in_window_with_zone(input: &SummaryInput, timestamp_ms: i64, zone: &Zone) -> bool {
     if matches!(input.resolution, Some(Resolution::Hour)) {
         let Some(since) = input
             .since_time
@@ -61,22 +278,10 @@ pub(crate) fn in_window(input: &SummaryInput, timestamp_ms: i64) -> bool {
         };
         return timestamp_ms >= since && timestamp_ms < until;
     }
-    let day = day(timestamp_ms, zone_offset(&input.time_zone));
+    let Some(day) = day(timestamp_ms, zone) else {
+        return false;
+    };
     day >= input.since_day && day <= input.until_day
-}
-
-fn day(timestamp_ms: i64, offset: FixedOffset) -> String {
-    offset
-        .timestamp_millis_opt(timestamp_ms)
-        .single()
-        .unwrap_or_else(|| {
-            Utc.timestamp_millis_opt(timestamp_ms)
-                .single()
-                .unwrap()
-                .with_timezone(&offset)
-        })
-        .format("%Y-%m-%d")
-        .to_string()
 }
 
 fn add_totals(target: &mut TokenTotals, source: &TokenTotals) {
@@ -140,8 +345,8 @@ pub(crate) fn aggregate(
     records: impl IntoIterator<Item = (Record, String)>,
     rates: &pricing::RateTable,
     overrides: &pricing::RateTable,
-) -> (Vec<Bucket>, Stats) {
-    let offset = zone_offset(&input.time_zone);
+) -> Result<(Vec<Bucket>, Stats), String> {
+    let zone = parse_zone(&input.time_zone)?;
     let hourly = matches!(input.resolution, Some(Resolution::Hour));
     let since_time = input
         .since_time
@@ -158,22 +363,29 @@ pub(crate) fn aggregate(
             stats.duplicates_dropped += 1;
             continue;
         }
-        if !in_window(input, record.timestamp_ms) {
+        if !in_window_with_zone(input, record.timestamp_ms, &zone) {
             stats.out_of_window += 1;
             continue;
         }
-        let day = day(record.timestamp_ms, offset);
+        let Some(day) = day(record.timestamp_ms, &zone) else {
+            stats.out_of_window += 1;
+            continue;
+        };
         if let Some(model) = resolve_alias(&input.model_aliases, &record.model) {
             record.model = model;
         }
         let hour_start = if hourly {
             let since = since_time.unwrap_or(record.timestamp_ms);
             let index = record.timestamp_ms.saturating_sub(since) / 3_600_000;
-            Some(
-                DateTime::from_timestamp_millis(since + index * 3_600_000)
-                    .unwrap_or_else(|| Utc.timestamp_millis_opt(since).single().unwrap())
-                    .to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true),
-            )
+            let Some(start) = since.checked_add(index.saturating_mul(3_600_000)) else {
+                stats.out_of_window += 1;
+                continue;
+            };
+            let Some(start) = DateTime::from_timestamp_millis(start) else {
+                stats.out_of_window += 1;
+                continue;
+            };
+            Some(start.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true))
         } else {
             None
         };
@@ -256,7 +468,7 @@ pub(crate) fn aggregate(
             .then(a.provider.cmp(&b.provider))
             .then(a.model.cmp(&b.model))
     });
-    (output, stats)
+    Ok((output, stats))
 }
 
 #[cfg(test)]
@@ -292,9 +504,38 @@ mod tests {
             ],
             &HashMap::new(),
             &HashMap::new(),
-        );
+        )
+        .unwrap();
         assert_eq!(stats.duplicates_dropped, 1);
         assert_eq!(buckets[0].model, "final");
         assert_eq!(buckets[0].records, 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn iana_zone_uses_dst_transitions_for_day_buckets() {
+        let zone = parse_zone("America/New_York").unwrap();
+        let before_spring = DateTime::parse_from_rfc3339("2026-03-08T04:30:00Z")
+            .unwrap()
+            .timestamp_millis();
+        let after_spring = DateTime::parse_from_rfc3339("2026-03-08T05:30:00Z")
+            .unwrap()
+            .timestamp_millis();
+        assert_eq!(day(before_spring, &zone).as_deref(), Some("2026-03-07"));
+        assert_eq!(day(after_spring, &zone).as_deref(), Some("2026-03-08"));
+        assert_eq!(zone.offset_seconds(before_spring), -18_000);
+        assert_eq!(zone.offset_seconds(after_spring), -14_400);
+    }
+
+    #[test]
+    fn invalid_iana_zone_is_rejected_instead_of_becoming_utc() {
+        assert!(parse_zone("Not/AZone").is_err());
+        assert!(parse_zone("../UTC").is_err());
+    }
+
+    #[test]
+    fn fixed_mobile_zone_identifiers_are_supported() {
+        assert_eq!(parse_zone("GMT+0900").unwrap().offset_seconds(0), 9 * 3_600);
+        assert_eq!(parse_zone("UTC-07:30").unwrap().offset_seconds(0), -27_000);
     }
 }

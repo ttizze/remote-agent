@@ -230,6 +230,7 @@ impl UsageService {
         self.load_rates(false).await;
         let started = std::time::Instant::now();
         let aggregate_input = input.clone();
+        let aggregate_zone = aggregation::parse_zone(&aggregate_input.time_zone)?;
         let (rates, cache, scan_cache_path) = {
             let rates = self
                 .rates
@@ -281,7 +282,13 @@ impl UsageService {
                 let distinct_sessions = result
                     .records
                     .iter()
-                    .filter(|record| aggregation::in_window(&aggregate_input, record.timestamp_ms))
+                    .filter(|record| {
+                        aggregation::in_window_with_zone(
+                            &aggregate_input,
+                            record.timestamp_ms,
+                            &aggregate_zone,
+                        )
+                    })
                     .filter_map(|record| {
                         (!record.session_id.is_empty()).then_some(&record.session_id)
                     })
@@ -303,7 +310,7 @@ impl UsageService {
                 ));
             }
             let (buckets, _stats) =
-                aggregation::aggregate(&aggregate_input, all_records, &rates, &overrides);
+                aggregation::aggregate(&aggregate_input, all_records, &rates, &overrides)?;
             let _ =
                 std::fs::create_dir_all(scan_cache_path.parent().unwrap_or_else(|| Path::new(".")));
             if let Ok(bytes) = serde_json::to_vec(&*cache_guard) {
@@ -353,6 +360,7 @@ fn validate_input(input: &SummaryInput) -> Result<(), String> {
     {
         return Err("使用期間が不正です。".into());
     }
+    aggregation::parse_zone(&input.time_zone)?;
     if matches!(input.resolution, Some(usage::Resolution::Hour))
         && (input.since_time.is_none() || input.until_time.is_none())
     {
@@ -401,6 +409,13 @@ mod tests {
         input.resolution = Some(usage::Resolution::Hour);
         input.since_time = Some("2026-01-01T01:00:00Z".into());
         input.until_time = Some("2026-01-01T00:00:00Z".into());
+        assert!(validate_input(&input).is_err());
+    }
+
+    #[test]
+    fn unknown_time_zone_is_rejected_without_utc_fallback() {
+        let mut input = SummaryInput::daily("2026-01-01", "2026-01-01");
+        input.time_zone = "Not/AZone".into();
         assert!(validate_input(&input).is_err());
     }
 }
