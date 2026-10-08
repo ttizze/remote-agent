@@ -5,11 +5,17 @@ use agent_core::{
 use agent_transport::transport::{Endpoint, Relays, Ticket};
 use host_daemon::local_host::{LocalHost, LocalHostRegistry, LocalHostState};
 use std::{
+    io::Write,
     path::PathBuf,
     process::{Command, Stdio},
     sync::Arc,
     time::Duration,
 };
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct DesktopHandoffAttempt {
+    executable: PathBuf,
+}
 
 #[cfg(target_os = "linux")]
 mod linux;
@@ -486,6 +492,86 @@ fn resolve_installed_desktop_executable(
     resolve_installed_executable(directory, "desktop", &relative)
 }
 
+fn desktop_handoff_attempt_path(directory: &std::path::Path) -> PathBuf {
+    directory.join("transactions/desktop-handoff.json")
+}
+
+fn write_desktop_handoff_attempt(
+    directory: &std::path::Path,
+    executable: &std::path::Path,
+) -> anyhow::Result<bool> {
+    let path = desktop_handoff_attempt_path(directory);
+    let parent = path
+        .parent()
+        .expect("desktop handoff marker has a transaction directory");
+    host_daemon::platform::create_state_directory(parent)?;
+    let bytes = serde_json::to_vec(&DesktopHandoffAttempt {
+        executable: executable.to_owned(),
+    })?;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut marker = match options.open(&path) {
+        Ok(marker) => marker,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => return Ok(false),
+        Err(error) => return Err(error.into()),
+    };
+    if let Err(error) = marker.write_all(&bytes).and_then(|_| marker.sync_all()) {
+        let _ = std::fs::remove_file(&path);
+        return Err(error.into());
+    }
+    Ok(true)
+}
+
+fn acknowledge_desktop_handoff_at(
+    directory: &std::path::Path,
+    current_executable: &std::path::Path,
+) -> anyhow::Result<bool> {
+    let path = desktop_handoff_attempt_path(directory);
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.into()),
+    };
+    let attempt: DesktopHandoffAttempt = match serde_json::from_slice(&bytes) {
+        Ok(attempt) => attempt,
+        Err(_) => {
+            let _ = std::fs::remove_file(&path);
+            return Ok(false);
+        }
+    };
+    let current = std::fs::canonicalize(current_executable)?;
+    let expected = match std::fs::canonicalize(&attempt.executable) {
+        Ok(path) => path,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let _ = std::fs::remove_file(&path);
+            return Ok(false);
+        }
+        Err(error) => return Err(error.into()),
+    };
+    if current != expected {
+        return Ok(false);
+    }
+    std::fs::remove_file(path)?;
+    Ok(true)
+}
+
+pub(crate) fn acknowledge_installed_desktop_handoff() -> anyhow::Result<bool> {
+    let preferred = state_dir().map_err(anyhow::Error::msg)?;
+    let isolated = isolated_host()?;
+    let registry = if isolated {
+        LocalHostRegistry::new(preferred.clone())
+    } else {
+        LocalHostRegistry::for_user()?
+    };
+    let location = registry.resolve(&preferred)?;
+    acknowledge_desktop_handoff_at(&location.directory, &std::env::current_exe()?)
+}
+
 /// Hand off to an installed Desktop update before the old application starts.
 /// The registry lock makes a running Host a safe stop condition: the bundled
 /// application remains in place until the Host and its active tasks have
@@ -506,11 +592,25 @@ pub(crate) fn handoff_installed_desktop() -> anyhow::Result<bool> {
     if !matches!(location.state, LocalHostState::Stopped) {
         return Ok(false);
     }
+    let handoff_attempt = desktop_handoff_attempt_path(&location.directory);
+    if handoff_attempt.exists() {
+        let pending = std::fs::read(&handoff_attempt)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<DesktopHandoffAttempt>(&bytes).ok())
+            .is_some_and(|attempt| std::fs::symlink_metadata(attempt.executable).is_ok());
+        if pending {
+            return Ok(false);
+        }
+        let _ = std::fs::remove_file(&handoff_attempt);
+    }
     let Some(installed) = resolve_installed_desktop_executable(&location.directory)? else {
         return Ok(false);
     };
     let current = std::env::current_exe()?;
     if std::fs::canonicalize(&current).ok() == std::fs::canonicalize(&installed).ok() {
+        return Ok(false);
+    }
+    if !write_desktop_handoff_attempt(&location.directory, &installed)? {
         return Ok(false);
     }
     let arguments: Vec<_> = std::env::args_os().skip(1).collect();
@@ -521,13 +621,19 @@ pub(crate) fn handoff_installed_desktop() -> anyhow::Result<bool> {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    command.spawn()?;
+    if let Err(error) = command.spawn() {
+        let _ = std::fs::remove_file(desktop_handoff_attempt_path(&location.directory));
+        return Err(error.into());
+    }
     Ok(true)
 }
 
 #[cfg(test)]
 mod update_handoff_tests {
-    use super::{resolve_installed_desktop_executable, resolve_installed_host_executable};
+    use super::{
+        acknowledge_desktop_handoff_at, resolve_installed_desktop_executable,
+        resolve_installed_host_executable, write_desktop_handoff_attempt,
+    };
     use std::fs;
 
     #[test]
@@ -659,6 +765,20 @@ mod update_handoff_tests {
             resolve_installed_desktop_executable(directory.path()).expect("handoff read"),
             Some(executable),
         );
+    }
+
+    #[test]
+    fn desktop_handoff_waits_for_the_installed_process_to_acknowledge() {
+        let directory = tempfile::tempdir().expect("temporary Desktop state directory");
+        let expected = directory.path().join("installed-desktop");
+        let current = directory.path().join("current-desktop");
+        fs::write(&expected, b"installed").expect("installed executable");
+        fs::write(&current, b"current").expect("current executable");
+        assert!(write_desktop_handoff_attempt(directory.path(), &expected).expect("write marker"));
+        assert!(!write_desktop_handoff_attempt(directory.path(), &current).expect("claim marker"));
+        assert!(!acknowledge_desktop_handoff_at(directory.path(), &current).expect("old app"));
+        assert!(acknowledge_desktop_handoff_at(directory.path(), &expected).expect("new app"));
+        assert!(!super::desktop_handoff_attempt_path(directory.path()).exists());
     }
 }
 

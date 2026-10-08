@@ -116,7 +116,9 @@ function assertHttpsUrl(value, field) {
   } catch {
     throw new Error(`${field} must be an absolute HTTPS URL`);
   }
-  if (url.protocol !== "https:") throw new Error(`${field} must be an absolute HTTPS URL`);
+  if (url.protocol !== "https:" || !url.hostname || url.username || url.password) {
+    throw new Error(`${field} must be an absolute HTTPS URL without credentials`);
+  }
   return url.toString();
 }
 
@@ -136,6 +138,7 @@ function validateMetadata(metadata, source = "release metadata") {
   }
   if (metadata.assets !== undefined) {
     if (!Array.isArray(metadata.assets)) throw new Error("release metadata assets must be an array");
+    const assetNames = new Set();
     for (const asset of metadata.assets) {
       if (
         !asset ||
@@ -144,6 +147,8 @@ function validateMetadata(metadata, source = "release metadata") {
         /[\\/\0]/u.test(asset.name) ||
         asset.name === "." ||
         asset.name === ".." ||
+        !/^[A-Za-z0-9._-]+$/u.test(asset.name) ||
+        assetNames.has(asset.name) ||
         typeof asset.sha256 !== "string" ||
         !/^[0-9a-f]{64}$/u.test(asset.sha256) ||
         !Number.isSafeInteger(asset.size) ||
@@ -152,6 +157,7 @@ function validateMetadata(metadata, source = "release metadata") {
       ) {
         throw new Error("release metadata contains an invalid asset");
       }
+      assetNames.add(asset.name);
     }
   }
   if (metadata.native_updates !== undefined) {

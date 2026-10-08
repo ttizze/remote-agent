@@ -14,7 +14,8 @@ use std::{
     cmp::Ordering,
     collections::HashMap,
     fs as std_fs,
-    io::{Read, Write},
+    io::Read,
+    io::Write,
     path::{Path, PathBuf},
     sync::{
         Arc,
@@ -42,6 +43,8 @@ const MAX_DOWNLOAD_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_ARCHIVE_UNCOMPRESSED_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_METADATA_BYTES: u64 = 1024 * 1024;
 const COPY_BUFFER_SIZE: usize = 64 * 1024;
+const MAX_REDIRECTS: usize = 5;
+const MAX_ARCHIVE_ENTRIES: usize = 100_000;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ReleaseAsset {
@@ -87,11 +90,13 @@ pub(crate) struct UpdateManager {
     client: reqwest::Client,
     records: Arc<Mutex<HashMap<UpdateTarget, UpdateRecord>>>,
     operation_locks: Arc<HashMap<UpdateTarget, Arc<Mutex<()>>>>,
+    worker_locks: Arc<HashMap<UpdateTarget, Arc<Mutex<()>>>>,
     fences: Arc<HashMap<UpdateTarget, Arc<AtomicU64>>>,
 }
 
 struct UpdateOperation {
     _lock: OwnedMutexGuard<()>,
+    worker_lock: Option<OwnedMutexGuard<()>>,
     cancellation: CancellationToken,
     generation: u64,
     manager: UpdateManager,
@@ -111,6 +116,12 @@ impl UpdateOperation {
 
     fn fence(&self) -> Arc<AtomicU64> {
         self.fence.clone()
+    }
+
+    fn take_worker_lock(&mut self) -> OwnedMutexGuard<()> {
+        self.worker_lock
+            .take()
+            .expect("update worker lock is available until archive extraction starts")
     }
 
     fn complete(&mut self) {
@@ -207,7 +218,7 @@ impl UpdateManager {
         let client = reqwest::Client::builder()
             .timeout(UPDATE_TIMEOUT)
             .redirect(reqwest::redirect::Policy::custom(|attempt| {
-                if is_https_url(attempt.url()) {
+                if should_follow_redirect(attempt.previous().len(), attempt.url()) {
                     attempt.follow()
                 } else {
                     attempt.stop()
@@ -227,6 +238,12 @@ impl UpdateManager {
         ]
         .into_iter()
         .collect();
+        let worker_locks = [
+            (UpdateTarget::Host, Arc::new(Mutex::new(()))),
+            (UpdateTarget::Desktop, Arc::new(Mutex::new(()))),
+        ]
+        .into_iter()
+        .collect();
         Self {
             state_dir,
             metadata_url,
@@ -234,6 +251,7 @@ impl UpdateManager {
             client,
             records: Arc::default(),
             operation_locks: Arc::new(operation_locks),
+            worker_locks: Arc::new(worker_locks),
             fences: Arc::new(fences),
         }
     }
@@ -245,6 +263,13 @@ impl UpdateManager {
             .expect("all update targets have an operation lock")
             .clone();
         let guard = lock.lock_owned().await;
+        let worker_lock = self
+            .worker_locks
+            .get(&target)
+            .expect("all update targets have an update worker lock")
+            .clone()
+            .lock_owned()
+            .await;
         let fence = self
             .fences
             .get(&target)
@@ -253,6 +278,7 @@ impl UpdateManager {
         let generation = fence.fetch_add(1, AtomicOrdering::SeqCst).saturating_add(1);
         UpdateOperation {
             _lock: guard,
+            worker_lock: Some(worker_lock),
             cancellation: CancellationToken::new(),
             generation,
             manager: self.clone(),
@@ -334,20 +360,34 @@ impl UpdateManager {
         let path = self.transaction_path(target);
         let bytes = fs::read(path).await.ok()?;
         let persisted = serde_json::from_slice::<PersistedUpdateRecord>(&bytes).ok()?;
-        if persisted
-            .metadata
-            .as_ref()
-            .is_some_and(|metadata| Self::validate_release_metadata(metadata, None).is_err())
+        if persisted.state.target != target
+            || persisted.metadata.as_ref().is_some_and(|metadata| {
+                Self::validate_release_metadata(metadata, None).is_err()
+                    || metadata.channel != persisted.state.channel
+            })
         {
             return None;
         }
         let mut state = persisted.state;
         let mut staged = persisted.staged;
         if let Some(candidate) = &staged {
-            let valid = self.staged_path_is_owned(target, candidate)
+            let owned = self.staged_path_is_owned(target, candidate);
+            let valid = owned
+                && self
+                    .staged_matches_release(
+                        target,
+                        &state,
+                        persisted.metadata.as_ref(),
+                        &persisted.platform,
+                        &persisted.architecture,
+                        candidate,
+                    )
+                    .is_ok()
                 && verify_staged_artifact(candidate).await.is_ok();
             if !valid {
-                let _ = fs::remove_file(&candidate.path).await;
+                if owned {
+                    let _ = fs::remove_file(&candidate.path).await;
+                }
                 staged = None;
                 state.downloaded_version = None;
                 state.download_percent = None;
@@ -401,13 +441,48 @@ impl UpdateManager {
             && parse_version(&staged.version).is_ok()
     }
 
+    fn staged_matches_release(
+        &self,
+        target: UpdateTarget,
+        state: &UpdateState,
+        metadata: Option<&ReleaseMetadata>,
+        platform: &str,
+        architecture: &str,
+        staged: &StagedArtifact,
+    ) -> Result<()> {
+        let metadata = metadata.context("staged update has no release metadata")?;
+        anyhow::ensure!(
+            state.downloaded_version.as_deref() == Some(staged.version.as_str()),
+            "staged update version does not match persisted state"
+        );
+        anyhow::ensure!(
+            staged.version == metadata.version,
+            "staged update version does not match release metadata"
+        );
+        let asset = select_asset(metadata, target, platform, architecture)?
+            .context("staged update has no matching release asset")?;
+        let file_name = staged
+            .path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .context("staged update path is not valid UTF-8")?;
+        anyhow::ensure!(
+            file_name == asset.name,
+            "staged update path does not match the selected release asset"
+        );
+        anyhow::ensure!(
+            staged.size == asset.size && staged.sha256.eq_ignore_ascii_case(&asset.sha256),
+            "staged update manifest does not match the selected release asset"
+        );
+        Ok(())
+    }
+
     async fn persist(&self, target: UpdateTarget, record: &UpdateRecord) {
         let directory = self.state_dir.join("transactions");
-        if fs::create_dir_all(&directory).await.is_err() {
+        if ensure_real_directory(&directory).await.is_err() {
             return;
         }
         let path = self.transaction_path(target);
-        let temporary = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
         let persisted = PersistedUpdateRecord {
             state: record.state.clone(),
             metadata: record.metadata.clone(),
@@ -418,10 +493,8 @@ impl UpdateManager {
         let Ok(bytes) = serde_json::to_vec(&persisted) else {
             return;
         };
-        if fs::write(&temporary, bytes).await.is_ok() {
-            let _ = fs::remove_file(&path).await;
-            let _ = fs::rename(temporary, path).await;
-        }
+        let _ = atomicwrites::AtomicFile::new(&path, atomicwrites::AllowOverwrite)
+            .write(|file| file.write_all(&bytes));
     }
 
     fn transaction_path(&self, target: UpdateTarget) -> PathBuf {
@@ -511,12 +584,27 @@ impl UpdateManager {
                 });
                 let available = compare_versions(&request.current_version, &metadata.version)?
                     == Ordering::Less;
-                let (release_notes, omitted_release_count) =
-                    bounded_release_notes(&metadata.release_notes);
-                let downloaded = record
+                if record.state.restart_required {
+                    record.metadata = Some(metadata);
+                    let state = record.state.clone();
+                    self.save(request.target, record).await;
+                    operation.complete();
+                    return Ok(state);
+                }
+                if record
                     .staged
                     .as_ref()
-                    .is_some_and(|staged| staged.version == metadata.version);
+                    .is_some_and(|staged| !available || staged.version != metadata.version)
+                {
+                    if let Some(staged) = record.staged.take() {
+                        let _ = fs::remove_file(staged.path).await;
+                    }
+                }
+                let (release_notes, omitted_release_count) =
+                    bounded_release_notes(&metadata.release_notes);
+                let downloaded = record.staged.as_ref().is_some_and(|staged| {
+                    available && asset.is_some() && staged.version == metadata.version
+                });
                 record.state = UpdateState {
                     status: if downloaded {
                         UpdateStatus::Downloaded
@@ -581,6 +669,10 @@ impl UpdateManager {
             .update_url
             .as_deref()
             .context("release metadata has no download URL")?;
+        anyhow::ensure!(
+            compare_versions(&record.state.current_version, &metadata.version)? == Ordering::Less,
+            "cannot download an update that is not newer than the current version"
+        );
         let url = asset_url(base_url, &asset.name)?;
         record.state = record
             .state
@@ -688,13 +780,27 @@ impl UpdateManager {
             .clone()
             .context("download an update before installing")?;
         let mut record = record;
-        if !self.staged_path_is_owned(request.target, &staged) {
-            return Err(anyhow!(
-                "staged update path is outside its target directory"
-            ));
-        }
-        if let Err(error) = verify_staged_artifact(&staged).await {
-            let _ = fs::remove_file(&staged.path).await;
+        let staged_path_owned = self.staged_path_is_owned(request.target, &staged);
+        let validation = staged_path_owned
+            .then(|| {
+                self.staged_matches_release(
+                    request.target,
+                    &record.state,
+                    record.metadata.as_ref(),
+                    &record.platform,
+                    &record.architecture,
+                    &staged,
+                )
+            })
+            .transpose()
+            .map_err(|error| anyhow!("staged update metadata is invalid: {error}"))
+            .and_then(|result| {
+                result.context("staged update path is outside its target directory")
+            });
+        if let Err(error) = validation {
+            if staged_path_owned {
+                let _ = fs::remove_file(&staged.path).await;
+            }
             record.staged = None;
             record.state.downloaded_version = None;
             record.state.download_percent = None;
@@ -705,17 +811,37 @@ impl UpdateManager {
             operation.complete();
             return Ok(state);
         }
+        if let Err(error) = verify_staged_artifact(&staged).await {
+            if staged_path_owned {
+                let _ = fs::remove_file(&staged.path).await;
+            }
+            record.staged = None;
+            record.state.downloaded_version = None;
+            record.state.download_percent = None;
+            record.state.restart_required = false;
+            record.state = record.state.download_failed(error.to_string());
+            let state = record.state.clone();
+            self.save(request.target, record).await;
+            operation.complete();
+            return Ok(state);
+        }
+        if compare_versions(&record.state.current_version, &staged.version)? != Ordering::Less {
+            let _ = fs::remove_file(&staged.path).await;
+            record.staged = None;
+            record.state.downloaded_version = None;
+            record.state.download_percent = None;
+            record.state.restart_required = false;
+            record.state = record.state.download_failed(
+                "cannot install an update that is not newer than the current version".into(),
+            );
+            let state = record.state.clone();
+            self.save(request.target, record).await;
+            operation.complete();
+            return Ok(state);
+        }
         record.state = record.state.install_started().map_err(anyhow::Error::msg)?;
         self.save(request.target, record.clone()).await;
-        let result = self
-            .extract(
-                request.target,
-                &staged,
-                operation.cancellation(),
-                operation.fence(),
-                operation.generation(),
-            )
-            .await;
+        let result = self.extract(request.target, &staged, &mut operation).await;
         debug_assert_eq!(
             self.current_generation(request.target),
             operation.generation()
@@ -820,6 +946,7 @@ impl UpdateManager {
                 "release update URL must use HTTPS"
             );
         }
+        let mut asset_names = std::collections::HashSet::new();
         for asset in &metadata.assets {
             anyhow::ensure!(
                 !asset.name.is_empty()
@@ -832,6 +959,17 @@ impl UpdateManager {
                             .unwrap_or_default()
                     && !asset.name.bytes().any(|byte| byte == b'/' || byte == b'\\'),
                 "release asset name must not contain a path"
+            );
+            anyhow::ensure!(
+                asset
+                    .name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte)),
+                "release asset name contains unsupported characters"
+            );
+            anyhow::ensure!(
+                asset_names.insert(asset.name.clone()),
+                "release metadata contains duplicate asset names"
             );
             anyhow::ensure!(
                 asset.size <= MAX_DOWNLOAD_BYTES,
@@ -858,9 +996,7 @@ impl UpdateManager {
         &self,
         target: UpdateTarget,
         staged: &StagedArtifact,
-        cancellation: CancellationToken,
-        fence: Arc<AtomicU64>,
-        generation: u64,
+        operation: &mut UpdateOperation,
     ) -> Result<()> {
         let extension = if staged.path.extension().and_then(|value| value.to_str()) == Some("zip") {
             ArchiveKind::Zip
@@ -879,14 +1015,18 @@ impl UpdateManager {
         ensure_real_directory(&target_root).await?;
         let temporary = target_root.join(format!(".staging-{}", uuid::Uuid::new_v4()));
         let archive_path = staged.path.clone();
-        let cancellation_for_worker = cancellation.clone();
+        let cancellation = operation.cancellation();
+        let fence = operation.fence();
+        let generation = operation.generation();
+        let worker_lock = operation.take_worker_lock();
         task::spawn_blocking(move || {
+            let _worker_lock = worker_lock;
             extract_archive_sync(
                 archive_path,
                 extension,
                 temporary,
                 install_root,
-                cancellation_for_worker,
+                cancellation,
                 fence,
                 generation,
             )
@@ -1026,7 +1166,11 @@ fn extract_tar_gz(
     let decoder = GzDecoder::new(file);
     let mut archive = tar::Archive::new(decoder);
     let mut total = 0u64;
-    for entry in archive.entries()? {
+    for (index, entry) in archive.entries()?.enumerate() {
+        anyhow::ensure!(
+            index < MAX_ARCHIVE_ENTRIES,
+            "update archive contains too many entries"
+        );
         let mut entry = entry?;
         if cancellation.is_cancelled() {
             bail!("update installation was cancelled");
@@ -1034,6 +1178,12 @@ fn extract_tar_gz(
         let path = entry.path()?.into_owned();
         validate_archive_path(&path)?;
         let kind = entry.header().entry_type();
+        if is_archive_root(&path) {
+            anyhow::ensure!(
+                kind.is_dir(),
+                "update archive root entry must be a directory"
+            );
+        }
         anyhow::ensure!(
             kind.is_file() || kind.is_dir(),
             "update archive contains a symlink, hard link, or special file"
@@ -1076,6 +1226,10 @@ fn extract_zip(
 ) -> Result<()> {
     let file = std_fs::File::open(archive_path)?;
     let mut archive = zip::ZipArchive::new(file)?;
+    anyhow::ensure!(
+        archive.len() <= MAX_ARCHIVE_ENTRIES,
+        "update archive contains too many entries"
+    );
     let mut total = 0u64;
     for index in 0..archive.len() {
         if cancellation.is_cancelled() {
@@ -1215,7 +1369,9 @@ fn validate_archive_entry(entry: &str) -> Result<()> {
 
 fn validate_archive_path(path: &Path) -> Result<()> {
     let mut has_normal_component = false;
+    let mut has_component = false;
     for component in path.components() {
+        has_component = true;
         match component {
             std::path::Component::Normal(_) => has_normal_component = true,
             std::path::Component::CurDir => {}
@@ -1227,14 +1383,26 @@ fn validate_archive_path(path: &Path) -> Result<()> {
         }
     }
     anyhow::ensure!(
-        has_normal_component,
+        has_normal_component || has_component && is_archive_root(path),
         "update archive contains an empty path"
     );
     Ok(())
 }
 
+fn is_archive_root(path: &Path) -> bool {
+    path.components()
+        .all(|component| matches!(component, std::path::Component::CurDir))
+}
+
 fn is_https_url(url: &Url) -> bool {
-    url.scheme() == "https" && url.host_str().is_some()
+    url.scheme() == "https"
+        && url.host_str().is_some()
+        && url.username().is_empty()
+        && url.password().is_none()
+}
+
+fn should_follow_redirect(previous_count: usize, next: &Url) -> bool {
+    previous_count <= MAX_REDIRECTS && is_https_url(next)
 }
 
 async fn read_response_limited(response: reqwest::Response, maximum: u64) -> Result<Vec<u8>> {
@@ -1330,34 +1498,34 @@ async fn verify_staged_artifact(staged: &StagedArtifact) -> Result<()> {
 }
 
 async fn ensure_real_directory(path: &Path) -> Result<()> {
-    match fs::symlink_metadata(path).await {
-        Ok(metadata) => {
-            anyhow::ensure!(
+    anyhow::ensure!(!path.as_os_str().is_empty(), "update path is empty");
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => continue,
+            std::path::Component::ParentDir => {
+                bail!("update path contains a parent directory component")
+            }
+            std::path::Component::Prefix(..) | std::path::Component::RootDir => {
+                current.push(component.as_os_str());
+            }
+            std::path::Component::Normal(part) => current.push(part),
+        }
+        match fs::symlink_metadata(&current).await {
+            Ok(metadata) => anyhow::ensure!(
                 metadata.is_dir() && !metadata.file_type().is_symlink(),
-                "update path is not a real directory"
-            );
+                "update path traverses a symlink or non-directory"
+            ),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                fs::create_dir(&current).await?;
+                let metadata = fs::symlink_metadata(&current).await?;
+                anyhow::ensure!(
+                    metadata.is_dir() && !metadata.file_type().is_symlink(),
+                    "update path is not a real directory"
+                );
+            }
+            Err(error) => return Err(error.into()),
         }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            fs::create_dir_all(path).await?;
-            let metadata = fs::symlink_metadata(path).await?;
-            anyhow::ensure!(
-                metadata.is_dir() && !metadata.file_type().is_symlink(),
-                "update path is not a real directory"
-            );
-        }
-        Err(error) => return Err(error.into()),
-    }
-    let mut current = Some(path);
-    while let Some(path) = current {
-        if path.as_os_str().is_empty() {
-            break;
-        }
-        let metadata = fs::symlink_metadata(path).await?;
-        anyhow::ensure!(
-            metadata.is_dir() && !metadata.file_type().is_symlink(),
-            "update path traverses a symlink"
-        );
-        current = path.parent();
     }
     Ok(())
 }
@@ -1501,6 +1669,44 @@ mod tests {
         let mut no_host = Url::parse("https://updates.example.test/releases").unwrap();
         no_host.set_host(None).unwrap();
         assert!(!is_https_url(&no_host));
+        assert!(!is_https_url(
+            &Url::parse("https://user:password@updates.example.test/releases").unwrap()
+        ));
+    }
+
+    #[test]
+    fn redirect_policy_requires_https_and_has_a_bounded_chain() {
+        let https = Url::parse("https://updates.example.test/releases").unwrap();
+        let http = Url::parse("http://updates.example.test/releases").unwrap();
+        assert!(should_follow_redirect(1, &https));
+        assert!(should_follow_redirect(MAX_REDIRECTS, &https));
+        assert!(!should_follow_redirect(MAX_REDIRECTS + 1, &https));
+        assert!(!should_follow_redirect(1, &http));
+    }
+
+    #[test]
+    fn release_assets_are_unique_and_safe_path_segments() {
+        let asset = ReleaseAsset {
+            name: "host-linux-x86_64.tar.gz".into(),
+            sha256: "0".repeat(64),
+            size: 1,
+        };
+        let metadata = ReleaseMetadata {
+            schema: 1,
+            version: "1.2.3".into(),
+            channel: UpdateChannel::Nightly,
+            update_url: Some("https://updates.example.test/".into()),
+            assets: vec![asset.clone()],
+            release_notes: vec![],
+            native_updates: HashMap::new(),
+        };
+        assert!(UpdateManager::validate_release_metadata(&metadata, None).is_ok());
+        let mut duplicate = metadata.clone();
+        duplicate.assets.push(asset);
+        assert!(UpdateManager::validate_release_metadata(&duplicate, None).is_err());
+        let mut unsafe_name = metadata;
+        unsafe_name.assets[0].name = "host-linux-x86_64.tar.gz?redirect".into();
+        assert!(UpdateManager::validate_release_metadata(&unsafe_name, None).is_err());
     }
 
     #[test]
@@ -1508,9 +1714,35 @@ mod tests {
         assert!(validate_archive_entry("host-daemon").is_ok());
         assert!(validate_archive_entry("nested/host-daemon").is_ok());
         assert!(validate_archive_entry("./nested/host-daemon").is_ok());
+        assert!(validate_archive_entry(".").is_ok());
+        assert!(validate_archive_entry("").is_err());
         assert!(validate_archive_entry("nested/../host-daemon").is_err());
         assert!(validate_archive_entry("../host-daemon").is_err());
         assert!(validate_archive_entry("/tmp/host-daemon").is_err());
+    }
+
+    #[test]
+    fn extracts_tar_archive_root_directory_entry() {
+        let directory = tempfile::tempdir().unwrap();
+        let archive_path = directory.path().join("update.tar.gz");
+        std::fs::write(
+            &archive_path,
+            tar_gz_entry(".", tar::EntryType::dir(), &[], None),
+        )
+        .unwrap();
+        let staging = directory.path().join("staging");
+        let install = directory.path().join("installed");
+        extract_archive_sync(
+            archive_path,
+            ArchiveKind::TarGz,
+            staging,
+            install.clone(),
+            CancellationToken::new(),
+            Arc::new(AtomicU64::new(1)),
+            1,
+        )
+        .unwrap();
+        assert!(install.is_dir());
     }
 
     #[test]
@@ -1580,6 +1812,21 @@ mod tests {
         );
         assert!(result.is_err());
         assert!(output.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn directory_creation_rejects_symlink_ancestors_before_writing() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().unwrap();
+        let outside = directory.path().join("outside");
+        let link = directory.path().join("link");
+        std::fs::create_dir(&outside).unwrap();
+        symlink(&outside, &link).unwrap();
+        let target = link.join("created");
+        assert!(ensure_real_directory(&target).await.is_err());
+        assert!(!outside.join("created").exists());
     }
 
     #[test]

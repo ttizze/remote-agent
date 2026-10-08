@@ -478,6 +478,26 @@ jobs:
           manifest=$(jq -er .manifest "$metadata")
           mapfile -t assets < <(find release-assets -maxdepth 1 -type f -print | sort)
           ((${#assets[@]} > 0)) || { echo 'no release artifacts were produced' >&2; exit 1; }
+          ANDROID_STORE_URL="$ANDROID_STORE_URL" IOS_STORE_URL="$IOS_STORE_URL" node <<'NODE'
+          const urls = [
+            ['ANDROID_STORE_URL', process.env.ANDROID_STORE_URL],
+            ['IOS_STORE_URL', process.env.IOS_STORE_URL],
+          ];
+          for (const [name, value] of urls) {
+            if (!value) continue;
+            let parsed;
+            try {
+              parsed = new URL(value);
+            } catch {
+              console.error(`${name} must be an absolute HTTPS URL`);
+              process.exit(1);
+            }
+            if (parsed.protocol !== 'https:' || !parsed.hostname || parsed.username || parsed.password) {
+              console.error(`${name} must be an absolute HTTPS URL without credentials`);
+              process.exit(1);
+            }
+          }
+          NODE
           native_updates=$(jq -cn \
             --arg android "$ANDROID_STORE_URL" \
             --arg ios "$IOS_STORE_URL" \

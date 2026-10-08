@@ -61,6 +61,44 @@ case "$channel" in
     nightly|preview|stable) ;;
     *) echo "unsupported release channel: $channel" >&2; exit 1 ;;
 esac
+
+validate_semver() {
+    local value=$1
+    local pattern='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-([0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*))?$'
+    [[ $value =~ $pattern ]] || return 1
+    local prerelease=${BASH_REMATCH[5]:-}
+    if [[ -n $prerelease ]]; then
+        local part
+        local -a parts
+        IFS='.' read -r -a parts <<< "$prerelease"
+        for part in "${parts[@]}"; do
+            [[ $part =~ ^0[0-9]+$ ]] || continue
+            return 1
+        done
+    fi
+}
+
+validate_https_url() {
+    local value=$1
+    local label=$2
+    [[ -z $value ]] && return 0
+    URL_TO_VALIDATE=$value URL_LABEL=$label node <<'NODE'
+const value = process.env.URL_TO_VALIDATE;
+const label = process.env.URL_LABEL;
+let url;
+try {
+  url = new URL(value);
+} catch {
+  console.error(`${label} must be an absolute HTTPS URL with a host`);
+  process.exit(1);
+}
+if (url.protocol !== "https:" || !url.hostname || url.username || url.password) {
+  console.error(`${label} must be an absolute HTTPS URL with a host`);
+  process.exit(1);
+}
+NODE
+}
+
 [[ $release_date =~ ^[0-9]{8}$ ]] || { echo "invalid release date: $release_date" >&2; exit 1; }
 [[ $run_number =~ ^[0-9]+$ ]] || { echo "invalid run number: $run_number" >&2; exit 1; }
 [[ $commit =~ ^[0-9a-fA-F]{7,64}$ ]] || { echo "invalid commit SHA: $commit" >&2; exit 1; }
@@ -91,7 +129,7 @@ else
     }
     version="$base_version-$channel.$release_date.$run_number"
 fi
-[[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]] || {
+validate_semver "$version" || {
     echo "invalid release version: $version" >&2
     exit 1
 }
@@ -111,10 +149,7 @@ if [[ -n $repository ]]; then
 fi
 
 for store_url in "$android_store_url" "$ios_store_url"; do
-    [[ -z $store_url || $store_url =~ ^https://[^[:space:]]+$ ]] || {
-        echo "native store URLs must be absolute HTTPS URLs" >&2
-        exit 1
-    }
+    validate_https_url "$store_url" "native store URL"
 done
 native_updates='{}'
 if [[ -n $android_store_url ]]; then

@@ -125,7 +125,11 @@ impl HostRpcService {
         codex: Result<Arc<CodexAppServer>, String>,
         projects: ProjectStore,
     ) -> anyhow::Result<Self> {
-        let update_dir = projects.path().with_file_name("updates");
+        let update_dir = projects
+            .path()
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("Host project state path has no parent"))?
+            .to_owned();
         let connections = Connections::new();
         let terminal_history = projects.path().with_file_name("terminals");
         let keybindings = Arc::new(crate::keybindings::Keybindings::new(
