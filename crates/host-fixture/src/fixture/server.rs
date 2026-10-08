@@ -389,7 +389,7 @@ pub(super) async fn run(home: PathBuf, config: Config) -> Result<()> {
                     let end = offset.saturating_add(limit(params, 64).min(100));
                     let page: Vec<_> = ordered.iter().skip(offset).take(end - offset)
                         .map(|thread| ThreadView { metadata: &thread.metadata, turns: &[] }).collect();
-                    context.trace(method, json!({"useStateDbOnly":params["useStateDbOnly"] == true,"count":page.len()}))?;
+                    context.trace(method, json!({"useStateDbOnly":params["useStateDbOnly"] == true,"count":page.len(),"ancestorThreadId":params["ancestorThreadId"]}))?;
                     #[derive(Serialize)] #[serde(rename_all = "camelCase")]
                     struct Page<'a> { data: &'a [ThreadView<'a>], next_cursor: Option<String> }
                     let next_cursor = if context.home.join("repeat-list-cursor").exists() {
