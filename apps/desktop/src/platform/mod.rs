@@ -1335,7 +1335,8 @@ async fn active_window_metadata(
         if !output.status.success() {
             return None;
         }
-        let mut lines = String::from_utf8_lossy(&output.stdout).lines();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let mut lines = stdout.lines();
         let app_name = lines.next()?.trim().to_owned();
         let window_title = lines.next().unwrap_or_default().trim().to_owned();
         let mut accessible_text = lines.collect::<Vec<_>>().join(" ").trim().to_owned();

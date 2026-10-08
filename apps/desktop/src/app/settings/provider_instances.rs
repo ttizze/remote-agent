@@ -101,7 +101,7 @@ impl Desktop {
     /// Renders explicit Host overrides together with live built-in slots.
     pub(super) fn render_provider_instances(
         &mut self,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let instances = effective_instances(self);
@@ -169,7 +169,7 @@ impl Desktop {
                         .outline()
                         .xsmall()
                         .label("Update")
-                        .on_click(cx.listener(move |view, _, window, cx| {
+                        .on_click(cx.listener(move |view, _, _, _| {
                             let instance = update_instance.clone();
                             view.perform_then(
                                 Intent::UpdateProvider {

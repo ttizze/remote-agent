@@ -1475,7 +1475,7 @@ mod tests {
 
     #[tokio::test]
     async fn cleanup_cdp_runs_both_commands_after_detachment_and_reports_errors() {
-        use futures_util::{SinkExt, StreamExt};
+        use futures_util::StreamExt;
         use tokio::net::TcpListener;
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

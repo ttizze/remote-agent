@@ -9,7 +9,7 @@ use agent_core::{
 };
 use gpui_kit::{
     component::{
-        Sizable,
+        Disableable, Sizable,
         button::{Button, ButtonVariants},
         h_flex,
         menu::{DropdownMenu, PopupMenuItem},

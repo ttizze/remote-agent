@@ -84,7 +84,6 @@ impl Desktop {
                 rows.push(notice("No ACP agents matched this search.").into_any_element());
             }
             for (index, agent) in result.agents.iter().enumerate() {
-                let agent_id = agent.id.clone();
                 let prepared = registry.prepared.get(&agent.id);
                 let probe = registry.probes.get(&agent.id);
                 let preparing = registry.prepare_pending.as_deref() == Some(agent.id.as_str());

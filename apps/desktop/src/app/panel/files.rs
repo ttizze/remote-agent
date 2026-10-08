@@ -11,6 +11,7 @@ use gpui_kit::{
         button::{Button, ButtonVariants},
         h_flex,
         input::{Editor, EditorState, Input, InputEvent, InputState, Position},
+        scroll::ScrollableElement,
         v_flex,
     },
     prelude::FluentBuilder,

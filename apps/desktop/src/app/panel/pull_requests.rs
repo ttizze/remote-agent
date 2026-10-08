@@ -83,7 +83,7 @@ impl Desktop {
                     let _ = owner.update(cx, |view, _| {
                         view.panels.pull_requests.selected = Some(key.canonical());
                         view.perform(Intent::LoadPullRequest {
-                            project_id,
+                            project_id: project_id.clone(),
                             host: Some(key.host.clone()),
                             repository: key.repository.clone(),
                             number: key.number,

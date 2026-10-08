@@ -1081,14 +1081,6 @@ pub(crate) mod fake {
                 .map(str::to_owned)
                 .collect()
         }
-        /// A `PATH` with this `gh` first, for code that locates `gh` itself.
-        pub(crate) fn path_env(&self) -> std::ffi::OsString {
-            let mut paths = vec![self.directory.path().to_path_buf()];
-            if let Some(existing) = std::env::var_os("PATH") {
-                paths.extend(std::env::split_paths(&existing));
-            }
-            std::env::join_paths(paths).unwrap()
-        }
         pub(crate) fn directory(&self) -> &Path {
             self.directory.path()
         }

@@ -847,11 +847,15 @@ async fn wait_for_attachment_release(
 
 impl Render for HostBrowser {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // The Store receives Host preview subscription snapshots independently
+        // of frame requests. Read one immutable snapshot for this render so
+        // fill sizing, local server cards, and recent URLs agree.
+        let preview = self.store.snapshot().preview.clone();
         if let Some((width, height)) = measured_frame_size(self.frame_bounds)
             && self
                 .frame
                 .as_ref()
-                .and_then(|frame| self.store.snapshot().preview.session(&frame.tab_id))
+                .and_then(|frame| preview.session(&frame.tab_id))
                 .is_some_and(|session| matches!(session.viewport, PreviewViewportSetting::Fill))
             && self.last_fill_size != Some((width, height))
         {
@@ -875,10 +879,6 @@ impl Render for HostBrowser {
         let empty = frame
             .and_then(|frame| frame.tabs.iter().find(|tab| tab.id == frame.tab_id))
             .is_none_or(|tab| tab.url.is_empty() || tab.url == "about:blank");
-        // The Store receives Host preview subscription snapshots independently
-        // of frame requests. Read its immutable snapshot during render so
-        // local server cards and recent URLs follow that live subscription.
-        let preview = self.store.snapshot().preview.clone();
         let recording = frame
             .map(|frame| frame.tab_id.as_str())
             .and_then(|tab_id| preview.recording_for(tab_id))
