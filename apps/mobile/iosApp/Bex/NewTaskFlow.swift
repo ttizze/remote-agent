@@ -12,6 +12,7 @@ struct NewTaskFlow: View {
     @State private var query = ""
     @State private var adding = false
     @State private var projectPath = ""
+    @State private var folderPickerPresented = false
 
     var body: some View {
         NavigationStack(path: $path) {
@@ -23,6 +24,9 @@ struct NewTaskFlow: View {
         .onAppear {
             if draftOpen {
                 path = [model.snapshot.selectedProjectId() ?? "chats"]
+            }
+            if projectPath.isEmpty {
+                projectPath = configuredProjectBaseDirectory() ?? ""
             }
         }
         .onChange(of: model.selectedThreadId) { _, thread in
@@ -78,14 +82,41 @@ struct NewTaskFlow: View {
                     .accessibilityLabel("Add project")
             }
         }
-        .alert("Add project", isPresented: $adding) {
-            TextField("Absolute path on the environment", text: $projectPath)
-                .textInputAutocapitalization(.never).autocorrectionDisabled()
-            Button("Add") {
-                model.perform(.addProject(path: projectPath))
-                projectPath = ""
+        .sheet(isPresented: $adding) {
+            NavigationStack {
+                Form {
+                    Section("Project folder on the Host") {
+                        TextField(
+                            configuredProjectBaseDirectory() ?? "Absolute path on the environment",
+                            text: $projectPath
+                        )
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        Button("Choose remote folder") { folderPickerPresented = true }
+                    }
+                }
+                .navigationTitle("Add project")
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Cancel") { adding = false }
+                    }
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("Add") {
+                            let path = projectPath.trimmingCharacters(in: .whitespacesAndNewlines)
+                            guard !path.isEmpty else { return }
+                            model.perform(.addProject(path: path))
+                            projectPath = ""
+                            adding = false
+                        }
+                    }
+                }
+                .sheet(isPresented: $folderPickerPresented) {
+                    RemoteFolderPicker(model: model, initialPath: configuredProjectBaseDirectory()) { path in
+                        projectPath = path
+                        folderPickerPresented = false
+                    }
+                }
             }
-            Button("Cancel", role: .cancel) {}
         }
     }
 
@@ -96,6 +127,16 @@ struct NewTaskFlow: View {
             model.openNewThread(projectId: project)
         }
         path = [project ?? "chats"]
+    }
+
+    private func configuredProjectBaseDirectory() -> String? {
+        model.snapshot.settings(scope: .host).sections
+            .flatMap(\.rows)
+            .first(where: { $0.id == .addProjectBaseDirectory })
+            .flatMap { row in
+                guard case let .text(value, _) = row.control else { return nil }
+                return value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : value
+            }
     }
 }
 

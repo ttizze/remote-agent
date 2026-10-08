@@ -248,6 +248,9 @@ fn main() {
                 logging_error,
                 connections: std::sync::Arc::new(platform::Connections::default()),
             });
+            // Give GPUI's Windows adapter a stable unpackaged identity and a
+            // user-facing name before any native notification is posted.
+            cx.set_app_identity("app.remoteagent.desktop", "Remote Agent");
             cx.on_app_quit(|cx| {
                 tracing::info!(target: "desktop", operation = "shutdown", "Desktop shutting down");
                 let runtime = cx.global::<Runtime>().clone();
@@ -291,6 +294,16 @@ fn main() {
                         app::load_appearance();
                         app::apply_appearance(window.appearance(), cx);
                         let desktop = cx.new(|cx| app::Desktop::new(window, cx));
+                        let notification_desktop = desktop.downgrade();
+                        cx.on_system_notification_response(move |response, cx| {
+                            if response.action_id.as_deref() == Some("open")
+                                || response.action_id.is_none()
+                            {
+                                let _ = notification_desktop.update(cx, |desktop, _| {
+                                    desktop.queue_notification_route(response.tag.to_string());
+                                });
+                            }
+                        });
                         cx.new(|cx| Root::new(desktop, window, cx))
                     },
                 )

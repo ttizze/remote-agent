@@ -47,11 +47,11 @@ pub fn resolve_project_settings(host: &HostSettings, project_id: Option<&str>) -
             host.default_runtime_mode,
         ),
         default_thread_env_mode: pick(
-            Some(overrides.and_then(|project| project.default_thread_env_mode)),
+            overrides.and_then(|project| project.default_thread_env_mode.map(Some)),
             host.default_thread_env_mode,
         ),
         worktree_submodules: pick(
-            Some(overrides.and_then(|project| project.worktree_submodules)),
+            overrides.and_then(|project| project.worktree_submodules.map(Some)),
             host.worktree_submodules,
         ),
         new_worktrees_start_from_origin: pick(
@@ -196,6 +196,9 @@ pub enum SettingChange {
     },
     StorageLogsAfterDays {
         days: Option<u32>,
+    },
+    AddProjectBaseDirectory {
+        value: String,
     },
     /// A project follows the Host's value again.
     Inherit {
@@ -368,6 +371,9 @@ pub fn plan_settings_update(
                     ..Default::default()
                 })
             }
+            SettingChange::AddProjectBaseDirectory { value } => {
+                patch.add_project_base_directory = Some(value.trim().to_owned())
+            }
             SettingChange::Inherit { .. } => return None,
         },
         SettingsScope::Project { project_id } => {
@@ -432,7 +438,8 @@ pub fn plan_settings_update(
                 | SettingChange::StorageWorktreeOnDelete { .. }
                 | SettingChange::StorageWorktreeUnchanged { .. } => return None,
                 SettingChange::StorageBrowserArtifactsAfterDays { .. }
-                | SettingChange::StorageLogsAfterDays { .. } => return None,
+                | SettingChange::StorageLogsAfterDays { .. }
+                | SettingChange::AddProjectBaseDirectory { .. } => return None,
             }
             patch = project_patch(project_id, overrides);
         }
@@ -754,6 +761,26 @@ mod tests {
                 branch_name_prefix: Some("team".into()),
                 ..Default::default()
             }
+        );
+    }
+
+    #[test]
+    fn absent_nullable_project_overrides_inherit_the_host_value() {
+        let mut host = HostSettings::default();
+        host.default_thread_env_mode = Some(ThreadEnvMode::Worktree);
+        let inherited = resolve_project_settings(&host, Some("p"));
+        assert_eq!(
+            inherited.default_thread_env_mode,
+            (Some(ThreadEnvMode::Worktree), SettingSource::Host)
+        );
+
+        host.project_overrides.insert(
+            "p".into(),
+            ProjectSettingsOverrides::default(),
+        );
+        assert_eq!(
+            resolve_project_settings(&host, Some("p")).default_thread_env_mode,
+            (Some(ThreadEnvMode::Worktree), SettingSource::Host)
         );
     }
 }

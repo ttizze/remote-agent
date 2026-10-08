@@ -175,6 +175,11 @@ impl Views {
 pub(crate) struct Desktop {
     pub(crate) session: Option<StoreSession>,
     pub(crate) snapshot: Arc<Snapshot>,
+    /// Last snapshot used as the notification transition baseline.
+    notification_snapshot: Arc<Snapshot>,
+    /// Native notifications that can be retracted when core reports that all
+    /// attention was cleared by selection or focus.
+    active_notification_tags: BTreeSet<String>,
     /// Immutable projections for every authenticated Host store.
     pub(crate) environment_registry: EnvironmentRegistry,
     pub(crate) views: Arc<Views>,
@@ -190,6 +195,9 @@ pub(crate) struct Desktop {
     selected_retry_at: Option<(Instant, u32)>,
     profile_environment_ids: BTreeMap<String, String>,
     pending_open: Option<(String, String)>,
+    /// Route queued by the platform notification callback. The callback has
+    /// no Window handle; the next UI tick consumes it on the owning view.
+    pending_notification_route: Option<String>,
     pending_new_thread: Option<(String, Option<String>)>,
     local_host_supervised: bool,
     pending_load_balanced_new_thread: Option<PendingLoadBalancedNewThread>,
@@ -430,6 +438,7 @@ impl Desktop {
             }),
             cx.observe_window_activation(window, |view, window, cx| {
                 if window.is_window_active() {
+                    view.dismiss_active_notifications(cx);
                     view.refresh_diff_on_window_activation(cx);
                 }
             }),
@@ -455,6 +464,8 @@ impl Desktop {
         let mut view = Self {
             session: None,
             snapshot: Arc::default(),
+            notification_snapshot: Arc::default(),
+            active_notification_tags: BTreeSet::new(),
             views: Arc::new(Views::derive(
                 &Snapshot::default(),
                 &EnvironmentRegistry::default(),
@@ -477,6 +488,7 @@ impl Desktop {
             selected_retry_at: None,
             profile_environment_ids: BTreeMap::new(),
             pending_open: None,
+            pending_notification_route: None,
             pending_new_thread: None,
             local_host_supervised: false,
             pending_load_balanced_new_thread: None,
@@ -555,6 +567,7 @@ impl Desktop {
             self.background_connecting.remove(&remote.id);
         }
         self.snapshot = Arc::default();
+        self.notification_snapshot = self.snapshot.clone();
         self.disconnected(window, cx);
         let updates = self.updates.clone();
         let epoch = self.epoch;
@@ -986,6 +999,9 @@ impl Desktop {
     fn receive(&mut self, update: Update, window: &mut Window, cx: &mut Context<Self>) {
         match update {
             Update::Tick => {
+                if let Some(route) = self.pending_notification_route.take() {
+                    self.open_notification_route(&route, window, cx);
+                }
                 self.retry_pending_load_balanced_new_thread(window, cx);
                 self.apply_pending_open(window, cx);
                 self.reconnect_selected_if_due(window, cx);
@@ -1153,7 +1169,10 @@ impl Desktop {
                 if let Some(session) = self.background_sessions.get(&profile_id) {
                     session.save(snapshot.clone());
                 }
-                self.environment_registry.update(snapshot);
+                self.environment_registry.update(snapshot.clone());
+                if let Some(previous) = current.as_ref() {
+                    self.deliver_notification_events(previous, &snapshot, window, cx);
+                }
                 if disconnected {
                     self.background_sessions.remove(&profile_id);
                     self.background_failed(&profile_id);
@@ -1353,10 +1372,7 @@ impl Desktop {
     }
 
     fn snapshot_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(environment_id) = self.environment_registry.update(self.snapshot.clone()) {
-            self.environment_registry.select(&environment_id);
-            self.generation += 1;
-        }
+        self.deliver_snapshot_notifications(window, cx);
         self.start_background_connections();
         if self.remote.is_some()
             && self.snapshot.environment.is_some()
@@ -1378,6 +1394,102 @@ impl Desktop {
         self.schedule_views(cx);
     }
 
+    fn deliver_snapshot_notifications(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let previous = std::mem::replace(&mut self.notification_snapshot, self.snapshot.clone());
+        if let Some(environment_id) = self.environment_registry.update(self.snapshot.clone()) {
+            self.environment_registry.select(&environment_id);
+            self.generation += 1;
+        }
+        self.deliver_notification_events(&previous, &self.snapshot, window, cx);
+    }
+
+    fn notification_badge_count(&self) -> u32 {
+        let snapshots = self.environment_registry.snapshots();
+        if snapshots.is_empty() {
+            return agent_core::view::notifications::badge_count(&self.snapshot);
+        }
+        snapshots
+            .iter()
+            .map(|snapshot| agent_core::view::notifications::badge_count(snapshot))
+            .fold(0, u32::saturating_add)
+    }
+
+    fn deliver_notification_events(
+        &mut self,
+        previous: &Snapshot,
+        current: &Snapshot,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let focused = window.is_window_active();
+        let events = agent_core::view::notifications::between(
+            previous,
+            current,
+            focused,
+            focused,
+        );
+        let mut delivered_os_notification = false;
+        for event in events {
+            if event.in_app {
+                let route = event.deep_link.clone();
+                let desktop = cx.entity().downgrade();
+                let notification = match event.kind {
+                    agent_core::view::notifications::NotificationEventKind::Completion => {
+                        Notification::success(event.body.clone())
+                    }
+                    agent_core::view::notifications::NotificationEventKind::Failed => {
+                        Notification::error(event.body.clone())
+                    }
+                    agent_core::view::notifications::NotificationEventKind::Input
+                    | agent_core::view::notifications::NotificationEventKind::Approval
+                    | agent_core::view::notifications::NotificationEventKind::Limited => {
+                        Notification::warning(event.body.clone())
+                    }
+                };
+                window.push_notification(
+                    notification.title(event.title.clone()).on_click(move |_, _, app| {
+                        let _ = desktop.update(app, |view, cx| {
+                            view.queue_notification_route(route.clone());
+                            cx.notify();
+                        });
+                    }),
+                    cx,
+                );
+            }
+            if event.operating_system {
+                // GPUI owns the native adapter on every desktop target. The
+                // tag is the complete core route, and the registered app
+                // callback returns it to this UI owner when the user clicks.
+                let tag = event.deep_link.clone();
+                cx.show_system_notification(SystemNotification {
+                    tag: tag.clone().into(),
+                    title: event.title.clone().into(),
+                    body: event.body.clone().into(),
+                    actions: vec![SystemNotificationAction {
+                        id: "open".into(),
+                        label: "Open".into(),
+                    }],
+                });
+                self.active_notification_tags.insert(tag);
+                delivered_os_notification = true;
+            }
+            if event.sound {
+                let sound_kind = event.sound_kind;
+                self.runtime.handle.spawn(async move {
+                    let _ = platform::play_notification_sound(sound_kind).await;
+                });
+            }
+        }
+        if focused {
+            // Focusing the window acknowledges native notices, matching the
+            // in-app selection path even when another Host still has pending
+            // attention rows.
+            self.dismiss_active_notifications(cx);
+        } else if !delivered_os_notification && self.notification_badge_count() == 0 {
+            self.dismiss_active_notifications(cx);
+        }
+    }
+
     fn views_changed(&mut self, previous: &Views, window: &mut Window, cx: &mut Context<Self>) {
         self.timeline_views_changed(previous, window, cx);
         self.sync_composer(window, cx);
@@ -1386,12 +1498,19 @@ impl Desktop {
 
     /// The connection went away; screens drop what belonged to it.
     fn disconnected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.dismiss_active_notifications(cx);
         self.timeline.reset();
         self.panels.reset(window, cx);
         self.sidebar_animation.reset();
         self.right_panel_animation.reset();
         self.terminal_drawer_animation.reset();
         self.sync_composer(window, cx);
+    }
+
+    fn dismiss_active_notifications(&mut self, cx: &mut Context<Self>) {
+        for tag in std::mem::take(&mut self.active_notification_tags) {
+            cx.dismiss_system_notification(&tag);
+        }
     }
 
     /// The selected thread's id.
@@ -1407,6 +1526,38 @@ impl Desktop {
         self.route = Route::Chat;
         self.perform(Intent::OpenThread { thread_id });
         cx.notify();
+    }
+
+    /// Handles the route returned by a native notification adapter on the UI
+    /// owner. The callback selects the owning environment before dispatching
+    /// the thread intent, so a click never opens the same id on another Host.
+    fn open_notification_route(
+        &mut self,
+        deep_link: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match agent_domain::parse_activity_deep_link(deep_link) {
+            Some(agent_domain::ActivityDeepLink::Overview) => {
+                self.route = Route::Chat;
+                self.perform(Intent::LeaveThread);
+                cx.notify();
+            }
+            Some(agent_domain::ActivityDeepLink::Thread {
+                environment_id,
+                thread_id,
+            }) => {
+                self.route = Route::Chat;
+                self.pending_open = Some((environment_id, thread_id));
+                self.apply_pending_open(window, cx);
+            }
+            None => {}
+        }
+    }
+
+    /// Queues a native notification response for the window-owned tick.
+    pub(crate) fn queue_notification_route(&mut self, route: String) {
+        self.pending_notification_route = Some(route);
     }
 
     fn begin_new_thread(&self, project_id: Option<String>) {

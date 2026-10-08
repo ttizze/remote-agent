@@ -32,6 +32,8 @@ import dev.remoteagent.core.environmentProjectRows as buildEnvironmentProjectRow
 import dev.remoteagent.core.environmentSettings as buildEnvironmentSettings
 import dev.remoteagent.core.environmentThreadList as buildEnvironmentThreadList
 import dev.remoteagent.core.generateIdentity
+import dev.remoteagent.core.notificationEvents as buildNotificationEvents
+import dev.remoteagent.core.notificationBadgeCount as buildNotificationBadgeCount
 import dev.remoteagent.core.parseInvitation
 import dev.remoteagent.core.subscriptionUsageWidgetsJson
 import dev.remoteagent.core.validateInvitation
@@ -173,6 +175,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
         private set
 
     var notice by mutableStateOf<String?>(null)
+    var notificationThreadRoute by mutableStateOf<String?>(null)
     var invitation by mutableStateOf<Invitation?>(null)
         private set
 
@@ -327,6 +330,13 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
     }
 
     fun environmentSnapshotsForCore(): List<Snapshot> = environmentSnapshots.values.toList()
+
+    /** Core computes each Host's attention count; the native badge aggregates
+     * those independent counts across every connected environment. */
+    fun notificationBadgeCount(): UInt =
+        environmentSnapshots.values.fold(0u) { total, snapshot ->
+            total + buildNotificationBadgeCount(snapshot)
+        }
 
     fun environmentProjects(query: String): List<EnvironmentProjectRow> =
         buildEnvironmentProjectRows(environmentSnapshotsForCore(), query)
@@ -564,13 +574,6 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
             else -> false
         }
 
-    private fun notificationSoundEnabled(): Boolean =
-        when (snapshot.preferences().notificationMode) {
-            dev.remoteagent.core.NotificationMode.SOUND,
-            dev.remoteagent.core.NotificationMode.NOTIFICATIONS_AND_SOUND -> true
-            else -> false
-        }
-
     fun editDraft(text: String) {
         composerText = text
         val (revision, base) = draftEdits.edit(text)
@@ -642,6 +645,16 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
         val host = profileId ?: return null
         val thread = route as? Route.Thread ?: return null
         return "remoteagent://threads/${android.net.Uri.encode(host)}/${android.net.Uri.encode(thread.id)}"
+    }
+
+    fun openNotificationThread() {
+        val route = notificationThreadRoute ?: return
+        notificationThreadRoute = null
+        notice = null
+        openPushDeepLink(
+            android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(route))
+                .putExtra(EXTRA_PUSH_DEEP_LINK, route)
+        )
     }
 
     fun back() {
@@ -807,6 +820,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
         val pushPreferencesChanged = previous?.preferences()?.liveActivitiesEnabled !=
             next.preferences().liveActivitiesEnabled
         environmentSnapshots = environmentSnapshots + (profile.id to next)
+        previous?.let { deliverAttentionEvents(it, next) }
         val row = EnvironmentRow(
             profileId = profile.id,
             environmentId = next.environmentId() ?: profile.id,
@@ -1014,19 +1028,6 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
     private fun publish(next: Snapshot) {
         if (!next.supersedes(snapshot)) return
         if (next === snapshot) return
-        val becameUnavailable = snapshot.error() == null && next.error() != null
-        if (
-            becameUnavailable &&
-                appInBackground &&
-                (notificationsEnabled() || notificationSoundEnabled())
-        ) {
-            LocalNotifications.deliver(
-                context,
-                "Bex needs your attention",
-                next.error() ?: "The Host reported an error.",
-                notificationSoundEnabled(),
-            )
-        }
         val name = next.hostName()
         if (name != null && profiles.any { it.id == profileId && it.name != name }) {
             profiles = profiles.map { if (it.id == profileId) it.copy(name = name) else it }
@@ -1059,6 +1060,35 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
         }
     }
 
+    private fun deliverAttentionEvents(previous: Snapshot, current: Snapshot) {
+        val appActive = !appInBackground
+        val badgeCount = if (appActive) 0u else notificationBadgeCount()
+        if (appActive) LocalNotifications.clearDelivered(context)
+        val attentionEvents = buildNotificationEvents(previous, current, appActive, appActive)
+        attentionEvents.forEach { event ->
+            if (event.inApp) {
+                notice = "${event.kind}: ${event.body}"
+                notificationThreadRoute = event.deepLink
+            }
+            if (event.operatingSystem) {
+                LocalNotifications.deliver(
+                    context = context,
+                    title = event.title,
+                    body = event.body,
+                    sound = event.sound,
+                    threadId = event.threadId,
+                    deepLink = event.deepLink,
+                    badgeCount = badgeCount,
+                    kind = event.kind.toString(),
+                    soundKind = event.soundKind.toString(),
+                )
+            } else if (event.sound) {
+                LocalNotifications.playSound(context, event.soundKind.toString())
+            }
+        }
+        LocalNotifications.updateBadge(context, badgeCount)
+    }
+
     /** Saves the model preferences every Host shares; the store writes its own state. */
     fun persist() {
         val current = owner?.snapshot() ?: return
@@ -1087,6 +1117,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
         val value = intent.getStringExtra(EXTRA_PUSH_DEEP_LINK)
             ?: intent.data?.takeIf { it.scheme == "remoteagent" }?.toString()
             ?: return
+        LocalNotifications.acknowledge(context, value)
         val uri = runCatching { android.net.Uri.parse(value) }.getOrNull() ?: return
         if (isUsageDeepLink(uri)) {
             openUsageDeepLink()
@@ -1125,7 +1156,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
 
     private fun validPushRouteSegment(value: String): Boolean =
         value.isNotEmpty() && value != "." && value != ".." &&
-            value.none { it == '/' || it == '\\' || it.isISOControl() }
+            value.none { it == '\\' || it.isISOControl() }
 
     private fun openUsageDeepLink() {
         usageDeepLinkRequests += 1

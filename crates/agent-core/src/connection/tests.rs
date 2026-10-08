@@ -2188,6 +2188,101 @@ fn preferences_change_on_the_device_and_survive_a_restart() {
 }
 
 #[test]
+fn browser_preferences_validate_persist_and_project_a_safe_default() {
+    let mut owner = owner(Snapshot::default());
+    owner
+        .prepare(Intent::SetBrowserRecordingFrameRate { frame_rate: 60 })
+        .unwrap();
+    owner
+        .prepare(Intent::SetBrowserRecordingShowKeyPresses { enabled: true })
+        .unwrap();
+    owner
+        .prepare(Intent::SetBrowserProfiles {
+            profiles: vec![crate::view::browser::BrowserProfile {
+                id: "work".into(),
+                name: "Work".into(),
+                kind: crate::view::browser::BrowserProfileKind::Persistent,
+            }],
+        })
+        .unwrap();
+    owner
+        .prepare(Intent::SetBrowserDefaultProfile {
+            profile_id: "missing".into(),
+        })
+        .unwrap();
+
+    assert_eq!(owner.state.preferences.browser.recording_frame_rate, 60);
+    assert!(owner.state.preferences.browser.recording_show_key_presses);
+    assert_eq!(
+        owner.state.preferences.browser.resolved().profile_id,
+        crate::view::browser::DEFAULT_BROWSER_PROFILE_ID
+    );
+    let restored =
+        crate::persistence::decode(&crate::persistence::encode(&owner.state).unwrap()).unwrap();
+    assert_eq!(restored.preferences.browser, owner.state.preferences.browser);
+
+    assert!(owner
+        .prepare(Intent::SetBrowserRecordingFrameRate { frame_rate: 59 })
+        .is_err());
+    assert!(owner
+        .prepare(Intent::SetBrowserProfiles {
+            profiles: vec![crate::view::browser::BrowserProfile {
+                id: "bad\0id".into(),
+                name: "Bad".into(),
+                kind: crate::view::browser::BrowserProfileKind::Persistent,
+            }],
+        })
+        .is_err());
+}
+
+#[test]
+fn browser_profile_intents_share_naming_and_reset_default_after_removal() {
+    let mut owner = owner(Snapshot::default());
+    owner
+        .prepare(Intent::CreateBrowserProfile {
+            profile_id: "profile-a".into(),
+            requested_name: Some("New profile".into()),
+        })
+        .unwrap();
+    owner
+        .prepare(Intent::CreateBrowserProfile {
+            profile_id: "profile-b".into(),
+            requested_name: Some("New profile".into()),
+        })
+        .unwrap();
+    assert_eq!(
+        owner.state.preferences.browser.profiles[1].name,
+        "New profile 2"
+    );
+    owner
+        .prepare(Intent::SetBrowserDefaultProfile {
+            profile_id: "profile-b".into(),
+        })
+        .unwrap();
+    owner
+        .prepare(Intent::RenameBrowserProfile {
+            profile_id: "profile-b".into(),
+            name: "  Work  ".into(),
+        })
+        .unwrap();
+    owner
+        .prepare(Intent::RemoveBrowserProfile {
+            profile_id: "profile-b".into(),
+        })
+        .unwrap();
+    assert_eq!(
+        owner.state.preferences.browser.default_profile_id,
+        crate::view::browser::DEFAULT_BROWSER_PROFILE_ID
+    );
+    assert!(owner
+        .prepare(Intent::RenameBrowserProfile {
+            profile_id: crate::view::browser::DEFAULT_BROWSER_PROFILE_ID.into(),
+            name: "Nope".into(),
+        })
+        .is_err());
+}
+
+#[test]
 fn a_saved_staged_model_takes_the_options_it_was_last_given() {
     use crate::view::models::{
         fixtures::{host_instance, host_model},

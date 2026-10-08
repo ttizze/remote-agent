@@ -75,18 +75,20 @@ impl Desktop {
         let existing = self.draft_attachments(&draft_key);
         let settings = self.snapshot.preferences.snapshot_capture.clone();
         let feedback = Some((settings.flash, settings.animations));
-        self.stage(draft_key, feedback, None, move || {
+        self.stage_async(draft_key, feedback, None, async move {
             let path = staging_directory()?.join(format!("Snapshot-{}.png", uuid::Uuid::new_v4()));
             let permission =
-                crate::platform::snapshot_permission_granted(settings.include_accessibility);
+                crate::platform::snapshot_permission_granted(settings.include_accessibility).await;
             if !agent_core::view::snapshot_capture::capture_is_allowed(&settings, permission) {
                 return Err("Screen capture permission is required for this setting.".into());
             }
-            crate::platform::capture_snapshot(&path, settings.include_accessibility)?;
+            crate::platform::capture_snapshot(&path, settings.include_accessibility).await?;
             if settings.play_sound {
-                let _ = crate::platform::play_snapshot_sound(settings.sound);
+                let _ = crate::platform::play_snapshot_sound(settings.sound).await;
             }
-            stage_paths(vec![path], &existing)
+            tokio::task::spawn_blocking(move || stage_paths(vec![path], &existing))
+                .await
+                .map_err(|error| error.to_string())?
         });
     }
 
@@ -260,13 +262,28 @@ impl Desktop {
         snapshot_id: Option<String>,
         work: impl FnOnce() -> Result<(Vec<LocalFile>, Option<String>), String> + Send + 'static,
     ) {
+        self.stage_async(draft_key, snapshot_feedback, snapshot_id, async move {
+            tokio::task::spawn_blocking(work)
+                .await
+                .map_err(|error| error.to_string())?
+        });
+    }
+
+    fn stage_async(
+        &self,
+        draft_key: String,
+        snapshot_feedback: Option<(bool, bool)>,
+        snapshot_id: Option<String>,
+        work: impl std::future::Future<Output = Result<(Vec<LocalFile>, Option<String>), String>>
+        + Send
+        + 'static,
+    ) {
         let updates = self.updates.clone();
         let epoch = self.epoch;
         self.runtime.handle.spawn(async move {
-            let (files, error) = match tokio::task::spawn_blocking(work).await {
-                Ok(Ok(staged)) => staged,
-                Ok(Err(error)) => (vec![], Some(error)),
-                Err(error) => (vec![], Some(error.to_string())),
+            let (files, error) = match work.await {
+                Ok(staged) => staged,
+                Err(error) => (vec![], Some(error)),
             };
             let _ = updates
                 .send((
@@ -395,23 +412,28 @@ fn stage_paths(
                 mime_type: admitted.mime_type,
             }
         };
-        copy_snapshot_metadata(source, Path::new(&staged.path));
+        copy_snapshot_metadata(source, Path::new(&staged.path))?;
         files.push(staged);
     }
     Ok((files, error))
 }
 
-fn copy_snapshot_metadata(source: &Path, target: &Path) {
+fn copy_snapshot_metadata(source: &Path, target: &Path) -> Result<(), String> {
     let source_metadata = crate::platform::snapshot_metadata_path(source);
-    let Ok(bytes) = std::fs::read(&source_metadata) else {
-        return;
+    let bytes = match std::fs::read(&source_metadata) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(format!("snapshot metadata could not be read: {error}"));
+        }
     };
-    if bytes.len() > 128 * 1024
-        || serde_json::from_slice::<agent_domain::CapturedWindow>(&bytes).is_err()
-    {
-        return;
+    if bytes.len() > 128 * 1024 {
+        return Err("snapshot metadata is too large".into());
     }
-    let _ = std::fs::write(crate::platform::snapshot_metadata_path(target), bytes);
+    serde_json::from_slice::<agent_domain::CapturedWindow>(&bytes)
+        .map_err(|error| format!("snapshot metadata is invalid: {error}"))?;
+    std::fs::write(crate::platform::snapshot_metadata_path(target), bytes)
+        .map_err(|error| format!("snapshot metadata could not be copied: {error}"))
 }
 
 fn stage_clipboard(
@@ -620,7 +642,8 @@ pub(crate) fn stash_images_to_files(images: &[StashImage]) -> Vec<LocalFile> {
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_DIMENSION, compress_image_file, encode_stash_images, mime_type, stash_images_to_files,
+        MAX_DIMENSION, compress_image_file, copy_snapshot_metadata, encode_stash_images, mime_type,
+        stash_images_to_files,
     };
     use std::path::Path;
 
@@ -676,5 +699,36 @@ mod tests {
         assert_eq!(mime_type("a.PNG"), "image/png");
         assert_eq!(mime_type("notes.md"), "text/markdown");
         assert_eq!(mime_type("archive.tar.gz"), "application/octet-stream");
+    }
+
+    #[test]
+    fn snapshot_metadata_copy_reports_invalid_and_io_failures() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source.png");
+        let target = directory.path().join("target.png");
+        let metadata = agent_domain::CapturedWindow {
+            app_name: "Editor".into(),
+            window_title: "Draft".into(),
+            accessible_text: None,
+            accessibility: None,
+        };
+        std::fs::write(
+            crate::platform::snapshot_metadata_path(&source),
+            serde_json::to_vec(&metadata).unwrap(),
+        )
+        .unwrap();
+        copy_snapshot_metadata(&source, &target).unwrap();
+        assert_eq!(
+            std::fs::read(crate::platform::snapshot_metadata_path(&target)).unwrap(),
+            serde_json::to_vec(&metadata).unwrap()
+        );
+
+        std::fs::write(
+            crate::platform::snapshot_metadata_path(&source),
+            b"{invalid",
+        )
+        .unwrap();
+        let error = copy_snapshot_metadata(&source, &target).unwrap_err();
+        assert!(error.contains("metadata is invalid"));
     }
 }

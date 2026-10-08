@@ -821,10 +821,22 @@ impl Desktop {
                 self.panels.next_browser += 1;
                 let id = self.panels.next_browser;
                 if let (Some(store), Some(thread)) = (self.store(), self.thread_id()) {
+                    let resolved_browser = self.snapshot.preferences.browser.resolved();
                     let browser = crate::browser::HostBrowser::new(
                         store,
                         thread,
-                        crate::browser::PreviewDefaults::default(),
+                        crate::browser::PreviewDefaults {
+                            viewport: resolved_browser.viewport,
+                            appearance: resolved_browser.appearance,
+                            zoom: resolved_browser.zoom,
+                            profile_id: Some(resolved_browser.profile_id),
+                            recording_options:
+                                agent_protocol::preview::PreviewRecordingOptions {
+                                    frame_rate: resolved_browser.recording_frame_rate as u8,
+                                    show_key_presses: resolved_browser.recording_show_key_presses,
+                                    show_mouse_presses: resolved_browser.recording_show_mouse_presses,
+                                },
+                        },
                         window,
                         cx,
                     );

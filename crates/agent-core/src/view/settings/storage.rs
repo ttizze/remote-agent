@@ -13,6 +13,7 @@ pub(super) const SECTION: Section = Section {
         SettingId::StorageWorktreeOnMerge,
         SettingId::StorageBrowserArtifactsAfterDays,
         SettingId::StorageLogsAfterDays,
+        SettingId::AddProjectBaseDirectory,
         SettingId::StorageWorktreeOnDelete,
         SettingId::StorageWorktreeUnchanged,
     ],
@@ -69,6 +70,18 @@ pub(super) const SECTION: Section = Section {
                             value: host.storage_cleanup.logs_after_days.unwrap_or(30),
                             min: agent_protocol::models::MIN_RETENTION_DAYS,
                             max: agent_protocol::models::MAX_RETENTION_DAYS,
+                        },
+                    )
+                },
+                super::SettingsRow {
+                    resettable: !host.add_project_base_directory.is_empty(),
+                    ..row(
+                        SettingId::AddProjectBaseDirectory,
+                        "Add-project folder",
+                        Some("Start the add-project folder picker here; leave empty for your home directory."),
+                        SettingControl::Text {
+                            value: host.add_project_base_directory.clone(),
+                            placeholder: Some("Home directory".into()),
                         },
                     )
                 },
@@ -139,6 +152,12 @@ pub(super) const SECTION: Section = Section {
                     )
                 })
         }
+        (SettingId::AddProjectBaseDirectory, SettingValue::Text { value }) => Some(update(
+            scope,
+            SettingChange::AddProjectBaseDirectory {
+                value: value.trim().to_owned(),
+            },
+        )),
         _ => None,
     },
     reset: |id| match id {
@@ -172,7 +191,53 @@ pub(super) const SECTION: Section = Section {
             &SettingsScope::Host,
             SettingChange::StorageLogsAfterDays { days: None },
         )),
+        SettingId::AddProjectBaseDirectory => Some(update(
+            &SettingsScope::Host,
+            SettingChange::AddProjectBaseDirectory { value: String::new() },
+        )),
         _ => None,
     },
     inherit: |_| None,
 };
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        models::HostSettings,
+        state::Snapshot,
+        view::{settings::settings_view, time::TimestampFormat},
+    };
+
+    #[test]
+    fn add_project_base_directory_is_a_persisted_host_setting() {
+        let mut host = HostSettings::default();
+        host.add_project_base_directory = "~/projects".into();
+        let view = settings_view(&Snapshot::default(), Some(&host), &SettingsScope::Host, TimestampFormat::Locale);
+        let row = view
+            .sections
+            .iter()
+            .flat_map(|section| &section.rows)
+            .find(|row| row.id == SettingId::AddProjectBaseDirectory)
+            .expect("add-project setting row");
+        assert!(row.resettable);
+        assert!(matches!(
+            row.control,
+            SettingControl::Text { ref value, .. } if value == "~/projects"
+        ));
+        assert_eq!(
+            (SECTION.intent)(
+                &Snapshot::default(),
+                &SettingsScope::Host,
+                SettingId::AddProjectBaseDirectory,
+                &SettingValue::Text { value: " /tmp/projects ".into() },
+            ),
+            Some(crate::state::Intent::UpdateSettings {
+                scope: SettingsScope::Host,
+                change: SettingChange::AddProjectBaseDirectory {
+                    value: "/tmp/projects".into(),
+                },
+            })
+        );
+    }
+}

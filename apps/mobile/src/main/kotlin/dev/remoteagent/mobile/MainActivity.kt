@@ -35,7 +35,8 @@ class MainActivity : ComponentActivity() {
             localNetworkGranted = granted
         }
     private val requestNotifications =
-        registerForActivityResult(ActivityResultContracts.RequestPermission()) {
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+            LocalNotifications.permissionResult(this, granted)
             model.refreshPushRegistration()
         }
 
@@ -43,9 +44,18 @@ class MainActivity : ComponentActivity() {
         super.onResume()
         localNetworkGranted =
             checkSelfPermission(Manifest.permission.ACCESS_LOCAL_NETWORK) == PackageManager.PERMISSION_GRANTED
-        // Reconcile notification permission changes made in system settings
-        // and replay every retained Host registration after a background
-        // interval. This does not request permission by itself.
+        // A not-determined permission is still being requested (or may be
+        // requested below). Do not treat that state as a denial: doing so
+        // would clear events queued while Android owns the permission sheet.
+        if (
+            android.os.Build.VERSION.SDK_INT < 33 ||
+                checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
+        ) {
+            LocalNotifications.permissionResult(this, true)
+        }
+        LocalNotifications.clearDelivered(this)
+        // Reconcile notification permission changes made in system settings and
+        // replay every retained Host registration after a background interval.
         model.refreshPushRegistration()
     }
 

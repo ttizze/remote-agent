@@ -3,13 +3,16 @@ use super::{
     ProjectSettingKey, SettingChange, SettingControl, SettingId, SettingSource, SettingValue,
     SettingsRow, SettingsScope,
     registry::{Context, Section},
-    row, section, update,
+    resettable_for, row, section, update,
 };
 use crate::models::HostSettings;
 
 fn browser_row(on: bool, source: Option<SettingSource>) -> SettingsRow {
     SettingsRow {
-        resettable: on != HostSettings::default().enable_agent_browser_access,
+        resettable: resettable_for(
+            source,
+            on != HostSettings::default().enable_agent_browser_access,
+        ),
         source,
         ..row(
             SettingId::AgentBrowserAccess,
@@ -125,6 +128,7 @@ mod tests {
             find(&view, SettingId::AgentBrowserAccess).source,
             Some(SettingSource::Project)
         );
+        assert!(find(&view, SettingId::AgentBrowserAccess).resettable);
         assert!(
             view.sections
                 .iter()

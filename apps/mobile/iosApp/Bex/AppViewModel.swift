@@ -31,6 +31,7 @@ final class BexAppViewModel: ObservableObject {
     @Published var pairingError: String?
     @Published var pairingInvitation: Invitation?
     @Published var notice: String?
+    @Published var notificationThreadRoute: String? = nil
     @Published var profiles: [HostProfile] = []
     @Published private(set) var environments: [EnvironmentRow] = []
     /// Latest immutable core snapshot for each saved environment.
@@ -508,6 +509,9 @@ final class BexAppViewModel: ObservableObject {
         let pushPreferencesChanged = previous?.preferences().liveActivitiesEnabled
             != next.preferences().liveActivitiesEnabled
         environmentSnapshots[profile.id] = next
+        if let previous {
+            deliverAttentionEvents(previous: previous, current: next)
+        }
         let row = EnvironmentRow(
             profileId: profile.id,
             environmentId: next.environmentId() ?? profile.id,
@@ -907,6 +911,16 @@ final class BexAppViewModel: ObservableObject {
         Array(environmentSnapshots.values)
     }
 
+    /// Core computes attention per Host; native badges represent the sum for
+    /// every saved environment rather than a boolean for the selected Host.
+    func notificationBadgeCount() -> UInt32 {
+        environmentSnapshots.values.reduce(UInt32(0)) { total, snapshot in
+            total.addingReportingOverflow(
+                AgentCore.notificationBadgeCount(snapshot: snapshot)
+            ).partialValue
+        }
+    }
+
     func environmentProjects(_ query: String) -> [EnvironmentProjectRow] {
         AgentCore.environmentProjectRows(snapshots: environmentSnapshotsForCore(), query: query)
     }
@@ -1040,21 +1054,8 @@ extension BexAppViewModel {
             profiles[index].name = name
             do { try HostProfile.save(profiles) } catch { notice = error.localizedDescription }
         }
-        let becameUnavailable = snapshot.error() == nil && next.error() != nil
         if snapshot.error() != next.error() {
             notice = next.error()
-        }
-        if becameUnavailable && UIApplication.shared.applicationState != .active {
-            let mode = next.preferences().notificationMode
-            let notificationsEnabled = mode == .notifications || mode == .notificationsAndSound
-            let soundEnabled = mode == .sound || mode == .notificationsAndSound
-            if notificationsEnabled || soundEnabled {
-                LocalNotifications.deliver(
-                    title: "Bex needs your attention",
-                    body: next.error() ?? "The Host reported an error.",
-                    sound: soundEnabled
-                )
-            }
         }
         let threadChanged = snapshot.selectedThreadId() != next.selectedThreadId()
         snapshot = next
@@ -1080,6 +1081,56 @@ extension BexAppViewModel {
             do { try await Task.sleep(nanoseconds: 250_000_000) } catch { return }
             self?.persist()
         }
+    }
+
+    private func deliverAttentionEvents(
+        previous: AgentCore.Snapshot,
+        current: AgentCore.Snapshot
+    ) {
+        let appActive = UIApplication.shared.applicationState == .active
+        let attentionEvents = AgentCore.notificationEvents(
+            previous: previous,
+            current: current,
+            appVisible: appActive,
+            appFocused: appActive
+        )
+        let badgeCount = appActive ? 0 : notificationBadgeCount()
+        if appActive { LocalNotifications.clearDelivered() }
+        for event in attentionEvents {
+            if event.inApp {
+                notice = "\(event.kind): \(event.body)"
+                notificationThreadRoute = event.deepLink
+            }
+            if event.operatingSystem {
+                LocalNotifications.deliver(
+                    title: event.title,
+                    body: event.body,
+                    sound: event.sound,
+                    threadId: event.threadId,
+                    deepLink: event.deepLink,
+                    badgeCount: badgeCount,
+                    kind: String(describing: event.kind),
+                    soundKind: String(describing: event.soundKind)
+                )
+            } else if event.sound {
+                LocalNotifications.playSound(soundKind: String(describing: event.soundKind))
+            }
+        }
+        LocalNotifications.updateBadge(badgeCount)
+    }
+
+    func openNotificationThread() {
+        guard let route = notificationThreadRoute else { return }
+        if AgentPushCenter.isActivityOverviewDeepLink(route) {
+            notificationThreadRoute = nil
+            notice = nil
+            openActivityOverviewDeepLink()
+            return
+        }
+        guard let target = AgentPushCenter.threadTarget(from: route) else { return }
+        notificationThreadRoute = nil
+        notice = nil
+        openPushThread(hostId: target.hostId, threadId: target.threadId)
     }
 
     /// Saves the model preferences every Host shares; the store writes its own state.

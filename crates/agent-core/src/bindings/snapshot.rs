@@ -8,7 +8,7 @@ use crate::{
     },
     models::{FileContent, FileList, Project, WorktreeSettings},
     state::{Draft, RefScope, Snapshot},
-    view::{load_balancing, thread_list::ThreadListOptions},
+    view::{load_balancing, notifications, thread_list::ThreadListOptions},
 };
 use agent_protocol::{
     models::AgentActivityPhase,
@@ -255,6 +255,27 @@ pub fn environment_load_balancing_pending_action(
     )
 }
 
+/// Folds two Host snapshots into the attention events a native client should
+/// deliver. The app supplies its visibility and focus state; core owns the
+/// status transition, completion edge and preference decisions.
+#[uniffi::export]
+pub fn notification_events(
+    previous: Arc<Snapshot>,
+    current: Arc<Snapshot>,
+    app_visible: bool,
+    app_focused: bool,
+) -> Vec<notifications::NotificationEvent> {
+    notifications::between(&previous, &current, app_visible, app_focused)
+}
+
+/// The aggregate attention count used by native notification badges. This is
+/// exposed separately from event folding because focus and thread selection
+/// can clear attention without producing a new transition event.
+#[uniffi::export]
+pub fn notification_badge_count(snapshot: Arc<Snapshot>) -> u32 {
+    notifications::badge_count(&snapshot)
+}
+
 #[uniffi::export]
 impl Snapshot {
     #[uniffi::constructor]
@@ -264,6 +285,12 @@ impl Snapshot {
     #[uniffi::constructor]
     pub fn restore(bytes: Vec<u8>) -> Result<Arc<Self>, AgentError> {
         Ok(Arc::new(crate::persistence::decode(&bytes).map_err(error)?))
+    }
+    /// Device-local browser facts for a Preview opener. Native clients pass
+    /// these explicit values to their Host/browser owner instead of deriving
+    /// defaults or reading project settings themselves.
+    pub fn browser_defaults(&self) -> crate::view::browser::BrowserDefaults {
+        crate::view::preview::browser_defaults(self)
     }
     pub fn serialize_model_preferences(&self) -> Result<Vec<u8>, AgentError> {
         crate::persistence::encode_model_preferences(self).map_err(error)

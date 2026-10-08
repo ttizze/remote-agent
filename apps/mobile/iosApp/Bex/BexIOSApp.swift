@@ -16,6 +16,8 @@ struct BexIOSApp: App {
                     if notification.userInfo?["type"] as? String == "new-thread" { model.handleShortcut() }
                 }
                 .onAppear {
+                    LocalNotifications.refreshAuthorization()
+                    LocalNotifications.clearDelivered()
                     model.ingestIncomingShareHandoffs()
                     if AgentPushCenter.takePendingShortcut() == "new-thread" { model.handleShortcut() }
                     model.setActivityUpdater { [weak pushCenter] states in
@@ -63,10 +65,12 @@ struct BexIOSApp: App {
                         }
                     case .active where wasBackgrounded:
                         wasBackgrounded = false
+                        LocalNotifications.clearDelivered()
                         model.ingestIncomingShareHandoffs()
                         pushCenter.refreshPreferences(activityStates: model.activityContentStatesForPush())
                         model.connect(afterForeground: true)
                     case .active:
+                        LocalNotifications.clearDelivered()
                         model.ingestIncomingShareHandoffs()
                         pushCenter.refreshPreferences(activityStates: model.activityContentStatesForPush())
                     default:

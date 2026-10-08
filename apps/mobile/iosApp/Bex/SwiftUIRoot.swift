@@ -111,6 +111,7 @@ private struct WorkspaceRoot: View {
     @ObservedObject var model: BexAppViewModel
     @State private var routes: [ThreadRoute] = []
     @State private var showingSettings = false
+    @State private var settingsProjectId: String?
     @State private var showingNewTask = false
     /// The new task opens on the draft core already prepared.
     @State private var newTaskDraftOpen = false
@@ -136,7 +137,9 @@ private struct WorkspaceRoot: View {
                 }
             }
         }
-        .sheet(isPresented: $showingSettings) { SettingsScreen(model: model) }
+        .sheet(isPresented: $showingSettings, onDismiss: { settingsProjectId = nil }) {
+            SettingsScreen(model: model, projectId: settingsProjectId)
+        }
         .sheet(isPresented: $showingNewTask, onDismiss: restoreThread) {
             NewTaskFlow(model: model, draftOpen: newTaskDraftOpen) { _ in
                 returnThread = nil
@@ -146,11 +149,27 @@ private struct WorkspaceRoot: View {
             .presentationDetents([.fraction(0.92)])
         }
         .onChange(of: model.selectedThreadId) { _, _ in routes = [] }
+        .overlay(alignment: .bottom) {
+            if let notice = model.notice {
+                HStack(spacing: 12) {
+                    Text(notice).lineLimit(2).frame(maxWidth: .infinity, alignment: .leading)
+                    if model.notificationThreadRoute != nil {
+                        Button("Open") { model.openNotificationThread() }
+                    }
+                    Button("Dismiss") { model.notice = nil }
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 12)
+                .background(AppTheme.groupedCard, in: RoundedRectangle(cornerRadius: 16))
+                .padding(12)
+            }
+        }
     }
 
     private func list(sidebar: Bool) -> some View {
         ThreadListScreen(model: model, sidebar: sidebar, openSettings: { projectId in
             _ = model.selectScopedValue(projectId)
+            settingsProjectId = projectId
             showingSettings = true
         }, newTask: newTask,
                          showNewTaskDraft: showNewTaskDraft)

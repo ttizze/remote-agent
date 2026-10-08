@@ -1161,6 +1161,94 @@ impl Owner {
                 self.state.preferences.snapshot_capture.animations = enabled;
                 Next::Done
             }
+            Intent::SetBrowserRecordingFrameRate { frame_rate } => {
+                if !crate::view::browser::BROWSER_RECORDING_FRAME_RATES.contains(&frame_rate) {
+                    return Err(invalid("Browser recording frame rate must be 30 or 60."));
+                }
+                self.state.preferences.browser.recording_frame_rate = frame_rate;
+                Next::Done
+            }
+            Intent::SetBrowserViewport { viewport } => {
+                crate::view::browser::validate_browser_viewport(&viewport).map_err(invalid)?;
+                self.state.preferences.browser.viewport = viewport;
+                Next::Done
+            }
+            Intent::SetBrowserZoom { zoom } => {
+                self.state.preferences.browser.zoom = zoom;
+                Next::Done
+            }
+            Intent::SetBrowserAppearance { appearance } => {
+                self.state.preferences.browser.appearance = appearance;
+                Next::Done
+            }
+            Intent::SetBrowserLinkTarget { target } => {
+                self.state.preferences.browser.link_target = target;
+                Next::Done
+            }
+            Intent::SetBrowserAutoShowFloatingPreview { enabled } => {
+                self.state.preferences.browser.auto_show_floating_preview = enabled;
+                Next::Done
+            }
+            Intent::SetBrowserRecordingShowKeyPresses { enabled } => {
+                self.state.preferences.browser.recording_show_key_presses = enabled;
+                Next::Done
+            }
+            Intent::SetBrowserRecordingShowMousePresses { enabled } => {
+                self.state.preferences.browser.recording_show_mouse_presses = enabled;
+                Next::Done
+            }
+            Intent::SetBrowserProfiles { profiles } => {
+                let mut browser = self.state.preferences.browser.clone();
+                browser.profiles = profiles;
+                browser.validate().map_err(invalid)?;
+                self.state.preferences.browser = browser;
+                Next::Done
+            }
+            Intent::CreateBrowserProfile {
+                profile_id,
+                requested_name,
+            } => {
+                let browser = &mut self.state.preferences.browser;
+                let profile = crate::view::browser::create_browser_profile(
+                    &browser.profiles,
+                    profile_id,
+                    requested_name.as_deref(),
+                )
+                .map_err(invalid)?;
+                browser.profiles.push(profile);
+                browser.validate().map_err(invalid)?;
+                Next::Done
+            }
+            Intent::RenameBrowserProfile { profile_id, name } => {
+                let browser = &mut self.state.preferences.browser;
+                browser.profiles = crate::view::browser::rename_browser_profile(
+                    &browser.profiles,
+                    &profile_id,
+                    &name,
+                )
+                .map_err(invalid)?;
+                browser.validate().map_err(invalid)?;
+                Next::Done
+            }
+            Intent::RemoveBrowserProfile { profile_id } => {
+                let browser = &mut self.state.preferences.browser;
+                browser.profiles = crate::view::browser::remove_browser_profile(
+                    &browser.profiles,
+                    &profile_id,
+                )
+                .map_err(invalid)?;
+                if browser.default_profile_id == profile_id {
+                    browser.default_profile_id =
+                        crate::view::browser::DEFAULT_BROWSER_PROFILE_ID.into();
+                }
+                browser.validate().map_err(invalid)?;
+                Next::Done
+            }
+            Intent::SetBrowserDefaultProfile { profile_id } => {
+                crate::view::browser::validate_browser_profile_id(&profile_id).map_err(invalid)?;
+                self.state.preferences.browser.default_profile_id = profile_id;
+                Next::Done
+            }
             Intent::ImportShare { content } => {
                 let incoming = crate::view::share::compose(&content);
                 if !incoming.is_empty() {

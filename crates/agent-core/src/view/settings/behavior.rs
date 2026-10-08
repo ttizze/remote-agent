@@ -3,7 +3,7 @@ use super::{
     ProjectSettingKey, SettingChange, SettingControl, SettingId, SettingSource, SettingValue,
     SettingsRow, SettingsScope, choice,
     registry::{Context, Section},
-    row, section, update,
+    resettable_for, row, section, update,
 };
 use crate::{models::HostSettings, state::Intent, view::time::TimestampFormat};
 
@@ -17,7 +17,10 @@ pub fn timestamp_format_id(format: TimestampFormat) -> &'static str {
 
 fn continue_row(on: bool, source: Option<SettingSource>) -> SettingsRow {
     SettingsRow {
-        resettable: on != HostSettings::default().continue_after_restart,
+        resettable: resettable_for(
+            source,
+            on != HostSettings::default().continue_after_restart,
+        ),
         source,
         ..row(
             SettingId::ContinueAfterRestart,

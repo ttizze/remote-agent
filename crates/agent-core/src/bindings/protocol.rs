@@ -18,6 +18,11 @@ enum PreviewAppearance {
     Dark,
 }
 #[uniffi::remote(Enum)]
+enum BrowserLinkTarget {
+    System,
+    App,
+}
+#[uniffi::remote(Enum)]
 enum PreviewViewportPreset {
     IphoneSe,
     IphoneXr,

@@ -135,7 +135,13 @@ private fun AppSurface(model: AndroidAppModel, requestQrScan: (onContents: (Stri
             model.notice?.let { notice ->
                 Snackbar(
                     Modifier.align(Alignment.BottomCenter).padding(16.dp),
-                    action = { TextButton(onClick = { model.notice = null }) { Text("Dismiss") } },
+                    action = {
+                        if (model.notificationThreadRoute != null) {
+                            TextButton(onClick = model::openNotificationThread) { Text("Open") }
+                        } else {
+                            TextButton(onClick = { model.notice = null }) { Text("Dismiss") }
+                        }
+                    },
                     containerColor = AppTheme.colors.foreground,
                     contentColor = AppTheme.colors.screen,
                 ) {

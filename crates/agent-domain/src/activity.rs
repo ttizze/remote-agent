@@ -1,11 +1,93 @@
 //! Display bounds shared by operating-system activity delivery and rendering.
 
+use percent_encoding::percent_decode_str;
+use url::Url;
+
 pub const ACTIVITY_SUMMARY_LIMIT: usize = 120;
 pub const ACTIVITY_STATUS_LIMIT: usize = 40;
 pub const ACTIVITY_LINK_LIMIT: usize = 512;
 pub const ACTIVITY_ROWS_LIMIT: usize = 5;
 /// Host-independent route used when one alert represents several rows.
 pub const ACTIVITY_OVERVIEW_DEEP_LINK: &str = "remoteagent://overview";
+
+/// A validated activity deep link. The route keeps environment and thread
+/// identity together so native clients do not open a same-named thread on a
+/// different Host.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ActivityDeepLink {
+    Overview,
+    Thread {
+        environment_id: String,
+        thread_id: String,
+    },
+}
+
+/// Builds the canonical environment-qualified activity route used by
+/// notification decisions and native click handlers.
+pub fn activity_thread_deep_link(environment_id: &str, thread_id: &str) -> String {
+    format!(
+        "remoteagent://threads/{}/{}",
+        encode_route_segment(environment_id),
+        encode_route_segment(thread_id),
+    )
+}
+
+fn encode_route_segment(value: &str) -> String {
+    value
+        .bytes()
+        .flat_map(|byte| match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                vec![char::from(byte)]
+            }
+            byte => format!("%{byte:02X}").chars().collect(),
+        })
+        .collect()
+}
+
+/// Parses the canonical routes shared by desktop and native click consumers.
+pub fn parse_activity_deep_link(value: &str) -> Option<ActivityDeepLink> {
+    let url = Url::parse(value).ok()?;
+    if !url.username().is_empty()
+        || url.password().is_some()
+        || url.port().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return None;
+    }
+    if value == ACTIVITY_OVERVIEW_DEEP_LINK {
+        return Some(ActivityDeepLink::Overview);
+    }
+    let segments = url.path_segments()?.collect::<Vec<_>>();
+    match (url.scheme(), url.host_str()) {
+        ("remoteagent", Some("threads")) => {
+            let [environment_id, thread_id] = segments.as_slice() else {
+                return None;
+            };
+            Some(ActivityDeepLink::Thread {
+                environment_id: decode_route_segment(environment_id)?,
+                thread_id: decode_route_segment(thread_id)?,
+            })
+        }
+        _ => None,
+    }
+}
+
+fn decode_route_segment(segment: &str) -> Option<String> {
+    (!segment.is_empty())
+        .then(|| percent_decode_str(segment).decode_utf8().ok())
+        .flatten()
+        .filter(|segment| {
+            let value = segment.as_ref();
+            !value.is_empty()
+                && value != "."
+                && value != ".."
+                && !value
+                    .chars()
+                    .any(|character| character == '\\' || character.is_control())
+        })
+        .map(|segment| segment.into_owned())
+}
 pub const ACTIVITY_MESSAGE_MAX_AGE_MS: i64 = 10 * 60 * 1_000;
 pub const RUNNING_ACTIVITY_TTL_MS: i64 = 2 * 60 * 60 * 1_000;
 pub const WAITING_ACTIVITY_TTL_MS: i64 = 24 * 60 * 60 * 1_000;
@@ -557,7 +639,11 @@ pub fn bounded_activity_link(value: &str) -> String {
                     segments.len() == 2 && segments.iter().all(|segment| !segment.is_empty())
                 })));
     valid.then(|| value.to_owned()).unwrap_or_default()
+
 }
+
+
+
 
 /// Trims a display string and bounds it in UTF-16 units without splitting a
 /// surrogate pair. The ellipsis is part of the display budget.
@@ -889,6 +975,35 @@ mod tests {
         );
         assert_eq!(bounded_activity_text("abc  defg", 8), "abc...");
         assert_eq!(bounded_activity_text("😀😀😀", 5), "😀...");
+    }
+
+    #[test]
+    fn activity_routes_require_a_host_and_thread_or_the_shared_overview() {
+        assert_eq!(
+            parse_activity_deep_link(ACTIVITY_OVERVIEW_DEEP_LINK),
+            Some(ActivityDeepLink::Overview)
+        );
+        assert_eq!(
+            parse_activity_deep_link("remoteagent://threads/host-a/thread-1"),
+            Some(ActivityDeepLink::Thread {
+                environment_id: "host-a".into(),
+                thread_id: "thread-1".into(),
+            })
+        );
+        assert_eq!(
+            parse_activity_deep_link("remoteagent://threads/host%2Fa/thread%2Fb"),
+            Some(ActivityDeepLink::Thread {
+                environment_id: "host/a".into(),
+                thread_id: "thread/b".into(),
+            })
+        );
+        assert!(parse_activity_deep_link("remoteagent://threads/thread-1").is_none());
+        assert!(parse_activity_deep_link("remote-agent://thread/host-a:thread-1").is_none());
+        assert_eq!(
+            activity_thread_deep_link("host/a", "thread/b"),
+            "remoteagent://threads/host%2Fa/thread%2Fb"
+        );
+        assert!(parse_activity_deep_link("remoteagent://threads/host-a/thread-1?open=1").is_none());
     }
 
     proptest! {

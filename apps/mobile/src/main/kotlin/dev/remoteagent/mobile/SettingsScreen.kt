@@ -25,6 +25,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
@@ -52,6 +53,7 @@ import dev.remoteagent.core.NativeUpdatePlatform
 import dev.remoteagent.core.NativeUpdateRequest
 import dev.remoteagent.core.ProviderKind
 import dev.remoteagent.core.SettingControl
+import dev.remoteagent.core.SettingSource
 import dev.remoteagent.core.SettingValue
 import dev.remoteagent.core.SettingsRow
 import dev.remoteagent.core.SettingsScope
@@ -59,6 +61,7 @@ import dev.remoteagent.core.ThreadMenuConfirmation
 import dev.remoteagent.core.UpdateChannel
 import dev.remoteagent.core.accountErrorMessage
 import dev.remoteagent.core.privacyPolicy
+import java.util.UUID
 
 private const val PERCENT = 100f
 
@@ -156,6 +159,7 @@ internal fun SettingsScreen(model: AndroidAppModel, projectId: String?) {
                             SettingRow(
                                 row,
                                 onReset = { model.snapshot.settingReset(scope, row)?.let(model::perform) },
+                                onIntent = model::perform,
                             ) { value ->
                                 model.snapshot.settingIntent(scope, row.id, value)?.let(model::perform)
                             }
@@ -506,7 +510,12 @@ private fun NavigationRow(icon: ImageVector, label: String, onClick: () -> Unit)
 }
 
 @Composable
-private fun SettingRow(row: SettingsRow, onReset: () -> Unit, onEdit: (SettingValue) -> Unit) {
+private fun SettingRow(
+    row: SettingsRow,
+    onReset: () -> Unit,
+    onIntent: (Intent) -> Unit,
+    onEdit: (SettingValue) -> Unit,
+) {
     val colors = AppTheme.colors
     var open by remember { mutableStateOf(false) }
     Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -560,6 +569,21 @@ private fun SettingRow(row: SettingsRow, onReset: () -> Unit, onEdit: (SettingVa
                         style = AppTheme.footnote,
                         color = colors.foregroundSecondary,
                     )
+                is SettingControl.Text -> {
+                    var text by remember(row.id, control.value) { mutableStateOf(control.value) }
+                    OutlinedTextField(
+                        value = text,
+                        onValueChange = {
+                            text = it
+                            onEdit(SettingValue.Text(it))
+                        },
+                        modifier = Modifier.fillMaxWidth(0.58f),
+                        placeholder = { control.placeholder?.let { Text(it) } },
+                        singleLine = true,
+                    )
+                }
+                is SettingControl.BrowserProfiles ->
+                    BrowserProfilesControl(control, onEdit, onIntent)
             }
         }
         val choice = row.control as? SettingControl.Choice
@@ -570,8 +594,87 @@ private fun SettingRow(row: SettingsRow, onReset: () -> Unit, onEdit: (SettingVa
                     onEdit(SettingValue.Choice(option.id))
                 }
             }
-        if (row.resettable)
+            if (row.resettable)
             Text("Reset", Modifier.clickable(onClick = onReset), style = AppTheme.caption, color = colors.primaryText)
+        row.source?.let { source ->
+            Text(
+                if (source == SettingSource.Project) "Project override" else "Inherited from Host",
+                style = AppTheme.caption,
+                color = colors.primaryText,
+            )
+        }
+    }
+}
+
+@Composable
+private fun BrowserProfilesControl(
+    control: SettingControl.BrowserProfiles,
+    onDefault: (SettingValue) -> Unit,
+    onIntent: (Intent) -> Unit,
+) {
+    val colors = AppTheme.colors
+    var editingId by remember { mutableStateOf<String?>(null) }
+    var editingName by remember { mutableStateOf("") }
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        control.profiles.forEach { profile ->
+            val builtIn = profile.id == "default"
+            Row(
+                Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                Text(profile.name, Modifier.weight(1f), style = AppTheme.body, color = colors.foreground)
+                TextButton(onClick = {
+                    onDefault(SettingValue.Choice(profile.id))
+                }) {
+                    Text(
+                        if (profile.id == control.defaultProfileId) "Default" else "Use",
+                        color = colors.primaryText,
+                    )
+                }
+                if (!builtIn) {
+                    TextButton(onClick = {
+                        editingId = profile.id
+                        editingName = profile.name
+                    }) {
+                        Text("Rename", color = colors.primaryText)
+                    }
+                    TextButton(onClick = {
+                        onIntent(Intent.RemoveBrowserProfile(profile.id))
+                    }) {
+                        Text("Remove", color = colors.dangerForeground)
+                    }
+                }
+            }
+            if (editingId == profile.id) {
+                OutlinedTextField(
+                    value = editingName,
+                    onValueChange = { editingName = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    label = { Text("Profile name") },
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    TextButton(onClick = {
+                        onIntent(Intent.RenameBrowserProfile(profile.id, editingName))
+                        editingId = null
+                    }) {
+                        Text("Save", color = colors.primaryText)
+                    }
+                    TextButton(onClick = { editingId = null }) {
+                        Text("Cancel", color = colors.foregroundMuted)
+                    }
+                }
+            }
+        }
+        TextButton(
+            enabled = control.profiles.count { it.id != "default" } < 24,
+            onClick = {
+                onIntent(Intent.CreateBrowserProfile(UUID.randomUUID().toString(), null))
+            },
+        ) {
+            Text("New profile", color = colors.primaryText)
+        }
     }
 }
 
@@ -687,8 +790,9 @@ private fun AccountsSection(model: AndroidAppModel) {
                 }
                 if (advisory.canUpdate) {
                     TextButton(onClick = {
-                        model.perform(Intent.UpdateProvider(advisory.instanceId, null))
-                        model.perform(Intent.LoadProviders)
+                        model.perform(Intent.UpdateProvider(advisory.instanceId, null)) { result ->
+                            if (result.isSuccess) model.perform(Intent.LoadProviders)
+                        }
                     }) {
                         Text("Update provider", color = colors.primaryText)
                     }

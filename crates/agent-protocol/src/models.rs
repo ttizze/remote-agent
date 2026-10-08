@@ -1385,149 +1385,6 @@ pub struct BackgroundActivityPatch {
     pub overrides: Option<BackgroundActivityOverrides>,
 }
 
-pub const MIN_BROWSER_VIEWPORT_DIMENSION: u32 = 240;
-pub const MAX_BROWSER_VIEWPORT_DIMENSION: u32 = 3840;
-pub const MAX_BROWSER_VIEWPORT_AREA: u32 = 3840 * 2160;
-/// The zoom steps the browser's zoom controls step through, in percent.
-pub const BROWSER_ZOOM_PERCENTS: [u32; 17] = [
-    25, 33, 50, 67, 75, 80, 90, 100, 110, 125, 150, 175, 200, 250, 300, 400, 500,
-];
-pub const BROWSER_VIEWPORT_PRESETS: [&str; 17] = [
-    "iphone-se",
-    "iphone-xr",
-    "iphone-12-pro",
-    "iphone-14-pro-max",
-    "pixel-7",
-    "samsung-galaxy-s8-plus",
-    "samsung-galaxy-s20-ultra",
-    "ipad-mini",
-    "ipad-air",
-    "ipad-pro",
-    "surface-pro-7",
-    "surface-duo",
-    "galaxy-z-fold-5",
-    "asus-zenbook-fold",
-    "samsung-galaxy-a51-71",
-    "nest-hub",
-    "nest-hub-max",
-];
-/// The size a browser tab opens with when nothing names one.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum BrowserViewport {
-    /// The panel's size.
-    #[default]
-    Fill,
-    Freeform {
-        width: u32,
-        height: u32,
-    },
-    Preset {
-        width: u32,
-        height: u32,
-        preset_id: String,
-    },
-}
-/// The color scheme browser pages see.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum BrowserAppearance {
-    #[default]
-    System,
-    Light,
-    Dark,
-}
-/// Where a clicked link opens.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum BrowserLinkTarget {
-    /// The OS default browser.
-    #[default]
-    System,
-    /// A browser tab beside the thread.
-    App,
-}
-/// Defaults for browser tabs opened without an explicit viewport, zoom or
-/// appearance, by the user or by an agent.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, rename_all = "camelCase")]
-pub struct BrowserDefaults {
-    pub viewport: BrowserViewport,
-    /// One of `BROWSER_ZOOM_PERCENTS`.
-    pub zoom_percent: u32,
-    pub appearance: BrowserAppearance,
-    pub link_target: BrowserLinkTarget,
-    /// Show the floating preview when an agent opens a page.
-    pub auto_show_floating_preview: bool,
-}
-impl Default for BrowserDefaults {
-    fn default() -> Self {
-        Self {
-            viewport: BrowserViewport::Fill,
-            zoom_percent: 100,
-            appearance: BrowserAppearance::System,
-            link_target: BrowserLinkTarget::System,
-            auto_show_floating_preview: true,
-        }
-    }
-}
-impl BrowserDefaults {
-    fn patched(&self, patch: &BrowserDefaultsPatch) -> Self {
-        Self {
-            viewport: patch
-                .viewport
-                .clone()
-                .unwrap_or_else(|| self.viewport.clone()),
-            zoom_percent: patch.zoom_percent.unwrap_or(self.zoom_percent),
-            appearance: patch.appearance.unwrap_or(self.appearance),
-            link_target: patch.link_target.unwrap_or(self.link_target),
-            auto_show_floating_preview: patch
-                .auto_show_floating_preview
-                .unwrap_or(self.auto_show_floating_preview),
-        }
-    }
-    fn validate(&self) -> Result<(), String> {
-        if !BROWSER_ZOOM_PERCENTS.contains(&self.zoom_percent) {
-            return Err(format!("{}% is not a browser zoom step", self.zoom_percent));
-        }
-        let (width, height) = match &self.viewport {
-            BrowserViewport::Fill => return Ok(()),
-            BrowserViewport::Freeform { width, height } => (*width, *height),
-            BrowserViewport::Preset {
-                width,
-                height,
-                preset_id,
-            } => {
-                if !BROWSER_VIEWPORT_PRESETS.contains(&preset_id.as_str()) {
-                    return Err(format!("{preset_id} is not a browser viewport preset"));
-                }
-                (*width, *height)
-            }
-        };
-        let range = MIN_BROWSER_VIEWPORT_DIMENSION..=MAX_BROWSER_VIEWPORT_DIMENSION;
-        if !range.contains(&width) || !range.contains(&height) {
-            return Err(format!(
-                "browser viewport sides need {MIN_BROWSER_VIEWPORT_DIMENSION} to {MAX_BROWSER_VIEWPORT_DIMENSION} pixels"
-            ));
-        }
-        if width.saturating_mul(height) > MAX_BROWSER_VIEWPORT_AREA {
-            return Err(format!(
-                "browser viewport area must not exceed {MAX_BROWSER_VIEWPORT_AREA} pixels"
-            ));
-        }
-        Ok(())
-    }
-}
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, rename_all = "camelCase")]
-pub struct BrowserDefaultsPatch {
-    pub viewport: Option<BrowserViewport>,
-    pub zoom_percent: Option<u32>,
-    pub appearance: Option<BrowserAppearance>,
-    pub link_target: Option<BrowserLinkTarget>,
-    pub auto_show_floating_preview: Option<bool>,
-}
-
 /// A text setting, trimmed as it is read.
 trait Trim {
     fn trimmed(self) -> Self;
@@ -1671,7 +1528,6 @@ pub struct HostSettings {
     /// The merge method pull requests start with; `None` reuses the method
     /// last chosen on the device.
     pub pull_request_merge_method: Option<PullRequestMergeMethod>,
-    pub browser: BrowserDefaults,
     /// Configured provider instances, keyed by the instance id used in model
     /// selections and runtime launches. The built-in instances are used when
     /// a key is absent; entries here override their launch and catalogue
@@ -1708,7 +1564,6 @@ impl Default for HostSettings {
             source_control_writing_style: SourceControlWritingStyle::default(),
             source_control_writer_model_selection: None,
             pull_request_merge_method: None,
-            browser: BrowserDefaults::default(),
             provider_instances: Default::default(),
             project_overrides: Default::default(),
         }
@@ -1747,7 +1602,6 @@ pub struct HostSettingsPatch {
     pub source_control_writing_style: Option<SourceControlWritingStylePatch>,
     pub source_control_writer_model_selection: Option<Nullable<agent_domain::ModelSelection>>,
     pub pull_request_merge_method: Option<Nullable<PullRequestMergeMethod>>,
-    pub browser: Option<BrowserDefaultsPatch>,
     /// Replaces the configured provider instance map. The Host validates the
     /// complete map before persisting it so removing an instance cannot leave
     /// a half-updated launch configuration.
@@ -1798,7 +1652,6 @@ impl HostSettings {
             source_control_writing_style,
             source_control_writer_model_selection,
             pull_request_merge_method,
-            browser,
             provider_instances,
             project_overrides,
         } = patch.clone();
@@ -1871,9 +1724,6 @@ impl HostSettings {
             &mut next.pull_request_merge_method,
             pull_request_merge_method,
         );
-        if let Some(patch) = browser {
-            next.browser = next.browser.patched(&patch);
-        }
         set(&mut next.provider_instances, provider_instances);
         for (project, overrides) in project_overrides {
             match overrides {
@@ -1918,7 +1768,6 @@ impl HostSettings {
         retention(self.storage_cleanup.browser_artifacts_after_days)?;
         retention(self.storage_cleanup.logs_after_days)?;
         cleanup(self.worktree_cleanup.as_ref())?;
-        self.browser.validate()?;
         for (instance, config) in &self.provider_instances {
             config.validate(instance)?;
         }
@@ -2322,60 +2171,6 @@ mod settings_tests {
             ..Default::default()
         });
         assert!(inherited.project_overrides.is_empty());
-    }
-
-    #[test]
-    fn browser_defaults_fill_the_panel_at_full_zoom_and_reject_odd_sizes() {
-        let settings = decode(json!({}));
-        assert_eq!(settings.browser, BrowserDefaults::default());
-        assert_eq!(settings.browser.viewport, BrowserViewport::Fill);
-        assert_eq!(settings.browser.zoom_percent, 100);
-        assert!(settings.browser.auto_show_floating_preview);
-        let with = |patch| {
-            HostSettings::default().patched(&HostSettingsPatch {
-                browser: Some(patch),
-                ..Default::default()
-            })
-        };
-        assert!(
-            with(BrowserDefaultsPatch {
-                zoom_percent: Some(33),
-                ..Default::default()
-            })
-            .validate()
-            .is_ok()
-        );
-        assert!(
-            with(BrowserDefaultsPatch {
-                zoom_percent: Some(101),
-                ..Default::default()
-            })
-            .validate()
-            .is_err()
-        );
-        let freeform = |width, height| {
-            with(BrowserDefaultsPatch {
-                viewport: Some(BrowserViewport::Freeform { width, height }),
-                ..Default::default()
-            })
-            .validate()
-        };
-        assert!(freeform(3840, 2160).is_ok());
-        assert!(freeform(239, 800).is_err());
-        assert!(freeform(3840, 2161).is_err());
-        let preset = |preset_id: &str| {
-            with(BrowserDefaultsPatch {
-                viewport: Some(BrowserViewport::Preset {
-                    width: 390,
-                    height: 844,
-                    preset_id: preset_id.into(),
-                }),
-                ..Default::default()
-            })
-            .validate()
-        };
-        assert!(preset("iphone-12-pro").is_ok());
-        assert!(preset("desktop-1920x1080").is_err());
     }
 
     // shared backgroundActivitySettings.ts resolve/normalize, intervals only.

@@ -89,6 +89,11 @@ pub struct PreferencesView {
     pub in_app_notifications_enabled: bool,
     pub live_activities_enabled: bool,
     pub load_balancing_enabled: bool,
+    pub browser_recording_frame_rate: u32,
+    pub browser_recording_show_key_presses: bool,
+    pub browser_recording_show_mouse_presses: bool,
+    pub browser_profiles: Vec<crate::view::browser::BrowserProfile>,
+    pub browser_default_profile_id: String,
 }
 
 impl Snapshot {
@@ -510,6 +515,7 @@ impl Snapshot {
     }
     pub fn preferences(&self) -> PreferencesView {
         let preferences = &self.preferences;
+        let browser = preferences.browser.resolved();
         PreferencesView {
             timestamp_format: preferences.timestamp_format,
             favorite_models: preferences.favorite_models.clone(),
@@ -528,6 +534,11 @@ impl Snapshot {
             in_app_notifications_enabled: preferences.in_app_notifications_enabled,
             live_activities_enabled: preferences.live_activities_enabled,
             load_balancing_enabled: preferences.load_balancing_enabled,
+            browser_recording_frame_rate: preferences.browser.recording_frame_rate,
+            browser_recording_show_key_presses: preferences.browser.recording_show_key_presses,
+            browser_recording_show_mouse_presses: preferences.browser.recording_show_mouse_presses,
+            browser_profiles: browser.profiles,
+            browser_default_profile_id: browser.profile_id,
         }
     }
     /// The project's icon; `None` shows its initials. Clients cache the image

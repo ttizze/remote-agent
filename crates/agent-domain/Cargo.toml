@@ -11,6 +11,7 @@ serde_json.workspace = true
 thiserror.workspace = true
 regex = "1"
 url.workspace = true
+percent-encoding = "2"
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 
 [dev-dependencies]

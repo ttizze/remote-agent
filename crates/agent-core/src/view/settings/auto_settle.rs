@@ -3,7 +3,7 @@ use super::{
     ProjectSettingKey, SettingChange, SettingControl, SettingId, SettingSource, SettingValue,
     SettingsRow, SettingsScope, SettingsSection,
     registry::{Context, Section},
-    row, section, update,
+    resettable_for, row, section, update,
 };
 use crate::models::{AutoSettle, HostSettings};
 
@@ -30,7 +30,7 @@ fn auto_settle_days(value: AutoSettle) -> Option<u32> {
 fn auto_settle_section(value: AutoSettle, source: Option<SettingSource>) -> SettingsSection {
     let days = auto_settle_days(value);
     let mut rows = vec![SettingsRow {
-        resettable: value != HostSettings::default().auto_settle,
+        resettable: resettable_for(source, value != HostSettings::default().auto_settle),
         source,
         ..row(
             SettingId::AutoSettleInactiveThreads,
@@ -41,6 +41,10 @@ fn auto_settle_section(value: AutoSettle, source: Option<SettingSource>) -> Sett
     }];
     if let Some(days) = days {
         rows.push(SettingsRow {
+            resettable: resettable_for(
+                source,
+                Some(days) != auto_settle_days(HostSettings::default().auto_settle),
+            ),
             source,
             ..row(
                 SettingId::AutoSettleDays,

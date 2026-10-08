@@ -554,7 +554,7 @@ final class AgentPushCenter: NSObject, UIApplicationDelegate, UNUserNotification
 
     private static func validRouteSegment(_ value: String) -> Bool {
         !value.isEmpty && value != "." && value != ".." && value.unicodeScalars.allSatisfy { scalar in
-            scalar.value != 0x2f && scalar.value != 0x5c && !CharacterSet.controlCharacters.contains(scalar)
+            scalar.value != 0x5c && !CharacterSet.controlCharacters.contains(scalar)
         }
     }
 

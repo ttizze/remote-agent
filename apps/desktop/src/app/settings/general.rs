@@ -10,6 +10,7 @@ use crate::app::{
 use agent_core::{
     state::Intent,
     view::{
+        browser::BrowserProfile,
         models::picker::PickerRail,
         settings::{
             SettingControl, SettingId, SettingValue, SettingsRow, SettingsScope, SettingsSection,
@@ -40,8 +41,16 @@ pub(super) struct GeneralState {
     storage_days_value: Option<(SettingsScope, u32)>,
     browser_days: Entity<InputState>,
     browser_days_value: Option<(SettingsScope, u32)>,
+    browser_width: Entity<InputState>,
+    browser_width_value: Option<(SettingsScope, u32)>,
+    browser_height: Entity<InputState>,
+    browser_height_value: Option<(SettingsScope, u32)>,
+    browser_profile_name: Entity<InputState>,
+    browser_profile_edit_id: Option<String>,
     logs_days: Entity<InputState>,
     logs_days_value: Option<(SettingsScope, u32)>,
+    project_base: Entity<InputState>,
+    project_base_value: Option<(SettingsScope, String)>,
     folder: Entity<InputState>,
     folder_value: Option<String>,
     copy_paths: Entity<InputState>,
@@ -54,7 +63,11 @@ impl GeneralState {
         let days = cx.new(|cx| InputState::new(window, cx));
         let storage_days = cx.new(|cx| InputState::new(window, cx));
         let browser_days = cx.new(|cx| InputState::new(window, cx));
+        let browser_width = cx.new(|cx| InputState::new(window, cx));
+        let browser_height = cx.new(|cx| InputState::new(window, cx));
+        let browser_profile_name = cx.new(|cx| InputState::new(window, cx));
         let logs_days = cx.new(|cx| InputState::new(window, cx));
+        let project_base = cx.new(|cx| InputState::new(window, cx));
         let folder = cx.new(|cx| InputState::new(window, cx));
         let copy_paths = cx.new(|cx| InputState::new(window, cx).placeholder(".env, .env.local"));
         let subscriptions = vec![
@@ -161,6 +174,58 @@ impl GeneralState {
                 },
             ),
             cx.subscribe_in(
+                &browser_profile_name,
+                window,
+                |view, input, event: &InputEvent, _, cx| {
+                    if matches!(event, InputEvent::Blur | InputEvent::PressEnter { .. })
+                        && let Some(profile_id) =
+                            view.settings.general.browser_profile_edit_id.clone()
+                    {
+                        let name = input.read(cx).value().trim().to_owned();
+                        if !name.is_empty() {
+                            view.perform(Intent::RenameBrowserProfile { profile_id, name });
+                        }
+                        view.settings.general.browser_profile_edit_id = None;
+                    }
+                },
+            ),
+            cx.subscribe_in(
+                &browser_width,
+                window,
+                |view, input, event: &InputEvent, _, cx| {
+                    if matches!(event, InputEvent::Change)
+                        && let Ok(value) = input.read(cx).value().trim().parse::<u32>()
+                        && (agent_protocol::preview::PREVIEW_VIEWPORT_MIN_DIMENSION
+                            ..=agent_protocol::preview::PREVIEW_VIEWPORT_MAX_DIMENSION)
+                            .contains(&value)
+                    {
+                        view.apply_setting(
+                            &SettingsScope::Host,
+                            SettingId::BrowserDefaultViewportWidth,
+                            SettingValue::Number { value },
+                        );
+                    }
+                },
+            ),
+            cx.subscribe_in(
+                &browser_height,
+                window,
+                |view, input, event: &InputEvent, _, cx| {
+                    if matches!(event, InputEvent::Change)
+                        && let Ok(value) = input.read(cx).value().trim().parse::<u32>()
+                        && (agent_protocol::preview::PREVIEW_VIEWPORT_MIN_DIMENSION
+                            ..=agent_protocol::preview::PREVIEW_VIEWPORT_MAX_DIMENSION)
+                            .contains(&value)
+                    {
+                        view.apply_setting(
+                            &SettingsScope::Host,
+                            SettingId::BrowserDefaultViewportHeight,
+                            SettingValue::Number { value },
+                        );
+                    }
+                },
+            ),
+            cx.subscribe_in(
                 &logs_days,
                 window,
                 |view, input, event: &InputEvent, window, cx| {
@@ -190,6 +255,24 @@ impl GeneralState {
                             }
                         }
                         _ => {}
+                    }
+                },
+            ),
+            cx.subscribe_in(
+                &project_base,
+                window,
+                |view, input, event: &InputEvent, _, cx| {
+                    let Some(scope) = view.settings_scope() else {
+                        return;
+                    };
+                    if matches!(event, InputEvent::Blur | InputEvent::PressEnter { .. }) {
+                        view.apply_setting(
+                            &scope,
+                            SettingId::AddProjectBaseDirectory,
+                            SettingValue::Text {
+                                value: input.read(cx).value().trim().to_owned(),
+                            },
+                        );
                     }
                 },
             ),
@@ -224,8 +307,16 @@ impl GeneralState {
             storage_days_value: None,
             browser_days,
             browser_days_value: None,
+            browser_width,
+            browser_width_value: None,
+            browser_height,
+            browser_height_value: None,
+            browser_profile_name,
+            browser_profile_edit_id: None,
             logs_days,
             logs_days_value: None,
+            project_base,
+            project_base_value: None,
             folder,
             folder_value: None,
             copy_paths,
@@ -417,7 +508,22 @@ impl Desktop {
         self.sync_days_field(scope, sections, window, cx);
         self.sync_storage_days_field(scope, sections, window, cx);
         self.sync_browser_days_field(scope, sections, window, cx);
+        self.sync_browser_dimension_field(
+            scope,
+            sections,
+            SettingId::BrowserDefaultViewportWidth,
+            window,
+            cx,
+        );
+        self.sync_browser_dimension_field(
+            scope,
+            sections,
+            SettingId::BrowserDefaultViewportHeight,
+            window,
+            cx,
+        );
         self.sync_logs_days_field(scope, sections, window, cx);
+        self.sync_project_base_field(scope, sections, window, cx);
         sections
             .iter()
             .map(|settings_section| {
@@ -568,6 +674,76 @@ impl Desktop {
         }
     }
 
+    fn sync_browser_dimension_field(
+        &mut self,
+        scope: &SettingsScope,
+        sections: &[SettingsSection],
+        id: SettingId,
+        window: &mut Window,
+        cx: &mut Context<Desktop>,
+    ) {
+        let Some(value) = sections
+            .iter()
+            .flat_map(|section| &section.rows)
+            .find_map(|row| match row.control {
+                SettingControl::Number { value, .. } if row.id == id => Some(value),
+                _ => None,
+            })
+        else {
+            return;
+        };
+        let shown = Some((scope.clone(), value));
+        match id {
+            SettingId::BrowserDefaultViewportWidth
+                if self.settings.general.browser_width_value != shown =>
+            {
+                self.settings.general.browser_width_value = shown;
+                self.settings.general.browser_width.update(cx, |input, cx| {
+                    input.set_value(value.to_string(), window, cx)
+                });
+            }
+            SettingId::BrowserDefaultViewportHeight
+                if self.settings.general.browser_height_value != shown =>
+            {
+                self.settings.general.browser_height_value = shown;
+                self.settings.general.browser_height.update(cx, |input, cx| {
+                    input.set_value(value.to_string(), window, cx)
+                });
+            }
+            _ => {}
+        }
+    }
+
+    fn sync_project_base_field(
+        &mut self,
+        scope: &SettingsScope,
+        sections: &[SettingsSection],
+        window: &mut Window,
+        cx: &mut Context<Desktop>,
+    ) {
+        let Some(value) = sections
+            .iter()
+            .flat_map(|section| &section.rows)
+            .find_map(|row| match &row.control {
+                SettingControl::Text { value, .. }
+                    if row.id == SettingId::AddProjectBaseDirectory =>
+                {
+                    Some(value.clone())
+                }
+                _ => None,
+            })
+        else {
+            return;
+        };
+        let shown = Some((scope.clone(), value.clone()));
+        if self.settings.general.project_base_value != shown {
+            self.settings.general.project_base_value = shown;
+            self.settings.general.project_base.update(cx, |input, cx| {
+                input.set_value(value, window, cx)
+            });
+        }
+    }
+
     fn render_setting_row(
         &mut self,
         scope: &SettingsScope,
@@ -636,6 +812,10 @@ impl Desktop {
                         &self.settings.general.browser_days
                     }
                     SettingId::StorageLogsAfterDays => &self.settings.general.logs_days,
+                    SettingId::BrowserDefaultViewportWidth => &self.settings.general.browser_width,
+                    SettingId::BrowserDefaultViewportHeight => {
+                        &self.settings.general.browser_height
+                    }
                     _ => &self.settings.general.days,
                 };
                 Input::new(input)
@@ -644,6 +824,15 @@ impl Desktop {
                     .aria_label(row.title.clone())
                     .into_any_element()
             }
+            SettingControl::Text { .. } => Input::new(&self.settings.general.project_base)
+                .small()
+                .w(px(280.))
+                .aria_label(row.title.clone())
+                .into_any_element(),
+            SettingControl::BrowserProfiles {
+                profiles,
+                default_profile_id,
+            } => self.render_browser_profiles(profiles, default_profile_id, cx),
             SettingControl::Model {
                 model_label,
                 traits_label,
@@ -657,6 +846,92 @@ impl Desktop {
             setting = setting.status(Self::setting_source_label(source));
         }
         setting.render()
+    }
+
+    fn render_browser_profiles(
+        &self,
+        profiles: &[BrowserProfile],
+        default_profile_id: &str,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let mut rows = v_flex().gap(px(4.)).children(profiles.iter().map(|profile| {
+            let profile_id = profile.id.clone();
+            let is_default = profile.id == default_profile_id;
+            let built_in = profile.id == "default";
+            let mut row = h_flex()
+                .gap(px(8.))
+                .child(
+                    div()
+                        .flex_1()
+                        .text_sm()
+                        .child(profile.name.clone()),
+                );
+            if profile.id != "incognito" {
+                row = row.child(
+                    Button::new(("browser-profile-select", profile.id.clone()))
+                        .outline()
+                        .small()
+                        .label(if is_default { "Default" } else { "Use" })
+                        .on_click(cx.listener(move |view, _, _, _| {
+                            view.perform(Intent::SetBrowserDefaultProfile {
+                                profile_id: profile_id.clone(),
+                            });
+                        })),
+                );
+            }
+            if !built_in {
+                let edit_id = profile.id.clone();
+                let edit_name = profile.name.clone();
+                let remove_id = profile.id.clone();
+                row = row
+                    .child(
+                        Button::new(("browser-profile-rename", profile.id.clone()))
+                            .outline()
+                            .small()
+                            .label("Rename")
+                            .on_click(cx.listener(move |view, _, window, cx| {
+                                view.settings.general.browser_profile_edit_id =
+                                    Some(edit_id.clone());
+                                view.settings.general.browser_profile_name.update(cx, |input, cx| {
+                                    input.set_value(edit_name.clone(), window, cx)
+                                });
+                            })),
+                    )
+                    .child(
+                        Button::new(("browser-profile-remove", profile.id.clone()))
+                            .outline()
+                            .small()
+                            .label("Remove")
+                            .on_click(cx.listener(move |view, _, _, _| {
+                                view.perform(Intent::RemoveBrowserProfile {
+                                    profile_id: remove_id.clone(),
+                                });
+                            })),
+                    );
+            }
+            row
+        }));
+        let create = Button::new("browser-profile-create")
+            .outline()
+            .small()
+            .disabled(profiles.len().saturating_sub(1) >= 24)
+            .label("New profile")
+            .on_click(cx.listener(|view, _, _, _| {
+                view.perform(Intent::CreateBrowserProfile {
+                    profile_id: uuid::Uuid::new_v4().to_string(),
+                    requested_name: None,
+                });
+            }));
+        rows = rows.child(create);
+        if self.settings.general.browser_profile_edit_id.is_some() {
+            rows = rows.child(
+                Input::new(&self.settings.general.browser_profile_name)
+                    .small()
+                    .w(px(240.))
+                    .aria_label("Browser profile name"),
+            );
+        }
+        rows.into_any_element()
     }
 
     /// The Model row's control: the default model's picker and its traits.
