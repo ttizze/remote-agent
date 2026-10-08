@@ -37,14 +37,12 @@ pub struct DeviceSessionView {
     pub device_id: String,
     pub platform: String,
     pub opened_at: String,
-    pub session_epoch: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct DeviceFrameView {
     pub thread_id: String,
-    pub session_epoch: String,
     pub host_id: String,
     pub device_id: String,
     pub platform: String,
@@ -58,7 +56,6 @@ pub struct DeviceFrameView {
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct DeviceVideoFrameView {
     pub thread_id: String,
-    pub session_epoch: String,
     pub host_id: String,
     pub device_id: String,
     pub platform: String,
@@ -77,7 +74,6 @@ pub struct DeviceVideoFrameView {
 pub struct DeviceAccessibilityView {
     pub host_id: String,
     pub device_id: String,
-    pub session_epoch: String,
     pub elements: Vec<DeviceAccessibilityElementView>,
     pub errors: Vec<String>,
     pub read_at: String,
@@ -100,7 +96,6 @@ pub struct DeviceAccessibilityElementView {
 pub struct DeviceForegroundView {
     pub host_id: String,
     pub device_id: String,
-    pub session_epoch: String,
     pub app_id: Option<String>,
     pub received_at: String,
 }
@@ -110,7 +105,6 @@ pub struct DeviceForegroundView {
 pub struct DeviceEventLogView {
     pub host_id: String,
     pub device_id: String,
-    pub session_epoch: String,
     pub id: u64,
     pub timestamp: String,
     pub kind: String,
@@ -121,7 +115,6 @@ pub struct DeviceEventLogView {
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct DeviceScreenView {
     pub thread_id: Option<String>,
-    pub session_epoch: String,
     pub host_id: Option<String>,
     pub device_id: Option<String>,
     pub width: u32,
@@ -141,8 +134,6 @@ pub struct DeviceRecordingView {
     pub host_id: String,
     pub device_id: String,
     pub format: String,
-    pub file_name: String,
-    pub mime_type: String,
     pub started_at: String,
     pub frame_count: u64,
     pub byte_count: u64,
@@ -252,7 +243,6 @@ pub fn device_view(snapshot: &Snapshot) -> DeviceView {
                 device_id: session.device_id.clone(),
                 platform: platform_name(session.platform).into(),
                 opened_at: session.opened_at.clone(),
-                session_epoch: session.session_epoch.clone(),
             })
             .collect(),
         details: state
@@ -296,7 +286,6 @@ pub fn device_view(snapshot: &Snapshot) -> DeviceView {
             .values()
             .map(|frame| DeviceFrameView {
                 thread_id: frame.thread_id.to_string(),
-                session_epoch: frame.session_epoch.clone(),
                 host_id: frame.device.host_id.clone(),
                 device_id: frame.device.id.clone(),
                 platform: platform_name(frame.device.platform).into(),
@@ -311,7 +300,6 @@ pub fn device_view(snapshot: &Snapshot) -> DeviceView {
             .values()
             .map(|frame| DeviceVideoFrameView {
                 thread_id: frame.thread_id.to_string(),
-                session_epoch: frame.session_epoch.clone(),
                 host_id: frame.device.host_id.clone(),
                 device_id: frame.device.id.clone(),
                 platform: platform_name(frame.device.platform).into(),
@@ -331,7 +319,6 @@ pub fn device_view(snapshot: &Snapshot) -> DeviceView {
             .map(|tree| DeviceAccessibilityView {
                 host_id: tree.host_id.clone(),
                 device_id: tree.device_id.clone(),
-                session_epoch: tree.session_epoch.clone(),
                 elements: tree
                     .elements
                     .iter()
@@ -355,7 +342,6 @@ pub fn device_view(snapshot: &Snapshot) -> DeviceView {
             .map(|update| DeviceForegroundView {
                 host_id: update.host_id.clone(),
                 device_id: update.device_id.clone(),
-                session_epoch: update.session_epoch.clone(),
                 app_id: update.app.as_ref().map(|app| app.id.clone()),
                 received_at: update.received_at.clone(),
             })
@@ -367,7 +353,6 @@ pub fn device_view(snapshot: &Snapshot) -> DeviceView {
             .map(|entry| DeviceEventLogView {
                 host_id: entry.host_id.clone(),
                 device_id: entry.device_id.clone(),
-                session_epoch: entry.session_epoch.clone(),
                 id: entry.id,
                 timestamp: entry.timestamp.clone(),
                 kind: entry.kind.clone(),
@@ -379,7 +364,6 @@ pub fn device_view(snapshot: &Snapshot) -> DeviceView {
             .values()
             .map(|screen| DeviceScreenView {
                 thread_id: screen.thread_id.as_ref().map(ToString::to_string),
-                session_epoch: screen.session_epoch.clone(),
                 host_id: screen.host_id.clone(),
                 device_id: screen.device_id.clone(),
                 width: screen.width,
@@ -400,8 +384,6 @@ pub fn device_view(snapshot: &Snapshot) -> DeviceView {
                 host_id: status.host_id.clone(),
                 device_id: status.device_id.clone(),
                 format: recording_format_name(status.format).into(),
-                file_name: status.file_name.clone(),
-                mime_type: status.mime_type.clone(),
                 started_at: status.started_at.clone(),
                 frame_count: status.frame_count,
                 byte_count: status.byte_count,
@@ -414,8 +396,6 @@ pub fn device_view(snapshot: &Snapshot) -> DeviceView {
             host_id: recording.status.host_id.clone(),
             device_id: recording.status.device_id.clone(),
             format: recording_format_name(recording.status.format).into(),
-            file_name: recording.status.file_name.clone(),
-            mime_type: recording.status.mime_type.clone(),
             started_at: recording.status.started_at.clone(),
             frame_count: recording.status.frame_count,
             byte_count: recording.status.byte_count,
@@ -471,7 +451,9 @@ fn orientation_name(orientation: agent_protocol::device::DeviceOrientation) -> &
 
 fn recording_format_name(format: agent_protocol::device::DeviceRecordingFormat) -> &'static str {
     match format {
-        agent_protocol::device::DeviceRecordingFormat::Mp4 => "mp4",
+        agent_protocol::device::DeviceRecordingFormat::RawFrames => "raw",
+        agent_protocol::device::DeviceRecordingFormat::Mjpeg => "mjpeg",
+        agent_protocol::device::DeviceRecordingFormat::Avcc => "avcc",
     }
 }
 

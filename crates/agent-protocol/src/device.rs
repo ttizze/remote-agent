@@ -134,10 +134,7 @@ pub struct DeviceSession {
     pub host_id: String,
     pub device_id: String,
     pub platform: DevicePlatform,
-    /// Wall-clock time used for user-facing session history.
     pub opened_at: String,
-    /// Opaque generation used to reject queued events from an earlier reopen.
-    pub session_epoch: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -484,7 +481,6 @@ pub struct DeviceScreenshot {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeviceFrame {
     pub thread_id: ThreadId,
-    pub session_epoch: String,
     pub device: DeviceSummary,
     #[serde(with = "crate::protocol::bytes")]
     pub png: Vec<u8>,
@@ -510,7 +506,6 @@ pub enum DeviceFrameEncoding {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeviceVideoFrame {
     pub thread_id: ThreadId,
-    pub session_epoch: String,
     pub device: DeviceSummary,
     #[serde(with = "crate::protocol::bytes")]
     pub payload: Vec<u8>,
@@ -526,7 +521,6 @@ pub struct DeviceVideoFrame {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DeviceScreenConfig {
     pub thread_id: Option<ThreadId>,
-    pub session_epoch: String,
     pub host_id: Option<String>,
     pub device_id: Option<String>,
     pub width: u32,
@@ -556,7 +550,6 @@ pub struct DeviceAccessibilityElement {
 pub struct DeviceAccessibilityTree {
     pub host_id: String,
     pub device_id: String,
-    pub session_epoch: String,
     pub elements: Vec<DeviceAccessibilityElement>,
     pub errors: Vec<String>,
     pub read_at: String,
@@ -566,7 +559,6 @@ pub struct DeviceAccessibilityTree {
 pub struct DeviceForegroundUpdate {
     pub host_id: String,
     pub device_id: String,
-    pub session_epoch: String,
     pub app: Option<DeviceForegroundApp>,
     pub received_at: String,
 }
@@ -575,7 +567,6 @@ pub struct DeviceForegroundUpdate {
 pub struct DeviceEventLogEntry {
     pub host_id: String,
     pub device_id: String,
-    pub session_epoch: String,
     pub id: u64,
     pub timestamp: String,
     pub kind: String,
@@ -650,8 +641,9 @@ pub struct DeviceEventLogInput {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DeviceRecordingFormat {
-    /// H.264 frames finalized as a playable fragmented MP4 attachment.
-    Mp4,
+    RawFrames,
+    Mjpeg,
+    Avcc,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -675,8 +667,6 @@ pub struct DeviceRecordingStatus {
     pub host_id: String,
     pub device_id: String,
     pub format: DeviceRecordingFormat,
-    pub file_name: String,
-    pub mime_type: String,
     pub active: bool,
     pub started_at: String,
     pub frame_count: u64,
