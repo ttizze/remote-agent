@@ -438,6 +438,7 @@ fn compactable_conversation_needs_a_message_other_than_a_bare_compact() {
     let mut state = thread_state("Thread");
     assert!(!has_compactable_conversation(&state, false, None));
     let compact = Message {
+        scheduled_task: None,
         notification: None,
         id: agent_domain::MessageId::new("m1").unwrap(),
         run: None,

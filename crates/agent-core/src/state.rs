@@ -92,6 +92,52 @@ pub struct Draft {
     pub created_at_ms: Option<i64>,
 }
 
+/// A schedule editor's local value. Core converts this value into the Host
+/// protocol record so native clients do not reproduce scheduling rules.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
+pub enum ScheduledTaskScheduleDraft {
+    Interval { every_ms: u64 },
+    FixedTime { time_of_day: String, weekdays: Vec<u8> },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
+pub enum ScheduledTaskWorkspaceDraft {
+    Root {
+        branch: Option<String>,
+    },
+    ExistingWorktree {
+        worktree_path: String,
+        branch: Option<String>,
+    },
+    Worktree {
+        base_ref: String,
+        branch: Option<String>,
+        start_from_origin: bool,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct ScheduledTaskDraft {
+    pub id: Option<String>,
+    pub title: String,
+    pub prompt: String,
+    pub enabled: bool,
+    pub schedule: ScheduledTaskScheduleDraft,
+    pub project_id: String,
+    pub thread_id: Option<String>,
+    pub workspace: ScheduledTaskWorkspaceDraft,
+    pub instance_id: String,
+    pub driver: Driver,
+    pub model: String,
+    pub options: Vec<ModelOption>,
+    pub runtime_mode: RuntimeMode,
+    pub interaction_mode: InteractionMode,
+    pub creation_source: String,
+}
+
 /// The new-thread composer's workspace choice.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
@@ -427,6 +473,8 @@ pub struct Snapshot {
     pub resume_compaction_dismissals: BTreeSet<String>,
     /// The Host's keybindings as its stream last reported them.
     pub keybindings: Option<Arc<agent_protocol::keybindings::KeybindingsConfig>>,
+    /// The Host's durable scheduled-task list.
+    pub scheduled_tasks: Vec<agent_protocol::scheduled_tasks::ScheduledTask>,
     pub session_import: SessionImport,
     /// Answer drafts by question request id.
     pub question_drafts: BTreeMap<String, QuestionDrafts>,
@@ -1494,6 +1542,29 @@ pub enum Intent {
     ListWorktrees,
     RemoveWorktree {
         path: String,
+    },
+    /// Saves the shared scheduled-task editor draft through the Host.
+    SaveScheduledTask {
+        draft: ScheduledTaskDraft,
+    },
+    SetScheduledTaskEnabled {
+        id: String,
+        enabled: bool,
+    },
+    DeleteScheduledTask {
+        id: String,
+    },
+    RunScheduledTaskNow {
+        id: String,
+    },
+    /// Searches the branch list used by a scheduled task's worktree picker.
+    SearchScheduledTaskBranches {
+        project_id: String,
+        query: String,
+    },
+    /// Requests the next page of a scheduled task's branch picker.
+    LoadMoreScheduledTaskBranches {
+        project_id: String,
     },
 
     // Files.

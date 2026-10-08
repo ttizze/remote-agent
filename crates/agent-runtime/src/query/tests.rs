@@ -89,6 +89,7 @@ impl Writer {
             minute,
             FactBody::MessageCreated {
                 context: None,
+                scheduled_task: None,
                 id: MessageId::new(id).unwrap(),
                 run: None,
                 role,
@@ -391,6 +392,7 @@ async fn reads_history_pages_and_single_items_from_the_actor() {
     dispatch(
         "hello",
         Command::Send(SendMessage {
+            scheduled_task: None,
             context: None,
             title_seed: None,
             created_by: MessageAuthor::User,

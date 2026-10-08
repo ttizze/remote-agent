@@ -75,6 +75,8 @@ internal sealed interface Route {
 
     data object Appearance : Route
 
+    data object ScheduledTasks : Route
+
     data object Archived : Route
 }
 

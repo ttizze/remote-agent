@@ -23,6 +23,7 @@ pub mod requests;
 pub mod review_files;
 pub mod search;
 pub mod search_ranking;
+pub mod scheduled_tasks;
 pub mod settings;
 pub mod setup_card;
 pub mod sidebar;

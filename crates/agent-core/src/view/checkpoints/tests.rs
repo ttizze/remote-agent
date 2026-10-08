@@ -8,6 +8,7 @@ use rstest::rstest;
 
 fn message(id: &str, run: &str, role: Role, intent: InputIntent) -> Message {
     Message {
+        scheduled_task: None,
         notification: None,
         id: MessageId::new(id).unwrap(),
         run: Some(RunId::new(run).unwrap()),

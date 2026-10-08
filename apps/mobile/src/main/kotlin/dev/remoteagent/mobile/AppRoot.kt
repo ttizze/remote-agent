@@ -110,6 +110,8 @@ private fun AppSurface(model: AndroidAppModel, requestQrScan: (onContents: (Stri
                     is Route.Pdf -> PdfScreen(model, route.file)
                     is Route.Settings -> SettingsScreen(model, route.projectId)
                     Route.Appearance -> AppearanceScreen(model)
+
+                    Route.ScheduledTasks -> ScheduledTasksScreen(model)
                     Route.Archived -> ArchivedScreen(model)
                 }
             }

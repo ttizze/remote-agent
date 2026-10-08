@@ -53,6 +53,7 @@ fn live_shell(owner: &mut Owner, sequence: u64, threads: Vec<agent_domain::Threa
 }
 fn message(id: &str, text: &str) -> Message {
     Message {
+        scheduled_task: None,
         notification: None,
         id: MessageId::new(id).unwrap(),
         run: None,

@@ -97,6 +97,20 @@ CREATE TABLE launches (
 ) STRICT;
 CREATE INDEX launches_thread ON launches (thread_id);
 
+CREATE TABLE scheduled_tasks (
+    task_id TEXT PRIMARY KEY,
+    enabled INTEGER NOT NULL,
+    definition TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    next_run_at TEXT,
+    last_run_at TEXT,
+    last_run_status TEXT NOT NULL CHECK (last_run_status IN ('never', 'running', 'succeeded', 'failed')),
+    last_run_error TEXT,
+    run_count INTEGER NOT NULL
+) STRICT;
+CREATE INDEX scheduled_tasks_due ON scheduled_tasks (next_run_at)
+    WHERE enabled = 1 AND last_run_status <> 'running';
+
 CREATE TABLE checkpoint_baselines (
     scope_id TEXT NOT NULL,
     ordinal INTEGER NOT NULL,

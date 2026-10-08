@@ -941,6 +941,27 @@ impl Owner {
         }
     }
 
+    fn scheduled_task_project_root(&self, project_id: &str) -> Option<String> {
+        self.state
+            .shell_projects()
+            .iter()
+            .find(|project| project.id == project_id)
+            .and_then(|project| project.roots.first())
+            .map(|root| root.path.clone())
+    }
+
+    pub(super) fn load_more_scheduled_task_branches(&mut self, project_id: String) {
+        if let Some(root) = self.scheduled_task_project_root(&project_id) {
+            self.load_more_refs(root, RefScope::All);
+        }
+    }
+
+    pub(super) fn load_scheduled_task_branches(&mut self, project_id: String, query: String) {
+        if let Some(root) = self.scheduled_task_project_root(&project_id) {
+            self.load_refs(root, RefScope::All, query);
+        }
+    }
+
     /// Loads the refs and status the new-thread workspace controls show.
     pub(super) fn load_new_thread_branches(&mut self, query: String) {
         if let Some(root) = self.state.new_thread_project_root() {

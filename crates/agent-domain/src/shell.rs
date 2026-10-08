@@ -288,6 +288,7 @@ mod tests {
     }
     fn send(key: &str, mode: DispatchMode) -> Command {
         Command::Send(SendMessage {
+            scheduled_task: None,
             context: None,
             created_by: MessageAuthor::User,
             creation_source: "client".into(),

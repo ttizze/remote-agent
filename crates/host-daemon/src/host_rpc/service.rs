@@ -15,10 +15,11 @@ use agent_protocol::{
     operations as op,
     protocol::{Body, Call, Response},
     provider::ProviderKind,
+    scheduled_tasks as st,
 };
 use agent_runtime::{
-    ImportHome, ImportSettings, OsFs, RuntimeConfig, ScanConfig, SetupProgress, SetupRequest,
-    SetupRun,
+    ImportHome, ImportSettings, OsFs, RuntimeConfig, ScanConfig, ScheduledTaskError,
+    ScheduledTaskInput, SetupProgress, SetupRequest, SetupRun, WorkspaceStrategy,
 };
 use agent_transport::peer::RpcMessageError;
 use codex_app_server::CodexAppServer;
@@ -127,6 +128,116 @@ impl ClaudeCredentials for ClaudeResources {
 }
 
 impl HostRpcService {
+    fn scheduled_task(task: agent_runtime::ScheduledTask) -> st::ScheduledTask {
+        st::ScheduledTask {
+            id: task.id,
+            title: task.title,
+            prompt: task.prompt,
+            enabled: task.enabled,
+            schedule: task.schedule,
+            project_id: task.project,
+            thread_id: task.thread,
+            workspace: Self::wire_workspace(task.workspace),
+            selection: task.selection,
+            runtime_mode: task.runtime_mode,
+            interaction_mode: task.interaction_mode,
+            created_by: task.created_by,
+            creation_source: task.creation_source,
+            created_at: task.created_at,
+            updated_at: task.updated_at,
+            next_run_at: task.next_run_at,
+            last_run_at: task.last_run_at,
+            last_run_status: match task.last_run_status {
+                agent_runtime::ScheduledTaskRunStatus::Never => st::ScheduledTaskRunStatus::Never,
+                agent_runtime::ScheduledTaskRunStatus::Running => st::ScheduledTaskRunStatus::Running,
+                agent_runtime::ScheduledTaskRunStatus::Succeeded => st::ScheduledTaskRunStatus::Succeeded,
+                agent_runtime::ScheduledTaskRunStatus::Failed => st::ScheduledTaskRunStatus::Failed,
+            },
+            last_run_error: task.last_run_error,
+            run_count: task.run_count,
+        }
+    }
+
+    fn runtime_workspace(workspace: &agent_protocol::conversation::WorkspaceStrategy) -> WorkspaceStrategy {
+        match workspace {
+            agent_protocol::conversation::WorkspaceStrategy::Root { branch } => {
+                WorkspaceStrategy::Root { branch: branch.clone() }
+            }
+            agent_protocol::conversation::WorkspaceStrategy::ExistingWorktree {
+                worktree_path,
+                branch,
+            } => WorkspaceStrategy::ExistingWorktree {
+                path: worktree_path.clone(),
+                branch: branch.clone(),
+            },
+            agent_protocol::conversation::WorkspaceStrategy::Worktree {
+                base_ref,
+                branch,
+                start_from_origin,
+            } => WorkspaceStrategy::Worktree {
+                base_ref: base_ref.clone(),
+                branch: branch.clone(),
+                start_from_origin: *start_from_origin,
+            },
+        }
+    }
+
+    fn wire_workspace(workspace: WorkspaceStrategy) -> agent_protocol::conversation::WorkspaceStrategy {
+        match workspace {
+            WorkspaceStrategy::Root { branch } => {
+                agent_protocol::conversation::WorkspaceStrategy::Root { branch }
+            }
+            WorkspaceStrategy::ExistingWorktree { path, branch } => {
+                agent_protocol::conversation::WorkspaceStrategy::ExistingWorktree {
+                    worktree_path: path,
+                    branch,
+                }
+            }
+            WorkspaceStrategy::Worktree {
+                base_ref,
+                branch,
+                start_from_origin,
+            } => agent_protocol::conversation::WorkspaceStrategy::Worktree {
+                base_ref,
+                branch,
+                start_from_origin,
+            },
+        }
+    }
+
+    fn scheduled_input(params: &st::UpsertScheduledTask) -> ScheduledTaskInput {
+        ScheduledTaskInput {
+            id: params.id.clone(),
+            require_existing: params.require_existing,
+            command_id: params.command_id.clone(),
+            title: params.title.clone(),
+            prompt: params.prompt.clone(),
+            enabled: params.enabled,
+            schedule: params.schedule.clone(),
+            project: params.project_id.clone(),
+            thread: params.thread_id.clone(),
+            workspace: Self::runtime_workspace(&params.workspace),
+            selection: params.selection.clone(),
+            runtime_mode: params.runtime_mode,
+            interaction_mode: params.interaction_mode,
+            created_by: agent_domain::MessageAuthor::User,
+            creation_source: params.creation_source.clone(),
+        }
+    }
+
+    fn scheduled_failure(error: ScheduledTaskError) -> Failure {
+        match error {
+            ScheduledTaskError::NotFound(id) => {
+                Failure::new("scheduled_task_not_found", format!("Schedule task {id} not found."))
+            }
+            ScheduledTaskError::AlreadyRunning(id) => Failure::new(
+                "scheduled_task_already_running",
+                format!("Schedule task {id} is already running."),
+            ),
+            ScheduledTaskError::Store(error) => Failure::new("scheduled_task_failed", error),
+        }
+    }
+
     pub fn new(
         codex: Result<Arc<CodexAppServer>, String>,
         projects: ProjectStore,
@@ -452,6 +563,10 @@ impl HostRpcService {
             let cancel = self.inner.connections.cancellation(session)?;
             return Ok(self.stacked_action(params, cancel));
         }
+        if let Call::SubscribeScheduledTasks(_) = call {
+            let cancel = self.inner.connections.cancellation(session)?;
+            return Ok(self.scheduled_tasks(cancel).await);
+        }
         Ok(Response::from_result(self.request(session, call).await).into())
     }
 
@@ -559,6 +674,41 @@ impl HostRpcService {
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => None,
                     }
+                })
+            },
+            cancel,
+        )
+    }
+    /// The complete scheduled-task list first, then a fresh list after each
+    /// durable change. The revision watch is deliberately read before the
+    /// first list so a concurrent write cannot be lost.
+    async fn scheduled_tasks(&self, cancel: tokio_util::sync::CancellationToken) -> HostReply {
+        let conversation = match self.conversation() {
+            Ok(conversation) => conversation.clone(),
+            Err(error) => return Response::from_result::<(), _>(Err(error)).into(),
+        };
+        let tasks = conversation.runtime.scheduled_tasks().clone();
+        let receiver = Arc::new(tokio::sync::Mutex::new(tasks.subscribe()));
+        let first = match tasks.list().await {
+            Ok(tasks) => st::ScheduledTaskList {
+                tasks: tasks.into_iter().map(Self::scheduled_task).collect(),
+            },
+            Err(error) => {
+                return Response::error("scheduled_tasks_unavailable", &error).into();
+            }
+        };
+        crate::conversation::stream(
+            std::collections::VecDeque::from([first]),
+            st::ScheduledTaskList { tasks: vec![] },
+            move || {
+                let (receiver, tasks) = (receiver.clone(), tasks.clone());
+                Box::pin(async move {
+                    let mut receiver = receiver.lock().await;
+                    receiver.changed().await.ok()?;
+                    let list = tasks.list().await.ok()?;
+                    Some(vec![st::ScheduledTaskList {
+                        tasks: list.into_iter().map(Self::scheduled_task).collect(),
+                    }])
                 })
             },
             cancel,
@@ -909,6 +1059,64 @@ impl HostRpcService {
                     .await
                     .map_err(|error| Failure::new("keybindings_update_failed", error))?)
                 .into(),
+                Call::UpsertScheduledTask(params) => {
+                    params
+                        .validate()
+                        .map_err(|error| Failure::new("invalid_params", error))?;
+                    let task = self
+                        .conversation()?
+                        .runtime
+                        .scheduled_tasks()
+                        .upsert(Self::scheduled_input(params))
+                        .await
+                        .map_err(Self::scheduled_failure)?;
+                    Self::scheduled_task(task).into()
+                }
+                Call::ListScheduledTasks(_) => {
+                    let tasks = self
+                        .conversation()?
+                        .runtime
+                        .scheduled_tasks()
+                        .list()
+                        .await
+                        .map_err(|error| Failure::new("scheduled_tasks_unavailable", error))?;
+                    st::ScheduledTaskList {
+                        tasks: tasks.into_iter().map(Self::scheduled_task).collect(),
+                    }
+                    .into()
+                }
+                Call::SetScheduledTaskEnabled(params) => {
+                    let task = self
+                        .conversation()?
+                        .runtime
+                        .scheduled_tasks()
+                        .set_enabled(&params.id, params.enabled)
+                        .await
+                        .map_err(Self::scheduled_failure)?;
+                    Self::scheduled_task(task).into()
+                }
+                Call::DeleteScheduledTask(params) => {
+                    self.conversation()?
+                        .runtime
+                        .scheduled_tasks()
+                        .delete(&params.id)
+                        .await
+                        .map_err(|error| Failure::new("scheduled_task_failed", error))?;
+                    st::ScheduledTaskRef {
+                        id: params.id.clone(),
+                    }
+                    .into()
+                }
+                Call::RunScheduledTaskNow(params) => {
+                    let task = self
+                        .conversation()?
+                        .runtime
+                        .scheduled_tasks()
+                        .run_now(&params.id)
+                        .await
+                        .map_err(Self::scheduled_failure)?;
+                    Self::scheduled_task(task).into()
+                }
                 Call::ReadWorktreeSettings(_) | Call::UpdateWorktreeSettings(_) => {
                     let update = if let Call::UpdateWorktreeSettings(settings) = request {
                         Some(settings.clone())

@@ -11,4 +11,5 @@ pub mod permissions;
 pub mod protocol;
 pub mod provider;
 pub mod vcs;
+pub mod scheduled_tasks;
 pub mod workspace;

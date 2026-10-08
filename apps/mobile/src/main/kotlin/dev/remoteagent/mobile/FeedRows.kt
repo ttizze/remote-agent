@@ -235,10 +235,17 @@ private fun Bubble(
 @Composable
 private fun UserBubble(model: AndroidAppModel, row: UserMessageRow, actions: FeedActions) {
     val above: (@Composable () -> Unit)? =
-        if (row.badge == null && row.decorations.attribution == null) null
+        if (row.badge == null && row.decorations.attribution == null && row.decorations.automation == null) null
         else {
             {
                 Row(Modifier.padding(bottom = 3.5.dp), horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                    row.decorations.automation?.let { automation ->
+                        Text(
+                            automation.label,
+                            style = AppTheme.caption,
+                            color = AppTheme.colors.foregroundMuted,
+                        )
+                    }
                     row.decorations.attribution?.let { attribution ->
                         Text(
                             attribution.label,

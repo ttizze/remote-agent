@@ -20,6 +20,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Archive
 import androidx.compose.material.icons.outlined.ChevronRight
 import androidx.compose.material.icons.outlined.Computer
+import androidx.compose.material.icons.outlined.Schedule
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
@@ -85,6 +86,7 @@ internal fun SettingsScreen(model: AndroidAppModel, projectId: String?) {
                 item {
                     SectionCard("Projects & threads") {
                         NavigationRow(Icons.Outlined.Archive, "Archived Threads") { model.navigate(Route.Archived) }
+                        NavigationRow(Icons.Outlined.Schedule, "Scheduled tasks") { model.navigate(Route.ScheduledTasks) }
                     }
                 }
             view.project?.let { header ->

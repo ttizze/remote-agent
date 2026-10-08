@@ -1,6 +1,8 @@
 //! One contract per native request; provider JSON conversion stays at its boundary.
 use super::*;
-use crate::{conversation as c, models as m, operations as op, vcs, workspace as w};
+use crate::{
+    conversation as c, models as m, operations as op, scheduled_tasks as st, vcs, workspace as w,
+};
 macro_rules! contracts {
     ($($variant:ident, $method:literal => ($params:ty, $result:ty) $([$clone:ident])?),* $(,)?) => {
         // Bind metadata to the operation, not the parameter type: ReadFile and
@@ -122,4 +124,11 @@ contracts! {
     ResolvePullRequest, "host/git/resolvePullRequest" => (vcs::ResolvePullRequest, vcs::ResolvedPullRequestResult) [clone],
     PreparePullRequestThread, "host/git/preparePullRequestThread" => (vcs::PreparePullRequestThread, vcs::PreparedPullRequestThread) [clone],
     PublishRepository, "host/sourceControl/publishRepository" => (vcs::PublishRepository, vcs::PublishedRepository) [clone],
+    // Scheduled tasks
+    ListScheduledTasks, "host/scheduledTasks/list" => (m::Empty, st::ScheduledTaskList),
+    SubscribeScheduledTasks, "host/scheduledTasks/subscribe" => (m::Empty, st::ScheduledTaskList),
+    UpsertScheduledTask, "host/scheduledTasks/upsert" => (st::UpsertScheduledTask, st::ScheduledTask) [clone],
+    SetScheduledTaskEnabled, "host/scheduledTasks/setEnabled" => (st::SetScheduledTaskEnabled, st::ScheduledTask) [clone],
+    DeleteScheduledTask, "host/scheduledTasks/delete" => (st::ScheduledTaskRef, st::ScheduledTaskRef),
+    RunScheduledTaskNow, "host/scheduledTasks/runNow" => (st::ScheduledTaskRef, st::ScheduledTask),
 }

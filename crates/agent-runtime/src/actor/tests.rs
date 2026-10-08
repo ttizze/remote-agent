@@ -65,6 +65,7 @@ pub(crate) fn create(thread: &ThreadId) -> Command {
 }
 pub(crate) fn send(id: &str) -> Command {
     Command::Send(SendMessage {
+        scheduled_task: None,
         context: None,
         title_seed: None,
         created_by: MessageAuthor::User,

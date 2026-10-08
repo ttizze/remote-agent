@@ -7,6 +7,7 @@ use super::{
 use crate::{peer::PeerError, protocol::Call};
 use agent_domain::WorktreeSetupSnapshot;
 use agent_protocol::conversation::{ShellUpdate, ThreadUpdate};
+use agent_protocol::scheduled_tasks::ScheduledTaskList;
 use serde::de::DeserializeOwned;
 use tokio::sync::mpsc;
 
@@ -18,6 +19,7 @@ pub(super) enum Payload {
     Keybindings(agent_protocol::keybindings::KeybindingsConfig),
     VcsStatus(agent_protocol::vcs::VcsStatusStreamEvent),
     ActionProgress(agent_protocol::vcs::ActionProgressEvent),
+    ScheduledTasks(ScheduledTaskList),
     /// The stream closed; `None` when it ended without an error.
     Ended(Option<PeerError>),
 }

@@ -77,6 +77,7 @@ pub(super) enum StreamKey {
     Keybindings,
     VcsStatus(String),
     GitAction(String),
+    ScheduledTasks,
 }
 impl StreamKey {
     pub fn location(&self) -> Option<ShellLocation> {
@@ -695,6 +696,7 @@ impl Owner {
         self.subscribe_git_statuses();
         self.subscribe_terminal_metadata();
         self.subscribe_keybindings();
+        self.subscribe_scheduled_tasks();
         self.refresh();
         self.sources_tick(now_ms());
         if let Some(request) = self

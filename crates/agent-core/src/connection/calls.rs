@@ -5,7 +5,9 @@ use super::{
     owner::{Event, FileTransfer, Owner, Waiter},
 };
 use crate::{peer::PeerError, protocol::Call, state::*};
-use agent_protocol::{conversation as c, models as m, operations as op, workspace as w};
+use agent_protocol::{
+    conversation as c, models as m, operations as op, scheduled_tasks as st, workspace as w,
+};
 use std::sync::Arc;
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
@@ -51,6 +53,9 @@ pub(super) enum Reply {
     ProjectIcon(Option<m::ProjectFavicon>),
     SwitchedRef(w::SwitchedRef),
     Keybindings(agent_protocol::keybindings::KeybindingsConfig),
+    ScheduledTasks(st::ScheduledTaskList),
+    ScheduledTask(st::ScheduledTask),
+    ScheduledTaskRef(st::ScheduledTaskRef),
     Done,
 }
 
@@ -112,6 +117,13 @@ async fn execute(peer: &Peer, call: &Call) -> Result<Reply, PeerError> {
             Reply::Done
         }
         Call::CancelSetup(_) => Reply::SetupCancelled(peer.request(call).await?),
+        Call::UpsertScheduledTask(_)
+        | Call::SetScheduledTaskEnabled(_)
+        | Call::RunScheduledTaskNow(_) => {
+            Reply::ScheduledTask(peer.request(call).await?)
+        }
+        Call::ListScheduledTasks(_) => Reply::ScheduledTasks(peer.request(call).await?),
+        Call::DeleteScheduledTask(_) => Reply::ScheduledTaskRef(peer.request(call).await?),
         _ => {
             let _: m::Empty = peer.request(call).await?;
             Reply::Done
@@ -663,6 +675,20 @@ impl Owner {
                 if let Call::CancelSetup(request) = call {
                     self.setup_cancelled(&request.thread_id, cancelled.cancelled);
                 }
+            }
+            Reply::ScheduledTask(task) => {
+                self.state
+                    .scheduled_tasks
+                    .retain(|existing| existing.id != task.id);
+                self.state.scheduled_tasks.push(task);
+            }
+            Reply::ScheduledTasks(tasks) => {
+                self.state.scheduled_tasks = tasks.tasks;
+            }
+            Reply::ScheduledTaskRef(task) => {
+                self.state
+                    .scheduled_tasks
+                    .retain(|existing| existing.id != task.id);
             }
             Reply::Done => {}
         }

@@ -5,10 +5,10 @@ use crate::{
     EffectHandlers, EffectWorker, ExecutorContext, HandoffCatalog, HistoryPage, HostOperations,
     HostProject, IDLE_EVICTION, ImportCounts, ImportError, ImportProject, Importer, LaunchError,
     LaunchReply, LaunchThread, LiveSessions, NoHandoffCatalog, Preparations, ProjectDirectory,
-    ProjectRoots, QueryError, RuntimeError, ScanConfig, ScanResult, Scanner, SearchMatch,
-    SessionHost, SessionManager, SessionOptions, ShellHub, ShellSubscribe, ShellSubscription,
-    SqliteOutbox, Store, SystemClock, ThreadSubscribe, ThreadSubscription, ThreadView,
-    TranscriptFs, WorkerOptions, WorkspaceFence, with_runtime_handlers,
+    ProjectRoots, QueryError, RuntimeError, ScanConfig, ScanResult, Scanner, ScheduledTasks,
+    SearchMatch, SessionHost, SessionManager, SessionOptions, ShellHub, ShellSubscribe,
+    ShellSubscription, SqliteOutbox, Store, SystemClock, ThreadSubscribe, ThreadSubscription,
+    ThreadView, TranscriptFs, WorkerOptions, WorkspaceFence, with_runtime_handlers,
 };
 use agent_domain::{Command, CommandId, Input, RecoveryTrigger, ResolvedPlan, ThreadId};
 use std::path::{Path, PathBuf};
@@ -96,7 +96,8 @@ pub struct Runtime {
     importer: Option<(Arc<Importer>, Arc<Scanner>)>,
     daemon: DaemonOptions,
     eviction: Option<Duration>,
-    preparations: Preparations,
+    preparations: Arc<Preparations>,
+    scheduled: Arc<ScheduledTasks>,
     phase: watch::Sender<Phase>,
     /// Client operations hold it shared; shutdown takes it to wait for them.
     admission: RwLock<()>,
@@ -141,11 +142,18 @@ impl Runtime {
             config.clock.clone(),
             config.worker.clone(),
         ));
+        let preparations = Arc::new(Preparations::default());
+        let scheduled = ScheduledTasks::new(
+            executors.clone(),
+            preparations.clone(),
+            config.clock.clone(),
+        );
         let sweeps = crate::sweep::Sweeps {
             store: store.clone(),
             registry: registry.clone(),
             ops: ops.clone(),
             clock: config.clock.clone(),
+            scheduled: scheduled.clone(),
             settings_changed: Arc::default(),
         };
         let projects = Arc::new(HostProjects(ops));
@@ -171,7 +179,8 @@ impl Runtime {
             importer,
             daemon: config.daemon,
             eviction: config.eviction,
-            preparations: Preparations::default(),
+            preparations,
+            scheduled,
             phase: watch::Sender::new(Phase::Opened),
             admission: RwLock::new(()),
             lifecycle: tokio::sync::Mutex::new(()),
@@ -211,10 +220,15 @@ impl Runtime {
         &self.executors.sessions
     }
 
+    pub fn scheduled_tasks(&self) -> &Arc<ScheduledTasks> {
+        &self.scheduled
+    }
+
     /// Settles what the previous process left behind before any client command:
-    /// process-bound effects are cancelled, then every thread with unfinished
-    /// work recovers. Then the effect worker, unfinished launch preparations and
-    /// the first-run import start.
+    /// process-bound effects are cancelled, every thread with unfinished work
+    /// recovers and interrupted scheduled task runs are released. Then the
+    /// effect worker, unfinished launch preparations, the sweeps and the
+    /// first-run import start.
     pub async fn start(&self) -> Result<(), RuntimeError> {
         let claimed = self.phase.send_if_modified(|phase| {
             let opened = *phase == Phase::Opened;
@@ -234,6 +248,12 @@ impl Runtime {
                 .reconcile_after_process_loss(&self.handlers)
                 .await?;
             self.recover(RecoveryTrigger::Startup).await?;
+            if let Err(error) = self.scheduled.release_interrupted().await {
+                // A malformed schedule row must not prevent the Host from
+                // starting. The recovery routine releases rows independently;
+                // this warning is for a store-wide failure while doing so.
+                tracing::warn!(%error, "Could not reset interrupted schedule task runs");
+            }
             Ok::<_, RuntimeError>(
                 self.store()
                     .blocking(|store| store.unprepared_launches())

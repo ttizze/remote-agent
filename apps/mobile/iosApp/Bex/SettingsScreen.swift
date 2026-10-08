@@ -35,6 +35,9 @@ struct SettingsScreen: View {
                         }
                     }
                     SettingsGroup(title: "Server settings") {
+                        SettingsLink(symbol: "calendar.badge.clock", label: "Scheduled tasks") {
+                            ScheduledTasksScreen(model: model)
+                        }
                         SettingsLink(symbol: "person.crop.circle", label: "Provider accounts") {
                             ProviderAccountsPage(model: model)
                         }

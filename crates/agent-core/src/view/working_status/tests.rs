@@ -356,6 +356,7 @@ fn timestamp(value: &str) -> Timestamp {
 
 fn message(id: &str, text: &str) -> Message {
     Message {
+        scheduled_task: None,
         notification: None,
         id: MessageId::new(id).unwrap(),
         run: None,

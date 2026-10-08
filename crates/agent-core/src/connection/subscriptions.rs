@@ -53,6 +53,9 @@ impl Owner {
             StreamKey::GitAction(_) => {
                 tokio::spawn(follow(target, call, Payload::ActionProgress))
             }
+            StreamKey::ScheduledTasks => {
+                tokio::spawn(follow(target, call, Payload::ScheduledTasks))
+            }
         };
         let failures = network
             .streams
@@ -189,6 +192,17 @@ impl Owner {
         self.open_stream(key, Call::RunStackedAction(request));
     }
 
+    /// The Host's complete scheduled-task list and every later change.
+    pub(super) fn subscribe_scheduled_tasks(&mut self) {
+        if !self.connected() {
+            return;
+        }
+        self.open_stream(
+            StreamKey::ScheduledTasks,
+            Call::SubscribeScheduledTasks(agent_protocol::models::Empty {}),
+        );
+    }
+
     fn terminal_metadata(&mut self, event: agent_protocol::operations::TerminalMetadataEvent) {
         use agent_protocol::operations::TerminalMetadataEvent as Metadata;
         let terminals = &mut self.state.terminal_metadata;
@@ -308,6 +322,7 @@ impl Owner {
             self.subscribe_thread(&thread);
         }
         self.subscribe_git_statuses();
+        self.subscribe_scheduled_tasks();
     }
 
     pub(super) fn subscribe_git_statuses(&mut self) {
@@ -385,6 +400,7 @@ impl Owner {
             StreamKey::Keybindings => self.subscribe_keybindings(),
             StreamKey::VcsStatus(cwd) => self.subscribe_vcs_status(cwd),
             StreamKey::GitAction(_) => {}
+            StreamKey::ScheduledTasks => self.subscribe_scheduled_tasks(),
         }
     }
 
@@ -443,6 +459,9 @@ impl Owner {
                 if terminal {
                     self.close_stream(&key);
                 }
+            (StreamKey::ScheduledTasks, Payload::ScheduledTasks(list)) => {
+                self.healthy(&StreamKey::ScheduledTasks);
+                self.state.scheduled_tasks = list.tasks;
             }
             _ => {}
         }
@@ -474,6 +493,7 @@ impl Owner {
                 | StreamKey::Keybindings
                 | StreamKey::VcsStatus(_)
                 | StreamKey::GitAction(_) => {}
+                | StreamKey::ScheduledTasks => {}
             }
             self.schedule_resubscribe(key);
             return;
