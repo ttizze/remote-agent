@@ -11,6 +11,7 @@ import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -51,6 +52,8 @@ import dev.remoteagent.core.DeviceView
 import dev.remoteagent.core.Intent
 import java.io.File
 
+private data class StreamKey(val hostId: String, val deviceId: String, val screenId: Int)
+
 /** Native device picker, setup and live frame surface for a conversation. */
 @Composable
 internal fun DeviceScreen(model: AndroidAppModel, threadId: String) {
@@ -59,7 +62,7 @@ internal fun DeviceScreen(model: AndroidAppModel, threadId: String) {
     val hostProfile = model.profileId
     val threadSessions = view.sessions.filter { it.threadId == threadId }
     val sessionKey = threadSessions.joinToString(",") { "${it.hostId}:${it.deviceId}" }
-    val liveFrames = view.videoFrames.filter { it.threadId == threadId }
+    val liveEvents = view.videoEvents.filter { it.threadId == threadId }
     LaunchedEffect(threadId, hostProfile) {
         model.perform(Intent.OpenThread(threadId))
         model.perform(Intent.LoadDevices)
@@ -248,9 +251,13 @@ internal fun DeviceScreen(model: AndroidAppModel, threadId: String) {
                         }
                     }
                 }
-            if (liveFrames.isEmpty()) {
+            if (liveEvents.isEmpty()) {
                 view.frames.filter { it.threadId == threadId }.maxByOrNull { it.sequence }?.let { frame ->
-                    item(key = "frame-${frame.sequence}") {
+                    val epoch = threadSessions.firstOrNull {
+                        it.hostId == frame.hostId && it.deviceId == frame.deviceId
+                    }?.openedAt.orEmpty()
+                    val frameAspect = frame.width.toFloat() / frame.height.toFloat().coerceAtLeast(1f)
+                    item(key = "frame-${frame.hostId}-${frame.deviceId}-$epoch") {
                         val bitmap = remember(frame.sequence) {
                             BitmapFactory.decodeByteArray(frame.png, 0, frame.png.size)?.asImageBitmap()
                         }
@@ -258,9 +265,9 @@ internal fun DeviceScreen(model: AndroidAppModel, threadId: String) {
                             Box(
                                 Modifier
                                     .fillMaxWidth()
-                                    .size(320.dp)
+                                    .aspectRatio(frameAspect)
                                     .deviceKeyInput(model, frame.hostId, frame.deviceId)
-                                    .deviceTouchInput(model, frame.hostId, frame.deviceId, frame.sequence),
+                                    .deviceTouchInput(model, frame.hostId, frame.deviceId, epoch, 0),
                             ) {
                                 Image(it, "Live device frame", Modifier.fillMaxSize(), contentScale = ContentScale.Fit)
                                 DeviceAccessibilityOverlay(view, frame.hostId, frame.deviceId)
@@ -269,18 +276,21 @@ internal fun DeviceScreen(model: AndroidAppModel, threadId: String) {
                     }
                 }
             } else {
-                liveFrames
-                    .groupBy { it.screenId ?: 0 }
-                    .toSortedMap()
-                    .forEach { (screenId, frames) ->
-                        frames.maxByOrNull { it.sequence }?.let { frame ->
-                            item(key = "video-frame-${frame.hostId}-${frame.deviceId}-$screenId-${frame.sequence}") {
-                                if (frames.size > 1 || screenId != 0) Text("Live screen $screenId")
-                                when (frame.encoding) {
-                                    "jpeg", "mjpeg" -> DeviceJpegFrame(model, view, frame)
-                                    "h264", "semu", "avcc-description" -> DeviceH264Frame(model, view, frame)
-                                    else -> Text("Unsupported live device frame format: ${frame.encoding}")
-                                }
+                liveEvents
+                    .groupBy { StreamKey(it.hostId, it.deviceId, it.screenId?.toInt() ?: 0) }
+                    .toSortedMap(compareBy({ it.hostId }, { it.deviceId }, { it.screenId }))
+                    .forEach { (stream, events) ->
+                        val ordered = events.sortedBy { it.sequence }
+                        val frame = ordered.lastOrNull() ?: return@forEach
+                        val epoch = threadSessions.firstOrNull {
+                            it.hostId == stream.hostId && it.deviceId == stream.deviceId
+                        }?.openedAt.orEmpty()
+                        item(key = "video-frame-${stream.hostId}-${stream.deviceId}-${stream.screenId}-$epoch") {
+                            if (ordered.size > 1 || stream.screenId != 0) Text("Live screen ${stream.screenId}")
+                            when (frame.encoding) {
+                                "jpeg", "mjpeg" -> DeviceJpegFrame(model, view, frame, epoch, stream.screenId)
+                                "h264", "semu", "avcc-description" -> DeviceH264Frame(model, view, ordered, epoch, stream.screenId)
+                                else -> Text("Unsupported live device frame format: ${frame.encoding}")
                             }
                         }
                     }
@@ -359,6 +369,8 @@ private fun DeviceJpegFrame(
     model: AndroidAppModel,
     view: DeviceView,
     frame: dev.remoteagent.core.DeviceVideoFrameView,
+    sessionEpoch: String,
+    screenId: Int,
 ) {
     val bitmap = remember(frame.sequence) {
         BitmapFactory.decodeByteArray(frame.payload, 0, frame.payload.size)?.asImageBitmap()
@@ -367,9 +379,9 @@ private fun DeviceJpegFrame(
         Box(
             Modifier
                 .fillMaxWidth()
-                .size(320.dp)
+                .aspectRatio(frame.width.toFloat() / frame.height.toFloat().coerceAtLeast(1f))
                 .deviceKeyInput(model, frame.hostId, frame.deviceId)
-                .deviceTouchInput(model, frame.hostId, frame.deviceId, frame.sequence),
+                .deviceTouchInput(model, frame.hostId, frame.deviceId, sessionEpoch, screenId),
         ) {
             Image(it, "Live device video frame", Modifier.fillMaxSize(), contentScale = ContentScale.Fit)
             DeviceAccessibilityOverlay(view, frame.hostId, frame.deviceId)
@@ -381,19 +393,22 @@ private fun DeviceJpegFrame(
 private fun DeviceH264Frame(
     model: AndroidAppModel,
     view: DeviceView,
-    frame: dev.remoteagent.core.DeviceVideoFrameView,
+    frames: List<dev.remoteagent.core.DeviceVideoFrameView>,
+    sessionEpoch: String,
+    screenId: Int,
 ) {
+    val frame = frames.lastOrNull() ?: return
     val decoder = remember { DeviceVideoDecoder() }
-    val streamKey = "${model.profileId}:${frame.hostId}:${frame.deviceId}:${frame.screenId ?: 0}"
+    val streamKey = "${model.profileId}:$sessionEpoch:${frame.hostId}:${frame.deviceId}:$screenId"
     DisposableEffect(decoder) {
         onDispose { decoder.close() }
     }
     Box(
         Modifier
             .fillMaxWidth()
-            .size(320.dp)
+            .aspectRatio(frame.width.toFloat() / frame.height.toFloat().coerceAtLeast(1f))
             .deviceKeyInput(model, frame.hostId, frame.deviceId)
-            .deviceTouchInput(model, frame.hostId, frame.deviceId, frame.sequence),
+            .deviceTouchInput(model, frame.hostId, frame.deviceId, sessionEpoch, screenId),
     ) {
         AndroidView(
             modifier = Modifier.fillMaxSize(),
@@ -432,13 +447,15 @@ private fun DeviceH264Frame(
                         }
                         ?: emptyList()
                 decoder.reset(streamKey, frame.width.toInt(), frame.height.toInt())
-                decoder.submit(
-                    payload = frame.payload.toByteArray(),
-                    encoding = frame.encoding,
-                    sequence = frame.sequence,
-                    timestampUs = frame.timestampUs,
-                    keyframe = frame.keyframe,
-                )
+                frames.forEach { event ->
+                    decoder.submit(
+                        payload = event.payload.toByteArray(),
+                        encoding = event.encoding,
+                        sequence = event.sequence,
+                        timestampUs = event.timestampUs,
+                        keyframe = event.keyframe,
+                    )
+                }
             },
         )
     }
@@ -464,11 +481,14 @@ private fun Modifier.deviceTouchInput(
     model: AndroidAppModel,
     hostId: String,
     deviceId: String,
-    sequence: ULong,
-): Modifier = pointerInput(sequence) {
+    sessionEpoch: String,
+    screenId: Int,
+): Modifier = pointerInput(hostId, deviceId, sessionEpoch, screenId) {
     awaitEachGesture {
         awaitPointerEventScope {
             val down = awaitFirstDown()
+            var lastPosition = down.position
+            var ended = false
             fun send(phase: String, position: androidx.compose.ui.geometry.Offset) {
                 val x = (position.x / size.width).coerceIn(0f, 1f)
                 val y = (position.y / size.height).coerceIn(0f, 1f)
@@ -481,19 +501,25 @@ private fun Modifier.deviceTouchInput(
                 )
             }
             send("begin", down.position)
-            while (true) {
-                val event = awaitPointerEvent()
-                val change = event.changes.first()
-                when {
-                    change.changedToUp() -> {
-                        send("end", change.position)
-                        break
-                    }
-                    change.positionChanged() -> {
-                        change.consume()
-                        send("move", change.position)
+            try {
+                while (true) {
+                    val event = awaitPointerEvent()
+                    val change = event.changes.firstOrNull() ?: break
+                    lastPosition = change.position
+                    when {
+                        change.changedToUp() -> {
+                            send("end", change.position)
+                            ended = true
+                            break
+                        }
+                        change.positionChanged() -> {
+                            change.consume()
+                            send("move", change.position)
+                        }
                     }
                 }
+            } finally {
+                if (!ended) send("end", lastPosition)
             }
         }
     }
