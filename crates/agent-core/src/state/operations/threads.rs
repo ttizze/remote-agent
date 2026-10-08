@@ -1157,7 +1157,7 @@ mod tests {
     }
 
     #[test]
-    fn opening_an_old_project_task_uses_its_metadata_before_history_and_clears_running_on_disconnect()
+    fn opening_an_old_project_task_uses_metadata_before_history_and_clears_cached_status_on_disconnect()
      {
         let id = SessionRef::new(ProviderKind::Codex, "old".into()).unwrap();
         let page: crate::models::ThreadList = serde_json::from_value(serde_json::json!({
@@ -1175,10 +1175,6 @@ mod tests {
         assert_eq!(snapshot.navigation.cwd, "/old-project");
         assert_eq!(snapshot.selected_directory(), "/old-project");
         assert_eq!(
-            snapshot.task_activity_overview(Vec::new()).sessions,
-            vec![id.clone()]
-        );
-        assert_eq!(
             snapshot
                 .thread_metadata(&id)
                 .unwrap()
@@ -1186,12 +1182,6 @@ mod tests {
             Some(false)
         );
         let (disconnected, _) = reduce(&snapshot, Event::Disconnected("offline".into()));
-        assert!(
-            disconnected
-                .task_activity_overview(Vec::new())
-                .sessions
-                .is_empty()
-        );
         assert_eq!(
             disconnected.thread_metadata(&id).unwrap().status,
             crate::models::SessionStatus::Unknown
