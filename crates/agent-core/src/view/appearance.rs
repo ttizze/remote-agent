@@ -27,6 +27,8 @@ pub const TERMINAL_FONT_SIZES: (u32, u32) = (8, 20);
 pub const MAX_FONT_FAMILY_CHARS: usize = 200;
 /// The stock palette's card in the theme library.
 pub const STANDARD_THEME_LABEL: &str = "Bex";
+const MATERIAL_YOU_THEME_ID: &str = "material-you";
+const MATERIAL_YOU_THEME_LABEL: &str = "Material You";
 
 /// The color scheme choices exposed by the mobile Appearance screen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -58,6 +60,15 @@ pub struct MobileAppearance {
     /// `None` follows the terminal's platform default.
     pub terminal_font_size: Option<f64>,
     pub code_word_wrap: bool,
+}
+
+/// A theme name a mobile client can present for selection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct MobileThemeChoice {
+    /// `None` selects the stock palette.
+    pub id: Option<String>,
+    pub label: String,
 }
 
 impl Default for MobileAppearance {
@@ -118,7 +129,29 @@ pub const MOBILE_DEFAULT_CODE_FONT_SIZE: f64 = 12.0;
 pub const MOBILE_CODE_FONT_SIZES: (u32, u32) = (8, 18);
 
 fn known_mobile_theme(id: Option<String>) -> Option<String> {
-    id.filter(|id| id == "material-you" || built_in_theme(id).is_some())
+    id.filter(|id| id == MATERIAL_YOU_THEME_ID || built_in_theme(id).is_some())
+}
+
+/// Lists the mobile theme choices shared by all clients. Material You is
+/// included only when the platform can provide it.
+pub fn mobile_theme_choices(include_material_you: bool) -> Vec<MobileThemeChoice> {
+    let mut choices =
+        Vec::with_capacity(1 + BUILT_IN_THEMES.len() + usize::from(include_material_you));
+    choices.push(MobileThemeChoice {
+        id: None,
+        label: STANDARD_THEME_LABEL.into(),
+    });
+    choices.extend(BUILT_IN_THEMES.iter().map(|theme| MobileThemeChoice {
+        id: Some(theme.id.into()),
+        label: theme.label.into(),
+    }));
+    if include_material_you {
+        choices.push(MobileThemeChoice {
+            id: Some(MATERIAL_YOU_THEME_ID.into()),
+            label: MATERIAL_YOU_THEME_LABEL.into(),
+        });
+    }
+    choices
 }
 
 /// Pulls saved mobile values into the ranges the native controls expose.
@@ -258,7 +291,7 @@ pub fn mobile_typography(appearance: MobileAppearance) -> MobileTypography {
 /// intentionally falls back to the stock roles here.
 pub fn mobile_theme_colors(theme_id: Option<&str>, dark: bool) -> HashMap<String, String> {
     let mut appearance = Appearance::default();
-    if let Some(theme_id) = theme_id.filter(|id| *id != "material-you") {
+    if let Some(theme_id) = theme_id.filter(|id| *id != MATERIAL_YOU_THEME_ID) {
         appearance.use_theme(Some(theme_id));
     }
     appearance.palette(dark).colors

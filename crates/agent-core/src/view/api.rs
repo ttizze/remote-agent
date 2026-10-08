@@ -807,6 +807,15 @@ pub fn mobile_theme_colors(
     crate::view::appearance::mobile_theme_colors(theme_id.as_deref(), dark)
 }
 
+/// Lists the shared mobile themes, optionally including the platform's
+/// Material You choice.
+#[cfg_attr(feature = "bindings", uniffi::export)]
+pub fn mobile_theme_choices(
+    include_material_you: bool,
+) -> Vec<crate::view::appearance::MobileThemeChoice> {
+    crate::view::appearance::mobile_theme_choices(include_material_you)
+}
+
 /// Steps a mobile terminal size through the shared bounded half-point scale.
 #[cfg_attr(feature = "bindings", uniffi::export)]
 pub fn terminal_font_size_step(current: f64, larger: bool) -> f64 {
