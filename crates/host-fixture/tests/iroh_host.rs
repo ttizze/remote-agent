@@ -19,6 +19,21 @@ use tokio_util::sync::CancellationToken;
 mod codex_fixture;
 use host_fixture::test_support::{HostFixture, Memory};
 
+// These transport Hosts run without account management and use an explicit
+// Codex new-chat preference.
+fn codex_chat_snapshot() -> agent_core::state::Snapshot {
+    agent_core::state::Snapshot {
+        model_defaults: agent_core::state::ModelDefaults {
+            new_chat_model: Some(agent_protocol::models::ModelRef {
+                provider: agent_protocol::session::ProviderKind::Codex,
+                id: "fixture-model".into(),
+            }),
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
+
 fn next_submission_id() -> String {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     format!(
@@ -640,7 +655,7 @@ async fn new_live_conversation_avoids_unmaterialized_history_and_survives_reconn
         let endpoint = Endpoint::bind(fixture.credentials.local_identity().await, Relays::Disabled)
             .await
             .unwrap();
-        let store = Store::connect(&endpoint, &fixture.ticket, Default::default(), None)
+        let store = Store::connect(&endpoint, &fixture.ticket, codex_chat_snapshot(), None)
             .await
             .unwrap();
         store
@@ -832,7 +847,7 @@ async fn submissions_complete_across_saved_worktree_settings_and_chat_scopes() {
                     std::fs::write(&source, bytes).unwrap();
                     let fixture = start_host(&root).await;
                     let endpoint = Endpoint::bind(fixture.credentials.local_identity().await, Relays::Disabled).await.unwrap();
-                    let store = Store::connect(&endpoint, &fixture.ticket, Default::default(), None).await.unwrap();
+                    let store = Store::connect(&endpoint, &fixture.ticket, codex_chat_snapshot(), None).await.unwrap();
                     // Compare submission effects after asynchronous model defaults
                     // have loaded, so catalog normalization cannot change the draft.
                     let mut updates = store.subscribe();
@@ -1134,7 +1149,7 @@ async fn repeated_turn_history_preserves_both_responses_after_reopening_and_rest
         let endpoint = Endpoint::bind(fixture.credentials.local_identity().await, Relays::Disabled)
             .await
             .unwrap();
-        let store = Store::connect(&endpoint, &fixture.ticket, Default::default(), None)
+        let store = Store::connect(&endpoint, &fixture.ticket, codex_chat_snapshot(), None)
             .await
             .unwrap();
         store
@@ -2139,7 +2154,7 @@ async fn discovered_host_keeps_mobile_and_desktop_turns_in_sync_across_reconnect
         let mobile = Store::connect(
             &mobile_endpoint,
             &ticket,
-            Snapshot::default(),
+            codex_chat_snapshot(),
             Some(invitation),
         )
         .await
@@ -2328,7 +2343,7 @@ async fn completed_conversations_refresh_the_sidebar_without_manual_reload() {
                     .install(Path::new(env!("CARGO_BIN_EXE_bex-codex-fixture")), &root).unwrap();
                 let fixture = HostFixture::start(&root, AppServerConfig { program, ..Default::default() }, Arc::new(Memory::default()), "isolated", false, None).await.unwrap();
                 let endpoint = Endpoint::bind(fixture.credentials.local_identity().await, Relays::Disabled).await.unwrap();
-                let store = Store::connect(&endpoint, &fixture.ticket, Default::default(), None).await.unwrap();
+                let store = Store::connect(&endpoint, &fixture.ticket, codex_chat_snapshot(), None).await.unwrap();
                 store.dispatch(Intent::NewChat { cwd: if scoped { project.to_str().unwrap().into() } else { String::new() } }).await.unwrap();
                 select_fixture_model(&store).await;
                 let key = store.snapshot().navigation.draft_key.clone();
@@ -2388,7 +2403,7 @@ async fn worktree_management_preserves_conversations_and_recreates_deleted_check
         git(&["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false", "commit", "--allow-empty", "--quiet", "-m", "fixture"]);
         let fixture = start_host(&root).await;
         let endpoint = Endpoint::bind(fixture.credentials.local_identity().await, Relays::Disabled).await.unwrap();
-        let store = Store::connect(&endpoint, &fixture.ticket, Default::default(), None).await.unwrap();
+        let store = Store::connect(&endpoint, &fixture.ticket, codex_chat_snapshot(), None).await.unwrap();
         store.dispatch(Intent::UpdateWorktreeSettings(op::UpdateWorktreeSettings { settings: models::WorktreeSettings { create_on_new_session: true, ..Default::default() } })).await.unwrap();
         store.dispatch(Intent::NewChat { cwd: project.to_str().unwrap().into() }).await.unwrap();
         select_fixture_model(&store).await;
@@ -2721,7 +2736,7 @@ async fn visualization_reaches_store_and_reopens_after_source_removal() {
         let endpoint = Endpoint::bind(fixture.credentials.local_identity().await, Relays::Disabled)
             .await
             .unwrap();
-        let store = Store::connect(&endpoint, &fixture.ticket, Default::default(), None)
+        let store = Store::connect(&endpoint, &fixture.ticket, codex_chat_snapshot(), None)
             .await
             .unwrap();
         let prompt = "[success] [visualize] Compare twelve icons";
