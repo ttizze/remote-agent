@@ -11,8 +11,9 @@ extension BexLaunchUITests {
         try useSimulatorListFixture("title-fixture")
         app.buttons["tasks.menu"].tap()
         app.buttons["tasks.refresh"].tap()
+        XCTAssertTrue(app.descendants(matching: .any)["tasks.row.codex:pagination-chat-16"].waitForExistence(timeout: 20))
         let project = app.buttons["tasks.project.pagination-project-16"]
-        XCTAssertTrue(project.waitForExistence(timeout: 20))
+        scrollToListElement(project, in: app)
         XCTAssertEqual(project.value as? String, "閉じています")
         project.tap()
         let newest = app.descendants(matching: .any)["tasks.project.row.codex:pagination-project-thread-16-16"]
