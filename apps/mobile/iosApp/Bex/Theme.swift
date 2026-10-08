@@ -310,7 +310,7 @@ struct MobileAppearanceState: Equatable {
         case .light: .light
         case .dark: .dark
         }
-        AgentCore.MobileAppearance(
+        return AgentCore.MobileAppearance(
             colorScheme: scheme,
             theme: theme,
             lightTheme: lightTheme,
