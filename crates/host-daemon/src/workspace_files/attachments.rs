@@ -283,6 +283,10 @@ impl WorkspaceFiles {
         validate([Limits::from(&attachment)])?;
         Ok(attachment)
     }
+    // Upload metadata, content digest, and capture provenance are independent
+    // resource facts at this persistence boundary; a mutable wrapper would
+    // obscure which values are validated and written.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn save_attachment_upload(
         &self,
         path: &Path,

@@ -114,7 +114,7 @@ fn valid_version(value: &str) -> bool {
     };
     let second_dot = first_dot + 1 + second_dot;
     let suffix_start = value[second_dot + 1..]
-        .find(|character| ['-', '+'].contains(character))
+        .find(['-', '+'])
         .map(|index| second_dot + 1 + index)
         .unwrap_or(value.len());
     let core = [

@@ -521,6 +521,9 @@ impl DeviceState {
     /// epoch. iOS receives physical modifier transitions; Android keeps its
     /// source semantic key path and does not receive unsupported modifier
     /// pseudo-characters.
+    // These independent native key facts form the wire boundary; keeping them
+    // explicit avoids hiding session identity and modifier state in a wrapper.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn key_input_plan(
         &mut self,
         thread_id: ThreadId,

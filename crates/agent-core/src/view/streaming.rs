@@ -42,7 +42,7 @@ fn paragraph_boundary(text: &str) -> bool {
     trimmed.ends_with("\n\n")
         || (trimmed.ends_with('`')
             && trimmed.matches("```").count() >= 2
-            && trimmed.matches("```").count() % 2 == 0)
+            && trimmed.matches("```").count().is_multiple_of(2))
 }
 
 #[cfg(test)]

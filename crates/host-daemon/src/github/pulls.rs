@@ -737,7 +737,7 @@ impl GitHubPullRequestService {
                     .first()
                     .map(|comment| comment.body.clone())
                     .unwrap_or_default();
-                Some(PullRequestReviewThread {
+                PullRequestReviewThread {
                     id,
                     path: node
                         .get("path")
@@ -751,7 +751,7 @@ impl GitHubPullRequestService {
                         .and_then(|value| value.as_bool())
                         .unwrap_or(false),
                     comments,
-                })
+                }
             })
             .collect())
     }
