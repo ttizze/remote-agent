@@ -54,14 +54,18 @@ struct BexSwiftUIRoot: View {
             }
         }
         .onChange(of: model.usageDeepLinkRequests) { _, count in
-            if count > 0 { showingUsage = true }
+            if count > 0 {
+                showingUsage = true
+            }
         }
         .sheet(isPresented: $showingUsage) {
             NavigationStack {
                 UsageScreen(model: model, initialTab: .limits)
                     .onAppear { model.consumeUsageDeepLinkRequest() }
                     .onChange(of: model.usageDeepLinkRequests) { _, count in
-                        if count > 0 { model.consumeUsageDeepLinkRequest() }
+                        if count > 0 {
+                            model.consumeUsageDeepLinkRequest()
+                        }
                     }
             }
         }
@@ -137,9 +141,11 @@ private struct WorkspaceRoot: View {
                 }
             }
         }
-        .sheet(isPresented: $showingSettings, onDismiss: { settingsProjectId = nil }) {
-            SettingsScreen(model: model, projectId: settingsProjectId)
-        }
+        .sheet(
+            isPresented: $showingSettings,
+            onDismiss: { settingsProjectId = nil },
+            content: { SettingsScreen(model: model, projectId: settingsProjectId) }
+        )
         .sheet(isPresented: $showingNewTask, onDismiss: restoreThread) {
             NewTaskFlow(model: model, draftOpen: newTaskDraftOpen) { _ in
                 returnThread = nil
