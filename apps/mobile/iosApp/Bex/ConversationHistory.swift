@@ -128,6 +128,12 @@ extension ThreadScreen {
     }
 }
 
+struct ConversationScrollMetrics: Equatable {
+    let content: CGSize
+    let container: CGSize
+    let latestVisible: Bool
+}
+
 func conversationRows(_ rows: [ThreadConversationRow],
                       expansion: [String: ActivityExpansion]) -> [ThreadConversationRow] {
     var expanded = false
