@@ -184,7 +184,7 @@ internal object LocalNotifications {
                 .setAutoCancel(true)
                 .setOnlyAlertOnce(true)
                 .setNumber(postedCount)
-        if (!alert) builder.setSilent(true)
+        // setOnlyAlertOnce above keeps badge refreshes from replaying sound or vibration.
         request.deepLink?.let { deepLink ->
             val route = Intent(Intent.ACTION_VIEW, Uri.parse(deepLink), context, MainActivity::class.java)
             request.kind?.let { route.putExtra("notificationKind", it) }

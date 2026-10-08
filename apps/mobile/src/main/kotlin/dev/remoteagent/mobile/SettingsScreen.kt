@@ -50,10 +50,12 @@ import dev.remoteagent.core.ArchivedOptions
 import dev.remoteagent.core.ArchivedSortOrder
 import dev.remoteagent.core.DiagnosticRow
 import dev.remoteagent.core.Intent
+import dev.remoteagent.core.MobileColorScheme
 import dev.remoteagent.core.NativeUpdatePlatform
 import dev.remoteagent.core.NativeUpdateRequest
 import dev.remoteagent.core.ProviderKind
 import dev.remoteagent.core.SettingControl
+import dev.remoteagent.core.SettingId
 import dev.remoteagent.core.SettingSource
 import dev.remoteagent.core.SettingValue
 import dev.remoteagent.core.SettingsRow
@@ -69,9 +71,9 @@ private const val PERCENT = 100f
 
 private fun releaseUpdateChannel(): UpdateChannel =
     when (BuildConfig.RELEASE_CHANNEL) {
-        "nightly" -> UpdateChannel.Nightly
-        "preview" -> UpdateChannel.Preview
-        else -> UpdateChannel.Stable
+        "nightly" -> UpdateChannel.NIGHTLY
+        "preview" -> UpdateChannel.PREVIEW
+        else -> UpdateChannel.STABLE
     }
 
 @Composable
@@ -85,7 +87,7 @@ internal fun SettingsScreen(model: AndroidAppModel, projectId: String?) {
             model.perform(Intent.LoadWorktreeSettings)
             model.perform(
                 Intent.LoadNativeUpdate(
-                    NativeUpdateRequest(NativeUpdatePlatform.Android, BuildConfig.VERSION_NAME, releaseUpdateChannel())
+                    NativeUpdateRequest(NativeUpdatePlatform.ANDROID, BuildConfig.VERSION_NAME, releaseUpdateChannel())
                 )
             )
             model.perform(Intent.LoadBackgroundPolicy)
@@ -151,7 +153,7 @@ internal fun SettingsScreen(model: AndroidAppModel, projectId: String?) {
                     }
                 }
             items(view.sections, key = { it.id }) { section ->
-                val rows = section.rows.filterNot { projectId == null && it.id == SettingId.LoadBalancing }
+                val rows = section.rows.filterNot { projectId == null && it.id == SettingId.LOAD_BALANCING }
                 Column {
                     SectionCard(section.title) {
                         rows.forEachIndexed { index, row ->
@@ -412,14 +414,14 @@ private fun BackgroundDiagnosticsSection(model: AndroidAppModel) {
             backgroundIntervalSeconds(rows, "automaticGitFetchIntervalMs"),
             listOf(0, 15, 30, 60, 300, 900),
         ) { seconds ->
-            model.perform(Intent.SetAutomaticGitFetchInterval(seconds))
+            model.perform(Intent.SetAutomaticGitFetchInterval(seconds.toUInt()))
         }
         BackgroundIntervalPicker(
             "Provider health interval",
             backgroundIntervalSeconds(rows, "providerHealthRefreshIntervalMs"),
             listOf(0, 60, 300, 900, 1800),
         ) { seconds ->
-            model.perform(Intent.SetProviderHealthRefreshInterval(seconds))
+            model.perform(Intent.SetProviderHealthRefreshInterval(seconds.toUInt()))
         }
         model.snapshot.hostResourceRows().forEach { row ->
             Text(
@@ -658,7 +660,7 @@ private fun SettingRow(
             Text("Reset", Modifier.clickable(onClick = onReset), style = AppTheme.caption, color = colors.primaryText)
         row.source?.let { source ->
             Text(
-                if (source == SettingSource.Project) "Project override" else "Inherited from Host",
+                if (source == SettingSource.PROJECT) "Project override" else "Inherited from Host",
                 style = AppTheme.caption,
                 color = colors.primaryText,
             )
@@ -772,7 +774,7 @@ private fun AccountsSection(model: AndroidAppModel) {
                         trackColor = colors.secondary,
                     )
                 }
-                if ((limits?.resetCreditCount ?: 0) > 0) {
+                if ((limits?.resetCreditCount ?: 0u) > 0u) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(
                             "Reset credits: ${limits?.resetCreditCount}",

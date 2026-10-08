@@ -142,20 +142,24 @@ internal fun activityLifecycleNeedsReset(expiredHosts: Boolean, aggregateActive:
 private fun storedActivityStates(preferences: android.content.SharedPreferences): MutableMap<String, JsonObject> =
     preferences.all
         .filterKeys { it.startsWith(ACTIVITY_HOST_PREFIX) }
+        .asSequence()
         .mapNotNull { (key, raw) ->
             val json = raw as? String ?: return@mapNotNull null
             val parsed = activityState(json) ?: return@mapNotNull null
             key.removePrefix(ACTIVITY_HOST_PREFIX) to parsed
         }
+        .toMap()
         .toMutableMap()
 
 private fun storedActivityExpiries(preferences: android.content.SharedPreferences): MutableMap<String, Long> =
     preferences.all
         .filterKeys { it.startsWith(ACTIVITY_EXPIRY_PREFIX) }
+        .asSequence()
         .mapNotNull { (key, raw) ->
             val expiry = raw as? Long ?: return@mapNotNull null
             key.removePrefix(ACTIVITY_EXPIRY_PREFIX) to expiry
         }
+        .toMap()
         .toMutableMap()
 
 internal fun retainedActivityStates(
@@ -165,6 +169,7 @@ internal fun retainedActivityStates(
 ): List<Pair<String, JsonObject>> =
     states
         .asSequence()
+        .map { (hostId, state) -> hostId to state }
         .filter { (hostId, _) -> expiryAtMillis[hostId]?.let { !activityExpiryDue(it, nowMillis, null) } ?: true }
         .sortedWith(
             compareByDescending<Pair<String, JsonObject>> { (_, state) ->

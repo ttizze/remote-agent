@@ -50,7 +50,7 @@ internal fun ScheduledTasksScreen(model: AndroidAppModel) {
         draft = null
         saveError = null
     }
-    LaunchedEffect(snapshot.revision) {
+    LaunchedEffect(snapshot.revision()) {
         if (draft == null && selected != null) draft = snapshot.scheduledTaskDraft(selected)
     }
     ScreenScaffold("Scheduled tasks", onBack = model::back) {
@@ -320,13 +320,7 @@ private fun ScheduledTaskScheduleFields(current: ScheduledTaskDraft, onChange: (
             selected = !interval,
             onClick = {
                 onChange(
-                    current.copy(
-                        schedule =
-                            ScheduledTaskScheduleDraft.FixedTime(
-                                "09:00",
-                                listOf(1u, 2u, 3u, 4u, 5u).map { it.toUByte() },
-                            )
-                    )
+                    current.copy(schedule = ScheduledTaskScheduleDraft.FixedTime("09:00", byteArrayOf(1, 2, 3, 4, 5)))
                 )
             },
             label = { Text("Fixed time") },
@@ -371,13 +365,16 @@ private fun ScheduledTaskWeekdayFields(
     Row(Modifier.padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
         listOf("S", "M", "T", "W", "T", "F", "S").forEachIndexed { index, label ->
             FilterChip(
-                selected = index.toUByte() in schedule.weekdays.map { it.toUByte() },
+                selected = index.toByte() in schedule.weekdays,
                 onClick = {
                     val days = schedule.weekdays.toMutableList()
-                    val day = index.toUByte()
+                    val day = index.toByte()
                     if (!days.remove(day)) days.add(day)
                     onChange(
-                        current.copy(schedule = ScheduledTaskScheduleDraft.FixedTime(schedule.timeOfDay, days.sorted()))
+                        current.copy(
+                            schedule =
+                                ScheduledTaskScheduleDraft.FixedTime(schedule.timeOfDay, days.sorted().toByteArray())
+                        )
                     )
                 },
                 label = { Text(label) },

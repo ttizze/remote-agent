@@ -3,8 +3,8 @@
     <shortcut
         android:shortcutId="new-thread"
         android:icon="@drawable/bex_icon"
-        android:shortcutShortLabel="New thread"
-        android:shortcutLongLabel="Start a new thread">
+        android:shortcutShortLabel="@string/new_thread_shortcut_short"
+        android:shortcutLongLabel="@string/new_thread_shortcut_long">
         <intent
             android:action="android.intent.action.VIEW"
             android:targetPackage="dev.remoteagent.mobile"

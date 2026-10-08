@@ -161,7 +161,7 @@ internal fun HomeScreen(model: AndroidAppModel) {
                                 )
                             }
                             items(aggregate.pendingTasks, key = { it.task.key }) { item ->
-                                val actions = pendingTaskActions(item.task.kind, item.task.projectId)
+                                val actions = pendingTaskActions(item.task.kind)
                                 PendingTaskListRow(
                                     item.task,
                                     status = actions.status,

@@ -7,7 +7,9 @@ import android.view.TextureView
 import android.widget.FrameLayout
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.focusable
 import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -31,7 +33,6 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.focus.focusable
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
@@ -39,9 +40,8 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.onPreviewKeyEvent
-import androidx.compose.ui.input.pointer.awaitFirstDown
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.changedToUp
-import androidx.compose.ui.input.pointer.consume
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChanged
 import androidx.compose.ui.layout.ContentScale
@@ -64,7 +64,14 @@ import java.io.File
 
 private data class StreamKey(val hostId: String, val deviceId: String, val screenId: Int, val sessionEpoch: String)
 
-private data class DeviceKeyFacts(val code: String, val key: String, val meta: Boolean, val ctrl: Boolean)
+private data class DeviceKeyFacts(
+    val code: String,
+    val key: String,
+    val meta: Boolean,
+    val ctrl: Boolean,
+    val shift: Boolean,
+    val alt: Boolean,
+)
 
 private const val DEVICE_EVENT_LOG_LOAD_LIMIT = 100
 private const val DEVICE_DUO_HALF_OPEN_ANGLE = 90f
@@ -329,7 +336,7 @@ private object DeviceOverviewSections {
                         Intent.DeviceAction(
                             session.hostId,
                             session.deviceId,
-                            DeviceActionIntent.Fold(DeviceFoldPostureIntent.Closed),
+                            DeviceActionIntent.Fold(DeviceFoldPostureIntent.CLOSED),
                         )
                     )
                 }
@@ -342,7 +349,7 @@ private object DeviceOverviewSections {
                         Intent.DeviceAction(
                             session.hostId,
                             session.deviceId,
-                            DeviceActionIntent.Fold(DeviceFoldPostureIntent.Opened),
+                            DeviceActionIntent.Fold(DeviceFoldPostureIntent.OPENED),
                         )
                     )
                 }
@@ -361,26 +368,26 @@ private object DeviceOverviewSections {
             Button(onClick = { send(DeviceDuoCommandIntent.Angle(DEVICE_DUO_HALF_OPEN_ANGLE)) }) { Text("Duo 90°") }
             Button(onClick = { send(DeviceDuoCommandIntent.Angle(DEVICE_DUO_FULL_OPEN_ANGLE)) }) { Text("Duo 180°") }
             listOf(
-                    DeviceDuoPoseIntent.Closed to "Duo closed",
-                    DeviceDuoPoseIntent.Book to "Duo book",
-                    DeviceDuoPoseIntent.Open to "Duo open",
-                    DeviceDuoPoseIntent.Laptop to "Duo laptop",
-                    DeviceDuoPoseIntent.Tent to "Duo tent",
+                    DeviceDuoPoseIntent.CLOSED to "Duo closed",
+                    DeviceDuoPoseIntent.BOOK to "Duo book",
+                    DeviceDuoPoseIntent.OPEN to "Duo open",
+                    DeviceDuoPoseIntent.LAPTOP to "Duo laptop",
+                    DeviceDuoPoseIntent.TENT to "Duo tent",
                 )
                 .forEach { (pose, label) ->
                     Button(onClick = { send(DeviceDuoCommandIntent.Pose(pose)) }) { Text(label) }
                 }
             Button(onClick = { send(DeviceDuoCommandIntent.Table(true)) }) { Text("Table on") }
             Button(onClick = { send(DeviceDuoCommandIntent.Table(false)) }) { Text("Table off") }
-            listOf(DeviceDuoPhysicalIntent.Faceup to "Face up", DeviceDuoPhysicalIntent.Facedown to "Face down")
+            listOf(DeviceDuoPhysicalIntent.FACEUP to "Face up", DeviceDuoPhysicalIntent.FACEDOWN to "Face down")
                 .forEach { (physical, label) ->
                     Button(onClick = { send(DeviceDuoCommandIntent.Physical(physical)) }) { Text(label) }
                 }
             listOf(
-                    DeviceDuoOrientationIntent.Portrait to "Portrait",
-                    DeviceDuoOrientationIntent.LandscapeLeft to "Landscape left",
-                    DeviceDuoOrientationIntent.PortraitUpsideDown to "Portrait upside down",
-                    DeviceDuoOrientationIntent.LandscapeRight to "Landscape right",
+                    DeviceDuoOrientationIntent.PORTRAIT to "Portrait",
+                    DeviceDuoOrientationIntent.LANDSCAPE_LEFT to "Landscape left",
+                    DeviceDuoOrientationIntent.PORTRAIT_UPSIDE_DOWN to "Portrait upside down",
+                    DeviceDuoOrientationIntent.LANDSCAPE_RIGHT to "Landscape right",
                 )
                 .forEach { (orientation, label) ->
                     Button(onClick = { send(DeviceDuoCommandIntent.Orientation(orientation)) }) { Text(label) }
@@ -417,13 +424,14 @@ private object DeviceStreamSections {
                         }
                     }
             }
-            .sortedBy { it.screenId ?: 0 }
+            .sortedBy { it.screenId?.toInt() ?: 0 }
             .forEach { screen ->
                 item(
-                    key = "screen-${screen.hostId}-${screen.deviceId}-${screen.screenId ?: 0}-${screen.sessionEpoch}"
+                    key =
+                        "screen-${screen.hostId}-${screen.deviceId}-${screen.screenId?.toInt() ?: 0}-${screen.sessionEpoch}"
                 ) {
                     Text(
-                        "Screen ${screen.screenId ?: 0}: ${screen.width}×${screen.height} · " +
+                        "Screen ${screen.screenId?.toInt() ?: 0}: ${screen.width}×${screen.height} · " +
                             "${screen.orientation}" +
                             (screen.hingeAngle?.let { " · hinge ${it.toInt()}°" } ?: "")
                     )
@@ -592,7 +600,7 @@ private fun DeviceJpegFrame(
         Box(
             Modifier.fillMaxWidth()
                 .aspectRatio(frame.width.toFloat() / frame.height.toFloat().coerceAtLeast(1f))
-                .deviceKeyInput(model, frame.hostId, frame.deviceId)
+                .deviceKeyInput(model, frame.hostId, frame.deviceId, sessionEpoch)
                 .deviceTouchInput(
                     model,
                     frame.hostId,
@@ -624,7 +632,7 @@ private fun DeviceH264Frame(
     Box(
         Modifier.fillMaxWidth()
             .aspectRatio(frame.width.toFloat() / frame.height.toFloat().coerceAtLeast(1f))
-            .deviceKeyInput(model, frame.hostId, frame.deviceId)
+            .deviceKeyInput(model, frame.hostId, frame.deviceId, sessionEpoch)
             .deviceTouchInput(
                 model,
                 frame.hostId,
@@ -684,7 +692,7 @@ private fun DeviceH264Surface(
             decoder.reset(streamKey, frame.width.toInt(), frame.height.toInt())
             frames.forEach { event ->
                 decoder.submit(
-                    payload = event.payload.toByteArray(),
+                    payload = event.payload,
                     encoding = event.encoding,
                     sequence = event.sequence,
                     timestampUs = event.timestampUs,
@@ -731,51 +739,49 @@ private fun Modifier.deviceTouchInput(
             var active = false
             var ended = false
             try {
-                awaitPointerEventScope {
-                    val down = awaitFirstDown()
-                    fun send(phase: String, position: androidx.compose.ui.geometry.Offset): Boolean {
-                        val point =
-                            projectTouchPoint(
-                                position.x,
-                                position.y,
-                                size.width,
-                                size.height,
-                                contentWidth.toFloat(),
-                                contentHeight.toFloat(),
-                            ) ?: return false
-                        val x = point.x
-                        val y = point.y
-                        lastPoint = x to y
-                        model.perform(
-                            Intent.DeviceAction(hostId, deviceId, DeviceActionIntent.Touch(phase, point.x, point.y))
-                        )
-                        return true
-                    }
-                    active = send("begin", down.position)
-                    while (true) {
-                        val event = awaitPointerEvent()
-                        val change = event.changes.first()
-                        when {
-                            change.changedToUp() -> {
-                                if (active && !send("end", change.position)) {
-                                    lastPoint?.let { (x, y) ->
-                                        model.perform(
-                                            Intent.DeviceAction(hostId, deviceId, DeviceActionIntent.Touch("end", x, y))
-                                        )
-                                    }
+                val down = awaitFirstDown()
+                fun send(phase: String, position: androidx.compose.ui.geometry.Offset): Boolean {
+                    val point =
+                        projectTouchPoint(
+                            position.x,
+                            position.y,
+                            size.width.toFloat(),
+                            size.height.toFloat(),
+                            contentWidth.toFloat(),
+                            contentHeight.toFloat(),
+                        ) ?: return false
+                    val x = point.x
+                    val y = point.y
+                    lastPoint = x to y
+                    model.perform(
+                        Intent.DeviceAction(hostId, deviceId, DeviceActionIntent.Touch(phase, point.x, point.y))
+                    )
+                    return true
+                }
+                active = send("begin", down.position)
+                while (true) {
+                    val event = awaitPointerEvent()
+                    val change = event.changes.first()
+                    when {
+                        change.changedToUp() -> {
+                            if (active && !send("end", change.position)) {
+                                lastPoint?.let { (x, y) ->
+                                    model.perform(
+                                        Intent.DeviceAction(hostId, deviceId, DeviceActionIntent.Touch("end", x, y))
+                                    )
                                 }
-                                ended = true
-                                active = false
-                                lastPoint = null
-                                break
                             }
-                            change.positionChanged() -> {
-                                change.consume()
-                                if (active) {
-                                    send("move", change.position)
-                                } else {
-                                    active = send("begin", change.position)
-                                }
+                            ended = true
+                            active = false
+                            lastPoint = null
+                            break
+                        }
+                        change.positionChanged() -> {
+                            change.consume()
+                            if (active) {
+                                send("move", change.position)
+                            } else {
+                                active = send("begin", change.position)
                             }
                         }
                     }
@@ -791,7 +797,12 @@ private fun Modifier.deviceTouchInput(
         }
     }
 
-private fun Modifier.deviceKeyInput(model: AndroidAppModel, hostId: String, deviceId: String): Modifier =
+private fun Modifier.deviceKeyInput(
+    model: AndroidAppModel,
+    hostId: String,
+    deviceId: String,
+    sessionEpoch: String,
+): Modifier =
     focusable().onPreviewKeyEvent { event ->
         // Android's device stream sends key actions on keydown only. The Host
         // maps the actual key value to either a text or navigation event and
@@ -802,7 +813,16 @@ private fun Modifier.deviceKeyInput(model: AndroidAppModel, hostId: String, devi
             Intent.DeviceAction(
                 hostId,
                 deviceId,
-                DeviceActionIntent.Key(facts.code, facts.key, true, facts.meta, facts.ctrl),
+                DeviceActionIntent.Key(
+                    code = facts.code,
+                    key = facts.key,
+                    sessionEpoch = sessionEpoch,
+                    down = true,
+                    meta = facts.meta,
+                    ctrl = facts.ctrl,
+                    shift = facts.shift,
+                    alt = facts.alt,
+                ),
             )
         )
         true
@@ -825,5 +845,7 @@ private fun deviceKeyFacts(event: AndroidKeyEvent): DeviceKeyFacts? {
         key = key,
         meta = event.isMetaPressed,
         ctrl = event.isCtrlPressed,
+        shift = event.isShiftPressed,
+        alt = event.isAltPressed,
     )
 }

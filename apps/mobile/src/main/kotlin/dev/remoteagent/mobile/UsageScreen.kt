@@ -336,7 +336,7 @@ private fun UsageLimitPoolView(pool: UsageLimitPool, useReset: (UsageLimitAccoun
                 Text("${window.remainingPercent}% remaining", style = AppTheme.caption)
             }
             LinearProgressIndicator(
-                progress = { window.remainingPercent / 100f },
+                progress = { window.remainingPercent.toFloat() / 100f },
                 modifier = Modifier.fillMaxWidth(),
                 color = colors.primary,
                 trackColor = colors.secondary,
@@ -367,7 +367,7 @@ private fun UsageLimitPoolView(pool: UsageLimitPool, useReset: (UsageLimitAccoun
             }
         }
         pool.accounts
-            .filter { it.resetCreditCount > 0 || it.externalLabel != null || it.error != null }
+            .filter { it.resetCreditCount > 0u || it.externalLabel != null || it.error != null }
             .forEach { account -> UsageLimitAccount(account, showWindows = false) { useReset(account) } }
     }
 }
@@ -389,14 +389,14 @@ private fun UsageLimitAccount(account: UsageLimitAccount, showWindows: Boolean =
                     Text("${window.remainingPercent}% remaining", style = AppTheme.caption)
                 }
                 LinearProgressIndicator(
-                    progress = { window.remainingPercent / 100f },
+                    progress = { window.remainingPercent.toFloat() / 100f },
                     modifier = Modifier.fillMaxWidth(),
                     color = colors.primary,
                     trackColor = colors.secondary,
                 )
             }
         }
-        if (account.resetCreditCount > 0) {
+        if (account.resetCreditCount > 0u) {
             Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
                 Text(
                     "Reset credits: ${account.resetCreditCount}",

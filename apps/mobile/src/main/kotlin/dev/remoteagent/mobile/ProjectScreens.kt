@@ -212,7 +212,7 @@ internal fun LocalFolderScreen(model: AndroidAppModel) {
             .settings(SettingsScope.Host)
             .sections
             .flatMap { it.rows }
-            .firstOrNull { it.id == SettingId.AddProjectBaseDirectory }
+            .firstOrNull { it.id == SettingId.ADD_PROJECT_BASE_DIRECTORY }
             ?.control
             ?.let { it as? SettingControl.Text }
             ?.value

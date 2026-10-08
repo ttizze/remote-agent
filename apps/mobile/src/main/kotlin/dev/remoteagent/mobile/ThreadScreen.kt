@@ -55,6 +55,7 @@ import dev.remoteagent.core.BannerVariant
 import dev.remoteagent.core.ChangedFilesDisclosure
 import dev.remoteagent.core.ComposerOptions
 import dev.remoteagent.core.ComposerShortcuts
+import dev.remoteagent.core.ContextChip
 import dev.remoteagent.core.HeaderActionKind
 import dev.remoteagent.core.HeaderPanelState
 import dev.remoteagent.core.Intent
@@ -114,12 +115,21 @@ internal fun ThreadScreen(model: AndroidAppModel, threadId: String) {
     val copy = rememberCopy()
     val current = view
     val header = current?.header
+    val terminalThreadId = current?.threadId
+    val terminals = current?.terminals ?: emptyList()
+    val projectName = header?.project?.name
+    val cwd = header?.cwd
+    val openTerminal: (String?) -> Unit = terminalAction@{ terminalId ->
+        val routeThreadId = terminalThreadId ?: return@terminalAction
+        val terminal = terminals.firstOrNull { it.terminalId == terminalId } ?: terminals.firstOrNull()
+        model.navigate(Route.Terminal(routeThreadId, terminal?.terminalId ?: "", projectName, cwd))
+    }
     ScreenScaffold(
         header?.title ?: "",
         subtitle = header?.subtitle,
         onBack = model::back,
         actions = {
-            current?.let { HeaderActions(model, it) }
+            current?.let { HeaderActions(model, it, openTerminal) }
             HeaderIconButton(Icons.Outlined.Smartphone, "Device") { model.navigate(Route.Device(threadId)) }
         },
     ) {
@@ -164,6 +174,8 @@ internal fun ThreadScreen(model: AndroidAppModel, threadId: String) {
                         )
                 },
                 openThread = model::openThread,
+                openTerminal = openTerminal,
+                showContextPreview = { sheet = ThreadSheet.ContextPreview(it) },
                 openDiff = { card ->
                     model.perform(Intent.SelectDiffTurn(card.run, card.openDiffPath))
                     model.navigate(Route.Workspace(WorkspaceTab.Diff))
@@ -217,25 +229,39 @@ internal fun ThreadScreen(model: AndroidAppModel, threadId: String) {
             if (current.requests.approval == null && current.requests.questions == null)
                 Composer(model, current.composer) { sheet = ThreadSheet.Settings }
         }
-        when (sheet) {
+        when (val activeSheet = sheet) {
             ThreadSheet.Queue -> current.queue?.let { QueueSheet(model, it) { sheet = null } }
             ThreadSheet.Agents -> current.agents?.let { AgentsSheet(model, it) { sheet = null } }
             ThreadSheet.Settings -> ThreadSettingsSheet(model, current.composer) { sheet = null }
             ThreadSheet.Setup -> current.setup.card?.let { card -> SetupDetailsSheet(model, card) { sheet = null } }
+            is ThreadSheet.ContextPreview ->
+                ContextPreviewSheet(
+                    activeSheet.chip,
+                    onClose = { sheet = null },
+                    onOpenTerminal = { terminalId ->
+                        sheet = null
+                        openTerminal(terminalId)
+                    },
+                )
             null -> Unit
         }
     }
 }
 
-private enum class ThreadSheet {
-    Queue,
-    Agents,
-    Settings,
-    Setup,
+private sealed interface ThreadSheet {
+    data object Queue : ThreadSheet
+
+    data object Agents : ThreadSheet
+
+    data object Settings : ThreadSheet
+
+    data object Setup : ThreadSheet
+
+    data class ContextPreview(val chip: ContextChip) : ThreadSheet
 }
 
 @Composable
-private fun HeaderActions(model: AndroidAppModel, view: ThreadView) {
+private fun HeaderActions(model: AndroidAppModel, view: ThreadView, openTerminal: (String?) -> Unit) {
     view.header?.actions?.forEach { action ->
         when (action.kind) {
             HeaderActionKind.FILES ->
@@ -243,16 +269,7 @@ private fun HeaderActions(model: AndroidAppModel, view: ThreadView) {
                     model.navigate(Route.Workspace(WorkspaceTab.Files))
                 }
             HeaderActionKind.TERMINAL ->
-                HeaderIconButton(Icons.Outlined.Terminal, action.accessibilityLabel) {
-                    model.navigate(
-                        Route.Terminal(
-                            view.threadId,
-                            view.terminals.firstOrNull()?.terminalId ?: "",
-                            view.header?.project?.name,
-                            view.header?.cwd,
-                        )
-                    )
-                }
+                HeaderIconButton(Icons.Outlined.Terminal, action.accessibilityLabel) { openTerminal(null) }
             HeaderActionKind.MERGE_BACK ->
                 IconButton(onClick = { model.perform(Intent.MergeBack) }, modifier = Modifier.size(48.dp)) {
                     Icon(

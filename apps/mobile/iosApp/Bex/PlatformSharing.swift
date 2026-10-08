@@ -6,10 +6,6 @@ import UIKit
 struct RemoteAgentSharePayload: Codable {
     let text: String
     let urls: [String]
-
-    var content: ShareContent {
-        ShareContent(text: text, urls: urls)
-    }
 }
 
 enum RemoteAgentShareInbox {
@@ -21,19 +17,15 @@ enum RemoteAgentShareInbox {
         let content: ShareContent
     }
 
-    private static func directory() -> URL? {
-        FileManager.default
-            .containerURL(forSecurityApplicationGroupIdentifier: appGroupIdentifier)?
-            .appendingPathComponent(directoryName, isDirectory: true)
-    }
-
     static func pending() -> [Pending] {
-        guard let directory,
-              let files = try? FileManager.default.contentsOfDirectory(
-                  at: directory,
-                  includingPropertiesForKeys: [.contentModificationDateKey],
-                  options: [.skipsHiddenFiles]
-              )
+        guard let directory = FileManager.default
+            .containerURL(forSecurityApplicationGroupIdentifier: appGroupIdentifier)?
+            .appendingPathComponent(directoryName, isDirectory: true),
+            let files = try? FileManager.default.contentsOfDirectory(
+                at: directory,
+                includingPropertiesForKeys: [.contentModificationDateKey],
+                options: [.skipsHiddenFiles]
+            )
         else { return [] }
         return files
             .filter { $0.pathExtension == "json" }
@@ -42,7 +34,7 @@ enum RemoteAgentShareInbox {
                 guard let data = try? Data(contentsOf: file),
                       let payload = try? JSONDecoder().decode(RemoteAgentSharePayload.self, from: data)
                 else { return nil }
-                return Pending(file: file, content: payload.content)
+                return Pending(file: file, content: ShareContent(text: payload.text, urls: payload.urls))
             }
     }
 

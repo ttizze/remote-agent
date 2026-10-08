@@ -74,7 +74,7 @@ private data class PendingLoadBalancedNewThread(
     val projectId: String,
     val sourceEnvironmentId: String,
     val startedAtMillis: Long,
-    val generation: Long,
+    val generation: ULong,
 )
 
 private data class PendingClientPreferencesHandoff(
@@ -244,7 +244,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
     private var observation: Job? = null
     private var persistence: Job? = null
     private var pendingLoadBalancedNewThread: PendingLoadBalancedNewThread? = null
-    private var loadBalancingAttemptGeneration = 0L
+    private var loadBalancingAttemptGeneration = 0UL
     private var automaticRouteProfileId: String? = null
     private var browserProfileRemovalGeneration = 0UL
     private val pending = ArrayDeque<Pair<Intent, (Result<Outcome>) -> Unit>>()
@@ -643,7 +643,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
                 System.currentTimeMillis(),
             )
         if (evaluation.pendingResources) {
-            loadBalancingAttemptGeneration += 1
+            loadBalancingAttemptGeneration += 1UL
             val generation = loadBalancingAttemptGeneration
             pendingLoadBalancedNewThread =
                 PendingLoadBalancedNewThread(projectId, sourceEnvironmentId, System.currentTimeMillis(), generation)
@@ -667,7 +667,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
         route: dev.remoteagent.core.EnvironmentLoadBalancedRouteView,
         fallbackProjectId: String,
         sourceEnvironmentId: String,
-        generation: Long,
+        generation: ULong,
     ) {
         automaticRouteProfileId = environments.firstOrNull { it.environmentId == route.environmentId }?.profileId
         perform(Intent.NewThread("${route.environmentId}:${route.projectId}")) { result ->
@@ -686,7 +686,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
         automaticRouteProfileId = null
     }
 
-    private fun retryPendingLoadBalancedNewThread(generation: Long? = null) {
+    private fun retryPendingLoadBalancedNewThread(generation: ULong? = null) {
         val pending = pendingLoadBalancedNewThread ?: return
         if (generation != null && generation != pending.generation) return
         val nowMillis = System.currentTimeMillis()
@@ -738,7 +738,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
     }
 
     private fun invalidatePendingLoadBalancedNewThread() {
-        loadBalancingAttemptGeneration += 1
+        loadBalancingAttemptGeneration += 1UL
         pendingLoadBalancedNewThread = null
     }
 
@@ -1159,7 +1159,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
                 profiles = profiles.filterNot { it.id == id }
                 environments = environments.filterNot { it.profileId == id }
                 environmentSnapshots = environmentSnapshots - id
-                renderActivityAggregate(removeActivityState(context, id))
+                renderActivityAggregate(context, removeActivityState(context, id))
                 publishUsageWidget()
                 repository.saveProfiles(profiles)
                 File(repository.cacheDirectory(id)).deleteRecursively()
@@ -1443,7 +1443,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
                 owner = owner,
                 bytes = bytes.copyOf(),
                 token = token,
-                minimumRevision = owner.snapshot().revision + HANDOFF_REVISION_INCREMENT,
+                minimumRevision = owner.snapshot().revision() + HANDOFF_REVISION_INCREMENT,
             )
         return token
     }
@@ -1512,7 +1512,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
             return false
         }
         val matchesPending = bytes.contentEquals(pending.bytes)
-        if (matchesPending && source.revision < pending.minimumRevision) return true
+        if (matchesPending && source.revision() < pending.minimumRevision) return true
         if (!matchesPending && !allowPendingSelected) return true
         if (allowPendingSelected) clearSelectedClientPreferencesHandoff()
         return false

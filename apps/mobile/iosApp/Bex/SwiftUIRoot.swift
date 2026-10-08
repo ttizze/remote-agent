@@ -8,9 +8,9 @@ struct BexSwiftUIRoot: View {
     @State private var showingUsage = false
 
     var body: some View {
-        _ = appearanceRevision
+        let _ = appearanceRevision
         Group {
-            if model.profiles.isEmpty || model.screen == .pairing && model.profiles.isEmpty {
+            if model.profiles.isEmpty {
                 NavigationStack { pairingScreen }
             } else if model.screen == .profiles || model.screen == .pairing {
                 NavigationStack {
