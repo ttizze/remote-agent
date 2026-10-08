@@ -410,6 +410,14 @@ impl Desktop {
         cx.refresh_windows();
     }
 
+    fn change_word_wrap(&mut self, wrap: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let changed = appearance().word_wrap != wrap;
+        self.change_appearance(|appearance| appearance.word_wrap = wrap, cx);
+        if changed {
+            self.panels.files.set_word_wrap(wrap, window, cx);
+        }
+    }
+
     /// A family typed into its field takes effect once it is installed (and
     /// monospace where columns need it); an unknown name snaps back.
     fn commit_font(
@@ -1063,9 +1071,7 @@ impl Desktop {
                         "reset-word-wrap",
                         "word wrapping",
                         "Reset to default",
-                        |view, _, cx| {
-                            view.change_appearance(|appearance| appearance.word_wrap = true, cx)
-                        },
+                        |view, window, cx| view.change_word_wrap(true, window, cx),
                         cx,
                     )
                 }))
@@ -1075,9 +1081,9 @@ impl Desktop {
                         .accessibility_label(
                             "Wrap code, tables, diffs, and file previews by default",
                         )
-                        .on_click(cx.listener(|view, on: &bool, _, cx| {
+                        .on_click(cx.listener(|view, on: &bool, window, cx| {
                             let on = *on;
-                            view.change_appearance(|appearance| appearance.word_wrap = on, cx)
+                            view.change_word_wrap(on, window, cx)
                         })),
                 )
                 .render(),

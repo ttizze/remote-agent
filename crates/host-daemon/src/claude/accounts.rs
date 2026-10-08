@@ -12,7 +12,7 @@ use serde_json::Value;
 use std::{
     path::{Path, PathBuf},
     process::Stdio,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
@@ -45,6 +45,120 @@ pub(crate) struct Accounts {
     native_checked_at: Option<Instant>,
     login: Option<Login>,
     usage: crate::account_usage::UsageCache,
+}
+
+const CLAUDE_USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
+const CLAUDE_API_BASE: &str = "https://api.anthropic.com";
+
+fn valid_grant_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 40
+        && value.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_' || byte == b'-'
+        })
+}
+
+fn future_timestamp(value: &str, now: SystemTime) -> Option<i64> {
+    let parsed = chrono::DateTime::parse_from_rfc3339(value).ok()?;
+    let timestamp = parsed.timestamp();
+    let now = now.duration_since(SystemTime::UNIX_EPOCH).ok()?.as_secs() as i64;
+    (timestamp > now).then_some(timestamp)
+}
+
+fn claude_reset_credits(
+    value: &Value,
+    now: SystemTime,
+) -> Option<agent_protocol::usage::ResetCredits> {
+    let block = value.get("cedar_ember")?.as_object()?;
+    if block.get("eligible").and_then(Value::as_bool) != Some(true) {
+        return None;
+    }
+    let next_id = block.get("next_grant_id").and_then(Value::as_str);
+    let grants = block.get("grants").and_then(Value::as_array);
+    let mut available_count = 0u32;
+    let mut next_expires_at = None;
+    let mut next_credit_id = None;
+    if let Some(grants) = grants {
+        for grant in grants {
+            let Some(grant) = grant.as_object() else {
+                continue;
+            };
+            let Some(id) = grant.get("id").and_then(Value::as_str) else {
+                continue;
+            };
+            if !valid_grant_id(id)
+                || grant.get("paused").and_then(Value::as_bool) == Some(true)
+                || grant.get("usable_now").and_then(Value::as_bool) != Some(true)
+            {
+                continue;
+            }
+            let expires_at = match grant.get("ends_at") {
+                None | Some(Value::Null) => None,
+                Some(Value::String(value)) => future_timestamp(value, now),
+                _ => None,
+            };
+            if grant.get("ends_at").is_some() && expires_at.is_none() {
+                continue;
+            }
+            let resets_left = grant
+                .get("resets_left")
+                .and_then(Value::as_u64)
+                .and_then(|value| u32::try_from(value).ok())
+                .unwrap_or_default();
+            available_count = available_count.saturating_add(resets_left);
+            if next_id == Some(id) {
+                next_credit_id = Some(id.to_owned());
+                next_expires_at = expires_at;
+            }
+        }
+    }
+    next_credit_id.map(|next_credit_id| agent_protocol::usage::ResetCredits {
+        available_count,
+        next_expires_at,
+        next_credit_id: Some(next_credit_id),
+    })
+}
+
+async fn claude_access_token(home: &Path) -> Option<String> {
+    if cfg!(target_os = "macos") {
+        // Claude stores OAuth credentials in the Keychain on macOS. The Host
+        // never shells out to read that secure store for this optional probe.
+        return None;
+    }
+    let bytes = tokio::fs::read(home.join(".credentials.json")).await.ok()?;
+    let value = serde_json::from_slice::<Value>(&bytes).ok()?;
+    value
+        .get("claudeAiOauth")
+        .and_then(Value::as_object)
+        .and_then(|oauth| oauth.get("accessToken"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .map(str::to_owned)
+}
+
+async fn read_claude_reset_credits(
+    home: &Path,
+    version: &str,
+) -> Option<agent_protocol::usage::ResetCredits> {
+    let token = claude_access_token(home).await?;
+    let response = reqwest::Client::new()
+        .get(CLAUDE_USAGE_URL)
+        .query(&[("cedar_ember", "1"), ("skip_spend", "1")])
+        .header("authorization", format!("Bearer {token}"))
+        .header("anthropic-beta", "oauth-2025-04-20")
+        .header(
+            "user-agent",
+            format!("claude-cli/{version} (external, cli)"),
+        )
+        .timeout(Duration::from_secs(10))
+        .send()
+        .await
+        .ok()?
+        .error_for_status()
+        .ok()?;
+    let value = response.json::<Value>().await.ok()?;
+    claude_reset_credits(&value, SystemTime::now())
 }
 struct Login {
     started: Instant,
@@ -186,6 +300,7 @@ impl Accounts {
     pub(crate) fn usage_request(
         &mut self,
         id: &str,
+        version: Option<String>,
     ) -> Result<
         impl std::future::Future<Output = agent_protocol::operations::AccountUsage> + use<>,
         String,
@@ -210,10 +325,100 @@ impl Accounts {
                         Some(serde_json::json!({"subtype":"get_usage","skip_behaviors":true})),
                     )
                     .await?;
-                    Ok(crate::account_usage::claude(&response))
+                    let reset_credits = match version.as_deref() {
+                        Some(version) => read_claude_reset_credits(&home, version).await,
+                        None => None,
+                    };
+                    Ok(crate::account_usage::UsageSnapshot {
+                        windows: crate::account_usage::claude(&response),
+                        reset_credits,
+                        external_usage: None,
+                    })
                 })
                 .await
         })
+    }
+
+    pub(crate) async fn consume_reset_credit(
+        &mut self,
+        account_id: &str,
+        credit_id: Option<&str>,
+        version: &str,
+    ) -> Result<agent_protocol::models::Empty, String> {
+        let grant_id = credit_id.ok_or("No Claude reset credit is available.")?;
+        if !valid_grant_id(grant_id) {
+            return Err("Claude returned a malformed reset credit.".into());
+        }
+        let home = self.account_home(account_id)?;
+        let token = claude_access_token(&home)
+            .await
+            .ok_or("Sign in to Claude again to redeem resets.")?;
+        let account = tokio::fs::read(home.join(".claude.json"))
+            .await
+            .map_err(|_| "Claude could not read its account.")?;
+        let account = serde_json::from_slice::<Value>(&account)
+            .map_err(|_| "Claude could not read its account.")?;
+        let organization = account
+            .get("oauthAccount")
+            .and_then(Value::as_object)
+            .and_then(|oauth| oauth.get("organizationUuid"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| {
+                !value.is_empty()
+                    && value
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+            })
+            .ok_or("Claude could not read its organization.")?;
+        let request_id = uuid::Uuid::new_v4().to_string();
+        let response = reqwest::Client::new()
+            .post(format!(
+                "{CLAUDE_API_BASE}/api/organizations/{organization}/reset_rate_limits"
+            ))
+            .header("authorization", format!("Bearer {token}"))
+            .header("anthropic-beta", "oauth-2025-04-20")
+            .header(
+                "user-agent",
+                format!("claude-cli/{version} (external, cli)"),
+            )
+            .json(&serde_json::json!({
+                "program": "cedar_ember",
+                "grant_id": grant_id,
+                "request_id": request_id,
+            }))
+            .timeout(Duration::from_secs(25))
+            .send()
+            .await
+            .map_err(|_| "Claude could not redeem the reset.")?;
+        if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            return Err("Claude is rate limiting resets. Try again soon.".into());
+        }
+        if matches!(
+            response.status(),
+            reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
+        ) {
+            return Err("Sign in to Claude again to redeem resets.".into());
+        }
+        let value = response
+            .error_for_status()
+            .map_err(|_| "Claude could not redeem the reset.")?
+            .json::<Value>()
+            .await
+            .map_err(|_| "Claude could not redeem the reset.")?;
+        match value.get("result").and_then(Value::as_str) {
+            Some("reset" | "already_used") => {
+                self.usage.remove(account_id);
+                Ok(agent_protocol::models::Empty {})
+            }
+            Some("not_limited") => Err("There is nothing to reset right now.".into()),
+            Some("ineligible") => Err("No Claude reset credit is available.".into()),
+            Some("cooldown") => Err("Claude resets are cooling down. Try again later.".into()),
+            Some("unavailable") => {
+                Err("Claude could not confirm the reset. Refresh to check.".into())
+            }
+            _ => Err("Claude returned an invalid reset response.".into()),
+        }
     }
 
     pub(crate) async fn request(
@@ -510,6 +715,42 @@ async fn read_output(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reset_credits_only_expose_the_next_live_grant() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let value = serde_json::json!({
+            "cedar_ember": {
+                "eligible": true,
+                "next_grant_id": "grant_a",
+                "grants": [
+                    {"id":"grant_a","resets_left":2,"usable_now":true,"ends_at":"2027-01-01T00:00:00Z"},
+                    {"id":"paused","resets_left":9,"usable_now":true,"paused":true},
+                    {"id":"expired","resets_left":9,"usable_now":true,"ends_at":"2025-01-01T00:00:00Z"},
+                    {"id":"grant_b","resets_left":3,"usable_now":false}
+                ]
+            }
+        });
+        assert_eq!(
+            claude_reset_credits(&value, now),
+            Some(agent_protocol::usage::ResetCredits {
+                available_count: 2,
+                next_expires_at: Some(1_798_761_600),
+                next_credit_id: Some("grant_a".into()),
+            })
+        );
+    }
+
+    #[test]
+    fn reset_credit_parser_does_not_offer_an_ineligible_account() {
+        assert_eq!(
+            claude_reset_credits(
+                &serde_json::json!({"cedar_ember":{"eligible":false}}),
+                SystemTime::now(),
+            ),
+            None
+        );
+    }
 
     #[tokio::test]
     async fn repeated_listing_reuses_native_identity_but_expiration_rechecks_it() {

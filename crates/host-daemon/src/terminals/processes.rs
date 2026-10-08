@@ -86,16 +86,19 @@ impl ProcessTable {
 
     /// The first child of the shell that is not a childless copy of the shell
     /// itself, which async prompt themes fork while they wait.
-    pub(crate) fn subprocess(&self, shell: u32) -> Subprocess {
+    pub(crate) fn subprocess_pid(&self, shell: u32) -> Option<u32> {
         let shell_name = self.command_name(shell);
-        let child = self.children.get(&shell).and_then(|children| {
+        self.children.get(&shell).and_then(|children| {
             children.iter().copied().find(|pid| {
                 shell_name.is_none()
                     || self.command_name(*pid) != shell_name
                     || self.children.get(pid).is_some_and(|c| !c.is_empty())
             })
-        });
-        match child {
+        })
+    }
+
+    pub(crate) fn subprocess(&self, shell: u32) -> Subprocess {
+        match self.subprocess_pid(shell) {
             None => Subprocess::Idle,
             Some(pid) => Subprocess::Running(
                 self.command_name(pid)

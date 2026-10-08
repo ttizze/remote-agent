@@ -6,7 +6,12 @@ use crate::presentation::{
     theme::{Theme, theme},
     themes::{BUILT_IN_THEMES, built_in_theme},
 };
+use crate::view::terminals::text_size::{
+    DEFAULT_TERMINAL_FONT_SIZE, MAX_TERMINAL_FONT_SIZE, MIN_TERMINAL_FONT_SIZE,
+    normalize_terminal_font_size,
+};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 pub const MIN_CONTRAST: u32 = 50;
 pub const MAX_CONTRAST: u32 = 200;
@@ -22,6 +27,241 @@ pub const TERMINAL_FONT_SIZES: (u32, u32) = (8, 20);
 pub const MAX_FONT_FAMILY_CHARS: usize = 200;
 /// The stock palette's card in the theme library.
 pub const STANDARD_THEME_LABEL: &str = "Bex";
+
+/// The color scheme choices exposed by the mobile Appearance screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
+#[serde(rename_all = "camelCase")]
+pub enum MobileColorScheme {
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
+/// Appearance values that are meaningful on a phone or tablet. The native
+/// clients persist this record locally and ask core to normalize and resolve
+/// it, so their controls do not grow separate ranges or typography rules.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+#[serde(rename_all = "camelCase")]
+pub struct MobileAppearance {
+    pub color_scheme: MobileColorScheme,
+    /// The theme used for both appearances; `None` is the stock palette.
+    pub theme: Option<String>,
+    pub light_theme: Option<String>,
+    pub dark_theme: Option<String>,
+    /// Body text size in points, inclusive 11 through 22.
+    pub base_font_size: u32,
+    /// `None` follows the base scale's code size.
+    pub code_font_size: Option<u32>,
+    /// `None` follows the terminal's platform default.
+    pub terminal_font_size: Option<f64>,
+    pub code_word_wrap: bool,
+}
+
+impl Default for MobileAppearance {
+    fn default() -> Self {
+        Self {
+            color_scheme: MobileColorScheme::System,
+            theme: None,
+            light_theme: None,
+            dark_theme: None,
+            base_font_size: 16,
+            code_font_size: None,
+            terminal_font_size: None,
+            code_word_wrap: false,
+        }
+    }
+}
+
+/// The resolved mobile sizes in points. Line heights use the same scale as
+/// the mobile type ramp, including custom base text sizes.
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct MobileTypography {
+    pub base_font_size: f64,
+    pub micro_font_size: f64,
+    pub micro_line_height: f64,
+    pub caption_font_size: f64,
+    pub caption_line_height: f64,
+    pub label_font_size: f64,
+    pub label_line_height: f64,
+    pub footnote_font_size: f64,
+    pub footnote_line_height: f64,
+    pub body_font_size: f64,
+    pub body_line_height: f64,
+    pub headline_font_size: f64,
+    pub headline_line_height: f64,
+    pub title_font_size: f64,
+    pub title_line_height: f64,
+    pub large_title_font_size: f64,
+    pub large_title_line_height: f64,
+    pub display_font_size: f64,
+    pub display_line_height: f64,
+    pub markdown_body_font_size: f64,
+    pub markdown_body_line_height: f64,
+    pub markdown_h1_font_size: f64,
+    pub markdown_h2_font_size: f64,
+    pub markdown_h3_font_size: f64,
+    pub markdown_h4_font_size: f64,
+    pub markdown_code_font_size: f64,
+    pub markdown_code_line_height: f64,
+    pub code_font_size: f64,
+    pub code_line_number_font_size: f64,
+    pub code_line_height: f64,
+    pub terminal_font_size: f64,
+}
+
+pub const MOBILE_BASE_FONT_SIZES: (u32, u32) = (11, 22);
+pub const MOBILE_DEFAULT_CODE_FONT_SIZE: f64 = 12.0;
+pub const MOBILE_CODE_FONT_SIZES: (u32, u32) = (8, 18);
+
+fn known_mobile_theme(id: Option<String>) -> Option<String> {
+    id.filter(|id| id == "material-you" || built_in_theme(id).is_some())
+}
+
+/// Pulls saved mobile values into the ranges the native controls expose.
+pub fn normalize_mobile_appearance(mut appearance: MobileAppearance) -> MobileAppearance {
+    appearance.theme = known_mobile_theme(appearance.theme);
+    appearance.light_theme = known_mobile_theme(appearance.light_theme);
+    appearance.dark_theme = known_mobile_theme(appearance.dark_theme);
+    appearance.base_font_size = appearance
+        .base_font_size
+        .clamp(MOBILE_BASE_FONT_SIZES.0, MOBILE_BASE_FONT_SIZES.1);
+    appearance.code_font_size = appearance
+        .code_font_size
+        .map(|size| size.clamp(MOBILE_CODE_FONT_SIZES.0, MOBILE_CODE_FONT_SIZES.1));
+    appearance.terminal_font_size = appearance
+        .terminal_font_size
+        .map(|size| normalize_terminal_font_size(Some(size)));
+    appearance
+}
+
+/// Selects one mobile appearance's theme while retaining the other side of a
+/// shared theme. Selecting the stock palette for one side moves a shared
+/// built-in theme to the other side so the `None` value remains an actual
+/// independent stock choice.
+pub fn mobile_assign_theme(
+    mut appearance: MobileAppearance,
+    dark: bool,
+    theme_id: Option<String>,
+) -> MobileAppearance {
+    let theme_id = known_mobile_theme(theme_id);
+    if theme_id.is_none() && appearance.theme.is_some() {
+        let other = if dark {
+            appearance
+                .light_theme
+                .clone()
+                .or_else(|| appearance.theme.clone())
+        } else {
+            appearance
+                .dark_theme
+                .clone()
+                .or_else(|| appearance.theme.clone())
+        };
+        appearance.theme = None;
+        if dark {
+            appearance.light_theme = other;
+            appearance.dark_theme = None;
+        } else {
+            appearance.dark_theme = other;
+            appearance.light_theme = None;
+        }
+    } else if dark {
+        appearance.dark_theme = theme_id;
+    } else {
+        appearance.light_theme = theme_id;
+    }
+    normalize_mobile_appearance(appearance)
+}
+
+/// Resolves the shared mobile type ramp after the current appearance values.
+pub fn mobile_typography(appearance: MobileAppearance) -> MobileTypography {
+    let appearance = normalize_mobile_appearance(appearance);
+    let scale = f64::from(appearance.base_font_size) / 16.0;
+    let derived_terminal = ((DEFAULT_TERMINAL_FONT_SIZE * scale) * 2.0).round() / 2.0;
+    let role = |font_size: f64, line_height: f64| {
+        (
+            (font_size * scale).round().max(8.0),
+            (line_height * scale).round().max(10.0),
+        )
+    };
+    let (micro_font_size, micro_line_height) = role(11.0, 14.0);
+    let (caption_font_size, caption_line_height) = role(12.0, 16.0);
+    let (label_font_size, label_line_height) = role(13.0, 17.0);
+    let (footnote_font_size, footnote_line_height) = role(14.0, 19.0);
+    let (body_font_size, body_line_height) = role(16.0, 23.0);
+    let (headline_font_size, headline_line_height) = role(18.0, 23.0);
+    let (title_font_size, title_line_height) = role(21.0, 28.0);
+    let (large_title_font_size, large_title_line_height) = role(26.0, 32.0);
+    let (display_font_size, display_line_height) = role(30.0, 36.0);
+    let markdown_body_font_size = f64::from(appearance.base_font_size);
+    let markdown_body_line_height = (23.0 * scale).round().max(18.0);
+    let markdown_h1_font_size = (21.0 * scale).round().max(16.0);
+    let markdown_h2_font_size = (19.0 * scale).round().max(14.0);
+    let markdown_h3_font_size = (17.0 * scale).round().max(13.0);
+    let markdown_h4_font_size = (15.0 * scale).round().max(12.0);
+    let markdown_code_font_size = (13.0 * scale).round().max(10.0);
+    let markdown_code_line_height = markdown_code_font_size + 6.0;
+    let code_font_size = f64::from(appearance.code_font_size.unwrap_or_else(|| {
+        (MOBILE_DEFAULT_CODE_FONT_SIZE * scale).round().clamp(
+            MOBILE_CODE_FONT_SIZES.0 as f64,
+            MOBILE_CODE_FONT_SIZES.1 as f64,
+        ) as u32
+    }));
+    let code_line_number_font_size =
+        (11.0 * code_font_size / MOBILE_DEFAULT_CODE_FONT_SIZE).round().max(8.0);
+    MobileTypography {
+        base_font_size: f64::from(appearance.base_font_size),
+        micro_font_size,
+        micro_line_height,
+        caption_font_size,
+        caption_line_height,
+        label_font_size,
+        label_line_height,
+        footnote_font_size,
+        footnote_line_height,
+        body_font_size,
+        body_line_height,
+        headline_font_size,
+        headline_line_height,
+        title_font_size,
+        title_line_height,
+        large_title_font_size,
+        large_title_line_height,
+        display_font_size,
+        display_line_height,
+        markdown_body_font_size,
+        markdown_body_line_height,
+        markdown_h1_font_size,
+        markdown_h2_font_size,
+        markdown_h3_font_size,
+        markdown_h4_font_size,
+        markdown_code_font_size,
+        markdown_code_line_height,
+        code_font_size,
+        code_line_number_font_size,
+        code_line_height: (22.0 * code_font_size / MOBILE_DEFAULT_CODE_FONT_SIZE)
+            .round()
+            .max(14.0),
+        terminal_font_size: appearance
+            .terminal_font_size
+            .unwrap_or(derived_terminal)
+            .clamp(MIN_TERMINAL_FONT_SIZE, MAX_TERMINAL_FONT_SIZE),
+    }
+}
+
+/// Returns the resolved hex palette for a stock or built-in mobile theme.
+/// Android's Material You choice is supplied by the platform and therefore
+/// intentionally falls back to the stock roles here.
+pub fn mobile_theme_colors(theme_id: Option<&str>, dark: bool) -> HashMap<String, String> {
+    let mut appearance = Appearance::default();
+    if let Some(theme_id) = theme_id.filter(|id| *id != "material-you") {
+        appearance.use_theme(Some(theme_id));
+    }
+    appearance.palette(dark).colors
+}
 
 /// Light, dark, or following the system.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]

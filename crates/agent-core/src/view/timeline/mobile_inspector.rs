@@ -141,8 +141,13 @@ pub fn build_activity_inspector(
     now_ms: i64,
 ) -> Option<ActivityInspector> {
     let support = resolve_item_support(state, item_id);
+    let loaded_task = match details.get(item_id) {
+        Some(Detail::LoadedWithTask { task, .. }) => Some(task.as_ref()),
+        _ => None,
+    };
     let item: Item = match details.get(item_id) {
         Some(Detail::Loaded(item)) => (**item).clone(),
+        Some(Detail::LoadedWithTask { item, .. }) => (**item).clone(),
         _ => state.notification_card(support.item.as_ref()?).into_owned(),
     };
     let visibility = if state
@@ -264,7 +269,7 @@ pub fn build_activity_inspector(
             }
         }
         ItemKind::Subagent { .. } => {
-            if let Some(task) = subagent_task(state, &item) {
+            if let Some(task) = loaded_task.or_else(|| subagent_task(state, &item)) {
                 inspector.block("Prompt", Some(&task.prompt), false);
                 inspector.block("Progress", task.progress.as_deref(), false);
                 inspector.block("Result", task.result.as_deref(), false);
@@ -581,5 +586,32 @@ mod tests {
                 .iter()
                 .any(|block| block.label == "Input" && block.value.contains("full input"))
         );
+    }
+
+    #[test]
+    fn routes_the_task_from_loaded_detail_to_a_subagent_inspector() {
+        let delivered = timed(subagent("subagent", "node-1"));
+        let loaded = delivered.clone();
+        let state = State {
+            runs: vec![run("run-1", 1, RunStatus::Completed)],
+            ..state(vec![delivered])
+        };
+        let id = TurnItemId::new("subagent").unwrap();
+        let mut loaded_task = task("node-1", "child", "Review the complete output");
+        loaded_task.progress = Some("Still reading".into());
+        let details = BTreeMap::from([(
+            id.clone(),
+            Detail::LoadedWithTask {
+                item: Box::new(loaded),
+                task: Box::new(loaded_task),
+            },
+        )]);
+        let model = build_activity_inspector(&state, &id, &details, 0).unwrap();
+        assert!(model.blocks.iter().any(|block| {
+            block.label == "Prompt" && block.value == "Review the complete output"
+        }));
+        assert!(model.blocks.iter().any(|block| {
+            block.label == "Progress" && block.value == "Still reading"
+        }));
     }
 }

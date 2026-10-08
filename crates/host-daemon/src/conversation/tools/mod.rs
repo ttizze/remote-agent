@@ -3,12 +3,14 @@
 //! committed thread state.
 mod backend;
 mod catalog;
+mod diagnostics;
 mod orchestrator;
 mod project;
 mod read;
 #[cfg(test)]
 mod tests;
 mod thread;
+mod worktree;
 
 pub(crate) use backend::HostOrchestration;
 pub(crate) use catalog::read_only_tools;
@@ -22,7 +24,7 @@ use futures_util::future::BoxFuture;
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     net::{Ipv4Addr, SocketAddr},
     sync::{Arc, Mutex, Weak},
     time::Duration,
@@ -435,11 +437,17 @@ pub(crate) fn thread_id(value: &str) -> Result<ThreadId, ToolError> {
 
 pub(crate) struct AgentTools {
     backend: Arc<dyn Orchestration>,
+    /// Serializes the destructive workspace handoff for each calling thread;
+    /// two provider requests must not create competing unbound checkouts.
+    handoffs: Arc<Mutex<HashSet<String>>>,
 }
 
 impl AgentTools {
     pub(crate) fn new(backend: Arc<dyn Orchestration>) -> Self {
-        Self { backend }
+        Self {
+            backend,
+            handoffs: Arc::default(),
+        }
     }
 
     /// One tool call as an MCP `CallToolResult`.
@@ -457,6 +465,11 @@ impl AgentTools {
             "delegate_task" => self.delegate_task(scope, &input).await,
             "task_status" => self.task_status(scope, &input).await,
             "task_cancel" => self.task_cancel(scope, &input).await,
+            "schedule_task" => self.schedule_task(scope, &input).await,
+            "list_scheduled_tasks" => self.list_scheduled_tasks(scope).await,
+            "update_scheduled_task" => self.update_scheduled_task(scope, &input).await,
+            "delete_scheduled_task" => self.delete_scheduled_task(scope, &input).await,
+            "run_scheduled_task_now" => self.run_scheduled_task_now(scope, &input).await,
             "create_threads" => self.create_threads(scope, &input).await,
             "thread_list" => self.list_threads(scope, &input).await,
             "thread_read" => self.read_thread(scope, &input).await,
@@ -483,6 +496,14 @@ impl AgentTools {
             "project_list" => self.project_list(scope, &input).await,
             "project_read" => self.project_read(scope, &input).await,
             "project_create" => self.project_create(scope, &input).await,
+            "worktree_list" => self.worktree_list(scope, &input).await,
+            "worktree_status" => self.worktree_status(scope).await,
+            "worktree_handoff" => self.worktree_handoff(scope, &input).await,
+            "background_status" => self.background_status(scope).await,
+            "host_resources" => self.host_resources(scope).await,
+            "process_diagnostics" => self.process_diagnostics(scope).await,
+            "process_resource_history" => self.process_resource_history(scope, &input).await,
+            "trace_diagnostics" => self.trace_diagnostics(scope, &input).await,
             _ => {
                 return error_content(&format!("Tool {name} not found"));
             }

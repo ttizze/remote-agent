@@ -790,6 +790,7 @@ mod tests {
     fn gives_each_assistant_message_its_runs_latest_checkpoint() {
         let at = Timestamp::parse("2026-10-01T10:00:00Z").unwrap();
         let message = |id: &str, run: &str, role| Message {
+            scheduled_task: None,
             notification: None,
             id: MessageId::new(id).unwrap(),
             run: Some(RunId::new(run).unwrap()),

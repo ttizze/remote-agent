@@ -5,7 +5,8 @@ use crate::commands::outbox::Outbox;
 use crate::sync::{ShellCache, ShellStatus, ThreadSync};
 use agent_domain::{
     Attachment, AttachmentKind, CheckpointId, Driver, InteractionMode, MessageContext,
-    ModelSelection, RunId, RuntimeMode, State, ThreadId, ThreadShell, WorktreeSetupSnapshot,
+    ModelSelection, PullRequestDetail, PullRequestLink, PullRequestSummary, RunId, RuntimeMode,
+    State, ThreadId, ThreadShell, WorktreeSetupSnapshot,
 };
 use agent_protocol::conversation::{SearchMatch, ShellSnapshot};
 use serde::{Deserialize, Serialize};
@@ -17,8 +18,10 @@ use std::{
 };
 
 mod device;
+mod git;
 mod sources;
 pub use device::*;
+pub use git::*;
 pub use sources::*;
 
 /// The project a new thread uses when none is chosen.
@@ -81,9 +84,59 @@ pub struct Draft {
     pub context: Option<MessageContext>,
     /// Where a new thread's first run works; only new-thread drafts set it.
     pub workspace: Option<DraftWorkspace>,
+    /// The project selected when this new-thread draft was opened.
+    pub project_id: Option<String>,
+    /// When the draft was opened for its project; used to order pending work.
+    pub project_selected_at_ms: Option<i64>,
     /// When a new-thread draft first held work for its project; the list
     /// orders unsent drafts by it.
     pub created_at_ms: Option<i64>,
+}
+
+/// A schedule editor's local value. Core converts this value into the Host
+/// protocol record so native clients do not reproduce scheduling rules.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
+pub enum ScheduledTaskScheduleDraft {
+    Interval { every_ms: u64 },
+    FixedTime { time_of_day: String, weekdays: Vec<u8> },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
+pub enum ScheduledTaskWorkspaceDraft {
+    Root {
+        branch: Option<String>,
+    },
+    ExistingWorktree {
+        worktree_path: String,
+        branch: Option<String>,
+    },
+    Worktree {
+        base_ref: String,
+        branch: Option<String>,
+        start_from_origin: bool,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct ScheduledTaskDraft {
+    pub id: Option<String>,
+    pub title: String,
+    pub prompt: String,
+    pub enabled: bool,
+    pub schedule: ScheduledTaskScheduleDraft,
+    pub project_id: String,
+    pub thread_id: Option<String>,
+    pub workspace: ScheduledTaskWorkspaceDraft,
+    pub instance_id: String,
+    pub driver: Driver,
+    pub model: String,
+    pub options: Vec<ModelOption>,
+    pub runtime_mode: RuntimeMode,
+    pub interaction_mode: InteractionMode,
+    pub creation_source: String,
 }
 
 /// The new-thread composer's workspace choice.
@@ -96,6 +149,8 @@ pub struct DraftWorkspace {
     /// An existing worktree that has the branch checked out.
     pub worktree_path: Option<String>,
     pub start_from_origin: bool,
+    /// A choice made by the user survives mode changes and late defaults.
+    pub start_from_origin_choice: Option<bool>,
 }
 impl Default for Draft {
     fn default() -> Self {
@@ -110,6 +165,8 @@ impl Default for Draft {
             interaction_mode: InteractionMode::Default,
             context: None,
             workspace: None,
+            project_id: None,
+            project_selected_at_ms: None,
             created_at_ms: None,
         }
     }
@@ -124,6 +181,20 @@ fn attachment_error(code: &str) -> String {
     .into()
 }
 impl Draft {
+    /// Copies only the values that seed a fresh task. Content, context,
+    /// workspace and identity belong to the draft that supplied them.
+    pub fn user_defaults(&self) -> Self {
+        Self {
+            instance_id: self.instance_id.clone(),
+            driver: self.driver,
+            model: self.model.clone(),
+            options: self.options.clone(),
+            runtime_mode: self.runtime_mode,
+            interaction_mode: self.interaction_mode,
+            ..Self::default()
+        }
+    }
+
     pub fn is_empty(&self) -> bool {
         self.text.trim().is_empty() && self.attachments.is_empty()
     }
@@ -360,12 +431,74 @@ pub struct SearchRequest {
 }
 
 #[derive(Debug, Clone, Default)]
+pub struct PullRequestClientState {
+    pub by_project: BTreeMap<String, Vec<PullRequestSummary>>,
+    pub list_requested: BTreeSet<String>,
+    pub links_by_thread: BTreeMap<ThreadId, Vec<PullRequestLink>>,
+    pub details: BTreeMap<String, PullRequestDetail>,
+    pub diffs: BTreeMap<String, agent_protocol::pull_requests::PullRequestDiff>,
+    pub diff_file_contents:
+        BTreeMap<String, agent_protocol::pull_requests::PullRequestDiffFileContents>,
+    pub files: BTreeMap<String, agent_protocol::pull_requests::PullRequestFile>,
+    pub viewed_files:
+        BTreeMap<String, agent_protocol::pull_requests::PullRequestViewedFiles>,
+    pub auth: Option<agent_protocol::pull_requests::SourceControlAuth>,
+    pub discovery: Option<agent_protocol::pull_requests::SourceControlDiscovery>,
+    pub selected_project: Option<String>,
+}
+
+/// A collision-free in-memory key for one file's old/new content within a
+/// pull-request diff. Git paths cannot contain NUL, so it is also a stable
+/// prefix for clearing all cached contexts when a fresh diff replaces it.
+pub(crate) fn pull_request_diff_context_key(
+    reference: &agent_domain::PullRequestKey,
+    old_path: &str,
+    new_path: &str,
+) -> String {
+    let canonical = reference.canonical();
+    format!(
+        "{canonical}\0{}:{old_path}\0{}:{new_path}",
+        old_path.len(),
+        new_path.len()
+    )
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct PullRequestViewedFileInput {
+    pub path: String,
+    pub viewed: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
+#[serde(rename_all = "kebab-case")]
+pub enum PullRequestDiffChangeTypeInput {
+    Change,
+    RenamePure,
+    RenameChanged,
+    New,
+    Deleted,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct PullRequestStackHeadInput {
+    pub number: u64,
+    pub head_sha: String,
+}
+
+#[derive(Debug, Clone, Default)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Object))]
 pub struct Snapshot {
     pub store_id: String,
     pub revision: u64,
     pub connected: bool,
     pub host_name: Option<String>,
+    /// Identity, platform and capabilities of the connected Host.
+    pub environment: Option<crate::models::EnvironmentDescriptor>,
+    /// Live activity published by the authenticated Host.
+    pub awareness: Option<crate::models::AwarenessSnapshot>,
     pub error: Option<String>,
     pub shell: Arc<ShellCache>,
     /// Open only while the archive is shown.
@@ -379,6 +512,8 @@ pub struct Snapshot {
     pub follow_up: FollowUpBehavior,
     pub selected_thread: Option<ThreadId>,
     pub selected_project: Option<String>,
+    /// The independently keyed new-thread draft currently being edited.
+    pub open_new_thread_draft: Option<String>,
     pub editing_run: Option<RunId>,
     pub search: String,
     pub search_matches: Vec<SearchMatch>,
@@ -390,17 +525,38 @@ pub struct Snapshot {
     pub providers: Option<Vec<crate::models::ProviderInstance>>,
     pub workspace: Workspace,
     pub terminals: BTreeMap<String, Terminal>,
-    /// Provider commands, path search, Git status, refs and diff previews.
+    /// Provider commands, path search, refs and diff previews.
     pub sources: WorkspaceSources,
+    /// Git status subscriptions and action progress.
+    pub git: GitState,
+    pub pull_requests: PullRequestClientState,
     /// By project id.
     pub project_icons: BTreeMap<String, ProjectIconEntry>,
     /// What the Host's terminal metadata stream reports for every thread's
     /// terminals, by thread and terminal id.
     pub terminal_metadata:
         BTreeMap<(ThreadId, String), agent_protocol::operations::TerminalSummary>,
+    /// Host-owned preview sessions and discovered local servers.
+    pub preview: PreviewState,
     pub accounts: Option<agent_protocol::operations::Accounts>,
     pub account_login: Option<agent_protocol::operations::AccountLogin>,
+    /// The last Host usage report and its loading error, if any.
+    pub usage_summary: Option<agent_protocol::usage::Summary>,
+    pub usage_pricing: Option<agent_protocol::usage::Pricing>,
+    pub usage_loading: bool,
+    pub usage_error: Option<String>,
     pub host_status: Option<crate::models::HostStatus>,
+    /// The Host's current background activity and power policy snapshot.
+    pub background_policy: Option<agent_protocol::background::BackgroundPolicySnapshot>,
+    /// The shared Host or desktop update transaction state.
+    pub updates: BTreeMap<crate::models::UpdateTarget, crate::models::UpdateState>,
+    /// The native app's store update surface, when a configured release link exists.
+    pub native_update: Option<crate::models::NativeUpdateState>,
+    pub host_resources: Option<agent_protocol::background::HostResourcesSnapshot>,
+    pub process_diagnostics: Option<agent_protocol::background::ProcessDiagnosticsResult>,
+    pub process_resource_history:
+        Option<agent_protocol::background::ProcessResourceHistoryResult>,
+    pub trace_diagnostics: Option<agent_protocol::background::TraceDiagnosticsResult>,
     pub remote_hosts: Vec<crate::models::RemoteHost>,
     pub invitation: Option<crate::models::Invitation>,
     pub preferences: Preferences,
@@ -413,6 +569,8 @@ pub struct Snapshot {
     pub resume_compaction_dismissals: BTreeSet<String>,
     /// The Host's keybindings as its stream last reported them.
     pub keybindings: Option<Arc<agent_protocol::keybindings::KeybindingsConfig>>,
+    /// The Host's durable scheduled-task list.
+    pub scheduled_tasks: Vec<agent_protocol::scheduled_tasks::ScheduledTask>,
     pub session_import: SessionImport,
     /// Answer drafts by question request id.
     pub question_drafts: BTreeMap<String, QuestionDrafts>,
@@ -427,9 +585,317 @@ pub struct Snapshot {
     pub timelines: Arc<std::sync::Mutex<crate::view::timeline::rows::TimelineCache>>,
 }
 
+/// The device's fold of Host preview metadata. Pixels remain in the browser
+/// panel; this state only describes tabs, server cards and ordering.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PreviewState {
+    pub sessions: BTreeMap<String, agent_protocol::preview::PreviewSessionSnapshot>,
+    pub local_servers: Vec<agent_protocol::preview::DiscoveredLocalServer>,
+    pub recent_urls: Vec<String>,
+    pub active_tab: Option<String>,
+    pub server_epoch: Option<String>,
+    pub revision: u64,
+    pub scanner_epoch: Option<String>,
+    pub scanner_revision: u64,
+    pub configured_urls: Vec<String>,
+    #[serde(skip)]
+    pub recordings: BTreeMap<String, agent_protocol::preview::PreviewRecordingStatus>,
+    #[serde(skip)]
+    pub last_recordings: BTreeMap<String, agent_protocol::preview::PreviewRecordingArtifact>,
+    #[serde(skip)]
+    closed_tabs: BTreeSet<String>,
+}
+impl PreviewState {
+    pub fn apply_list(&mut self, result: agent_protocol::preview::PreviewListResult) {
+        let server_epoch_changed = !result.server_epoch.is_empty()
+            && self
+                .server_epoch
+                .as_deref()
+                .is_some_and(|epoch| epoch != result.server_epoch.as_str());
+        let same_server_epoch = self
+            .server_epoch
+            .as_deref()
+            .is_some_and(|epoch| epoch == result.server_epoch.as_str());
+        let scanner_is_newer = !result.scanner_epoch.is_empty()
+            && (self.scanner_epoch.as_deref() != Some(result.scanner_epoch.as_str())
+                || result.scanner_revision > self.scanner_revision);
+        if same_server_epoch && result.revision <= self.revision {
+            if scanner_is_newer {
+                self.local_servers = result.local_servers;
+                self.scanner_epoch = Some(result.scanner_epoch);
+                self.scanner_revision = result.scanner_revision;
+            }
+            return;
+        }
+        self.sessions = result
+            .sessions
+            .into_iter()
+            .map(|session| (session.tab_id.clone(), session))
+            .collect();
+        self.recordings = result
+            .recordings
+            .into_iter()
+            .map(|status| (status.tab_id.clone(), status))
+            .collect();
+        if server_epoch_changed {
+            self.last_recordings.clear();
+        } else {
+            self.last_recordings
+                .retain(|tab_id, _| self.sessions.contains_key(tab_id));
+        }
+        self.closed_tabs
+            .retain(|tab_id| !self.sessions.contains_key(tab_id));
+        for session in self.sessions.values() {
+            if matches!(
+                &session.nav_status,
+                agent_protocol::preview::PreviewNavStatus::Idle
+            ) {
+                continue;
+            }
+            let url = match &session.nav_status {
+                agent_protocol::preview::PreviewNavStatus::Loading { url, .. }
+                | agent_protocol::preview::PreviewNavStatus::Success { url, .. }
+                | agent_protocol::preview::PreviewNavStatus::LoadFailed { url, .. } => url,
+                agent_protocol::preview::PreviewNavStatus::Idle => unreachable!(),
+            };
+            self.recent_urls.retain(|recent| recent != url);
+            self.recent_urls.insert(0, url.clone());
+        }
+        self.recent_urls.truncate(12);
+        self.local_servers = result.local_servers;
+        if !result.server_epoch.is_empty() {
+            self.server_epoch = Some(result.server_epoch);
+        }
+        self.revision = result.revision;
+        if result.scanner_epoch.is_empty() {
+            self.scanner_epoch = None;
+            self.scanner_revision = 0;
+        } else {
+            self.scanner_epoch = Some(result.scanner_epoch);
+            self.scanner_revision = result.scanner_revision;
+        }
+        if self
+            .active_tab
+            .as_ref()
+            .is_none_or(|tab| !self.sessions.contains_key(tab))
+        {
+            self.active_tab = self.sessions.keys().next().cloned();
+        }
+    }
+    pub fn upsert(&mut self, session: agent_protocol::preview::PreviewSessionSnapshot) {
+        if self.closed_tabs.contains(&session.tab_id) {
+            return;
+        }
+        self.active_tab = Some(session.tab_id.clone());
+        if let Some(url) = match &session.nav_status {
+            agent_protocol::preview::PreviewNavStatus::Loading { url, .. }
+            | agent_protocol::preview::PreviewNavStatus::Success { url, .. }
+            | agent_protocol::preview::PreviewNavStatus::LoadFailed { url, .. } => Some(url),
+            agent_protocol::preview::PreviewNavStatus::Idle => None,
+        } {
+            self.recent_urls.retain(|recent| recent != url);
+            self.recent_urls.insert(0, url.clone());
+            self.recent_urls.truncate(12);
+        }
+        self.sessions.insert(session.tab_id.clone(), session);
+    }
+    pub fn close(&mut self, tab_id: Option<&str>) {
+        if let Some(tab_id) = tab_id {
+            self.closed_tabs.insert(tab_id.to_owned());
+            self.sessions.remove(tab_id);
+            if self.active_tab.as_deref() == Some(tab_id) {
+                self.active_tab = self.sessions.keys().next().cloned();
+            }
+            self.recordings.remove(tab_id);
+            self.last_recordings.remove(tab_id);
+        } else {
+            self.closed_tabs.extend(self.sessions.keys().cloned());
+            self.sessions.clear();
+            self.active_tab = None;
+            self.recordings.clear();
+            self.last_recordings.clear();
+        }
+    }
+    pub fn session(&self, tab_id: &str) -> Option<&agent_protocol::preview::PreviewSessionSnapshot> {
+        self.sessions.get(tab_id)
+    }
+
+    pub fn recording_for(&self, tab_id: &str) -> Option<&agent_protocol::preview::PreviewRecordingStatus> {
+        self.recordings.get(tab_id)
+    }
+
+    pub fn last_recording_for(&self, tab_id: &str) -> Option<&agent_protocol::preview::PreviewRecordingArtifact> {
+        self.last_recordings.get(tab_id)
+    }
+}
+
+#[cfg(test)]
+mod preview_state_tests {
+    use super::PreviewState;
+    use agent_domain::ThreadId;
+    use agent_protocol::preview::{PreviewListResult, PreviewViewportSetting};
+
+    fn list(epoch: &str, revision: u64, tab_id: &str) -> PreviewListResult {
+        PreviewListResult {
+            sessions: vec![agent_protocol::preview::PreviewSessionSnapshot {
+                thread_id: ThreadId::new("thread").unwrap(),
+                tab_id: tab_id.into(),
+                nav_status: agent_protocol::preview::PreviewNavStatus::Idle,
+                can_go_back: false,
+                can_go_forward: false,
+                viewport: PreviewViewportSetting::Fill,
+                zoom: agent_protocol::preview::PreviewZoom::X100,
+                appearance: agent_protocol::preview::PreviewAppearance::System,
+                updated_at: String::new(),
+            }],
+            recordings: vec![],
+            local_servers: vec![],
+            scanned_at: String::new(),
+            server_epoch: epoch.into(),
+            revision,
+            scanner_epoch: "scanner".into(),
+            scanner_revision: revision,
+        }
+    }
+
+    #[test]
+    fn ignores_stale_snapshot_within_the_same_host_epoch() {
+        let mut state = PreviewState::default();
+        state.apply_list(list("epoch", 4, "new"));
+        state.apply_list(list("epoch", 4, "old"));
+        state.apply_list(list("epoch", 3, "older"));
+        assert!(state.sessions.contains_key("new"));
+        assert!(!state.sessions.contains_key("old"));
+        assert!(!state.sessions.contains_key("older"));
+    }
+
+    #[test]
+    fn accepts_a_new_host_epoch_even_when_its_revision_is_lower() {
+        let mut state = PreviewState::default();
+        state.apply_list(list("old", 18, "old-tab"));
+        state.last_recordings.insert(
+            "old-tab".into(),
+            agent_protocol::preview::PreviewRecordingArtifact {
+                id: "browser-recording-old".into(),
+                tab_id: "old-tab".into(),
+                path: "/tmp/browser-recording-old.webm".into(),
+                mime_type: "video/webm".into(),
+                size_bytes: 1,
+                created_at: "2026-01-01T00:00:00Z".into(),
+            },
+        );
+        state.apply_list(list("new", 1, "new-tab"));
+        assert_eq!(state.server_epoch.as_deref(), Some("new"));
+        assert!(state.sessions.contains_key("new-tab"));
+        assert!(!state.sessions.contains_key("old-tab"));
+        assert!(state.last_recordings.is_empty());
+    }
+
+    #[test]
+    fn applies_new_scanner_data_without_replacing_same_revision_sessions() {
+        let mut state = PreviewState::default();
+        state.apply_list(list("epoch", 4, "tab"));
+        let mut next = list("epoch", 4, "tab");
+        next.scanner_revision = 5;
+        next.local_servers = vec![agent_protocol::preview::DiscoveredLocalServer {
+            host: "localhost".into(),
+            port: 5173,
+            url: "http://localhost:5173/".into(),
+            process_name: Some("node".into()),
+            pid: Some(42),
+            terminal: None,
+        }];
+        state.apply_list(next);
+        assert_eq!(state.local_servers.len(), 1);
+        assert!(state.sessions.contains_key("tab"));
+        assert_eq!(state.scanner_revision, 5);
+
+        let mut stale = list("epoch", 4, "tab");
+        stale.scanner_revision = 3;
+        state.apply_list(stale);
+        assert_eq!(state.local_servers.len(), 1);
+        assert_eq!(state.scanner_revision, 5);
+    }
+
+    #[test]
+    fn applies_independent_recording_slots_for_each_preview_tab() {
+        let mut state = PreviewState::default();
+        let mut result = list("epoch", 1, "tab-a");
+        result.sessions.push(agent_protocol::preview::PreviewSessionSnapshot {
+            thread_id: ThreadId::new("thread").unwrap(),
+            tab_id: "tab-b".into(),
+            nav_status: agent_protocol::preview::PreviewNavStatus::Idle,
+            can_go_back: false,
+            can_go_forward: false,
+            viewport: PreviewViewportSetting::Fill,
+            zoom: agent_protocol::preview::PreviewZoom::X100,
+            appearance: agent_protocol::preview::PreviewAppearance::System,
+            updated_at: String::new(),
+        });
+        result.recordings = vec![
+            agent_protocol::preview::PreviewRecordingStatus {
+                tab_id: "tab-a".into(),
+                recording: true,
+                started_at: Some("2026-01-01T00:00:00Z".into()),
+            },
+            agent_protocol::preview::PreviewRecordingStatus {
+                tab_id: "tab-b".into(),
+                recording: true,
+                started_at: Some("2026-01-01T00:00:01Z".into()),
+            },
+        ];
+        state.apply_list(result);
+        assert!(state.recording_for("tab-a").is_some_and(|status| status.recording));
+        assert!(state.recording_for("tab-b").is_some_and(|status| status.recording));
+    }
+
+    #[test]
+    fn ignores_a_late_session_reply_after_a_local_close() {
+        let mut state = PreviewState::default();
+        state.apply_list(list("epoch", 1, "tab"));
+        let session = state.sessions.get("tab").cloned().unwrap();
+        state.close(Some("tab"));
+        state.upsert(session);
+        assert!(state.sessions.is_empty());
+    }
+
+    #[test]
+    fn closing_the_recorded_tab_discards_ephemeral_recording_state() {
+        let mut state = PreviewState::default();
+        state.recordings.insert("tab".into(), agent_protocol::preview::PreviewRecordingStatus {
+            tab_id: "tab".into(),
+            recording: true,
+            started_at: Some("2026-01-01T00:00:00Z".into()),
+        });
+        state.last_recordings.insert("tab".into(), agent_protocol::preview::PreviewRecordingArtifact {
+            id: "browser-recording-test".into(),
+            tab_id: "tab".into(),
+            path: "/tmp/browser-recording-test.webm".into(),
+            mime_type: "video/webm".into(),
+            size_bytes: 1,
+            created_at: "2026-01-01T00:00:01Z".into(),
+        });
+        state.close(Some("tab"));
+        assert!(state.recordings.is_empty());
+        assert!(state.last_recordings.is_empty());
+    }
+}
+
 impl Snapshot {
     pub fn accepts_after(&self, previous: &Snapshot) -> bool {
         self.store_id != previous.store_id || self.revision >= previous.revision
+    }
+    pub fn environment_display_label(&self) -> Option<&str> {
+        self.environment
+            .as_ref()
+            .map(|environment| environment.label.as_str())
+            .or(self.host_name.as_deref())
+    }
+    pub fn context_environment_id(&self) -> Option<&str> {
+        self.environment
+            .as_ref()
+            .map(|environment| environment.environment_id.as_str())
+            .or(self.host_name.as_deref())
     }
     pub fn terminal_available(&self) -> bool {
         self.connected && !self.cwd().is_empty()
@@ -476,6 +942,39 @@ impl Snapshot {
             .map(ToString::to_string)
             .unwrap_or_else(|| self.new_thread_draft_key())
     }
+    /// Starts an independently keyed new-thread draft and selects its project.
+    pub fn begin_new_thread_draft(
+        &mut self,
+        key: String,
+        project_id: Option<String>,
+        selected_at_ms: i64,
+    ) {
+        let mut draft = self.default_draft.user_defaults();
+        draft.project_id = Some(
+            project_id
+                .clone()
+                .unwrap_or_else(|| CHATS_PROJECT.to_owned()),
+        );
+        draft.project_selected_at_ms = Some(selected_at_ms);
+        draft.created_at_ms = None;
+        self.drafts.insert(key.clone(), draft);
+        self.open_new_thread_draft = Some(key);
+        self.selected_project = project_id;
+    }
+    /// Retargets the open new-thread draft without replacing its identity.
+    pub fn retarget_new_thread_draft(&mut self, project_id: Option<String>) {
+        let key = self.new_thread_draft_key();
+        let target = project_id
+            .clone()
+            .unwrap_or_else(|| CHATS_PROJECT.to_owned());
+        if let Some(draft) = self.drafts.get_mut(&key) {
+            if draft.project_id.as_deref() != Some(target.as_str()) {
+                draft.project_id = Some(target);
+                draft.workspace = None;
+            }
+        }
+        self.selected_project = project_id;
+    }
     /// Stamps new-thread drafts that just gained work with `now_ms`, forgets
     /// the stamp of ones emptied again, and freezes the copy of the open
     /// draft the sidebar shows when the open draft changed.
@@ -483,8 +982,8 @@ impl Snapshot {
         let due: Vec<String> = self
             .drafts
             .iter()
-            .filter(|(key, draft)| {
-                key.starts_with("new:") && draft.created_at_ms.is_none() != draft.is_empty()
+            .filter(|(_key, draft)| {
+                draft.project_id.is_some() && draft.created_at_ms.is_none() != draft.is_empty()
             })
             .map(|(key, _)| key.clone())
             .collect();
@@ -513,10 +1012,12 @@ impl Snapshot {
         }
     }
     pub fn new_thread_draft_key(&self) -> String {
-        format!(
-            "new:{}",
-            self.selected_project.as_deref().unwrap_or(CHATS_PROJECT)
-        )
+        self.open_new_thread_draft.clone().unwrap_or_else(|| {
+            format!(
+                "new:{}",
+                self.selected_project.as_deref().unwrap_or(CHATS_PROJECT)
+            )
+        })
     }
     pub fn current_draft(&self) -> Draft {
         self.drafts
@@ -608,7 +1109,7 @@ impl Snapshot {
                 interaction_mode,
                 ..Draft::default().with_selection(selection)
             },
-            None => self.default_draft.clone(),
+            None => self.default_draft.user_defaults(),
         }
     }
     /// A fork or merge back from this thread is waiting for the Host.
@@ -642,12 +1143,25 @@ impl Snapshot {
     }
     /// The root of the project a new thread would use; none for chats.
     pub fn new_thread_project_root(&self) -> Option<String> {
-        let project = self.selected_project.as_deref()?;
+        let project = self.new_thread_project_id()?;
         self.shell_projects()
             .iter()
             .find(|candidate| candidate.id == project)
             .and_then(|project| project.roots.first())
             .map(|root| root.path.clone())
+    }
+    /// The project stamped on the active new-thread draft, or the selected
+    /// project while a draft has not been opened yet.
+    pub fn new_thread_project_id(&self) -> Option<&str> {
+        match self
+            .drafts
+            .get(&self.new_thread_draft_key())
+            .and_then(|draft| draft.project_id.as_deref())
+        {
+            Some(CHATS_PROJECT) => None,
+            Some(project) => Some(project),
+            None => self.selected_project.as_deref(),
+        }
     }
     /// The checked-out branch of the project's root and the worktree it is
     /// checked out in when that differs from the root.
@@ -676,11 +1190,16 @@ impl Snapshot {
     /// mode on the project's checkout.
     pub fn new_thread_workspace(&self) -> DraftWorkspace {
         use crate::view::projects::selection::ThreadWorkspaceMode;
-        if let Some(workspace) = self
+        if let Some(mut workspace) = self
             .drafts
             .get(&self.new_thread_draft_key())
             .and_then(|draft| draft.workspace.clone())
         {
+            if workspace.start_from_origin_choice.is_none() {
+                workspace.start_from_origin = workspace.mode
+                    == ThreadWorkspaceMode::Worktree
+                    && self.new_worktree_starts_from_origin(workspace.mode);
+            }
             return workspace;
         }
         let mode = self
@@ -719,6 +1238,7 @@ impl Snapshot {
             branch,
             worktree_path,
             start_from_origin: self.new_worktree_starts_from_origin(mode),
+            start_from_origin_choice: None,
         }
     }
     /// A new-thread draft's origin choice when its mode is set: on for a new
@@ -823,6 +1343,8 @@ pub struct Workspace {
     pub review_generation: u64,
     pub review: Option<Arc<crate::models::WorkspaceReview>>,
     pub diff_request: Option<agent_protocol::conversation::GetTurnDiff>,
+    /// A diff selection waits for the selected environment's cwd to arrive.
+    pub diff_retry_when_cwd_available: bool,
     pub worktree_settings: Option<crate::models::WorktreeSettings>,
     pub worktrees: Vec<crate::models::Worktree>,
 }
@@ -945,6 +1467,56 @@ pub struct LocalFile {
     pub mime_type: String,
 }
 
+/// Results of Host-owned Git operations that native clients can continue
+/// from without re-reading or re-deriving the checkout state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct GitPullOutcome {
+    pub status: String,
+    pub ref_name: String,
+    pub upstream_ref: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct GitWorktreeOutcome {
+    pub path: String,
+    pub ref_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct GitPullRequestOutcome {
+    pub number: u64,
+    pub title: String,
+    pub url: String,
+    pub base_branch: String,
+    pub head_branch: String,
+    pub state: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct GitPullRequestThreadOutcome {
+    pub pull_request: GitPullRequestOutcome,
+    pub branch: String,
+    pub worktree_path: Option<String>,
+    pub is_on_pull_request_head: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct GitPublishOutcome {
+    pub name_with_owner: String,
+    pub url: String,
+    pub ssh_url: String,
+    pub remote_name: String,
+    pub remote_url: String,
+    pub branch: String,
+    pub upstream_branch: Option<String>,
+    pub status: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum AnswerEdit {
@@ -959,8 +1531,16 @@ pub enum Intent {
     OpenThread {
         thread_id: String,
     },
+    /// Reopens one independently keyed unsent new-thread draft.
+    OpenDraft {
+        draft_key: String,
+    },
     LeaveThread,
     NewThread {
+        project_id: Option<String>,
+    },
+    /// Moves the open new-thread draft to a project while retaining its key and content.
+    SetNewThreadProject {
         project_id: Option<String>,
     },
     ShowArchived {
@@ -973,6 +1553,152 @@ pub enum Intent {
         project_id: Option<String>,
     },
     Refresh,
+
+    // Pull requests and source control.
+    LoadPullRequests {
+        project_id: String,
+        repository: Option<String>,
+        query: Option<String>,
+        include_closed: bool,
+    },
+    LoadPullRequest {
+        project_id: String,
+        host: Option<String>,
+        repository: String,
+        number: u64,
+    },
+    LoadPullRequestDiff {
+        project_id: String,
+        host: Option<String>,
+        repository: String,
+        number: u64,
+        cursor: Option<String>,
+        commit: Option<String>,
+    },
+    LoadPullRequestDiffFileContents {
+        project_id: String,
+        host: Option<String>,
+        repository: String,
+        number: u64,
+        commit: Option<String>,
+        change_type: PullRequestDiffChangeTypeInput,
+        old_path: String,
+        new_path: String,
+    },
+    LoadPullRequestViewedFiles {
+        project_id: String,
+        host: Option<String>,
+        repository: String,
+        number: u64,
+    },
+    SetPullRequestFilesViewed {
+        project_id: String,
+        host: Option<String>,
+        repository: String,
+        number: u64,
+        files: Vec<PullRequestViewedFileInput>,
+    },
+    PullRequestAction {
+        project_id: String,
+        host: Option<String>,
+        repository: String,
+        number: u64,
+        action: String,
+        stack_number: Option<u64>,
+        expected_stack_heads: Vec<PullRequestStackHeadInput>,
+        merge_method: Option<String>,
+    },
+    SubmitPullRequestReview {
+        project_id: String,
+        host: Option<String>,
+        repository: String,
+        number: u64,
+        verdict: String,
+        body: String,
+    },
+    LinkPullRequest {
+        thread_id: String,
+        project_id: String,
+        host: String,
+        repository: String,
+        number: u64,
+        url: String,
+    },
+    UnlinkPullRequest {
+        thread_id: String,
+        project_id: String,
+        host: String,
+        repository: String,
+        number: u64,
+    },
+    SetPullRequestWatch {
+        thread_id: String,
+        project_id: String,
+        host: String,
+        repository: String,
+        number: u64,
+        url: String,
+        enabled: bool,
+    },
+    LoadSourceControlAuth {
+        cwd: Option<String>,
+    },
+    LoadSourceControlDiscovery {
+        cwd: String,
+    },
+
+    // Host-owned web preview.
+    PreviewList {
+        configured_urls: Vec<String>,
+    },
+    PreviewOpen {
+        url: Option<String>,
+        viewport: agent_protocol::preview::PreviewViewportSetting,
+        appearance: agent_protocol::preview::PreviewAppearance,
+        zoom: agent_protocol::preview::PreviewZoom,
+    },
+    PreviewNavigate {
+        tab_id: String,
+        url: String,
+    },
+    PreviewResize {
+        tab_id: String,
+        viewport: agent_protocol::preview::PreviewViewportSetting,
+        rendered_width: Option<u32>,
+        rendered_height: Option<u32>,
+    },
+    PreviewSetAppearance {
+        tab_id: String,
+        appearance: agent_protocol::preview::PreviewAppearance,
+    },
+    PreviewSetZoom {
+        tab_id: String,
+        zoom: agent_protocol::preview::PreviewZoom,
+    },
+    PreviewRefresh {
+        tab_id: String,
+    },
+    PreviewClose {
+        tab_id: Option<String>,
+    },
+    PreviewSelectTab {
+        tab_id: String,
+    },
+    PreviewRecordingStart {
+        tab_id: String,
+    },
+    PreviewRecordingStop {
+        tab_id: String,
+    },
+
+    SearchContents {
+        cwd: String,
+        query: String,
+        limit: u32,
+        case_sensitive: bool,
+        whole_word: bool,
+        use_regex: bool,
+    },
 
     // Composer.
     EditDraft {
@@ -1006,7 +1732,7 @@ pub enum Intent {
         thread_id: String,
         output: crate::view::terminals::output_context::TerminalOutputContext,
     },
-    /// Drops an unsent draft: a thread's (its id) or a new thread's (`new:<project>`).
+    /// Drops an unsent draft: a thread's id or an independently keyed new thread.
     DiscardDraft {
         draft_key: String,
     },
@@ -1186,6 +1912,73 @@ pub enum Intent {
     },
     ReviewWorkspace {
         cwd: String,
+    },
+    // Git status and stacked actions.
+    SubscribeVcsStatus {
+        cwd: String,
+    },
+    RefreshVcsStatus {
+        cwd: String,
+    },
+    /// Loads local and remote refs for the Git controls branch picker.
+    LoadVcsRefs {
+        cwd: String,
+        query: String,
+    },
+    /// Checks out an existing local or remote ref in this checkout.
+    SwitchVcsRef {
+        cwd: String,
+        ref_name: String,
+    },
+    /// Creates and checks out a branch at the checkout's current HEAD.
+    CreateVcsRef {
+        cwd: String,
+        ref_name: String,
+    },
+    PullVcs {
+        cwd: String,
+    },
+    RunVcsAction {
+        action_id: String,
+        cwd: String,
+        action: String,
+        commit_message: Option<String>,
+        feature_branch: bool,
+        file_paths: Option<Vec<String>>,
+        thread_id: Option<String>,
+        project_id: Option<String>,
+    },
+    InitRepository {
+        cwd: String,
+    },
+    CreateVcsWorktree {
+        cwd: String,
+        ref_name: String,
+        new_ref_name: Option<String>,
+        base_ref_name: Option<String>,
+        path: Option<String>,
+    },
+    RemoveVcsWorktree {
+        cwd: String,
+        path: String,
+        force: bool,
+    },
+    ResolvePullRequest {
+        cwd: String,
+        reference: String,
+    },
+    PreparePullRequestThread {
+        cwd: String,
+        reference: String,
+        mode: String,
+        thread_id: Option<String>,
+    },
+    PublishRepository {
+        cwd: String,
+        repository: String,
+        visibility: String,
+        remote_name: Option<String>,
+        protocol: Option<String>,
     },
     ReadTurnDiff {
         from_run_ordinal: u64,
@@ -1400,6 +2193,19 @@ pub enum Intent {
         scope: crate::view::settings::SettingsScope,
         change: crate::view::settings::SettingChange,
     },
+    LoadBackgroundPolicy,
+    LoadDiagnostics {
+        trace_file_path: String,
+    },
+    SetBackgroundProfile {
+        profile: String,
+    },
+    SetAutomaticGitFetchInterval {
+        seconds: u32,
+    },
+    SetProviderHealthRefreshInterval {
+        seconds: u32,
+    },
     ResetProjectSettings {
         project_id: String,
     },
@@ -1425,6 +2231,29 @@ pub enum Intent {
     RemoveWorktree {
         path: String,
     },
+    /// Saves the shared scheduled-task editor draft through the Host.
+    SaveScheduledTask {
+        draft: ScheduledTaskDraft,
+    },
+    SetScheduledTaskEnabled {
+        id: String,
+        enabled: bool,
+    },
+    DeleteScheduledTask {
+        id: String,
+    },
+    RunScheduledTaskNow {
+        id: String,
+    },
+    /// Searches the branch list used by a scheduled task's worktree picker.
+    SearchScheduledTaskBranches {
+        project_id: String,
+        query: String,
+    },
+    /// Requests the next page of a scheduled task's branch picker.
+    LoadMoreScheduledTaskBranches {
+        project_id: String,
+    },
 
     // Files.
     ListFiles {
@@ -1444,6 +2273,18 @@ pub enum Intent {
 
     // Accounts and Hosts.
     LoadAccounts,
+    LoadUsageSummary {
+        input: crate::view::usage::UsageSummaryInput,
+    },
+    SetUsagePreferences {
+        preferences: crate::view::usage::UsagePreferences,
+    },
+    RefreshUsageRates,
+    ConsumeResetCredit {
+        provider: crate::provider::ProviderKind,
+        account_id: String,
+        credit_id: Option<String>,
+    },
     LoadProviders,
     SelectAccount {
         provider: crate::provider::ProviderKind,
@@ -1466,6 +2307,25 @@ pub enum Intent {
         id: String,
     },
     LoadHostStatus,
+    LoadUpdateStatus {
+        target: crate::models::UpdateTarget,
+    },
+    CheckUpdate {
+        request: crate::models::UpdateCheckRequest,
+    },
+    DownloadUpdate {
+        target: crate::models::UpdateTarget,
+    },
+    InstallUpdate {
+        target: crate::models::UpdateTarget,
+    },
+    SetUpdateChannel {
+        target: crate::models::UpdateTarget,
+        channel: crate::models::UpdateChannel,
+    },
+    LoadNativeUpdate {
+        request: crate::models::NativeUpdateRequest,
+    },
     LoadRemoteHosts,
     LoadHostManagement,
     PairRemoteHost {
@@ -1511,6 +2371,61 @@ mod tests {
             "typed\n\nsent"
         );
         assert_eq!(merge_restored_text("sent", "sent"), "sent");
+    }
+
+    #[test]
+    fn user_defaults_drop_content_context_workspace_and_identity() {
+        let source = Draft {
+            text: "task-specific text".into(),
+            attachments: vec![DraftAttachment {
+                id: "attachment".into(),
+                remote_id: None,
+                name: "note.txt".into(),
+                mime_type: "text/plain".into(),
+                kind: "file".into(),
+                size_bytes: 4,
+                local_path: "/tmp/note.txt".into(),
+                status: "ready".into(),
+                error: None,
+            }],
+            instance_id: "claude".into(),
+            driver: agent_domain::Driver::Claude,
+            model: "sonnet".into(),
+            options: vec![ModelOption {
+                key: "effort".into(),
+                value: "high".into(),
+            }],
+            runtime_mode: agent_domain::RuntimeMode::ApprovalRequired,
+            interaction_mode: agent_domain::InteractionMode::Plan,
+            context: Some(MessageContext {
+                version: 1,
+                records: vec![],
+            }),
+            workspace: Some(DraftWorkspace {
+                mode: crate::view::projects::selection::ThreadWorkspaceMode::Worktree,
+                branch: Some("feature".into()),
+                worktree_path: Some("/trees/feature".into()),
+                start_from_origin: true,
+                start_from_origin_choice: Some(true),
+            }),
+            project_id: Some("project".into()),
+            project_selected_at_ms: Some(1),
+            created_at_ms: Some(2),
+        };
+        let defaults = source.user_defaults();
+        assert_eq!(defaults.instance_id, "claude");
+        assert_eq!(defaults.driver, agent_domain::Driver::Claude);
+        assert_eq!(defaults.model, "sonnet");
+        assert_eq!(defaults.options, source.options);
+        assert_eq!(defaults.runtime_mode, agent_domain::RuntimeMode::ApprovalRequired);
+        assert_eq!(defaults.interaction_mode, agent_domain::InteractionMode::Plan);
+        assert!(defaults.text.is_empty());
+        assert!(defaults.attachments.is_empty());
+        assert!(defaults.context.is_none());
+        assert!(defaults.workspace.is_none());
+        assert!(defaults.project_id.is_none());
+        assert!(defaults.project_selected_at_ms.is_none());
+        assert!(defaults.created_at_ms.is_none());
     }
 
     fn skills(start: usize, count: usize) -> (String, MessageContext) {
@@ -1750,5 +2665,22 @@ mod tests {
                 .as_deref(),
             Some("pending:1")
         );
+    }
+
+    #[test]
+    fn new_thread_drafts_keep_identity_and_project_stamp_when_retargeted() {
+        let mut snapshot = Snapshot::default();
+        snapshot.begin_new_thread_draft("new:first".into(), Some("one".into()), 11);
+        snapshot.drafts.get_mut("new:first").unwrap().text = "keep".into();
+        snapshot.retarget_new_thread_draft(Some("two".into()));
+        let draft = &snapshot.drafts["new:first"];
+        assert_eq!(snapshot.new_thread_draft_key(), "new:first");
+        assert_eq!(draft.text, "keep");
+        assert_eq!(draft.project_id.as_deref(), Some("two"));
+        assert_eq!(draft.project_selected_at_ms, Some(11));
+        assert_eq!(draft.workspace, None);
+        snapshot.retarget_new_thread_draft(None);
+        snapshot.selected_project = Some("other".into());
+        assert_eq!(snapshot.new_thread_project_id(), None);
     }
 }

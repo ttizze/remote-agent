@@ -97,6 +97,15 @@ impl Desktop {
             .w_full()
             .items_end()
             .gap_1()
+            .when_some(decorations.automation.clone(), |message, automation| {
+                message.child(
+                    div()
+                        .id(SharedString::from(format!("automation-{id}")))
+                        .mr_1()
+                        .text_color(tint("textMuted", 0.7))
+                        .child(text_2xs(automation.label)),
+                )
+            })
             .when_some(decorations.attribution.clone(), |message, attribution| {
                 let label = div()
                     .id(SharedString::from(format!("attribution-{id}")))

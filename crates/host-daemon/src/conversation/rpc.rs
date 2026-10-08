@@ -340,6 +340,7 @@ impl Conversation {
                 let mut context = message.context.clone();
                 claimed = self.claim(&thread, &mut attachments, context.as_mut())?;
                 Some(InitialMessage {
+                    scheduled_task: None,
                     id: message.id.clone(),
                     text: message.text.clone(),
                     attachments,

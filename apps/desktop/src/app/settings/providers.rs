@@ -487,17 +487,29 @@ impl Desktop {
     ) -> AnyElement {
         let in_use = selected == Some(&account.id);
         let mut details: Vec<String> = account.plan_type.iter().cloned().collect();
-        if let Some(usage) = &account.usage {
-            details.extend(
-                usage
-                    .windows
-                    .iter()
-                    .map(|window| format!("{} {}% left", window.label, window.remaining_percent)),
-            );
+        let limit = self
+            .snapshot
+            .usage_limits()
+            .into_iter()
+            .find(|usage| usage.id == account.id);
+        if let Some(usage) = &limit {
+            details.extend(usage.windows.iter().map(|window| {
+                format!("{} {}% left", window.label, window.remaining_percent)
+            }));
+            if usage.reset_credit_count > 0 {
+                details.push(format!("{} reset credit(s)", usage.reset_credit_count));
+            }
+            if let Some(label) = usage.external_label.as_ref() {
+                details.push(label.clone());
+            }
         }
         let provider = account.provider;
         let id = account.id.clone();
         let delete_id = account.id.clone();
+        let reset_id = account.id.clone();
+        let reset_credit_id = limit.as_ref().and_then(|usage| usage.next_credit_id.clone());
+        let can_reset = limit.as_ref().is_some_and(|usage| usage.reset_credit_count > 0);
+        let external_url = limit.as_ref().and_then(|usage| usage.external_url.clone());
         let label = provider_name(provider);
         let message = format!(
             "Sign out of {label} on {host}? This stops running threads that share this sign-in. Thread history is kept."
@@ -509,6 +521,51 @@ impl Desktop {
         row.control(
             h_flex()
                 .gap(px(6.))
+                .when(can_reset, |actions| {
+                    actions.child(
+                        Button::new(("use-reset-credit", index))
+                            .outline()
+                            .small()
+                            .label("Use reset")
+                            .on_click(cx.listener(move |view, _, window, cx| {
+                                let account_id = reset_id.clone();
+                                let credit_id = reset_credit_id.clone();
+                                view.confirm(
+                                    crate::app::dialogs::Confirm {
+                                        title: Some("Use a reset credit?".into()),
+                                        message: "This redeems one credit and clears the current rate-limit windows.".into(),
+                                        action: "Use credit".into(),
+                                        destructive: false,
+                                    },
+                                    window,
+                                    cx,
+                                    move |view, _, _| {
+                                        view.perform_then(
+                                            Intent::ConsumeResetCredit {
+                                                provider,
+                                                account_id: account_id.clone(),
+                                                credit_id: credit_id.clone(),
+                                            },
+                                            |view, result, _, _| {
+                                                if result.is_ok() {
+                                                    view.perform(Intent::LoadAccounts);
+                                                }
+                                            },
+                                        )
+                                    },
+                                )
+                            })),
+                    )
+                })
+                .when_some(external_url, |actions, url| {
+                    actions.child(
+                        Button::new(("open-external-usage", index))
+                            .ghost()
+                            .small()
+                            .label("Manage usage")
+                            .on_click(move |_, _, cx| cx.open_url(&url)),
+                    )
+                })
                 .child(if in_use {
                     div()
                         .text_xs()

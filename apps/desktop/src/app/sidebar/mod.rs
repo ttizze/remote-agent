@@ -16,6 +16,7 @@ use super::{
 };
 use agent_core::view::sidebar::SidebarOptions;
 use agent_core::{
+    environment::{EnvironmentSidebarSection, EnvironmentSidebarView, EnvironmentThreadRow},
     state::Intent,
     view::{
         sidebar::{
@@ -403,6 +404,9 @@ impl Desktop {
 
     fn render_thread_list(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let views = self.views.clone();
+        if views.environment_sidebar.sections.len() > 1 && self.snapshot.search.trim().is_empty() {
+            return self.render_environment_thread_list(views.environment_sidebar.clone(), cx);
+        }
         let sidebar = &views.sidebar;
         let mut list = v_flex().min_h_full().p_2().gap_px();
         if let Some(search) = &sidebar.search {
@@ -475,6 +479,233 @@ impl Desktop {
                 },
             ))
             .child(list)
+    }
+
+    fn render_environment_thread_list(
+        &mut self,
+        view: EnvironmentSidebarView,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let mut list = v_flex().min_h_full().p_2().gap_2();
+        let inbox_count = self.views.environment_inbox.items.len();
+        if inbox_count > 0 {
+            list = list.child(
+                div()
+                    .px_2()
+                    .pb_1()
+                    .text_2xs()
+                    .text_color(color("sidebarMutedForeground"))
+                    .child(format!("All environments · {inbox_count} active")),
+            );
+        }
+        for section in view.sections {
+            list = list.child(self.render_environment_section(section, cx));
+        }
+        if !view.activities.is_empty() {
+            list = list.child(
+                v_flex()
+                    .gap_1()
+                    .pt_2()
+                    .child(
+                        div()
+                            .px_2()
+                            .text_xs()
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(color("sidebarMutedForeground"))
+                            .child("Agent activity"),
+                    )
+                    .children(view.activities.into_iter().map(|activity| {
+                        let thread = agent_core::environment::scoped_key(
+                            &activity.environment.environment_id,
+                            &activity.activity.thread_id,
+                        );
+                        let label = activity.environment.label.clone();
+                        let title = activity.activity.thread_title.clone();
+                        let headline = activity.activity.headline.clone();
+                        let id = thread.unwrap_or_default();
+                        h_flex()
+                            .id(ElementId::Name(format!("activity-{id}").into()))
+                            .w_full()
+                            .gap_2()
+                            .px_2()
+                            .py_1p5()
+                            .rounded(px(8.))
+                            .cursor_pointer()
+                            .hover(|row| row.bg(color("sidebarRowHover")))
+                            .child(icon("bot").size_3().text_color(color("updateForeground")))
+                            .child(
+                                v_flex()
+                                    .min_w_0()
+                                    .child(div().truncate().text_xs().child(title))
+                                    .child(
+                                        div()
+                                            .truncate()
+                                            .text_2xs()
+                                            .text_color(color("sidebarMutedForeground"))
+                                            .child(format!("{label} · {headline}")),
+                                    ),
+                            )
+                            .on_click(cx.listener(move |view, _, _, cx| {
+                                if !id.is_empty() {
+                                    view.open_sidebar_thread(id.clone(), cx);
+                                }
+                            }))
+                    })),
+            );
+        }
+        div()
+            .id("environment-sidebar-list")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .child(list)
+    }
+
+    fn render_environment_section(
+        &mut self,
+        section: EnvironmentSidebarSection,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let title = section.summary.descriptor.label.clone();
+        let environment_id = section.summary.descriptor.environment_id.clone();
+        let status = match section.summary.connection {
+            agent_core::environment::EnvironmentConnectionState::Connected => "Connected",
+            agent_core::environment::EnvironmentConnectionState::Connecting => "Connecting…",
+            agent_core::environment::EnvironmentConnectionState::Disconnected => "Offline",
+        };
+        let status = section.summary.reconnect_reason.as_deref().map_or_else(
+            || status.to_owned(),
+            |reason| format!("{status} · {reason}"),
+        );
+        v_flex()
+            .gap_1()
+            .child(
+                h_flex()
+                    .px_2()
+                    .gap_2()
+                    .child(
+                        icon("monitor")
+                            .size_3()
+                            .text_color(color("sidebarMutedForeground")),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .truncate()
+                            .text_xs()
+                            .font_weight(FontWeight::MEDIUM)
+                            .child(title),
+                    )
+                    .child(
+                        div()
+                            .text_2xs()
+                            .text_color(color("sidebarMutedForeground"))
+                            .child(status),
+                    ),
+            )
+            .children(
+                section
+                    .drafts
+                    .into_iter()
+                    .map(|draft| self.render_environment_draft(&environment_id, draft, cx)),
+            )
+            .children(
+                section
+                    .rows
+                    .into_iter()
+                    .map(|item| self.render_environment_row(item, cx)),
+            )
+    }
+
+    fn render_environment_draft(
+        &mut self,
+        environment_id: &str,
+        draft: agent_core::view::sidebar::SidebarDraftRow,
+        cx: &mut Context<Desktop>,
+    ) -> Div {
+        let project = draft.project_name.clone().unwrap_or_default();
+        let preview = draft.preview.clone();
+        let environment_id = environment_id.to_owned();
+        let project_id = agent_core::environment::parse_scoped_project_key(&draft.project_id)
+            .map(|reference| reference.project_id);
+        h_flex()
+            .id(ElementId::Name(
+                format!("environment-draft-{}", draft.draft_key).into(),
+            ))
+            .w_full()
+            .gap_2()
+            .px_2()
+            .py_1p5()
+            .rounded(px(8.))
+            .cursor_pointer()
+            .hover(|row| row.bg(color("sidebarRowHover")))
+            .child(
+                icon("square-pen")
+                    .size_3()
+                    .text_color(color("warningForeground")),
+            )
+            .child(
+                v_flex()
+                    .min_w_0()
+                    .child(
+                        div()
+                            .truncate()
+                            .text_xs()
+                            .child(format!("{environment_id} · {project}")),
+                    )
+                    .child(
+                        div()
+                            .truncate()
+                            .text_2xs()
+                            .text_color(color("sidebarMutedForeground"))
+                            .child(preview),
+                    ),
+            )
+            .on_click(cx.listener(move |view, _, window, cx| {
+                view.pending_new_thread = Some((environment_id.clone(), project_id.clone()));
+                view.apply_pending_open(window, cx);
+                cx.notify();
+            }))
+    }
+
+    fn render_environment_row(
+        &mut self,
+        item: EnvironmentThreadRow,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let id = item.row.id.clone();
+        let project = item.row.project_name.clone().unwrap_or_default();
+        let title = item.row.title.clone();
+        let environment = item.environment_label;
+        h_flex()
+            .id(ElementId::Name(format!("environment-thread-{id}").into()))
+            .w_full()
+            .gap_2()
+            .px_2()
+            .py_1p5()
+            .rounded(px(8.))
+            .cursor_pointer()
+            .hover(|row| row.bg(color("sidebarRowHover")))
+            .child(
+                icon("message-square")
+                    .size_3()
+                    .text_color(color("sidebarMutedForeground")),
+            )
+            .child(
+                v_flex()
+                    .min_w_0()
+                    .child(div().truncate().text_sm().child(title))
+                    .child(
+                        div()
+                            .truncate()
+                            .text_2xs()
+                            .text_color(color("sidebarMutedForeground"))
+                            .child(format!("{environment} · {project}")),
+                    ),
+            )
+            .on_click(cx.listener(move |view, _, _, cx| {
+                view.open_sidebar_thread(id.clone(), cx);
+            }))
     }
 
     fn render_empty_state(&self, empty: &SidebarEmptyState, cx: &mut Context<Self>) -> AnyElement {
@@ -586,8 +817,23 @@ impl Desktop {
     /// Opens a thread from the list: the selection clears and the row anchors
     /// the next Shift+click range.
     fn open_sidebar_thread(&mut self, thread_id: String, cx: &mut Context<Self>) {
-        self.sidebar.selection.open(&thread_id);
-        self.open_thread(thread_id, cx);
+        let local_thread_id =
+            if let Some(reference) = agent_core::environment::parse_scoped_thread_key(&thread_id) {
+                if self.environment_registry.selected() != Some(reference.environment_id.as_str()) {
+                    self.pending_open = Some((
+                        reference.environment_id.clone(),
+                        reference.thread_id.clone(),
+                    ));
+                    self.promote_environment(&reference.environment_id);
+                    cx.notify();
+                    return;
+                }
+                reference.thread_id
+            } else {
+                thread_id
+            };
+        self.sidebar.selection.open(&local_thread_id);
+        self.open_thread(local_thread_id, cx);
         self.refresh_views(cx);
     }
 

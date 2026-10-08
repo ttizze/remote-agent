@@ -7,17 +7,27 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.ViewModel
 import dev.remoteagent.core.AgentStore
+import dev.remoteagent.core.ArtifactTemplate
 import dev.remoteagent.core.BrowserFrame
 import dev.remoteagent.core.BrowserRequest
 import dev.remoteagent.core.Connection
 import dev.remoteagent.core.DictationPreparation
+import dev.remoteagent.core.EnvironmentProjectRow
+import dev.remoteagent.core.EnvironmentSettingsEntryView
+import dev.remoteagent.core.EnvironmentThreadListView
 import dev.remoteagent.core.Intent
 import dev.remoteagent.core.Invitation
 import dev.remoteagent.core.Outcome
 import dev.remoteagent.core.Snapshot
+import dev.remoteagent.core.appendArtifactTemplateUsePrompt
 import dev.remoteagent.core.ShareContent
+import dev.remoteagent.core.ThreadListOptions
+import dev.remoteagent.core.environmentProjectRows as buildEnvironmentProjectRows
+import dev.remoteagent.core.environmentSettings as buildEnvironmentSettings
+import dev.remoteagent.core.environmentThreadList as buildEnvironmentThreadList
 import dev.remoteagent.core.generateIdentity
 import dev.remoteagent.core.parseInvitation
+import dev.remoteagent.core.subscriptionUsageWidgetsJson
 import dev.remoteagent.core.validateInvitation
 import java.io.File
 import kotlinx.coroutines.CancellationException
@@ -33,6 +43,26 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+
+internal data class EnvironmentActivityRow(
+    val threadId: String,
+    val title: String,
+    val headline: String,
+    val detail: String?,
+    val phase: String,
+)
+
+internal data class EnvironmentRow(
+    val profileId: String,
+    val environmentId: String,
+    val label: String,
+    val state: String,
+    val platform: String?,
+    val machine: String?,
+    val capabilities: List<String>,
+    val reconnectReason: String?,
+    val activities: List<EnvironmentActivityRow>,
+)
 
 private const val PERSISTENCE_QUEUE_CAPACITY = 8
 private const val MILLIS_PER_SECOND = 1000L
@@ -67,7 +97,16 @@ internal sealed interface Route {
     /** `file` opens that file of the Files tab. */
     data class Workspace(val tab: WorkspaceTab, val file: String? = null, val line: ULong? = null) : Route
 
+    /** A resource-backed PDF preview; PDFs never enter the text file reader. */
+    data class Pdf(val file: String) : Route
+
     data class Settings(val projectId: String? = null) : Route
+
+    data object Appearance : Route
+
+    data object ScheduledTasks : Route
+
+    data object Usage : Route
 
     data object Archived : Route
 }
@@ -87,9 +126,17 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
         private set
 
     private val draftEdits = DraftRevision()
+    private val usageWidget = UsageWidgetPublisher(context)
     private var composerKey = ""
 
     var profiles by mutableStateOf(emptyList<HostProfile>())
+        private set
+
+    var environments by mutableStateOf(emptyList<EnvironmentRow>())
+        private set
+
+    /** Latest immutable core snapshot for every saved environment. */
+    var environmentSnapshots by mutableStateOf(emptyMap<String, Snapshot>())
         private set
 
     var profileId by mutableStateOf<String?>(null)
@@ -111,8 +158,14 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
     var composerText by mutableStateOf("")
         private set
 
+    /** Counts requests to focus the composer with the cursor at the end of the draft. */
+    var composerFocusRequests by mutableIntStateOf(0)
+        private set
+
     private var followingFrom: String? = null
     private var owner: AgentStore? = null
+    private val backgroundOwners = mutableMapOf<String, AgentStore>()
+    private val backgroundJobs = mutableMapOf<String, Job>()
     private var initialization: Job? = null
     private var connection: Job? = null
     private var observation: Job? = null
@@ -132,9 +185,20 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
         runCatching { profiles = repository.profiles() }.onFailure { notice = it.message }
         if (profiles.isEmpty()) stack = listOf(Route.Pairing)
         repository.selected?.takeIf { id -> profiles.any { it.id == id } }?.let(::selectProfile)
+            ?: startBackgroundProfiles(null)
     }
 
     fun perform(intent: Intent, complete: (Result<Outcome>) -> Unit = {}) {
+        val (routed, profile) = routeIntent(intent)
+        if (profile != null && profile != profileId) {
+            selectProfile(profile)
+            pending.addLast(routed to complete)
+            return
+        }
+        performOnCurrent(routed, complete)
+    }
+
+    private fun performOnCurrent(intent: Intent, complete: (Result<Outcome>) -> Unit = {}) {
         val store = owner
         if (store == null) {
             if (initialization != null) pending.addLast(intent to complete)
@@ -166,6 +230,75 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
         operations.add(operation)
         operation.start()
     }
+
+    private fun routeIntent(intent: Intent): Pair<Intent, String?> {
+        fun route(value: String?): Pair<String?, String?> = scopedValue(value)
+        return when (intent) {
+            is Intent.OpenThread -> {
+                val (id, profile) = route(intent.threadId)
+                Intent.OpenThread(id ?: intent.threadId) to profile
+            }
+            is Intent.NewThread -> {
+                val (id, profile) = route(intent.projectId)
+                Intent.NewThread(id) to profile
+            }
+            is Intent.Thread -> {
+                val (id, profile) = route(intent.threadId)
+                Intent.Thread(id ?: intent.threadId, intent.action) to profile
+            }
+            is Intent.MoveThread -> {
+                val (id, profile) = route(intent.threadId)
+                Intent.MoveThread(id ?: intent.threadId, intent.section, intent.destination) to profile
+            }
+            is Intent.FilterProject -> {
+                val (id, profile) = route(intent.projectId)
+                Intent.FilterProject(id) to profile
+            }
+            is Intent.NewThreadOnBranch -> {
+                val (id, profile) = route(intent.projectId)
+                Intent.NewThreadOnBranch(id ?: intent.projectId, intent.branch, intent.worktreePath) to profile
+            }
+            is Intent.ResetProjectSettings -> {
+                val (id, profile) = route(intent.projectId)
+                Intent.ResetProjectSettings(id ?: intent.projectId) to profile
+            }
+            else -> intent to null
+        }
+    }
+
+    private fun scopedValue(value: String?): Pair<String?, String?> {
+        val raw = value ?: return null to null
+        val separator = raw.indexOf(':')
+        if (separator <= 0 || separator == raw.lastIndex) return value to null
+        val environmentId = raw.substring(0, separator)
+        val profile = environments.firstOrNull { it.environmentId == environmentId }?.profileId
+            ?: return value to null
+        return raw.substring(separator + 1) to profile
+    }
+
+    fun environmentSnapshotsForCore(): List<Snapshot> = environmentSnapshots.values.toList()
+
+    fun environmentProjects(query: String): List<EnvironmentProjectRow> =
+        buildEnvironmentProjectRows(environmentSnapshotsForCore(), query)
+
+    fun environmentSettings(): List<EnvironmentSettingsEntryView> =
+        buildEnvironmentSettings(environmentSnapshotsForCore())
+
+    fun environmentThreadList(
+        nowMs: Long,
+        options: ThreadListOptions,
+        query: String,
+        selectedProject: String?,
+        selectedThread: String?,
+    ): EnvironmentThreadListView =
+        buildEnvironmentThreadList(
+            environmentSnapshotsForCore(),
+            nowMs,
+            options,
+            query,
+            selectedProject,
+            selectedThread,
+        )
 
     private fun follow(outcome: Outcome) {
         if (outcome is Outcome.StartedThread && route == Route.NewTask) {
@@ -226,6 +359,13 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
         }
     }
 
+    /** Adds the template's prompt to the draft and brings the composer up with the cursor after it. */
+    fun useArtifactTemplate(template: ArtifactTemplate) {
+        val next = appendArtifactTemplateUsePrompt(composerText, template)
+        if (next != composerText) editDraft(next)
+        composerFocusRequests += 1
+    }
+
     fun navigate(next: Route, selection: Intent? = null) {
         when (next) {
             is Route.Thread -> {
@@ -235,6 +375,12 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
             Route.NewTask -> {
                 draftEdits.reset()
                 perform(selection ?: Intent.NewThread(snapshot.selectedProjectId()))
+            }
+            is Route.Settings -> {
+                val (projectId, profile) = scopedValue(next.projectId)
+                if (profile != null && profile != profileId) selectProfile(profile)
+                stack = stack + Route.Settings(projectId)
+                return
             }
             Route.Archived -> perform(Intent.ShowArchived(true))
             else -> Unit
@@ -248,8 +394,11 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
      */
     fun chooseProject(projectId: String?) {
         draftEdits.reset()
-        perform(Intent.NewThread(projectId))
         val below = stack.getOrNull(stack.size - 2)
+        perform(
+            if (below == Route.NewTask) Intent.SetNewThreadProject(projectId)
+            else Intent.NewThread(projectId)
+        )
         stack = if (below == Route.NewTask) stack.dropLast(1) else stack + Route.NewTask
     }
 
@@ -257,7 +406,10 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
     fun projectAdded(projectId: String) {
         val flow = setOf(Route.ChooseProject, Route.AddProject, Route.AddProjectLocal, Route.NewTask)
         draftEdits.reset()
-        perform(Intent.NewThread(projectId))
+        perform(
+            if (Route.NewTask in stack) Intent.SetNewThreadProject(projectId)
+            else Intent.NewThread(projectId)
+        )
         stack = stack.takeWhile { it !in flow } + Route.NewTask
     }
 
@@ -295,14 +447,17 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
         if (profiles.none { it.id == id }) return
         stack = listOf(Route.Home)
         if (profileId == id && owner != null) {
+            startBackgroundProfiles(id)
             connect()
             return
         }
         val old = detach()
+        val background = backgroundOwners.remove(id)
+        backgroundJobs.remove(id)?.cancel()
         profileId = id
         repository.selected = id
         publish(Snapshot.empty())
-        scope.launch { runCatching { old?.shutdown() } }
+        scope.launch { runCatching { old?.shutdown(); background?.shutdown() } }
         initialization = scope.launch {
             try {
                 val store =
@@ -325,6 +480,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
                 }
                 observe(store, id)
                 connect()
+                startBackgroundProfiles(id)
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Exception) {
@@ -351,8 +507,102 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
         return old
     }
 
+    /** Starts one independent cached Store and retry loop for every saved Host. */
+    private fun startBackgroundProfiles(selected: String?) {
+        profiles
+            .filterNot { it.id == selected }
+            .filterNot { backgroundJobs.containsKey(it.id) }
+            .forEach { profile -> superviseBackground(profile) }
+    }
+
+    private fun superviseBackground(profile: HostProfile) {
+        lateinit var job: Job
+        job = scope.launch {
+            var delayMillis = 250L
+            try {
+                while (isActive && profiles.any { it.id == profile.id } && profile.id != profileId) {
+                    try {
+                        val store =
+                            backgroundOwners.getOrPut(profile.id) {
+                                AgentStore.offline(
+                                    repository.stateFile(profile.id),
+                                    repository.modelPreferences(),
+                                    repository.cacheDirectory(profile.id),
+                                    repository.diagnosticsDirectory(profile.id),
+                                )
+                            }
+                        val identity =
+                            withContext(Dispatchers.IO) {
+                                AndroidCredentialStore(context, profile.id).loadOrCreate(::generateIdentity)
+                            }
+                        publishEnvironment(profile, store.snapshot())
+                        try {
+                            store.resume(Connection(profile.ticket, identity, null, true))
+                        } finally {
+                            identity.fill(0)
+                        }
+                        publishEnvironment(profile, store.snapshot())
+                        var previous = store.snapshot()
+                        while (isActive && profile.id != profileId) {
+                            store.nextSnapshot(previous)
+                            val latest = store.snapshot()
+                            publishEnvironment(profile, latest)
+                            if (!latest.connected()) break
+                            previous = latest
+                        }
+                        delayMillis = 250L
+                    } catch (error: CancellationException) {
+                        throw error
+                    } catch (error: Exception) {
+                        notice = notice ?: "${profile.name}: ${error.message}"
+                    }
+                    if (isActive && profile.id != profileId) {
+                        delay(delayMillis)
+                        delayMillis = (delayMillis * 2).coerceAtMost(300_000L)
+                    }
+                }
+            } finally {
+                backgroundJobs.remove(profile.id)
+            }
+        }
+        backgroundJobs[profile.id] = job
+    }
+
+    private fun publishEnvironment(profile: HostProfile, next: Snapshot) {
+        environmentSnapshots = environmentSnapshots + (profile.id to next)
+        val row = EnvironmentRow(
+            profileId = profile.id,
+            environmentId = next.environmentId() ?: profile.id,
+            label = next.environmentLabel() ?: profile.name,
+            state = next.environmentConnectionState() ?: "connecting",
+            platform = next.environmentPlatform(),
+            machine = next.environmentMachine(),
+            capabilities = next.environmentCapabilities(),
+            reconnectReason = next.environmentReconnectReason(),
+            activities = next.awarenessActivities().map { activity ->
+                EnvironmentActivityRow(
+                    threadId = next.scopedThreadId(activity.threadId) ?: activity.threadId,
+                    title = activity.threadTitle,
+                    headline = activity.headline,
+                    detail = activity.detail,
+                    phase = activity.phase,
+                )
+            },
+        )
+        environments = (environments.filterNot { it.profileId == profile.id } + row)
+            .sortedBy { it.label.lowercase() }
+        publishUsageWidget()
+    }
+
+    private fun publishUsageWidget() {
+        usageWidget.publish(subscriptionUsageWidgetsJson(environmentSnapshotsForCore(), 6u))
+    }
+
     fun removeProfile(id: String) {
         runCatching {
+                val background = backgroundOwners.remove(id)
+                backgroundJobs.remove(id)?.cancel()
+                scope.launch { runCatching { background?.shutdown() } }
                 AndroidCredentialStore(context, id).remove()
                 if (profileId == id) {
                     val old = detach()
@@ -362,6 +612,9 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
                     scope.launch { old?.shutdown() }
                 }
                 profiles = profiles.filterNot { it.id == id }
+                environments = environments.filterNot { it.profileId == id }
+                environmentSnapshots = environmentSnapshots - id
+                publishUsageWidget()
                 repository.saveProfiles(profiles)
                 File(repository.cacheDirectory(id)).deleteRecursively()
                 if (profiles.isEmpty()) stack = listOf(Route.Pairing)
@@ -448,6 +701,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
         appInBackground = false
         owner?.appBecameActive()
         connect()
+        startBackgroundProfiles(profileId)
     }
 
     fun connect() {
@@ -524,6 +778,9 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
             repository.saveProfiles(profiles)
         }
         snapshot = next
+        profileId?.let { id ->
+            profiles.firstOrNull { it.id == id }?.let { profile -> publishEnvironment(profile, next) }
+        }
         val selected = next.selectedThreadId()
         val from = followingFrom
         if (from != null && selected != null && selected != from) {
@@ -604,8 +861,12 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
         connection?.cancel()
         initialization?.cancel()
         persistence?.cancel()
+        backgroundJobs.values.forEach { it.cancel() }
+        val backgroundStores = backgroundOwners.values.toList()
+        backgroundOwners.clear()
         scope.launch {
             operations.toList().joinAll()
+            backgroundStores.forEach { store -> runCatching { store.shutdown() } }
             owner?.let { store ->
                 runCatching { store.shutdown() }
                 writes.send(store.snapshot())

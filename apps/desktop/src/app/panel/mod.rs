@@ -3,6 +3,7 @@
 mod details;
 mod diff;
 mod files;
+mod pull_requests;
 mod terminal_drawer;
 
 use super::{
@@ -35,14 +36,16 @@ pub(crate) enum PanelTab {
     Terminal,
     Files,
     Browser,
+    PullRequests,
 }
 impl PanelTab {
     /// The order the surface menus list them in.
-    const ALL: [PanelTab; 4] = [
+    const ALL: [PanelTab; 5] = [
         PanelTab::Browser,
         PanelTab::Terminal,
         PanelTab::Files,
         PanelTab::Diff,
+        PanelTab::PullRequests,
     ];
     fn label(self) -> &'static str {
         match self {
@@ -50,6 +53,7 @@ impl PanelTab {
             PanelTab::Terminal => "Terminal",
             PanelTab::Files => "Files",
             PanelTab::Diff => "Diff",
+            PanelTab::PullRequests => "Pull requests",
         }
     }
     fn icon(self) -> &'static str {
@@ -58,6 +62,7 @@ impl PanelTab {
             PanelTab::Terminal => "square-terminal",
             PanelTab::Files => "files",
             PanelTab::Diff => "file-diff",
+            PanelTab::PullRequests => "git-pull-request",
         }
     }
     fn key(self) -> &'static str {
@@ -66,6 +71,7 @@ impl PanelTab {
             PanelTab::Terminal => "t",
             PanelTab::Files => "f",
             PanelTab::Diff => "d",
+            PanelTab::PullRequests => "p",
         }
     }
     fn unavailable_hint(self) -> &'static str {
@@ -73,6 +79,7 @@ impl PanelTab {
             PanelTab::Browser => "Only available in the desktop app.",
             PanelTab::Terminal | PanelTab::Files => "Available when a project is open.",
             PanelTab::Diff => "Available for Git repositories.",
+            PanelTab::PullRequests => "Available for GitHub repositories.",
         }
     }
 }
@@ -82,6 +89,7 @@ impl PanelTab {
 #[derive(Clone, PartialEq, Debug)]
 pub(crate) enum Surface {
     Diff,
+    PullRequests,
     Files,
     Browser {
         id: u64,
@@ -98,6 +106,7 @@ impl Surface {
     fn id(&self) -> String {
         match self {
             Surface::Diff => "diff".into(),
+            Surface::PullRequests => "pull-requests".into(),
             Surface::Files => "files".into(),
             Surface::Browser { id } => format!("browser:{id}"),
             Surface::Terminal { key, .. } => format!("terminal:{key}"),
@@ -106,6 +115,7 @@ impl Surface {
     fn kind(&self) -> PanelTab {
         match self {
             Surface::Diff => PanelTab::Diff,
+            Surface::PullRequests => PanelTab::PullRequests,
             Surface::Files => PanelTab::Files,
             Surface::Browser { .. } => PanelTab::Browser,
             Surface::Terminal { .. } => PanelTab::Terminal,
@@ -229,11 +239,13 @@ pub(crate) struct PanelState {
     width: f32,
     launcher_focus: FocusHandle,
     browsers: HashMap<u64, Entity<crate::browser::Browser>>,
+    preview_browsers: HashMap<u64, Entity<crate::browser::HostBrowser>>,
     next_browser: u64,
     diff: diff::DiffState,
     files: files::FilesState,
     terminals: terminal_drawer::TerminalState,
     details: details::DetailsState,
+    pull_requests: pull_requests::PullRequestsState,
     _subscriptions: Vec<Subscription>,
 }
 impl PanelState {
@@ -244,11 +256,13 @@ impl PanelState {
             width: super::ui::metrics().panel_width,
             launcher_focus: cx.focus_handle(),
             browsers: HashMap::new(),
+            preview_browsers: HashMap::new(),
             next_browser: 0,
             diff: diff::DiffState::new(window, cx, &mut subscriptions),
             files: files::FilesState::new(window, cx, &mut subscriptions),
             terminals: terminal_drawer::TerminalState::default(),
             details: details::DetailsState::default(),
+            pull_requests: pull_requests::PullRequestsState::default(),
             _subscriptions: subscriptions,
         }
     }
@@ -258,10 +272,18 @@ impl PanelState {
         self.diff.reset();
         self.files.reset();
         self.details = details::DetailsState::default();
+        self.pull_requests = pull_requests::PullRequestsState::default();
         for browser in self.browsers.values() {
             browser.update(cx, |browser, cx| browser.set_visible(false, cx));
         }
+        for browser in self.preview_browsers.values() {
+            browser.update(cx, |browser, cx| {
+                browser.close();
+                browser.set_visible(false, cx);
+            });
+        }
         self.browsers.clear();
+        self.preview_browsers.clear();
         self.threads.clear();
     }
 }
@@ -302,68 +324,131 @@ impl Desktop {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        if !self.right().open {
+        let panel_key = self.panel_thread();
+        let right = self.right().clone();
+        let duration = Desktop::panel_animation_duration();
+        let animation = self.right_panel_animation.prepare(
+            &panel_key,
+            if right.open { 1. } else { 0. },
+            duration,
+        );
+        if !right.open && !self.panels.threads.contains_key(&panel_key) {
             return None;
         }
         let viewport = window.viewport_size().width.as_f32();
         let width = clamp_panel_width(self.panels.width, viewport);
-        let body = match self.right().active_surface().cloned() {
+        let open = right.open;
+        let body = match right.active_surface().cloned() {
             None => self.render_launcher(cx),
-            Some(Surface::Browser { id }) => match self.panels.browsers.get(&id) {
-                Some(browser) => div()
-                    .flex_1()
-                    .min_h_0()
-                    .child(browser.clone())
-                    .into_any_element(),
-                None => div().flex_1().into_any_element(),
-            },
+            Some(Surface::Browser { id }) => {
+                if let Some(browser) = self.panels.preview_browsers.get(&id) {
+                    div()
+                        .flex_1()
+                        .min_h_0()
+                        .child(browser.clone())
+                        .into_any_element()
+                } else {
+                    match self.panels.browsers.get(&id) {
+                        Some(browser) => div()
+                            .flex_1()
+                            .min_h_0()
+                            .child(browser.clone())
+                            .into_any_element(),
+                        None => div().flex_1().into_any_element(),
+                    }
+                }
+            }
             Some(surface @ Surface::Terminal { .. }) => {
                 self.render_terminals(Some(surface.id()), window, cx)
             }
             Some(Surface::Files) => self.render_files(window, cx),
             Some(Surface::Diff) => self.render_diff(window, cx),
+            Some(Surface::PullRequests) => self.render_pull_requests(window, cx),
         };
-        Some(
-            v_flex()
-                .id("right-panel")
-                .relative()
-                .w(px(width))
-                .flex_shrink_0()
-                .h_full()
-                .bg(color("canvas"))
-                .border_l_1()
-                .border_color(color("border"))
-                .on_drag_move(cx.listener(
-                    |view, event: &DragMoveEvent<PanelResize>, window, cx| {
-                        let viewport = window.viewport_size().width.as_f32();
-                        let right = event.bounds.right().as_f32();
-                        view.panels.width =
-                            clamp_panel_width(right - event.event.position.x.as_f32(), viewport);
-                        cx.notify();
+        let panel = v_flex()
+            .id("right-panel")
+            .relative()
+            .w(px(if open { width } else { 0. }))
+            .flex_shrink_0()
+            .h_full()
+            .overflow_hidden()
+            .bg(color("canvas"))
+            .border_l_1()
+            .border_color(color("border"))
+            .on_drag_move(
+                cx.listener(|view, event: &DragMoveEvent<PanelResize>, window, cx| {
+                    let viewport = window.viewport_size().width.as_f32();
+                    let right = event.bounds.right().as_f32();
+                    view.panels.width =
+                        clamp_panel_width(right - event.event.position.x.as_f32(), viewport);
+                    cx.notify();
+                }),
+            )
+            .child(self.render_tab_bar(cx))
+            .child(v_flex().flex_1().min_h_0().child(body))
+            .child(
+                div()
+                    .id("right-panel-resize")
+                    .absolute()
+                    .left(px(-3.))
+                    .top_0()
+                    .bottom_0()
+                    .w(px(6.))
+                    .cursor_col_resize()
+                    .on_drag(PanelResize, |drag, _, _, cx| {
+                        cx.stop_propagation();
+                        cx.new(|_| drag.clone())
+                    })
+                    .on_click(cx.listener(|view, event: &ClickEvent, _, cx| {
+                        if event.click_count() == 2 {
+                            view.panels.width = super::ui::metrics().panel_width;
+                            cx.notify();
+                        }
+                    })),
+            );
+        Some(match animation {
+            Some(animation) => panel
+                .with_animation(
+                    ("desktop-right-panel-animation", animation.run),
+                    Animation::new(animation.duration).with_easing(super::panel_ease_out),
+                    move |panel, delta| {
+                        let progress = animation.from + (animation.target - animation.from) * delta;
+                        panel.w(px(width * progress))
                     },
-                ))
-                .child(self.render_tab_bar(cx))
-                .child(v_flex().flex_1().min_h_0().child(body))
-                .child(
-                    div()
-                        .id("right-panel-resize")
-                        .absolute()
-                        .left(px(-3.))
-                        .top_0()
-                        .bottom_0()
-                        .w(px(6.))
-                        .cursor_col_resize()
-                        .on_drag(PanelResize, |drag, _, _, cx| {
-                            cx.stop_propagation();
-                            cx.new(|_| drag.clone())
-                        })
-                        .on_click(cx.listener(|view, event: &ClickEvent, _, cx| {
-                            if event.click_count() == 2 {
-                                view.panels.width = super::ui::metrics().panel_width;
-                                cx.notify();
-                            }
-                        })),
                 )
+                .into_any_element(),
+            None => panel.into_any_element(),
+        })
+    }
+
+    /// Keeps the active Host Preview visible as a small player while the full
+    /// panel is closed. The same entity remains the source of frames and input.
+    pub(crate) fn render_preview_mini_player(
+        &self,
+        cx: &mut Context<Desktop>,
+    ) -> Option<AnyElement> {
+        let right = self.right();
+        if right.open {
+            return None;
+        }
+        let Surface::Browser { id } = right.active_surface()? else {
+            return None;
+        };
+        let browser = self.panels.preview_browsers.get(id)?.clone();
+        Some(
+            div()
+                .id("preview-mini-player")
+                .absolute()
+                .right_4()
+                .bottom_4()
+                .w(px(320.))
+                .h(px(220.))
+                .rounded_md()
+                .border_1()
+                .border_color(color("border"))
+                .bg(color("canvas"))
+                .shadow_lg()
+                .child(browser)
                 .into_any_element(),
         )
     }
@@ -373,9 +458,17 @@ impl Desktop {
         match surface {
             Surface::Browser { id } => self
                 .panels
-                .browsers
+                .preview_browsers
                 .get(id)
-                .map_or_else(|| "Browser".into(), |browser| browser.read(cx).title(cx)),
+                .map_or_else(
+                    || {
+                        self.panels
+                            .browsers
+                            .get(id)
+                            .map_or_else(|| "Browser".into(), |browser| browser.read(cx).title(cx))
+                    },
+                    |browser| browser.read(cx).title(cx),
+                ),
             Surface::Terminal { active, .. } => {
                 let thread = self.panel_thread();
                 self.snapshot
@@ -532,11 +625,13 @@ impl Desktop {
         let has_folder = !self.snapshot.cwd().is_empty();
         let terminal = self.snapshot.terminal_available();
         let thread = self.snapshot.selected_thread.is_some();
+        let pull_requests = self.snapshot.selected_project.is_some() && self.snapshot.connected;
         move |tab| match tab {
             PanelTab::Browser => true,
             PanelTab::Terminal => terminal,
             PanelTab::Files => has_folder,
             PanelTab::Diff => thread,
+            PanelTab::PullRequests => pull_requests,
         }
     }
 
@@ -627,10 +722,40 @@ impl Desktop {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        if !self.panels.terminals.drawer_open() {
+        let open = self.panels.terminals.drawer_open();
+        let thread_key = self.thread_id().unwrap_or_default();
+        let duration = Desktop::panel_animation_duration();
+        let animation = self.terminal_drawer_animation.prepare(
+            &thread_key,
+            if open { 1. } else { 0. },
+            duration,
+        );
+        if !open && !self.panels.terminals.drawer_present() {
             return None;
         }
-        Some(self.render_terminals(None, window, cx))
+        let height = self
+            .panels
+            .terminals
+            .drawer_height(window.viewport_size().height.as_f32());
+        let drawer = v_flex()
+            .id("terminal-drawer-animation")
+            .h(px(if open { height } else { 0. }))
+            .flex_shrink_0()
+            .overflow_hidden()
+            .child(self.render_terminals(None, window, cx));
+        Some(match animation {
+            Some(animation) => drawer
+                .with_animation(
+                    ("desktop-terminal-drawer-animation", animation.run),
+                    Animation::new(animation.duration).with_easing(super::panel_ease_out),
+                    move |drawer, delta| {
+                        let progress = animation.from + (animation.target - animation.from) * delta;
+                        drawer.h(px(height * progress))
+                    },
+                )
+                .into_any_element(),
+            None => drawer.into_any_element(),
+        })
     }
 
     /// Follows the snapshot: the diff source, file editor and terminals.
@@ -638,6 +763,7 @@ impl Desktop {
         self.sync_terminals(window, cx);
         self.sync_diff(cx);
         self.sync_files(window, cx);
+        self.sync_pull_requests();
         self.sync_browser(cx);
     }
 
@@ -651,6 +777,10 @@ impl Desktop {
             _ => None,
         };
         for (id, browser) in &self.panels.browsers {
+            let visible = shown == Some(*id);
+            browser.update(cx, |browser, cx| browser.set_visible(visible, cx));
+        }
+        for (id, browser) in &self.panels.preview_browsers {
             let visible = shown == Some(*id);
             browser.update(cx, |browser, cx| browser.set_visible(visible, cx));
         }
@@ -670,25 +800,31 @@ impl Desktop {
         match tab {
             PanelTab::Diff => self.right_mut().upsert(Surface::Diff),
             PanelTab::Files => self.right_mut().upsert(Surface::Files),
+            PanelTab::PullRequests => self.right_mut().upsert(Surface::PullRequests),
             PanelTab::Browser => {
-                match crate::browser::Browser::new(
-                    wry::WebViewBuilder::new(),
-                    #[cfg(target_os = "macos")]
-                    crate::browser::ChromeProfileSource::default(),
-                    window,
-                    cx,
-                ) {
-                    Ok(browser) => {
-                        self.panels.next_browser += 1;
-                        let id = self.panels.next_browser;
-                        self.panels.browsers.insert(id, browser);
-                        self.right_mut().upsert(Surface::Browser { id });
-                    }
-                    Err(error) => {
-                        self.show_error(&error, window, cx);
-                        return;
+                self.panels.next_browser += 1;
+                let id = self.panels.next_browser;
+                if let (Some(store), Some(thread)) = (self.store(), self.thread_id()) {
+                    let browser = crate::browser::HostBrowser::new(store, thread, window, cx);
+                    self.panels.preview_browsers.insert(id, browser);
+                } else {
+                    match crate::browser::Browser::new(
+                        wry::WebViewBuilder::new(),
+                        #[cfg(target_os = "macos")]
+                        crate::browser::ChromeProfileSource::default(),
+                        window,
+                        cx,
+                    ) {
+                        Ok(browser) => {
+                            self.panels.browsers.insert(id, browser);
+                        }
+                        Err(error) => {
+                            self.show_error(&error, window, cx);
+                            return;
+                        }
                     }
                 }
+                self.right_mut().upsert(Surface::Browser { id });
             }
             PanelTab::Terminal => {
                 if !self.add_terminal_surface() {
@@ -807,6 +943,19 @@ impl Desktop {
             && let Some(browser) = self.panels.browsers.remove(&browser)
         {
             browser.update(cx, |browser, cx| browser.set_visible(false, cx));
+        }
+        if let Some(Surface::Browser { id: browser }) = self
+            .right()
+            .surfaces
+            .iter()
+            .find(|surface| surface.id() == id)
+            .cloned()
+            && let Some(browser) = self.panels.preview_browsers.remove(&browser)
+        {
+            browser.update(cx, |browser, cx| {
+                browser.close();
+                browser.set_visible(false, cx);
+            });
         }
         let right = self.right_mut();
         right.close(id);

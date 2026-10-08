@@ -1,6 +1,10 @@
 //! Provider account, catalog and configuration operations, without conversation state.
 use super::{identity::Identity, service::Failure};
-use agent_protocol::{models::Model, operations as op, provider::ProviderKind};
+use agent_protocol::{
+    models::{Empty, Model},
+    operations as op,
+    provider::ProviderKind,
+};
 use codex_app_server::CodexAppServer;
 use serde::Serialize;
 use serde_json::Value;
@@ -246,6 +250,21 @@ impl Identity for CodexResources {
             .map_err(|e| Failure::new("account_operation_failed", e))?;
         Ok(fetch.await)
     }
+    async fn consume_reset_credit(
+        &self,
+        account_id: &str,
+        credit_id: Option<&str>,
+    ) -> Result<Empty, Failure> {
+        let mut accounts = self.accounts.lock().await;
+        accounts
+            .as_mut()
+            .ok_or_else(|| {
+                Failure::new("account_unavailable", "Account management is unavailable.")
+            })?
+            .consume_reset_credit(account_id, credit_id)
+            .await
+            .map_err(|error| Failure::new("account_operation_failed", error))
+    }
 }
 
 pub(crate) struct ClaudeResources {
@@ -339,10 +358,31 @@ impl crate::host_rpc::identity::Identity for ClaudeResources {
             .map_err(|e| crate::host_rpc::service::Failure::new("account_operation_failed", e))
     }
     async fn usage(&self, id: &str) -> Result<op::AccountUsage, crate::host_rpc::service::Failure> {
-        let fetch =
-            self.accounts.lock().await.usage_request(id).map_err(|e| {
-                crate::host_rpc::service::Failure::new("account_operation_failed", e)
-            })?;
+        let version = self.version().await;
+        let fetch = self
+            .accounts
+            .lock()
+            .await
+            .usage_request(id, version)
+            .map_err(|e| crate::host_rpc::service::Failure::new("account_operation_failed", e))?;
         Ok(fetch.await)
+    }
+    async fn consume_reset_credit(
+        &self,
+        account_id: &str,
+        credit_id: Option<&str>,
+    ) -> Result<Empty, crate::host_rpc::service::Failure> {
+        let version = self.version().await.ok_or_else(|| {
+            crate::host_rpc::service::Failure::new(
+                "provider_unavailable",
+                "Claude version is unavailable.",
+            )
+        })?;
+        self.accounts
+            .lock()
+            .await
+            .consume_reset_credit(account_id, credit_id, &version)
+            .await
+            .map_err(|e| crate::host_rpc::service::Failure::new("account_operation_failed", e))
     }
 }

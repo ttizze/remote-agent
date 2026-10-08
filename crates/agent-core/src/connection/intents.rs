@@ -26,7 +26,7 @@ use agent_domain::{
     ApprovalDecision, Command, InteractionMode, MessageId, Plan, PlanRef, RunId, RuntimeRequestId,
     State, ThreadId, Timestamp,
 };
-use agent_protocol::{conversation as c, models as m, operations as op};
+use agent_protocol::{conversation as c, models as m, operations as op, pull_requests as pr};
 use std::sync::Arc;
 
 pub(super) enum Next {
@@ -160,13 +160,39 @@ impl Owner {
                 self.select_thread(Some(thread_id(id)?));
                 Next::Done
             }
+            Intent::OpenDraft { draft_key } => {
+                let draft = self
+                    .state
+                    .drafts
+                    .get(&draft_key)
+                    .filter(|draft| !draft_key.is_empty() && draft.project_id.is_some())
+                    .ok_or_else(|| invalid("Unknown draft"))?;
+                let project_id = draft.project_id.clone();
+                self.select_thread(None);
+                self.state.open_new_thread_draft = Some(draft_key);
+                self.state.selected_project = project_id
+                    .filter(|project| project.as_str() != CHATS_PROJECT);
+                Next::Done
+            }
             Intent::LeaveThread => {
                 self.select_thread(None);
                 Next::Done
             }
             Intent::NewThread { project_id } => {
                 self.select_thread(None);
-                self.state.selected_project = project_id;
+                self.state.begin_new_thread_draft(
+                    new_id("new"),
+                    project_id,
+                    super::owner::now_ms() as i64,
+                );
+                Next::Done
+            }
+            Intent::SetNewThreadProject { project_id } => {
+                if self.state.selected_thread.is_some() {
+                    return Err(invalid("Open a new thread first"));
+                }
+                self.ensure_new_thread_draft();
+                self.state.retarget_new_thread_draft(project_id);
                 Next::Done
             }
             Intent::ShowArchived { open } => {
@@ -181,11 +207,291 @@ impl Owner {
                 self.search(query);
                 Next::Done
             }
+            Intent::LoadPullRequests {
+                project_id,
+                repository,
+                query,
+                include_closed,
+            } => Next::call(
+                Call::ListPullRequests(pr::ListPullRequests {
+                    project_id,
+                    repository,
+                    host: None,
+                    state: if include_closed {
+                        pr::PullRequestListState::All
+                    } else {
+                        pr::PullRequestListState::Open
+                    },
+                    query,
+                    limit: 100,
+                    cursor: None,
+                    fresh: true,
+                }),
+                None,
+            ),
+            Intent::LoadPullRequest {
+                project_id,
+                host,
+                repository,
+                number,
+            } => Next::call(
+                Call::GetPullRequest(pr::GetPullRequest {
+                    reference: pr::PullRequestRef {
+                        project_id,
+                        repository,
+                        number,
+                        host,
+                        allow_stale: false,
+                    },
+                }),
+                None,
+            ),
+            Intent::LoadPullRequestDiff {
+                project_id,
+                host,
+                repository,
+                number,
+                cursor,
+                commit,
+            } => Next::call(
+                Call::GetPullRequestDiff(pr::GetPullRequestDiff {
+                    reference: pr::PullRequestRef {
+                        project_id,
+                        repository,
+                        number,
+                        host,
+                        allow_stale: false,
+                    },
+                    cursor,
+                    commit,
+                    fresh: true,
+                }),
+                None,
+            ),
+            Intent::LoadPullRequestDiffFileContents {
+                project_id,
+                host,
+                repository,
+                number,
+                commit,
+                change_type,
+                old_path,
+                new_path,
+            } => Next::call(
+                Call::GetPullRequestDiffFileContents(pr::GetPullRequestDiffFileContents {
+                    reference: pr::PullRequestRef {
+                        project_id,
+                        repository,
+                        number,
+                        host,
+                        allow_stale: false,
+                    },
+                    commit,
+                    change_type: match change_type {
+                        PullRequestDiffChangeTypeInput::Change => {
+                            pr::PullRequestDiffChangeType::Change
+                        }
+                        PullRequestDiffChangeTypeInput::RenamePure => {
+                            pr::PullRequestDiffChangeType::RenamePure
+                        }
+                        PullRequestDiffChangeTypeInput::RenameChanged => {
+                            pr::PullRequestDiffChangeType::RenameChanged
+                        }
+                        PullRequestDiffChangeTypeInput::New => pr::PullRequestDiffChangeType::New,
+                        PullRequestDiffChangeTypeInput::Deleted => {
+                            pr::PullRequestDiffChangeType::Deleted
+                        }
+                    },
+                    old_path,
+                    new_path,
+                }),
+                None,
+            ),
+            Intent::LoadPullRequestViewedFiles {
+                project_id,
+                host,
+                repository,
+                number,
+            } => Next::call(
+                Call::GetPullRequestViewedFiles(pr::GetPullRequestViewedFiles {
+                    reference: pr::PullRequestRef {
+                        project_id,
+                        repository,
+                        number,
+                        host,
+                        allow_stale: false,
+                    },
+                    limit: 1_000,
+                }),
+                None,
+            ),
+            Intent::SetPullRequestFilesViewed {
+                project_id,
+                host,
+                repository,
+                number,
+                files,
+            } => Next::call(
+                Call::SetPullRequestFilesViewed(pr::SetPullRequestFilesViewed {
+                    reference: pr::PullRequestRef {
+                        project_id,
+                        repository,
+                        number,
+                        host,
+                        allow_stale: false,
+                    },
+                    files: files
+                        .into_iter()
+                        .map(|file| pr::PullRequestViewedFile {
+                            path: file.path,
+                            viewed: file.viewed,
+                        })
+                        .collect(),
+                }),
+                None,
+            ),
+            Intent::PullRequestAction {
+                project_id,
+                host,
+                repository,
+                number,
+                action,
+                stack_number,
+                expected_stack_heads,
+                merge_method,
+            } => Next::call(
+                Call::PullRequestAction(pr::PullRequestActionRequest {
+                    reference: pr::PullRequestRef {
+                        project_id,
+                        repository,
+                        number,
+                        host,
+                        allow_stale: false,
+                    },
+                    action: parse_pull_request_action(&action)?,
+                    stack_number,
+                    expected_stack_heads: (!expected_stack_heads.is_empty()).then(|| {
+                        expected_stack_heads
+                            .into_iter()
+                            .map(|head| pr::PullRequestStackHead {
+                                number: head.number,
+                                head_sha: head.head_sha,
+                            })
+                            .collect()
+                    }),
+                    merge_method: merge_method
+                        .as_deref()
+                        .map(parse_pull_request_merge_method)
+                        .transpose()?,
+                }),
+                None,
+            ),
+            Intent::SubmitPullRequestReview {
+                project_id,
+                host,
+                repository,
+                number,
+                verdict,
+                body,
+            } => Next::call(
+                Call::SubmitPullRequestReview(pr::SubmitPullRequestReview {
+                    reference: pr::PullRequestRef {
+                        project_id,
+                        repository,
+                        number,
+                        host,
+                        allow_stale: false,
+                    },
+                    verdict: parse_pull_request_verdict(&verdict)?,
+                    body,
+                }),
+                None,
+            ),
+            Intent::LinkPullRequest {
+                thread_id,
+                project_id,
+                host,
+                repository,
+                number,
+                url,
+            } => Next::call(
+                Call::LinkPullRequest(pr::LinkPullRequest {
+                    thread_id,
+                    project_id,
+                    host,
+                    repository,
+                    number,
+                    url,
+                    source: agent_domain::PullRequestLinkSource::Manual,
+                    refresh: true,
+                }),
+                None,
+            ),
+            Intent::UnlinkPullRequest {
+                thread_id,
+                project_id,
+                host,
+                repository,
+                number,
+            } => Next::call(
+                Call::UnlinkPullRequest(pr::UnlinkPullRequest {
+                    thread_id,
+                    project_id,
+                    host,
+                    repository,
+                    number,
+                }),
+                None,
+            ),
+            Intent::SetPullRequestWatch {
+                thread_id,
+                project_id,
+                host,
+                repository,
+                number,
+                url,
+                enabled,
+            } => Next::call(
+                Call::SetPullRequestWatch(pr::SetPullRequestWatch {
+                    thread_id,
+                    project_id,
+                    link: agent_domain::PullRequestLink {
+                        host,
+                        repository,
+                        number,
+                        url,
+                        source: agent_domain::PullRequestLinkSource::Manual,
+                        linked_at: agent_domain::Timestamp::from_millis(super::owner::now_ms() as i64)
+                            .map_err(|error| invalid(error))?,
+                        snapshot: None,
+                        stack: None,
+                        watch: None,
+                    },
+                    enabled,
+                }),
+                None,
+            ),
+            Intent::LoadSourceControlAuth { cwd } => Next::call(
+                Call::SourceControlAuth(pr::SourceControlAuthRequest {
+                    host: None,
+                    cwd,
+                    fresh: true,
+                }),
+                None,
+            ),
+            Intent::LoadSourceControlDiscovery { cwd } => Next::call(
+                Call::SourceControlDiscovery(pr::SourceControlDiscoveryRequest {
+                    cwd,
+                    fresh: true,
+                }),
+                None,
+            ),
             Intent::ReorderPinned {
                 thread_id: moved,
                 before_thread_id,
             } => self.reorder_pinned(moved, before_thread_id)?,
             Intent::EditDraft { text, base_text } => {
+                self.ensure_new_thread_draft();
                 let mut draft = self.state.current_draft();
                 draft.text = match base_text {
                     Some(base) => merge_draft_text(base, text, draft.text.clone()),
@@ -397,6 +703,14 @@ impl Owner {
                 self.load_more_new_thread_branches();
                 Next::Done
             }
+            Intent::SearchScheduledTaskBranches { project_id, query } => {
+                self.load_scheduled_task_branches(project_id, query);
+                Next::Done
+            }
+            Intent::LoadMoreScheduledTaskBranches { project_id } => {
+                self.load_more_scheduled_task_branches(project_id);
+                Next::Done
+            }
             Intent::SetNewThreadWorkspace { mode } => self.set_new_thread_workspace(mode)?,
             Intent::SelectNewThreadBranch {
                 branch,
@@ -412,7 +726,11 @@ impl Owner {
                 worktree_path,
             } => {
                 self.select_thread(None);
-                self.state.selected_project = Some(project_id);
+                self.state.begin_new_thread_draft(
+                    new_id("new"),
+                    Some(project_id),
+                    super::owner::now_ms() as i64,
+                );
                 self.start_new_thread_on_branch(branch, worktree_path);
                 self.load_new_thread_branches(String::new());
                 Next::Done
@@ -531,15 +849,13 @@ impl Owner {
                 model,
                 options,
             } => {
-                let draft = Draft {
-                    instance_id,
-                    driver,
-                    model,
-                    options,
-                    ..self.state.default_draft.clone()
-                };
-                let selection = draft.selection().map_err(invalid)?;
-                self.state.default_draft = draft;
+                let mut defaults = self.state.default_draft.user_defaults();
+                defaults.instance_id = instance_id;
+                defaults.driver = driver;
+                defaults.model = model;
+                defaults.options = options;
+                let selection = defaults.selection().map_err(invalid)?;
+                self.state.default_draft = defaults;
                 Next::call(
                     Call::UpdateSettings(Box::new(m::HostSettingsPatch {
                         default_model_selection: Some(m::Nullable::Value(selection)),
@@ -549,7 +865,9 @@ impl Owner {
                 )
             }
             Intent::SetDefaultRuntimeMode { mode } => {
-                self.state.default_draft.runtime_mode = mode;
+                let mut defaults = self.state.default_draft.user_defaults();
+                defaults.runtime_mode = mode;
+                self.state.default_draft = defaults;
                 Next::Done
             }
             Intent::SetProviderInstances {
@@ -601,6 +919,79 @@ impl Owner {
                     Some(patch) => Next::call(Call::UpdateSettings(Box::new(patch)), None),
                     None => Next::Done,
                 }
+            }
+            Intent::LoadBackgroundPolicy => {
+                Next::call(Call::ReadBackground(agent_protocol::background::ReadBackground {}), None)
+            }
+            Intent::LoadDiagnostics { trace_file_path } => {
+                self.job(Call::ReadBackground(agent_protocol::background::ReadBackground {}), None, None);
+                self.job(Call::ReadHostResources(agent_protocol::background::ReadHostResources {}), None, None);
+                self.job(Call::ReadProcessDiagnostics(agent_protocol::background::ReadProcessDiagnostics {}), None, None);
+                self.job(
+                    Call::ReadProcessResourceHistory(
+                        agent_protocol::background::ReadProcessResourceHistory {
+                            window_ms: 60 * 60_000,
+                            bucket_ms: 60_000,
+                        },
+                    ),
+                    None,
+                    None,
+                );
+                self.job(
+                    Call::ReadTraceDiagnostics(agent_protocol::background::ReadTraceDiagnostics {
+                        trace_file_path,
+                        max_files: 16,
+                        slow_span_threshold_ms: Some(1_000.0),
+                    }),
+                    None,
+                    None,
+                );
+                Next::Done
+            }
+            Intent::SetBackgroundProfile { profile } => {
+                if self.state.background_policy.is_none() {
+                    return Next::Done;
+                }
+                let profile = match profile.as_str() {
+                    "balanced" => agent_domain::BackgroundActivityProfile::Balanced,
+                    "performance" => agent_domain::BackgroundActivityProfile::Performance,
+                    "battery-saver" => agent_domain::BackgroundActivityProfile::BatterySaver,
+                    _ => return Next::Done,
+                };
+                let policy = agent_domain::BackgroundActivityPolicy::preset(profile);
+                Next::call(
+                    Call::UpdateBackgroundPolicy(
+                        agent_protocol::background::UpdateBackgroundPolicy { policy },
+                    ),
+                    None,
+                )
+            }
+            Intent::SetAutomaticGitFetchInterval { seconds } => {
+                let Some(current) = self.state.background_policy.as_ref() else {
+                    return Next::Done;
+                };
+                let mut policy = current.policy.clone();
+                policy.automatic_git_fetch_interval_ms = u64::from(seconds).saturating_mul(1_000);
+                Next::call(
+                    Call::UpdateBackgroundPolicy(
+                        agent_protocol::background::UpdateBackgroundPolicy { policy },
+                    ),
+                    None,
+                )
+            }
+            Intent::SetProviderHealthRefreshInterval { seconds } => {
+                let Some(current) = self.state.background_policy.as_ref() else {
+                    return Next::Done;
+                };
+                let mut policy = current.policy.clone();
+                policy.provider_health_refresh_interval_ms =
+                    u64::from(seconds).saturating_mul(1_000);
+                Next::call(
+                    Call::UpdateBackgroundPolicy(
+                        agent_protocol::background::UpdateBackgroundPolicy { policy },
+                    ),
+                    None,
+                )
             }
             Intent::ResetProjectSettings { project_id } => Next::call(
                 Call::UpdateSettings(Box::new(clear_project_overrides(
@@ -777,17 +1168,14 @@ impl Owner {
                 model,
                 options,
             } => {
+                self.ensure_new_thread_draft();
                 let mut draft = self.state.current_draft();
                 draft.instance_id = instance_id;
                 draft.driver = driver;
                 draft.model = model;
                 draft.options = options;
                 let selection = draft.selection().map_err(invalid)?;
-                self.state.default_draft = Draft {
-                    text: String::new(),
-                    attachments: vec![],
-                    ..draft.clone()
-                };
+                self.state.default_draft = draft.user_defaults();
                 let key = self.state.draft_key();
                 self.state.drafts.insert(key, draft);
                 self.thread_command(select_model_command(selection))
@@ -854,11 +1242,19 @@ impl Owner {
                 self.app_became_active();
                 Next::Done
             }
+            Intent::PreviewSelectTab { tab_id } => {
+                if self.state.preview.session(&tab_id).is_none() {
+                    return Err(invalid("Preview tab is unavailable"));
+                }
+                self.state.preview.active_tab = Some(tab_id);
+                Next::Done
+            }
             other => self.peripheral(other)?,
         })
     }
 
     fn update_draft(&mut self, change: impl FnOnce(&mut Draft)) {
+        self.ensure_new_thread_draft();
         let mut draft = self.state.current_draft();
         change(&mut draft);
         let key = self.state.draft_key();
@@ -919,6 +1315,7 @@ impl Owner {
         if self.state.editing_run.is_some() {
             return self.queue(QueueAction::SaveEdit);
         }
+        self.ensure_new_thread_draft();
         let draft = self.state.current_draft();
         let slash = draft.text.trim().to_ascii_lowercase();
         if matches!(slash.as_str(), "/plan" | "/default") && draft.attachments.is_empty() {
@@ -987,8 +1384,8 @@ impl Owner {
                     thread: Some(thread.clone()),
                     project: self
                         .state
-                        .selected_project
-                        .clone()
+                        .new_thread_project_id()
+                        .map(str::to_owned)
                         .unwrap_or_else(|| CHATS_PROJECT.into()),
                     title: title_seed.clone(),
                     title_seed: Some(title_seed),
@@ -1211,15 +1608,23 @@ impl Owner {
 
     /// Admits the picked files by the reference rules, then uploads the accepted ones.
     /// Images over the size limit must be downscaled by the client first.
-    fn attach_files(&mut self, key: String, files: Vec<LocalFile>) -> Result<(), PeerError> {
+    fn attach_files(&mut self, mut key: String, files: Vec<LocalFile>) -> Result<(), PeerError> {
+        let answer_draft = key.starts_with("answer:");
+        if self.state.selected_thread.is_none() && !answer_draft {
+            let was_current = key == self.state.draft_key();
+            self.ensure_new_thread_draft();
+            if was_current && !self.state.drafts.contains_key(&key) {
+                key = self.state.draft_key();
+            }
+        }
         if key != self.state.draft_key()
             && !self.state.drafts.contains_key(&key)
-            && !key.starts_with("answer:")
+            && !answer_draft
         {
             return Err(invalid("The attachment draft is no longer available"));
         }
         let mut draft = self.state.drafts.get(&key).cloned().unwrap_or_else(|| {
-            if key.starts_with("answer:") {
+            if answer_draft {
                 Draft::default()
             } else {
                 self.state.current_draft()
@@ -1374,10 +1779,20 @@ impl Owner {
     fn peripheral(&mut self, intent: Intent) -> Result<Next, PeerError> {
         Ok(match intent {
             Intent::Transcribe {
-                draft_key,
+                mut draft_key,
                 preparation,
                 audio,
             } => {
+                if self.state.selected_thread.is_none()
+                    && self
+                        .state
+                        .drafts
+                        .get(&draft_key)
+                        .is_none_or(|draft| draft.project_id.is_none())
+                {
+                    self.ensure_new_thread_draft();
+                    draft_key = self.state.draft_key();
+                }
                 let draft = self
                     .state
                     .drafts
@@ -1388,6 +1803,37 @@ impl Owner {
                     Call::Transcribe(op::Transcribe { preparation, audio }),
                     Some((draft_key, draft)),
                 )
+            }
+            Intent::SearchContents {
+                cwd,
+                query,
+                limit,
+                case_sensitive,
+                whole_word,
+                use_regex,
+            } => {
+                let request = agent_protocol::workspace::SearchContents {
+                    cwd: cwd.clone(),
+                    query: query.clone(),
+                    limit,
+                    case_sensitive,
+                    whole_word,
+                    use_regex,
+                };
+                request.validate().map_err(invalid)?;
+                self.state.sources.content_search.wanted = Some(
+                    crate::state::ContentSearchQuery {
+                        cwd,
+                        query,
+                        limit,
+                        case_sensitive,
+                        whole_word,
+                        use_regex,
+                    },
+                );
+                self.state.sources.content_search.in_flight = true;
+                self.state.sources.content_search.error = None;
+                Next::call(Call::SearchContents(request), None)
             }
             Intent::ListFiles { path } => {
                 self.state.workspace.requested_directory = Some(path.clone());
@@ -1438,15 +1884,35 @@ impl Owner {
                 )
             }
             Intent::ReviewWorkspace { cwd } => {
+                self.state.workspace.diff_retry_when_cwd_available = false;
                 self.state.workspace.diff_request = None;
                 self.state.workspace.review = None;
                 Next::call(Call::ReviewWorkspace(op::ReviewWorkspace { cwd }), None)
             }
+            Intent::SubscribeVcsStatus { cwd } => {
+                self.subscribe_vcs_status(cwd);
+                Next::Done
+            }
+            Intent::RefreshVcsStatus { cwd } => self.prepare_vcs_intent(
+                Intent::RefreshVcsStatus { cwd },
+            )?,
+            intent @ Intent::LoadVcsRefs { .. }
+            | intent @ Intent::SwitchVcsRef { .. }
+            | intent @ Intent::CreateVcsRef { .. } => self.prepare_vcs_intent(intent)?,
+            Intent::PullVcs { cwd } => self.prepare_vcs_intent(Intent::PullVcs { cwd })?,
+            intent @ Intent::RunVcsAction { .. } => self.prepare_vcs_intent(intent)?,
+            intent @ Intent::InitRepository { .. }
+            | intent @ Intent::CreateVcsWorktree { .. }
+            | intent @ Intent::RemoveVcsWorktree { .. }
+            | intent @ Intent::ResolvePullRequest { .. }
+            | intent @ Intent::PreparePullRequestThread { .. }
+            | intent @ Intent::PublishRepository { .. } => self.prepare_vcs_intent(intent)?,
             Intent::ReadTurnDiff {
                 from_run_ordinal,
                 to_run_ordinal,
                 ignore_whitespace,
             } => {
+                self.state.workspace.diff_retry_when_cwd_available = false;
                 let request = c::GetTurnDiff {
                     thread_id: self.selected()?,
                     from_run_ordinal,
@@ -1467,7 +1933,59 @@ impl Owner {
             Intent::RemoveWorktree { path } => {
                 Next::call(Call::RemoveWorktree(op::RemoveWorktree { path }), None)
             }
+            Intent::SaveScheduledTask { draft } => {
+                let request = crate::view::scheduled_tasks::upsert(&draft, self.new_command_id())
+                    .map_err(invalid)?;
+                Next::call(Call::UpsertScheduledTask(request), None)
+            }
+            Intent::SetScheduledTaskEnabled { id, enabled } => Next::call(
+                Call::SetScheduledTaskEnabled(
+                    agent_protocol::scheduled_tasks::SetScheduledTaskEnabled { id, enabled },
+                ),
+                None,
+            ),
+            Intent::DeleteScheduledTask { id } => Next::call(
+                Call::DeleteScheduledTask(agent_protocol::scheduled_tasks::ScheduledTaskRef { id }),
+                None,
+            ),
+            Intent::RunScheduledTaskNow { id } => Next::call(
+                Call::RunScheduledTaskNow(
+                    agent_protocol::scheduled_tasks::ScheduledTaskRef { id },
+                ),
+                None,
+            ),
             Intent::LoadAccounts => Next::call(Call::ListAccounts(m::Empty {}), None),
+            Intent::LoadUsageSummary { input } => {
+                self.state.usage_loading = true;
+                self.state.usage_error = None;
+                Next::call(
+                    Call::ReadUsageSummary(op::ReadUsageSummary {
+                        input: input.into(),
+                    }),
+                    None,
+                )
+            }
+            Intent::SetUsagePreferences { preferences } => {
+                self.state.preferences.usage = preferences;
+                Next::Done
+            }
+            Intent::RefreshUsageRates => {
+                self.state.usage_loading = true;
+                self.state.usage_error = None;
+                Next::call(Call::RefreshUsageRates(op::RefreshUsageRates {}), None)
+            }
+            Intent::ConsumeResetCredit {
+                provider,
+                account_id,
+                credit_id,
+            } => Next::call(
+                Call::ConsumeResetCredit(op::ConsumeResetCredit {
+                    provider,
+                    account_id,
+                    credit_id,
+                }),
+                None,
+            ),
             Intent::LoadProviders => Next::call(Call::ListProviders(m::Empty {}), None),
             Intent::SelectAccount { provider, id } => Next::call(
                 Call::SelectAccount(op::SelectAccount { provider, id }),
@@ -1490,6 +2008,25 @@ impl Owner {
                 None,
             ),
             Intent::LoadHostStatus => Next::call(Call::HostStatus(m::Empty {}), None),
+            Intent::LoadUpdateStatus { target } => Next::call(
+                Call::ReadUpdateStatus(m::UpdateStatusRequest { target }),
+                None,
+            ),
+            Intent::CheckUpdate { request } => Next::call(Call::CheckUpdate(request), None),
+            Intent::DownloadUpdate { target } => Next::call(
+                Call::DownloadUpdate(m::UpdateActionRequest { target }),
+                None,
+            ),
+            Intent::InstallUpdate { target } => {
+                Next::call(Call::InstallUpdate(m::UpdateActionRequest { target }), None)
+            }
+            Intent::SetUpdateChannel { target, channel } => Next::call(
+                Call::SetUpdateChannel(m::UpdateChannelRequest { target, channel }),
+                None,
+            ),
+            Intent::LoadNativeUpdate { request } => {
+                Next::call(Call::ReadNativeUpdate(request), None)
+            }
             Intent::LoadRemoteHosts => Next::call(Call::ListRemotes(m::Empty {}), None),
             Intent::LoadHostManagement => {
                 self.job(Call::HostStatus(m::Empty {}), None, None);
@@ -1503,7 +2040,154 @@ impl Owner {
             Intent::AddProject { path } => {
                 Next::call(Call::AddProject(op::AddProject { cwd: path }), None)
             }
+            Intent::PreviewList { configured_urls } => {
+                self.state.preview.configured_urls = configured_urls.clone();
+                if let Some(thread) = self.state.selected_thread.clone() {
+                    self.close_stream(&super::owner::StreamKey::Preview(thread.clone()));
+                    self.subscribe_preview(&thread);
+                }
+                Next::call(
+                    Call::PreviewList(agent_protocol::preview::PreviewList {
+                        thread_id: self.selected()?,
+                        configured_urls,
+                    }),
+                    None,
+                )
+            }
+            Intent::PreviewOpen {
+                url,
+                viewport,
+                appearance,
+                zoom,
+            } => {
+                let request = agent_protocol::preview::PreviewOpen {
+                    thread_id: self.selected()?,
+                    url,
+                    viewport,
+                    appearance,
+                    zoom,
+                    rendered_size: None,
+                };
+                request.validate().map_err(invalid)?;
+                Next::call(Call::PreviewOpen(request), None)
+            }
+            Intent::PreviewNavigate { tab_id, url } => {
+                let request = agent_protocol::preview::PreviewNavigate {
+                    thread_id: self.selected()?,
+                    tab_id,
+                    url,
+                };
+                request.validate().map_err(invalid)?;
+                Next::call(Call::PreviewNavigate(request), None)
+            }
+            Intent::PreviewResize {
+                tab_id,
+                viewport,
+                rendered_width,
+                rendered_height,
+            } => {
+                let rendered_size = match (rendered_width, rendered_height) {
+                    (Some(width), Some(height)) => Some(
+                        agent_protocol::preview::PreviewRenderedViewportSize { width, height },
+                    ),
+                    (None, None) => None,
+                    _ => return Err(invalid("measured preview viewport dimensions must be paired")),
+                };
+                let request = agent_protocol::preview::PreviewResize {
+                    thread_id: self.selected()?,
+                    tab_id,
+                    viewport,
+                    rendered_size,
+                };
+                request.validate().map_err(invalid)?;
+                Next::call(Call::PreviewResize(request), None)
+            }
+            Intent::PreviewSetAppearance { tab_id, appearance } => {
+                let request = agent_protocol::preview::PreviewSetAppearance {
+                    thread_id: self.selected()?,
+                    tab_id,
+                    appearance,
+                };
+                request.validate().map_err(invalid)?;
+                Next::call(Call::PreviewSetAppearance(request), None)
+            }
+            Intent::PreviewSetZoom { tab_id, zoom } => {
+                let request = agent_protocol::preview::PreviewSetZoom {
+                    thread_id: self.selected()?,
+                    tab_id,
+                    zoom,
+                };
+                request.validate().map_err(invalid)?;
+                Next::call(Call::PreviewSetZoom(request), None)
+            }
+            Intent::PreviewRefresh { tab_id } => {
+                let request = agent_protocol::preview::PreviewTab {
+                    thread_id: self.selected()?,
+                    tab_id,
+                };
+                request.validate().map_err(invalid)?;
+                Next::call(Call::PreviewRefresh(request), None)
+            }
+            Intent::PreviewClose { tab_id } => {
+                let request = agent_protocol::preview::PreviewClose {
+                    thread_id: self.selected()?,
+                    tab_id,
+                };
+                request.validate().map_err(invalid)?;
+                Next::call(Call::PreviewClose(request), None)
+            }
+            Intent::PreviewRecordingStart { tab_id } => {
+                let request = agent_protocol::preview::PreviewRecordingStart {
+                    thread_id: self.selected()?,
+                    tab_id,
+                };
+                request.validate().map_err(invalid)?;
+                Next::call(Call::PreviewRecordingStart(request), None)
+            }
+            Intent::PreviewRecordingStop { tab_id } => {
+                let request = agent_protocol::preview::PreviewRecordingStop {
+                    thread_id: self.selected()?,
+                    tab_id,
+                };
+                request.validate().map_err(invalid)?;
+                Next::call(Call::PreviewRecordingStop(request), None)
+            }
             _ => unreachable!("conversation intents are prepared above"),
         })
+    }
+}
+
+fn parse_pull_request_action(value: &str) -> Result<agent_domain::PullRequestAction, PeerError> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "merge" => Ok(agent_domain::PullRequestAction::Merge),
+        "mark_ready" | "ready" => Ok(agent_domain::PullRequestAction::MarkReady),
+        "mark_draft" | "draft" => Ok(agent_domain::PullRequestAction::MarkDraft),
+        "close" => Ok(agent_domain::PullRequestAction::Close),
+        "reopen" => Ok(agent_domain::PullRequestAction::Reopen),
+        "update_branch" => Ok(agent_domain::PullRequestAction::UpdateBranch),
+        "enable_auto_merge" => Ok(agent_domain::PullRequestAction::EnableAutoMerge),
+        "disable_auto_merge" => Ok(agent_domain::PullRequestAction::DisableAutoMerge),
+        "revert" => Ok(agent_domain::PullRequestAction::Revert),
+        _ => Err(invalid("unknown pull request action")),
+    }
+}
+
+fn parse_pull_request_merge_method(
+    value: &str,
+) -> Result<pr::PullRequestMergeMethod, PeerError> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "merge" => Ok(pr::PullRequestMergeMethod::Merge),
+        "squash" => Ok(pr::PullRequestMergeMethod::Squash),
+        "rebase" => Ok(pr::PullRequestMergeMethod::Rebase),
+        _ => Err(invalid("unknown pull request merge method")),
+    }
+}
+
+fn parse_pull_request_verdict(value: &str) -> Result<pr::PullRequestReviewVerdict, PeerError> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "approve" => Ok(pr::PullRequestReviewVerdict::Approve),
+        "request_changes" | "changes" => Ok(pr::PullRequestReviewVerdict::RequestChanges),
+        "comment" => Ok(pr::PullRequestReviewVerdict::Comment),
+        _ => Err(invalid("unknown pull request review verdict")),
     }
 }

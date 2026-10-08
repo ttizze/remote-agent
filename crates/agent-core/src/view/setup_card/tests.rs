@@ -596,6 +596,7 @@ fn mobile_cancel_waits_only_until_the_turn_starts() {
 
 fn user_message(id: &str, run: &str) -> Message {
     Message {
+        scheduled_task: None,
         notification: None,
         id: MessageId::new(id).unwrap(),
         run: Some(RunId::new(run).unwrap()),

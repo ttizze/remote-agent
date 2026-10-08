@@ -10,7 +10,7 @@ use gpui_kit::{
         Disableable, Sizable,
         button::{Button, ButtonVariants},
         h_flex,
-        input::{Editor, EditorState, InputEvent, Position},
+        input::{Editor, EditorState, Input, InputEvent, InputState, Position},
         v_flex,
     },
     prelude::FluentBuilder,
@@ -19,6 +19,7 @@ use gpui_kit::{
 
 pub(super) struct FilesState {
     editor: Entity<EditorState>,
+    content_query: Entity<InputState>,
     /// The file the editor holds.
     path: Option<String>,
     value: String,
@@ -28,6 +29,8 @@ pub(super) struct FilesState {
     pending: Option<u64>,
     /// The folder listed when the tab opened.
     listed_for: Option<String>,
+    /// The last content search sent for the current workspace and query.
+    content_search_for: Option<(String, String)>,
     /// A file to show at a line (from 1) once the editor holds it.
     reveal: Option<(String, u64)>,
 }
@@ -38,19 +41,32 @@ impl FilesState {
         subscriptions: &mut Vec<Subscription>,
     ) -> Self {
         let editor = cx.new(|cx| EditorState::new(window, cx));
+        if !crate::app::ui_word_wrap() {
+            editor.update(cx, |editor, cx| editor.set_soft_wrap(false, window, cx));
+        }
+        let content_query = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("Search project contents")
+        });
         subscriptions.push(cx.subscribe(&editor, |view, input, event, cx| {
             if matches!(event, InputEvent::Change) {
                 let text = input.read(cx).value().to_string();
                 view.file_edited(text);
             }
         }));
+        subscriptions.push(cx.subscribe(&content_query, |view, input, event, cx| {
+            if matches!(event, InputEvent::Change) {
+                view.content_search_changed(input.read(cx).value().to_string());
+            }
+        }));
         Self {
             editor,
+            content_query,
             path: None,
             value: String::new(),
             revision: 0,
             pending: None,
             listed_for: None,
+            content_search_for: None,
             reveal: None,
         }
     }
@@ -59,7 +75,18 @@ impl FilesState {
         self.value.clear();
         self.pending = None;
         self.listed_for = None;
+        self.content_search_for = None;
         self.reveal = None;
+    }
+
+    pub(crate) fn set_word_wrap(
+        &mut self,
+        wrap: bool,
+        window: &mut Window,
+        cx: &mut Context<Desktop>,
+    ) {
+        self.editor
+            .update(cx, |editor, cx| editor.set_soft_wrap(wrap, window, cx));
     }
 }
 
@@ -89,6 +116,30 @@ impl Desktop {
         );
     }
 
+    fn content_search_changed(&mut self, query: String) {
+        if query.is_empty() {
+            self.panels.files.content_search_for = None;
+            return;
+        }
+        let cwd = self.snapshot.cwd();
+        if cwd.is_empty() {
+            return;
+        }
+        let key = (cwd.clone(), query.clone());
+        if self.panels.files.content_search_for.as_ref() == Some(&key) {
+            return;
+        }
+        self.panels.files.content_search_for = Some(key);
+        self.perform(Intent::SearchContents {
+            cwd,
+            query,
+            limit: agent_protocol::workspace::CONTENT_SEARCH_MAX_LIMIT.min(100),
+            case_sensitive: false,
+            whole_word: false,
+            use_regex: false,
+        });
+    }
+
     /// Lists the thread's folder when the tab first shows it, and loads the
     /// open file's text, or its unsaved draft, into the editor.
     pub(super) fn sync_files(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -98,7 +149,22 @@ impl Desktop {
             && self.panels.files.listed_for.as_ref() != Some(&cwd)
         {
             self.panels.files.listed_for = Some(cwd.clone());
-            self.perform(Intent::ListFiles { path: cwd });
+            self.perform(Intent::ListFiles { path: cwd.clone() });
+        }
+        let content_query = self.panels.files.content_query.read(cx).value().to_string();
+        if !content_query.is_empty()
+            && self.panels.files.content_search_for
+                != Some((cwd.clone(), content_query.clone()))
+        {
+            self.panels.files.content_search_for = Some((cwd.clone(), content_query.clone()));
+            self.perform(Intent::SearchContents {
+                cwd,
+                query: content_query,
+                limit: agent_protocol::workspace::CONTENT_SEARCH_MAX_LIMIT.min(100),
+                case_sensitive: false,
+                whole_word: false,
+                use_regex: false,
+            });
         }
         let Some(file) = self.snapshot.workspace.file.clone() else {
             return;
@@ -141,6 +207,13 @@ impl Desktop {
 
     pub(super) fn render_files(&mut self, _: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let workspace = &self.snapshot.workspace;
+        let content_search = self.snapshot.content_search();
+        let content_query = self.panels.files.content_query.read(cx).value().to_string();
+        let content_matches = if content_query.is_empty() {
+            Vec::new()
+        } else {
+            content_search.matches.clone()
+        };
         let directory = workspace.directory.clone();
         let listing = directory
             .as_ref()
@@ -241,6 +314,11 @@ impl Desktop {
                             .text_xs()
                             .text_color(color("textMuted"))
                             .child(listing),
+                    )
+                    .child(
+                        Input::new(&self.panels.files.content_query)
+                            .small()
+                            .aria_label("Search project contents"),
                     ),
             )
             .when(loading, |column| {
@@ -251,6 +329,56 @@ impl Desktop {
                         .text_xs()
                         .text_color(color("textMuted"))
                         .child("Loading files…"),
+                )
+            })
+            .when(!content_matches.is_empty(), |column| {
+                column.child(
+                    v_flex()
+                        .max_h(relative(0.35))
+                        .overflow_y_scroll()
+                        .border_b_1()
+                        .border_color(tint("border", 0.6))
+                        .children(content_matches.into_iter().map(|item| {
+                            let path = item.path.clone();
+                            let line = item.line_number as u64;
+                            h_flex()
+                                .id(SharedString::from(format!(
+                                    "content-match-{}-{}",
+                                    item.path, item.line_number
+                                )))
+                                .w_full()
+                                .gap_2()
+                                .px_2()
+                                .py_1()
+                                .cursor_pointer()
+                                .hover(|row| row.bg(tint("accentSurface", 0.6)))
+                                .child(
+                                    v_flex()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .child(div().truncate().text_xs().child(path.clone()))
+                                        .child(
+                                            div()
+                                                .truncate()
+                                                .text_2xs()
+                                                .text_color(color("textMuted"))
+                                                .child(item.line_content),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .text_2xs()
+                                        .text_color(color("textMuted"))
+                                        .child(format!("{line}")),
+                                )
+                                .on_click(cx.listener(move |view, _, _, _| {
+                                    view.reveal_file_line(path.clone(), Some(line));
+                                    view.perform(Intent::ReadFile {
+                                        path: path.clone(),
+                                        discard_draft: false,
+                                    });
+                                }))
+                        })),
                 )
             })
             .child(

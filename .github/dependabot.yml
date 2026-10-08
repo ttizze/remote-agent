@@ -56,6 +56,20 @@ updates:
       visualization-minor-and-patch:
         patterns: ["*"]
         update-types: [minor, patch]
+  - package-ecosystem: npm
+    directory: "/crates/host-daemon/src/claude/sdk"
+    schedule:
+      interval: weekly
+      day: thursday
+      time: "04:00"
+      timezone: Asia/Tokyo
+    open-pull-requests-limit: 1
+    cooldown:
+      default-days: 7
+    groups:
+      claude-sdk-minor-and-patch:
+        patterns: ["*"]
+        update-types: [minor, patch]
   - package-ecosystem: nix
     directories: ["/", "/tools/agent-peer"]
     schedule:

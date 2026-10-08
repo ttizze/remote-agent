@@ -28,6 +28,29 @@ fn input_requires_the_displayed_tab_but_reads_and_selection_can_refresh_it() {
     }
 }
 
+#[tokio::test]
+async fn recording_completion_is_replayable_after_startup_receiver_drops() {
+    let (done, startup_receiver) = tokio::sync::watch::channel::<
+        Option<Result<agent_protocol::preview::PreviewRecordingArtifact, String>>,
+    >(None);
+    drop(startup_receiver);
+    done.send_replace(Some(Ok(agent_protocol::preview::PreviewRecordingArtifact {
+        id: "browser-recording-test".into(),
+        tab_id: "tab".into(),
+        path: "/tmp/browser-recording-test.webm".into(),
+        mime_type: "video/webm;codecs=vp9".into(),
+        size_bytes: 1,
+        created_at: "2026-01-01T00:00:00Z".into(),
+    })));
+    let mut late_receiver = done.subscribe();
+
+    let result = wait_for_recording_completion(&mut late_receiver)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(result.id, "browser-recording-test");
+}
+
 fn request(thread: &ThreadId, frame: &BrowserFrame, action: BrowserAction) -> BrowserRequest {
     BrowserRequest {
         thread_id: thread.clone(),

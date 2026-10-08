@@ -115,6 +115,7 @@ pub fn send_command(input: StartTurn) -> Command {
         .filter(|_| input.dispatch == TurnDispatch::Start)
         .map(|run| Continuation::Manual { run });
     Command::Send(SendMessage {
+        scheduled_task: None,
         created_by: MessageAuthor::User,
         creation_source: input.creation_source,
         id: input.message.id,

@@ -222,6 +222,7 @@ fn runless_work_started_at(state: &State) -> Option<Timestamp> {
 
 fn stored_message(state: &State, chat: &ChatMessage) -> Message {
     state.message(&chat.id).cloned().unwrap_or_else(|| Message {
+        scheduled_task: None,
         notification: None,
         id: chat.id.clone(),
         run: chat.run.clone(),

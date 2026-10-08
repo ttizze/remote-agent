@@ -691,8 +691,9 @@ pub fn git_diff_view(
     }
     let base_ref = source.and_then(|source| source.base_ref.clone());
     GitDiffView {
-        is_repo: sources
-            .vcs_status
+        is_repo: snapshot
+            .git
+            .status
             .get(cwd)
             .is_none_or(|status| status.is_repo),
         loading: preview.is_some_and(|entry| entry.result.is_none() && entry.error.is_none()),

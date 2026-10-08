@@ -7,7 +7,14 @@ for await (const line of createInterface({ input: process.stdin })) {
   if (frame.type === "control_request") {
     if (frame.request.subtype === "initialize" && process.argv.includes("--fixture-startup-failure")) process.exit(7);
     if (frame.request.subtype === "interrupt") send({ type: "control_cancel_request", request_id: "permission" });
-    send({ type: "control_response", response: { subtype: "success", request_id: frame.request_id, response: { commands: [], models: [], account: {} } } });
+    let response = { commands: [], models: [], account: {} };
+    if (frame.request.subtype === "mcp_set_servers") {
+      const servers = frame.request.servers;
+      send({ type: "fixture_mcp_registered", hasToken: servers.orchestration.env.AGENT_TOOLS_TOKEN === "fixture-private-scope",
+        tokenInArguments: process.argv.some((arg) => arg.includes("fixture-private-scope")), mcpInArguments: process.argv.includes("--mcp-config") });
+      response = { added: Object.keys(servers), removed: [], errors: {} };
+    }
+    send({ type: "control_response", response: { subtype: "success", request_id: frame.request_id, response } });
   } else if (frame.type === "user") {
     prompt = frame;
     if (prompt.message.content === "crash") process.exit(7);

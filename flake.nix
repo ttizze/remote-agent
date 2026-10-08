@@ -7,7 +7,7 @@
 
   outputs = { nixpkgs, rust-overlay, ... }:
     let
-      supportedSystems = [ "aarch64-darwin" "x86_64-darwin" "aarch64-linux" "x86_64-linux" ];
+      supportedSystems = [ "aarch64-darwin" "aarch64-linux" "x86_64-linux" ];
       forEachSystem = function:
         nixpkgs.lib.genAttrs supportedSystems (system:
           function (import nixpkgs {
@@ -22,7 +22,9 @@
     {
       packages = forEachSystem (pkgs: {
         agent-peer = pkgs.callPackage ./tools/agent-peer/package.nix { };
+        ffmpeg = pkgs.ffmpeg;
         kani = pkgs.callPackage ./tools/kani/package.nix { };
+        kache = pkgs.callPackage ./tools/kache/package.nix { };
       });
       devShells = forEachSystem (pkgs:
         let
@@ -46,11 +48,12 @@
               "x86_64-linux-android"
             ];
           };
-          sccacheHook = ''
+          kache = pkgs.callPackage ./tools/kache/package.nix { };
+          kacheHook = ''
             # CI already restores Cargo outputs.
             if [ -z "''${CI:-}" ]; then
-              export RUSTC_WRAPPER="${pkgs.sccache}/bin/sccache"
-              export SCCACHE_DIR="''${SCCACHE_DIR:-$HOME/${if pkgs.stdenv.hostPlatform.isDarwin then "Library/Caches/Mozilla.sccache" else ".cache/sccache"}}"
+              export RUSTC_WRAPPER="${kache}/bin/kache"
+              export KACHE_CACHE_DIR="''${KACHE_CACHE_DIR:-$HOME/${if pkgs.stdenv.hostPlatform.isDarwin then "Library/Caches/kache" else ".cache/kache"}}"
             fi
           '';
           androidSdk = (pkgs.androidenv.composeAndroidPackages {
@@ -81,7 +84,7 @@
             ANDROID_HOME = "${androidSdk}/libexec/android-sdk";
             ANDROID_SDK_ROOT = "${androidSdk}/libexec/android-sdk";
             shellHook = pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isDarwin ''
-              export DEVELOPER_DIR="''${BEX_XCODE_DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}"
+              export DEVELOPER_DIR="''${APP_XCODE_DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}"
             '';
           };
           kani = pkgs.mkShell {
@@ -93,7 +96,7 @@
           native = pkgs.mkShell {
             RUST_TOOLCHAIN_VERSION = rustToolchain.version;
             NEXTEST_VERSION = pkgs.cargo-nextest.version;
-            packages = with pkgs; [ rustToolchain sccache cargo-mutants cargo-nextest just jq git pkg-config cmake clang workflowLinter nodejs ]
+            packages = with pkgs; [ rustToolchain kache cargo-mutants cargo-nextest just jq git pkg-config cmake clang workflowLinter nodejs ffmpeg ]
               ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
                 lsof
                 alsa-lib fontconfig freetype libxkbcommon wayland libGL vulkan-loader
@@ -102,7 +105,7 @@
               ];
             LD_LIBRARY_PATH = pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux
               (pkgs.lib.makeLibraryPath [ pkgs.vulkan-loader pkgs.libGL pkgs.libxkbcommon pkgs.wayland ]);
-            shellHook = sccacheHook + pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isDarwin ''
+            shellHook = kacheHook + pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isDarwin ''
               export PATH="/usr/sbin:$PATH"
             '';
           };
@@ -120,9 +123,10 @@
               workflowLinter
               nodejs
               rustToolchain
-              sccache
+              kache
               cargo-mutants
               cargo-nextest
+              ffmpeg
             ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
               lsof
               gradle
@@ -135,13 +139,13 @@
               pkgs.swiftformat
             ];
 
-            shellHook = sccacheHook + pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isDarwin ''
+            shellHook = kacheHook + pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isDarwin ''
               # Use macOS's kernel-matched process inspector. The Nix lsof
               # build scans this host much more slowly under Simulator load.
               export PATH="/usr/sbin:$PATH"
               # The Nix compiler setup overwrites DEVELOPER_DIR with its own SDK.
-              if [ -d "''${BEX_XCODE_DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}" ]; then
-                export DEVELOPER_DIR="''${BEX_XCODE_DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}"
+              if [ -d "''${APP_XCODE_DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}" ]; then
+                export DEVELOPER_DIR="''${APP_XCODE_DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}"
                 unset SDKROOT
                 # Xcode expects to drive clang itself. Nix's LD override makes
                 # xcodebuild invoke ld directly with clang-only -Xlinker flags.

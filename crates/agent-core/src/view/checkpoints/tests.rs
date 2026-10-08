@@ -8,6 +8,7 @@ use rstest::rstest;
 
 fn message(id: &str, run: &str, role: Role, intent: InputIntent) -> Message {
     Message {
+        scheduled_task: None,
         notification: None,
         id: MessageId::new(id).unwrap(),
         run: Some(RunId::new(run).unwrap()),
@@ -514,6 +515,7 @@ fn the_git_view_reads_the_preview_source_its_scope_picks() {
             ignore_whitespace: false,
             file: None,
         },
+        active_cwd: "/repo".into(),
         result: Some(std::sync::Arc::new(DiffPreviewResult {
             cwd: "/repo".into(),
             generated_at: agent_domain::Timestamp::from_millis(0).unwrap(),

@@ -369,6 +369,15 @@ private fun CardRow(row: ThreadRow, environmentLabel: String?, drivers: List<Dri
             maxLines = 2,
             overflow = TextOverflow.Ellipsis,
         )
+        row.pullRequestLabel?.let {
+            Text(
+                it,
+                Modifier.padding(top = 3.5.dp),
+                style = AppTheme.caption.copy(fontFamily = AppTheme.mono),
+                color = colors.primaryText,
+                maxLines = 1,
+            )
+        }
         row.searchSnippet?.let {
             Text(it, Modifier.padding(top = 3.5.dp), style = AppTheme.caption, color = muted, maxLines = 2)
         }

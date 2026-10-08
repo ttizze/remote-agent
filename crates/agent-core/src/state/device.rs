@@ -29,6 +29,7 @@ pub struct Preferences {
     pub terminal_font_size: Option<f64>,
     /// Each model's last chosen options, which a newly picked model takes.
     pub model_options: crate::view::models::staging::ModelOptionMemory,
+    pub usage: crate::view::usage::UsagePreferences,
     /// How this device presents thread attention and completion events.
     pub notification_mode: crate::view::notifications::NotificationMode,
     /// Whether foreground thread events appear as in-app notices.
@@ -52,6 +53,7 @@ impl Default for Preferences {
             resume_compaction_dismissed: BTreeSet::new(),
             terminal_font_size: None,
             model_options: BTreeMap::new(),
+            usage: Default::default(),
             notification_mode: crate::view::notifications::NotificationMode::default(),
             in_app_notifications_enabled: true,
             load_balancing_enabled: false,

@@ -20,9 +20,12 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Archive
 import androidx.compose.material.icons.outlined.ChevronRight
 import androidx.compose.material.icons.outlined.Computer
+import androidx.compose.material.icons.outlined.Schedule
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
@@ -43,17 +46,27 @@ import androidx.compose.ui.unit.sp
 import dev.remoteagent.core.ArchivedLayout
 import dev.remoteagent.core.ArchivedOptions
 import dev.remoteagent.core.ArchivedSortOrder
+import dev.remoteagent.core.DiagnosticRow
 import dev.remoteagent.core.Intent
+import dev.remoteagent.core.NativeUpdatePlatform
+import dev.remoteagent.core.NativeUpdateRequest
 import dev.remoteagent.core.ProviderKind
 import dev.remoteagent.core.SettingControl
 import dev.remoteagent.core.SettingValue
 import dev.remoteagent.core.SettingsRow
 import dev.remoteagent.core.SettingsScope
 import dev.remoteagent.core.ThreadMenuConfirmation
+import dev.remoteagent.core.UpdateChannel
 import dev.remoteagent.core.accountErrorMessage
 import dev.remoteagent.core.privacyPolicy
 
 private const val PERCENT = 100f
+
+private fun releaseUpdateChannel(): UpdateChannel = when (BuildConfig.RELEASE_CHANNEL) {
+    "nightly" -> UpdateChannel.Nightly
+    "preview" -> UpdateChannel.Preview
+    else -> UpdateChannel.Stable
+}
 
 @Composable
 internal fun SettingsScreen(model: AndroidAppModel, projectId: String?) {
@@ -63,6 +76,16 @@ internal fun SettingsScreen(model: AndroidAppModel, projectId: String?) {
         if (projectId == null) {
             model.perform(Intent.LoadAccounts)
             model.perform(Intent.LoadWorktreeSettings)
+            model.perform(
+                Intent.LoadNativeUpdate(
+                    NativeUpdateRequest(
+                        NativeUpdatePlatform.Android,
+                        BuildConfig.VERSION_NAME,
+                        releaseUpdateChannel(),
+                    )
+                )
+            )
+            model.perform(Intent.LoadBackgroundPolicy)
         }
     }
     val view = model.snapshot.settings(scope)
@@ -71,13 +94,29 @@ internal fun SettingsScreen(model: AndroidAppModel, projectId: String?) {
             if (projectId == null)
                 item {
                     SectionCard("Connections") {
-                        NavigationRow(Icons.Outlined.Computer, "Environments") { model.showHosts() }
+                        NavigationRow(
+                            Icons.Outlined.Computer,
+                            "Environments (${model.environmentSettings().size})",
+                        ) { model.showHosts() }
+                    }
+                }
+            if (projectId == null)
+                item {
+                    SectionCard("Interface") {
+                        NavigationRow(Icons.Outlined.Computer, "Appearance") { model.navigate(Route.Appearance) }
                     }
                 }
             if (projectId == null)
                 item {
                     SectionCard("Projects & threads") {
                         NavigationRow(Icons.Outlined.Archive, "Archived Threads") { model.navigate(Route.Archived) }
+                        NavigationRow(Icons.Outlined.Schedule, "Scheduled tasks") { model.navigate(Route.ScheduledTasks) }
+                    }
+                }
+            if (projectId == null)
+                item {
+                    SectionCard("Server settings") {
+                        NavigationRow(Icons.Outlined.Computer, "Usage") { model.navigate(Route.Usage) }
                     }
                 }
             view.project?.let { header ->
@@ -130,11 +169,265 @@ internal fun SettingsScreen(model: AndroidAppModel, projectId: String?) {
                 }
             }
             if (projectId == null) item { AccountsSection(model) }
+            if (projectId == null) item { NativeUpdateSection(model) }
+            if (projectId == null) item { BackgroundDiagnosticsSection(model) }
             if (projectId == null)
                 item { Text(privacyPolicy(), style = AppTheme.caption, color = AppTheme.colors.foregroundMuted) }
         }
     }
 }
+
+@Composable
+internal fun AppearanceScreen(model: AndroidAppModel) {
+    val context = LocalContext.current
+    var appearance by remember { mutableStateOf(AppTheme.appearance) }
+    var themeTarget by remember { mutableStateOf("both") }
+    fun update(next: MobileAppearanceSettings) {
+        appearance = next.normalized()
+        AppTheme.update(context, appearance)
+        model.perform(Intent.SetTerminalFontSize(appearance.resolvedTerminalFontSize()))
+    }
+    ScreenScaffold("Appearance", onBack = model::back) {
+        LazyColumn(contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(20.dp)) {
+            item {
+                SectionCard("Color scheme") {
+                    MobileColorScheme.entries.forEach { scheme ->
+                        Row(
+                            Modifier.fillMaxWidth().clickable { update(appearance.copy(colorScheme = scheme)) }.padding(16.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            RadioButton(appearance.colorScheme == scheme, { update(appearance.copy(colorScheme = scheme)) })
+                            Text(scheme.name.lowercase().replaceFirstChar { it.uppercase() }, style = AppTheme.body)
+                        }
+                    }
+                }
+            }
+            item {
+                SectionCard("Themes") {
+                    Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        listOf("both" to "Both", "light" to "Light", "dark" to "Dark").forEach { (id, label) ->
+                            TextButton(onClick = { themeTarget = id }) {
+                                Text(label, color = if (themeTarget == id) AppTheme.colors.primaryText else AppTheme.colors.foregroundMuted)
+                            }
+                        }
+                    }
+                    listOf(null to "Bex", "chat" to "Chat", "grove" to "Grove", "ocean" to "Ocean",
+                        "ember" to "Ember", "iris" to "Iris", "material-you" to "Material You").forEach { (id, label) ->
+                        val selected = when (themeTarget) {
+                            "light" -> appearance.lightTheme == id
+                            "dark" -> appearance.darkTheme == id
+                            else -> appearance.theme == id && appearance.lightTheme == null && appearance.darkTheme == null
+                        }
+                        val pick = {
+                            update(
+                                when (themeTarget) {
+                                    "light" -> appearance.assigningTheme(false, id)
+                                    "dark" -> appearance.assigningTheme(true, id)
+                                    else -> appearance.copy(theme = id, lightTheme = null, darkTheme = null)
+                                }
+                            )
+                        }
+                        Row(
+                            Modifier.fillMaxWidth().clickable(onClick = pick)
+                                .padding(horizontal = 16.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            RadioButton(selected, pick)
+                            Text(label, style = AppTheme.body)
+                        }
+                    }
+                }
+            }
+            item {
+                SectionCard("Text") {
+                    SizeRow("Base size", appearance.baseFontSize, 11, 22) {
+                        update(appearance.copy(baseFontSize = it))
+                    }
+                }
+            }
+            item {
+                SectionCard("Code") {
+                    ToggleRow("Custom size", appearance.codeFontSize != null) {
+                        update(appearance.copy(codeFontSize = if (it) appearance.codeFontSize ?: 12 else null))
+                    }
+                    appearance.codeFontSize?.let { size ->
+                        SizeRow("Code size", size, 8, 18) { update(appearance.copy(codeFontSize = it)) }
+                    }
+                    ToggleRow("Wrap long lines", appearance.codeWordWrap) {
+                        update(appearance.copy(codeWordWrap = it))
+                    }
+                }
+            }
+            item {
+                SectionCard("Terminal") {
+                    ToggleRow("Custom size", appearance.terminalFontSize != null) {
+                        update(appearance.copy(terminalFontSize = if (it) appearance.terminalFontSize ?: 10.5 else null))
+                    }
+                    appearance.terminalFontSize?.let { size ->
+                        SizeRow("Terminal size", size, 6.0, 14.0, 0.5) {
+                            update(appearance.copy(terminalFontSize = it))
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun BackgroundDiagnosticsSection(model: AndroidAppModel) {
+    val colors = AppTheme.colors
+    val rows = model.snapshot.backgroundRows()
+    SectionCard("Background activity & diagnostics") {
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text("Host policy", Modifier.weight(1f), style = AppTheme.body, color = colors.foreground)
+            TextButton(onClick = { model.perform(Intent.LoadDiagnostics("")) }) {
+                Text("Refresh", color = colors.primaryText)
+            }
+        }
+        rows.forEachIndexed { index, row ->
+            if (row.key == "profile" ||
+                row.key == "automaticGitFetchIntervalMs" ||
+                row.key == "providerHealthRefreshIntervalMs"
+            ) return@forEachIndexed
+            if (index > 0) HorizontalDivider(color = colors.border)
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                Text(row.key, Modifier.weight(1f), style = AppTheme.caption, color = colors.foregroundMuted)
+                Text(row.value, style = AppTheme.caption, color = colors.foregroundSecondary)
+            }
+        }
+        val profile = rows.firstOrNull { it.key == "profile" }?.value?.lowercase()
+        if (profile != null) {
+            HorizontalDivider(color = colors.border)
+            listOf("balanced", "performance", "battery-saver").forEach { choice ->
+                ChoiceRow(choice.replace('-', ' ').replaceFirstChar { it.uppercase() }, null, profile == choice) {
+                    model.perform(Intent.SetBackgroundProfile(choice))
+                }
+            }
+        }
+        BackgroundIntervalPicker(
+            "Git fetch interval",
+            backgroundIntervalSeconds(rows, "automaticGitFetchIntervalMs"),
+            listOf(0, 15, 30, 60, 300, 900),
+        ) { seconds ->
+            model.perform(Intent.SetAutomaticGitFetchInterval(seconds))
+        }
+        BackgroundIntervalPicker(
+            "Provider health interval",
+            backgroundIntervalSeconds(rows, "providerHealthRefreshIntervalMs"),
+            listOf(0, 60, 300, 900, 1800),
+        ) { seconds ->
+            model.perform(Intent.SetProviderHealthRefreshInterval(seconds))
+        }
+        model.snapshot.hostResourceRows().forEach { row ->
+            Text("${row.key}: ${row.value}", Modifier.padding(horizontal = 16.dp, vertical = 4.dp), style = AppTheme.caption, color = colors.foregroundMuted)
+        }
+        model.snapshot.processRows().take(8).forEach { row ->
+            Text("${row.key}: ${row.value}", Modifier.padding(horizontal = 16.dp, vertical = 4.dp), style = AppTheme.caption, color = colors.foregroundMuted)
+        }
+        model.snapshot.processHistoryRows().take(8).forEach { row ->
+            Text("${row.key}: ${row.value}", Modifier.padding(horizontal = 16.dp, vertical = 4.dp), style = AppTheme.caption, color = colors.foregroundMuted)
+        }
+        model.snapshot.traceRows().forEach { row ->
+            Text("${row.key}: ${row.value}", Modifier.padding(horizontal = 16.dp, vertical = 4.dp), style = AppTheme.caption, color = colors.foregroundMuted)
+        }
+    }
+}
+
+@Composable
+private fun NativeUpdateSection(model: AndroidAppModel) {
+    val context = LocalContext.current
+    val update = model.snapshot.nativeUpdate()
+    SectionCard("App updates") {
+        Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text(
+                when {
+                    update == null -> "Checking for updates…"
+                    update.updateAvailable -> "Version ${update.latestVersion ?: "new"} is available"
+                    update.message != null -> update.message!!
+                    else -> "Up to date"
+                },
+                style = AppTheme.body,
+                color = AppTheme.colors.foreground,
+            )
+            update?.takeIf { it.updateAvailable }?.storeUrl?.let { url ->
+                TextButton(onClick = {
+                    val uri = Uri.parse(url)
+                    if (uri.scheme == "https") {
+                        context.startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW, uri))
+                    }
+                }) {
+                    Text("Open Play Store", color = AppTheme.colors.primaryText)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun BackgroundIntervalPicker(
+    title: String,
+    selectedSeconds: Int,
+    values: List<Int>,
+    onChange: (Int) -> Unit,
+) {
+    val options = (values + selectedSeconds).distinct().sorted()
+    val index = options.indexOf(selectedSeconds)
+    Row(
+        Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(title, Modifier.weight(1f), style = AppTheme.caption, color = AppTheme.colors.foregroundMuted)
+        TextButton(onClick = { onChange(options[index - 1]) }, enabled = index > 0) {
+            Text("−", color = AppTheme.colors.foreground)
+        }
+        Text(
+            if (selectedSeconds == 0) "Disabled" else "$selectedSeconds s",
+            style = AppTheme.caption,
+            color = AppTheme.colors.foregroundSecondary,
+        )
+        TextButton(onClick = { onChange(options[index + 1]) }, enabled = index >= 0 && index + 1 < options.size) {
+            Text("+", color = AppTheme.colors.foreground)
+        }
+    }
+}
+
+@Composable
+private fun ToggleRow(label: String, checked: Boolean, onCheckedChange: (Boolean) -> Unit) {
+    Row(Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+        Text(label, Modifier.weight(1f), style = AppTheme.body)
+        Switch(checked, onCheckedChange)
+    }
+}
+
+@Composable
+private fun SizeRow(label: String, value: Int, min: Int, max: Int, onChange: (Int) -> Unit) {
+    Row(Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+        Text(label, Modifier.weight(1f), style = AppTheme.body)
+        TextButton(onClick = { if (value > min) onChange(value - 1) }, enabled = value > min) { Text("−") }
+        Text(value.toString(), style = AppTheme.body.copy(fontFamily = AppTheme.mono))
+        TextButton(onClick = { if (value < max) onChange(value + 1) }, enabled = value < max) { Text("+") }
+    }
+}
+
+@Composable
+private fun SizeRow(label: String, value: Double, min: Double, max: Double, step: Double, onChange: (Double) -> Unit) {
+    Row(Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+        Text(label, Modifier.weight(1f), style = AppTheme.body)
+        TextButton(onClick = { if (value > min) onChange((value - step).coerceAtLeast(min)) }, enabled = value > min) { Text("−") }
+        Text(String.format("%.1f", value), style = AppTheme.body.copy(fontFamily = AppTheme.mono))
+        TextButton(onClick = { if (value < max) onChange((value + step).coerceAtMost(max)) }, enabled = value < max) { Text("+") }
+    }
+}
+
+private fun backgroundIntervalSeconds(rows: List<DiagnosticRow>, key: String): Int =
+    rows.firstOrNull { it.key == key }?.value?.toLongOrNull()?.div(1_000L)?.coerceAtMost(Int.MAX_VALUE.toLong())?.toInt() ?: 0
 
 @Composable
 private fun NavigationRow(icon: ImageVector, label: String, onClick: () -> Unit) {
@@ -226,6 +519,8 @@ private fun AccountsSection(model: AndroidAppModel) {
     var code by remember { mutableStateOf("") }
     SectionCard("Provider accounts") {
         model.snapshot.accounts()?.accounts.orEmpty().forEach { account ->
+            val limits = model.snapshot.usageLimits().firstOrNull { it.id == account.id }
+            var confirmingReset by remember(account.id) { mutableStateOf(false) }
             Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
@@ -241,7 +536,7 @@ private fun AccountsSection(model: AndroidAppModel) {
                         Text("Remove", color = colors.dangerForeground)
                     }
                 }
-                account.usage?.windows?.forEach { window ->
+                limits?.windows?.forEach { window ->
                     Text(
                         "${window.label}: ${window.remainingPercent}% remaining",
                         style = AppTheme.caption,
@@ -254,9 +549,44 @@ private fun AccountsSection(model: AndroidAppModel) {
                         trackColor = colors.secondary,
                     )
                 }
-                account.usage?.error?.let {
+                if ((limits?.resetCreditCount ?: 0) > 0) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("Reset credits: ${limits?.resetCreditCount}", style = AppTheme.caption, color = colors.foregroundMuted, modifier = Modifier.weight(1f))
+                        TextButton(onClick = { confirmingReset = true }) {
+                            Text("Use reset", color = colors.primaryText)
+                        }
+                    }
+                }
+                limits?.externalLabel?.let {
+                    TextButton(onClick = {
+                        limits.externalUrl?.let { url ->
+                            val uri = Uri.parse(url)
+                            if (uri.scheme == "https") {
+                                context.startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW, uri))
+                            }
+                        }
+                    }) {
+                        Text(it, style = AppTheme.caption, color = colors.primaryText)
+                    }
+                }
+                limits?.error?.let {
                     Text(accountErrorMessage(it), style = AppTheme.caption, color = colors.warningForeground)
                 }
+            }
+            if (confirmingReset) {
+                AlertDialog(
+                    onDismissRequest = { confirmingReset = false },
+                    title = { Text("Use a reset credit?") },
+                    text = { Text("This redeems one credit and clears the current rate-limit windows.") },
+                    confirmButton = {
+                        TextButton(onClick = {
+                            confirmingReset = false
+                            model.perform(Intent.ConsumeResetCredit(account.provider, account.id, limits?.nextCreditId))
+                            model.perform(Intent.LoadAccounts)
+                        }) { Text("Use credit") }
+                    },
+                    dismissButton = { TextButton(onClick = { confirmingReset = false }) { Text("Cancel") } },
+                )
             }
             HorizontalDivider(color = colors.border)
         }
