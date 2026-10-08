@@ -124,6 +124,7 @@ final class AgentPushCenter: NSObject, UIApplicationDelegate, UNUserNotification
             guard let self else { return }
             self.deviceToken = value
             self.submitRegistrations()
+            self.setActiveForKnownHosts()
         }
     }
 
@@ -391,6 +392,15 @@ final class AgentPushCenter: NSObject, UIApplicationDelegate, UNUserNotification
             for await activity in Activity<AgentActivityAttributes>.activityUpdates {
                 guard let self else { return }
                 let hostId = self.hostId(for: activity)
+                guard self.knownHostIds().contains(hostId) else {
+                    Task { @MainActor in
+                        await activity.end(
+                            ActivityContent(state: activity.content.state, staleDate: nil),
+                            dismissalPolicy: .immediate,
+                        )
+                    }
+                    continue
+                }
                 self.activityIds[hostId] = activity.id
                 self.activityHosts[activity.id] = hostId
                 self.observeActivityToken(activity, hostId: hostId)
@@ -407,6 +417,15 @@ final class AgentPushCenter: NSObject, UIApplicationDelegate, UNUserNotification
         }
         for activity in Activity<AgentActivityAttributes>.activities {
             let hostId = hostId(for: activity)
+            guard knownHostIds().contains(hostId) else {
+                Task { @MainActor in
+                    await activity.end(
+                        ActivityContent(state: activity.content.state, staleDate: nil),
+                        dismissalPolicy: .immediate,
+                    )
+                }
+                continue
+            }
             activityIds[hostId] = activity.id
             activityHosts[activity.id] = hostId
             observeActivityToken(activity, hostId: hostId)

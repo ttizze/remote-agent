@@ -63,9 +63,6 @@ internal fun RemoteAgentApp(
         model.requestPushPermissionIfNeeded(requestNotifications)
     }
     AppMaterialTheme {
-        LaunchedEffect(model.snapshot.preferences().notificationMode.toString()) {
-            (activity as? MainActivity)?.requestNotificationPermissionIfNeeded()
-        }
         val context = LocalContext.current
         val root = model.snapshot.currentDirectory()
         val markdown =

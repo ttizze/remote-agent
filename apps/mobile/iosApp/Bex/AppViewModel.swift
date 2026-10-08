@@ -158,7 +158,10 @@ final class BexAppViewModel: ObservableObject {
                 }
             }
             Task { [weak self] in
-                do { try await background?.shutdown() } catch { self?.notice = error.localizedDescription }
+                do {
+                    await unregistration?.value
+                    try await background?.shutdown()
+                } catch { self?.notice = error.localizedDescription }
             }
             profiles = remaining
             publishUsageWidget()
@@ -473,9 +476,10 @@ final class BexAppViewModel: ObservableObject {
     private func activityContentState(_ source: AgentCore.Snapshot) -> AgentActivityAttributes.ContentState? {
         let activities = source.awarenessActivities()
         guard !activities.isEmpty else { return nil }
-        let items = activities.map { activity in
+        let items = activities.compactMap { activity -> AgentActivityAttributes.Item? in
             let phase = canonicalActivityPhase(activity.phase)
             let environmentId = activity.environmentId.isEmpty ? (source.environmentId() ?? "") : activity.environmentId
+            guard !environmentId.isEmpty, !activity.threadId.isEmpty else { return nil }
             return AgentActivityAttributes.Item(
                 environmentId: environmentId,
                 threadId: activity.threadId,
@@ -491,6 +495,7 @@ final class BexAppViewModel: ObservableObject {
                 )
             )
         }
+        guard !items.isEmpty else { return nil }
         let activeCount = items.reduce(into: UInt32(0)) { result, item in
             if !["completed", "failed", "stale"].contains(item.phase) { result += 1 }
         }

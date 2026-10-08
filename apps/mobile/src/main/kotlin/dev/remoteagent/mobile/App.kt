@@ -647,7 +647,6 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
             val unregistration = unregisterPush(id)
             val background = backgroundOwners.remove(id)
             backgroundJobs.remove(id)?.cancel()
-            scope.launch { runCatching { background?.shutdown() } }
             AndroidCredentialStore(context, id).remove()
             var old: AgentStore? = null
             if (profileId == id) {
@@ -664,6 +663,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
             File(repository.cacheDirectory(id)).deleteRecursively()
             scope.launch {
                 unregistration?.join()
+                runCatching { background?.shutdown() }
                 old?.shutdown()
             }
             if (profiles.isEmpty()) stack = listOf(Route.Pairing)

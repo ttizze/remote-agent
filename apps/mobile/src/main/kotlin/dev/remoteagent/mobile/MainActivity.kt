@@ -39,22 +39,10 @@ class MainActivity : ComponentActivity() {
             model.refreshPushRegistration()
         }
 
-    internal fun requestNotificationPermissionIfNeeded() {
-        if (
-            android.os.Build.VERSION.SDK_INT >= 33 &&
-                model.notificationsEnabled() &&
-                checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) !=
-                    PackageManager.PERMISSION_GRANTED
-        ) {
-            requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1001)
-        }
-    }
-
     override fun onResume() {
         super.onResume()
         localNetworkGranted =
             checkSelfPermission(Manifest.permission.ACCESS_LOCAL_NETWORK) == PackageManager.PERMISSION_GRANTED
-        requestNotificationPermissionIfNeeded()
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
