@@ -25,7 +25,7 @@ private struct BexTaskActivity: Widget {
         } dynamicIsland: { context in
             DynamicIsland {
                 DynamicIslandExpandedRegion(.leading) {
-                    Text("Bex").font(.headline)
+                    Text("bex").font(.headline)
                 }
                 DynamicIslandExpandedRegion(.trailing) {
                     Text("\(context.state.summary.total)件").font(.caption)

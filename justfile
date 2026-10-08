@@ -48,7 +48,7 @@ dev: (build-desktop-macos "dev")
         accounts=$(/usr/bin/plutil -extract directory raw -o - "$accounts/host-instance.json")
     fi
     target=$(cargo metadata --no-deps --format-version 1 | jq -er .target_directory)
-    open -n "$target/debug/Bex.app" --env BEX_ISOLATED_HOST=1 \
+    open -n "$target/debug/bex.app" --env BEX_ISOLATED_HOST=1 \
         --env "BEX_STATE_DIR=$HOME/Library/Application Support/app.bex.BEX-Dev" \
         --env "BEX_ACCOUNT_STATE_DIR=$accounts"
 

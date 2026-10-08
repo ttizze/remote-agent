@@ -44,8 +44,8 @@ if [[ $product == host ]]; then
     echo "$output/host-daemon"
     exit
 fi
-staging=$(mktemp -d "$output/.Bex-build.XXXXXX")
-destination="$output/Bex.app"
+staging=$(mktemp -d "$output/.bex-build.XXXXXX")
+destination="$output/bex.app"
 cleanup() {
     result=$?
     if [[ -d $staging/previous.app && ! -e $destination ]]; then
@@ -60,19 +60,19 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
-bundle="$staging/Bex.app"
+bundle="$staging/bex.app"
 executables="$bundle/Contents/MacOS"
 resources="$bundle/Contents/Resources"
 mkdir -p "$executables" "$resources"
-cp apps/desktop/assets/icon.icns "$resources/Bex.icns"
+cp apps/desktop/assets/icon.icns "$resources/bex.icns"
 cp crates/host-daemon/src/claude/sdk/SDK-LICENSE.md "$resources/Claude-Agent-SDK-LICENSE.md"
-cp "$output/bex-desktop" "$executables/Bex"
+cp "$output/bex-desktop" "$executables/bex"
 cp "$output/host-daemon" "$executables/host-daemon"
 cp crates/host-daemon/src/claude/sdk/bridge.bundle.mjs "$resources/bex-claude-sdk.mjs"
 cp "$output/bex-provider-supervisor" "$executables/bex-provider-supervisor"
 cp apps/desktop/macos/Info.plist "$bundle/Contents/Info.plist"
 # Use macOS's libiconv so the app also runs on Macs without Nix.
-for executable in "$executables/Bex" "$executables/host-daemon" "$executables/bex-provider-supervisor"; do
+for executable in "$executables/bex" "$executables/host-daemon" "$executables/bex-provider-supervisor"; do
     while IFS= read -r library; do
         [[ $library == /nix/store/* ]] || continue
         [[ ${library##*/} == libiconv.2.dylib ]] || {
@@ -81,7 +81,7 @@ for executable in "$executables/Bex" "$executables/host-daemon" "$executables/be
         /usr/bin/install_name_tool -change "$library" /usr/lib/libiconv.2.dylib "$executable"
     done < <(/usr/bin/otool -L "$executable" | awk 'NR > 1 {print $1}')
 done
-sign "$executables/Bex"
+sign "$executables/bex"
 sign --identifier app.bex.provider-supervisor "$executables/bex-provider-supervisor"
 sign --identifier app.bex.host "$executables/host-daemon"
 sign "$bundle"
