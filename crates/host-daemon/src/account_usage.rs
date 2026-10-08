@@ -42,18 +42,40 @@ impl UsageEntry {
             return usage.clone();
         }
         let result = tokio::time::timeout(Duration::from_secs(8), fetch).await;
-        let (snapshot, error) = match result {
+        let snapshot = match result {
             Ok(Ok(snapshot))
                 if !snapshot.windows.is_empty() || snapshot.reset_credits.is_some() =>
             {
-                (snapshot, None)
+                snapshot
             }
-            _ => (
-                UsageSnapshot::default(),
-                Some(
-                    "使用量を取得できませんでした。しばらくしてから再読み込みしてください。".into(),
-                ),
-            ),
+            _ => {
+                // A transient provider failure must not erase the last usable
+                // limits. Keep its original fetched_at and cache age so a
+                // later refresh can retry instead of making stale data look
+                // fresh. Unsupported accounts have no usable snapshot and
+                // therefore continue to receive the bounded error below.
+                if let Some((_, previous)) = cached.as_ref()
+                    && (!previous.windows.is_empty() || previous.reset_credits.is_some())
+                {
+                    return previous.clone();
+                }
+                let usage = AccountUsage {
+                    windows: Vec::new(),
+                    fetched_at: SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs() as i64,
+                    error: Some(
+                        "使用量を取得できませんでした。しばらくしてから再読み込みしてください。"
+                            .into(),
+                    ),
+                    credential_fingerprint: None,
+                    reset_credits: None,
+                    external_usage: None,
+                };
+                *cached = Some((Instant::now(), usage.clone()));
+                return usage;
+            }
         };
         let usage = AccountUsage {
             windows: snapshot.windows,
@@ -61,7 +83,7 @@ impl UsageEntry {
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs() as i64,
-            error,
+            error: None,
             credential_fingerprint: snapshot.credential_fingerprint,
             reset_credits: snapshot.reset_credits,
             external_usage: snapshot.external_usage,
@@ -271,7 +293,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cache_is_scoped_to_account_and_expired_failures_replace_old_usage() {
+    async fn cache_is_scoped_to_account_and_expired_failures_keep_old_usage() {
         let mut cache = UsageCache::default();
         let a = cache.entry("a".into()).or_default().clone();
         let usage = a
@@ -281,6 +303,7 @@ mod tests {
                 ]))
             })
             .await;
+        let fetched_at = usage.fetched_at;
         let cached = a
             .read(async { panic!("fresh usage must not be fetched again") })
             .await;
@@ -294,8 +317,17 @@ mod tests {
         assert!(!failed.error.unwrap().contains("private"));
         a.0.lock().await.as_mut().unwrap().0 = Instant::now() - Duration::from_secs(61);
         let expired = a.read(async { Err("private upstream error".into()) }).await;
-        assert!(expired.windows.is_empty());
-        assert!(expired.error.is_some());
+        assert_eq!(expired.windows, usage.windows);
+        assert_eq!(expired.fetched_at, fetched_at);
+        assert!(expired.error.is_none());
+        let retried = a
+            .read(async {
+                Ok(UsageSnapshot::windows(vec![
+                    UsageWindow::from_used("5時間枠".into(), 32., None).unwrap(),
+                ]))
+            })
+            .await;
+        assert_eq!(retried.windows[0].used_percent, Some(32.));
         cache.remove("a");
         assert!(!Arc::ptr_eq(&a, cache.entry("a".into()).or_default()));
     }
