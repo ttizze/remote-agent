@@ -8115,6 +8115,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stale_recording_stop_cannot_finalize_the_reopened_lifetime() {
+        let directory = tempfile::tempdir().unwrap();
+        let service = DeviceService::new(directory.path().to_path_buf());
+        let thread_id = ThreadId::new("recording-stale-stop").unwrap();
+        service.inner.recordings.lock().await.insert(
+            (thread_id.clone(), LOCAL_DEVICE_HOST_ID.into(), "sim".into()),
+            ActiveDeviceRecording {
+                recorder: Mp4Recorder::new("new".into()),
+                error: None,
+                recording_id: 2,
+                session_epoch: "new-epoch".into(),
+            },
+        );
+        let result = service
+            .stop_recording(DeviceRecordingStopInput {
+                thread_id: thread_id.clone(),
+                host_id: Some(LOCAL_DEVICE_HOST_ID.into()),
+                device_id: "sim".into(),
+                recording_id: 1,
+                session_epoch: "old-epoch".into(),
+            })
+            .await;
+        assert!(result.is_err());
+        let recordings = service.inner.recordings.lock().await;
+        let current = recordings.get(&(thread_id, LOCAL_DEVICE_HOST_ID.into(), "sim".into())).unwrap();
+        assert_eq!(current.recording_id, 2);
+        assert_eq!(current.session_epoch, "new-epoch");
+    }
+
+    #[tokio::test]
     async fn recording_status_reports_frames_before_finalization() {
         let directory = tempfile::tempdir().unwrap();
         let service = DeviceService::new(directory.path().to_path_buf());
