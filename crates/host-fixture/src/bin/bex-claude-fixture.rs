@@ -252,7 +252,11 @@ fn main() {
                     }
                 }
                 emit(
-                    json!({"type":"control_response","response":{"subtype":"success","request_id":value["request_id"],"response":{"rate_limits":{"five_hour":{"utilization":72,"resets_at":"2033-05-18T03:33:20Z"},"seven_day":{"utilization":39,"resets_at":"2033-05-24T03:33:20Z"}}}}}),
+                    json!({"type":"control_response","response":{"subtype":"success","request_id":value["request_id"],"response":{"rate_limits":{"limits":[
+                        {"kind":"session","group":"session","percent":72,"resets_at":"2033-05-18T03:33:20Z","scope":null},
+                        {"kind":"weekly_all","group":"weekly","percent":39,"resets_at":"2033-05-24T03:33:20Z","scope":null},
+                        {"kind":"weekly_scoped","group":"weekly","percent":34,"resets_at":"2033-05-24T03:33:20Z","scope":{"model":{"display_name":"Fable"}}}
+                    ]}}}}),
                 );
             }
             "user" => {

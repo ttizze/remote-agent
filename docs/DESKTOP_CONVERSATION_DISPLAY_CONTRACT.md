@@ -147,14 +147,19 @@ Controls have no persistent border or model chevron. Fast toggles directly;
 effort opens the model's supported choices and its icon indicates the current
 level. Hide unsupported controls, and retain accessible labels and values.
 
-The model name opens a searchable catalog. Desktop's account row includes the
-Host-reported weekly quota windows; clicking it opens account switching, then
-account management (add/login/confirmed sign-out). On iPhone, new conversations
+The model name opens a searchable catalog. For Claude, the Host forwards the SDK's
+`displayName` unchanged as the model name, without a provider prefix or text from
+`description`.
+Desktop's account row includes the Host-reported weekly quota windows; clicking
+it opens account switching, then account management (add/login/confirmed sign-out).
+On iPhone, new conversations
 choose Codex or Claude Code with a segmented control; existing conversations
 keep their agent fixed. The account is read-only in the model picker, and
 Manage opens the same agent/account screen used by Settings. Browsing agent
-settings must not change the conversation's model. The selected account shows
-weekly quotas and reset times, with full usage details collapsed by default.
+settings must not change the conversation's model. Account management shows the
+selected account's reported quota windows, including 5-hour, weekly and
+model-specific limits, with remaining percentages and reset times visible by
+default, followed by the fetched time.
 Never invent quota values, account nicknames, unavailable agents or unsupported
 agent/connection combinations. Current Host adapters remain Codex and Claude;
 Pi and third-party connection adapters are not implied by the picker UI.
@@ -601,7 +606,10 @@ Acceptance: `new_conversation_moves_draft_to_pending_before_creation_reply`,
   is not restarted by selecting an account.
 - Host reads Codex account/rateLimits/read through the account's helper and Claude
   get_usage with skip_behaviors through the account's native configuration. It
-  sends normalized quota data only, never authentication responses, to clients.
+  normalizes Claude's current rate_limits.limits rows in server order, including
+  model and surface display names; it does not infer model-specific quotas from
+  the aggregate weekly window.
+  It sends normalized quota data only, never authentication responses, to clients.
   Usage is cached for 60 seconds per account; failed reads replace expired data
   with an unavailable state. Logged-out accounts lose their cached usage.
 
