@@ -7,6 +7,7 @@ import android.appwidget.AppWidgetProvider
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.graphics.Color
 import android.net.Uri
 import android.view.View
 import android.widget.RemoteViews
@@ -17,6 +18,9 @@ private const val WIDGET_STORAGE = "subscription-widget"
 private const val WIDGET_KEY = "timeline"
 private const val WIDGET_EXPIRY = "dev.remoteagent.mobile.SUBSCRIPTION_EXPIRY"
 private const val WIDGET_MAX_BYTES = 256 * 1024
+private const val PROGRESS_MAX_PERCENT = 100
+private const val LOW_REMAINING_PERCENT = 10
+private val LOW_REMAINING_COLOR = Color.rgb(185, 28, 28)
 
 internal class UsageWidgetPublisher(private val context: Context) {
     private var published: String? = null
@@ -53,9 +57,14 @@ class SubscriptionUsageWidget : AppWidgetProvider() {
             if (ids.isEmpty()) return
             val now = System.currentTimeMillis()
             val stored =
-                context.getSharedPreferences(WIDGET_STORAGE, Context.MODE_PRIVATE).getString(WIDGET_KEY, null)?.takeIf {
-                    it.length <= WIDGET_MAX_BYTES && it.toByteArray(Charsets.UTF_8).size <= WIDGET_MAX_BYTES
-                } ?: "{\"entries\":[]}"
+                context
+                    .getSharedPreferences(WIDGET_STORAGE, Context.MODE_PRIVATE)
+                    .getString(WIDGET_KEY, null)
+                    ?.takeIf {
+                        it.length <= WIDGET_MAX_BYTES &&
+                            it.toByteArray(Charsets.UTF_8).size <= WIDGET_MAX_BYTES
+                    }
+                    ?: "{\"entries\":[]}"
             val entry = JSONObject(subscriptionWidgetEntryJson(stored, now, "android", "auto", "auto"))
             val views = RemoteViews(context.packageName, R.layout.subscription_usage_widget)
             views.removeAllViews(R.id.usage_providers)
@@ -65,34 +74,7 @@ class SubscriptionUsageWidget : AppWidgetProvider() {
                 val provider = providers.getJSONObject(index)
                 val expiry = provider.getLong("expiresAt")
                 if (expiry > now && (deadline == null || expiry < deadline)) deadline = expiry
-                val row = RemoteViews(context.packageName, R.layout.subscription_usage_provider)
-                row.setTextViewText(R.id.usage_provider_name, provider.getString("name"))
-                val windows = provider.getJSONArray("windows")
-                row.setViewVisibility(
-                    R.id.usage_provider_detail,
-                    if (windows.length() == 0) View.VISIBLE else View.GONE,
-                )
-                row.setTextViewText(R.id.usage_provider_detail, provider.getString("detail"))
-                row.removeAllViews(R.id.usage_windows)
-                for (windowIndex in 0 until windows.length()) {
-                    val window = windows.getJSONObject(windowIndex)
-                    val quota = RemoteViews(context.packageName, R.layout.subscription_usage_quota)
-                    val remaining = window.getInt("remaining")
-                    quota.setTextViewText(R.id.usage_window_label, "${window.getString("label")} · $remaining% left")
-                    quota.setProgressBar(R.id.usage_window_progress, 100, remaining, false)
-                    if (remaining <= 10)
-                        quota.setTextColor(R.id.usage_window_label, android.graphics.Color.rgb(185, 28, 28))
-                    val reset = window.optLong("resetAt", 0)
-                    quota.setTextViewText(
-                        R.id.usage_window_reset,
-                        if (reset > 0) "Next reset ${formatDate(context, reset)}" else "Reset time unavailable",
-                    )
-                    row.addView(R.id.usage_windows, quota)
-                }
-                val hidden = provider.getInt("totalWindows") - windows.length()
-                row.setViewVisibility(R.id.usage_hidden_windows, if (hidden > 0) View.VISIBLE else View.GONE)
-                row.setTextViewText(R.id.usage_hidden_windows, "$hidden more in app")
-                views.addView(R.id.usage_providers, row)
+                views.addView(R.id.usage_providers, renderProvider(context, provider))
             }
             val checked = entry.getLong("checkedAt")
             views.setTextViewText(
@@ -116,8 +98,53 @@ class SubscriptionUsageWidget : AppWidgetProvider() {
             )
             manager.updateAppWidget(ids, views)
             val alarms = context.getSystemService(AlarmManager::class.java)
-            alarms.cancel(expiryIntent(context))
-            if (deadline != null) alarms.set(AlarmManager.RTC_WAKEUP, deadline, expiryIntent(context))
+            val alarmIntent = expiryIntent(context)
+            alarms.cancel(alarmIntent)
+            if (deadline != null) alarms.set(AlarmManager.RTC_WAKEUP, deadline, alarmIntent)
+        }
+
+        private fun renderProvider(context: Context, provider: JSONObject): RemoteViews {
+            val row = RemoteViews(context.packageName, R.layout.subscription_usage_provider)
+            row.setTextViewText(R.id.usage_provider_name, provider.getString("name"))
+            val windows = provider.getJSONArray("windows")
+            row.setViewVisibility(
+                R.id.usage_provider_detail,
+                if (windows.length() == 0) View.VISIBLE else View.GONE,
+            )
+            row.setTextViewText(R.id.usage_provider_detail, provider.getString("detail"))
+            row.removeAllViews(R.id.usage_windows)
+            for (windowIndex in 0 until windows.length()) {
+                row.addView(
+                    R.id.usage_windows,
+                    renderWindow(context, windows.getJSONObject(windowIndex)),
+                )
+            }
+            val hidden = provider.getInt("totalWindows") - windows.length()
+            row.setViewVisibility(R.id.usage_hidden_windows, if (hidden > 0) View.VISIBLE else View.GONE)
+            row.setTextViewText(R.id.usage_hidden_windows, "$hidden more in app")
+            return row
+        }
+
+        private fun renderWindow(context: Context, window: JSONObject): RemoteViews {
+            val quota = RemoteViews(context.packageName, R.layout.subscription_usage_quota)
+            val remaining = window.getInt("remaining")
+            quota.setTextViewText(
+                R.id.usage_window_label,
+                "${window.getString("label")} · $remaining% left",
+            )
+            quota.setProgressBar(R.id.usage_window_progress, PROGRESS_MAX_PERCENT, remaining, false)
+            if (remaining <= LOW_REMAINING_PERCENT) {
+                quota.setTextColor(
+                    R.id.usage_window_label,
+                    LOW_REMAINING_COLOR,
+                )
+            }
+            val reset = window.optLong("resetAt", 0)
+            quota.setTextViewText(
+                R.id.usage_window_reset,
+                if (reset > 0) "Next reset ${formatDate(context, reset)}" else "Reset time unavailable",
+            )
+            return quota
         }
 
         private fun expiryIntent(context: Context): PendingIntent =
@@ -130,7 +157,9 @@ class SubscriptionUsageWidget : AppWidgetProvider() {
 
         private fun formatDate(context: Context, millis: Long): String {
             val date = java.util.Date(millis)
-            return "${android.text.format.DateFormat.getMediumDateFormat(context).format(date)} ${android.text.format.DateFormat.getTimeFormat(context).format(date)}"
+            val day = android.text.format.DateFormat.getMediumDateFormat(context).format(date)
+            val time = android.text.format.DateFormat.getTimeFormat(context).format(date)
+            return "$day $time"
         }
     }
 }
