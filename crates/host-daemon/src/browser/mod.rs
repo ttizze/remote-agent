@@ -215,7 +215,7 @@ impl Browser {
                 Ok(result) => result,
                 Err(error) => Err(format!("recording task terminated: {error}")),
             };
-            let _ = done.send(Some(result));
+            done.send_replace(Some(result));
             if let Some(preview) = preview
                 && let Ok(thread_id) = agent_domain::ThreadId::new(monitor_thread)
             {
