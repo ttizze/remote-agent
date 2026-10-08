@@ -970,6 +970,7 @@ impl AgentTools {
                     &child,
                     stable_command(scope, "dispatch-thread", &key, Some(index)),
                     Command::Send(SendMessage {
+                        scheduled_task: None,
                         context: None,
                         created_by: MessageAuthor::Agent,
                         creation_source: "mcp".into(),
@@ -1317,6 +1318,7 @@ impl AgentTools {
             &target_id,
             stable_command(scope, "thread-send", &key, None),
             Command::Send(SendMessage {
+                scheduled_task: None,
                 context: None,
                 created_by: MessageAuthor::Agent,
                 creation_source: "mcp".into(),

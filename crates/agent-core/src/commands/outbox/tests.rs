@@ -298,6 +298,7 @@ fn shows_an_accepted_settle_or_snooze_over_an_old_input_request() {
 
 fn send(message_id: &str, text: &str, created_at: &str) -> PendingCommand {
     let command = Command::Send(SendMessage {
+        scheduled_task: None,
         created_by: agent_domain::MessageAuthor::User,
         creation_source: "mobile".into(),
         id: MessageId::new(message_id).unwrap(),
@@ -373,6 +374,7 @@ fn pending_messages_follow_send_order_until_the_thread_folds_them() {
         .first()
         .cloned()
         .unwrap_or_else(|| agent_domain::Message {
+            scheduled_task: None,
             notification: None,
             id: MessageId::new("first").unwrap(),
             run: None,

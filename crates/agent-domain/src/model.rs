@@ -248,6 +248,8 @@ pub struct Message {
     pub updated_at: Timestamp,
     /// Inline context records the text links to.
     pub context: Option<MessageContext>,
+    /// The scheduled task whose run sent this prompt.
+    pub scheduled_task: Option<String>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Run {
@@ -817,6 +819,8 @@ impl State {
 pub struct SendMessage {
     pub created_by: MessageAuthor,
     pub creation_source: String,
+    /// The scheduled task whose run sends this prompt.
+    pub scheduled_task: Option<String>,
     pub id: MessageId,
     pub text: String,
     pub attachments: Vec<Attachment>,

@@ -1884,6 +1884,7 @@ impl Decision {
                 created_by: message.created_by,
                 creation_source: message.creation_source.clone(),
                 context: context.clone(),
+                scheduled_task: message.scheduled_task.clone(),
             });
             self.user_item(&message.id, run);
             if restart {
@@ -1930,6 +1931,7 @@ impl Decision {
             created_by: message.created_by,
             creation_source: message.creation_source.clone(),
             context,
+            scheduled_task: message.scheduled_task.clone(),
         });
         self.fact(FactBody::RunRequested {
             id: id.clone(),
@@ -2084,6 +2086,7 @@ impl Decision {
                     created_by: MessageAuthor::Agent,
                     creation_source: "server".into(),
                     context: None,
+                    scheduled_task: None,
                 });
                 self.fact(FactBody::RunRequested {
                     id: run.clone(),
@@ -2330,6 +2333,7 @@ impl Decision {
                             },
                             creation_source: "server".into(),
                             context: None,
+                            scheduled_task: None,
                         },
                     );
                     self.fact_at(
@@ -2756,6 +2760,7 @@ impl Decision {
             }
             Compact => {
                 let message = SendMessage {
+                    scheduled_task: None,
                     context: None,
                     created_by: MessageAuthor::User,
                     creation_source: "client".into(),
@@ -3431,6 +3436,7 @@ impl Decision {
                 self.complete_request_cards(request, card);
                 if r.capability == ResponseCapability::Message {
                     let message = SendMessage {
+                        scheduled_task: None,
                         context: None,
                         created_by: MessageAuthor::User,
                         creation_source: "server".into(),
@@ -3927,6 +3933,7 @@ impl Decision {
                             created_by: MessageAuthor::Agent,
                             creation_source: "mcp".into(),
                             message: Box::new(SendMessage {
+                                scheduled_task: None,
                                 context: None,
                                 created_by: MessageAuthor::Agent,
                                 creation_source: "mcp".into(),
@@ -4162,6 +4169,7 @@ impl Decision {
                         created_by: MessageAuthor::Agent,
                         creation_source: "server".into(),
                         context: None,
+                        scheduled_task: None,
                     });
                     self.fact(FactBody::MessageNotificationAssigned {
                         id: message_id.clone(),
@@ -4186,6 +4194,7 @@ impl Decision {
                 }
                 let tasks = task_ids.clone();
                 let message = SendMessage {
+                    scheduled_task: None,
                     context: None,
                     created_by: MessageAuthor::Agent,
                     creation_source: "server".into(),
@@ -4438,6 +4447,7 @@ impl Decision {
                         created_by: MessageAuthor::Agent,
                         creation_source: "provider".into(),
                         context: None,
+                        scheduled_task: None,
                     });
                 }
                 ItemKind::AssistantMessage { message }
@@ -5168,6 +5178,7 @@ impl Decision {
                             created_by: MessageAuthor::Agent,
                             creation_source: "provider".into(),
                             context: None,
+                            scheduled_task: None,
                         });
                         let item = TurnItemId::new(self.native_key("item", attempt, key)).unwrap();
                         self.item_start(
@@ -5586,6 +5597,7 @@ impl Decision {
             }
             Wake { text, detail } => {
                 let message = SendMessage {
+                    scheduled_task: None,
                     context: None,
                     created_by: MessageAuthor::Agent,
                     creation_source: "provider".into(),
@@ -5659,6 +5671,7 @@ impl Decision {
             created_by: MessageAuthor::Agent,
             creation_source: "provider".into(),
             context: None,
+            scheduled_task: None,
         });
         if let Some(notification) = background_notification(
             &self

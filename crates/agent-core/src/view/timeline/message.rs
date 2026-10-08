@@ -318,6 +318,7 @@ mod tests {
     fn message(text: &str) -> Message {
         let at = Timestamp::parse("2026-03-17T19:12:28.000Z").unwrap();
         Message {
+            scheduled_task: None,
             notification: None,
             id: MessageId::new("message-1").unwrap(),
             run: Some(RunId::new("run-1").unwrap()),

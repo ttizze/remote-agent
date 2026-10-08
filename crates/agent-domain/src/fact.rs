@@ -222,6 +222,7 @@ pub enum FactBody {
         created_by: MessageAuthor,
         creation_source: String,
         context: Option<MessageContext>,
+        scheduled_task: Option<String>,
     },
     MessageNotificationAssigned {
         id: MessageId,
@@ -969,6 +970,7 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
             created_by,
             creation_source,
             context,
+            scheduled_task,
         } => {
             if state.messages.iter().any(|m| &m.id == id) {
                 return Err(FoldError::Conflict);
@@ -987,6 +989,7 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
                 created_at: at.clone(),
                 updated_at: at.clone(),
                 context: context.clone(),
+                scheduled_task: scheduled_task.clone(),
             });
         }
         MessageNotificationAssigned { id, notification } => {

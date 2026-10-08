@@ -181,6 +181,7 @@ fn keeps_transcript_bodies_out_of_shell_rows() {
         &mut state,
         agent_domain::FactBody::MessageCreated {
             context: None,
+            scheduled_task: None,
             id: agent_domain::MessageId::new("message-shell-budget").unwrap(),
             run: None,
             role: Role::Assistant,

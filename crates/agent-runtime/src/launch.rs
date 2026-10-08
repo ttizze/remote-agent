@@ -739,6 +739,7 @@ pub(crate) async fn launch(
             &thread,
             message_command,
             Command::Send(SendMessage {
+                scheduled_task: None,
                 context: message.context.clone(),
                 created_by: message.created_by,
                 creation_source: message.creation_source.clone(),

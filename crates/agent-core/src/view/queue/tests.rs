@@ -182,6 +182,7 @@ fn arrow_keys_and_drops_anchor_before_the_following_row() {
 
 fn message(id: &str, text: &str, attachments: Vec<Attachment>) -> Message {
     Message {
+        scheduled_task: None,
         notification: None,
         id: MessageId::new(id).unwrap(),
         run: None,

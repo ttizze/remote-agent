@@ -436,6 +436,7 @@ fn task(id: &str, child: &str, original: &str) -> Task {
 }
 fn message(id: &str, run: Option<&str>, role: Role, text: &str) -> Message {
     Message {
+        scheduled_task: None,
         notification: None,
         id: MessageId::new(id).unwrap(),
         run: run.map(|run| RunId::new(run).unwrap()),
