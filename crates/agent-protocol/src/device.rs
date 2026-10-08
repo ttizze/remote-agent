@@ -429,13 +429,16 @@ pub enum DeviceActionKind {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DeviceActionInput {
+    pub thread_id: ThreadId,
     pub host_id: Option<String>,
     pub device_id: String,
+    pub session_epoch: String,
     pub action: DeviceActionKind,
 }
 
 impl DeviceActionInput {
     pub fn validate(&self) -> Result<(), String> {
+        validate_device_session_epoch(&self.session_epoch)?;
         if self.device_id.trim().is_empty() || self.device_id.len() > 256 {
             return Err("device id is invalid".into());
         }
@@ -493,8 +496,10 @@ impl DeviceActionInput {
                 Err("device push payload is invalid".into())
             }
             DeviceActionKind::Input(input) => DeviceInput {
-                host_id: None,
+                thread_id: self.thread_id.clone(),
+                host_id: self.host_id.clone(),
                 device_id: self.device_id.clone(),
+                session_epoch: self.session_epoch.clone(),
                 input: input.clone(),
             }
             .validate(),
@@ -664,13 +669,16 @@ pub enum DeviceHardwareButton {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DeviceInput {
+    pub thread_id: ThreadId,
     pub host_id: Option<String>,
     pub device_id: String,
+    pub session_epoch: String,
     pub input: DeviceInputKind,
 }
 
 impl DeviceInput {
     pub fn validate(&self) -> Result<(), String> {
+        validate_device_session_epoch(&self.session_epoch)?;
         if self.device_id.trim().is_empty() || self.device_id.len() > 256 {
             return Err("device id is invalid".into());
         }
@@ -687,6 +695,16 @@ impl DeviceInput {
             _ => Ok(()),
         }
     }
+}
+
+fn validate_device_session_epoch(epoch: &str) -> Result<(), String> {
+    if epoch.trim().is_empty()
+        || epoch.len() > 256
+        || epoch.chars().any(char::is_control)
+    {
+        return Err("device session epoch is invalid".into());
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -855,8 +873,10 @@ mod tests {
         .validate()
         .is_ok());
         let bad_action = DeviceActionInput {
+            thread_id: ThreadId::new("thread").unwrap(),
             host_id: None,
             device_id: "sim".into(),
+            session_epoch: "epoch".into(),
             action: DeviceActionKind::SetLocation {
                 latitude: 91.0,
                 longitude: 0.0,
@@ -864,8 +884,10 @@ mod tests {
         };
         assert!(bad_action.validate().is_err());
         assert!(DeviceActionInput {
+            thread_id: ThreadId::new("thread").unwrap(),
             host_id: None,
             device_id: "sim".into(),
+            session_epoch: "epoch".into(),
             action: DeviceActionKind::SetToggle {
                 setting: "shell".into(),
                 value: true,
@@ -874,15 +896,19 @@ mod tests {
         .validate()
         .is_err());
         assert!(DeviceActionInput {
+            thread_id: ThreadId::new("thread").unwrap(),
             host_id: None,
             device_id: "sim".into(),
+            session_epoch: "epoch".into(),
             action: DeviceActionKind::SetLiquidGlass("opaque".into()),
         }
         .validate()
         .is_err());
         assert!(DeviceActionInput {
+            thread_id: ThreadId::new("thread").unwrap(),
             host_id: None,
             device_id: "sim".into(),
+            session_epoch: "epoch".into(),
             action: DeviceActionKind::SendPush {
                 app_id: "app.example".into(),
                 payload: serde_json::json!(["not", "an", "object"]),
@@ -942,8 +968,10 @@ mod tests {
     #[test]
     fn keyboard_input_validates_both_physical_code_and_actual_key_value() {
         let valid = DeviceInput {
+            thread_id: ThreadId::new("thread").unwrap(),
             host_id: None,
             device_id: "emulator-1".into(),
+            session_epoch: "epoch".into(),
             input: DeviceInputKind::Key {
                 code: "KeyA".into(),
                 key: "A".into(),
@@ -968,8 +996,10 @@ mod tests {
     #[test]
     fn duo_input_validates_a_bounded_angle_without_string_commands() {
         let input = DeviceInput {
+            thread_id: ThreadId::new("thread").unwrap(),
             host_id: None,
             device_id: "simulator".into(),
+            session_epoch: "epoch".into(),
             input: DeviceInputKind::Duo {
                 command: DeviceDuoCommand::Angle { value: 90.0 },
             },
@@ -980,5 +1010,21 @@ mod tests {
             *command = DeviceDuoCommand::Angle { value: 180.1 };
         }
         assert!(invalid.validate().is_err());
+    }
+
+    #[test]
+    fn scoped_device_requests_require_a_non_control_session_epoch() {
+        let mut input = DeviceInput {
+            thread_id: ThreadId::new("thread").unwrap(),
+            host_id: None,
+            device_id: "simulator".into(),
+            session_epoch: "epoch".into(),
+            input: DeviceInputKind::Rotate,
+        };
+        assert!(input.validate().is_ok());
+        input.session_epoch = " \n".into();
+        assert!(input.validate().is_err());
+        input.session_epoch = "x".repeat(257);
+        assert!(input.validate().is_err());
     }
 }

@@ -775,16 +775,27 @@ impl PreviewState {
         {
             return;
         }
-        if self
+        if status.recording {
+            if self
+                .recording_lifetimes
+                .get(&status.tab_id)
+                .is_some_and(|recording_id| {
+                    recording_id != &status.recording_id
+                        && self
+                            .recordings
+                            .get(&status.tab_id)
+                            .is_some_and(|current| current.recording)
+                })
+            {
+                return;
+            }
+            self.invalidated_recordings.remove(&status.tab_id);
+        } else if self
             .recording_lifetimes
             .get(&status.tab_id)
-            .is_some_and(|recording_id| recording_id != &status.recording_id)
-            || (!status.recording && !self.recording_lifetimes.contains_key(&status.tab_id))
+            .is_none_or(|recording_id| recording_id != &status.recording_id)
         {
             return;
-        }
-        if status.recording {
-            self.invalidated_recordings.remove(&status.tab_id);
         }
         self.recording_lifetimes
             .insert(status.tab_id.clone(), status.recording_id.clone());

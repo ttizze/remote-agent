@@ -2625,8 +2625,10 @@ impl Owner {
                     };
                     return Ok(Next::duo_call(
                         Call::DeviceInput(d::DeviceInput {
+                            thread_id: request.thread_id.clone(),
                             host_id: request.host_id.clone(),
                             device_id: request.device_id.clone(),
+                            session_epoch: request.session_epoch.clone(),
                             input: d::DeviceInputKind::Duo {
                                 command: device_duo_command(request.command.clone()),
                             },
@@ -2665,14 +2667,32 @@ impl Owner {
                         _ => Next::DeviceInputs(plan.inputs, plan.target),
                     });
                 }
+                let thread_id = self.selected()?;
+                let target = self.state.device.session_target(
+                    &thread_id,
+                    host_id.as_deref(),
+                    &device_id,
+                )?;
                 let action = device_action(action)?;
                 match action {
-                    d::DeviceActionKind::Input(input) => Next::call(
-                        Call::DeviceInput(d::DeviceInput { host_id, device_id, input }),
-                        None,
+                    d::DeviceActionKind::Input(input) => Next::DeviceInputs(
+                        vec![d::DeviceInput {
+                            thread_id: target.thread_id.clone(),
+                            host_id: Some(target.host_id.clone()),
+                            device_id: target.device_id.clone(),
+                            session_epoch: target.session_epoch.clone(),
+                            input,
+                        }],
+                        target,
                     ),
                     action => Next::call(
-                        Call::DeviceAction(d::DeviceActionInput { host_id, device_id, action }),
+                        Call::DeviceAction(d::DeviceActionInput {
+                            thread_id: target.thread_id,
+                            host_id: Some(target.host_id),
+                            device_id: target.device_id,
+                            session_epoch: target.session_epoch,
+                            action,
+                        }),
                         None,
                     ),
                 }
@@ -2851,6 +2871,7 @@ impl Owner {
                     .state
                     .preview
                     .recording_for(&tab_id)
+                    .filter(|status| status.recording)
                     .map(|status| status.recording_id.clone())
                     .ok_or_else(|| invalid("preview recording is not active"))?;
                 let request = agent_protocol::preview::PreviewRecordingStop {
