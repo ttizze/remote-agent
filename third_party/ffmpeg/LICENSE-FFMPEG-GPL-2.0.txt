@@ -1,0 +1,13 @@
+FFmpeg runtime license notice
+
+The pinned Nixpkgs FFmpeg output declares GNU General Public License, version 2
+or later (GPL-2.0-or-later) for the runtime source set.
+
+License text:
+https://www.gnu.org/licenses/old-licenses/gpl-2.0.txt
+
+Upstream source:
+https://ffmpeg.org/releases/ffmpeg-9.0.1.tar.xz
+
+This is a provenance notice; the complete license text is available at the URL
+above and is shipped with the artifact's legal notices.

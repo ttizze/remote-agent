@@ -28,7 +28,8 @@ Linux and macOS release jobs resolve the small, lockfile-pinned FFmpeg output
 declared in `flake.nix`. It enables only the FFmpeg libraries needed for the
 `libvpx-vp9` encoder and keeps the shared closure small enough to review. The
 component inventory is reviewed against the exact Nixpkgs revision in
-`flake.lock`.
+`flake.lock`, including the Linux glibc loader and GCC runtime when the
+platform's dynamic closure contains them.
 staging helper checks that the binary advertises `libvpx-vp9`, copies its
 non-system shared-library closure, and rewrites the Linux or macOS loader paths
 to the sibling `lib` directory. The macOS app puts the same layout in
@@ -47,10 +48,12 @@ supplies a shared build.
 The staging helper collects sorted license and copying files from a runtime
 root when they are present. Nix binary and library outputs commonly omit those
 files, so `third_party/ffmpeg/components.tsv` is an exact component-root
-inventory: each pinned output name maps to one checked-in notice, SPDX
-identifier, and HTTPS upstream source. A split inventory is accepted only for a
-listed component; an unknown unlicensed root fails packaging. The manifest
-records each component, license file, SPDX identifier, and source URL in
+inventory: each pinned output name maps to its checked-in notices, SPDX
+identifiers, and HTTPS upstream sources. A split inventory is accepted only for
+a listed component; an unknown root fails packaging even when it happens to
+contain an untracked license file. Windows' pinned Gyan artifact supplies the
+`ffmpeg-9.0.2-essentials_build` component identity before staging. The manifest
+records every component, license file, SPDX identifier, and source URL in
 `FFMPEG-RUNTIME.txt`, along with the source executable digest and loader mode.
 There is no generic license-directory fallback that could hide a new runtime
 dependency.

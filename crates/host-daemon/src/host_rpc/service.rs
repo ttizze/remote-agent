@@ -499,6 +499,10 @@ impl HostRpcService {
         })
     }
     pub async fn dispatch(&self, session: SessionId, call: &Call) -> Result<HostReply, String> {
+        // Admission and handoff share this gate. Holding it across the owner
+        // operation closes the window between the idle probe and starting a
+        // browser, conversation, terminal, or dictation task.
+        let _gate = self.inner.handoff_gate.lock().await;
         if self.inner.handoff_draining.load(Ordering::Acquire) {
             return Err("Host is waiting for its installed update to start".into());
         }

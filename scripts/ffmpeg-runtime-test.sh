@@ -38,6 +38,7 @@ exec "$@"
 EOF
 chmod 755 "$ffmpeg_root/bin/ffmpeg" "$ffmpeg_root/lib/ld-linux-fixture"
 printf '%s\n' 'unknown dependency' > "$unknown_root/lib/libunknown.so"
+printf '%s\n' 'untracked local license must not bypass the pinned inventory' > "$unknown_root/LICENSE.txt"
 license_dir="$temporary/split-licenses"
 mkdir -p "$license_dir"
 printf '%s\n' 'fixture FFmpeg GPLv3 split license' > "$license_dir/LICENSE-FFMPEG.txt"

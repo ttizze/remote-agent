@@ -1,0 +1,14 @@
+glibc runtime license notice
+
+The pinned Nixpkgs Linux runtime closure contains glibc 2.42-67, whose Nixpkgs
+license metadata is GNU Library General Public License version 2 or later
+(LGPL-2.0-or-later).
+
+License text:
+https://www.gnu.org/licenses/old-licenses/lgpl-2.0.txt
+
+Pinned source:
+https://ftp.gnu.org/gnu/glibc/glibc-2.42.tar.xz
+
+This is a provenance notice; the complete license text is available at the URL
+above and is shipped with the artifact's legal notices.

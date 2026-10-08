@@ -59,9 +59,8 @@ license_inventory_file=${AGENT_FFMPEG_LICENSE_INVENTORY:-$project_root/third_par
     exit 1
 }
 
-declare -A component_license=()
-declare -A component_spdx=()
-declare -A component_source=()
+component_inventory_normalized=$license_inventory_file
+declare -A component_license_seen=()
 while IFS=$'\t' read -r component license spdx source_url; do
     [[ -n $component || -n $license || -n $spdx || -n $source_url ]] || continue
     [[ $component == \#* ]] && continue
@@ -77,13 +76,12 @@ while IFS=$'\t' read -r component license spdx source_url; do
         echo "FFmpeg component license path escapes its inventory directory: $component" >&2
         exit 1
     }
-    [[ ${component_license[$component]+yes} ]] && {
-        echo "duplicate FFmpeg component license inventory row: $component" >&2
+    inventory_key="$component|$license"
+    [[ ${component_license_seen[$inventory_key]+yes} ]] && {
+        echo "duplicate FFmpeg component license inventory row: $inventory_key" >&2
         exit 1
     }
-    component_license[$component]=$license
-    component_spdx[$component]=$spdx
-    component_source[$component]=$source_url
+    component_license_seen[$inventory_key]=yes
 done < "$license_inventory_file"
 
 declare -a license_roots=()
@@ -111,7 +109,7 @@ component_name_for() {
             printf '%s\n' "$root_name"
             ;;
         *)
-            printf 'runtime-root\n'
+            printf '%s\n' "${AGENT_FFMPEG_COMPONENT:-$(basename "$path")}"
             ;;
     esac
 }
@@ -384,25 +382,26 @@ for root_index in "${!license_roots[@]}"; do
     find "$root" -maxdepth 6 -type f \( \
         -iname 'LICENSE*' -o -iname 'COPYING*' -o -iname 'COPYRIGHT*' \
     \) -print | LC_ALL=C sort > "$root_candidates"
-    if [[ -s $root_candidates ]]; then
-        while IFS= read -r license; do
-            [[ -n $license ]] || continue
-            register_license "$component" UNKNOWN local-runtime-root "$license"
-        done < "$root_candidates"
+    mapped_rows="$temporary/.license-map-$license_root_index"
+    awk -F '\t' -v wanted="$component" '$1 == wanted { print }' \
+        "$component_inventory_normalized" > "$mapped_rows"
+    if [[ -s $mapped_rows ]]; then
+        while IFS=$'\t' read -r mapped_component mapped_license mapped_spdx mapped_source; do
+            mapped_path="$license_dir/$mapped_license"
+            [[ -f $mapped_path ]] || {
+                echo "mapped FFmpeg license is missing for $mapped_component: $mapped_path" >&2
+                exit 1
+            }
+            register_license "$mapped_component" "$mapped_spdx" "$mapped_source" "$mapped_path"
+        done < "$mapped_rows"
         continue
     fi
-
-    mapped_license=${component_license[$component]:-}
-    [[ -n $mapped_license ]] || {
-        echo "unknown unlicensed FFmpeg runtime component: $component ($root)" >&2
+    if [[ -s $root_candidates ]]; then
+        echo "runtime component has license files but no pinned inventory mapping: $component ($root)" >&2
         exit 1
-    }
-    mapped_path="$license_dir/$mapped_license"
-    [[ -f $mapped_path ]] || {
-        echo "mapped FFmpeg license is missing for $component: $mapped_path" >&2
-        exit 1
-    }
-    register_license "$component" "${component_spdx[$component]}" "${component_source[$component]}" "$mapped_path"
+    fi
+    echo "unknown unlicensed FFmpeg runtime component: $component ($root)" >&2
+    exit 1
 done
 [[ -s $license_records ]] || {
     echo "FFmpeg runtime at $runtime_dir has no license or copying file" >&2

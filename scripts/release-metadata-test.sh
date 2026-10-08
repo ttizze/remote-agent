@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
+project_root=$(pwd -P)
 
 temporary=$(mktemp -d)
 cleanup() { rm -rf "$temporary"; }
@@ -75,7 +76,9 @@ EOF
 chmod +x "$temporary/ffmpeg.exe"
 printf '%s\n' 'FFmpeg GPLv3 fixture license' > "$temporary/LICENSE.txt"
 printf '%s\n' 'libvpx BSD fixture license' > "$temporary/COPYING.libvpx.txt"
-AGENT_FFMPEG_EXECUTABLE="$temporary/ffmpeg.exe" AGENT_FFMPEG_RUNTIME_DIR="$temporary" AGENT_FFMPEG_LICENSE_DIR="$temporary" \
+AGENT_FFMPEG_EXECUTABLE="$temporary/ffmpeg.exe" AGENT_FFMPEG_RUNTIME_DIR="$temporary" \
+AGENT_FFMPEG_COMPONENT='ffmpeg-9.0.2-essentials_build' AGENT_FFMPEG_LICENSE_DIR="$project_root/third_party/ffmpeg" \
+AGENT_FFMPEG_LICENSE_INVENTORY="$project_root/third_party/ffmpeg/components.tsv" \
 scripts/package-host.sh windows x86_64 "$temporary/host" "$temporary/target" >/dev/null
 tar -tzf "$temporary/host/host-windows-x86_64.tar.gz" | grep -Fx './host-daemon.exe' >/dev/null
 tar -tzf "$temporary/host/host-windows-x86_64.tar.gz" | grep -Fx './Claude-Agent-SDK-LICENSE.md' >/dev/null
@@ -84,7 +87,9 @@ tar -tzf "$temporary/host/host-windows-x86_64.tar.gz" | grep -Fx './ffmpeg.exe' 
 tar -tzf "$temporary/host/host-windows-x86_64.tar.gz" | grep -Fx './FFMPEG-RUNTIME.txt' >/dev/null
 tar -tzf "$temporary/host/host-windows-x86_64.tar.gz" | grep -F './FFMPEG-LICENSE-' >/dev/null
 printf 'desktop\n' > "$temporary/target/release/bex-desktop.exe"
-AGENT_FFMPEG_EXECUTABLE="$temporary/ffmpeg.exe" AGENT_FFMPEG_RUNTIME_DIR="$temporary" AGENT_FFMPEG_LICENSE_DIR="$temporary" \
+AGENT_FFMPEG_EXECUTABLE="$temporary/ffmpeg.exe" AGENT_FFMPEG_RUNTIME_DIR="$temporary" \
+AGENT_FFMPEG_COMPONENT='ffmpeg-9.0.2-essentials_build' AGENT_FFMPEG_LICENSE_DIR="$project_root/third_party/ffmpeg" \
+AGENT_FFMPEG_LICENSE_INVENTORY="$project_root/third_party/ffmpeg/components.tsv" \
     scripts/package-native-desktop.sh windows x86_64 "$temporary/desktop" "$temporary/target" >/dev/null
 tar -tzf "$temporary/desktop/desktop-windows-x86_64.tar.gz" | grep -Fx './desktop.exe' >/dev/null
 tar -tzf "$temporary/desktop/desktop-windows-x86_64.tar.gz" | grep -Fx './ffmpeg.exe' >/dev/null
