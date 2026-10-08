@@ -3,6 +3,7 @@ pub mod browser;
 pub mod background;
 pub mod conversation;
 pub mod diagnostics;
+pub mod device;
 pub mod error;
 pub mod keybindings;
 pub mod message;

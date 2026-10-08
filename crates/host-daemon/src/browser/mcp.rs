@@ -82,11 +82,25 @@ pub(super) fn listen(browser: &Arc<Browser>) -> Result<(), String> {
 
 #[derive(Serialize, Deserialize)]
 enum BridgeRequest {
-    Browser { thread: String, action: BrowserAction },
-    PreviewList { thread: String },
-    PreviewClose { thread: String, tab_id: Option<String> },
-    PreviewRecordingStart { thread: String, tab_id: Option<String> },
-    PreviewRecordingStop { thread: String, tab_id: Option<String> },
+    Browser {
+        thread: String,
+        action: BrowserAction,
+    },
+    PreviewList {
+        thread: String,
+    },
+    PreviewClose {
+        thread: String,
+        tab_id: Option<String>,
+    },
+    PreviewRecordingStart {
+        thread: String,
+        tab_id: Option<String>,
+    },
+    PreviewRecordingStop {
+        thread: String,
+        tab_id: Option<String>,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -114,17 +128,25 @@ async fn bridge_request(
             .map(BridgeResponse::PreviewList),
         BridgeRequest::PreviewClose { thread, tab_id } => {
             if let Some(tab_id) = tab_id {
-                browser.close_preview_tab(&thread, &tab_id).await?;
+                browser
+                    .close_preview_tab_with_cancel(&thread, &tab_id, request_cancel.clone())
+                    .await?;
             } else {
-                let tabs = browser
-                    .preview_list(&thread)
-                    .await?
+                let preview = tokio::select! {
+                    result = browser.preview_list(&thread) => result?,
+                    _ = request_cancel.cancelled() => {
+                        return Err("closing Preview tabs was cancelled".to_owned());
+                    }
+                };
+                let tabs = preview
                     .sessions
                     .into_iter()
                     .map(|session| session.tab_id)
                     .collect::<Vec<_>>();
                 for tab_id in tabs {
-                    browser.close_preview_tab(&thread, &tab_id).await?;
+                    browser
+                        .close_preview_tab_with_cancel(&thread, &tab_id, request_cancel.clone())
+                        .await?;
                 }
             }
             Ok(BridgeResponse::Empty)
@@ -136,8 +158,8 @@ async fn bridge_request(
             };
             browser
                 .start_preview_recording_with_cancel(&thread, &tab_id, request_cancel)
-            .await
-            .map(BridgeResponse::PreviewRecordingStatus)
+                .await
+                .map(BridgeResponse::PreviewRecordingStatus)
         }
         BridgeRequest::PreviewRecordingStop { thread, tab_id } => {
             let tab_id = match tab_id {
@@ -146,8 +168,8 @@ async fn bridge_request(
             };
             browser
                 .stop_preview_recording_with_cancel(&thread, &tab_id, request_cancel)
-            .await
-            .map(BridgeResponse::PreviewRecordingArtifact)
+                .await
+                .map(BridgeResponse::PreviewRecordingArtifact)
         }
     }
 }
@@ -234,10 +256,18 @@ fn content(result: Result<BridgeResponse, String>) -> Value {
         Ok(BridgeResponse::Frame(frame)) => json!({"content":[
             {"type":"text","text":json!({"tabs":frame.tabs,"active_tab":frame.tab_id,"width":frame.width,"height":frame.height,"dialog":frame.dialog}).to_string()},
             {"type":"image","mimeType":"image/jpeg","data":STANDARD.encode(frame.image)}],"isError":false}),
-        Ok(BridgeResponse::PreviewList(result)) => json!({"content":[{"type":"text","text":serde_json::to_string(&result).unwrap_or_default()}],"isError":false}),
-        Ok(BridgeResponse::PreviewRecordingStatus(result)) => json!({"content":[{"type":"text","text":serde_json::to_string(&result).unwrap_or_default()}],"isError":false}),
-        Ok(BridgeResponse::PreviewRecordingArtifact(result)) => json!({"content":[{"type":"text","text":serde_json::to_string(&result).unwrap_or_default()}],"isError":false}),
-        Ok(BridgeResponse::Empty) => json!({"content":[{"type":"text","text":"Preview tab closed"}],"isError":false}),
+        Ok(BridgeResponse::PreviewList(result)) => {
+            json!({"content":[{"type":"text","text":serde_json::to_string(&result).unwrap_or_default()}],"isError":false})
+        }
+        Ok(BridgeResponse::PreviewRecordingStatus(result)) => {
+            json!({"content":[{"type":"text","text":serde_json::to_string(&result).unwrap_or_default()}],"isError":false})
+        }
+        Ok(BridgeResponse::PreviewRecordingArtifact(result)) => {
+            json!({"content":[{"type":"text","text":serde_json::to_string(&result).unwrap_or_default()}],"isError":false})
+        }
+        Ok(BridgeResponse::Empty) => {
+            json!({"content":[{"type":"text","text":"Preview tab closed"}],"isError":false})
+        }
         Err(error) => json!({"content":[{"type":"text","text":error}],"isError":true}),
     }
 }
@@ -251,10 +281,12 @@ enum ToolCall {
 }
 
 fn parse_tool_call(name: &str, value: &Value) -> Result<ToolCall, String> {
-    let optional_tab_id = || match value.get("tab_id") {
-        None => Ok(None),
-        Some(Value::String(tab_id)) => Ok(Some(tab_id.clone())),
-        Some(_) => Err("tab_id must be a string when provided".into()),
+    let optional_tab_id = || -> Result<Option<String>, String> {
+        match value.get("tab_id") {
+            None => Ok(None),
+            Some(Value::String(tab_id)) => Ok(Some(tab_id.clone())),
+            Some(_) => Err("tab_id must be a string when provided".into()),
+        }
     };
     match name {
         "bex_browser" => parse_action(value).map(ToolCall::Browser),

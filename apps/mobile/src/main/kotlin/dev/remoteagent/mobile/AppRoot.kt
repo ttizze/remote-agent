@@ -104,6 +104,7 @@ private fun AppSurface(model: AndroidAppModel, requestQrScan: (onContents: (Stri
                     Route.Pairing -> PairingScreen(model, requestQrScan)
                     Route.Home -> HomeScreen(model)
                     is Route.Thread -> ThreadScreen(model, route.id)
+                    is Route.Device -> DeviceScreen(model, route.threadId)
                     Route.ChooseProject -> ChooseProjectScreen(model)
                     Route.AddProject -> AddProjectScreen(model)
                     Route.AddProjectLocal -> LocalFolderScreen(model)

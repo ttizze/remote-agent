@@ -18,8 +18,8 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
     sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering as AtomicOrdering},
+        Arc, Mutex as StdMutex,
+        atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering},
     },
     time::Duration,
 };
@@ -46,10 +46,14 @@ const COPY_BUFFER_SIZE: usize = 64 * 1024;
 const MAX_REDIRECTS: usize = 5;
 const MAX_ARCHIVE_ENTRIES: usize = 100_000;
 const HANDOFF_REQUEST_FILE: &str = "update-handoff.json";
+const HANDOFF_REQUEST_TTL_SECS: u64 = 300;
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct UpdateHandoffRequest {
     target: UpdateTarget,
+    version: String,
+    owner_pid: u32,
+    created_at: u64,
 }
 
 fn handoff_request_path(state_dir: &Path) -> PathBuf {
@@ -59,15 +63,36 @@ fn handoff_request_path(state_dir: &Path) -> PathBuf {
 /// Ask the running Host to drain before the target executable is selected.
 /// The request is owner-only state and create-once so concurrent Desktop
 /// launches cannot overwrite one another's handoff decision.
-pub fn request_update_handoff(state_dir: &Path, target: UpdateTarget) -> Result<bool> {
+pub fn request_update_handoff(
+    state_dir: &Path,
+    target: UpdateTarget,
+    version: &str,
+) -> Result<bool> {
+    parse_version(version).context("update handoff version is invalid")?;
     let path = handoff_request_path(state_dir);
     let parent = path.parent().context("update handoff path has no parent")?;
     crate::platform::create_state_directory(parent)?;
-    let bytes = serde_json::to_vec(&UpdateHandoffRequest { target })?;
-    let file = crate::platform::private_file_options().open(&path);
-    let mut file = match file {
+    let bytes = serde_json::to_vec(&UpdateHandoffRequest {
+        target,
+        version: version.to_owned(),
+        owner_pid: std::process::id(),
+        created_at: unix_now(),
+    })?;
+    let mut file = match crate::platform::private_file_options().open(&path) {
         Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => return Ok(false),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            if read_update_handoff(state_dir)?.is_none() {
+                match crate::platform::private_file_options().open(&path) {
+                    Ok(file) => file,
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                        return Ok(false);
+                    }
+                    Err(error) => return Err(error.into()),
+                }
+            } else {
+                return Ok(false);
+            }
+        }
         Err(error) => return Err(error.into()),
     };
     if let Err(error) = file.write_all(&bytes).and_then(|_| file.sync_all()) {
@@ -85,7 +110,7 @@ pub fn clear_update_handoff(state_dir: &Path) -> Result<()> {
     }
 }
 
-fn read_update_handoff(state_dir: &Path) -> Result<Option<UpdateTarget>> {
+fn read_update_handoff(state_dir: &Path) -> Result<Option<UpdateHandoffRequest>> {
     let path = handoff_request_path(state_dir);
     let bytes = match std_fs::read(&path) {
         Ok(bytes) => bytes,
@@ -93,12 +118,39 @@ fn read_update_handoff(state_dir: &Path) -> Result<Option<UpdateTarget>> {
         Err(error) => return Err(error.into()),
     };
     match serde_json::from_slice::<UpdateHandoffRequest>(&bytes) {
-        Ok(request) => Ok(Some(request.target)),
+        Ok(request)
+            if request.owner_pid != 0
+                && !request.version.is_empty()
+                && parse_version(&request.version).is_ok()
+                && request.created_at.saturating_add(HANDOFF_REQUEST_TTL_SECS) >= unix_now()
+                && handoff_owner_is_live(request.owner_pid) =>
+        {
+            Ok(Some(request))
+        }
         Err(_) => {
             // A torn or old request must not pin every later Host startup.
             clear_update_handoff(state_dir)?;
             Ok(None)
         }
+        Ok(_) => {
+            clear_update_handoff(state_dir)?;
+            Ok(None)
+        }
+    }
+}
+
+fn handoff_owner_is_live(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        let result = unsafe { libc::kill(pid as libc::pid_t, 0) };
+        result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    }
+    #[cfg(not(unix))]
+    {
+        // Windows has no portable, dependency-free process probe here. The
+        // short request TTL still bounds a stale request on that platform.
+        let _ = pid;
+        true
     }
 }
 
@@ -152,10 +204,11 @@ pub(crate) struct UpdateManager {
     metadata_url: Option<String>,
     default_channel: UpdateChannel,
     client: reqwest::Client,
-    records: Arc<Mutex<HashMap<UpdateTarget, UpdateRecord>>>,
+    records: Arc<StdMutex<HashMap<UpdateTarget, UpdateRecord>>>,
     operation_locks: Arc<HashMap<UpdateTarget, Arc<Mutex<()>>>>,
     worker_locks: Arc<HashMap<UpdateTarget, Arc<Mutex<()>>>>,
     fences: Arc<HashMap<UpdateTarget, Arc<AtomicU64>>>,
+    active_operations: Arc<HashMap<UpdateTarget, Arc<AtomicBool>>>,
 }
 
 struct UpdateOperation {
@@ -166,6 +219,7 @@ struct UpdateOperation {
     manager: UpdateManager,
     target: UpdateTarget,
     fence: Arc<AtomicU64>,
+    active: Arc<AtomicBool>,
     completed: bool,
 }
 
@@ -189,6 +243,7 @@ impl UpdateOperation {
     }
 
     fn complete(&mut self) {
+        self.active.store(false, AtomicOrdering::Release);
         self.completed = true;
     }
 }
@@ -199,44 +254,35 @@ impl Drop for UpdateOperation {
             return;
         }
         self.cancellation.cancel();
-        let manager = self.manager.clone();
-        let target = self.target;
-        let generation = self.generation;
-        let lock = manager
-            .operation_locks
-            .get(&target)
-            .expect("all update targets have an operation lock")
-            .clone();
-        let persist = async move {
-            let _lock = lock.lock().await;
-            if manager.current_generation(target) != generation {
-                return;
-            }
-            let mut records = manager.records.lock().await;
-            let Some(record) = records.get_mut(&target) else {
-                return;
-            };
-            let status = record.state.status;
-            let state = match status {
-                UpdateStatus::Checking => record
-                    .state
-                    .check_failed("update transaction was cancelled".into(), Some(now())),
-                UpdateStatus::Downloading => record
-                    .state
-                    .download_failed("update transaction was cancelled".into()),
-                UpdateStatus::Installing => record
-                    .state
-                    .install_failed("update transaction was cancelled".into()),
-                _ => return,
-            };
-            record.state = state;
-            let snapshot = record.clone();
-            drop(records);
-            manager.persist(target, &snapshot).await;
+        // Drop runs while `_lock` is still held.  Update state is intentionally
+        // backed by a synchronous mutex and atomic file writer so cancellation
+        // cannot leave an in-flight status in memory while an un-awaited task
+        // races shutdown.
+        let snapshot = if self.manager.current_generation(self.target) == self.generation {
+            self.manager.records.lock().ok().and_then(|mut records| {
+                let record = records.get_mut(&self.target)?;
+                let state = match record.state.status {
+                    UpdateStatus::Checking => record
+                        .state
+                        .check_failed("update transaction was cancelled".into(), Some(now())),
+                    UpdateStatus::Downloading => record
+                        .state
+                        .download_failed("update transaction was cancelled".into()),
+                    UpdateStatus::Installing => record
+                        .state
+                        .install_failed("update transaction was cancelled".into()),
+                    _ => return None,
+                };
+                record.state = state;
+                Some(record.clone())
+            })
+        } else {
+            None
         };
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            handle.spawn(persist);
+        if let Some(snapshot) = snapshot {
+            self.manager.persist(self.target, &snapshot);
         }
+        self.active.store(false, AtomicOrdering::Release);
     }
 }
 
@@ -308,15 +354,22 @@ impl UpdateManager {
         ]
         .into_iter()
         .collect();
+        let active_operations = [
+            (UpdateTarget::Host, Arc::new(AtomicBool::new(false))),
+            (UpdateTarget::Desktop, Arc::new(AtomicBool::new(false))),
+        ]
+        .into_iter()
+        .collect();
         Self {
             state_dir,
             metadata_url,
             default_channel,
             client,
-            records: Arc::default(),
+            records: Arc::new(StdMutex::new(HashMap::new())),
             operation_locks: Arc::new(operation_locks),
             worker_locks: Arc::new(worker_locks),
             fences: Arc::new(fences),
+            active_operations: Arc::new(active_operations),
         }
     }
 
@@ -340,6 +393,12 @@ impl UpdateManager {
             .expect("all update targets have a generation fence")
             .clone();
         let generation = fence.fetch_add(1, AtomicOrdering::SeqCst).saturating_add(1);
+        let active = self
+            .active_operations
+            .get(&target)
+            .expect("all update targets have an active operation flag")
+            .clone();
+        active.store(true, AtomicOrdering::Release);
         UpdateOperation {
             _lock: guard,
             worker_lock: Some(worker_lock),
@@ -348,8 +407,15 @@ impl UpdateManager {
             manager: self.clone(),
             target,
             fence,
+            active,
             completed: false,
         }
+    }
+
+    pub(crate) fn has_active_operations(&self) -> bool {
+        self.active_operations
+            .values()
+            .any(|active| active.load(AtomicOrdering::Acquire))
     }
 
     fn current_generation(&self, target: UpdateTarget) -> u64 {
@@ -376,12 +442,23 @@ impl UpdateManager {
         Ok(acknowledged)
     }
 
-    async fn accept_handoff_if_ready(&self) -> Result<bool> {
-        let Some(target) = read_update_handoff(&self.state_dir)? else {
+    pub(crate) async fn accept_handoff_if_ready(&self) -> Result<bool> {
+        if self.has_active_operations() {
+            return Ok(false);
+        }
+        let Some(request) = read_update_handoff(&self.state_dir)? else {
             return Ok(false);
         };
-        let record = self.record(target).await;
-        if !record.state.restart_required || record.state.downloaded_version.is_none() {
+        if request.created_at.saturating_add(HANDOFF_REQUEST_TTL_SECS) < unix_now() {
+            clear_update_handoff(&self.state_dir)?;
+            return Ok(false);
+        }
+        let record = self.record(request.target).await;
+        if !record.state.restart_required
+            || record.state.downloaded_version.as_deref() != Some(request.version.as_str())
+        {
+            // The request must name the exact installed transaction. A request
+            // created before a later download cannot stop the Host repeatedly.
             clear_update_handoff(&self.state_dir)?;
             return Ok(false);
         }
@@ -422,7 +499,7 @@ impl UpdateManager {
 
     async fn record(&self, target: UpdateTarget) -> UpdateRecord {
         {
-            let records = self.records.lock().await;
+            let records = self.records.lock().expect("update records mutex poisoned");
             if let Some(record) = records.get(&target) {
                 return record.clone();
             }
@@ -434,13 +511,16 @@ impl UpdateManager {
             platform: std::env::consts::OS.into(),
             architecture: std::env::consts::ARCH.into(),
         });
-        let mut records = self.records.lock().await;
+        let mut records = self.records.lock().expect("update records mutex poisoned");
         records.entry(target).or_insert(restored).clone()
     }
 
     async fn save(&self, target: UpdateTarget, record: UpdateRecord) {
-        self.records.lock().await.insert(target, record.clone());
-        self.persist(target, &record).await;
+        self.records
+            .lock()
+            .expect("update records mutex poisoned")
+            .insert(target, record.clone());
+        self.persist(target, &record);
     }
 
     async fn restore(&self, target: UpdateTarget) -> Option<UpdateRecord> {
@@ -564,9 +644,9 @@ impl UpdateManager {
         Ok(())
     }
 
-    async fn persist(&self, target: UpdateTarget, record: &UpdateRecord) {
+    fn persist(&self, target: UpdateTarget, record: &UpdateRecord) {
         let directory = self.state_dir.join("transactions");
-        if ensure_real_directory(&directory).await.is_err() {
+        if ensure_real_directory_sync(&directory).is_err() {
             return;
         }
         let path = self.transaction_path(target);
@@ -601,6 +681,12 @@ impl UpdateManager {
         let mut operation = self.begin_operation(request.target).await;
         let mut record = self.record(request.target).await;
         if record.state.channel != request.channel {
+            if record.state.restart_required {
+                operation.complete();
+                bail!(
+                    "cannot change the update channel while an installed update is waiting for restart"
+                );
+            }
             if let Some(staged) = record.staged.take() {
                 let _ = fs::remove_file(staged.path).await;
             }
@@ -947,7 +1033,7 @@ impl UpdateManager {
     pub(crate) async fn native(&self, request: &NativeUpdateRequest) -> Result<NativeUpdateState> {
         let Some(metadata_url) = self.metadata_url.clone() else {
             return Ok(NativeUpdateState {
-                platform: request.platform,
+                platform: request.platform.clone(),
                 channel: request.channel,
                 current_version: request.current_version.clone(),
                 latest_version: None,
@@ -962,7 +1048,7 @@ impl UpdateManager {
             Ok(metadata) => metadata,
             Err(error) => {
                 return Ok(NativeUpdateState {
-                    platform: request.platform,
+                    platform: request.platform.clone(),
                     channel: request.channel,
                     current_version: request.current_version.clone(),
                     latest_version: None,
@@ -986,12 +1072,12 @@ impl UpdateManager {
             compare_versions(&request.current_version, &metadata.version)? == Ordering::Less;
         let (release_notes, _) = bounded_release_notes(&metadata.release_notes);
         Ok(NativeUpdateState {
-            platform: request.platform,
+            platform: request.platform.clone(),
             channel: request.channel,
             current_version: request.current_version.clone(),
             latest_version: Some(metadata.version),
             update_available: available && store_url.is_some(),
-            store_url,
+            store_url: store_url.clone(),
             release_notes,
             checked_at: Some(now()),
             message: (available && store_url.is_none())
@@ -1585,19 +1671,7 @@ async fn verify_staged_artifact(staged: &StagedArtifact) -> Result<()> {
 }
 
 async fn ensure_real_directory(path: &Path) -> Result<()> {
-    anyhow::ensure!(!path.as_os_str().is_empty(), "update path is empty");
-    let mut current = PathBuf::new();
-    for component in path.components() {
-        match component {
-            std::path::Component::CurDir => continue,
-            std::path::Component::ParentDir => {
-                bail!("update path contains a parent directory component")
-            }
-            std::path::Component::Prefix(..) | std::path::Component::RootDir => {
-                current.push(component.as_os_str());
-            }
-            std::path::Component::Normal(part) => current.push(part),
-        }
+    for current in real_directory_components(path)? {
         match fs::symlink_metadata(&current).await {
             Ok(metadata) => anyhow::ensure!(
                 metadata.is_dir() && !metadata.file_type().is_symlink(),
@@ -1615,6 +1689,47 @@ async fn ensure_real_directory(path: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn ensure_real_directory_sync(path: &Path) -> Result<()> {
+    for current in real_directory_components(path)? {
+        match std_fs::symlink_metadata(&current) {
+            Ok(metadata) => anyhow::ensure!(
+                metadata.is_dir() && !metadata.file_type().is_symlink(),
+                "update path traverses a symlink or non-directory"
+            ),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                std_fs::create_dir(&current)?;
+                let metadata = std_fs::symlink_metadata(&current)?;
+                anyhow::ensure!(
+                    metadata.is_dir() && !metadata.file_type().is_symlink(),
+                    "update path is not a real directory"
+                );
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
+}
+
+fn real_directory_components(path: &Path) -> Result<Vec<PathBuf>> {
+    anyhow::ensure!(!path.as_os_str().is_empty(), "update path is empty");
+    let mut current = PathBuf::new();
+    let mut components = Vec::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => continue,
+            std::path::Component::ParentDir => {
+                bail!("update path contains a parent directory component")
+            }
+            std::path::Component::Prefix(..) | std::path::Component::RootDir => {
+                current.push(component.as_os_str());
+            }
+            std::path::Component::Normal(part) => current.push(part),
+        }
+        components.push(current.clone());
+    }
+    Ok(components)
 }
 
 fn target_name(target: UpdateTarget) -> &'static str {
@@ -1740,6 +1855,13 @@ fn compare_versions(left: &str, right: &str) -> Result<Ordering> {
 fn now() -> String {
     chrono::DateTime::<chrono::Utc>::from(std::time::SystemTime::now())
         .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 #[cfg(test)]
@@ -2076,21 +2198,51 @@ mod tests {
     #[test]
     fn handoff_request_is_single_writer_and_clearable() {
         let directory = tempfile::tempdir().unwrap();
-        assert!(request_update_handoff(directory.path(), UpdateTarget::Desktop).unwrap());
-        assert!(!request_update_handoff(directory.path(), UpdateTarget::Host).unwrap());
+        assert!(request_update_handoff(directory.path(), UpdateTarget::Desktop, "1.1.0").unwrap());
+        assert!(!request_update_handoff(directory.path(), UpdateTarget::Host, "1.2.0").unwrap());
         let request: UpdateHandoffRequest =
             serde_json::from_slice(&std::fs::read(handoff_request_path(directory.path())).unwrap())
                 .unwrap();
         assert_eq!(request.target, UpdateTarget::Desktop);
+        assert_eq!(request.version, "1.1.0");
         clear_update_handoff(directory.path()).unwrap();
         assert!(!handoff_request_path(directory.path()).exists());
+    }
+
+    #[test]
+    fn expired_handoff_request_is_removed_before_a_new_owner_retries() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = handoff_request_path(directory.path());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&UpdateHandoffRequest {
+                target: UpdateTarget::Host,
+                version: "1.1.0".into(),
+                owner_pid: std::process::id(),
+                created_at: 0,
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(request_update_handoff(directory.path(), UpdateTarget::Desktop, "1.2.0").unwrap());
+        let replacement: UpdateHandoffRequest =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(replacement.target, UpdateTarget::Desktop);
+        assert_eq!(replacement.version, "1.2.0");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn handoff_request_rejects_a_nonexistent_owner() {
+        assert!(!handoff_owner_is_live(i32::MAX as u32));
     }
 
     #[tokio::test]
     async fn handoff_is_consumed_only_for_a_restartable_install() {
         let directory = tempfile::tempdir().unwrap();
         let manager = UpdateManager::new(directory.path().to_path_buf());
-        request_update_handoff(directory.path(), UpdateTarget::Desktop).unwrap();
+        request_update_handoff(directory.path(), UpdateTarget::Desktop, "1.1.0").unwrap();
         assert!(!manager.accept_handoff_if_ready().await.unwrap());
         assert!(!handoff_request_path(directory.path()).exists());
 
@@ -2113,9 +2265,65 @@ mod tests {
         let path = directory.path().join("transactions/desktop.json");
         std::fs::write(&path, serde_json::to_vec(&transaction).unwrap()).unwrap();
         let manager = UpdateManager::new(directory.path().to_path_buf());
-        request_update_handoff(directory.path(), UpdateTarget::Desktop).unwrap();
+        request_update_handoff(directory.path(), UpdateTarget::Desktop, "1.1.0").unwrap();
         assert!(manager.accept_handoff_if_ready().await.unwrap());
         assert!(!handoff_request_path(directory.path()).exists());
+    }
+
+    #[tokio::test]
+    async fn channel_change_preserves_an_install_waiting_for_restart() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(directory.path().join("transactions")).unwrap();
+        let mut state = UpdateState::initial(
+            UpdateTarget::Desktop,
+            "1.0.0".into(),
+            UpdateChannel::Nightly,
+            true,
+        );
+        state.status = UpdateStatus::Downloaded;
+        state.downloaded_version = Some("1.1.0".into());
+        state.restart_required = true;
+        let record = PersistedUpdateRecord {
+            state,
+            metadata: None,
+            staged: None,
+            platform: "linux".into(),
+            architecture: "x86_64".into(),
+        };
+        let path = directory.path().join("transactions/desktop.json");
+        let before = serde_json::to_vec(&record).unwrap();
+        std::fs::write(&path, &before).unwrap();
+        let manager = UpdateManager::new(directory.path().to_path_buf());
+        let result = manager
+            .set_channel(&UpdateChannelRequest {
+                target: UpdateTarget::Desktop,
+                channel: UpdateChannel::Preview,
+            })
+            .await;
+        assert!(result.is_err());
+        assert_eq!(std::fs::read(path).unwrap(), before);
+    }
+
+    #[tokio::test]
+    async fn dropping_an_update_operation_persists_cancellation_before_drain() {
+        let directory = tempfile::tempdir().unwrap();
+        let manager = UpdateManager::new(directory.path().to_path_buf());
+        let mut record = manager.record(UpdateTarget::Host).await;
+        record.state.status = UpdateStatus::Downloading;
+        manager.save(UpdateTarget::Host, record).await;
+        let operation = manager.begin_operation(UpdateTarget::Host).await;
+        assert!(manager.has_active_operations());
+        drop(operation);
+        assert!(!manager.has_active_operations());
+        let persisted: PersistedUpdateRecord = serde_json::from_slice(
+            &std::fs::read(directory.path().join("transactions/host.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(persisted.state.status, UpdateStatus::Error);
+        assert_eq!(
+            persisted.state.message.as_deref(),
+            Some("update transaction was cancelled")
+        );
     }
 
     #[test]

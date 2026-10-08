@@ -4,6 +4,7 @@ use agent_core::{
 };
 use agent_protocol::models::UpdateTarget;
 use agent_transport::transport::{Endpoint, Relays, Ticket};
+use anyhow::Context;
 use host_daemon::local_host::{LocalHost, LocalHostRegistry, LocalHostState};
 use std::{
     io::Write,
@@ -14,9 +15,14 @@ use std::{
     time::{Duration, Instant},
 };
 
+const DESKTOP_HANDOFF_TTL_SECS: u64 = 300;
+
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 struct DesktopHandoffAttempt {
     executable: PathBuf,
+    version: String,
+    owner_pid: u32,
+    created_at: u64,
 }
 
 #[cfg(target_os = "linux")]
@@ -94,13 +100,22 @@ pub(crate) struct Connections {
     local_endpoint: tokio::sync::OnceCell<(PathBuf, Endpoint)>,
     startup: tokio::sync::Mutex<()>,
 }
+
+/// The connection path is part of the power-publisher safety boundary.  A
+/// local session is marked only after the registry-backed local Host answered
+/// on its loopback endpoint; a remote ticket can never acquire this marker.
+pub(crate) struct ConnectedStore {
+    pub(crate) store: Arc<Store>,
+    pub(crate) local_host_supervised: bool,
+}
+
 impl Connections {
     pub(crate) async fn connect(
         self: &Arc<Self>,
         remote: Option<&str>,
         snapshot: Snapshot,
         options: StoreOptions,
-    ) -> anyhow::Result<Arc<Store>> {
+    ) -> anyhow::Result<ConnectedStore> {
         let startup = self.startup.lock().await;
         if let Some(remote) = remote {
             let ticket = remote.parse::<Ticket>()?;
@@ -112,13 +127,17 @@ impl Connections {
                 }
             };
             drop(startup);
-            return Ok(Arc::new(
-                Store::connect(endpoint, &ticket, snapshot, options, None).await?,
-            ));
+            return Ok(ConnectedStore {
+                store: Arc::new(Store::connect(endpoint, &ticket, snapshot, options, None).await?),
+                local_host_supervised: false,
+            });
         }
         let store = Arc::new(self.connect_local(snapshot, options).await?);
         self.recover_local(store.clone());
-        Ok(store)
+        Ok(ConnectedStore {
+            store,
+            local_host_supervised: true,
+        })
     }
 
     async fn endpoint_for(
@@ -163,7 +182,7 @@ impl Connections {
         let isolated = isolated_host()?;
         let mut child = None;
         let mut host_handoff_attempted = false;
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
         let mut last_error = anyhow::anyhow!("Host startup timed out");
         let ready = async {
             loop {
@@ -178,10 +197,23 @@ impl Connections {
                         handoff_installed_host(&directory, false, isolated)
                     })
                     .await??;
+                    host_handoff_attempted = stopped;
                     if !stopped {
                         last_error =
                             anyhow::anyhow!("Installed Host is waiting for active work to settle");
                     }
+                    continue;
+                }
+                if resolve_installed_host_executable(&location.directory)?.is_some()
+                    && !matches!(&location.state, LocalHostState::Stopped)
+                {
+                    // Do not reconnect the old Host after a handoff timeout;
+                    // retry while the target-owned transaction remains pending.
+                    host_handoff_attempted = false;
+                    if tokio::time::Instant::now() >= deadline {
+                        break Err(last_error);
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
                     continue;
                 }
                 match &location.state {
@@ -289,11 +321,12 @@ fn wait_for_host_stop(
     registry: &LocalHostRegistry,
     preferred: &std::path::Path,
     target: UpdateTarget,
+    version: &str,
 ) -> anyhow::Result<bool> {
     if initially_stopped {
         return Ok(true);
     }
-    let created = host_daemon::request_update_handoff(directory, target)?;
+    let created = host_daemon::request_update_handoff(directory, target, version)?;
     let deadline = Instant::now() + UPDATE_HANDOFF_TIMEOUT;
     loop {
         let current = registry.resolve(preferred)?;
@@ -327,12 +360,15 @@ fn handoff_installed_host(
     } else {
         LocalHostRegistry::for_user()?
     };
+    let version = pending_update_version(directory, UpdateTarget::Host)?
+        .context("installed Host has no matching update transaction")?;
     wait_for_host_stop(
         directory,
         initially_stopped,
         &registry,
         &preferred,
         UpdateTarget::Host,
+        &version,
     )
 }
 
@@ -576,6 +612,7 @@ fn desktop_handoff_attempt_path(directory: &std::path::Path) -> PathBuf {
 fn write_desktop_handoff_attempt(
     directory: &std::path::Path,
     executable: &std::path::Path,
+    version: &str,
 ) -> anyhow::Result<bool> {
     let path = desktop_handoff_attempt_path(directory);
     let parent = path
@@ -584,6 +621,9 @@ fn write_desktop_handoff_attempt(
     host_daemon::platform::create_state_directory(parent)?;
     let bytes = serde_json::to_vec(&DesktopHandoffAttempt {
         executable: executable.to_owned(),
+        version: version.to_owned(),
+        owner_pid: std::process::id(),
+        created_at: unix_now(),
     })?;
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
@@ -647,6 +687,57 @@ fn desktop_handoff_attempt_matches(
     Ok(true)
 }
 
+fn pending_update_version(
+    directory: &std::path::Path,
+    target: UpdateTarget,
+) -> anyhow::Result<Option<String>> {
+    let target_name = match target {
+        UpdateTarget::Host => "host",
+        UpdateTarget::Desktop => "desktop",
+    };
+    let path = directory
+        .join("transactions")
+        .join(format!("{}.json", target_name));
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let document = serde_json::from_slice::<serde_json::Value>(&bytes)?;
+    let Some(version) = document
+        .get("state")
+        .and_then(|state| state.get("downloadedVersion"))
+        .and_then(serde_json::Value::as_str)
+    else {
+        return Ok(None);
+    };
+    Ok((!version.is_empty()).then(|| version.to_owned()))
+}
+
+fn desktop_handoff_attempt_is_live(attempt: &DesktopHandoffAttempt) -> bool {
+    if attempt.owner_pid == 0
+        || unix_now().saturating_sub(attempt.created_at) > DESKTOP_HANDOFF_TTL_SECS
+    {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        let result = unsafe { libc::kill(attempt.owner_pid as libc::pid_t, 0) };
+        return result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
 pub(crate) fn acknowledge_installed_desktop_handoff() -> anyhow::Result<bool> {
     let preferred = state_dir().map_err(anyhow::Error::msg)?;
     let isolated = isolated_host()?;
@@ -703,24 +794,34 @@ pub(crate) fn handoff_installed_desktop() -> anyhow::Result<bool> {
     };
     let location = registry.resolve(&preferred)?;
     let handoff_attempt = desktop_handoff_attempt_path(&location.directory);
+    let Some(version) = pending_update_version(&location.directory, UpdateTarget::Desktop)? else {
+        let _ = std::fs::remove_file(&handoff_attempt);
+        return Ok(false);
+    };
+    let Some(installed) = resolve_installed_desktop_executable(&location.directory)? else {
+        let _ = std::fs::remove_file(&handoff_attempt);
+        return Ok(false);
+    };
     if handoff_attempt.exists() {
         let pending = std::fs::read(&handoff_attempt)
             .ok()
             .and_then(|bytes| serde_json::from_slice::<DesktopHandoffAttempt>(&bytes).ok())
-            .is_some_and(|attempt| std::fs::symlink_metadata(attempt.executable).is_ok());
+            .is_some_and(|attempt| {
+                attempt.version == version
+                    && std::fs::canonicalize(&attempt.executable).ok()
+                        == std::fs::canonicalize(&installed).ok()
+                    && desktop_handoff_attempt_is_live(&attempt)
+            });
         if pending {
             return Ok(false);
         }
         let _ = std::fs::remove_file(&handoff_attempt);
     }
-    let Some(installed) = resolve_installed_desktop_executable(&location.directory)? else {
-        return Ok(false);
-    };
     let current = std::env::current_exe()?;
     if std::fs::canonicalize(&current).ok() == std::fs::canonicalize(&installed).ok() {
         return Ok(false);
     }
-    if !write_desktop_handoff_attempt(&location.directory, &installed)? {
+    if !write_desktop_handoff_attempt(&location.directory, &installed, &version)? {
         return Ok(false);
     }
     if !wait_for_host_stop(
@@ -729,6 +830,7 @@ pub(crate) fn handoff_installed_desktop() -> anyhow::Result<bool> {
         &registry,
         &preferred,
         UpdateTarget::Desktop,
+        &version,
     )? {
         let _ = std::fs::remove_file(desktop_handoff_attempt_path(&location.directory));
         return Ok(false);
@@ -751,10 +853,11 @@ pub(crate) fn handoff_installed_desktop() -> anyhow::Result<bool> {
 #[cfg(test)]
 mod update_handoff_tests {
     use super::{
-        acknowledge_desktop_handoff_at, resolve_installed_desktop_executable,
-        resolve_installed_host_executable, write_desktop_handoff_attempt,
+        DesktopHandoffAttempt, acknowledge_desktop_handoff_at,
+        resolve_installed_desktop_executable, resolve_installed_host_executable,
+        write_desktop_handoff_attempt,
     };
-    use std::fs;
+    use std::{fs, path::PathBuf};
 
     #[test]
     fn selects_verified_installed_host_after_a_completed_install() {
@@ -894,11 +997,28 @@ mod update_handoff_tests {
         let current = directory.path().join("current-desktop");
         fs::write(&expected, b"installed").expect("installed executable");
         fs::write(&current, b"current").expect("current executable");
-        assert!(write_desktop_handoff_attempt(directory.path(), &expected).expect("write marker"));
-        assert!(!write_desktop_handoff_attempt(directory.path(), &current).expect("claim marker"));
+        assert!(
+            write_desktop_handoff_attempt(directory.path(), &expected, "1.0.0")
+                .expect("write marker")
+        );
+        assert!(
+            !write_desktop_handoff_attempt(directory.path(), &current, "1.0.0")
+                .expect("claim marker")
+        );
         assert!(!acknowledge_desktop_handoff_at(directory.path(), &current).expect("old app"));
         assert!(acknowledge_desktop_handoff_at(directory.path(), &expected).expect("new app"));
         assert!(!super::desktop_handoff_attempt_path(directory.path()).exists());
+    }
+
+    #[test]
+    fn expired_desktop_handoff_owner_does_not_block_a_new_launch() {
+        let attempt = DesktopHandoffAttempt {
+            executable: PathBuf::from("installed-desktop"),
+            version: "1.0.0".into(),
+            owner_pid: std::process::id(),
+            created_at: 0,
+        };
+        assert!(!super::desktop_handoff_attempt_is_live(&attempt));
     }
 }
 

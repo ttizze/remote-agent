@@ -669,16 +669,24 @@ private struct ProviderAccountsPage: View {
     @State private var code = ""
 
     var body: some View {
+        let usageLimits = model.snapshot.usageLimits()
         List {
             Section("Provider accounts") {
                 ForEach(model.snapshot.accounts()?.accounts ?? [], id: \.id) { account in
+                    let limits = usageLimits.first {
+                        $0.sourceAccountIds.contains(account.id)
+                    }
                     VStack(alignment: .leading, spacing: 8) {
                         AccountIdentityView(account: account)
-                        AccountUsageView(usage: account.usage) {
+                        AccountUsageView(limits: limits) {
+                            let sourceId = limits?.resetCreditAccountId ?? account.id
+                            let source = model.snapshot.accounts()?.accounts.first {
+                                $0.id == sourceId
+                            }
                             model.perform(.consumeResetCredit(
-                                provider: account.provider,
-                                accountId: account.id,
-                                creditId: account.usage?.resetCredits?.nextCreditId
+                                provider: source?.provider ?? account.provider,
+                                accountId: sourceId,
+                                creditId: limits?.nextCreditId
                             ))
                             model.perform(.loadAccounts)
                         }

@@ -98,6 +98,7 @@
             NEXTEST_VERSION = pkgs.cargo-nextest.version;
             packages = with pkgs; [ rustToolchain kache cargo-mutants cargo-nextest just jq git pkg-config cmake clang workflowLinter nodejs ffmpeg ]
               ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
+                patchelf
                 lsof
                 alsa-lib fontconfig freetype libxkbcommon wayland libGL vulkan-loader
                 libxcb libX11 libXcursor libXi libXrandr

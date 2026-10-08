@@ -129,7 +129,7 @@ fn recover(saved: Option<&[u8]>, defaults: &[u8]) -> Snapshot {
             ..Default::default()
         });
     if !defaults.is_empty() {
-        match serde_json::from_slice(defaults) {
+        match serde_json::from_slice::<Draft>(defaults) {
             Ok(draft) => state.default_draft = draft.user_defaults(),
             Err(_) => {
                 state.error =

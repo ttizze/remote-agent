@@ -331,6 +331,7 @@ impl Accounts {
                     };
                     Ok(crate::account_usage::UsageSnapshot {
                         windows: crate::account_usage::claude(&response),
+                        credential_fingerprint: None,
                         reset_credits,
                         external_usage: None,
                     })
@@ -340,6 +341,19 @@ impl Accounts {
     }
 
     pub(crate) async fn consume_reset_credit(
+        &mut self,
+        account_id: &str,
+        credit_id: Option<&str>,
+        version: &str,
+    ) -> Result<agent_protocol::models::Empty, String> {
+        let cache = self.usage.get(account_id).cloned();
+        let result = self
+            .consume_reset_credit_request(account_id, credit_id, version)
+            .await;
+        crate::account_usage::invalidate_after_reset(cache, result).await
+    }
+
+    async fn consume_reset_credit_request(
         &mut self,
         account_id: &str,
         credit_id: Option<&str>,
@@ -785,5 +799,51 @@ mod tests {
                 .is_err()
         );
         assert!(accounts.native_checked_at.is_none());
+    }
+
+    #[tokio::test]
+    async fn malformed_reset_invalidates_cached_usage_before_provider_request() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut accounts = Accounts::load(
+            PathBuf::from("missing-claude"),
+            directory.path().join("accounts"),
+            directory.path().join("native"),
+        )
+        .await
+        .unwrap();
+        let entry = accounts.usage.entry("missing".into()).or_default().clone();
+        entry
+            .read(async {
+                Ok(crate::account_usage::UsageSnapshot::windows(vec![
+                    agent_protocol::operations::UsageWindow::from_used(
+                        "5時間枠".into(),
+                        35.9,
+                        None,
+                    )
+                    .unwrap(),
+                ]))
+            })
+            .await;
+
+        let result = accounts
+            .consume_reset_credit("missing", Some("invalid grant"), "test")
+            .await;
+        assert_eq!(
+            result.unwrap_err(),
+            "Claude returned a malformed reset credit."
+        );
+        let refreshed = entry
+            .read(async {
+                Ok(crate::account_usage::UsageSnapshot::windows(vec![
+                    agent_protocol::operations::UsageWindow::from_used(
+                        "5時間枠".into(),
+                        82.4,
+                        None,
+                    )
+                    .unwrap(),
+                ]))
+            })
+            .await;
+        assert_eq!(refreshed.windows[0].used_percent, Some(82.4));
     }
 }

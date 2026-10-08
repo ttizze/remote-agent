@@ -1,6 +1,6 @@
 //! About and update actions. The page renders core's pure update state; the
 //! Host owns download and install effects and reports when a handoff is needed.
-use super::{Choice, Row, page_container, section, select};
+use super::{Choice, Row, page_container, section, select_with_disabled};
 use crate::app::{Desktop, ui::color};
 use agent_core::state::Intent;
 use agent_protocol::models::{
@@ -111,10 +111,13 @@ impl Desktop {
             selected: value == channel,
         })
         .collect();
-        let channel_control = select(
+        let channel_locked = host.or(desktop).is_some_and(|state| state.restart_required);
+        let channel_control = select_with_disabled(
             "update-channel",
             channel_label(channel),
             channel_choices,
+            176.,
+            channel_locked,
             move |view, value, _, _| {
                 let selected = match value.as_str() {
                     "nightly" => UpdateChannel::Nightly,
@@ -146,7 +149,11 @@ impl Desktop {
                             .control(div().text_sm().text_color(color("textMuted")).child(version))
                             .render(),
                         Row::new("Release channel")
-                            .description("Checks use the selected channel's release manifest.")
+                            .description(if channel_locked {
+                                "Restart the installed update before changing channels."
+                            } else {
+                                "Checks use the selected channel's release manifest."
+                            })
                             .control(channel_control)
                             .render(),
                     ],

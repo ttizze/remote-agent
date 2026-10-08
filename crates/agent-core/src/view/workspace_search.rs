@@ -1,8 +1,6 @@
 //! Pure presentation of project content search results.
-use crate::{
-    state::{ContentSearchQuery, Snapshot},
-};
-use agent_protocol::workspace::ContentSearch;
+use crate::state::{ContentSearchQuery, Snapshot};
+use agent_protocol::workspace::{ContentMatch, ContentSearch};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContentSearchView {

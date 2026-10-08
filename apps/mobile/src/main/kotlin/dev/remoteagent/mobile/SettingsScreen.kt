@@ -581,7 +581,7 @@ private fun AccountsSection(model: AndroidAppModel) {
     var code by remember { mutableStateOf("") }
     SectionCard("Provider accounts") {
         model.snapshot.accounts()?.accounts.orEmpty().forEach { account ->
-            val limits = model.snapshot.usageLimits().firstOrNull { it.id == account.id }
+            val limits = model.snapshot.usageLimits().firstOrNull { account.id in it.sourceAccountIds }
             var confirmingReset by remember(account.id) { mutableStateOf(false) }
             Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -643,7 +643,15 @@ private fun AccountsSection(model: AndroidAppModel) {
                     confirmButton = {
                         TextButton(onClick = {
                             confirmingReset = false
-                            model.perform(Intent.ConsumeResetCredit(account.provider, account.id, limits?.nextCreditId))
+                            val sourceId = limits?.resetCreditAccountId ?: account.id
+                            val source = model.snapshot.accounts()?.accounts?.firstOrNull { it.id == sourceId }
+                            model.perform(
+                                Intent.ConsumeResetCredit(
+                                    source?.provider ?: account.provider,
+                                    sourceId,
+                                    limits?.nextCreditId,
+                                )
+                            )
                             model.perform(Intent.LoadAccounts)
                         }) { Text("Use credit") }
                     },

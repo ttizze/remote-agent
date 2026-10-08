@@ -26,10 +26,20 @@ verify() { /usr/bin/codesign --verify --deep --strict "$1"; }
 if [[ $product == host ]]; then
     cargo build --locked --package host-daemon --package codex-app-server --package bex-process --release
     cp crates/host-daemon/src/claude/sdk/SDK-LICENSE.md "$target/release/Claude-Agent-SDK-LICENSE.md"
+    scripts_dir=$(cd "$(dirname "$0")" && pwd)
+    rm -f "$target/release/ffmpeg" "$target/release/ffmpeg-bin" \
+        "$target/release/FFMPEG-RUNTIME.txt" "$target/release"/FFMPEG-LICENSE-*
+    rm -rf "$target/release/lib"
+    "$scripts_dir/stage-ffmpeg-runtime.sh" macos "$target/release"
     sign --identifier app.bex.provider-supervisor "$target/release/bex-provider-supervisor"
     verify "$target/release/bex-provider-supervisor"
     sign --identifier app.bex.host "$target/release/host-daemon"
     verify "$target/release/host-daemon"
+    sign "$target/release/ffmpeg"
+    for library in "$target/release"/lib/*.dylib; do
+        [[ -e $library ]] || continue
+        sign "$library"
+    done
     echo "$target/release/host-daemon"
     exit
 fi
@@ -60,6 +70,8 @@ cp crates/host-daemon/src/claude/sdk/SDK-LICENSE.md "$resources/Claude-Agent-SDK
 cp "$target/release/bex-desktop" "$executables/Bex"
 cp "$target/release/host-daemon" "$executables/host-daemon"
 cp "$target/release/bex-provider-supervisor" "$executables/bex-provider-supervisor"
+scripts_dir=$(cd "$(dirname "$0")" && pwd)
+"$scripts_dir/stage-ffmpeg-runtime.sh" macos "$executables"
 cp apps/desktop/macos/Info.plist "$bundle/Contents/Info.plist"
 if [[ -n ${APP_RELEASE_VERSION:-} ]]; then
     /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $APP_RELEASE_VERSION" "$bundle/Contents/Info.plist"
@@ -70,6 +82,11 @@ fi
 sign "$executables/Bex"
 sign --identifier app.bex.provider-supervisor "$executables/bex-provider-supervisor"
 sign --identifier app.bex.host "$executables/host-daemon"
+sign "$executables/ffmpeg"
+for library in "$executables"/lib/*.dylib; do
+    [[ -e $library ]] || continue
+    sign "$library"
+done
 sign "$bundle"
 verify "$bundle"
 if [[ -e $destination ]]; then mv "$destination" "$staging/previous.app"; fi

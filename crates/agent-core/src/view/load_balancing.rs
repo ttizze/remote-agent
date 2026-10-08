@@ -97,21 +97,14 @@ pub struct Candidate {
 /// saturated samples are ignored; ties retain the caller's deterministic
 /// candidate order. The domain-owned `usable_for_load_balancing` predicate is
 /// the first capacity gate so clients do not duplicate probe validation.
-pub fn select_environment<'a>(
-    candidates: &'a [Candidate],
-    now_ms: i64,
-) -> Option<&'a str> {
+pub fn select_environment<'a>(candidates: &'a [Candidate], now_ms: i64) -> Option<&'a str> {
     let mut selected = None;
     let mut best_score = 0.0_f64;
     for candidate in candidates {
         let Some(resources) = candidate.resources.as_ref() else {
             continue;
         };
-        if !resource_sample_is_fresh(
-            Some(resources),
-            candidate.received_at_ms,
-            now_ms,
-        ) {
+        if !resource_sample_is_fresh(Some(resources), candidate.received_at_ms, now_ms) {
             continue;
         }
         if candidate.weight == 0 || !resources.usable_for_load_balancing() {
@@ -123,8 +116,8 @@ pub fn select_environment<'a>(
         if cpu_utilization >= 0.95 {
             continue;
         }
-        let available_memory = resources.available_memory_bytes as f64
-            / resources.total_memory_bytes as f64;
+        let available_memory =
+            resources.available_memory_bytes as f64 / resources.total_memory_bytes as f64;
         if available_memory <= 0.05 {
             continue;
         }

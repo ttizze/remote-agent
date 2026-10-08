@@ -158,4 +158,12 @@ test("exposes native store links only when configured", () => {
     nativeUpdate({ ...base, native_updates: { android: { url: androidLink } } }, "0.1.0-nightly.20261008.41", "android").update_available,
     true,
   );
+  assert.throws(
+    () => nativeUpdate({ ...base, native_updates: { android: { url: "https://example.invalid/mobile" } } }, "0.1.0-nightly.20261008.41", "android"),
+    /approved store host/,
+  );
+  assert.equal(
+    nativeUpdate({ ...base, native_updates: { ios: { url: "https://testflight.apple.com/join/example" } } }, "0.1.0-nightly.20261008.41", "ios").update_available,
+    true,
+  );
 });

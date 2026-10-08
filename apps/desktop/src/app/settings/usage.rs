@@ -8,7 +8,7 @@ use agent_core::{
     view::usage::{UsagePreferences, UsageSummaryInput},
 };
 use agent_protocol::usage::PriceOverride;
-use chrono::Local;
+use chrono::{Local, TimeZone};
 use gpui_kit::{
     component::{
         Sizable, StyledExt,
@@ -19,7 +19,7 @@ use gpui_kit::{
     prelude::FluentBuilder,
     *,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub(super) struct UsageState {
     aliases: Entity<InputState>,
@@ -102,6 +102,49 @@ pub(super) fn summary_input(
         model_aliases: preferences.model_aliases,
         price_overrides: preferences.price_overrides,
     }
+}
+
+fn use_reset_button(
+    id: impl Into<ElementId>,
+    provider: agent_protocol::provider::ProviderKind,
+    account_id: String,
+    credit_id: Option<String>,
+    cx: &mut Context<Desktop>,
+) -> AnyElement {
+    Button::new(id)
+        .outline()
+        .small()
+        .label("Use reset")
+        .on_click(cx.listener(move |view, _, window, cx| {
+            let account_id = account_id.clone();
+            let credit_id = credit_id.clone();
+            view.confirm(
+                crate::app::dialogs::Confirm {
+                    title: Some("Use a reset credit?".into()),
+                    message: "This redeems one credit and clears the current rate-limit windows."
+                        .into(),
+                    action: "Use credit".into(),
+                    destructive: false,
+                },
+                window,
+                cx,
+                move |view, _, _| {
+                    view.perform_then(
+                        Intent::ConsumeResetCredit {
+                            provider,
+                            account_id: account_id.clone(),
+                            credit_id: credit_id.clone(),
+                        },
+                        |view, result, _, _| {
+                            if result.is_ok() {
+                                view.perform(Intent::LoadAccounts);
+                            }
+                        },
+                    )
+                },
+            )
+        }))
+        .into_any_element()
 }
 
 impl Desktop {
@@ -258,29 +301,124 @@ impl Desktop {
             None,
             preference_rows,
         );
-        let limit_rows = self
+        let pools = self
             .snapshot
-            .usage_limits()
-            .into_iter()
-            .map(|account| {
-                let windows = account
-                    .windows
+            .usage_limit_pools(Local::now().timestamp_millis());
+        let accounts = self.snapshot.usage_limits();
+        let source_accounts = self
+            .snapshot
+            .accounts
+            .as_ref()
+            .map(|accounts| accounts.accounts.clone())
+            .unwrap_or_default();
+        let mut pooled_ids = BTreeSet::new();
+        let mut limit_rows = Vec::new();
+        for pool in pools {
+            pooled_ids.extend(pool.accounts.iter().map(|account| account.id.clone()));
+            for window in pool.windows {
+                let mut details = vec![format!("{}% left", window.remaining_percent)];
+                if let Some(pace) = window.pace {
+                    details.push(format!("{pace} pace"));
+                }
+                if window.members.len() > 1 {
+                    details.push(format!("{} accounts pooled", window.members.len()));
+                }
+                if let Some(reset) = window.resets.first() {
+                    let at = Local
+                        .timestamp_millis_opt(reset.at)
+                        .single()
+                        .map(|date| date.format("%Y-%m-%d %H:%M").to_string())
+                        .unwrap_or_else(|| reset.at.to_string());
+                    details.push(format!("next reset {at}"));
+                }
+                limit_rows.push(
+                    Row::new(format!("{} · {}", pool.provider, window.label))
+                        .description(details.join(" · "))
+                        .render(),
+                );
+            }
+            for account in pool.accounts {
+                if account.reset_credit_count == 0
+                    && account.external_label.is_none()
+                    && account.error.is_none()
+                {
+                    continue;
+                }
+                let details = (account.reset_credit_count > 0)
+                    .then(|| format!("{} reset credit(s)", account.reset_credit_count))
                     .into_iter()
-                    .map(|window| format!("{} {}% left", window.label, window.remaining_percent))
-                    .collect::<Vec<_>>();
-                let credits = (account.reset_credit_count > 0)
-                    .then(|| format!("{} reset credit(s)", account.reset_credit_count));
-                Row::new(account.email.unwrap_or(account.id)).description(
-                    windows
-                        .into_iter()
-                        .chain(credits)
-                        .chain(account.external_label)
-                        .collect::<Vec<_>>()
-                        .join(" · "),
-                )
-                .render()
-            })
-            .collect();
+                    .chain(account.external_label)
+                    .chain(account.error)
+                    .collect::<Vec<_>>()
+                    .join(" · ");
+                let reset_id = account
+                    .reset_credit_account_id
+                    .clone()
+                    .unwrap_or_else(|| account.id.clone());
+                let reset_credit_id = account.next_credit_id.clone();
+                let provider = source_accounts
+                    .iter()
+                    .find(|source| source.id == reset_id)
+                    .map(|source| source.provider.clone());
+                let can_reset = account.reset_credit_count > 0 && provider.is_some();
+                let action_index = limit_rows.len();
+                let mut row = Row::new(account.email.unwrap_or(account.id)).description(details);
+                if can_reset {
+                    let account_id = reset_id;
+                    let credit_id = reset_credit_id;
+                    let provider = provider.expect("reset source checked above");
+                    row = row.control(use_reset_button(
+                        ("use-reset-credit-usage", action_index),
+                        provider,
+                        account_id,
+                        credit_id,
+                        cx,
+                    ));
+                }
+                limit_rows.push(row.render());
+            }
+        }
+        for account in accounts {
+            if pooled_ids.contains(&account.id) {
+                continue;
+            }
+            let details = (account.reset_credit_count > 0)
+                .then(|| format!("{} reset credit(s)", account.reset_credit_count))
+                .into_iter()
+                .chain(account.external_label)
+                .chain(account.error)
+                .collect::<Vec<_>>();
+            let description = if details.is_empty() {
+                "No limits reported".into()
+            } else {
+                details.join(" · ")
+            };
+            let reset_id = account
+                .reset_credit_account_id
+                .clone()
+                .unwrap_or_else(|| account.id.clone());
+            let reset_credit_id = account.next_credit_id.clone();
+            let provider = source_accounts
+                .iter()
+                .find(|source| source.id == reset_id)
+                .map(|source| source.provider.clone());
+            let can_reset = account.reset_credit_count > 0 && provider.is_some();
+            let action_index = limit_rows.len();
+            let mut row = Row::new(account.email.unwrap_or(account.id)).description(description);
+            if can_reset {
+                let account_id = reset_id;
+                let credit_id = reset_credit_id;
+                let provider = provider.expect("reset source checked above");
+                row = row.control(use_reset_button(
+                    ("use-reset-credit-usage", action_index),
+                    provider,
+                    account_id,
+                    credit_id,
+                    cx,
+                ));
+            }
+            limit_rows.push(row.render());
+        }
         let limits = section(Some("Limits"), None, None, limit_rows);
         let notice = view.error.map(|error| {
             v_flex()

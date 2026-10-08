@@ -11,6 +11,7 @@ pub(crate) type UsageCache = HashMap<String, Arc<UsageEntry>>;
 #[derive(Debug, Default)]
 pub(crate) struct UsageSnapshot {
     pub windows: Vec<UsageWindow>,
+    pub credential_fingerprint: Option<String>,
     pub reset_credits: Option<agent_protocol::usage::ResetCredits>,
     pub external_usage: Option<agent_protocol::usage::ExternalUsage>,
 }
@@ -19,6 +20,7 @@ impl UsageSnapshot {
     pub(crate) fn windows(windows: Vec<UsageWindow>) -> Self {
         Self {
             windows,
+            credential_fingerprint: None,
             ..Self::default()
         }
     }
@@ -60,12 +62,27 @@ impl UsageEntry {
                 .unwrap_or_default()
                 .as_secs() as i64,
             error,
+            credential_fingerprint: snapshot.credential_fingerprint,
             reset_credits: snapshot.reset_credits,
             external_usage: snapshot.external_usage,
         };
         *cached = Some((Instant::now(), usage.clone()));
         usage
     }
+
+    pub(crate) async fn invalidate(&self) {
+        *self.0.lock().await = None;
+    }
+}
+
+pub(crate) async fn invalidate_after_reset<T>(
+    entry: Option<Arc<UsageEntry>>,
+    result: Result<T, String>,
+) -> Result<T, String> {
+    if let Some(entry) = entry {
+        entry.invalidate().await;
+    }
+    result
 }
 
 pub(crate) fn codex_reset_credits(value: &Value) -> Option<agent_protocol::usage::ResetCredits> {
@@ -211,7 +228,8 @@ mod tests {
             &json!({"rateLimitsByLimitId":{"codex":{"primary":{"usedPercent":28.2,"windowDurationMins":300,"resetsAt":1900000000},"secondary":null},"other":{"limitName":"Extra","primary":{"usedPercent":110,"windowDurationMins":10080}}}}),
         );
         assert_eq!(windows.len(), 1);
-        assert_eq!(windows[0].remaining_percent, 71);
+        assert_eq!(windows[0].used_percent, Some(28.2));
+        assert_eq!(windows[0].remaining_percent, 72);
         assert_eq!(windows[0].label, "5時間枠");
         let fallback = codex(&json!({
             "rateLimits": {
@@ -288,5 +306,34 @@ mod tests {
         let usage = entry.read(async { Ok(UsageSnapshot::default()) }).await;
         assert!(usage.windows.is_empty());
         assert!(usage.error.is_some());
+    }
+
+    #[tokio::test]
+    async fn reset_outcome_invalidates_cached_usage_even_when_redemption_fails() {
+        let entry = Arc::new(UsageEntry::default());
+        let first = entry
+            .read(async {
+                Ok(UsageSnapshot::windows(vec![
+                    UsageWindow::from_used("5時間枠".into(), 35.9, None).unwrap(),
+                ]))
+            })
+            .await;
+        assert_eq!(first.windows[0].used_percent, Some(35.9));
+
+        let result = invalidate_after_reset(
+            Some(entry.clone()),
+            Err::<(), _>("No reset credit is available.".into()),
+        )
+        .await;
+        assert_eq!(result.unwrap_err(), "No reset credit is available.");
+
+        let refreshed = entry
+            .read(async {
+                Ok(UsageSnapshot::windows(vec![
+                    UsageWindow::from_used("5時間枠".into(), 82.4, None).unwrap(),
+                ]))
+            })
+            .await;
+        assert_eq!(refreshed.windows[0].used_percent, Some(82.4));
     }
 }

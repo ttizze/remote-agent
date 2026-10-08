@@ -13,9 +13,9 @@ use crate::text_generation::{
     pull_request_template, sanitize_commit_message, sanitize_pr_content,
 };
 use agent_protocol::vcs::{
-    ActionPhase, ActionProgressEvent, ActionProgressKind, ActionToast, ActionToastCta,
-    BranchStep, BranchStepStatus, CommitStep, CommitStepStatus, PrStep, PrStepStatus,
-    PushStep, PushStepStatus, RunStackedAction, StackedAction, StackedActionResult,
+    ActionPhase, ActionProgressEvent, ActionProgressKind, ActionToast, ActionToastCta, BranchStep,
+    BranchStepStatus, CommitStep, CommitStepStatus, PrStep, PrStepStatus, PushStep, PushStepStatus,
+    RunStackedAction, StackedAction, StackedActionResult,
 };
 use agent_runtime::TextGenerationRequest;
 use anyhow::anyhow;
@@ -66,13 +66,17 @@ fn phases(request: &RunStackedAction) -> Vec<ActionPhase> {
     if action.commits() {
         phases.push(ActionPhase::Commit);
     }
-    if matches!(action, StackedAction::Push | StackedAction::CommitPush | StackedAction::CommitPushPr)
-        || (action == StackedAction::CreatePr
-            && should_push_before_pr(Path::new(&request.cwd)))
+    if matches!(
+        action,
+        StackedAction::Push | StackedAction::CommitPush | StackedAction::CommitPushPr
+    ) || (action == StackedAction::CreatePr && should_push_before_pr(Path::new(&request.cwd)))
     {
         phases.push(ActionPhase::Push);
     }
-    if matches!(action, StackedAction::CreatePr | StackedAction::CommitPushPr) {
+    if matches!(
+        action,
+        StackedAction::CreatePr | StackedAction::CommitPushPr
+    ) {
         phases.push(ActionPhase::Pr);
     }
     phases
@@ -140,8 +144,7 @@ async fn run(
         ));
     }
     if request.action == StackedAction::CreatePr
-        && stdout(cwd, &["status", "--porcelain"])
-            .is_some_and(|output| !output.is_empty())
+        && stdout(cwd, &["status", "--porcelain"]).is_some_and(|output| !output.is_empty())
     {
         return Err(ActionError::at(
             ActionPhase::Pr,
@@ -178,10 +181,23 @@ async fn run(
         None
     };
     let branch = if request.action.commits() && request.feature_branch {
-        phase(&request, &sender, ActionPhase::Branch, "Creating feature branch").await;
-        let name = create_feature_branch(cwd, generated.as_ref().map(|m| m.branch.as_str()).filter(|b| !b.is_empty()).or_else(|| generated.as_ref().map(|m| m.subject.as_str())))
-            .await
-            .map_err(|error| ActionError::at(ActionPhase::Branch, error))?;
+        phase(
+            &request,
+            &sender,
+            ActionPhase::Branch,
+            "Creating feature branch",
+        )
+        .await;
+        let name = create_feature_branch(
+            cwd,
+            generated
+                .as_ref()
+                .map(|m| m.branch.as_str())
+                .filter(|b| !b.is_empty())
+                .or_else(|| generated.as_ref().map(|m| m.subject.as_str())),
+        )
+        .await
+        .map_err(|error| ActionError::at(ActionPhase::Branch, error))?;
         BranchStep {
             status: BranchStepStatus::Created,
             name: Some(name),
@@ -194,12 +210,10 @@ async fn run(
     };
     let commit = if request.action.commits() {
         phase(&request, &sender, ActionPhase::Commit, "Committing changes").await;
-        let message = generated
-            .take()
-            .unwrap_or_else(|| GeneratedCommitMessage {
-                subject: "Update project files".into(),
-                ..Default::default()
-            });
+        let message = generated.take().unwrap_or_else(|| GeneratedCommitMessage {
+            subject: "Update project files".into(),
+            ..Default::default()
+        });
         commit(cwd, &request, &message, &sender).await?
     } else {
         CommitStep {
@@ -211,7 +225,8 @@ async fn run(
     let push_requested = matches!(
         request.action,
         StackedAction::Push | StackedAction::CommitPush | StackedAction::CommitPushPr
-    ) || (request.action == StackedAction::CreatePr && should_push_before_pr(cwd));
+    ) || (request.action == StackedAction::CreatePr
+        && should_push_before_pr(cwd));
     let push = if push_requested {
         phase(&request, &sender, ActionPhase::Push, "Pushing changes").await;
         push(cwd, &request, &sender).await?
@@ -223,7 +238,10 @@ async fn run(
             set_upstream: None,
         }
     };
-    let pr = if matches!(request.action, StackedAction::CreatePr | StackedAction::CommitPushPr) {
+    let pr = if matches!(
+        request.action,
+        StackedAction::CreatePr | StackedAction::CommitPushPr
+    ) {
         phase(&request, &sender, ActionPhase::Pr, "Opening pull request").await;
         pull_request(cwd, &request, github.as_ref(), text.as_ref()).await?
     } else {
@@ -264,14 +282,24 @@ async fn run(
 fn should_push_before_pr(cwd: &Path) -> bool {
     let upstream = stdout(
         cwd,
-        &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"],
+        &[
+            "rev-parse",
+            "--abbrev-ref",
+            "--symbolic-full-name",
+            "@{upstream}",
+        ],
     );
     let Some(upstream) = upstream else {
         return true;
     };
     stdout(
         cwd,
-        &["rev-list", "--left-right", "--count", &format!("{upstream}...HEAD")],
+        &[
+            "rev-list",
+            "--left-right",
+            "--count",
+            &format!("{upstream}...HEAD"),
+        ],
     )
     .and_then(|counts| counts.split_whitespace().nth(1)?.parse::<u64>().ok())
     .is_some_and(|ahead| ahead > 0)
@@ -279,7 +307,11 @@ fn should_push_before_pr(cwd: &Path) -> bool {
 
 async fn stage_selected_files(cwd: &Path, request: &RunStackedAction) -> anyhow::Result<()> {
     let mut add_args = vec!["add".to_owned(), "--".to_owned()];
-    match request.file_paths.as_ref().filter(|paths| !paths.is_empty()) {
+    match request
+        .file_paths
+        .as_ref()
+        .filter(|paths| !paths.is_empty())
+    {
         Some(paths) => add_args.extend(paths.iter().cloned()),
         None => add_args.push(".".into()),
     }
@@ -332,10 +364,14 @@ async fn commit_message(
     let Some(text) = text else {
         return Ok(fallback);
     };
-    let summary = stdout(Path::new(&request.cwd), &["diff", "--cached", "--stat"])
-        .unwrap_or_default();
-    let patch = stdout(Path::new(&request.cwd), &["diff", "--cached", "--no-color"])
-        .unwrap_or_default();
+    let summary =
+        stdout(Path::new(&request.cwd), &["diff", "--cached", "--stat"]).unwrap_or_default();
+    let patch =
+        stdout(Path::new(&request.cwd), &["diff", "--cached", "--no-color"]).unwrap_or_default();
+    let generation = text.generation_settings(
+        request.project_id.as_deref().unwrap_or_default(),
+        "generateCommitMessage",
+    );
     let generated = text
         .generate(TextGenerationRequest {
             operation: "git-commit-message",
@@ -348,6 +384,8 @@ async fn commit_message(
                 request.feature_branch,
             ),
             attachments: vec![],
+            model: generation.model,
+            instructions: generation.instructions,
             output_schema: commit_message_schema(request.feature_branch),
         })
         .await;
@@ -365,7 +403,12 @@ async fn create_feature_branch(cwd: &Path, fragment: Option<&str>) -> anyhow::Re
     for suffix in 2..102 {
         let exists = git(
             cwd,
-            &["show-ref", "--verify", "--quiet", &format!("refs/heads/{branch}")],
+            &[
+                "show-ref",
+                "--verify",
+                "--quiet",
+                &format!("refs/heads/{branch}"),
+            ],
             super::Options::default(),
         )
         .is_ok_and(|result| result.ok());
@@ -417,7 +460,7 @@ async fn commit(
         });
     }
     let message = format_commit_message(message);
-    let args = vec!["commit".to_owned(), "-m".to_owned(), message];
+    let args = vec!["commit".to_owned(), "-m".to_owned(), message.clone()];
     let refs: Vec<&str> = args.iter().map(String::as_str).collect();
     let mut report = |progress: Progress| {
         let kind = match progress {
@@ -489,16 +532,29 @@ async fn push(
     let branch = stdout(cwd, &["branch", "--show-current"])
         .filter(|branch| !branch.is_empty())
         .ok_or_else(|| ActionError::at(ActionPhase::Push, "Cannot push a detached HEAD."))?;
-    let upstream = stdout(cwd, &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"]);
+    let upstream = stdout(
+        cwd,
+        &[
+            "rev-parse",
+            "--abbrev-ref",
+            "--symbolic-full-name",
+            "@{upstream}",
+        ],
+    );
     let upstream_branch = upstream
         .as_deref()
         .and_then(|value| split_remote_ref(value, &remote_names(cwd)))
         .map(|(_, branch)| branch)
         .or_else(|| upstream.clone());
     if upstream.is_some() {
-        let counts = stdout(cwd, &["rev-list", "--left-right", "--count", "@{upstream}...HEAD"])
-            .unwrap_or_default();
-        let mut numbers = counts.split_whitespace().filter_map(|part| part.parse::<u64>().ok());
+        let counts = stdout(
+            cwd,
+            &["rev-list", "--left-right", "--count", "@{upstream}...HEAD"],
+        )
+        .unwrap_or_default();
+        let mut numbers = counts
+            .split_whitespace()
+            .filter_map(|part| part.parse::<u64>().ok());
         let _behind = numbers.next().unwrap_or(0);
         let ahead = numbers.next().unwrap_or(1);
         if ahead == 0 {
@@ -540,7 +596,15 @@ async fn push(
     if !pushed.ok() {
         return Err(ActionError::at(ActionPhase::Push, "Git push failed."));
     }
-    let current_upstream = stdout(cwd, &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"]);
+    let current_upstream = stdout(
+        cwd,
+        &[
+            "rev-parse",
+            "--abbrev-ref",
+            "--symbolic-full-name",
+            "@{upstream}",
+        ],
+    );
     Ok(PushStep {
         status: PushStepStatus::Pushed,
         branch: Some(branch),
@@ -559,13 +623,30 @@ async fn pull_request(
     github: Option<&crate::github::cli::GitHubCli>,
     text: Option<&TextGenerator>,
 ) -> Result<PrStep, ActionError> {
-    let github = github.ok_or_else(|| ActionError::at(ActionPhase::Pr, "GitHub CLI is unavailable."))?;
+    let github =
+        github.ok_or_else(|| ActionError::at(ActionPhase::Pr, "GitHub CLI is unavailable."))?;
     let branch = stdout(cwd, &["branch", "--show-current"])
         .filter(|branch| !branch.is_empty())
-        .ok_or_else(|| ActionError::at(ActionPhase::Pr, "Cannot create a pull request from a detached HEAD."))?;
-    let upstream = stdout(cwd, &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"]);
+        .ok_or_else(|| {
+            ActionError::at(
+                ActionPhase::Pr,
+                "Cannot create a pull request from a detached HEAD.",
+            )
+        })?;
+    let upstream = stdout(
+        cwd,
+        &[
+            "rev-parse",
+            "--abbrev-ref",
+            "--symbolic-full-name",
+            "@{upstream}",
+        ],
+    );
     if upstream.is_none() {
-        return Err(ActionError::at(ActionPhase::Pr, "Push the branch with an upstream before creating a pull request."));
+        return Err(ActionError::at(
+            ActionPhase::Pr,
+            "Push the branch with an upstream before creating a pull request.",
+        ));
     }
     let context = branch_head_context(cwd, &branch, upstream.as_deref(), None);
     let (repository, host) = github_scope(cwd);
@@ -591,14 +672,27 @@ async fn pull_request(
             title: Some(existing.title),
         });
     }
-    let commit_subject = stdout(cwd, &["log", "-1", "--format=%s"]).unwrap_or_else(|| "Update project files".into());
+    let commit_subject =
+        stdout(cwd, &["log", "-1", "--format=%s"]).unwrap_or_else(|| "Update project files".into());
     let template = pull_request_template(cwd, &default).ok().flatten();
-    let commits = stdout(cwd, &["log", "--format=%s", &format!("{default}..HEAD")]).unwrap_or_default();
+    let commits =
+        stdout(cwd, &["log", "--format=%s", &format!("{default}..HEAD")]).unwrap_or_default();
     let stat = stdout(cwd, &["diff", "--stat", &format!("{default}...HEAD")]).unwrap_or_default();
-    let patch = stdout(cwd, &["diff", "--no-color", &format!("{default}...HEAD")]).unwrap_or_default();
+    let patch =
+        stdout(cwd, &["diff", "--no-color", &format!("{default}...HEAD")]).unwrap_or_default();
+    let generation = text
+        .map(|text| {
+            text.generation_settings(
+                request.project_id.as_deref().unwrap_or_default(),
+                "generatePullRequestContent",
+            )
+        })
+        .unwrap_or_default();
     let mut content = GeneratedPrContent {
         title: commit_subject,
-        body: template.clone().unwrap_or_else(|| "## Summary\n\n## Testing\n".into()),
+        body: template
+            .clone()
+            .unwrap_or_else(|| "## Summary\n\n## Testing\n".into()),
     };
     if let Some(text) = text {
         if let Ok(raw) = text
@@ -606,8 +700,17 @@ async fn pull_request(
                 operation: "git-pull-request-content",
                 project: request.project_id.clone().unwrap_or_default(),
                 cwd: request.cwd.clone(),
-                prompt: pr_content_prompt(&default, &branch, &commits, &stat, &patch, template.as_deref()),
+                prompt: pr_content_prompt(
+                    &default,
+                    &branch,
+                    &commits,
+                    &stat,
+                    &patch,
+                    template.as_deref(),
+                ),
                 attachments: vec![],
+                model: generation.model,
+                instructions: generation.instructions,
                 output_schema: pr_content_schema(),
             })
             .await
@@ -637,7 +740,12 @@ async fn pull_request(
     let created = find_open_pr(github, cwd, &context, host.as_deref())
         .await
         .map_err(|error| ActionError::at(ActionPhase::Pr, error))?
-        .ok_or_else(|| ActionError::at(ActionPhase::Pr, "GitHub did not return the created pull request."))?;
+        .ok_or_else(|| {
+            ActionError::at(
+                ActionPhase::Pr,
+                "GitHub did not return the created pull request.",
+            )
+        })?;
     Ok(PrStep {
         status: PrStepStatus::Created,
         url: Some(created.url),

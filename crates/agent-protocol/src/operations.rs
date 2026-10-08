@@ -104,6 +104,9 @@ pub struct AccountUsage {
     pub windows: Vec<UsageWindow>,
     pub fetched_at: i64,
     pub error: Option<String>,
+    /// A provider-supplied stable account identifier when it is safe to expose
+    /// as an identity key. This is never a credential or token.
+    pub credential_fingerprint: Option<String>,
     pub reset_credits: Option<crate::usage::ResetCredits>,
     pub external_usage: Option<crate::usage::ExternalUsage>,
 }
@@ -114,7 +117,7 @@ pub struct UsageWindow {
     pub id: Option<String>,
     pub kind: Option<crate::usage::WindowKind>,
     pub label: String,
-    pub used_percent: Option<u32>,
+    pub used_percent: Option<f64>,
     pub remaining_percent: u32,
     pub window_duration_mins: Option<u32>,
     pub resets_at: Option<i64>,
@@ -122,12 +125,16 @@ pub struct UsageWindow {
 
 impl UsageWindow {
     pub fn from_used(label: String, used: f64, resets_at: Option<i64>) -> Option<Self> {
-        used.is_finite().then(|| Self {
+        if !used.is_finite() {
+            return None;
+        }
+        let used = used.clamp(0.0, 100.0);
+        Some(Self {
             id: None,
             kind: None,
             label,
-            used_percent: Some(used.clamp(0.0, 100.0).floor() as u32),
-            remaining_percent: (100.0 - used.clamp(0.0, 100.0)).floor() as u32,
+            used_percent: Some(used),
+            remaining_percent: (100.0 - used).round() as u32,
             window_duration_mins: None,
             resets_at,
         })
@@ -513,7 +520,7 @@ pub struct ReadAccountUsage {
 pub struct ReadUsageSummary {
     pub input: crate::usage::SummaryInput,
 }
-rpc_method!(ReadUsageSummary, UsageSummary, |self| self.clone());
+rpc_method!(ReadUsageSummary, ReadUsageSummary, |self| self.clone());
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RefreshUsageRates {}
@@ -717,5 +724,14 @@ mod terminal_tests {
             Call::RefreshUsageRates(RefreshUsageRates {}).method(),
             "host/usage/refreshRates"
         );
+    }
+
+    #[test]
+    fn usage_windows_keep_finite_fractional_percentages_and_round_remaining_for_display() {
+        let window = UsageWindow::from_used("session".into(), 35.9, None).unwrap();
+        assert_eq!(window.used_percent, Some(35.9));
+        assert_eq!(window.remaining_percent, 64);
+        assert!(UsageWindow::from_used("nan".into(), f64::NAN, None).is_none());
+        assert!(UsageWindow::from_used("infinity".into(), f64::INFINITY, None).is_none());
     }
 }

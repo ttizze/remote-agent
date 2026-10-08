@@ -59,6 +59,7 @@ impl Owner {
             }
             StreamKey::Awareness => tokio::spawn(follow(target, call, Payload::Awareness)),
             StreamKey::Background => tokio::spawn(follow(target, call, Payload::Background)),
+            StreamKey::Device(_) => tokio::spawn(follow(target, call, Payload::Device)),
         };
         let failures = network
             .streams
@@ -244,6 +245,18 @@ impl Owner {
         );
     }
 
+    pub(super) fn subscribe_device(&mut self, thread: &ThreadId) {
+        if !self.connected() {
+            return;
+        }
+        self.open_stream(
+            StreamKey::Device(thread.clone()),
+            Call::DeviceSubscribe(agent_protocol::device::DeviceSubscribeInput {
+                thread_id: thread.clone(),
+            }),
+        );
+    }
+
     fn terminal_metadata(&mut self, event: agent_protocol::operations::TerminalMetadataEvent) {
         use agent_protocol::operations::TerminalMetadataEvent as Metadata;
         let terminals = &mut self.state.terminal_metadata;
@@ -278,6 +291,7 @@ impl Owner {
         self.close_stream(&StreamKey::Thread(thread.clone()));
         self.close_stream(&StreamKey::Setup(thread.clone()));
         self.close_stream(&StreamKey::Preview(thread.clone()));
+        self.close_stream(&StreamKey::Device(thread.clone()));
     }
 
     /// The archive is subscribed only while it is shown.
@@ -452,6 +466,11 @@ impl Owner {
             StreamKey::ScheduledTasks => self.subscribe_scheduled_tasks(),
             StreamKey::Awareness => self.subscribe_awareness(),
             StreamKey::Background => self.subscribe_background(),
+            StreamKey::Device(thread) => {
+                if self.state.selected_thread.as_ref() == Some(&thread) {
+                    self.subscribe_device(&thread);
+                }
+            }
         }
     }
 
@@ -527,6 +546,10 @@ impl Owner {
                 self.healthy(&StreamKey::Background);
                 self.state.background_policy = Some(snapshot);
             }
+            (StreamKey::Device(thread), Payload::Device(event)) => {
+                self.healthy(&StreamKey::Device(thread));
+                self.state.device.apply_event(event);
+            }
             _ => {}
         }
     }
@@ -560,7 +583,8 @@ impl Owner {
                 | StreamKey::Preview(_)
                 | StreamKey::ScheduledTasks
                 | StreamKey::Awareness
-                | StreamKey::Background => {}
+                | StreamKey::Background
+                | StreamKey::Device(_) => {}
             }
             self.schedule_resubscribe(key);
             return;

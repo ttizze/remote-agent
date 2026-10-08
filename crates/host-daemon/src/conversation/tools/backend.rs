@@ -3,8 +3,8 @@
 use super::ModelCatalog;
 use crate::background::BackgroundOwner;
 use crate::conversation::ProjectCatalog;
-use crate::projects::NamedProjectError;
 use crate::conversation::SharedResources;
+use crate::projects::NamedProjectError;
 use crate::workspace_files::{Claimed, Copies, WorkspaceFiles};
 use agent_domain::{
     Attachment, Command, CommandId, Driver, OptionDescriptor, Reply, State, ThreadId, ThreadShell,
@@ -166,10 +166,7 @@ pub(crate) trait Orchestration: Send + Sync {
     }
 
     /// Runs the configured project setup script in a newly handed-off checkout.
-    fn run_thread_setup(
-        &self,
-        request: SetupRequest,
-    ) -> BoxFuture<'_, Result<SetupRun, String>> {
+    fn run_thread_setup(&self, request: SetupRequest) -> BoxFuture<'_, Result<SetupRun, String>> {
         let _ = request;
         Box::pin(async { Err("Project setup is unavailable.".into()) })
     }
@@ -211,10 +208,7 @@ pub(crate) trait Orchestration: Send + Sync {
             Err("scheduled tasks are unavailable".into())
         })
     }
-    fn run_scheduled_task_now(
-        &self,
-        id: String,
-    ) -> BoxFuture<'_, Result<ScheduledTask, String>> {
+    fn run_scheduled_task_now(&self, id: String) -> BoxFuture<'_, Result<ScheduledTask, String>> {
         Box::pin(async move {
             let _ = id;
             Err("scheduled tasks are unavailable".into())
@@ -313,10 +307,7 @@ impl Orchestration for HostOrchestration {
         })
     }
 
-    fn run_scheduled_task_now(
-        &self,
-        id: String,
-    ) -> BoxFuture<'_, Result<ScheduledTask, String>> {
+    fn run_scheduled_task_now(&self, id: String) -> BoxFuture<'_, Result<ScheduledTask, String>> {
         Box::pin(async move {
             self.runtime
                 .scheduled_tasks()
@@ -536,7 +527,11 @@ impl Orchestration for HostOrchestration {
     }
 
     fn vcs_refs(&self, request: ListRefs) -> BoxFuture<'_, Result<RefList, String>> {
-        Box::pin(async move { crate::vcs::refs(request).await.map_err(|error| error.to_string()) })
+        Box::pin(async move {
+            crate::vcs::refs(request)
+                .await
+                .map_err(|error| error.to_string())
+        })
     }
 
     fn vcs_status(&self, cwd: String) -> BoxFuture<'_, Result<VcsStatus, String>> {
@@ -621,27 +616,22 @@ impl Orchestration for HostOrchestration {
             };
             removed?;
             if let Some(branch) = branch {
-                crate::vcs::delete_local_branch(
-                    std::path::Path::new(&project_root),
-                    &branch,
-                    true,
-                )
-                .map_err(|error| format!("Unable to remove created branch '{branch}': {error:#}"))?;
+                crate::vcs::delete_local_branch(std::path::Path::new(&project_root), &branch, true)
+                    .map_err(|error| {
+                        format!("Unable to remove created branch '{branch}': {error:#}")
+                    })?;
             }
             Ok(())
         })
     }
 
-    fn run_thread_setup(
-        &self,
-        request: SetupRequest,
-    ) -> BoxFuture<'_, Result<SetupRun, String>> {
+    fn run_thread_setup(&self, request: SetupRequest) -> BoxFuture<'_, Result<SetupRun, String>> {
         let resources = self.resources.clone();
         Box::pin(async move { crate::conversation::run_project_setup(&resources, request).await })
     }
 
     fn worktree_start_from_origin(&self, project: &str) -> bool {
-        let settings = self.resources.worktrees.conversation();
+        let settings = self.resources.worktrees.latest_host_settings();
         settings
             .project_overrides
             .get(project)

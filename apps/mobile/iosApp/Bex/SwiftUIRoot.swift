@@ -57,6 +57,7 @@ struct BexSwiftUIRoot: View {
 /// Screens pushed over a thread.
 enum ThreadRoute: Hashable {
     case thread
+    case device
     case terminal(String?, UUID)
     case files
     case review
@@ -133,7 +134,8 @@ private struct WorkspaceRoot: View {
         ThreadScreen(model: model, routes: ThreadRoutes(
             terminal: { routes.append(.terminal($0, UUID())) },
             files: { routes.append(.files) },
-            review: { routes.append(.review) }
+            review: { routes.append(.review) },
+            device: { routes.append(.device) }
         ))
     }
 
@@ -156,6 +158,10 @@ private struct WorkspaceRoot: View {
         switch route {
         case .thread:
             threadScreen
+        case .device:
+            if let threadId = model.selectedThreadId {
+                DeviceScreen(model: model, threadId: threadId)
+            }
         case let .terminal(terminal, _):
             if let thread = model.selectedThreadId {
                 TerminalScreen(model: model, threadId: thread, terminalId: terminal)

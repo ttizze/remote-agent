@@ -161,6 +161,12 @@ impl Accounts {
             .accounts
             .iter()
             .any(|account| account.id == id && account.chatgpt_account_id.is_none());
+        let credential_fingerprint = self
+            .registry
+            .accounts
+            .iter()
+            .find(|account| account.id == id)
+            .and_then(|account| account.chatgpt_account_id.clone());
         let helper = self.helper(id)?;
         let cache = self.usage.entry(id.to_owned()).or_default().clone();
         Ok(async move {
@@ -172,6 +178,7 @@ impl Accounts {
                         .unwrap_or_default()
                         .as_secs() as i64,
                     error: None,
+                    credential_fingerprint: None,
                     reset_credits: None,
                     external_usage: None,
                 };
@@ -182,6 +189,7 @@ impl Accounts {
                         rpc(helper.server().await?, "account/rateLimits/read", json!({})).await?;
                     Ok(crate::account_usage::UsageSnapshot {
                         windows: crate::account_usage::codex(&value),
+                        credential_fingerprint,
                         reset_credits: crate::account_usage::codex_reset_credits(&value),
                         external_usage: Some(agent_protocol::usage::ExternalUsage {
                             label: "ChatGPT usage".into(),
@@ -194,6 +202,18 @@ impl Accounts {
     }
 
     pub(crate) async fn consume_reset_credit(
+        &mut self,
+        account_id: &str,
+        credit_id: Option<&str>,
+    ) -> Result<Empty, String> {
+        let cache = self.usage.get(account_id).cloned();
+        let result = self
+            .consume_reset_credit_request(account_id, credit_id)
+            .await;
+        crate::account_usage::invalidate_after_reset(cache, result).await
+    }
+
+    async fn consume_reset_credit_request(
         &mut self,
         account_id: &str,
         credit_id: Option<&str>,

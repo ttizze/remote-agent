@@ -12,6 +12,7 @@ pub mod collation;
 pub mod command_palette;
 pub mod composer;
 pub mod git;
+pub mod device;
 pub mod header;
 pub mod inbox;
 pub mod keybindings;

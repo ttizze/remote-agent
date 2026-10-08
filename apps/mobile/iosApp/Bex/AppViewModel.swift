@@ -108,8 +108,8 @@ final class BexAppViewModel: ObservableObject {
 
     /// Opens a new draft on the selected repository's least-loaded connected
     /// environment. Core owns candidate matching and capacity scoring; this
-    /// owner only promotes the Store and applies the target-canonical
-    /// selection returned by core.
+    /// owner only promotes the Store and reapplies the source draft's
+    /// user-selected model options and modes.
     func openNewThread(projectId: String?) {
         guard let projectId,
               let sourceEnvironmentId = snapshot.environmentId()

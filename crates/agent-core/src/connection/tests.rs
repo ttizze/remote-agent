@@ -162,6 +162,30 @@ fn commands(next: Next) -> Vec<crate::commands::outbox::PendingCommand> {
 }
 
 #[test]
+fn reset_credit_intent_writes_the_selected_source_and_credit() {
+    let mut owner = owner(Snapshot::default());
+    let Next::Call(call, None) = owner
+        .prepare(Intent::ConsumeResetCredit {
+            provider: agent_protocol::provider::ProviderKind::Claude,
+            account_id: "source-account".into(),
+            credit_id: Some("credit-1".into()),
+        })
+        .unwrap()
+    else {
+        panic!("reset credit request")
+    };
+    let crate::protocol::Call::ConsumeResetCredit(request) = *call else {
+        panic!("reset credit request")
+    };
+    assert_eq!(
+        request.provider,
+        agent_protocol::provider::ProviderKind::Claude
+    );
+    assert_eq!(request.account_id, "source-account");
+    assert_eq!(request.credit_id.as_deref(), Some("credit-1"));
+}
+
+#[test]
 fn a_send_clears_the_composer_shows_the_message_and_restores_it_when_refused() {
     let mut owner = opened(thread_state("Thread"));
     owner.state.drafts.insert(
@@ -2035,6 +2059,59 @@ fn default_model_and_permissions_keep_only_user_defaults() {
         owner.state.default_draft.runtime_mode,
         agent_domain::RuntimeMode::ApprovalRequired
     );
+}
+
+#[test]
+fn provider_instance_edit_writes_one_validated_host_settings_patch() {
+    let mut owner = owner(Snapshot {
+        host_settings: Some(agent_protocol::models::HostSettings::default()),
+        ..Snapshot::default()
+    });
+    let config = agent_protocol::models::ProviderInstanceConfig {
+        driver: agent_domain::Driver::Codex,
+        display_name: "Build".into(),
+        binary_path: Some("/opt/codex".into()),
+        environment: BTreeMap::from([("PROFILE".into(), "work".into())]),
+        custom_models: vec![agent_protocol::models::ProviderCustomModel {
+            slug: "reasoning".into(),
+            name: "Reasoning".into(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let map = BTreeMap::from([("build".into(), config.clone())]);
+    let next = owner
+        .prepare(Intent::SetProviderInstances {
+            provider_instances_json: serde_json::to_string(&map).unwrap(),
+        })
+        .unwrap();
+    let Next::Call(call, _) = next else {
+        panic!("provider edits must be sent to the Host");
+    };
+    let crate::protocol::Call::UpdateSettings(patch) = *call else {
+        panic!("provider edits must use host/settings/update");
+    };
+    assert_eq!(patch.provider_instances, Some(map));
+    assert_eq!(patch.provider_instances.as_ref().unwrap()["build"], config);
+}
+
+#[test]
+fn provider_instance_edit_rejects_invalid_environment_before_dispatch() {
+    let mut owner = owner(Snapshot {
+        host_settings: Some(agent_protocol::models::HostSettings::default()),
+        ..Snapshot::default()
+    });
+    let next = owner.prepare(Intent::SetProviderInstances {
+        provider_instances_json: serde_json::to_string(&BTreeMap::from([(
+            "build".into(),
+            agent_protocol::models::ProviderInstanceConfig {
+                environment: BTreeMap::from([("bad-name".into(), "x".into())]),
+                ..Default::default()
+            },
+        )]))
+        .unwrap(),
+    });
+    assert!(next.is_err());
 }
 
 #[test]
