@@ -70,6 +70,7 @@ pub struct DeviceVideoFrameView {
     pub timestamp_us: Option<u64>,
     pub keyframe: bool,
     pub screen_id: Option<u8>,
+    pub session_epoch: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -132,6 +133,54 @@ pub struct DeviceScreenView {
     pub hinge_pose: Option<String>,
     pub table_mode: bool,
     pub table_mode_available: bool,
+    /// Duo panel streams are already in framebuffer coordinates and must not
+    /// receive the iOS display-orientation touch remap.
+    pub raw_touch: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct DeviceTouchPoint {
+    pub x: f32,
+    pub y: f32,
+}
+
+/// Projects a native pointer through a centered `ContentScale.Fit` surface.
+/// Points in the letterbox bars are ignored so clients cannot send touches
+/// outside the device framebuffer.
+pub fn project_touch_point(
+    x: f32,
+    y: f32,
+    viewport_width: f32,
+    viewport_height: f32,
+    content_width: f32,
+    content_height: f32,
+) -> Option<DeviceTouchPoint> {
+    if !x.is_finite()
+        || !y.is_finite()
+        || !viewport_width.is_finite()
+        || !viewport_height.is_finite()
+        || !content_width.is_finite()
+        || !content_height.is_finite()
+        || viewport_width <= 0.0
+        || viewport_height <= 0.0
+        || content_width <= 0.0
+        || content_height <= 0.0
+    {
+        return None;
+    }
+    let scale = (viewport_width / content_width).min(viewport_height / content_height);
+    let rendered_width = content_width * scale;
+    let rendered_height = content_height * scale;
+    let left = (viewport_width - rendered_width) / 2.0;
+    let top = (viewport_height - rendered_height) / 2.0;
+    if x < left || x > left + rendered_width || y < top || y > top + rendered_height {
+        return None;
+    }
+    Some(DeviceTouchPoint {
+        x: ((x - left) / rendered_width).clamp(0.0, 1.0),
+        y: ((y - top) / rendered_height).clamp(0.0, 1.0),
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -149,6 +198,8 @@ pub struct DeviceRecordingView {
     pub frame_count: u64,
     pub byte_count: u64,
     pub error: Option<String>,
+    pub artifact_extension: Option<String>,
+    pub artifact_mime_type: Option<String>,
     pub bytes: Vec<u8>,
 }
 
@@ -311,11 +362,15 @@ pub fn device_view(snapshot: &Snapshot) -> DeviceView {
                 sequence: frame.sequence,
             })
             .collect(),
-        video_frames: state.video_frames.values().map(video_frame_view).collect(),
+        video_frames: state
+            .video_frames
+            .values()
+            .map(|frame| video_frame_view(frame, &state.sessions))
+            .collect(),
         video_events: state
             .video_events
             .values()
-            .flat_map(|frames| frames.iter().map(video_frame_view))
+            .flat_map(|frames| frames.iter().map(|frame| video_frame_view(frame, &state.sessions)))
             .collect(),
         accessibility: state
             .accessibility
@@ -382,6 +437,7 @@ pub fn device_view(snapshot: &Snapshot) -> DeviceView {
                 hinge_pose: screen.hinge_pose.clone(),
                 table_mode: screen.table_mode,
                 table_mode_available: screen.table_mode_available,
+                raw_touch: screen.supports_hinge_angle && !screen.supports_physical_orientation,
             })
             .collect(),
         recordings: state
@@ -400,6 +456,8 @@ pub fn device_view(snapshot: &Snapshot) -> DeviceView {
                 frame_count: status.frame_count,
                 byte_count: status.byte_count,
                 error: status.error.clone(),
+                artifact_extension: None,
+                artifact_mime_type: None,
                 bytes: vec![],
             })
             .collect(),
@@ -416,6 +474,8 @@ pub fn device_view(snapshot: &Snapshot) -> DeviceView {
             frame_count: recording.status.frame_count,
             byte_count: recording.status.byte_count,
             error: recording.status.error.clone(),
+            artifact_extension: recording.artifact.as_ref().map(|artifact| artifact.extension.clone()),
+            artifact_mime_type: recording.artifact.as_ref().map(|artifact| artifact.mime_type.clone()),
             bytes: recording.bytes.clone(),
         }),
         error: state.error.clone(),
@@ -456,7 +516,10 @@ fn video_encoding_name(encoding: agent_protocol::device::DeviceFrameEncoding) ->
     }
 }
 
-fn video_frame_view(frame: &agent_protocol::device::DeviceVideoFrame) -> DeviceVideoFrameView {
+fn video_frame_view(
+    frame: &agent_protocol::device::DeviceVideoFrame,
+    sessions: &[agent_protocol::device::DeviceSession],
+) -> DeviceVideoFrameView {
     DeviceVideoFrameView {
         thread_id: frame.thread_id.to_string(),
         host_id: frame.device.host_id.clone(),
@@ -470,6 +533,15 @@ fn video_frame_view(frame: &agent_protocol::device::DeviceVideoFrame) -> DeviceV
         timestamp_us: frame.timestamp_us,
         keyframe: frame.keyframe,
         screen_id: frame.screen_id,
+        session_epoch: sessions
+            .iter()
+            .find(|session| {
+                session.thread_id == frame.thread_id
+                    && session.host_id == frame.device.host_id
+                    && session.device_id == frame.device.id
+            })
+            .map(|session| session.opened_at.clone())
+            .unwrap_or_default(),
     }
 }
 
@@ -498,5 +570,23 @@ mod tests {
         assert_eq!(view.status, "disabled");
         assert!(!view.enabled);
         assert!(view.hosts.is_empty());
+    }
+
+    #[test]
+    fn touch_projection_rejects_letterbox_and_normalizes_content() {
+        assert_eq!(project_touch_point(f32::NAN, 0.0, 100.0, 100.0, 100.0, 100.0), None);
+        assert_eq!(project_touch_point(0.0, 0.0, 0.0, 100.0, 100.0, 100.0), None);
+        assert_eq!(
+            project_touch_point(50.0, 100.0, 1000.0, 1000.0, 1000.0, 500.0),
+            None,
+        );
+        assert_eq!(
+            project_touch_point(250.0, 500.0, 1000.0, 1000.0, 1000.0, 500.0),
+            Some(DeviceTouchPoint { x: 0.25, y: 0.5 }),
+        );
+        assert_eq!(
+            project_touch_point(750.0, 750.0, 1000.0, 1000.0, 1000.0, 500.0),
+            Some(DeviceTouchPoint { x: 0.75, y: 1.0 }),
+        );
     }
 }

@@ -15,7 +15,7 @@ use agent_protocol::device::{
     DeviceSummary, DeviceTextSize, DeviceToolVersion, DeviceToolVersions, DeviceAccessibilityInput,
     DeviceAccessibilityTree,
     DeviceEventLogEntry, DeviceEventLogInput, DeviceFrameEncoding, DeviceInput, DeviceInputKind,
-    DeviceRecording, DeviceRecordingStartInput, DeviceRecordingStatus, DeviceRecordingStopInput,
+    DeviceRecording, DeviceRecordingArtifact, DeviceRecordingStartInput, DeviceRecordingStatus, DeviceRecordingStopInput,
     DeviceScreenConfig, DeviceTouchPhase, DeviceVideoFrame, DeviceHardwareButton,
     DeviceRecordingFormat, LOCAL_DEVICE_HOST_ID,
     DeviceDuoCommand, DeviceDuoPhysical, DeviceDuoPose, DeviceFoldPosture,
@@ -1663,7 +1663,10 @@ fn duo_command_wire(command: &DeviceDuoCommand) -> serde_json::Value {
     }
 }
 
-fn rotate_touch(screen: Option<&DeviceScreenConfig>, x: f32, y: f32) -> (f32, f32) {
+fn rotate_touch(screen: Option<&DeviceScreenConfig>, x: f32, y: f32, raw: bool) -> (f32, f32) {
+    if raw {
+        return (x, y);
+    }
     let Some(screen) = screen else { return (x, y); };
     if screen.width > screen.height { return (x, y); }
     match screen.orientation {
@@ -4610,9 +4613,9 @@ impl DeviceService {
                         DeviceInputKind::SetOrientation(orientation)
                     }
                 }
-                DeviceInputKind::Touch { phase, x, y } if device.platform == DevicePlatform::Ios => {
-                    let (x, y) = rotate_touch(screen.as_ref(), *x, *y);
-                    DeviceInputKind::Touch { phase: *phase, x, y }
+                DeviceInputKind::Touch { phase, x, y, raw } if device.platform == DevicePlatform::Ios => {
+                    let (x, y) = rotate_touch(screen.as_ref(), *x, *y, *raw);
+                    DeviceInputKind::Touch { phase: *phase, x, y, raw: *raw }
                 }
                 _ => input.input.clone(),
             };
@@ -6037,7 +6040,7 @@ async fn hub_input(
     .map_err(|_| "device input stream connection timed out".to_owned())?
     .map_err(|error| format!("device input stream failed: {error}"))?;
     let message = match (platform, input) {
-        (DevicePlatform::Ios, DeviceInputKind::Touch { phase, x, y }) => {
+        (DevicePlatform::Ios, DeviceInputKind::Touch { phase, x, y, .. }) => {
             let phase = match phase { DeviceTouchPhase::Begin => "begin", DeviceTouchPhase::Move => "move", DeviceTouchPhase::End => "end" };
             async_tungstenite::tungstenite::Message::binary([vec![0x03], serde_json::to_vec(&serde_json::json!({"type": phase, "x": x, "y": y})).map_err(|error| error.to_string())?].concat())
         }
@@ -6045,7 +6048,7 @@ async fn hub_input(
             let usage = ios_hid_usage(code).ok_or_else(|| format!("unsupported iOS keyboard code {code}"))?;
             async_tungstenite::tungstenite::Message::binary([vec![0x06], serde_json::to_vec(&serde_json::json!({"type": if *down { "down" } else { "up" }, "usage": usage})).map_err(|error| error.to_string())?].concat())
         }
-        (_, DeviceInputKind::Touch { phase, x, y }) => {
+        (_, DeviceInputKind::Touch { phase, x, y, .. }) => {
             let action = match phase { DeviceTouchPhase::Begin => "down", DeviceTouchPhase::Move => "move", DeviceTouchPhase::End => "up" };
             async_tungstenite::tungstenite::Message::Text(serde_json::json!({"type":"touch", "action": action, "x": x, "y": y}).to_string().into())
         }
@@ -7300,7 +7303,8 @@ mod tests {
             table_mode: false,
             table_mode_available: false,
         };
-        assert_eq!(rotate_touch(Some(&screen), 0.25, 0.75), (0.75, 0.75));
+        assert_eq!(rotate_touch(Some(&screen), 0.25, 0.75, false), (0.75, 0.75));
+        assert_eq!(rotate_touch(Some(&screen), 0.25, 0.75, true), (0.25, 0.75));
     }
 
     #[tokio::test]
@@ -7576,7 +7580,7 @@ mod tests {
             port,
             DevicePlatform::Ios,
             "sim",
-            &DeviceInputKind::Touch { phase: DeviceTouchPhase::Begin, x: 0.25, y: 0.75 },
+            &DeviceInputKind::Touch { phase: DeviceTouchPhase::Begin, x: 0.25, y: 0.75, raw: false },
             0,
         )
         .await
@@ -7678,7 +7682,7 @@ mod tests {
             port,
             DevicePlatform::Android,
             "emu",
-            &DeviceInputKind::Touch { phase: DeviceTouchPhase::End, x: 0.2, y: 0.1 },
+            &DeviceInputKind::Touch { phase: DeviceTouchPhase::End, x: 0.2, y: 0.1, raw: false },
             0,
         )
         .await

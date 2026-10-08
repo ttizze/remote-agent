@@ -74,6 +74,9 @@ internal class DeviceVideoIngressGate(
     }
 
     @Synchronized
+    fun isCurrent(admission: Admission): Boolean = admission.generation == generation && !closed
+
+    @Synchronized
     fun forceResync() {
         needsKeyframe = true
     }
@@ -150,10 +153,9 @@ internal class DeviceVideoDecoder : TextureView.SurfaceTextureListener {
         val admission = ingress.offer(sequence, encoding, keyframe, payload.size) ?: return
         val copy = payload.copyOf()
         if (!handler.post {
+            if (ingress.isCurrent(admission)) submitOnWorker(copy, encoding, sequence, timestampUs, keyframe)
             val completion = ingress.complete(admission)
             if (completion.resync) requestKeyframeResync()
-            if (!completion.current || closed) return@post
-            submitOnWorker(copy, encoding, sequence, timestampUs, keyframe)
         }) {
             ingress.complete(admission)
         }
@@ -505,11 +507,3 @@ private fun ByteArray.startsWithAnnexB(): Boolean =
         (size >= 4 && this[0] == 0.toByte() && this[1] == 0.toByte() && this[2] == 0.toByte() && this[3] == 1.toByte()))
 
 private val ANNEX_B_START_CODE = byteArrayOf(0, 0, 0, 1)
-
-internal data class DeviceRecordingArtifact(val extension: String, val mimeType: String)
-
-internal fun recordingArtifact(format: String): DeviceRecordingArtifact = when (format.lowercase()) {
-    "mjpeg" -> DeviceRecordingArtifact("mjpeg", "multipart/x-mixed-replace; boundary=remote-agent-device")
-    "avcc" -> DeviceRecordingArtifact("avcc", "video/avc")
-    else -> DeviceRecordingArtifact("bin", "application/octet-stream")
-}

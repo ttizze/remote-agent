@@ -1,0 +1,349 @@
+import AVFoundation
+import CoreImage
+import CoreMedia
+import Foundation
+import UIKit
+import VideoToolbox
+
+/// Decodes one ordered device feed. The Host sends complete AVCC/SEMU access
+/// units; this object retains codec configuration and waits for a keyframe after
+/// a gap or decoder reset instead of presenting a delta as a valid picture.
+final class DeviceVideoDecoder {
+    private var formatDescription: CMVideoFormatDescription?
+    private var session: VTDecompressionSession?
+    private var awaitingKeyframe = true
+    private var latestPixelBuffer: CVPixelBuffer?
+    private let lock = NSLock()
+    private let context = CIContext()
+    private var accessUnitBytes = 0
+
+    deinit {
+        session.map(VTDecompressionSessionInvalidate)
+    }
+
+    func reset() {
+        session.map(VTDecompressionSessionInvalidate)
+        session = nil
+        formatDescription = nil
+        awaitingKeyframe = true
+        accessUnitBytes = 0
+        lock.lock()
+        latestPixelBuffer = nil
+        lock.unlock()
+    }
+
+    func consume(_ frame: DeviceVideoFrameView) -> UIImage? {
+        switch frame.encoding {
+        case "jpeg", "mjpeg":
+            return UIImage(data: Data(frame.payload))
+        case "png":
+            return UIImage(data: Data(frame.payload))
+        case "avcc-description":
+            guard configure(description: frame.payload) else { return nil }
+            awaitingKeyframe = true
+            accessUnitBytes = 0
+            return nil
+        case "h264", "semu":
+            guard frame.keyframe || !awaitingKeyframe else { return nil }
+            if frame.keyframe {
+                accessUnitBytes = 0
+                if formatDescription == nil {
+                    configureFromAccessUnit(frame.payload)
+                }
+            }
+            guard formatDescription != nil else { return nil }
+            let accessUnit = annexBToAvcc(frame.payload)
+            guard !accessUnit.isEmpty, accessUnit.count <= 8 * 1024 * 1024 else {
+                reset()
+                return nil
+            }
+            accessUnitBytes = accessUnitBytes.saturatingAdd(accessUnit.count)
+            guard accessUnitBytes <= 8 * 1024 * 1024 else {
+                reset()
+                return nil
+            }
+            guard decode(accessUnit, timestampUs: frame.timestampUs ?? frame.sequence &* 16_667) else {
+                reset()
+                return nil
+            }
+            awaitingKeyframe = false
+            return imageFromLatestPixelBuffer()
+        default:
+            return nil
+        }
+    }
+
+    private func configure(description bytes: [UInt8]) -> Bool {
+        guard let parameterSets = avcParameterSets(from: bytes) else { return false }
+        return configure(parameterSets: parameterSets)
+    }
+
+    private func configureFromAccessUnit(_ bytes: [UInt8]) {
+        let nals = annexBNALUnits(bytes)
+        let parameterSets = nals.filter { guard let first = $0.first else { return false }; return first & 0x1f == 7 || first & 0x1f == 8 }
+        guard parameterSets.count >= 2 else { return }
+        _ = configure(parameterSets: [parameterSets[0], parameterSets[1]])
+    }
+
+    private func configure(parameterSets: [[UInt8]]) -> Bool {
+        guard parameterSets.count >= 2 else { return false }
+        var description: CMVideoFormatDescription?
+        let sps = parameterSets[0]
+        let pps = parameterSets[1]
+        let status = sps.withUnsafeBytes { spsRaw in
+            pps.withUnsafeBytes { ppsRaw in
+                let pointers: [UnsafePointer<UInt8>] = [
+                    spsRaw.bindMemory(to: UInt8.self).baseAddress!,
+                    ppsRaw.bindMemory(to: UInt8.self).baseAddress!,
+                ]
+                let sizes = [sps.count, pps.count]
+                return pointers.withUnsafeBufferPointer { pointerBuffer in
+                    sizes.withUnsafeBufferPointer { sizeBuffer in
+                        CMVideoFormatDescriptionCreateFromH264ParameterSets(
+                            allocator: kCFAllocatorDefault,
+                            parameterSetCount: 2,
+                            parameterSetPointers: pointerBuffer.baseAddress!,
+                            parameterSetSizes: sizeBuffer.baseAddress!,
+                            nalUnitHeaderLength: 4,
+                            formatDescriptionOut: &description
+                        )
+                    }
+                }
+            }
+        }
+        guard status == noErr, let description else { return false }
+        session.map(VTDecompressionSessionInvalidate)
+        var callback = VTDecompressionOutputCallbackRecord(
+            decompressionOutputCallback: Self.outputCallback,
+            decompressionOutputRefCon: Unmanaged.passUnretained(self).toOpaque()
+        )
+        var newSession: VTDecompressionSession?
+        let sessionStatus = VTDecompressionSessionCreate(
+            allocator: kCFAllocatorDefault,
+            formatDescription: description,
+            decoderSpecification: nil,
+            imageBufferAttributes: nil,
+            outputCallback: &callback,
+            decompressionSessionOut: &newSession
+        )
+        guard sessionStatus == noErr, let newSession else { return false }
+        formatDescription = description
+        session = newSession
+        awaitingKeyframe = true
+        return true
+    }
+
+    private func decode(_ bytes: [UInt8], timestampUs: UInt64) -> Bool {
+        guard let session, let formatDescription else { return false }
+        var blockBuffer: CMBlockBuffer?
+        let blockStatus = CMBlockBufferCreateWithMemoryBlock(
+            allocator: kCFAllocatorDefault,
+            memoryBlock: nil,
+            blockLength: bytes.count,
+            blockAllocator: kCFAllocatorDefault,
+            customBlockSource: nil,
+            offsetToData: 0,
+            dataLength: bytes.count,
+            flags: 0,
+            blockBufferOut: &blockBuffer
+        )
+        guard blockStatus == kCMBlockBufferNoErr, let blockBuffer else { return false }
+        let copyStatus = bytes.withUnsafeBytes { raw in
+            CMBlockBufferReplaceDataBytes(
+                with: raw.baseAddress!,
+                blockBuffer: blockBuffer,
+                offsetIntoDestination: 0,
+                dataLength: bytes.count
+            )
+        }
+        guard copyStatus == kCMBlockBufferNoErr else { return false }
+        var timing = CMSampleTimingInfo(
+            duration: .invalid,
+            presentationTimeStamp: CMTime(value: CMTimeValue(timestampUs), timescale: 1_000_000),
+            decodeTimeStamp: .invalid
+        )
+        var sampleBuffer: CMSampleBuffer?
+        var size = bytes.count
+        let sampleStatus = CMSampleBufferCreateReady(
+            allocator: kCFAllocatorDefault,
+            dataBuffer: blockBuffer,
+            formatDescription: formatDescription,
+            sampleCount: 1,
+            sampleTimingEntryCount: 1,
+            sampleTimingArray: &timing,
+            sampleSizeEntryCount: 1,
+            sampleSizeArray: &size,
+            sampleBufferOut: &sampleBuffer
+        )
+        guard sampleStatus == noErr, let sampleBuffer else { return false }
+        var flags = VTDecodeInfoFlags()
+        let status = VTDecompressionSessionDecodeFrame(
+            session,
+            sampleBuffer: sampleBuffer,
+            flags: [],
+            frameRefcon: nil,
+            infoFlagsOut: &flags
+        )
+        guard status == noErr else { return false }
+        _ = VTDecompressionSessionWaitForAsynchronousFrames(session)
+        return true
+    }
+
+    private func imageFromLatestPixelBuffer() -> UIImage? {
+        lock.lock()
+        let pixelBuffer = latestPixelBuffer
+        lock.unlock()
+        guard let pixelBuffer, let cgImage = context.createCGImage(CIImage(cvPixelBuffer: pixelBuffer), from: CGRect(x: 0, y: 0, width: CVPixelBufferGetWidth(pixelBuffer), height: CVPixelBufferGetHeight(pixelBuffer))) else {
+            return nil
+        }
+        return UIImage(cgImage: cgImage)
+    }
+
+    private static let outputCallback: VTDecompressionOutputCallback = { refCon, _, status, _, imageBuffer, _, _ in
+        guard status == noErr, let refCon, let imageBuffer else { return }
+        let decoder = Unmanaged<DeviceVideoDecoder>.fromOpaque(refCon).takeUnretainedValue()
+        decoder.lock.lock()
+        decoder.latestPixelBuffer = imageBuffer
+        decoder.lock.unlock()
+    }
+}
+
+/// Owns one decoder per device screen. Screen 1 and 3 are independent feeds,
+/// so a delayed delta from one panel cannot corrupt the other panel's image.
+@MainActor
+final class DeviceFrameStore: ObservableObject {
+    struct RenderedFrame: Identifiable {
+        let id: String
+        let threadId: String
+        let image: UIImage
+        let screenId: Int
+        let hostId: String
+        let deviceId: String
+    }
+
+    @Published private(set) var frames: [String: RenderedFrame] = [:]
+    private var decoders: [String: DeviceVideoDecoder] = [:]
+    private var sequences: [String: UInt64] = [:]
+
+    func consume(_ input: [DeviceVideoFrameView], threadId: String, sessionEpochs: [String: String]) {
+        for frame in input where frame.threadId == threadId {
+            let screenId = Int(frame.screenId ?? 0)
+            let deviceKey = "\(frame.hostId):\(frame.deviceId)"
+            guard let sessionEpoch = sessionEpochs[deviceKey], sessionEpoch == frame.sessionEpoch else { continue }
+            let key = "\(threadId):\(deviceKey):\(sessionEpoch):\(screenId)"
+            if sequences[key].map({ frame.sequence <= $0 }) == true { continue }
+            sequences[key] = frame.sequence
+            let decoder = decoders[key] ?? {
+                let decoder = DeviceVideoDecoder()
+                decoders[key] = decoder
+                return decoder
+            }()
+            if let image = decoder.consume(frame) {
+                frames[key] = RenderedFrame(
+                    id: key,
+                    threadId: threadId,
+                    image: image,
+                    screenId: screenId,
+                    hostId: frame.hostId,
+                    deviceId: frame.deviceId
+                )
+            }
+        }
+    }
+
+    func frames(for threadId: String) -> [RenderedFrame] {
+        frames.values.filter { $0.threadId == threadId }.sorted { $0.id < $1.id }
+    }
+
+    func reset(threadId: String) {
+        let prefix = "\(threadId):"
+        let keys = Set(
+            frames.keys.filter { $0.hasPrefix(prefix) }
+                + decoders.keys.filter { $0.hasPrefix(prefix) }
+                + sequences.keys.filter { $0.hasPrefix(prefix) }
+        )
+        for key in keys {
+            frames.removeValue(forKey: key)
+            decoders.removeValue(forKey: key)
+            sequences.removeValue(forKey: key)
+        }
+    }
+}
+
+private func annexBNALUnits(_ bytes: [UInt8]) -> [[UInt8]] {
+    var starts: [(nal: Int, code: Int)] = []
+    var index = 0
+    while index + 3 < bytes.count {
+        if bytes[index...].starts(with: [0, 0, 0, 1]) {
+            starts.append((index + 4, index))
+            index += 4
+        } else if bytes[index...].starts(with: [0, 0, 1]) {
+            starts.append((index + 3, index))
+            index += 3
+        } else {
+            index += 1
+        }
+    }
+    return starts.enumerated().compactMap { offset, start in
+        let end = offset + 1 < starts.count ? starts[offset + 1].code : bytes.count
+        guard start.nal < end else { return nil }
+        return Array(bytes[start.nal..<end])
+    }
+}
+
+private func annexBToAvcc(_ bytes: [UInt8]) -> [UInt8] {
+    let nals = annexBNALUnits(bytes)
+    if !nals.isEmpty {
+        return nals.reduce(into: []) { result, nal in
+            var length = UInt32(nal.count).bigEndian
+            withUnsafeBytes(of: &length) { result.append(contentsOf: $0) }
+            result.append(contentsOf: nal)
+        }
+    }
+    var result: [UInt8] = []
+    var index = 0
+    while index + 4 <= bytes.count {
+        let length = Int(bytes[index]) << 24 | Int(bytes[index + 1]) << 16 | Int(bytes[index + 2]) << 8 | Int(bytes[index + 3])
+        index += 4
+        guard length > 0, index + length <= bytes.count else { return [] }
+        result.append(contentsOf: bytes[index - 4..<index + length])
+        index += length
+    }
+    return index == bytes.count ? result : []
+}
+
+private func avcParameterSets(from bytes: [UInt8]) -> [[UInt8]]? {
+    if bytes.first == 1, bytes.count >= 7 {
+        var index = 5
+        let spsCount = Int(bytes[index] & 0x1f)
+        index += 1
+        var sets: [[UInt8]] = []
+        for _ in 0..<spsCount {
+            guard index + 2 <= bytes.count else { return nil }
+            let length = Int(bytes[index]) << 8 | Int(bytes[index + 1])
+            index += 2
+            guard length > 0, index + length <= bytes.count else { return nil }
+            sets.append(Array(bytes[index..<index + length]))
+            index += length
+        }
+        guard index < bytes.count else { return nil }
+        let ppsCount = Int(bytes[index]); index += 1
+        for _ in 0..<ppsCount {
+            guard index + 2 <= bytes.count else { return nil }
+            let length = Int(bytes[index]) << 8 | Int(bytes[index + 1])
+            index += 2
+            guard length > 0, index + length <= bytes.count else { return nil }
+            sets.append(Array(bytes[index..<index + length]))
+            index += length
+        }
+        return sets.count >= 2 ? sets : nil
+    }
+    let sets = annexBNALUnits(bytes).filter { guard let first = $0.first else { return false }; return first & 0x1f == 7 || first & 0x1f == 8 }
+    return sets.count >= 2 ? sets : nil
+}
+
+private extension UInt64 {
+    func saturatingAdd(_ value: Int) -> UInt64 {
+        addingReportingOverflow(UInt64(max(value, 0))).overflow ? UInt64.max : self + UInt64(max(value, 0))
+    }
+}

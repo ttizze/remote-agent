@@ -134,10 +134,7 @@ pub struct DeviceSession {
     pub host_id: String,
     pub device_id: String,
     pub platform: DevicePlatform,
-    /// Wall-clock time used for user-facing session history.
     pub opened_at: String,
-    /// Opaque generation used to reject queued events from an earlier reopen.
-    pub session_epoch: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -527,7 +524,6 @@ pub struct DeviceScreenshot {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeviceFrame {
     pub thread_id: ThreadId,
-    pub session_epoch: String,
     pub device: DeviceSummary,
     #[serde(with = "crate::protocol::bytes")]
     pub png: Vec<u8>,
@@ -553,7 +549,6 @@ pub enum DeviceFrameEncoding {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeviceVideoFrame {
     pub thread_id: ThreadId,
-    pub session_epoch: String,
     pub device: DeviceSummary,
     #[serde(with = "crate::protocol::bytes")]
     pub payload: Vec<u8>,
@@ -569,7 +564,6 @@ pub struct DeviceVideoFrame {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DeviceScreenConfig {
     pub thread_id: Option<ThreadId>,
-    pub session_epoch: String,
     pub host_id: Option<String>,
     pub device_id: Option<String>,
     pub width: u32,
@@ -599,7 +593,6 @@ pub struct DeviceAccessibilityElement {
 pub struct DeviceAccessibilityTree {
     pub host_id: String,
     pub device_id: String,
-    pub session_epoch: String,
     pub elements: Vec<DeviceAccessibilityElement>,
     pub errors: Vec<String>,
     pub read_at: String,
@@ -609,7 +602,6 @@ pub struct DeviceAccessibilityTree {
 pub struct DeviceForegroundUpdate {
     pub host_id: String,
     pub device_id: String,
-    pub session_epoch: String,
     pub app: Option<DeviceForegroundApp>,
     pub received_at: String,
 }
@@ -618,7 +610,6 @@ pub struct DeviceForegroundUpdate {
 pub struct DeviceEventLogEntry {
     pub host_id: String,
     pub device_id: String,
-    pub session_epoch: String,
     pub id: u64,
     pub timestamp: String,
     pub kind: String,
@@ -627,10 +618,13 @@ pub struct DeviceEventLogEntry {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum DeviceInputKind {
-    Touch { phase: DeviceTouchPhase, x: f32, y: f32 },
-    /// A keyboard event carries both its physical code and the browser-style
-    /// key value. The code is used for iOS HID; Android uses the key value so
-    /// shifted and non-ASCII input is preserved without guessing from a code.
+    /// Normalized touch coordinates. `raw` skips the iOS display-orientation
+    /// remap for a Duo panel whose stream already uses framebuffer space.
+    Touch { phase: DeviceTouchPhase, x: f32, y: f32, raw: bool },
+    /// A keyboard event carries both its physical code and the platform's
+    /// actual key value. iOS uses the code for HID; Android uses the key value
+    /// so shifted and non-ASCII input is preserved without client-side
+    /// guessing.
     Key {
         code: String,
         key: String,
@@ -703,8 +697,10 @@ pub struct DeviceEventLogInput {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DeviceRecordingFormat {
+    RawFrames,
+    Mjpeg,
     /// H.264 frames finalized as a playable fragmented MP4 attachment.
-    Mp4,
+    Avcc,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -720,8 +716,6 @@ pub struct DeviceRecordingStopInput {
     pub thread_id: ThreadId,
     pub host_id: Option<String>,
     pub device_id: String,
-    pub recording_id: u64,
-    pub session_epoch: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -729,13 +723,7 @@ pub struct DeviceRecordingStatus {
     pub thread_id: ThreadId,
     pub host_id: String,
     pub device_id: String,
-    /// Monotonic identity for one recording lifetime on the owning Host.
-    pub recording_id: u64,
-    /// Device session generation that supplied the recording frames.
-    pub session_epoch: String,
     pub format: DeviceRecordingFormat,
-    pub file_name: String,
-    pub mime_type: String,
     pub active: bool,
     pub started_at: String,
     pub frame_count: u64,
@@ -744,8 +732,15 @@ pub struct DeviceRecordingStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceRecordingArtifact {
+    pub extension: String,
+    pub mime_type: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeviceRecording {
     pub status: DeviceRecordingStatus,
+    pub artifact: Option<DeviceRecordingArtifact>,
     #[serde(with = "crate::protocol::bytes")]
     pub bytes: Vec<u8>,
 }
@@ -909,6 +904,33 @@ mod tests {
         png.extend_from_slice(&640u32.to_be_bytes());
         assert_eq!(png_dimensions(&png), (320, 640));
         assert_eq!(png_dimensions(&[0, 1, 2]), (0, 0));
+    }
+
+    #[test]
+    fn keyboard_input_validates_actual_key_value() {
+        let valid = DeviceActionInput {
+            host_id: None,
+            device_id: "emulator-1".into(),
+            action: DeviceActionKind::Input(DeviceInputKind::Key {
+                code: "Digit1".into(),
+                key: "!".into(),
+                down: true,
+                meta: false,
+                ctrl: false,
+            }),
+        };
+        assert!(valid.validate().is_ok());
+        let empty = DeviceActionInput {
+            action: DeviceActionKind::Input(DeviceInputKind::Key {
+                code: "KeyA".into(),
+                key: String::new(),
+                down: true,
+                meta: false,
+                ctrl: false,
+            }),
+            ..valid.clone()
+        };
+        assert!(empty.validate().is_err());
     }
 
     #[test]
