@@ -86,6 +86,7 @@
 		5AB6A7AE322325E65DDA2487 /* ThreadListScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A7CF6141551F258EB69E54C /* ThreadListScreen.swift */; };
 		5A4C365DEB59BCFAE2F44CB6 /* ThreadPresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5ADC0C2661897D759FA63D62 /* ThreadPresentation.swift */; };
 		5A19A0BB9DE49CE354D481B7 /* ThreadScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5AD2FB764B8CACFD3D675D52 /* ThreadScreen.swift */; };
+		5A19A0BB9DE49CE354D481B8 /* ThreadScreenComponents.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5AD2FB764B8CACFD3D675D53 /* ThreadScreenComponents.swift */; };
 		5AD0731BC60260A55BE547A9 /* ThreadSettingsSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A8798F151C7F526417EFF38 /* ThreadSettingsSheet.swift */; };
 		5A46B2D51AE880BCD813F5AC /* WorkLogRows.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A414901BB8690A34C0E1505 /* WorkLogRows.swift */; };
 		5A343CB63EE630AA2A269B10 /* WorkingControl.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A5221674666158F3BE13321 /* WorkingControl.swift */; };
@@ -202,6 +203,7 @@
 		5A7CF6141551F258EB69E54C /* ThreadListScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThreadListScreen.swift; sourceTree = "<group>"; };
 		5ADC0C2661897D759FA63D62 /* ThreadPresentation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThreadPresentation.swift; sourceTree = "<group>"; };
 		5AD2FB764B8CACFD3D675D52 /* ThreadScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThreadScreen.swift; sourceTree = "<group>"; };
+		5AD2FB764B8CACFD3D675D53 /* ThreadScreenComponents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThreadScreenComponents.swift; sourceTree = "<group>"; };
 		5A8798F151C7F526417EFF38 /* ThreadSettingsSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThreadSettingsSheet.swift; sourceTree = "<group>"; };
 		5A414901BB8690A34C0E1505 /* WorkLogRows.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkLogRows.swift; sourceTree = "<group>"; };
 		5A5221674666158F3BE13321 /* WorkingControl.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkingControl.swift; sourceTree = "<group>"; };
@@ -324,6 +326,7 @@
 				5A7CF6141551F258EB69E54C /* ThreadListScreen.swift */,
 				5ADC0C2661897D759FA63D62 /* ThreadPresentation.swift */,
 				5AD2FB764B8CACFD3D675D52 /* ThreadScreen.swift */,
+				5AD2FB764B8CACFD3D675D53 /* ThreadScreenComponents.swift */,
 				5A8798F151C7F526417EFF38 /* ThreadSettingsSheet.swift */,
 				5A414901BB8690A34C0E1505 /* WorkLogRows.swift */,
 				5A5221674666158F3BE13321 /* WorkingControl.swift */,
@@ -537,6 +540,7 @@
 				5AB6A7AE322325E65DDA2487 /* ThreadListScreen.swift in Sources */,
 				5A4C365DEB59BCFAE2F44CB6 /* ThreadPresentation.swift in Sources */,
 				5A19A0BB9DE49CE354D481B7 /* ThreadScreen.swift in Sources */,
+				5A19A0BB9DE49CE354D481B8 /* ThreadScreenComponents.swift in Sources */,
 				5AD0731BC60260A55BE547A9 /* ThreadSettingsSheet.swift in Sources */,
 				5A46B2D51AE880BCD813F5AC /* WorkLogRows.swift in Sources */,
 				5A343CB63EE630AA2A269B10 /* WorkingControl.swift in Sources */,

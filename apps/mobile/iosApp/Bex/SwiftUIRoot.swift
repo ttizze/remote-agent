@@ -8,7 +8,6 @@ struct BexSwiftUIRoot: View {
     @State private var showingUsage = false
 
     var body: some View {
-        let _ = appearanceRevision
         Group {
             if model.profiles.isEmpty {
                 NavigationStack { pairingScreen }
