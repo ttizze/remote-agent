@@ -15,7 +15,7 @@ use agent_protocol::device::{
     DeviceSummary, DeviceTextSize, DeviceToolVersion, DeviceToolVersions, DeviceAccessibilityInput,
     DeviceAccessibilityTree,
     DeviceEventLogEntry, DeviceEventLogInput, DeviceFrameEncoding, DeviceInput, DeviceInputKind,
-    DeviceRecording, DeviceRecordingArtifact, DeviceRecordingStartInput, DeviceRecordingStatus, DeviceRecordingStopInput,
+    DeviceRecording, DeviceRecordingStartInput, DeviceRecordingStatus, DeviceRecordingStopInput,
     DeviceScreenConfig, DeviceTouchPhase, DeviceVideoFrame, DeviceHardwareButton,
     DeviceRecordingFormat, LOCAL_DEVICE_HOST_ID,
     DeviceDuoCommand, DeviceDuoPhysical, DeviceDuoPose, DeviceFoldPosture,

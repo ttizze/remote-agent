@@ -215,6 +215,7 @@ pub struct DeviceState {
     pub recordings: BTreeMap<(String, String, String), agent_protocol::device::DeviceRecordingStatus>,
     pub duo_controls: BTreeMap<(String, String, String, String), DeviceDuoControlState>,
     duo_request_sequence: u64,
+    closed_recordings: BTreeMap<(String, String, String), (u64, String)>,
     pub last_recording: Option<DeviceRecording>,
     pub last_screenshot: Option<DeviceScreenshot>,
     pub error: Option<String>,
@@ -536,6 +537,19 @@ impl DeviceState {
                         screen.session_epoch.clone(),
                     ))
                 });
+                let removed_recordings = self
+                    .recordings
+                    .iter()
+                    .filter_map(|(key, status)| {
+                        let keep = active.iter().any(|(active_thread, active_host, active_device, active_epoch)| {
+                            active_thread == &key.0
+                                && active_host == &key.1
+                                && active_device == &key.2
+                                && active_epoch == &status.session_epoch
+                        });
+                        (!keep).then(|| (key.clone(), (status.recording_id, status.session_epoch.clone())))
+                    })
+                    .collect::<Vec<_>>();
                 self.recordings.retain(|(thread, host, device), status| {
                     active.iter().any(|(active_thread, active_host, active_device, active_epoch)| {
                         active_thread == thread
@@ -544,6 +558,9 @@ impl DeviceState {
                             && active_epoch == &status.session_epoch
                     })
                 });
+                for (key, lifetime) in removed_recordings {
+                    self.closed_recordings.insert(key, lifetime);
+                }
                 if self.last_recording.as_ref().is_some_and(|recording| {
                     !active.iter().any(|(thread, host, device, _)| {
                         thread == &recording.status.thread_id.to_string()
@@ -664,14 +681,20 @@ impl DeviceState {
                         .get(&key)
                         .is_none_or(|current| status.recording_id >= current.recording_id)
                     {
+                        self.closed_recordings.remove(&key);
                         self.recordings.insert(key, status);
                     }
                 } else if self
                     .recordings
                     .get(&key)
-                    .is_some_and(|current| current.recording_id == status.recording_id)
+                    .is_some_and(|current| {
+                        current.recording_id == status.recording_id
+                            && current.session_epoch == status.session_epoch
+                    })
                 {
                     self.recordings.remove(&key);
+                    self.closed_recordings
+                        .insert(key, (status.recording_id, status.session_epoch));
                 }
             }
             DeviceEvent::RecordingComplete(recording) => {
@@ -680,12 +703,31 @@ impl DeviceState {
                     recording.status.host_id.clone(),
                     recording.status.device_id.clone(),
                 );
-                if self
-                    .recordings
-                    .get(&key)
-                    .is_some_and(|current| current.recording_id == recording.status.recording_id)
-                {
+                let completion_was_pending = if let Some(current) = self.recordings.get(&key) {
+                    if current.recording_id != recording.status.recording_id
+                        || current.session_epoch != recording.status.session_epoch
+                    {
+                        return;
+                    }
                     self.recordings.remove(&key);
+                    false
+                } else if self.sessions.iter().any(|session| {
+                    session.thread_id.to_string() == key.0
+                        && session.host_id == key.1
+                        && session.device_id == key.2
+                        && session.session_epoch != recording.status.session_epoch
+                }) {
+                    return;
+                } else if self.closed_recordings.get(&key).is_none_or(|(recording_id, session_epoch)| {
+                    *recording_id != recording.status.recording_id
+                        || session_epoch != &recording.status.session_epoch
+                }) {
+                    return;
+                } else {
+                    true
+                };
+                if completion_was_pending {
+                    self.closed_recordings.remove(&key);
                 }
                 if self
                     .last_recording
