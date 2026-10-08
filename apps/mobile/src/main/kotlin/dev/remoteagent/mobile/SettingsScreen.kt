@@ -119,6 +119,7 @@ internal fun SettingsScreen(model: AndroidAppModel, projectId: String?) {
                         NavigationRow(Icons.Outlined.Computer, "Usage") { model.navigate(Route.Usage) }
                     }
                 }
+            if (projectId == null) item { LoadBalancingSettings(model) }
             view.project?.let { header ->
                 item {
                     Row(
@@ -146,9 +147,10 @@ internal fun SettingsScreen(model: AndroidAppModel, projectId: String?) {
                     }
                 }
             items(view.sections, key = { it.id }) { section ->
+                val rows = section.rows.filterNot { projectId == null && it.id == SettingId.LoadBalancing }
                 Column {
                     SectionCard(section.title) {
-                        section.rows.forEachIndexed { index, row ->
+                        rows.forEachIndexed { index, row ->
                             if (index > 0) HorizontalDivider(color = AppTheme.colors.border)
                             SettingRow(
                                 row,
@@ -173,6 +175,66 @@ internal fun SettingsScreen(model: AndroidAppModel, projectId: String?) {
             if (projectId == null) item { BackgroundDiagnosticsSection(model) }
             if (projectId == null)
                 item { Text(privacyPolicy(), style = AppTheme.caption, color = AppTheme.colors.foregroundMuted) }
+        }
+    }
+}
+
+@Composable
+private fun LoadBalancingSettings(model: AndroidAppModel) {
+    val rows = model.loadBalancingPreferences()
+    SectionCard("Load balancing") {
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text("Automatic routing", style = AppTheme.body)
+                Text(
+                    "Choose a connected environment for matching new threads.",
+                    style = AppTheme.caption,
+                    color = AppTheme.colors.foregroundMuted,
+                )
+            }
+            Switch(
+                checked = model.snapshot.preferences().loadBalancingEnabled,
+                onCheckedChange = model::setLoadBalancingEnabled,
+                colors = SwitchDefaults.colors(checkedThumbColor = AppTheme.colors.primaryText),
+            )
+        }
+        if (rows.size < 2) {
+            Text(
+                "Connect at least two environments to choose weights.",
+                Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                style = AppTheme.caption,
+                color = AppTheme.colors.foregroundMuted,
+            )
+        } else {
+            rows.forEach { row ->
+                HorizontalDivider(color = AppTheme.colors.border)
+                Column(Modifier.fillMaxWidth().padding(16.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(row.environmentLabel, style = AppTheme.body, modifier = Modifier.weight(1f))
+                        Text(row.connectionState, style = AppTheme.caption, color = AppTheme.colors.foregroundMuted)
+                    }
+                    Row(
+                        Modifier.fillMaxWidth().padding(top = 6.dp),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        listOf(100u to "Prefer", 50u to "Normal", 25u to "Less often", 0u to "Manual only").forEach { (weight, label) ->
+                            TextButton(
+                                enabled = model.snapshot.preferences().loadBalancingEnabled,
+                                onClick = { model.setLoadBalancingWeight(row.environmentId, weight.toUByte()) },
+                            ) {
+                                Text(
+                                    label,
+                                    color = if (row.weight.toUInt() == weight) AppTheme.colors.primaryText
+                                    else AppTheme.colors.foregroundMuted,
+                                )
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 }

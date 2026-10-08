@@ -8,7 +8,7 @@ use crate::{
     },
     models::{FileContent, FileList, Project, WorktreeSettings},
     state::{Draft, RefScope, Snapshot},
-    view::thread_list::ThreadListOptions,
+    view::{load_balancing, thread_list::ThreadListOptions},
 };
 use agent_protocol::{
     models::AgentActivityPhase,
@@ -28,6 +28,42 @@ pub struct AwarenessActivityView {
     pub detail: Option<String>,
     pub model_title: Option<String>,
     pub updated_at_ms: i64,
+}
+
+/// One device-local load-balancing preference, paired with the environment
+/// whose Store owns the setting. Native clients use the id to route edits to
+/// the correct authenticated Host.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct EnvironmentLoadBalancingPreferenceView {
+    pub environment_id: String,
+    pub environment_label: String,
+    pub connection_state: String,
+    pub enabled: bool,
+    pub weight: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct EnvironmentLoadBalancedRouteView {
+    pub environment_id: String,
+    pub project_id: String,
+    pub provider_instance: String,
+    pub driver: agent_domain::Driver,
+    pub model: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct EnvironmentLoadBalancingEvaluationView {
+    pub candidate_count: u64,
+    pub pending_resources: bool,
+    pub route: Option<EnvironmentLoadBalancedRouteView>,
+}
+
+fn environment_registry(snapshots: Vec<Arc<Snapshot>>) -> EnvironmentRegistry {
+    let mut registry = EnvironmentRegistry::default();
+    for snapshot in snapshots {
+        registry.update(snapshot);
+    }
+    registry
 }
 
 fn awareness_phase_name(phase: &AgentActivityPhase) -> String {
@@ -50,10 +86,7 @@ pub fn environment_project_rows(
     snapshots: Vec<Arc<Snapshot>>,
     query: String,
 ) -> Vec<EnvironmentProjectRow> {
-    let mut registry = EnvironmentRegistry::default();
-    for snapshot in snapshots {
-        registry.update(snapshot);
-    }
+    let registry = environment_registry(snapshots);
     registry.project_rows(&query)
 }
 
@@ -68,10 +101,7 @@ pub fn environment_thread_list(
     selected_project: Option<String>,
     selected_thread: Option<String>,
 ) -> EnvironmentThreadListView {
-    let mut registry = EnvironmentRegistry::default();
-    for snapshot in snapshots {
-        registry.update(snapshot);
-    }
+    let registry = environment_registry(snapshots);
     registry.thread_list(
         now_ms,
         options,
@@ -85,11 +115,94 @@ pub fn environment_thread_list(
 /// to the correct Store even when multiple Hosts expose identical local data.
 #[uniffi::export]
 pub fn environment_settings(snapshots: Vec<Arc<Snapshot>>) -> Vec<EnvironmentSettingsEntryView> {
-    let mut registry = EnvironmentRegistry::default();
-    for snapshot in snapshots {
-        registry.update(snapshot);
-    }
+    let registry = environment_registry(snapshots);
     registry.settings_entries()
+}
+
+/// Returns the persisted per-environment choices used by the native settings
+/// pages. The default remains Normal (50) when no environment-specific entry
+/// has been written yet.
+#[uniffi::export]
+pub fn environment_load_balancing_preferences(
+    snapshots: Vec<Arc<Snapshot>>,
+) -> Vec<EnvironmentLoadBalancingPreferenceView> {
+    let registry = environment_registry(snapshots);
+    registry
+        .summaries()
+        .into_iter()
+        .filter_map(|summary| {
+            let environment_id = summary.descriptor.environment_id.clone();
+            let environment_label = summary.descriptor.label.clone();
+            let snapshot = registry.snapshot(&environment_id)?;
+            let connection_state = match summary.connection {
+                crate::environment::EnvironmentConnectionState::Connected => "connected",
+                crate::environment::EnvironmentConnectionState::Connecting => "connecting",
+                crate::environment::EnvironmentConnectionState::Disconnected => "disconnected",
+            };
+            Some(EnvironmentLoadBalancingPreferenceView {
+                environment_id,
+                environment_label,
+                connection_state: connection_state.into(),
+                enabled: snapshot.preferences.load_balancing_enabled,
+                weight: load_balancing::preference_for_weight(
+                    snapshot
+                        .preferences
+                        .load_balancing_weights
+                        .get(&summary.descriptor.environment_id)
+                        .copied(),
+                ),
+            })
+        })
+        .collect()
+}
+
+/// Evaluates the source draft against all registered environments. This is a
+/// pure projection over cached snapshots; native owners request resource
+/// refreshes only when the returned evaluation says a matching candidate is
+/// still waiting for its first reply.
+#[uniffi::export]
+pub fn environment_load_balancing_route(
+    snapshots: Vec<Arc<Snapshot>>,
+    source_environment_id: String,
+    project_id: String,
+    now_ms: i64,
+) -> EnvironmentLoadBalancingEvaluationView {
+    let registry = environment_registry(snapshots);
+    let empty = || EnvironmentLoadBalancingEvaluationView {
+        candidate_count: 0,
+        pending_resources: false,
+        route: None,
+    };
+    let Some(source) = registry.snapshot(&source_environment_id) else {
+        return empty();
+    };
+    if !source.preferences.load_balancing_enabled {
+        return empty();
+    }
+    let draft = source.new_thread_default_draft_for_project(Some(&project_id));
+    if draft.instance_id.is_empty() || draft.model.is_empty() {
+        return empty();
+    }
+    let evaluation = registry.evaluate_load_balancing(
+        &source_environment_id,
+        &project_id,
+        draft.driver,
+        Some(&draft.instance_id),
+        &draft.model,
+        &source.preferences.load_balancing_weights,
+        now_ms,
+    );
+    EnvironmentLoadBalancingEvaluationView {
+        candidate_count: evaluation.candidate_count as u64,
+        pending_resources: evaluation.pending_resources,
+        route: evaluation.route.map(|route| EnvironmentLoadBalancedRouteView {
+            environment_id: route.environment_id,
+            project_id: route.project_id,
+            provider_instance: route.provider_instance,
+            driver: route.driver,
+            model: route.model,
+        }),
+    }
 }
 
 #[uniffi::export]
@@ -283,6 +396,14 @@ impl Snapshot {
     }
     pub fn draft(&self) -> Draft {
         self.current_draft()
+    }
+    /// Defaults for a fresh new-thread draft, without borrowing a selected
+    /// thread's task-specific model or workspace.
+    pub fn new_thread_defaults(&self) -> Draft {
+        self.new_thread_default_draft()
+    }
+    pub fn new_thread_defaults_for_project(&self, project_id: Option<String>) -> Draft {
+        self.new_thread_default_draft_for_project(project_id.as_deref())
     }
     pub fn search_query(&self) -> String {
         self.search.clone()

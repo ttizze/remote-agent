@@ -90,9 +90,11 @@ struct NewTaskFlow: View {
     }
 
     private func choose(_ project: String?) {
-        model.perform(draftOpen
-            ? .setNewThreadProject(projectId: project)
-            : .newThread(projectId: project))
+        if draftOpen {
+            model.perform(.setNewThreadProject(projectId: project))
+        } else {
+            model.openNewThread(projectId: project)
+        }
         path = [project ?? "chats"]
     }
 }

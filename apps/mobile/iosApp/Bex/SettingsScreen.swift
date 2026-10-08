@@ -47,6 +47,9 @@ struct SettingsScreen: View {
                         SettingsLink(symbol: "person.crop.circle", label: "Provider accounts") {
                             ProviderAccountsPage(model: model)
                         }
+                        SettingsLink(symbol: "arrow.triangle.2.circlepath", label: "Load balancing") {
+                            LoadBalancingSettingsPage(model: model)
+                        }
                         SettingsLink(symbol: "plus.bubble", label: "New threads") {
                             HostSettingsPage(model: model, title: "New threads", sections: ["new-threads"])
                         }
@@ -551,6 +554,57 @@ private struct HostSettingsPage: View {
         .scrollContentBackground(.hidden)
         .background(AppTheme.sheet)
         .navigationTitle(title)
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+private struct LoadBalancingSettingsPage: View {
+    @ObservedObject var model: BexAppViewModel
+
+    var body: some View {
+        let rows = model.loadBalancingPreferences()
+        List {
+            Section {
+                Toggle("Automatic routing", isOn: Binding(
+                    get: { model.snapshot.preferences().loadBalancingEnabled },
+                    set: { model.setLoadBalancingEnabled($0) }
+                ))
+                Text("Choose a connected environment for matching new threads.")
+                    .font(AppTheme.font(13)).foregroundStyle(AppTheme.muted)
+            }
+            if rows.count < 2 {
+                Section {
+                    Text("Connect at least two environments to choose weights.")
+                        .foregroundStyle(AppTheme.muted)
+                }
+            } else {
+                Section("Environment weights") {
+                    ForEach(rows, id: \.environmentId) { row in
+                        VStack(alignment: .leading, spacing: 6) {
+                            HStack {
+                                Text(row.environmentLabel)
+                                Spacer()
+                                Text(row.connectionState).foregroundStyle(AppTheme.muted)
+                            }
+                            Picker("Weight", selection: Binding(
+                                get: { row.weight },
+                                set: { model.setLoadBalancingWeight(environmentId: row.environmentId, weight: $0) }
+                            )) {
+                                Text("Prefer").tag(UInt8(100))
+                                Text("Normal").tag(UInt8(50))
+                                Text("Less often").tag(UInt8(25))
+                                Text("Manual only").tag(UInt8(0))
+                            }
+                            .pickerStyle(.menu)
+                            .disabled(!model.snapshot.preferences().loadBalancingEnabled)
+                        }
+                    }
+                }
+            }
+        }
+        .scrollContentBackground(.hidden)
+        .background(AppTheme.sheet)
+        .navigationTitle("Load balancing")
         .navigationBarTitleDisplayMode(.inline)
     }
 }

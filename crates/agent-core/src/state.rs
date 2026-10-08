@@ -553,6 +553,9 @@ pub struct Snapshot {
     /// The native app's store update surface, when a configured release link exists.
     pub native_update: Option<crate::models::NativeUpdateState>,
     pub host_resources: Option<agent_protocol::background::HostResourcesSnapshot>,
+    /// Client receipt time for the latest resource reply. Host sample clocks
+    /// are not comparable across environments and are never used for routing.
+    pub host_resources_received_at_ms: Option<i64>,
     pub process_diagnostics: Option<agent_protocol::background::ProcessDiagnosticsResult>,
     pub process_resource_history:
         Option<agent_protocol::background::ProcessResourceHistoryResult>,
@@ -1033,14 +1036,17 @@ impl Snapshot {
     /// The new-thread defaults after applying the selected project's overrides.
     /// A draft explicitly saved for that project still wins over this fallback.
     pub fn new_thread_default_draft(&self) -> Draft {
-        let mut draft = self.default_draft.clone();
+        self.new_thread_default_draft_for_project(self.selected_project.as_deref())
+    }
+    /// The new-thread defaults for an explicit project selection. Native
+    /// project pickers can evaluate routing before changing the selected
+    /// project on the Store, so the override lookup must use the requested id.
+    pub fn new_thread_default_draft_for_project(&self, project_id: Option<&str>) -> Draft {
+        let mut draft = self.default_draft.user_defaults();
         let Some(host) = &self.host_settings else {
             return draft;
         };
-        let overrides = self
-            .selected_project
-            .as_deref()
-            .and_then(|project| host.project_overrides.get(project));
+        let overrides = project_id.and_then(|project| host.project_overrides.get(project));
         if let Some(mode) = overrides.and_then(|project| project.default_runtime_mode) {
             draft.runtime_mode = mode;
         }
@@ -1048,45 +1054,6 @@ impl Snapshot {
             overrides.and_then(|project| project.default_model_selection.as_ref())
         {
             draft = draft.with_selection(selection);
-        }
-        if self.preferences.load_balancing_enabled {
-            let providers = self.providers.as_deref().unwrap_or(&[]);
-            let candidates = providers
-                .iter()
-                .map(|provider| crate::view::load_balancing::Candidate {
-                    instance_id: provider.instance.clone(),
-                    driver: provider.driver,
-                    ready: provider.enabled
-                        && provider.status == agent_protocol::models::ProviderStatus::Ready,
-                })
-                .collect::<Vec<_>>();
-            let seed = crate::view::load_balancing::seed(
-                self.selected_project.as_deref().unwrap_or(CHATS_PROJECT),
-            );
-            if let Some(instance) = crate::view::load_balancing::select_instance(
-                &candidates,
-                draft.driver,
-                &self.preferences.load_balancing_weights,
-                seed,
-            ) {
-                if let Some(provider) = providers
-                    .iter()
-                    .find(|provider| provider.instance == instance)
-                {
-                    let model = provider
-                        .models
-                        .iter()
-                        .find(|model| model.slug == draft.model)
-                        .or_else(|| provider.models.iter().find(|model| model.is_default))
-                        .or_else(|| provider.models.first());
-                    if let Some(model) = model {
-                        draft.instance_id = provider.instance.clone();
-                        draft.driver = provider.driver;
-                        draft.model = model.slug.clone();
-                        draft.options.clear();
-                    }
-                }
-            }
         }
         draft
     }
@@ -2115,15 +2082,18 @@ pub enum Intent {
     SetInAppNotificationsEnabled {
         enabled: bool,
     },
-    /// Enables weighted routing of new threads across provider instances.
+    /// Enables weighted routing of new threads across matching environments.
     SetLoadBalancingEnabled {
         enabled: bool,
     },
-    /// Sets one provider instance's local routing weight from 0 to 100.
+    /// Sets one environment's local routing weight from 0 to 100.
     SetLoadBalancingWeight {
-        instance_id: String,
+        environment_id: String,
         weight: u8,
     },
+    /// Refreshes capacity only while an automatic new-thread route is being
+    /// resolved. There is no background polling for this intent.
+    RefreshLoadBalancingResources,
     SetSnapshotCaptureEnabled {
         enabled: bool,
     },
@@ -2566,14 +2536,21 @@ mod tests {
             snapshot.new_thread_workspace().mode,
             crate::view::projects::selection::ThreadWorkspaceMode::Local
         );
+        let other = snapshot.new_thread_default_draft_for_project(Some("other"));
+        assert_eq!(other.instance_id, "codex");
+        assert_eq!(other.model, "gpt");
     }
 
     #[test]
-    fn load_balancing_routes_a_new_thread_to_the_weighted_ready_instance() {
+    fn load_balancing_preference_does_not_mutate_a_host_default_draft() {
         let mut snapshot = Snapshot {
             selected_project: Some("project".into()),
             host_settings: Some(crate::models::HostSettings::default()),
             default_draft: Draft {
+                text: "old task text".into(),
+                project_id: Some("old-project".into()),
+                project_selected_at_ms: Some(10),
+                created_at_ms: Some(20),
                 instance_id: "codex".into(),
                 driver: Driver::Codex,
                 model: "shared".into(),
@@ -2585,59 +2562,14 @@ mod tests {
         snapshot
             .preferences
             .load_balancing_weights
-            .insert("codex-build".into(), 100);
-        snapshot.providers = Some(vec![
-            crate::models::ProviderInstance {
-                instance: "codex".into(),
-                driver: Driver::Codex,
-                display_name: "Codex".into(),
-                accent_color: None,
-                enabled: true,
-                installed: true,
-                version: None,
-                status: crate::models::ProviderStatus::Ready,
-                message: None,
-                unavailable_reason: None,
-                show_interaction_mode_toggle: true,
-                reports_context_window: true,
-                supported_runtime_modes: vec![],
-                models: vec![crate::models::Model {
-                    slug: "shared".into(),
-                    name: "Shared".into(),
-                    aliases: vec![],
-                    badge: None,
-                    is_default: true,
-                    is_legacy: false,
-                    option_descriptors: vec![],
-                }],
-            },
-            crate::models::ProviderInstance {
-                instance: "codex-build".into(),
-                driver: Driver::Codex,
-                display_name: "Build Codex".into(),
-                accent_color: None,
-                enabled: true,
-                installed: true,
-                version: None,
-                status: crate::models::ProviderStatus::Ready,
-                message: None,
-                unavailable_reason: None,
-                show_interaction_mode_toggle: true,
-                reports_context_window: true,
-                supported_runtime_modes: vec![],
-                models: vec![crate::models::Model {
-                    slug: "shared".into(),
-                    name: "Shared".into(),
-                    aliases: vec![],
-                    badge: None,
-                    is_default: true,
-                    is_legacy: false,
-                    option_descriptors: vec![],
-                }],
-            },
-        ]);
+            .insert("environment-build".into(), 100);
         let draft = snapshot.new_thread_default_draft();
-        assert_eq!(draft.instance_id, "codex-build");
+        assert_eq!(draft.instance_id, "codex");
+        assert_eq!(draft.model, "shared");
+        assert!(draft.text.is_empty());
+        assert!(draft.project_id.is_none());
+        assert!(draft.project_selected_at_ms.is_none());
+        assert!(draft.created_at_ms.is_none());
     }
 
     #[test]

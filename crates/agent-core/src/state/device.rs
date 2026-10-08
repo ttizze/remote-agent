@@ -34,9 +34,10 @@ pub struct Preferences {
     pub notification_mode: crate::view::notifications::NotificationMode,
     /// Whether foreground thread events appear as in-app notices.
     pub in_app_notifications_enabled: bool,
-    /// Routes new threads across ready provider instances on this device.
+    /// Routes new threads across matching ready environments on this device.
     pub load_balancing_enabled: bool,
-    /// Integer weights by provider instance; omitted instances use 100.
+    /// Integer weights by environment; omitted environments use the Normal
+    /// preference (50).
     pub load_balancing_weights: BTreeMap<String, u8>,
     /// Device-local screenshot capture behavior.
     pub snapshot_capture: crate::view::snapshot_capture::SnapshotPreferences,
