@@ -95,7 +95,6 @@ pub(crate) fn init(cx: &mut App) {
     };
     // Components and Base both keep resolved copies of the palette.
     theme.tokens = theme.colors.into();
-    theme.font_size = px(14.);
     theme.radius = px(8.);
     Theme::sync_base(cx);
 }
