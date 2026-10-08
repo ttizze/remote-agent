@@ -15,6 +15,7 @@ pub(super) struct JobResult {
     pub result: Result<Reply, PeerError>,
     pub complete: Option<Waiter>,
     pub sent: Option<(String, Draft)>,
+    pub diff_generation: Option<u64>,
 }
 
 pub(super) enum Reply {
@@ -112,6 +113,7 @@ impl Owner {
         for call in [
             Call::ListProviders(m::Empty {}),
             Call::ListAccounts(m::Empty {}),
+            Call::ReadConversationSettings(m::Empty {}),
         ] {
             self.job(call, None, None);
         }
@@ -123,6 +125,8 @@ impl Owner {
         complete: Option<Waiter>,
         sent: Option<(String, Draft)>,
     ) {
+        let diff_generation = matches!(&call, Call::DiffPreview(_))
+            .then_some(self.state.sources.diff_generation);
         let sender = self.sender.clone();
         let cancel = match &call {
             Call::Transcribe(params) => params
@@ -158,6 +162,7 @@ impl Owner {
                         result,
                         complete,
                         sent,
+                        diff_generation,
                     }),
                 ))
                 .await;
@@ -200,6 +205,7 @@ impl Owner {
                         result,
                         complete: Some(complete),
                         sent: None,
+                        diff_generation: None,
                     }),
                 ))
                 .await;
@@ -299,6 +305,7 @@ impl Owner {
             result,
             complete,
             sent,
+            diff_generation,
         } = result;
         let cancelled = match &call {
             Call::Transcribe(params) => params
@@ -348,9 +355,11 @@ impl Owner {
                     }
                     Call::ListRefs(request) => self.refs_finished(request, Err(&error)),
                     Call::DiffPreview(request) if request.file.is_some() => {
-                        self.diff_file_finished(request, Err(&error))
+                        self.diff_file_finished(request, Err(&error), diff_generation)
                     }
-                    Call::DiffPreview(request) => self.diff_preview_finished(request, Err(&error)),
+                    Call::DiffPreview(request) => {
+                        self.diff_preview_finished(request, Err(&error), diff_generation)
+                    }
                     Call::Search(params) => self.search_finished(&params.query, None),
                     Call::CancelSetup(_) => self.work_locally = None,
                     Call::ProjectFavicon(request) => self.project_icon_read(request, Err(())),
@@ -529,9 +538,9 @@ impl Owner {
             Reply::DiffPreview(preview) => {
                 if let Call::DiffPreview(request) = call {
                     if request.file.is_some() {
-                        self.diff_file_finished(request, Ok(preview));
+                        self.diff_file_finished(request, Ok(preview), diff_generation);
                     } else {
-                        self.diff_preview_finished(request, Ok(preview));
+                        self.diff_preview_finished(request, Ok(preview), diff_generation);
                         self.show_diff_preview();
                     }
                 }

@@ -1474,6 +1474,7 @@ mod tests {
             crate::state::Draft {
                 instance_id: "codex".into(),
                 model: "gpt-5.4".into(),
+                project_id: Some("chats".into()),
                 ..Default::default()
             },
         );

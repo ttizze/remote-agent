@@ -78,7 +78,25 @@ fn push_context_record(draft: &mut Draft, record: Value) {
 
 impl Owner {
     fn set_draft(&mut self, draft: Draft) {
+        self.ensure_new_thread_draft();
         let key = self.state.draft_key();
+        let identity = if self.state.selected_thread.is_none() && draft.project_id.is_none() {
+            self.state.drafts.get(&key).map(|current| {
+                (
+                    current.project_id.clone(),
+                    current.project_selected_at_ms,
+                    current.created_at_ms,
+                )
+            })
+        } else {
+            None
+        };
+        let mut draft = draft;
+        if let Some((project_id, project_selected_at_ms, created_at_ms)) = identity {
+            draft.project_id = project_id;
+            draft.project_selected_at_ms = project_selected_at_ms;
+            draft.created_at_ms = created_at_ms;
+        }
         self.state.drafts.insert(key, draft);
     }
 
@@ -769,6 +787,7 @@ impl Owner {
 
     /// Requests what the open thread's diff panel shows.
     pub(super) fn load_diff(&mut self) -> Result<Next, PeerError> {
+        self.state.workspace.diff_retry_when_cwd_available = false;
         let thread = self.selected()?;
         let turns = self
             .state
@@ -799,12 +818,34 @@ impl Owner {
             None => return Ok(Next::Done),
         };
         if cwd.is_empty() {
+            self.state.sources.diff_generation = self.state.sources.diff_generation.wrapping_add(1);
+            self.state.sources.diff_preview = None;
+            self.state.sources.diff_files = None;
+            self.state.workspace.review = None;
+            self.state.workspace.review_generation += 1;
+            self.state.workspace.diff_retry_when_cwd_available = true;
             return Ok(Next::Done);
         }
+        self.state.workspace.diff_retry_when_cwd_available = false;
         self.load_vcs_status(cwd.clone());
         let call = self.load_diff_preview(cwd, base_ref, ignore_whitespace);
         self.show_diff_preview();
         Ok(Next::call(call, None))
+    }
+
+    /// Retries a diff selection that arrived before its environment cwd.
+    pub(super) fn retry_pending_diff(&mut self) {
+        if !self.state.workspace.diff_retry_when_cwd_available
+            || !self.connected()
+            || self.state.selected_thread.is_none()
+            || self.state.cwd().is_empty()
+        {
+            return;
+        }
+        self.state.workspace.diff_retry_when_cwd_available = false;
+        if let Ok(Next::Call(call, sent)) = self.load_diff() {
+            self.job(*call, None, sent.map(|sent| *sent));
+        }
     }
 
     pub(super) fn toggle_favorite_model(&mut self, instance_id: &str, model: &str) {

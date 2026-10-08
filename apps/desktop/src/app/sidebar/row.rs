@@ -856,7 +856,7 @@ impl Desktop {
         let key = draft.draft_key.clone();
         let hovered = self.sidebar.hovered.as_deref() == Some(draft.draft_key.as_str());
         let project = draft.project_name.clone().unwrap_or_default();
-        let open = draft.project_id.clone();
+        let open = draft.draft_key.clone();
         let (menu_key, menu_project) = (draft.draft_key.clone(), draft.project_id.clone());
         let discard = draft.draft_key.clone();
         let hover_key = draft.draft_key.clone();
@@ -884,7 +884,9 @@ impl Desktop {
                     }))
                     .on_click(cx.listener(move |view, _, _, cx| {
                         view.clear_selection(cx);
-                        view.new_thread(Some(open.clone()), cx);
+                        view.perform(Intent::OpenDraft {
+                            draft_key: open.clone(),
+                        });
                     }))
                     .on_mouse_down(
                         MouseButton::Right,

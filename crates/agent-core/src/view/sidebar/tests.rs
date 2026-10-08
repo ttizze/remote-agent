@@ -427,14 +427,22 @@ fn new_thread_drafts_lead_the_sidebar_except_the_one_being_typed() {
             "new:alpha".to_string(),
             Draft {
                 text: "\n  Plan the release\nmore".into(),
+                project_id: Some("alpha".into()),
                 ..Draft::default()
             },
         ),
-        ("new:beta".to_string(), Draft::default()),
+        (
+            "new:beta".to_string(),
+            Draft {
+                project_id: Some("beta".into()),
+                ..Draft::default()
+            },
+        ),
         (
             "new:chats".to_string(),
             Draft {
                 text: "typing".into(),
+                project_id: Some("chats".into()),
                 ..Draft::default()
             },
         ),
@@ -458,15 +466,16 @@ fn new_thread_drafts_lead_the_sidebar_except_the_one_being_typed() {
 // shows the row it had when it was opened, which never repaints while typing.
 #[test]
 fn drafts_are_newest_first_and_the_open_one_is_frozen_as_it_was_opened() {
-    let draft = |text: &str, at: i64| Draft {
+    let draft = |project: &str, text: &str, at: i64| Draft {
         text: text.into(),
+        project_id: Some(project.into()),
         created_at_ms: Some(at),
         ..Draft::default()
     };
     let mut snapshot = snapshot(vec![thread("a", "alpha")]);
     snapshot.drafts = Shared::from(BTreeMap::from([
-        ("new:chats".to_string(), draft("older", 1)),
-        ("new:alpha".to_string(), draft("newer", 2)),
+        ("new:chats".to_string(), draft("chats", "older", 1)),
+        ("new:alpha".to_string(), draft("alpha", "newer", 2)),
     ]));
     snapshot.freeze_open_draft();
     snapshot.drafts.get_mut("new:chats").unwrap().text = "older, edited".into();

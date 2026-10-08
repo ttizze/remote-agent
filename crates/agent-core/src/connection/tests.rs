@@ -198,10 +198,12 @@ fn a_launch_opens_its_thread_once_the_shell_shows_it() {
     assert_eq!(launch.title, "Fix the bug");
     assert_eq!(launch.project_id, CHATS_PROJECT);
     assert_eq!(launch.thread_id.as_ref(), Some(&entry.thread));
+    let follow_up_key = owner.state.draft_key();
     owner.state.drafts.insert(
-        "new:chats".into(),
+        follow_up_key.clone(),
         Draft {
             text: "Next message".into(),
+            project_id: Some("chats".into()),
             ..draft()
         },
     );
@@ -210,7 +212,12 @@ fn a_launch_opens_its_thread_once_the_shell_shows_it() {
     live_shell(&mut owner, 5, vec![row(&entry.thread)]);
     assert_eq!(owner.state.selected_thread, Some(entry.thread.clone()));
     assert_eq!(owner.state.current_draft().text, "Next message");
-    assert!(owner.state.drafts["new:chats"].text.is_empty());
+    assert_eq!(
+        owner.state.drafts[entry.thread.as_str()].project_id,
+        None
+    );
+    assert!(owner.state.drafts[&follow_up_key].text.is_empty());
+    assert_eq!(owner.state.drafts[&follow_up_key].project_id, None);
     assert_eq!(
         receipt.try_recv().unwrap().unwrap(),
         Outcome::StartedThread {
@@ -399,6 +406,7 @@ fn a_discarded_draft_comes_back_unless_new_text_replaced_it() {
         let draft = Draft {
             text: "half-written prompt".into(),
             created_at_ms: Some(123),
+            project_id: Some("app".into()),
             ..Draft::default()
         };
         owner.state.drafts.insert("new:app".into(), draft.clone());
@@ -416,6 +424,7 @@ fn a_discarded_draft_comes_back_unless_new_text_replaced_it() {
             let newer = Draft {
                 text: "new reply".into(),
                 created_at_ms: Some(124),
+                project_id: Some("app".into()),
                 ..Draft::default()
             };
             owner.state.drafts.insert("new:app".into(), newer.clone());
@@ -932,6 +941,7 @@ fn job(
         result,
         complete: None,
         sent,
+        diff_generation: None,
     }
 }
 
@@ -1002,6 +1012,7 @@ fn a_remote_pairing_receipt_observes_the_registered_host() {
         })),
         complete: Some(complete),
         sent: None,
+        diff_generation: None,
     });
     assert_eq!(
         receipt.try_recv().unwrap().unwrap(),
@@ -2050,6 +2061,7 @@ fn discarding_a_draft_removes_only_that_draft() {
             key.into(),
             Draft {
                 text: "unsent".into(),
+                project_id: (key == "new:app").then(|| "app".into()),
                 ..Draft::default()
             },
         );
@@ -2111,6 +2123,10 @@ fn terminal_lines_join_the_draft_at_the_caret_once_per_range() {
     );
     assert_eq!(owner.state.current_draft().text, format!("see {link} it"));
     assert_eq!(cursor as usize, 4 + link.len() + 1);
+    assert_eq!(
+        owner.state.current_draft().project_id.as_deref(),
+        Some("chats")
+    );
     assert!(matches!(add(&mut owner, "", 0), Next::Done));
     assert_eq!(context_records(&owner).len(), 1);
 }
@@ -2287,9 +2303,76 @@ fn a_new_thread_on_a_branch_opens_a_local_draft_in_its_worktree() {
             branch: Some("fix".into()),
             worktree_path: Some("/trees/fix".into()),
             start_from_origin: false,
+            start_from_origin_choice: None,
         }
     );
     assert_eq!(owner.state.composer_cwd(), "/trees/fix");
+}
+
+#[test]
+fn each_new_thread_navigation_mints_an_independent_draft() {
+    let mut owner = owner(Snapshot {
+        default_draft: draft(),
+        ..Snapshot::default()
+    });
+    owner
+        .prepare(Intent::NewThread {
+            project_id: Some("first".into()),
+        })
+        .unwrap();
+    let first = owner.state.new_thread_draft_key();
+    owner.state.drafts.get_mut(&first).unwrap().text = "keep".into();
+    owner
+        .prepare(Intent::NewThread {
+            project_id: Some("second".into()),
+        })
+        .unwrap();
+    let second = owner.state.new_thread_draft_key();
+    assert_ne!(first, second);
+    assert_eq!(owner.state.drafts[&first].text, "keep");
+    assert_eq!(owner.state.drafts[&first].project_id.as_deref(), Some("first"));
+    assert_eq!(owner.state.drafts[&second].project_id.as_deref(), Some("second"));
+}
+
+#[test]
+fn the_initial_new_thread_composer_gets_a_draft_identity_before_editing() {
+    let mut owner = owner(Snapshot::default());
+    owner
+        .prepare(Intent::SetNewThreadProject {
+            project_id: Some("project".into()),
+        })
+        .unwrap();
+    let key = owner.state.open_new_thread_draft.clone().unwrap();
+    owner
+        .prepare(Intent::EditDraft {
+            text: "keep this draft".into(),
+            base_text: None,
+        })
+        .unwrap();
+    let draft = &owner.state.drafts[&key];
+    assert_eq!(draft.project_id.as_deref(), Some("project"));
+    assert!(draft.project_selected_at_ms.is_some());
+    assert!(draft.created_at_ms.is_some());
+    assert_eq!(draft.text, "keep this draft");
+}
+
+#[test]
+fn initial_new_thread_dictation_uses_the_draft_identity() {
+    let mut owner = owner(Snapshot::default());
+    let initial_key = owner.state.draft_key();
+    let next = owner
+        .prepare(Intent::Transcribe {
+            draft_key: initial_key,
+            preparation: None,
+            audio: vec![],
+        })
+        .unwrap();
+    let key = owner.state.open_new_thread_draft.clone().unwrap();
+    match next {
+        Next::Call(_, Some(sent)) => assert_eq!(sent.as_ref().0, &key),
+        _ => panic!("dictation should retain the draft it will update"),
+    }
+    assert_eq!(owner.state.drafts[&key].project_id.as_deref(), Some("chats"));
 }
 
 // mobile queries.ts usePaginatedBranches: later pages join the first.
@@ -2465,6 +2548,13 @@ fn only_applies_the_start_from_origin_default_to_new_worktree_drafts() {
     assert!(!owner.state.new_thread_workspace().start_from_origin);
     owner.set_new_thread_start_from_origin(true).unwrap();
     assert!(owner.state.new_thread_workspace().start_from_origin);
+    owner
+        .set_new_thread_workspace(ThreadWorkspaceMode::Local)
+        .unwrap();
+    owner
+        .set_new_thread_workspace(ThreadWorkspaceMode::Worktree)
+        .unwrap();
+    assert!(owner.state.new_thread_workspace().start_from_origin);
 }
 
 // BranchToolbarBranchSelector createRef: the searched name, sanitized, is
@@ -2559,6 +2649,62 @@ fn a_replaced_connection_releases_the_requests_it_carried() {
     let entry = &owner.state.sources.provider_commands[&key];
     assert!(!entry.in_flight);
     assert!(entry.retry_at_ms.is_some());
+}
+
+#[test]
+fn reconnect_requeues_search_and_lazy_diff_jobs() {
+    let mut owner = owner(Snapshot::default());
+    owner.state.search_request = Some(SearchRequest {
+        query: "needle".into(),
+        due_at_ms: None,
+    });
+    owner.state.sources.entries = EntrySearchState {
+        wanted: Some(EntryQuery {
+            cwd: "/repo".into(),
+            query: "src".into(),
+            limit: 20,
+        }),
+        result: None,
+        due_at_ms: None,
+    };
+    let mut diff = DiffFilesEntry {
+        preview: agent_protocol::workspace::DiffPreview {
+            cwd: "/repo".into(),
+            base_ref: None,
+            ignore_whitespace: false,
+            file: None,
+        },
+        kind: agent_protocol::workspace::DiffSourceKind::WorkingTree,
+        base_ref: None,
+        diff_hash: "hash".into(),
+        generated_at: agent_domain::Timestamp::from_millis(0).unwrap(),
+        layout: crate::view::timeline::rows::TimelineLayout::Desktop,
+        files: vec![],
+        patches: BTreeMap::from([(
+            "src/lib.rs".into(),
+            DiffFilePatch {
+                in_flight: true,
+                ..Default::default()
+            },
+        )]),
+        queue: vec!["src/main.rs".into()],
+        superseded: BTreeSet::from(["src/old.rs".into()]),
+        revision: 1,
+    };
+    owner.state.sources.diff_files = Some(diff.clone());
+    owner.abandon_requests();
+    assert!(owner
+        .state
+        .search_request
+        .as_ref()
+        .is_some_and(|request| request.due_at_ms.is_some()));
+    assert!(owner.state.sources.entries.due_at_ms.is_some());
+    diff = owner.state.sources.diff_files.take().unwrap();
+    assert!(diff.superseded.is_empty());
+    assert!(diff.queue.contains(&"src/lib.rs".into()));
+    assert!(diff.queue.contains(&"src/main.rs".into()));
+    assert!(diff.queue.contains(&"src/old.rs".into()));
+    assert!(!diff.patches["src/lib.rs"].in_flight);
 }
 
 #[tokio::test]
@@ -2817,4 +2963,84 @@ fn a_truncated_diff_with_its_file_list_is_read_file_by_file() {
 
     preview(&mut owner, 5, source("three", false, &files));
     assert!(owner.state.sources.diff_files.is_none());
+}
+
+#[test]
+fn reloading_a_diff_focus_invalidates_the_old_preview_and_lazy_files() {
+    use agent_protocol::workspace as w;
+    let mut owner = opened(thread_state("Thread"));
+    let request = w::DiffPreview {
+        cwd: "/repo".into(),
+        base_ref: None,
+        ignore_whitespace: false,
+        file: None,
+    };
+    owner.state.sources.diff_preview = Some(DiffPreviewEntry {
+        request: request.clone(),
+        result: Some(Arc::new(w::DiffPreviewResult {
+            cwd: "/repo".into(),
+            generated_at: agent_domain::Timestamp::from_millis(1).unwrap(),
+            sources: vec![],
+        })),
+        error: None,
+    });
+    owner.state.sources.diff_files = Some(DiffFilesEntry {
+        preview: request.clone(),
+        kind: w::DiffSourceKind::WorkingTree,
+        base_ref: None,
+        diff_hash: "old".into(),
+        generated_at: agent_domain::Timestamp::from_millis(1).unwrap(),
+        layout: crate::view::timeline::rows::TimelineLayout::Desktop,
+        files: vec![],
+        patches: BTreeMap::new(),
+        queue: vec![],
+        superseded: BTreeSet::new(),
+        revision: 1,
+    });
+    let stale = owner.load_diff_preview("/repo".into(), None, false);
+    let stale_generation = owner.state.sources.diff_generation;
+    let preview = owner.state.sources.diff_preview.as_ref().unwrap();
+    assert!(preview.result.is_none());
+    assert!(owner.state.sources.diff_files.is_none());
+
+    let current = owner.load_diff_preview("/repo".into(), None, false);
+    let current_generation = owner.state.sources.diff_generation;
+    owner.finished(JobResult {
+        call: stale,
+        result: Ok(CallReply::DiffPreview(w::DiffPreviewResult {
+            cwd: "/repo".into(),
+            generated_at: agent_domain::Timestamp::from_millis(2).unwrap(),
+            sources: vec![],
+        })),
+        complete: None,
+        sent: None,
+        diff_generation: Some(stale_generation),
+    });
+    assert!(owner.state.sources.diff_preview.as_ref().unwrap().result.is_none());
+    owner.finished(JobResult {
+        call: current,
+        result: Ok(CallReply::DiffPreview(w::DiffPreviewResult {
+            cwd: "/repo".into(),
+            generated_at: agent_domain::Timestamp::from_millis(3).unwrap(),
+            sources: vec![],
+        })),
+        complete: None,
+        sent: None,
+        diff_generation: Some(current_generation),
+    });
+    assert!(owner
+        .state
+        .sources
+        .diff_preview
+        .as_ref()
+        .unwrap()
+        .result
+        .is_some());
+}
+
+#[test]
+fn a_diff_selection_waits_for_the_environment_cwd() {
+    let mut owner = opened(thread_state("Thread"));
+    assert!(matches!(owner.load_diff().unwrap(), Next::Done));
+    assert!(owner.state.workspace.diff_retry_when_cwd_available);
 }

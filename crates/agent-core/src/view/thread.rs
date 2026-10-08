@@ -251,13 +251,14 @@ pub fn thread_view(
     let status = floating_working_status(
         state,
         &FloatingStatusInput {
-            // Core tracks only whether the Host is reachable.
             connection_phase: if snapshot.connected {
                 ConnectionStatus::Connected
+            } else if snapshot.error.is_some() {
+                ConnectionStatus::Error
             } else {
                 ConnectionStatus::Reconnecting
             },
-            connection_error: None,
+            connection_error: snapshot.error.clone(),
             environment_label: snapshot.host_name.clone(),
             sync_label: thread_sync_label(sync.status, content),
             content,

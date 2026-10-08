@@ -135,7 +135,7 @@ pub(super) enum Event {
         epoch: u64,
         thread: ThreadId,
         item: TurnItemId,
-        result: Box<Result<Option<agent_domain::Item>, PeerError>>,
+        result: Box<Result<Option<(agent_domain::Item, Option<agent_domain::Task>)>, PeerError>>,
     },
     Written(Written, bool),
     /// Resolves once the latest device state is written.
@@ -330,6 +330,7 @@ impl Owner {
     }
 
     pub fn publish(&mut self) {
+        self.retry_pending_diff();
         self.observe_list();
         if let Some(device) = &mut self.device {
             device.writer.observe(&self.state, now_ms());
@@ -620,6 +621,29 @@ impl Owner {
         Arc::make_mut(&mut self.state.outbox)
     }
 
+    /// Gives new-thread composer edits a real draft identity before they are
+    /// written. The initial composer can be visible before an explicit
+    /// `NewThread` intent, so its first edit must still become an independent
+    /// pending draft.
+    pub(super) fn ensure_new_thread_draft(&mut self) {
+        if self.state.selected_thread.is_some() {
+            return;
+        }
+        let key = self.state.new_thread_draft_key();
+        if self.state.open_new_thread_draft.is_some()
+            && self
+                .state
+                .drafts
+                .get(&key)
+                .is_some_and(|draft| draft.project_id.is_some())
+        {
+            return;
+        }
+        let project = self.state.selected_project.clone();
+        self.state
+            .begin_new_thread_draft(new_id("new"), project, now_ms() as i64);
+    }
+
     fn attach(
         &mut self,
         peer: Peer,
@@ -669,6 +693,18 @@ impl Owner {
         self.subscribe_terminal_metadata();
         self.subscribe_keybindings();
         self.refresh();
+        self.sources_tick(now_ms());
+        if let Some(request) = self
+            .state
+            .sources
+            .diff_preview
+            .as_ref()
+            .filter(|entry| entry.result.is_none())
+            .map(|entry| entry.request.clone())
+        {
+            self.job(Call::DiffPreview(request), None, None);
+        }
+        self.read_diff_files();
         self.state_outbox().reconnected();
         self.drain();
     }
@@ -677,6 +713,13 @@ impl Owner {
     /// any more, and a provider command scan is asked again.
     pub(super) fn abandon_requests(&mut self) {
         let now = now_ms();
+        if let Some(request) = self.state.search_request.as_mut() {
+            request.due_at_ms = Some(now);
+        }
+        if self.state.sources.entries.wanted.is_some() {
+            self.state.sources.entries.due_at_ms = Some(now);
+        }
+        self.state.sources.diff_generation = self.state.sources.diff_generation.wrapping_add(1);
         let sources = &mut self.state.sources;
         for entry in sources.provider_commands.values_mut() {
             if entry.in_flight {
@@ -686,6 +729,22 @@ impl Owner {
         }
         for entry in sources.refs.values_mut() {
             entry.in_flight = false;
+        }
+        if let Some(entry) = sources.diff_files.as_mut() {
+            let mut retry = entry.superseded.clone();
+            for (path, patch) in &mut entry.patches {
+                if patch.in_flight {
+                    patch.in_flight = false;
+                    retry.insert(path.clone());
+                }
+            }
+            entry.superseded.clear();
+            for path in retry {
+                if !entry.queue.contains(&path) {
+                    entry.queue.push(path);
+                }
+            }
+            entry.revision += 1;
         }
         for icon in self.state.project_icons.values_mut() {
             if icon.in_flight {
@@ -705,6 +764,7 @@ impl Owner {
 
     fn disconnected(&mut self, error: String) {
         self.interrupt_uploads();
+        self.abandon_requests();
         self.state.connected = false;
         self.state.error = Some(error);
         Arc::make_mut(&mut self.state.shell).disconnected();

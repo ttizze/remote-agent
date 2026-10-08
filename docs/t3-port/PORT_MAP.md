@@ -1601,11 +1601,11 @@ UniFFI の公開（`bindings/views.rs`）:
 - 状態を持たない関数: `timeline_update`、`answer_draft_key`、`admit_attachments`、`snooze_presets`。
 - 生成は `scripts/build-agent-bindings.sh`（`AgentCore.swift`、`AgentCoreFFI.h`、`AgentCoreFFI.modulemap`、`dev/remoteagent/core/agent_core.kt`）。
 
-未接続:
+接続済み:
 
-- provider ごとの runtime mode は Host から届かないので、すべての mode を出す（plan toggle と model option は 2026-10-08 に接続した）。
-- 接続状態は接続しているかどうかだけで、再接続中の環境名や理由は出ない。
-- 新しい task の下書きの project 選択時刻。
+- Host の provider catalog は各 instance の runtime mode capability を返し、core の draft が現在の runtime mode を保持して composer controls に渡す。
+- Snapshot の接続状態は Host 名と再接続理由を thread の floating status に渡す。
+- 新しい task の下書きは独立した key、project id、project 選択時刻を保持する。
 
 ### Android クライアント（段階 4、2026-10-07）
 
@@ -1659,10 +1659,10 @@ UniFFI の公開（`bindings/views.rs`）:
 | mobile `lib/mobileTheme`、既定の palette と状態色 | `presentation::theme` の `mobile*`・`status*`。`both_appearances_name_the_same_tokens_in_hex`。 |
 | web `MessagesTimeline.tsx` formatWorkingTimer、mobile `floating-working-control.tsx` formatWorkingDuration | `view::time::format_working_timer`（`working_timer_label`）、`view::working_status::format_working_duration`（`working_duration_label`）。`working_timer_floors_to_whole_seconds`。 |
 
-未接続（T3 にあって、まだ持たないもの）:
+接続済み:
 
-- diff の window focus での再読み込み、環境 cwd での再試行。
-- provider ごとの runtime mode。
+- diff の window focus は preview と遅延 file patches を無効化して再読み込みし、環境 cwd が後から届いた場合は pending selection を再試行する。
+- provider ごとの runtime mode capability と draft の現在値。
 
 truncated diff の file ごとの遅延読み込みは core の `review_files` と3クライアントの review へ接続した。`newWorktreesStartFromOrigin` は Host と project の疎な設定更新・新規 draft の workspace 選択へ接続した。resume compaction の帯は固定 T3 web と同じく desktop の composer に出す（固定 T3 mobile にはない）。
 

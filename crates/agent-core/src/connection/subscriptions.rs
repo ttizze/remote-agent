@@ -235,6 +235,7 @@ impl Owner {
         let workspace = &mut self.state.workspace;
         workspace.review = None;
         workspace.diff_request = None;
+        workspace.diff_retry_when_cwd_available = false;
         workspace.directory = None;
         workspace.listed_directory = None;
         workspace.file = None;
@@ -685,7 +686,7 @@ impl Owner {
                     item_id: item.clone(),
                 })
                 .await
-                .map(|detail| detail.map(|detail| detail.row.item));
+                .map(|detail| detail.map(|detail| (detail.row.item, detail.task)));
             let _ = sender
                 .send(Event::Detail {
                     epoch,
@@ -702,14 +703,14 @@ impl Owner {
         &mut self,
         thread: &ThreadId,
         item: &TurnItemId,
-        result: Result<Option<Item>, PeerError>,
+        result: Result<Option<(Item, Option<agent_domain::Task>)>, PeerError>,
     ) {
         let Some(sync) = self.state.threads.get_mut(thread) else {
             return;
         };
         let sync = Arc::make_mut(sync);
         match result {
-            Ok(loaded) => sync.detail_loaded(item, loaded),
+            Ok(loaded) => sync.detail_loaded_with_task(item, loaded),
             Err(error) => sync.detail_failed(item, error.to_string()),
         }
     }

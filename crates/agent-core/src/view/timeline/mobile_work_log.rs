@@ -124,6 +124,7 @@ pub fn work_log_row(
     let reasoning = matches!(item.kind, ItemKind::Reasoning).then(|| item.text.clone());
     let fetched = match detail {
         Some(Detail::Loaded(item)) => Some(item.as_ref()),
+        Some(Detail::LoadedWithTask { item, .. }) => Some(item.as_ref()),
         _ => None,
     };
     let fetch_error = match detail {

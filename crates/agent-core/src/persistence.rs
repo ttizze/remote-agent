@@ -26,6 +26,7 @@ struct LocalState {
     follow_up: FollowUpBehavior,
     selected_thread: Option<ThreadId>,
     selected_project: Option<String>,
+    open_new_thread_draft: Option<String>,
     outbox: Outbox,
     rollbacks: BTreeMap<CommandId, PendingRollback>,
     preferences: Preferences,
@@ -39,6 +40,7 @@ pub(crate) fn encode(snapshot: &Snapshot) -> Result<Vec<u8>, serde_json::Error> 
         follow_up: snapshot.follow_up,
         selected_thread: snapshot.selected_thread.clone(),
         selected_project: snapshot.selected_project.clone(),
+        open_new_thread_draft: snapshot.open_new_thread_draft.clone(),
         outbox: snapshot.outbox.persisted(),
         rollbacks: snapshot.rollbacks.clone(),
         preferences: snapshot.preferences.clone(),
@@ -58,6 +60,7 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<Snapshot, serde_json::Error> {
         follow_up: local.follow_up,
         selected_thread: local.selected_thread,
         selected_project: local.selected_project,
+        open_new_thread_draft: local.open_new_thread_draft,
         outbox: Arc::new(local.outbox),
         rollbacks: local.rollbacks,
         preferences: local.preferences,
@@ -150,6 +153,7 @@ struct Saved {
     follow_up: FollowUpBehavior,
     selected_thread: Option<ThreadId>,
     selected_project: Option<String>,
+    open_new_thread_draft: Option<String>,
     rollbacks: BTreeMap<CommandId, PendingRollback>,
     preferences: Preferences,
 }
@@ -163,6 +167,7 @@ impl Saved {
             follow_up: snapshot.follow_up,
             selected_thread: snapshot.selected_thread.clone(),
             selected_project: snapshot.selected_project.clone(),
+            open_new_thread_draft: snapshot.open_new_thread_draft.clone(),
             rollbacks: snapshot.rollbacks.clone(),
             preferences: snapshot.preferences.clone(),
         }
@@ -175,6 +180,7 @@ impl Saved {
             && self.follow_up == other.follow_up
             && self.selected_thread == other.selected_thread
             && self.selected_project == other.selected_project
+            && self.open_new_thread_draft == other.open_new_thread_draft
             && self.rollbacks == other.rollbacks
             && self.preferences == other.preferences
     }
@@ -410,6 +416,7 @@ mod tests {
             "new:chats".into(),
             Draft {
                 text: "Unsent message".into(),
+                project_id: Some("chats".into()),
                 ..Draft::default()
             },
         );

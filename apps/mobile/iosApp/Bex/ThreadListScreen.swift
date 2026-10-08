@@ -143,13 +143,16 @@ struct ThreadListScreen: View {
             // A row that changes shelf or action starts closed.
             .id("\(row.key):\(row.variant):\(row.swipePrimary.label)")
         case let .pendingTask(task):
-            let actions = pendingTaskActions(kind: task.kind, projectId: task.projectId)
+            let actions = pendingTaskActions(kind: task.kind)
             PendingTaskRowView(task: task, icon: ProjectIconImages.image(model.snapshot, task.projectId),
                                sidebar: sidebar, status: actions.status, isDraft: actions.isDraft)
                 .onTapGesture {
                     switch actions.open {
                     case let .openThread(threadId): model.openThread(threadId)
                     case .newThread:
+                        model.perform(actions.open)
+                        showNewTaskDraft()
+                    case .openDraft:
                         model.perform(actions.open)
                         showNewTaskDraft()
                     default: break

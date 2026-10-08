@@ -148,6 +148,9 @@ pub struct WorkspaceSources {
     /// By checkout directory.
     pub vcs_status: BTreeMap<String, w::VcsStatus>,
     pub refs: BTreeMap<(String, RefScope), RefsEntry>,
+    /// Increments whenever a new full diff preview is requested, so a late
+    /// answer for the same request cannot replace a newer focus reload.
+    pub diff_generation: u64,
     pub diff_preview: Option<DiffPreviewEntry>,
     pub diff_files: Option<DiffFilesEntry>,
     /// The layout the composer last reported, whose wording its menu uses.
