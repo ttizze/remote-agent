@@ -104,7 +104,10 @@ struct ServiceInner {
     updater: crate::UpdateManager,
     started: AtomicBool,
     handoff_draining: AtomicBool,
-    handoff_gate: tokio::sync::Mutex<()>,
+    // Ordinary admitted operations hold a read permit. Handoff takes the
+    // write permit, so independent RPCs can overlap while the handoff waits
+    // for all of them, and no new operation can enter once draining starts.
+    handoff_gate: tokio::sync::RwLock<()>,
 }
 
 #[derive(Default)]
@@ -400,7 +403,7 @@ impl HostRpcService {
                 updater: crate::UpdateManager::new(update_dir),
                 started: AtomicBool::new(false),
                 handoff_draining: AtomicBool::new(false),
-                handoff_gate: tokio::sync::Mutex::new(()),
+                handoff_gate: tokio::sync::RwLock::new(()),
             }),
         })
     }
@@ -934,7 +937,7 @@ impl HostRpcService {
     }
 
     pub(crate) async fn accept_handoff_if_idle(&self) -> anyhow::Result<bool> {
-        let _gate = self.inner.handoff_gate.lock().await;
+        let _gate = self.inner.handoff_gate.write().await;
         if self
             .inner
             .handoff_draining
@@ -966,9 +969,9 @@ impl HostRpcService {
     pub(crate) async fn acquire_handoff_gate(
         &self,
         allow_during_drain: bool,
-    ) -> Result<tokio::sync::MutexGuard<'_, ()>, String> {
-        let gate = self.inner.handoff_gate.lock().await;
-        if !allow_during_drain && self.handoff_is_draining() {
+    ) -> Result<tokio::sync::RwLockReadGuard<'_, ()>, String> {
+        let gate = self.inner.handoff_gate.read().await;
+        if !handoff_admission_allowed(self.handoff_is_draining(), allow_during_drain) {
             return Err("Host is waiting for its installed update to start".into());
         }
         Ok(gate)
@@ -1444,13 +1447,10 @@ impl HostRpcService {
     }
 
     pub(crate) async fn update(&self, call: &Call) -> Result<Body, Failure> {
-        let _gate = self.inner.handoff_gate.lock().await;
-        if self.handoff_is_draining() && !matches!(call, Call::ReadUpdateStatus(_)) {
-            return Err(Failure::new(
-                "host_handoff_in_progress",
-                "Host is waiting for its installed update to start",
-            ));
-        }
+        let _gate = self
+            .acquire_handoff_gate(matches!(call, Call::ReadUpdateStatus(_)))
+            .await
+            .map_err(|message| Failure::new("host_handoff_in_progress", message))?;
         let updater = &self.inner.updater;
         match call {
             Call::ReadUpdateStatus(request) => Ok(updater.status(request).await.into()),
@@ -3948,6 +3948,10 @@ fn merge_custom_models(
     }
 }
 
+fn handoff_admission_allowed(draining: bool, allow_during_drain: bool) -> bool {
+    allow_during_drain || !draining
+}
+
 #[cfg(test)]
 mod provider_settings_tests {
     use super::{merge_custom_models, provider_executable_available};
@@ -4010,5 +4014,46 @@ mod provider_settings_tests {
         assert!(provider_executable_available(Path::new("codex")));
         assert!(!provider_executable_available(Path::new("./codex")));
         assert!(!provider_executable_available(Path::new("/missing/codex")));
+    }
+}
+
+#[cfg(test)]
+mod handoff_gate_tests {
+    use super::handoff_admission_allowed;
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
+    use tokio::sync::oneshot;
+
+    #[tokio::test]
+    async fn readers_overlap_while_handoff_waits_and_drain_rejects_new_admissions() {
+        let gate = Arc::new(tokio::sync::RwLock::new(()));
+        let draining = Arc::new(AtomicBool::new(false));
+        let first = gate.read().await;
+        let second = gate.read().await;
+        let (accepted, received) = oneshot::channel();
+        let writer_gate = gate.clone();
+        let writer_draining = draining.clone();
+        let writer = tokio::spawn(async move {
+            let _write = writer_gate.write().await;
+            writer_draining.store(true, Ordering::Release);
+            accepted.send(()).expect("handoff waiter is alive");
+        });
+
+        tokio::task::yield_now().await;
+        assert!(!writer.is_finished(), "handoff must wait for both readers");
+        drop(first);
+        tokio::task::yield_now().await;
+        assert!(!writer.is_finished(), "handoff must wait for the second reader");
+        drop(second);
+        tokio::time::timeout(std::time::Duration::from_secs(1), received)
+            .await
+            .expect("handoff acquires the write permit")
+            .expect("handoff acceptance signal");
+        writer.await.expect("handoff task");
+
+        assert!(!handoff_admission_allowed(draining.load(Ordering::Acquire), false));
+        assert!(handoff_admission_allowed(draining.load(Ordering::Acquire), true));
     }
 }

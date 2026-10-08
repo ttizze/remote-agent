@@ -7,10 +7,12 @@
 
   outputs = { nixpkgs, rust-overlay, ... }:
     let
-      # Preview only needs the libvpx VP9 encoder. Keep the release runtime
-      # reviewable: a small shared FFmpeg output avoids shipping the full Nix
-      # codec/filter closure and lets the staging script enumerate every copied
-      # library against third_party/ffmpeg/components.tsv.
+      # The release runtime serves Host Preview recording and the native
+      # desktop/device transcode path. Keep it reviewable: a small shared
+      # FFmpeg output provides the built-in H.264/MJPEG codecs, libvpx VP8/VP9,
+      # image/WebM muxers, pipe I/O, and swscale without shipping the full
+      # codec/filter closure. The staging script verifies the resulting binary
+      # rather than trusting this option list alone.
       ffmpegRuntime = pkgs: pkgs.ffmpeg.override {
         ffmpegVariant = "small";
         withHeadlessDeps = false;
@@ -35,7 +37,10 @@
         buildAvutil = true;
         buildPostproc = false;
         buildSwresample = true;
-        buildSwscale = false;
+        # H.264/MJPEG frames need pixel-format and size conversion before the
+        # MJPEG output used by desktop/device previews. Keep this enabled in
+        # every pinned release build.
+        buildSwscale = true;
         withDocumentation = false;
         withHtmlDoc = false;
         withManPages = false;

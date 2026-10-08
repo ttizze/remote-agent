@@ -70,7 +70,12 @@ cat > "$temporary/ffmpeg.exe" <<'EOF'
 #!/usr/bin/env bash
 case " $* " in
     *' -version '*) printf '%s\n' 'ffmpeg version 9.0.2-fixture' ;;
-    *' -encoders '*) printf '%s\n' ' V..... libvpx-vp9           libvpx VP9' ;;
+    *' -decoders '*) printf '%s\n' ' V..... h264                 H.264 / AVC' ' V..... mjpeg                MJPEG' ;;
+    *' -encoders '*) printf '%s\n' ' V..... mjpeg                MJPEG' ' V..... libvpx-vp9           libvpx VP9' ;;
+    *' -demuxers '*) printf '%s\n' ' D..... h264                 raw H.264 video' ' D..... image2pipe            piped image2 sequence' ' D..... matroska,webm         Matroska / WebM' ;;
+    *' -muxers '*) printf '%s\n' ' E..... image2pipe            piped image2 sequence' ' E..... mpjpeg                MIME multipart JPEG' ' E..... matroska,webm         Matroska / WebM' ' E..... null                  raw null video' ;;
+    *' -protocols '*) printf '%s\n' 'Input:' ' pipe' 'Output:' ' pipe' ;;
+    *' -filters '*) printf '%s\n' ' ... scale             V->V       Scale the input video size and convert the image format.' ;;
 esac
 EOF
 chmod +x "$temporary/ffmpeg.exe"
@@ -95,7 +100,13 @@ AGENT_FFMPEG_LICENSE_INVENTORY="$project_root/third_party/ffmpeg/components.tsv"
 tar -tzf "$temporary/desktop/desktop-windows-x86_64.tar.gz" | grep -Fx './desktop.exe' >/dev/null
 tar -tzf "$temporary/desktop/desktop-windows-x86_64.tar.gz" | grep -Fx './ffmpeg.exe' >/dev/null
 tar -xOf "$temporary/desktop/desktop-windows-x86_64.tar.gz" ./FFMPEG-RUNTIME.txt |
-    grep -Fx 'encoder=libvpx-vp9' >/dev/null
+    grep -Fx 'encoder=mjpeg,libvpx-vp9' >/dev/null
+tar -xOf "$temporary/desktop/desktop-windows-x86_64.tar.gz" ./FFMPEG-RUNTIME.txt |
+    grep -Fx 'decoder=h264,mjpeg' >/dev/null
+tar -xOf "$temporary/desktop/desktop-windows-x86_64.tar.gz" ./FFMPEG-RUNTIME.txt |
+    grep -Fx 'filter=scale' >/dev/null
+tar -xOf "$temporary/desktop/desktop-windows-x86_64.tar.gz" ./FFMPEG-RUNTIME.txt |
+    grep -Fx 'muxer=image2pipe,mpjpeg,matroska,webm,null' >/dev/null
 tar -xOf "$temporary/desktop/desktop-windows-x86_64.tar.gz" ./FFMPEG-RUNTIME.txt |
     grep -F 'license_files=FFMPEG-LICENSE-' >/dev/null
 [[ $(tar -tzf "$temporary/desktop/desktop-windows-x86_64.tar.gz" | grep -c -F './FFMPEG-LICENSE-') -eq 5 ]]

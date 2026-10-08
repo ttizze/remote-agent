@@ -19,9 +19,30 @@ $executable = Get-ChildItem -LiteralPath $root -Filter ffmpeg.exe -File -Recurse
 if ($null -eq $executable) {
     throw 'The pinned FFmpeg archive did not contain ffmpeg.exe'
 }
-$encoders = & $executable.FullName -hide_banner -loglevel error -encoders 2>&1 | Out-String
-if ($LASTEXITCODE -ne 0 -or $encoders -notmatch 'libvpx-vp9') {
-    throw 'The pinned FFmpeg archive does not provide libvpx-vp9'
+$requiredCapabilities = @{
+    decoders = @('h264', 'mjpeg')
+    encoders = @('mjpeg', 'libvpx-vp9')
+    demuxers = @('h264', 'image2pipe', 'matroska,webm')
+    muxers = @('image2pipe', 'mpjpeg', 'matroska,webm', 'null')
+    protocols = @('pipe')
+    filters = @('scale')
+}
+foreach ($table in $requiredCapabilities.Keys) {
+    $output = & $executable.FullName -hide_banner -loglevel error "-$table" 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) {
+        throw "The pinned FFmpeg archive could not report its $table table"
+    }
+    foreach ($name in $requiredCapabilities[$table]) {
+        $escaped = [regex]::Escape($name)
+        $pattern = if ($table -eq 'protocols') {
+            "(?m)^\s*$escaped(\s|$)"
+        } else {
+            "(?m)^\s+\S+\s+$escaped(\s|$)"
+        }
+        if ($output -notmatch $pattern) {
+            throw "The pinned FFmpeg archive lacks required $table entry: $name"
+        }
+    }
 }
 
 # Point at the extracted package root so the staging helper can copy both DLLs
