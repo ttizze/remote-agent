@@ -1,6 +1,6 @@
 //! One contract per native request; provider JSON conversion stays at its boundary.
 use super::*;
-use crate::{conversation as c, models as m, operations as op, workspace as w};
+use crate::{conversation as c, device as d, models as m, operations as op, workspace as w};
 macro_rules! contracts {
     ($($variant:ident, $method:literal => ($params:ty, $result:ty) $([$clone:ident])?),* $(,)?) => {
         // Bind metadata to the operation, not the parameter type: ReadFile and
@@ -110,5 +110,15 @@ contracts! {
     RemoveRemote, "host/removeRemote" => (op::RemoveRemoteHost, m::Empty) [clone],
     Revoke, "host/revoke" => (op::RevokeDevice, m::Empty) [clone],
     Browser, "host/browser" => (crate::browser::BrowserRequest, crate::browser::BrowserFrame) [clone],
+    DeviceList, "host/device/list" => (d::DeviceListInput, d::DeviceServiceState) [clone],
+    DeviceConfigure, "host/device/configure" => (d::DeviceConfigureInput, d::DeviceServiceState) [clone],
+    DeviceHosts, "host/device/hosts" => (d::DeviceHostsInput, d::DeviceServiceState) [clone],
+    DeviceOpen, "host/device/open" => (d::DeviceOpenInput, d::DeviceSession) [clone],
+    DeviceClose, "host/device/close" => (d::DeviceCloseInput, m::Empty) [clone],
+    DeviceShutdown, "host/device/shutdown" => (d::DeviceShutdownInput, m::Empty) [clone],
+    DeviceDetail, "host/device/detail" => (d::DeviceDetailInput, d::DeviceDetail) [clone],
+    DeviceAction, "host/device/action" => (d::DeviceActionInput, d::DeviceDetail) [clone],
+    DeviceScreenshot, "host/device/screenshot" => (d::DeviceScreenshotInput, d::DeviceScreenshot) [clone],
+    DeviceSubscribe, "host/device/subscribe" => (d::DeviceSubscribeInput, d::DeviceEvent),
     ConnectionPerformance, "host/diagnostics/connection" => (crate::diagnostics::ConnectionPerformance, m::Empty) [clone],
 }

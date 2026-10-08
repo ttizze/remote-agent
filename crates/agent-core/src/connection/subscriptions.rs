@@ -49,6 +49,7 @@ impl Owner {
                 tokio::spawn(follow(target, call, Payload::TerminalMetadata))
             }
             StreamKey::Keybindings => tokio::spawn(follow(target, call, Payload::Keybindings)),
+            StreamKey::Device(_) => tokio::spawn(follow(target, call, Payload::Device)),
         };
         let failures = network
             .streams
@@ -143,6 +144,18 @@ impl Owner {
         );
     }
 
+    pub(super) fn subscribe_device(&mut self, thread: &ThreadId) {
+        if !self.connected() {
+            return;
+        }
+        self.open_stream(
+            StreamKey::Device(thread.clone()),
+            Call::DeviceSubscribe(agent_protocol::device::DeviceSubscribeInput {
+                thread_id: thread.clone(),
+            }),
+        );
+    }
+
     fn terminal_metadata(&mut self, event: agent_protocol::operations::TerminalMetadataEvent) {
         use agent_protocol::operations::TerminalMetadataEvent as Metadata;
         let terminals = &mut self.state.terminal_metadata;
@@ -176,6 +189,7 @@ impl Owner {
     fn close_thread_streams(&mut self, thread: &ThreadId) {
         self.close_stream(&StreamKey::Thread(thread.clone()));
         self.close_stream(&StreamKey::Setup(thread.clone()));
+        self.close_stream(&StreamKey::Device(thread.clone()));
     }
 
     /// The archive is subscribed only while it is shown.
@@ -322,6 +336,11 @@ impl Owner {
             }
             StreamKey::TerminalMetadata => self.subscribe_terminal_metadata(),
             StreamKey::Keybindings => self.subscribe_keybindings(),
+            StreamKey::Device(thread) => {
+                if self.state.selected_thread.as_ref() == Some(&thread) {
+                    self.subscribe_device(&thread);
+                }
+            }
         }
     }
 
@@ -364,6 +383,10 @@ impl Owner {
                 self.healthy(&StreamKey::Keybindings);
                 self.state.keybindings = Some(Arc::new(config));
             }
+            (StreamKey::Device(thread), Payload::Device(event)) => {
+                self.healthy(&StreamKey::Device(thread));
+                self.state.device.apply_event(event);
+            }
             _ => {}
         }
     }
@@ -389,7 +412,10 @@ impl Owner {
                         shell.stream_error();
                     }
                 }
-                StreamKey::Setup(_) | StreamKey::TerminalMetadata | StreamKey::Keybindings => {}
+                StreamKey::Setup(_)
+                | StreamKey::TerminalMetadata
+                | StreamKey::Keybindings
+                | StreamKey::Device(_) => {}
             }
             self.schedule_resubscribe(key);
             return;

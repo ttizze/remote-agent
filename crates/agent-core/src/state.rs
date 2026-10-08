@@ -425,6 +425,8 @@ pub struct Snapshot {
     pub thread_undo: crate::commands::undo::ThreadUndo,
     /// Timeline rows already built; every snapshot of the store shares them.
     pub timelines: Arc<std::sync::Mutex<crate::view::timeline::rows::TimelineCache>>,
+    /// Host-owned simulator and emulator state for the Device surface.
+    pub device: DeviceState,
 }
 
 impl Snapshot {
@@ -874,6 +876,35 @@ pub struct LocalFile {
 pub enum AnswerEdit {
     ToggleOption { value: String },
     Custom { text: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct DeviceHostInput {
+    pub id: String,
+    pub label: String,
+    pub target: String,
+    pub identity_file: Option<String>,
+    pub port: Option<u16>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
+pub enum DeviceActionIntent {
+    SetAppearance { dark: bool },
+    SetTextSize { size: String },
+    SetToggle { setting: String, value: bool },
+    SetLiquidGlass { value: String },
+    SetColorFilter { filter: String },
+    SetOrientation { orientation: String },
+    SetLocation { latitude: f64, longitude: f64 },
+    ClearLocation,
+    SetPermission { app_id: String, permission: String, decision: String },
+    OpenUrl { url: String },
+    LaunchApp { app_id: String },
+    TerminateApp { app_id: String },
+    Shake,
+    SendPush { app_id: String, payload: String },
 }
 
 #[derive(Debug, Clone)]
@@ -1353,6 +1384,43 @@ pub enum Intent {
     RevokeDevice {
         id: String,
     },
+
+    // Device panel and Host-owned simulator/emulator control.
+    LoadDevices,
+    ConfigureDevices {
+        enabled: Option<bool>,
+        agent_access_enabled: Option<bool>,
+        onboarding_completed: Option<bool>,
+    },
+    UpdateDeviceHosts {
+        hosts: Vec<DeviceHostInput>,
+    },
+    OpenDevice {
+        host_id: Option<String>,
+        device_id: String,
+        platform: String,
+        boot: bool,
+    },
+    CloseDevice {
+        host_id: Option<String>,
+        device_id: Option<String>,
+        shutdown: bool,
+    },
+    LoadDeviceDetail {
+        host_id: Option<String>,
+        device_id: String,
+    },
+    DeviceAction {
+        host_id: Option<String>,
+        device_id: String,
+        action: DeviceActionIntent,
+    },
+    CaptureDeviceScreenshot {
+        host_id: Option<String>,
+        device_id: String,
+    },
+    SubscribeDevice,
+    UnsubscribeDevice,
 }
 
 #[cfg(test)]

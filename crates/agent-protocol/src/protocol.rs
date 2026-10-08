@@ -93,6 +93,7 @@ results! {
     ImportCounts(crate::conversation::ImportCounts),
     Setup(Option<agent_domain::WorktreeSetupSnapshot>), SetupCancelled(crate::conversation::SetupCancelled),
     Browser(crate::browser::BrowserFrame),
+    Device(crate::device::DeviceEvent),
     PermissionSettings(crate::permissions::PermissionSettings),
     Providers(Vec<crate::models::ProviderInstance>), WorktreeSettings(crate::models::WorktreeSettings),
     ConversationSettings(crate::models::ConversationSettings),

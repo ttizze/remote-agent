@@ -16,6 +16,7 @@ pub(super) enum Payload {
     Setup(Option<WorktreeSetupSnapshot>),
     TerminalMetadata(agent_protocol::operations::TerminalMetadataEvent),
     Keybindings(agent_protocol::keybindings::KeybindingsConfig),
+    Device(agent_protocol::device::DeviceEvent),
     /// The stream closed; `None` when it ended without an error.
     Ended(Option<PeerError>),
 }
