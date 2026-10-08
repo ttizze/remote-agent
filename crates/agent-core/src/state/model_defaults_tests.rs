@@ -39,19 +39,25 @@ fn scoped_fixture() -> Snapshot {
         storage_scope: "vm:sessions".into(),
         models: Arc::new(catalog()),
         account: Arc::new(agent_core::state::AccountState {
-            accounts: Some(Arc::new(serde_json::from_value(json!({
-                "accounts": [{"id":"a","provider":"codex"},{"id":"b","provider":"claude"}],
-                "selected": {"codex":"a","claude":"b"}
-            })).unwrap())),
+            accounts: Some(Arc::new(
+                serde_json::from_value(json!({
+                    "accounts": [{"id":"a","provider":"codex"},{"id":"b","provider":"claude"}],
+                    "selected": {"codex":"a","claude":"b"}
+                }))
+                .unwrap(),
+            )),
             ..Default::default()
         }),
-        threads: Some(Arc::new(serde_json::from_value(json!({
-            "data": [], "moreProjectIds":[], "hasMoreChats":false, "hasMoreProjects":false, "projects": [
-                {"id":"outer", "name":"Outer", "roots":[{"path":"/repo/"}]},
-                {"id":"inner", "name":"Inner", "roots":[{"path":"/repo/nested"}]},
-                {"id":"windows", "name":"Windows", "roots":[{"path":"C:\\repo"}]}
-            ]
-        })).unwrap())),
+        threads: Some(Arc::new(
+            serde_json::from_value(json!({
+                "data": [],  "hasMore":false,  "projects": [
+                    {"id":"outer", "name":"Outer", "roots":[{"path":"/repo/"}]},
+                    {"id":"inner", "name":"Inner", "roots":[{"path":"/repo/nested"}]},
+                    {"id":"windows", "name":"Windows", "roots":[{"path":"C:\\repo"}]}
+                ]
+            }))
+            .unwrap(),
+        )),
         ..Default::default()
     }
 }

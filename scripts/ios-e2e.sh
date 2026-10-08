@@ -22,8 +22,8 @@ if [[ $# == 0 ]]; then
         testSimulatorMarksMergedWorktreesToTheRightOfRunningStatus \
         testSimulatorEditsHostWorktreeSettingsFromTaskMenu \
         testSimulatorSearchesFromBottomBarAndCreatesInCollapsedProject \
-        testSimulatorLoadsLatestFiveTitlesPerProjectAndExpandsOneProject \
-        testSimulatorPaginatesRecentProjectsAndUnassignedChats \
+        testSimulatorLoadsRecentTitlesAndOpensOldProjectsOnDemand \
+        testSimulatorPaginatesRecentTasksWithoutLoadingClosedProjects \
         testSimulatorFetchesNewTaskWhenReturningToList \
         testSimulatorFetchesNewTaskAfterForeground \
         testSimulatorKeepsOpenTaskAndFetchesLatestReplyAfterForeground \

@@ -62,20 +62,20 @@ async fn exercise(command: &[&str], expected: Value) {
                 Some("host/account/list") => json!({"accounts":[], "selected":{}}),
                 Some("host/session/list") => {
                     lists += 1;
-                    let (projects, chats, search) = if mode == "list" {
-                        (9, 11, "CLI search")
+                    let (limit, search) = if mode == "list" {
+                        (11, "CLI search")
                     } else {
-                        (5, 5, "")
+                        (30, "")
                     };
                     assert_eq!(
                         request["params"],
-                        json!({"projectLimit":projects,"chatLimit":chats,"projectThreadLimits":{},"searchTerm":search})
+                        json!({"limit":limit,"searchTerm":search})
                     );
                     if mode == "list" {
                         assert!(!handled);
                         handled = true;
                     }
-                    json!({"data":[{"id":{"provider":"codex","id":"fixture-thread"},"name":"CLI fixture"}],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false})
+                    json!({"data":[{"id":{"provider":"codex","id":"fixture-thread"},"name":"CLI fixture"}],"projects":[],"hasMore":false,})
                 }
                 Some("host/session/open") => {
                     reads += 1;
@@ -157,7 +157,7 @@ async fn exercise(command: &[&str], expected: Value) {
 }
 #[tokio::test]
 async fn cli_lists_over_iroh() {
-    exercise(&["list", "--project-limit", "9", "--chat-limit", "11", "--search", "CLI search"],json!({"data":[{"id":{"provider":"codex","id":"fixture-thread"},"name":"CLI fixture"}],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false})).await;
+    exercise(&["list", "--limit", "11", "--search", "CLI search"],json!({"data":[{"id":{"provider":"codex","id":"fixture-thread"},"name":"CLI fixture"}],"projects":[],"hasMore":false,})).await;
 }
 #[tokio::test]
 async fn cli_sends_over_iroh() {

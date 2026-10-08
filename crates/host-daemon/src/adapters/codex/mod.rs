@@ -40,8 +40,8 @@ struct ThreadListParams<'a> {
 }
 
 use crate::host_rpc::agent::{
-    Agent, AgentChange, AgentEvent, AnswerWrite, Identity, SessionPage, SessionSummary,
-    SubmissionState, emit,
+    Agent, AgentChange, AgentEvent, AnswerWrite, Identity, SessionListScope, SessionPage,
+    SessionSummary, SubmissionState, emit,
 };
 use agent_transport::peer::PeerEvent;
 use futures_util::FutureExt;
@@ -626,22 +626,37 @@ impl Agent for Codex {
         &self,
         search: &str,
         cursor: Option<String>,
-        ancestor: Option<&str>,
+        scope: SessionListScope<'_>,
+        limit: u32,
     ) -> Result<SessionPage, Failure> {
+        let (source_kinds, ancestor_thread_id): (&'static [&'static str], Option<&str>) =
+            match scope {
+                SessionListScope::Roots => {
+                    (&["cli", "vscode", "exec", "appServer", "unknown"], None)
+                }
+                SessionListScope::All => (
+                    &[
+                        "cli",
+                        "vscode",
+                        "exec",
+                        "appServer",
+                        "unknown",
+                        "subAgentThreadSpawn",
+                    ],
+                    None,
+                ),
+                SessionListScope::Descendants(id) => (&["subAgentThreadSpawn"], Some(id)),
+            };
         let page: Page<Value> = self
             .request(
                 "thread/list",
                 &ThreadListParams {
-                    limit: 100,
+                    limit: limit as usize,
                     sort_key: "updated_at",
                     sort_direction: "desc",
                     use_state_db_only: true,
-                    source_kinds: if ancestor.is_some() {
-                        &["subAgentThreadSpawn"]
-                    } else {
-                        &["cli", "vscode", "exec", "appServer", "unknown"]
-                    },
-                    ancestor_thread_id: ancestor,
+                    source_kinds,
+                    ancestor_thread_id,
                     search_term: (!search.trim().is_empty()).then_some(search),
                     cursor,
                 },

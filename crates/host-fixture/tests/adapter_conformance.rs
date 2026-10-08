@@ -483,7 +483,7 @@ async fn session_pages_preserve_healthy_listings_and_reject_repeated_native_curs
         .unwrap();
     assert_eq!(finished(&mut events).await.status, TurnStatus::Completed);
     let query = op::ListSessions::new(agent_protocol::models::ListQuery {
-        chat_limit: 200,
+        limit: 200,
         ..Default::default()
     });
     let listing = local.peer.call(&query).await.unwrap();
@@ -582,6 +582,7 @@ async fn worktree_lists_read_each_native_page_once_and_refresh_activity() {
             .map(|index| {
                 serde_json::json!({
                     "id":format!("page-{index}"),
+                    "parentThreadId":(index == 0).then_some("parent-outside-the-checkout"),
                     "cwd":if index == 0 { &paths[0] } else { &paths[1] },
                     "name":format!("Conversation {index}: {running}"),
                     "updatedAt":index,
@@ -676,34 +677,47 @@ async fn title_lists_stop_after_visible_sections_and_merge_provider_pages_in_ord
         .await
         .unwrap();
     assert_eq!(listing.data[0].id.as_ref(), Some(&session));
-    assert_eq!(listing.data.len(), 5);
+    assert_eq!(listing.data.len(), 30);
     assert_eq!(listing.data[1].id.as_ref().unwrap().id, "page-1999");
-    assert_eq!(listing.data[4].id.as_ref().unwrap().id, "page-1996");
-    assert!(listing.has_more_chats);
+    assert_eq!(listing.data[29].id.as_ref().unwrap().id, "page-1971");
+    assert!(listing.has_more);
     assert!(listing.provider_errors.is_none());
     assert_eq!(page_reads(), 1, "initial list must not fetch all 20 pages");
-    let mut descendant_roots = list_reads()
+    let descendant_roots = list_reads()
         .iter()
         .filter_map(|entry| entry["ancestorThreadId"].as_str().map(str::to_owned))
         .collect::<Vec<_>>();
-    descendant_roots.sort();
-    let mut visible_roots = listing
+    assert!(
+        descendant_roots.is_empty(),
+        "root titles must not read fleets"
+    );
+    let selected = listing
         .data
         .iter()
         .filter_map(|thread| thread.id.as_ref())
-        .filter(|id| id.provider == ProviderKind::Codex)
-        .map(|id| id.id.clone())
-        .collect::<Vec<_>>();
-    visible_roots.sort();
+        .find(|id| id.provider == ProviderKind::Codex)
+        .unwrap();
+    let agents = local
+        .peer
+        .call(&op::ListAgents {
+            thread_id: selected.clone(),
+        })
+        .await
+        .unwrap();
+    assert!(agents.is_empty());
     assert_eq!(
-        descendant_roots, visible_roots,
-        "descendant reads must be scoped to the visible Codex roots"
+        list_reads()
+            .iter()
+            .filter_map(|entry| entry["ancestorThreadId"].as_str().map(str::to_owned))
+            .collect::<Vec<_>>(),
+        [selected.id.clone()],
+        "fleet reads must target only the selected parent"
     );
 
     let expanded = local
         .peer
         .call(&op::ListSessions::new(agent_protocol::models::ListQuery {
-            chat_limit: 150,
+            limit: 150,
             ..Default::default()
         }))
         .await
@@ -711,7 +725,7 @@ async fn title_lists_stop_after_visible_sections_and_merge_provider_pages_in_ord
     assert_eq!(expanded.data.len(), 150);
     assert_eq!(expanded.data[0].id.as_ref(), Some(&session));
     assert_eq!(expanded.data[149].id.as_ref().unwrap().id, "page-1851");
-    assert!(expanded.has_more_chats);
+    assert!(expanded.has_more);
     assert_eq!(
         page_reads(),
         3,
@@ -728,7 +742,7 @@ async fn title_lists_stop_after_visible_sections_and_merge_provider_pages_in_ord
         .unwrap();
     assert_eq!(found.data.len(), 1);
     assert_eq!(found.data[0].id.as_ref().unwrap().id, "page-1900");
-    assert!(!found.has_more_chats);
+    assert!(!found.has_more);
     assert_eq!(page_reads(), 4);
 
     let tied: Vec<_> = (0..250).rev().map(|index| serde_json::json!({
@@ -741,20 +755,19 @@ async fn title_lists_stop_after_visible_sections_and_merge_provider_pages_in_ord
         .await
         .unwrap();
     assert_eq!(listing.data[0].id.as_ref(), Some(&session));
-    assert_eq!(
+    assert_eq!(listing.data.len(), 30);
+    assert!(
         listing
             .data
             .iter()
             .skip(1)
-            .map(|thread| thread.id.as_ref().unwrap().id.as_str())
-            .collect::<Vec<_>>(),
-        ["equal-000", "equal-001", "equal-002", "equal-003"]
+            .all(|t| t.updated_at == Some(100.0))
     );
-    assert!(listing.has_more_chats);
+    assert!(listing.has_more);
     assert_eq!(
         page_reads(),
-        7,
-        "finish timestamp ties across native page boundaries"
+        5,
+        "recent lists never exhaust timestamp ties across old pages"
     );
 
     let projects: Vec<_> = (0..3)
@@ -788,29 +801,34 @@ async fn title_lists_stop_after_visible_sections_and_merge_provider_pages_in_ord
             .collect::<Vec<_>>(),
         ["project-2", "project-1", "project-0"]
     );
-    assert_eq!(listing.data.len(), 20);
-    assert_eq!(listing.more_project_ids.len(), 3);
-    assert!(listing.has_more_chats);
+    assert_eq!(listing.data.len(), 30);
+    assert!(listing.has_more);
     assert_eq!(
         page_reads(),
-        8,
-        "stop when all visible sections have their lookahead"
+        6,
+        "recent list does not wait for each project or chat section"
     );
     let expanded = local
         .peer
-        .call(&op::ListSessions::new(agent_protocol::models::ListQuery {
-            project_thread_limits: [("project-0".into(), 150)].into(),
-            ..Default::default()
-        }))
+        .call(&op::ListProjectSessions {
+            project_id: "project-0".into(),
+            limit: 150,
+        })
         .await
         .unwrap();
-    assert_eq!(expanded.data.len(), 165);
-    assert_eq!(expanded.data[159].id.as_ref().unwrap().id, "scoped-1400");
-    assert_eq!(expanded.data[160].id.as_ref(), Some(&session));
+    assert_eq!(expanded.data.len(), 150);
+    assert_eq!(expanded.data[149].id.as_ref().unwrap().id, "scoped-1400");
+    assert!(
+        expanded
+            .data
+            .iter()
+            .all(|t| t.project_id.as_deref() == Some("project-0"))
+    );
+    assert!(expanded.has_more);
     assert_eq!(
         page_reads(),
-        15,
-        "expand only the requested project before stopping"
+        13,
+        "project expansion reads only its own title page, never other sections"
     );
     local.close().await;
     host.close().await.unwrap();

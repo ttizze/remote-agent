@@ -235,10 +235,13 @@ mod tests {
         let request = serde_json::from_value(json!({"id":"request","target":"session","delivery":"awaiting","body":{"question":{"questions":[]}}})).unwrap();
         thread.requests.insert("request".into(), Arc::new(request));
         for (status, expected) in [("running", "running"), ("idle", "finished")] {
-            ListSessions::new(Default::default()).apply(&mut state,serde_json::from_value(json!({
+            ListSessions::new(Default::default()).apply(
+                &mut state,
+                serde_json::from_value(json!({
                 "data":[{"id":{"provider":"codex","id":"task"}, "status":status}],
-                "projects":[], "moreProjectIds":[], "hasMoreChats":false, "hasMoreProjects":false
-            })).unwrap());
+                "projects":[],  "hasMore":false, }))
+                .unwrap(),
+            );
             assert_eq!(state.task_activities()[0].status, expected);
         }
     }
@@ -251,8 +254,7 @@ mod tests {
             "data":[
                 {"id":{"provider":"codex","id":"task"}, "status":"running", "name":""},
                 {"id":{"provider":"claude","id":"task"}, "status":"running", "preview":"Claude task"}
-            ], "projects":[], "moreProjectIds":[], "hasMoreChats":false, "hasMoreProjects":false
-        })).unwrap());
+            ], "projects":[],  "hasMore":false, })).unwrap());
         let tasks = state.task_activities();
         assert_eq!(tasks.len(), 2);
         assert!(tasks.iter().all(|task| task.ongoing));
@@ -265,10 +267,13 @@ mod tests {
     fn stale_list_rows_cannot_end_or_start_an_activity() {
         use crate::state::operations::{ListSessions, Operation};
         let mut state = Snapshot::default();
-        ListSessions::new(Default::default()).apply(&mut state, serde_json::from_value(json!({
+        ListSessions::new(Default::default()).apply(
+            &mut state,
+            serde_json::from_value(json!({
             "data":[{"id":{"provider":"codex","id":"task"}, "status":"running", "listStale":true}],
-            "projects":[], "moreProjectIds":[], "hasMoreChats":false, "hasMoreProjects":false
-        })).unwrap());
+            "projects":[],  "hasMore":false, }))
+            .unwrap(),
+        );
         assert_eq!(state.task_activities()[0].status, "unknown");
         assert!(!state.task_activities()[0].ongoing);
         let id = state.task_activities()[0].session.clone();

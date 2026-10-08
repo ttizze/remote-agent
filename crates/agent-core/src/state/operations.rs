@@ -68,6 +68,7 @@ pub enum Intent {
     ListWorktrees(ListWorktrees),
     RemoveWorktree(RemoveWorktree),
     ListSessions(ListSessions),
+    ListProjectSessions(ListProjectSessions),
     ListAgents(ListAgents),
     WatchAgents {
         thread_id: Option<crate::session::SessionRef>,
@@ -75,7 +76,13 @@ pub enum Intent {
     AddProject(AddProject),
     ExpandThreadList {
         project_id: Option<String>,
-        projects: bool,
+    },
+    SetProjectExpanded {
+        project_id: String,
+        expanded: bool,
+    },
+    RefreshProject {
+        project_id: String,
     },
     CreateSession(CreateSession),
     ReadThread(ReadThread),
@@ -199,6 +206,9 @@ pub enum OperationKey {
         turn: agent_protocol::ids::TurnId,
     },
     SessionList,
+    ProjectList {
+        project_id: String,
+    },
     Agents {
         session: crate::session::SessionRef,
     },
@@ -260,6 +270,7 @@ pub enum Scheduling {
     Control,
     LatestList(crate::models::ListQuery),
     LatestAgents(crate::session::SessionRef),
+    LatestProject(String),
     LatestReview,
     Item(ReadItem),
     Terminal { handle: String, starts: bool },
@@ -268,6 +279,9 @@ impl Scheduling {
     pub(crate) fn latest_key(&self) -> Option<OperationKey> {
         match self {
             Self::LatestList(_) => Some(OperationKey::SessionList),
+            Self::LatestProject(project_id) => Some(OperationKey::ProjectList {
+                project_id: project_id.clone(),
+            }),
             Self::LatestAgents(session) => Some(OperationKey::Agents {
                 session: session.clone(),
             }),
@@ -278,13 +292,6 @@ impl Scheduling {
     pub(crate) fn item(&self) -> Option<&ReadItem> {
         if let Self::Item(item) = self {
             Some(item)
-        } else {
-            None
-        }
-    }
-    pub(crate) fn query(&self) -> Option<&crate::models::ListQuery> {
-        if let Self::LatestList(query) = self {
-            Some(query)
         } else {
             None
         }

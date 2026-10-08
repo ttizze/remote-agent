@@ -4,7 +4,7 @@ use crate::{
     state::Snapshot,
 };
 use base64::Engine;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct ProjectSummary {
     pub id: String,
@@ -13,6 +13,11 @@ pub struct ProjectSummary {
     pub icon_png: Option<Vec<u8>>,
     pub monogram: String,
     pub icon_color: u32,
+    pub expanded: bool,
+    pub loading: bool,
+    pub error: Option<String>,
+    pub threads: Vec<ThreadSummary>,
+    pub has_more: bool,
 }
 
 fn project_summary(project: &Project) -> ProjectSummary {
@@ -54,6 +59,11 @@ fn project_summary(project: &Project) -> ProjectSummary {
             .and_then(|png| base64::engine::general_purpose::STANDARD.decode(png).ok()),
         monogram,
         icon_color: COLORS[index],
+        expanded: false,
+        loading: false,
+        error: None,
+        threads: Vec::new(),
+        has_more: false,
     }
 }
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
@@ -70,9 +80,7 @@ pub struct ThreadList {
     pub notice: Option<String>,
     pub threads: Vec<ThreadSummary>,
     pub projects: Vec<ProjectSummary>,
-    pub more_project_ids: Vec<String>,
-    pub has_more_chats: bool,
-    pub has_more_projects: bool,
+    pub has_more: bool,
 }
 #[cfg_attr(feature = "bindings", uniffi::export)]
 impl Snapshot {
@@ -110,42 +118,97 @@ impl Snapshot {
         if !self.archived_scopes.is_empty() {
             notices.push("保存領域が変更されています。以前の下書き・未保存編集は保持しています。Hostの保存先設定を元に戻すと再び表示できます。".into());
         }
-        let summaries = list
-            .data
-            .iter()
-            .filter(|thread| thread.parent_id.is_none())
-            .filter_map(|thread| {
-                let id = thread.id.clone()?;
-                let active = task_active(self.activity.active.get(&id).copied(), thread.status);
-                let unread = self.activity.unread.contains(&id);
-                Some(ThreadSummary {
-                    id,
-                    title: task_title(thread.name.as_deref(), thread.preview.as_deref()).to_owned()
-                        + if thread.list_stale == Some(true) {
-                            "（保存済み・未確認）"
-                        } else {
-                            ""
-                        },
-                    project_id: thread
-                        .project_id
-                        .as_ref()
-                        .filter(|id| project_ids.contains(id.as_str()))
-                        .cloned(),
-                    active,
-                    unread,
-                    worktree_status: thread.worktree_status,
-                })
-            })
-            .collect();
+        let summaries = thread_summaries(
+            &list.data,
+            &self.activity.active,
+            &self.activity.unread,
+            &project_ids,
+        );
         Some(ThreadList {
             notice: (!notices.is_empty()).then(|| notices.join("\n")),
             threads: summaries,
-            projects: list.projects.iter().map(project_summary).collect(),
-            more_project_ids: list.more_project_ids.clone(),
-            has_more_chats: list.has_more_chats,
-            has_more_projects: list.has_more_projects,
+            projects: list
+                .projects
+                .iter()
+                .map(|project| {
+                    let page = self.project_threads.get(&project.id);
+                    let branding = page
+                        .and_then(|page| page.projects.iter().find(|p| p.id == project.id))
+                        .unwrap_or(project);
+                    let mut summary = project_summary(branding);
+                    summary.expanded = self.expanded_projects.contains_key(&project.id);
+                    if summary.expanded && !self.connected && page.is_none() {
+                        summary.error = Some("接続するとタスクを読み込めます".into());
+                    }
+                    if let Some(operation) =
+                        self.operations
+                            .get(&crate::state::operations::OperationKey::ProjectList {
+                                project_id: project.id.clone(),
+                            })
+                    {
+                        match &operation.phase {
+                            crate::state::operations::OperationPhase::Running => {
+                                summary.loading = true
+                            }
+                            crate::state::operations::OperationPhase::Failed { message } => {
+                                summary.error = Some(message.clone())
+                            }
+                        }
+                    }
+                    if let Some(page) = page {
+                        summary.threads = thread_summaries(
+                            &page.data,
+                            &self.activity.active,
+                            &self.activity.unread,
+                            &project_ids,
+                        );
+                        summary.has_more = page.has_more;
+                        if let Some(errors) = &page.provider_errors {
+                            summary.error = Some(format!(
+                                "一部を取得できません（{}）",
+                                errors.keys().cloned().collect::<Vec<_>>().join("、")
+                            ));
+                        }
+                    }
+                    summary
+                })
+                .collect(),
+            has_more: list.has_more,
         })
     }
+}
+
+fn thread_summaries(
+    data: &[crate::models::Thread],
+    active: &BTreeMap<crate::session::SessionRef, bool>,
+    unread: &BTreeSet<crate::session::SessionRef>,
+    project_ids: &HashSet<&str>,
+) -> Vec<ThreadSummary> {
+    data.iter()
+        .filter(|thread| thread.parent_id.is_none())
+        .filter_map(|thread| {
+            let id = thread.id.clone()?;
+            let active = task_active(active.get(&id).copied(), thread.status);
+            let unread = unread.contains(&id);
+            Some(ThreadSummary {
+                id,
+                title: task_title(thread.name.as_deref(), thread.preview.as_deref()).to_owned()
+                    + if thread.list_stale == Some(true) {
+                        "（保存済み・未確認）"
+                    } else {
+                        ""
+                    },
+                project_id: thread
+                    .project_id
+                    .as_ref()
+                    .filter(|id| project_ids.contains(id.as_str()))
+                    .cloned(),
+                active,
+                unread,
+                worktree_status: thread.worktree_status,
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -190,8 +253,7 @@ mod tests {
             threads: Some(std::sync::Arc::new(
                 serde_json::from_value(json!({
                     "data":data,"projects":[{"id":"project","name":"Project","roots":[]}],
-                    "moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false
-                }))
+                    "hasMore":false,}))
                 .unwrap(),
             )),
             ..Default::default()
@@ -229,8 +291,7 @@ mod tests {
                     {"id":{"provider":"codex","id":"unknown"}}
                 ],
                 "projects":[{"id":"known", "name":"Project", "roots":[]}],
-                "moreProjectIds":["known"], "hasMoreChats":true, "hasMoreProjects":true
-            }))
+                 "hasMore":true, }))
             .unwrap(),
         );
         let list = snapshot.thread_list().unwrap();
@@ -249,15 +310,14 @@ mod tests {
             ]
         );
         assert_eq!(list.projects[0].id, "known");
-        assert_eq!(list.more_project_ids, vec!["known"]);
-        assert!(list.has_more_chats && list.has_more_projects);
+        assert!(list.has_more);
     }
 
     #[test]
     fn unavailable_provider_keeps_explicitly_stale_cached_summaries() {
         let mut snapshot = Snapshot::default();
         let page = |data, errors| {
-            serde_json::from_value(serde_json::json!({"data":data,"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false,"providerErrors":errors})).unwrap()
+            serde_json::from_value(serde_json::json!({"data":data,"projects":[],"hasMore":false,"providerErrors":errors})).unwrap()
         };
         ListSessions::new(Default::default()).apply(
             &mut snapshot,
@@ -325,9 +385,8 @@ mod tests {
             thread["worktreeStatus"] = json!(status);
         }
         let page: models::ThreadList = serde_json::from_value(json!({
-            "data":[thread], "projects":[], "moreProjectIds":[],
-            "hasMoreChats":false, "hasMoreProjects":false
-        }))
+            "data":[thread], "projects":[],
+            "hasMore":false, }))
         .unwrap();
         ListSessions::new(Default::default()).apply(&mut snapshot, page);
         let restored: Snapshot =

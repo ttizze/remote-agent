@@ -73,6 +73,7 @@ contracts! {
     ReadItem, "host/session/item/read" => (op::ReadItem, op::ItemResponse) [clone, op::ReadItem::validate],
     AddProject, "host/project/add" => (op::AddProject, String) [clone],
     ListSessions, "host/session/list" => (op::ListSessions, m::ThreadList) [clone],
+    ListProjectSessions, "host/project/sessions" => (op::ListProjectSessions, m::ThreadList) [clone],
     ListAgents, "host/session/agents" => (op::ListAgents, Vec<m::AgentObservation>) [clone],
     CreateSession, "host/session/create" => (op::CreateSession, s::OpenedSession),
     ForkSession, "host/session/fork" => (op::ForkSession, m::ThreadResponse) [clone, op::ForkSession::validate],

@@ -3,8 +3,6 @@ use std::sync::{Arc, OnceLock};
 
 use agent_protocol::operations as op;
 
-use agent_protocol::models::ListQuery;
-
 use agent_protocol::models::Thread;
 
 use agent_protocol::models::ThreadResponse;
@@ -14,7 +12,7 @@ use agent_protocol::protocol::{Body, Call, Response};
 use agent_transport::peer::RpcMessageError;
 use serde::Serialize;
 
-use super::agent::{Agent, Identity, SessionSummary, session_pages};
+use super::agent::{Agent, Identity, SessionListScope, SessionSummary, session_pages};
 use futures_util::{StreamExt, TryStreamExt};
 use std::collections::HashMap;
 
@@ -649,11 +647,13 @@ impl HostRpcService {
                     .is_some_and(|apns| apns.environment() == params.environment);
                 if enabled {
                     let list = self
-                        .host_title_list(agent_protocol::models::ListQuery {
-                            project_limit: u32::MAX,
-                            chat_limit: u32::MAX,
-                            ..Default::default()
-                        })
+                        .host_title_list(
+                            "",
+                            crate::projects::titles::TitleQuery::Recent {
+                                limit: u32::MAX,
+                                searching: false,
+                            },
+                        )
                         .await?;
                     self.inner
                         .router
@@ -864,18 +864,41 @@ impl HostRpcService {
             .into(),
             Call::ListSessions(params) => {
                 let started = std::time::Instant::now();
-                let result = self.host_title_list(params.query.clone()).await;
+                let result = self
+                    .host_title_list(
+                        &params.query.search_term,
+                        crate::projects::titles::TitleQuery::Recent {
+                            limit: params.query.limit,
+                            searching: !params.query.search_term.trim().is_empty(),
+                        },
+                    )
+                    .await;
                 tracing::info!(target: "bex", operation = "host.thread.list.performance",
                     message = %format_args!("elapsed_ms={} success={}", started.elapsed().as_millis(), result.is_ok()));
                 result?.into()
             }
+            Call::ListProjectSessions(params) => self
+                .host_title_list(
+                    "",
+                    crate::projects::titles::TitleQuery::Project {
+                        id: &params.project_id,
+                        limit: params.limit,
+                    },
+                )
+                .await?
+                .into(),
             Call::ListAgents(params) => {
                 let agent = self.agent(params.thread_id.provider)?;
                 let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
-                let mut threads = session_pages(agent.as_ref(), "", Some(&params.thread_id.id))
-                    .map_ok(|page| futures_util::stream::iter(page.into_iter().map(Ok)))
-                    .try_flatten()
-                    .boxed();
+                let mut threads = session_pages(
+                    agent.as_ref(),
+                    "",
+                    SessionListScope::Descendants(&params.thread_id.id),
+                    100,
+                )
+                .map_ok(|page| futures_util::stream::iter(page.into_iter().map(Ok)))
+                .try_flatten()
+                .boxed();
                 let mut agents = Vec::new();
                 while let Some(summary) = next_title(&mut threads, deadline).await? {
                     let thread = crate::projects::titles::summary(summary.thread);
@@ -1025,7 +1048,7 @@ impl HostRpcService {
         }
         let mut threads = Vec::new();
         for (_, agent) in self.agents() {
-            let pages = session_pages(agent.as_ref(), "", None);
+            let pages = session_pages(agent.as_ref(), "", SessionListScope::All, 100);
             futures_util::pin_mut!(pages);
             while let Some(result) = pages.next().await {
                 match result {
@@ -1207,25 +1230,32 @@ impl HostRpcService {
 
     async fn host_title_list(
         &self,
-        query: ListQuery,
+        search: &str,
+        query: crate::projects::titles::TitleQuery<'_>,
     ) -> Result<agent_protocol::models::ThreadList, Failure> {
-        let search = query.search_term.as_str();
         let agents = self.agents();
+        let page_size = match query {
+            crate::projects::titles::TitleQuery::Recent { limit, .. } => {
+                limit.max(1).saturating_add(1).min(100)
+            }
+            crate::projects::titles::TitleQuery::Project { .. } => 100,
+        };
         let started = std::time::Instant::now();
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
         let (snapshot, mut listings) = tokio::join!(
             self.project_snapshot(),
             futures_util::future::join_all(agents.iter().map(|(provider, agent)| async move {
-                let mut threads = session_pages(agent.as_ref(), search, None)
-                    .map_ok(|page| futures_util::stream::iter(page.into_iter().map(Ok)))
-                    .try_flatten()
-                    .boxed();
+                let mut threads =
+                    session_pages(agent.as_ref(), search, SessionListScope::Roots, page_size)
+                        .map_ok(|page| futures_util::stream::iter(page.into_iter().map(Ok)))
+                        .try_flatten()
+                        .boxed();
                 let head = next_title(&mut threads, deadline).await;
                 (*provider, agent.capabilities(), threads, head)
             }))
         );
         let snapshot = snapshot?;
-        let mut titles = crate::projects::titles::TitleList::new(&snapshot.projects, &query);
+        let mut titles = crate::projects::titles::TitleList::new(&snapshot.projects, query);
         let mut provider_errors = self
             .provider_errors()
             .as_object()
@@ -1239,22 +1269,27 @@ impl HostRpcService {
             .map(|summary| summary.thread.updated_at.unwrap_or_default())
             .max_by(f64::total_cmp)
         {
-            // Native pages guarantee descending timestamps, but equal timestamps
-            // can span pages. Finish each tie before applying the stable ID order.
+            // Never scan additional pages merely to exhaust a timestamp tie in
+            // the recent window. Order ties within the requested window by ID.
+            let maximum = titles.remaining_recent().unwrap_or(usize::MAX);
             let mut group = Vec::new();
             for (_, capabilities, threads, head) in &mut listings {
-                while head.as_ref().is_ok_and(|thread| {
-                    thread.as_ref().is_some_and(|summary| {
-                        summary
-                            .thread
-                            .updated_at
-                            .unwrap_or_default()
-                            .total_cmp(&newest)
-                            == std::cmp::Ordering::Equal
+                while group.len() < maximum
+                    && head.as_ref().is_ok_and(|thread| {
+                        thread.as_ref().is_some_and(|summary| {
+                            summary
+                                .thread
+                                .updated_at
+                                .unwrap_or_default()
+                                .total_cmp(&newest)
+                                == std::cmp::Ordering::Equal
+                        })
                     })
-                }) {
+                {
                     group.push((head.as_mut().unwrap().take().unwrap(), *capabilities));
-                    *head = next_title(threads, deadline).await;
+                    if group.len() < maximum {
+                        *head = next_title(threads, deadline).await;
+                    }
                 }
             }
             group.sort_by(|(a, _), (b, _)| a.thread.id.cmp(&b.thread.id));
@@ -1286,9 +1321,20 @@ impl HostRpcService {
         }
         let roots_ms = started.elapsed().as_millis();
         let mut page = titles.finish();
+        let mut visible_projects: std::collections::HashSet<_> = page
+            .data
+            .iter()
+            .filter_map(|thread| thread.project_id.as_ref().cloned())
+            .collect();
+        if let crate::projects::titles::TitleQuery::Project { id, .. } = query {
+            visible_projects.insert(id.to_owned());
+        }
         let mut projects = std::mem::take(&mut page.projects);
         let icons = tokio::task::spawn_blocking(move || {
             for project in &mut projects {
+                if !visible_projects.contains(&project.id) {
+                    continue;
+                }
                 project.favicon_png = project.roots.iter().find_map(|root| {
                     crate::projects::icons::resolve(std::path::Path::new(&root.path))
                 });
@@ -2052,7 +2098,10 @@ mod tests {
         let workspace = root.path().join("remote-agent");
         let native = root.path().join("native");
         std::fs::create_dir(&workspace).unwrap();
-        std::fs::create_dir_all(native.join("projects")).unwrap();
+        let transcript = native.join("projects/p");
+        std::fs::create_dir_all(&transcript).unwrap();
+        let id = "12345678-1234-4234-8234-123456789abc";
+        std::fs::write(transcript.join(format!("{id}.jsonl")),serde_json::json!({"type":"user","sessionId":id,"cwd":dunce::canonicalize(&workspace).unwrap(),"message":{"content":"Branding task"}}).to_string()+"\n").unwrap();
         std::fs::write(workspace.join("favicon.svg"),
             r##"<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32"><rect width="32" height="32" fill="#ff0000"/></svg>"##).unwrap();
         let projects = ProjectStore::new(root.path().join("bex-worktrees.json"));

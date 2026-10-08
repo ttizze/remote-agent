@@ -63,8 +63,18 @@ hydration must not change this default.
 
 ## History pagination and refresh
 
-- List query limits and search are not persisted; reopening restores five-item
-  defaults. Live navigation and reconnection retain the current query.
+- The initial list shows the latest 30 root tasks across providers, followed by
+  project headers. It does not fill every project's task page or scan old tasks
+  to prove that a small project is complete. Native timestamp ties are ordered
+  within the requested recent window; they never require exhausting old pages.
+- Opening a project loads its first five root titles independently. More adds
+  ten titles only to that project. Closing it removes its read target and ignores
+  late replies. Recent rows already proving the page are reused without another
+  read. Project loading and failure stay local to that section; the recent list
+  remains usable and its green loading indicator does not wait for project reads.
+- Recent limits, search and project expansion are not persisted. Reopening
+  restores 30 recent titles and closed projects. Live navigation and reconnection
+  retain the current selection; recent titles publish before open projects refresh.
 - While a list refresh is running, coalesce further refreshes into one follow-up
   using the latest query. A reply for that query remains valid after task
   navigation; a reply for an older search or display limit must not replace it.
