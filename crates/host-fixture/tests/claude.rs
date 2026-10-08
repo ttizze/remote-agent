@@ -900,6 +900,21 @@ async fn codex_exit_preserves_claude_approval_and_completes_after_reconnect() {
             .dispatch(Intent::NewChat { cwd: String::new() })
             .await
             .unwrap();
+        let model = store
+            .snapshot()
+            .models
+            .iter()
+            .find(|model| model.model.provider == ProviderKind::Codex)
+            .unwrap()
+            .model
+            .clone();
+        store
+            .dispatch(Intent::SelectModel {
+                thread_id: store.snapshot().navigation.draft_key.clone(),
+                model,
+            })
+            .await
+            .unwrap();
         let codex_id = send(&store, "[approval]", "codex-approval").await;
         until(&store, |snapshot| snapshot.requests().next().is_some()).await;
         store
