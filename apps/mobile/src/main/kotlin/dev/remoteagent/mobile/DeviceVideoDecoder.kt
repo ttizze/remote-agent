@@ -16,6 +16,78 @@ import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer
 import java.util.ArrayDeque
 
+/** Bounds UI-to-worker handoff before payload copies and Handler posts occur. */
+internal class DeviceVideoIngressGate(
+    private val maxFrames: Int = 8,
+    private val maxBytes: Int = 16 * 1024 * 1024,
+) {
+    data class Admission(val generation: Long, val bytes: Int)
+    data class Completion(val current: Boolean, val resync: Boolean)
+
+    private var streamKey: String? = null
+    private var generation = 0L
+    private var lastSequence: ULong? = null
+    private var inFlightFrames = 0
+    private var inFlightBytes = 0
+    private var overflowed = false
+    private var needsKeyframe = true
+    private var closed = false
+
+    @Synchronized
+    fun reset(streamKey: String) {
+        if (this.streamKey == streamKey) return
+        this.streamKey = streamKey
+        generation += 1
+        lastSequence = null
+        overflowed = false
+        needsKeyframe = true
+    }
+
+    @Synchronized
+    fun offer(sequence: ULong, encoding: String, keyframe: Boolean, bytes: Int): Admission? {
+        if (closed || bytes < 0 || bytes > maxBytes) return null
+        if (encoding != "h264" && encoding != "semu" && encoding != "avcc-description") return null
+        if (lastSequence?.let { sequence <= it } == true) return null
+        if (overflowed) return null
+        val actualKeyframe = keyframe && encoding != "avcc-description"
+        if (needsKeyframe && !actualKeyframe && encoding != "avcc-description") return null
+        if (inFlightFrames >= maxFrames || inFlightBytes > maxBytes - bytes) {
+            overflowed = true
+            needsKeyframe = true
+            return null
+        }
+        lastSequence = sequence
+        if (actualKeyframe) needsKeyframe = false
+        inFlightFrames += 1
+        inFlightBytes += bytes
+        return Admission(generation, bytes)
+    }
+
+    @Synchronized
+    fun complete(admission: Admission): Completion {
+        inFlightFrames = (inFlightFrames - 1).coerceAtLeast(0)
+        inFlightBytes = (inFlightBytes - admission.bytes).coerceAtLeast(0)
+        val current = admission.generation == generation && !closed
+        val resync = current && overflowed
+        if (resync) overflowed = false
+        return Completion(current, resync)
+    }
+
+    @Synchronized
+    fun forceResync() {
+        needsKeyframe = true
+    }
+
+    @Synchronized
+    fun close() {
+        closed = true
+        generation += 1
+        inFlightFrames = 0
+        inFlightBytes = 0
+        overflowed = false
+    }
+}
+
 /** A bounded, stateful H.264 decoder for the Host's live device transport. */
 internal class DeviceVideoDecoder : TextureView.SurfaceTextureListener {
     private data class Frame(
@@ -40,6 +112,7 @@ internal class DeviceVideoDecoder : TextureView.SurfaceTextureListener {
     private var outputPumpScheduled = false
     @Volatile private var closed = false
     private val pending = ArrayDeque<Frame>()
+    private val ingress = DeviceVideoIngressGate()
 
     fun attach(textureView: TextureView) {
         if (this.textureView === textureView) return
@@ -51,6 +124,7 @@ internal class DeviceVideoDecoder : TextureView.SurfaceTextureListener {
 
     fun reset(streamKey: String, width: Int, height: Int) {
         if (closed) return
+        ingress.reset(streamKey)
         handler.post {
             if (this.streamKey == streamKey && this.width == width && this.height == height) return@post
             closeCodec()
@@ -59,6 +133,7 @@ internal class DeviceVideoDecoder : TextureView.SurfaceTextureListener {
             this.height = height.coerceAtLeast(1)
             codecDescription = null
             needsKeyframe = true
+            ingress.forceResync()
             lastSequence = null
             pending.clear()
         }
@@ -72,9 +147,15 @@ internal class DeviceVideoDecoder : TextureView.SurfaceTextureListener {
         keyframe: Boolean,
     ) {
         if (closed) return
+        val admission = ingress.offer(sequence, encoding, keyframe, payload.size) ?: return
         val copy = payload.copyOf()
-        handler.post {
+        if (!handler.post {
+            val completion = ingress.complete(admission)
+            if (completion.resync) requestKeyframeResync()
+            if (!completion.current || closed) return@post
             submitOnWorker(copy, encoding, sequence, timestampUs, keyframe)
+        }) {
+            ingress.complete(admission)
         }
     }
 
@@ -112,6 +193,7 @@ internal class DeviceVideoDecoder : TextureView.SurfaceTextureListener {
     }
 
     private fun requestKeyframeResync() {
+        ingress.forceResync()
         closeCodec()
         pending.clear()
         needsKeyframe = true
@@ -147,6 +229,7 @@ internal class DeviceVideoDecoder : TextureView.SurfaceTextureListener {
     fun close() {
         if (closed) return
         closed = true
+        ingress.close()
         textureView?.surfaceTextureListener = null
         textureView = null
         handler.post {
