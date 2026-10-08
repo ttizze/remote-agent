@@ -818,7 +818,7 @@ impl PushService {
                     delivery_at_ms,
                     clear_source_at_ms,
                     alert,
-                )
+                )?
             }
         };
         self.send_request(request).await
