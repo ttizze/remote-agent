@@ -114,11 +114,11 @@ impl Chrome {
 
     pub async fn shutdown(mut self) {
         let _ = self.call(None, "Browser.close", json!({})).await;
-        // Keep the lifetime pipe open while Chrome flushes its profile on exit.
-        if tokio::time::timeout(Duration::from_secs(5), self.child.wait())
-            .await
-            .is_err()
-        {
+        // Keep the supervisor lifetime pipe open while Chrome flushes its profile.
+        if !matches!(
+            tokio::time::timeout(Duration::from_secs(5), self.child.wait()).await,
+            Ok(Ok(_))
+        ) {
             self.child.stdin.take();
             let _ = tokio::time::timeout(Duration::from_secs(5), self.child.wait()).await;
         }

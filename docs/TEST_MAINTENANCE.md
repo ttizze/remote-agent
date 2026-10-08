@@ -255,6 +255,13 @@ transfer server just to delete that check would reverse A14.
   accessibility frame. Text-copy gestures wait for the message frame to settle
   after scrolling; native menus, clipboard contents and selected-text assertions
   remain unchanged.
+  Model-default navigation waits for the task menu and its Settings item to
+  settle before tapping, then waits for the Models destination. Long-history
+  scrolling observes only the latest-visible boundary; the native size-change
+  anchor follows growing content while following latest. This avoids feeding
+  lazy-stack content-size estimates back into repeated programmatic scrolling.
+  History paging, detached reading, latest navigation and reopen assertions
+  remain unchanged.
   The shared connection fixture confirms that a previous client has terminated
   before launching the next client, retaining the initial readiness deadline.
   Maestro 2.11.0 and Java 21 are
@@ -362,6 +369,10 @@ Integration with the independent-provider Host changes also updates the fatal
 startup logging fixture: a missing Codex executable is recoverable, so corrupt
 isolated trust state now supplies the fatal error. Both process exits, distinct
 process IDs, startup records, and persisted error messages remain asserted.
+Isolated iroh submission fixtures that omit account management select their
+explicit Codex catalog model before submitting. Automatic selection still
+requires an authenticated provider; offline recovery, failed creation, sidebar
+refresh, worktree preservation and history assertions remain unchanged.
 
 The Android 17 integration exposed Compose's transitive Espresso 3.5.0 dependency
 calling the removed `InputManager.getInstance` API before Markdown assertions
