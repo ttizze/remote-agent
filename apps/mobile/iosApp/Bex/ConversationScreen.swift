@@ -246,6 +246,7 @@ extension ThreadScreen {
                     .font(.headline).lineLimit(1)
                 if model.isConnecting {
                     ProgressView().controlSize(.small)
+                        .tint(.red)
                         .accessibilityLabel("接続中")
                         .accessibilityIdentifier("connection.progress")
                 }
@@ -299,6 +300,7 @@ extension ThreadScreen {
                 contextLabel(model.selectedProfileName ?? "環境を選択", icon: "laptopcomputer")
                 if model.isConnecting {
                     ProgressView().controlSize(.small)
+                        .tint(.red)
                 }
             }
             .accessibilityLabel("環境: \(model.selectedProfileName ?? "未選択")")
