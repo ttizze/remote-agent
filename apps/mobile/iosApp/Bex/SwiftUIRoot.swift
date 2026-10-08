@@ -58,6 +58,9 @@ struct BexSwiftUIRoot: View {
             NavigationStack {
                 UsageScreen(model: model, initialTab: .limits)
                     .onAppear { model.consumeUsageDeepLinkRequest() }
+                    .onChange(of: model.usageDeepLinkRequests) { _, count in
+                        if count > 0 { model.consumeUsageDeepLinkRequest() }
+                    }
             }
         }
         .sheet(isPresented: $model.isScanning) {

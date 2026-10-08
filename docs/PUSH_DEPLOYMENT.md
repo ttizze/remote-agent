@@ -45,7 +45,10 @@ phase, short `status`, `updatedAt`, and its thread deep link.
 
 The iOS app needs the APNs capability and the `aps-environment` entitlement in
 the signed target. ActivityKit push starts use the `AgentActivityAttributes`
-schema and `input-push-token`; see Apple's
+schema and `input-push-token`. The app-scoped push-to-start token is copied to
+each retained Host's separate registration, so a Host can start its own card
+while the app is closed. Each returned activity token is stored only on the
+Host whose `environmentId` is in that activity's content state; see Apple's
 [ActivityKit push notification documentation](https://developer.apple.com/documentation/ActivityKit/starting-and-updating-live-activities-with-activitykit-push-notifications)
 for the required app and signing configuration.
 

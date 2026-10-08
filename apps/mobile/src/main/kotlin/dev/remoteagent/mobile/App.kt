@@ -794,6 +794,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
             profiles = profiles.filterNot { it.id == id }
             environments = environments.filterNot { it.profileId == id }
             environmentSnapshots = environmentSnapshots - id
+            renderActivityAggregate(removeActivityState(context, id))
             publishUsageWidget()
             repository.saveProfiles(profiles)
             File(repository.cacheDirectory(id)).deleteRecursively()
@@ -1115,6 +1116,10 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
             }
         }
         if (!changed) return
+        renderActivityAggregate(aggregate)
+    }
+
+    private fun renderActivityAggregate(aggregate: String?) {
         val presentation = aggregate?.let(::parseActivityPresentation)
         if (presentation == null) {
             PushNotificationCenter.cancelActivity(context)

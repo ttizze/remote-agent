@@ -93,6 +93,10 @@ final class AgentPushCenter: NSObject, UIApplicationDelegate, UNUserNotification
         hostIdsProvider = hostIds
         self.visibleThread = visibleThread
         preferencesProvider = preferences
+        // Wait until the model has supplied the retained Host ids. Looking at
+        // Activity.activities during UIApplication launch would otherwise
+        // classify every restored card as unknown and end it before profile
+        // restoration finishes.
         if #available(iOS 16.1, *) { observeActivityTokens() }
         submitRegistrations()
         if let pendingDeepLink {
@@ -114,7 +118,6 @@ final class AgentPushCenter: NSObject, UIApplicationDelegate, UNUserNotification
         didFinishLaunchingWithOptions _: [UIApplication.LaunchOptionsKey: Any]? = nil,
     ) -> Bool {
         notificationCenter.delegate = self
-        if #available(iOS 16.1, *) { observeActivityTokens() }
         return true
     }
 
@@ -210,7 +213,12 @@ final class AgentPushCenter: NSObject, UIApplicationDelegate, UNUserNotification
                 deviceId: deviceId(for: hostId),
                 token: token,
                 liveActivityToken: activityTokens[hostId],
-                pushToStartToken: pushToStartOwner == hostId ? pushToStartToken : nil,
+                // ActivityKit's push-to-start token is scoped to this app and
+                // activity type, rather than to a Host. Every retained Host
+                // gets the same token in its own Host-scoped registration;
+                // the Host sends only its own content state and the returned
+                // per-activity token is associated back by environmentId.
+                pushToStartToken: pushToStartToken,
                 bundleId: Bundle.main.bundleIdentifier ?? "com.ttizze.b-codex",
                 apnsEnvironment: Self.apnsEnvironment,
                 notificationsEnabled: notificationEnabled && preferences.notificationsEnabled,
@@ -222,8 +230,6 @@ final class AgentPushCenter: NSObject, UIApplicationDelegate, UNUserNotification
             )
         )
     }
-
-    private var pushToStartOwner: String? { knownHostIds().first }
 
     private var baseDeviceId: String {
         if let value = defaults.string(forKey: Self.deviceIdKey), !value.isEmpty { return value }
@@ -339,8 +345,10 @@ final class AgentPushCenter: NSObject, UIApplicationDelegate, UNUserNotification
         guard liveActivitiesEnabled else { endAllActivities(); return }
         let known = Set(knownHostIds())
         for (hostId, id) in activityIds where !known.contains(hostId) {
-            if let state = states[hostId] { await endActivity(hostId: hostId, contentState: state) }
-            else { removeActivity(hostId: hostId, id: id) }
+            await endActivity(
+                hostId: hostId,
+                contentState: states[hostId] ?? emptyContentState(),
+            )
         }
         for hostId in known {
             let state = states[hostId]

@@ -43,6 +43,10 @@ class MainActivity : ComponentActivity() {
         super.onResume()
         localNetworkGranted =
             checkSelfPermission(Manifest.permission.ACCESS_LOCAL_NETWORK) == PackageManager.PERMISSION_GRANTED
+        // Reconcile notification permission changes made in system settings
+        // and replay every retained Host registration after a background
+        // interval. This does not request permission by itself.
+        model.refreshPushRegistration()
     }
 
     override fun onSaveInstanceState(outState: Bundle) {

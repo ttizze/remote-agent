@@ -675,6 +675,8 @@ impl PushService {
                 && device.registration.live_activity_token.as_deref() == Some(item.token.as_str())
             {
                 device.registration.live_activity_token = None;
+                device.activity_start_sent = None;
+                device.activity_start_sent_at_ms = None;
             }
         }
         for item in start {
@@ -691,6 +693,8 @@ impl PushService {
                 && device.registration.live_activity_token.as_deref() == Some(item.token.as_str())
             {
                 device.registration.live_activity_token = None;
+                device.activity_start_sent = None;
+                device.activity_start_sent_at_ms = None;
             }
         }
         if next.devices == state.devices {
@@ -2383,6 +2387,47 @@ mod tests {
             .devices
             .get("device")
             .is_some_and(|device| device.active));
+        let _ = std::fs::remove_file(root);
+    }
+
+    #[tokio::test]
+    async fn shared_activity_start_token_keeps_host_registrations_independent() {
+        let root = std::env::temp_dir().join(format!("push-test-{}", uuid::Uuid::new_v4()));
+        let fake = Arc::new(FakeTransport {
+            calls: AtomicUsize::new(0),
+            statuses: Mutex::new(vec![]),
+        });
+        let service = PushService::with_transport(root.clone(), fake).unwrap();
+
+        let mut first = registration();
+        first.device_id = "device-a".into();
+        first.push_to_start_token = Some("shared-start-token".into());
+        let mut second = registration();
+        second.device_id = "device-b".into();
+        second.push_to_start_token = Some("shared-start-token".into());
+        service.register("principal-a", first).await.unwrap();
+        service.register("principal-b", second).await.unwrap();
+
+        let state = PushContentState {
+            title: "Project".into(),
+            subtitle: "Agent is working".into(),
+            active_count: 1,
+            updated_at: "2026-10-08T00:00:00.000Z".into(),
+            activities: vec![],
+        };
+        let devices = service.devices.lock().await.devices.clone();
+        assert_eq!(devices.len(), 2);
+        for device_id in ["device-a", "device-b"] {
+            assert_eq!(
+                live_activity_target_for_device(&devices[device_id], &state, PushActivityPhase::Running),
+                Some(("shared-start-token", "start")),
+            );
+        }
+
+        service.remove_principal("principal-a").await.unwrap();
+        let devices = service.devices.lock().await.devices.clone();
+        assert!(devices.contains_key("device-b"));
+        assert!(!devices.contains_key("device-a"));
         let _ = std::fs::remove_file(root);
     }
 

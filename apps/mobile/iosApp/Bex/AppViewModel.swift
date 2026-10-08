@@ -279,6 +279,10 @@ final class BexAppViewModel: ObservableObject {
                 } catch { self?.notice = error.localizedDescription }
             }
             profiles = remaining
+            // Removing a Host also removes its ActivityKit card and token
+            // association; the controller ends it before the Host store is
+            // allowed to shut down.
+            activityUpdater?(activityContentStatesForPush())
             publishUsageWidget()
             try HostProfile.save(profiles)
             startBackgroundProfiles(selectedProfileId)
