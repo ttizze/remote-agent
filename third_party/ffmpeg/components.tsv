@@ -28,6 +28,7 @@ ffmpeg-headless-8.1.2-lib	LICENSE-FFMPEG-GPL-3.0.txt	GPL-3.0-or-later	https://ff
 libvpx-1.16.0	LICENSE-LIBVPX-BSD-3-CLAUSE.txt	BSD-3-Clause	https://chromium.googlesource.com/webm/libvpx/+refs/tags/v1.16.0
 glibc-2.42-67	LICENSE-GLIBC-LGPL-2.0.txt	LGPL-2.0-or-later	https://ftp.gnu.org/gnu/glibc/glibc-2.42.tar.xz
 gcc-15.3.0-lib	LICENSE-GCC-GPL-3.0.txt	GPL-3.0-or-later	https://gcc.gnu.org/releases/gcc-15.3.0/
+gcc-15.3.0	LICENSE-GCC-GPL-3.0.txt	GPL-3.0-or-later	https://gcc.gnu.org/releases/gcc-15.3.0/
 ffmpeg-9.0.2-essentials_build	LICENSE-FFMPEG-GPL-2.0.txt	GPL-2.0-or-later	https://www.gyan.dev/ffmpeg/builds/packages/ffmpeg-9.0.2-essentials_build.zip
 ffmpeg-9.0.2-essentials_build	LICENSE-FFMPEG-LGPL-2.1.txt	LGPL-2.1-or-later	https://www.gyan.dev/ffmpeg/builds/packages/ffmpeg-9.0.2-essentials_build.zip
 ffmpeg-9.0.2-essentials_build	LICENSE-FFMPEG-LGPL-3.0.txt	LGPL-3.0-or-later	https://www.gyan.dev/ffmpeg/builds/packages/ffmpeg-9.0.2-essentials_build.zip
