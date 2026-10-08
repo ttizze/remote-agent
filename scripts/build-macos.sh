@@ -62,33 +62,15 @@ cp "$target/release/host-daemon" "$executables/host-daemon"
 cp crates/host-daemon/src/claude/sdk/bridge.bundle.mjs "$resources/bex-claude-sdk.mjs"
 cp "$target/release/bex-provider-supervisor" "$executables/bex-provider-supervisor"
 cp apps/desktop/macos/Info.plist "$bundle/Contents/Info.plist"
-# Keep Nix-linked libraries inside the bundle so it also runs on other Macs.
-code=("$executables/Bex" "$executables/host-daemon" "$executables/bex-provider-supervisor")
-libraries=()
-frameworks="$bundle/Contents/Frameworks"
-for ((index=0; index<${#code[@]}; index++)); do
+# Use macOS's libiconv so the app also runs on Macs without Nix.
+for executable in "$executables/Bex" "$executables/host-daemon" "$executables/bex-provider-supervisor"; do
     while IFS= read -r library; do
         [[ $library == /nix/store/* ]] || continue
-        name=${library##*/}
-        mkdir -p "$frameworks"
-        if [[ -f $frameworks/$name ]]; then
-            for source in "${libraries[@]}"; do
-                if [[ ${source##*/} == "$name" ]] && ! cmp -s "$library" "$source"; then
-                    echo "Conflicting bundled library: $name" >&2; exit 1
-                fi
-            done
-        else
-            cp "$library" "$frameworks/$name"
-            libraries+=("$library")
-            chmod u+w "$frameworks/$name"
-            /usr/bin/install_name_tool -id "@rpath/$name" "$frameworks/$name"
-            code+=("$frameworks/$name")
-        fi
-        /usr/bin/install_name_tool -change "$library" "@executable_path/../Frameworks/$name" "${code[index]}"
-    done < <(/usr/bin/otool -L "${code[index]}" | awk 'NR > 1 {print $1}')
-done
-for library in "${libraries[@]}"; do
-    sign "$frameworks/${library##*/}"
+        [[ ${library##*/} == libiconv.2.dylib ]] || {
+            echo "Unsupported Nix library dependency: $library" >&2; exit 1
+        }
+        /usr/bin/install_name_tool -change "$library" /usr/lib/libiconv.2.dylib "$executable"
+    done < <(/usr/bin/otool -L "$executable" | awk 'NR > 1 {print $1}')
 done
 sign "$executables/Bex"
 sign --identifier app.bex.provider-supervisor "$executables/bex-provider-supervisor"
