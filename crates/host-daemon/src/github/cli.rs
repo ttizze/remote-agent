@@ -612,11 +612,19 @@ pub(crate) struct CloneUrls {
 
 /// `gh repo create` prints the new repository's URL; reading it avoids a
 /// follow-up `gh repo view`, which can race GitHub's eventual consistency.
-pub(crate) fn clone_urls_from_create_output(stdout: &str, repository: &str) -> CloneUrls {
+pub(crate) fn clone_urls_from_create_output(
+    stdout: &str,
+    repository: &str,
+    host: Option<&str>,
+) -> CloneUrls {
+    let fallback_host = host
+        .map(str::trim)
+        .filter(|host| !host.is_empty())
+        .unwrap_or("github.com");
     let fallback = || CloneUrls {
         name_with_owner: repository.to_owned(),
-        url: format!("https://github.com/{repository}"),
-        ssh_url: format!("git@github.com:{repository}.git"),
+        url: format!("https://{fallback_host}/{repository}"),
+        ssh_url: format!("git@{fallback_host}:{repository}.git"),
     };
     let Some(start) = stdout.find("https://").or_else(|| stdout.find("http://")) else {
         return fallback();
@@ -693,11 +701,12 @@ impl GitHubCli {
     }
 
     /// Runs `gh` in `cwd`; a non-zero exit is classified from stderr.
-    pub(crate) async fn run(
+    async fn run_with_host(
         &self,
         cwd: &Path,
         args: &[&str],
         budget: Budget,
+        host: Option<&str>,
     ) -> Result<Output, GhError> {
         let mut command = tokio::process::Command::new(&self.program);
         command
@@ -708,6 +717,12 @@ impl GitHubCli {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
+        if let Some(host) = host
+            .map(str::trim)
+            .filter(|host| !host.is_empty() && !host.eq_ignore_ascii_case("github.com"))
+        {
+            command.env("GH_HOST", host);
+        }
         if cwd.is_dir() {
             command.current_dir(cwd);
         }
@@ -718,6 +733,30 @@ impl GitHubCli {
         Ok(output)
     }
 
+    pub(crate) async fn run(
+        &self,
+        cwd: &Path,
+        args: &[&str],
+        budget: Budget,
+    ) -> Result<Output, GhError> {
+        self.run_with_host(cwd, args, budget, None).await
+    }
+
+    async fn run_json_with_host(
+        &self,
+        cwd: &Path,
+        args: &[&str],
+        budget: Budget,
+        host: Option<&str>,
+    ) -> Result<Value, GhError> {
+        let output = self.run_with_host(cwd, args, budget, host).await?;
+        if output.stdout_truncated {
+            return Err(GhError::Decode("GitHub CLI output was too large to read."));
+        }
+        serde_json::from_str(&output.stdout)
+            .map_err(|_| GhError::Decode("GitHub CLI returned invalid JSON."))
+    }
+
     /// Runs `gh` and parses its stdout as JSON.
     pub(crate) async fn run_json(
         &self,
@@ -725,12 +764,7 @@ impl GitHubCli {
         args: &[&str],
         budget: Budget,
     ) -> Result<Value, GhError> {
-        let output = self.run(cwd, args, budget).await?;
-        if output.stdout_truncated {
-            return Err(GhError::Decode("GitHub CLI output was too large to read."));
-        }
-        serde_json::from_str(&output.stdout)
-            .map_err(|_| GhError::Decode("GitHub CLI returned invalid JSON."))
+        self.run_json_with_host(cwd, args, budget, None).await
     }
 
     /// `gh auth status --json hosts`.
@@ -793,23 +827,29 @@ impl GitHubCli {
             PULL_REQUEST_FIELDS,
         ]);
         let output = self
-            .run(cwd, &args, Budget::default())
+            .run_with_host(cwd, &args, Budget::default(), host)
             .await?;
         decode_pull_request_list(&output.stdout)
     }
 
     /// `gh pr view <reference> --json`; `reference` is a number or URL.
+    /// A numeric reference must carry its repository so enterprise Hosts do not
+    /// depend on the checkout's implicit remote.
     pub(crate) async fn pull_request(
         &self,
         cwd: &Path,
         reference: &str,
+        repository: Option<&str>,
+        host: Option<&str>,
     ) -> Result<PullRequestRecord, GhError> {
+        let repository_arg = repository.map(|repository| scoped_repository(host, repository));
+        let mut args = vec!["pr", "view", reference];
+        if let Some(repository) = repository_arg.as_deref() {
+            args.extend(["--repo", repository]);
+        }
+        args.extend(["--json", PULL_REQUEST_FIELDS]);
         let output = self
-            .run(
-                cwd,
-                &["pr", "view", reference, "--json", PULL_REQUEST_FIELDS],
-                Budget::default(),
-            )
+            .run_with_host(cwd, &args, Budget::default(), host)
             .await?;
         decode_pull_request(&output.stdout)
     }
@@ -821,11 +861,16 @@ impl GitHubCli {
         head_selector: &str,
         title: &str,
         body_file: &Path,
+        repository: Option<&str>,
+        host: Option<&str>,
     ) -> Result<(), GhError> {
         let body_path = body_file.to_string_lossy();
-        let args = [
-            "pr",
-            "create",
+        let repository_arg = repository.map(|repository| scoped_repository(host, repository));
+        let mut args = vec!["pr", "create"];
+        if let Some(repository) = repository_arg.as_deref() {
+            args.extend(["--repo", repository]);
+        }
+        args.extend([
             "--base",
             base_branch,
             "--head",
@@ -834,10 +879,10 @@ impl GitHubCli {
             title,
             "--body-file",
             body_path.as_ref(),
-        ];
-        self.run(cwd, &args, Budget::default())
-        .await
-        .map(|_| ())
+        ]);
+        self.run_with_host(cwd, &args, Budget::default(), host)
+            .await
+            .map(|_| ())
     }
 
     /// The repository's default branch as GitHub records it.
@@ -850,7 +895,9 @@ impl GitHubCli {
         let repository = scoped_repository(host, repository);
         let mut args = vec!["repo", "view", &repository];
         args.extend(["--json", "defaultBranchRef", "--jq", ".defaultBranchRef.name"]);
-        let output = self.run(cwd, &args, Budget::default()).await?;
+        let output = self
+            .run_with_host(cwd, &args, Budget::default(), host)
+            .await?;
         Ok(trimmed(Some(&output.stdout)))
     }
 
@@ -862,7 +909,9 @@ impl GitHubCli {
     ) -> Result<CloneUrls, GhError> {
         let repository = scoped_repository(host, repository);
         let args = ["repo", "view", &repository, "--json", "nameWithOwner,url,sshUrl"];
-        let value = self.run_json(cwd, &args, Budget::default()).await?;
+        let value = self
+            .run_json_with_host(cwd, &args, Budget::default(), host)
+            .await?;
         serde_json::from_value(value)
             .map_err(|_| GhError::Decode("GitHub CLI returned invalid repository JSON."))
     }
@@ -872,19 +921,21 @@ impl GitHubCli {
         cwd: &Path,
         repository: &str,
         visibility: RepositoryVisibility,
+        host: Option<&str>,
     ) -> Result<CloneUrls, GhError> {
         let flag = match visibility {
             RepositoryVisibility::Private => "--private",
             RepositoryVisibility::Public => "--public",
         };
         let output = self
-            .run(
+            .run_with_host(
                 cwd,
                 &["repo", "create", repository, flag],
                 Budget::default(),
+                host,
             )
             .await?;
-        Ok(clone_urls_from_create_output(&output.stdout, repository))
+        Ok(clone_urls_from_create_output(&output.stdout, repository, host))
     }
 
     pub(crate) async fn checkout_pull_request(
@@ -892,12 +943,20 @@ impl GitHubCli {
         cwd: &Path,
         reference: &str,
         force: bool,
+        repository: Option<&str>,
+        host: Option<&str>,
     ) -> Result<(), GhError> {
+        let repository_arg = repository.map(|repository| scoped_repository(host, repository));
         let mut args = vec!["pr", "checkout", reference];
+        if let Some(repository) = repository_arg.as_deref() {
+            args.extend(["--repo", repository]);
+        }
         if force {
             args.push("--force");
         }
-        self.run(cwd, &args, Budget::default()).await.map(|_| ())
+        self.run_with_host(cwd, &args, Budget::default(), host)
+            .await
+            .map(|_| ())
     }
 }
 
@@ -1096,7 +1155,8 @@ mod tests {
         assert_eq!(
             clone_urls_from_create_output(
                 "✓ Created repository Acme/Tool on GitHub\nhttps://github.com/Acme/Tool.git\n",
-                "acme/tool"
+                "acme/tool",
+                None,
             ),
             CloneUrls {
                 name_with_owner: "Acme/Tool".into(),
@@ -1105,11 +1165,19 @@ mod tests {
             }
         );
         assert_eq!(
-            clone_urls_from_create_output("done\n", "acme/tool"),
+            clone_urls_from_create_output("done\n", "acme/tool", None),
             CloneUrls {
                 name_with_owner: "acme/tool".into(),
                 url: "https://github.com/acme/tool".into(),
                 ssh_url: "git@github.com:acme/tool.git".into(),
+            }
+        );
+        assert_eq!(
+            clone_urls_from_create_output("done\n", "acme/tool", Some("ghe.example")),
+            CloneUrls {
+                name_with_owner: "acme/tool".into(),
+                url: "https://ghe.example/acme/tool".into(),
+                ssh_url: "git@ghe.example:acme/tool.git".into(),
             }
         );
     }
@@ -1198,6 +1266,75 @@ mod tests {
             vec!["pr list --repo ghe.example/acme/tool --head feature --state open --limit 100 --json number,title,url,baseRefName,headRefName,headRefOid,state,isDraft,mergedAt,closedAt,updatedAt,isCrossRepository,headRepository,headRepositoryOwner".to_owned()]
         );
         assert_eq!(scoped_repository(Some("ghe.example"), "acme/tool"), "ghe.example/acme/tool");
+    }
+
+    #[tokio::test]
+    async fn enterprise_pull_request_commands_use_repo_scope_and_gh_host() {
+        let gh = FakeGh::new(&[
+            (
+                "pr view 7 --repo ghe.example/acme/tool --json *",
+                "test \"$GH_HOST\" = ghe.example && echo '{\"number\":7,\"title\":\"Change\",\"url\":\"https://ghe.example/acme/tool/pull/7\",\"baseRefName\":\"main\",\"headRefName\":\"feature\"}'",
+            ),
+            (
+                "pr create --repo ghe.example/acme/tool --base main --head feature --title Change --body-file *",
+                "test \"$GH_HOST\" = ghe.example",
+            ),
+            (
+                "repo create acme/tool --private",
+                "test \"$GH_HOST\" = ghe.example && echo 'https://ghe.example/acme/tool'",
+            ),
+            (
+                "pr checkout 7 --repo ghe.example/acme/tool --force",
+                "test \"$GH_HOST\" = ghe.example",
+            ),
+        ]);
+        let directory = cwd();
+        let body = directory.path().join("body.md");
+        std::fs::write(&body, "body\n").unwrap();
+        let record = gh
+            .cli()
+            .pull_request(
+                directory.path(),
+                "7",
+                Some("acme/tool"),
+                Some("ghe.example"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(record.number, 7);
+        gh.cli()
+            .create_pull_request(
+                directory.path(),
+                "main",
+                "feature",
+                "Change",
+                &body,
+                Some("acme/tool"),
+                Some("ghe.example"),
+            )
+            .await
+            .unwrap();
+        let urls = gh
+            .cli()
+            .create_repository(
+                directory.path(),
+                "acme/tool",
+                RepositoryVisibility::Private,
+                Some("ghe.example"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(urls.url, "https://ghe.example/acme/tool");
+        gh.cli()
+            .checkout_pull_request(
+                directory.path(),
+                "7",
+                true,
+                Some("acme/tool"),
+                Some("ghe.example"),
+            )
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
