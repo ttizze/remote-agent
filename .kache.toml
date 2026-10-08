@@ -1,0 +1,4 @@
+[cache]
+# Look up shared artifacts before waiting for compiler slots. Compile-before-key
+# can otherwise queue cache hits behind builds under memory pressure.
+deferred_discovery = false
