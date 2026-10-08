@@ -237,7 +237,10 @@ impl Host {
         self.session.id()
     }
     async fn reply(&self, call: Call) -> crate::host_rpc::connections::HostReply {
-        self.service.dispatch(self.id(), &call).await.unwrap()
+        self.service
+            .dispatch_from_peer(self.id(), &call, false)
+            .await
+            .unwrap()
     }
     async fn call<T: DeserializeOwned>(&self, call: Call) -> Result<T, RpcFailure> {
         match protocol::decode::<Response<T>>(&self.reply(call).await.initial).unwrap() {
