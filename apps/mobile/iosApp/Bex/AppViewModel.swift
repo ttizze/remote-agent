@@ -9,6 +9,7 @@ final class BexAppViewModel: ObservableObject {
         let projectId: String
         let sourceEnvironmentId: String
         let startedAt: Date
+        let generation: UInt64
     }
 
     @Published private(set) var snapshot = AgentCore.Snapshot.empty()
@@ -61,6 +62,8 @@ final class BexAppViewModel: ObservableObject {
     private var operations: [UUID: Task<Void, Never>] = [:]
     private var incomingShareHandoffsInFlight: Set<URL> = []
     private var pendingLoadBalancedNewThread: PendingLoadBalancedNewThread?
+    private var loadBalancingAttemptGeneration: UInt64 = 0
+    private var automaticRouteProfileId: String?
     private let usageWidget = UsageWidgetPublisher()
 
     init() {
@@ -75,9 +78,14 @@ final class BexAppViewModel: ObservableObject {
 
     func selectProfile(_ id: String) {
         guard profiles.contains(where: { $0.id == id }) else { return }
-        pendingLoadBalancedNewThread = nil
+        if automaticRouteProfileId != nil, automaticRouteProfileId != id {
+            invalidatePendingLoadBalancedNewThread()
+        }
         screen = .threads
         if selectedProfileId == id, store != nil {
+            if automaticRouteProfileId == nil {
+                invalidatePendingLoadBalancedNewThread()
+            }
             connect(); return
         }
         connection?.cancel()
@@ -109,7 +117,7 @@ final class BexAppViewModel: ObservableObject {
         guard let projectId,
               let sourceEnvironmentId = snapshot.environmentId()
         else {
-            pendingLoadBalancedNewThread = nil
+            invalidatePendingLoadBalancedNewThread()
             perform(.newThread(projectId: projectId))
             return
         }
@@ -117,7 +125,7 @@ final class BexAppViewModel: ObservableObject {
         // environment route. Automatic balancing only applies to the source
         // Host's local project selection.
         if scopedValue(projectId).1 != nil {
-            pendingLoadBalancedNewThread = nil
+            invalidatePendingLoadBalancedNewThread()
             perform(.newThread(projectId: projectId))
             return
         }
@@ -128,77 +136,122 @@ final class BexAppViewModel: ObservableObject {
             nowMs: Int64(Date().timeIntervalSince1970 * 1_000)
         )
         if evaluation.pendingResources {
+            loadBalancingAttemptGeneration &+= 1
+            let generation = loadBalancingAttemptGeneration
             pendingLoadBalancedNewThread = PendingLoadBalancedNewThread(
                 projectId: projectId,
                 sourceEnvironmentId: sourceEnvironmentId,
-                startedAt: Date()
+                startedAt: Date(),
+                generation: generation
             )
             requestLoadBalancingResources()
             Task { [weak self] in
                 try? await Task.sleep(for: .seconds(3))
-                self?.retryPendingLoadBalancedNewThread()
+                self?.retryPendingLoadBalancedNewThread(generation: generation)
             }
             return
         }
-        pendingLoadBalancedNewThread = nil
+        invalidatePendingLoadBalancedNewThread()
         guard let route = evaluation.route else {
             perform(.newThread(projectId: projectId))
             return
         }
-        let sourceDraft = snapshot.newThreadDefaultsForProject(projectId: projectId)
-        startRoutedNewThread(route, sourceDraft: sourceDraft, fallbackProjectId: projectId)
+        startRoutedNewThread(
+            route,
+            fallbackProjectId: projectId,
+            sourceEnvironmentId: sourceEnvironmentId,
+            generation: loadBalancingAttemptGeneration
+        )
     }
 
     private func startRoutedNewThread(
         _ route: AgentCore.EnvironmentLoadBalancedRouteView,
-        sourceDraft: AgentCore.Draft,
-        fallbackProjectId: String
+        fallbackProjectId: String,
+        sourceEnvironmentId: String,
+        generation: UInt64
     ) {
+        automaticRouteProfileId = environments
+            .first(where: { $0.environmentId == route.environmentId })?
+            .profileId
         perform(.newThread(projectId: "\(route.environmentId):\(route.projectId)")) { [weak self] result in
+            guard let self, self.loadBalancingAttemptGeneration == generation else { return }
             guard case .success = result else {
-                self?.perform(.newThread(projectId: fallbackProjectId))
+                guard self.snapshot.environmentId() == route.environmentId else { return }
+                let fallback = "\(sourceEnvironmentId):\(fallbackProjectId)"
+                guard self.scopedValue(fallback).1 != nil else { return }
+                self.perform(.newThread(projectId: fallback))
                 return
             }
-            self?.perform(.setModel(
+            self.perform(.setModel(
                 instanceId: route.providerInstance,
                 driver: route.driver,
                 model: route.model,
-                options: sourceDraft.options
+                options: route.options
             ))
-            self?.perform(.setRuntimeMode(mode: sourceDraft.runtimeMode))
-            self?.perform(.setInteractionMode(mode: sourceDraft.interactionMode))
+            self.perform(.setRuntimeMode(mode: route.runtimeMode))
+            self.perform(.setInteractionMode(mode: route.interactionMode))
         }
+        automaticRouteProfileId = nil
     }
 
-    private func retryPendingLoadBalancedNewThread() {
+    private func retryPendingLoadBalancedNewThread(generation: UInt64? = nil) {
         guard let pending = pendingLoadBalancedNewThread else { return }
-        guard snapshot.environmentId() == pending.sourceEnvironmentId else {
-            pendingLoadBalancedNewThread = nil
-            perform(.newThread(projectId: pending.projectId))
+        guard generation == nil || generation == pending.generation else { return }
+        let nowMs = Int64(Date().timeIntervalSince1970 * 1_000)
+        switch AgentCore.environmentLoadBalancingPendingAction(
+            attemptGeneration: pending.generation,
+            currentGeneration: loadBalancingAttemptGeneration,
+            sourceEnvironmentId: pending.sourceEnvironmentId,
+            selectedEnvironmentId: snapshot.environmentId(),
+            startedAtMs: Int64(pending.startedAt.timeIntervalSince1970 * 1_000),
+            nowMs: nowMs,
+            timeoutMs: 3_000
+        ) {
+        case .cancel:
+            invalidatePendingLoadBalancedNewThread()
             return
-        }
-        guard Date().timeIntervalSince(pending.startedAt) <= 3 else {
-            pendingLoadBalancedNewThread = nil
-            perform(.newThread(projectId: pending.projectId))
+        case .fallback:
+            invalidatePendingLoadBalancedNewThread()
+            perform(.newThread(
+                projectId: "\(pending.sourceEnvironmentId):\(pending.projectId)"
+            ))
             return
+        case .retry:
+            break
         }
         let evaluation = AgentCore.environmentLoadBalancingRoute(
             snapshots: environmentSnapshotsForCore(),
             sourceEnvironmentId: pending.sourceEnvironmentId,
             projectId: pending.projectId,
-            nowMs: Int64(Date().timeIntervalSince1970 * 1_000)
+            nowMs: nowMs
         )
-        guard !evaluation.pendingResources else { return }
-        pendingLoadBalancedNewThread = nil
+        if evaluation.pendingResources {
+            if let generation {
+                Task { [weak self] in
+                    try? await Task.sleep(for: .milliseconds(50))
+                    self?.retryPendingLoadBalancedNewThread(generation: generation)
+                }
+            }
+            return
+        }
+        invalidatePendingLoadBalancedNewThread()
         guard let route = evaluation.route else {
-            perform(.newThread(projectId: pending.projectId))
+            perform(.newThread(
+                projectId: "\(pending.sourceEnvironmentId):\(pending.projectId)"
+            ))
             return
         }
         startRoutedNewThread(
             route,
-            sourceDraft: snapshot.newThreadDefaultsForProject(projectId: pending.projectId),
-            fallbackProjectId: pending.projectId
+            fallbackProjectId: pending.projectId,
+            sourceEnvironmentId: pending.sourceEnvironmentId,
+            generation: loadBalancingAttemptGeneration
         )
+    }
+
+    private func invalidatePendingLoadBalancedNewThread() {
+        loadBalancingAttemptGeneration &+= 1
+        pendingLoadBalancedNewThread = nil
     }
 
     private func requestLoadBalancingResources() {
@@ -270,7 +323,9 @@ final class BexAppViewModel: ObservableObject {
     }
 
     private func detachStore() -> AgentStore? {
-        pendingLoadBalancedNewThread = nil
+        if automaticRouteProfileId == nil {
+            invalidatePendingLoadBalancedNewThread()
+        }
         persist()
         draftEdits.reset()
         presentation?.cancel()

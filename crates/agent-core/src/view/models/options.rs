@@ -232,6 +232,18 @@ pub fn explicit_selections_from_descriptors(
         .collect()
 }
 
+/// Normalizes selections against the capabilities of the model that will
+/// receive them. Unknown keys are dropped; known choices and flags use the
+/// descriptor's validation and fallback rules. This keeps a source draft's
+/// choices only when the selected target model actually offers them.
+pub fn normalize_model_options(
+    capabilities: &[agent_domain::OptionDescriptor],
+    selections: &[ModelOption],
+) -> Vec<ModelOption> {
+    let descriptors: Vec<_> = capabilities.iter().map(OptionDescriptor::from).collect();
+    explicit_selections_from_descriptors(&option_descriptors(&descriptors, selections), selections)
+}
+
 /// Sets one descriptor's value when its kind matches.
 pub fn replace_descriptor_current_value(
     descriptors: &[OptionDescriptor],
@@ -412,6 +424,49 @@ mod tests {
             key: key.into(),
             value: value.into(),
         }
+    }
+
+    #[test]
+    fn normalizes_selections_for_a_fallback_model() {
+        let target = vec![
+            agent_domain::OptionDescriptor::Select(agent_domain::SelectOption {
+                id: "effort".into(),
+                label: "Effort".into(),
+                options: vec![
+                    agent_domain::OptionChoice {
+                        id: "high".into(),
+                        label: "High".into(),
+                        description: None,
+                        is_default: true,
+                    },
+                    agent_domain::OptionChoice {
+                        id: "low".into(),
+                        label: "Low".into(),
+                        description: None,
+                        is_default: false,
+                    },
+                ],
+                current_value: Some("high".into()),
+                prompt_injected_values: vec![],
+            }),
+            agent_domain::OptionDescriptor::Boolean(agent_domain::BooleanOption {
+                id: "fast".into(),
+                label: "Fast".into(),
+                description: None,
+                current_value: Some(false),
+            }),
+        ];
+        assert_eq!(
+            normalize_model_options(
+                &target,
+                &[option("effort", "invalid"), option("old", "value")],
+            ),
+            vec![option("effort", "high")],
+        );
+        assert_eq!(
+            normalize_model_options(&target, &[option("fast", "true")]),
+            vec![option("fast", "true")],
+        );
     }
     fn codex_caps() -> Vec<OptionDescriptor> {
         vec![
