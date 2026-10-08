@@ -1,11 +1,17 @@
 package dev.remoteagent.mobile
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -16,7 +22,12 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
@@ -47,7 +58,7 @@ internal fun RequestCard(request: Request, submit: (Answer, (String?) -> Unit) -
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(request.title, style = MaterialTheme.typography.labelLarge)
-            Text(request.body)
+            if (request.requestBody !is RequestBody.Question) Text(request.body)
             if (request.details.isNotEmpty()) Text(request.details, style = MaterialTheme.typography.bodySmall)
             when (val body = request.requestBody) {
                 is RequestBody.Approval -> ChoiceButtons(body.choices, false, disabled, ::respond)
@@ -121,9 +132,11 @@ private fun QuestionAnswers(key: String, questions: List<Question>, disabled: Bo
     var selections by remember(key) { mutableStateOf(emptyMap<String, List<String>>()) }
     questions.forEach { question ->
         val id = question.id
+        if (question.header.isNotEmpty()) Text(question.header, style = MaterialTheme.typography.labelLarge)
         Text(question.prompt)
-        question.choices.forEach { choice ->
+        question.choices.forEachIndexed { index, choice ->
             val selected = selections[id].orEmpty()
+            val isSelected = choice.id in selected
             TextButton(
                 onClick = {
                     selections =
@@ -135,10 +148,18 @@ private fun QuestionAnswers(key: String, questions: List<Question>, disabled: Bo
                     answers = answers + (id to "")
                 },
                 enabled = !disabled,
+                modifier = Modifier.fillMaxWidth().semantics { this.selected = isSelected },
+                shape = RoundedCornerShape(8.dp),
+                colors =
+                    ButtonDefaults.textButtonColors(
+                        containerColor =
+                            if (isSelected) MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)
+                            else Color.Transparent,
+                        contentColor = MaterialTheme.colorScheme.onSurface,
+                    ),
             ) {
-                Text("${if (choice.id in selected) "✓ " else ""}${choice.label}")
+                QuestionChoiceLabel(index + 1, choice.label, choice.description, isSelected)
             }
-            if (choice.description.isNotEmpty()) Text(choice.description)
         }
         if (question.allowFreeText)
             OutlinedTextField(
@@ -151,22 +172,51 @@ private fun QuestionAnswers(key: String, questions: List<Question>, disabled: Bo
     }
     Button(
         onClick = {
-            respond(
-                Answer.Questions(
-                    questions.associate { question ->
-                        question.id to
-                            buildQuestionAnswer(
-                                question.multiple,
-                                answers[question.id].orEmpty(),
-                                selections[question.id].orEmpty(),
-                            )
-                    }
-                )
-            )
+            val values =
+                questions.associate { question ->
+                    question.id to
+                        buildQuestionAnswer(
+                            question.multiple,
+                            answers[question.id].orEmpty(),
+                            selections[question.id].orEmpty(),
+                        )
+                }
+            respond(Answer.Questions(values))
         },
         enabled = !disabled,
     ) {
         Text("回答を送信")
+    }
+}
+
+@Composable
+private fun QuestionChoiceLabel(number: Int, label: String, description: String, selected: Boolean) {
+    Row(
+        Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        verticalAlignment = Alignment.Top,
+    ) {
+        Box(
+            Modifier.defaultMinSize(minWidth = 24.dp, minHeight = 24.dp)
+                .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(4.dp)),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                "$number",
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text(label, style = MaterialTheme.typography.bodyLarge)
+            if (description.isNotEmpty())
+                Text(
+                    description,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+        }
+        Text(if (selected) "✓" else "", Modifier.width(20.dp).clearAndSetSemantics {})
     }
 }
 
