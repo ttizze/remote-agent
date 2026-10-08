@@ -237,7 +237,7 @@ async fn run(
         !index.ok()
     } else {
         false
-    }
+    };
     let mut generated = if has_staged_changes {
         Some(
             commit_message(&request, &text, &cancel)
