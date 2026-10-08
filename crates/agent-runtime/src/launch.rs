@@ -38,6 +38,8 @@ pub struct InitialMessage {
     pub created_by: MessageAuthor,
     pub creation_source: String,
     pub context: Option<MessageContext>,
+    /// The scheduled task whose run sends this prompt.
+    pub scheduled_task: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -739,7 +741,7 @@ pub(crate) async fn launch(
             &thread,
             message_command,
             Command::Send(SendMessage {
-                scheduled_task: None,
+                scheduled_task: message.scheduled_task.clone(),
                 context: message.context.clone(),
                 created_by: message.created_by,
                 creation_source: message.creation_source.clone(),

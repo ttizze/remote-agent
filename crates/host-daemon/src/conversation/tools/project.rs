@@ -248,6 +248,7 @@ impl AgentTools {
         let (attachments, claimed) = (claimed.attachments, claimed.copies);
         let initial_message =
             (input.message.is_some() || !attachments.is_empty()).then(|| InitialMessage {
+                scheduled_task: None,
                 id: Some(message.clone()),
                 text: input.message.unwrap_or_default(),
                 attachments,

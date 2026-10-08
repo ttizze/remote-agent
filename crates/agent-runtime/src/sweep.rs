@@ -1,8 +1,10 @@
-//! Host sweeps over the thread list: automatic settlement every minute and
-//! usage-limit recovery on the shared five-second scheduler tick. Both derive
-//! their work from durable rows, so a restart needs no timers.
+//! Host sweeps over the thread list: automatic settlement every minute, and
+//! usage-limit recovery and due scheduled tasks on the shared five-second
+//! scheduler tick. All derive their work from durable rows, so a restart
+//! needs no timers.
 use crate::{
-    ActorRegistry, Clock, CommandOrigin, ConversationSettings, HostOperations, Store, StoreError,
+    ActorRegistry, Clock, CommandOrigin, ConversationSettings, HostOperations, ScheduledTasks,
+    Store, StoreError,
 };
 use agent_domain::{
     Command, CommandId, ThreadId, ThreadShell, auto_settlement_at, limit_recovery_command,
@@ -20,6 +22,7 @@ pub(crate) struct Sweeps {
     pub registry: Arc<ActorRegistry>,
     pub ops: Arc<dyn HostOperations>,
     pub clock: Arc<dyn Clock>,
+    pub scheduled: Arc<ScheduledTasks>,
     /// Settings changed: settle again now.
     pub settings_changed: Arc<Notify>,
 }
@@ -123,6 +126,12 @@ impl Sweeps {
         Ok(())
     }
 
+    /// The shared five-second tick: limit recovery, then due scheduled tasks.
+    async fn tick(&self) -> Result<(), StoreError> {
+        self.recover_limits().await?;
+        self.scheduled.run_due().await
+    }
+
     /// Runs until aborted.
     pub(crate) async fn run(self) {
         let mut settle = tokio::time::interval(SETTLEMENT_INTERVAL);
@@ -134,7 +143,7 @@ impl Sweeps {
             let result = tokio::select! {
                 _ = settle.tick() => self.settle().await,
                 () = self.settings_changed.notified() => self.settle().await,
-                _ = limits.tick() => self.recover_limits().await,
+                _ = limits.tick() => self.tick().await,
             };
             if let Err(error) = result {
                 tracing::warn!(%error, "a thread sweep failed");
