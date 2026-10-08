@@ -219,7 +219,7 @@ private fun mergeActivityState(
             preferences.edit().putBoolean(blockedKey(hostId), true).apply()
         }
         writeActivityStates(preferences, result.states, nowMillis)
-        result.copy(states = result.states)
+        result
     }
 }
 
