@@ -139,7 +139,9 @@ extension BexAppViewModel {
               let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
               let host = components.queryItems?.first(where: { $0.name == "host" })?.value,
               profiles.contains(where: { $0.id == host }) else { return }
-        if selectedProfileId != host { selectProfile(host) }
+        if selectedProfileId != host {
+            selectProfile(host)
+        }
         showThreadList()
     }
 

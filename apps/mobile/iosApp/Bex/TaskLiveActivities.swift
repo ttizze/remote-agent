@@ -33,7 +33,10 @@ final class TaskLiveActivities {
     private var started = Set<String>()
     private(set) var hostID: String?
     private(set) var sessions: [SessionRef] = []
-    private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "dev.remoteagent.mobile.ios", category: "LiveActivity")
+    private let logger = Logger(
+        subsystem: Bundle.main.bundleIdentifier ?? "dev.remoteagent.mobile.ios",
+        category: "LiveActivity"
+    )
 
     init() {
         (requests, output) = AsyncStream.makeStream()
@@ -125,8 +128,8 @@ final class TaskLiveActivities {
         sessions = overview.sessions
         let input = Input(hostID: hostID, connected: connected, foreground: foreground,
                           state: .init(summary: .init(running: overview.summary.running,
-                                                    waiting: overview.summary.waiting,
-                                                    unknown: overview.summary.unknown),
+                                                      waiting: overview.summary.waiting,
+                                                      unknown: overview.summary.unknown),
                                        connected: connected && overview.summary.unknown == 0,
                                        hostName: String(hostName.unicodeScalars.prefix(120))))
         guard input != (pending ?? previous) else { return }
@@ -158,7 +161,9 @@ final class TaskLiveActivities {
                 continue
             }
             guard input.connected else {
-                if remote.contains(activity.id) { continue }
+                if remote.contains(activity.id) {
+                    continue
+                }
                 var state = activity.content.state
                 state.connected = false
                 await activity.update(ActivityContent(state: state, staleDate: .now))
