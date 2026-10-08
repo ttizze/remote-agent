@@ -1018,6 +1018,25 @@ impl HostRpcService {
         })
     }
     pub async fn dispatch(&self, session: SessionId, call: &Call) -> Result<HostReply, String> {
+        self.dispatch_with_desktop_publisher(session, call, false).await
+    }
+
+    pub(crate) async fn dispatch_from_peer(
+        &self,
+        session: SessionId,
+        call: &Call,
+        local_node: bool,
+    ) -> Result<HostReply, String> {
+        self.dispatch_with_desktop_publisher(session, call, local_node)
+            .await
+    }
+
+    async fn dispatch_with_desktop_publisher(
+        &self,
+        session: SessionId,
+        call: &Call,
+        desktop_publisher_allowed: bool,
+    ) -> Result<HostReply, String> {
         if self.inner.handoff_draining.load(Ordering::Acquire) {
             return Err("Host is waiting for its installed update to start".into());
         }
@@ -1060,7 +1079,10 @@ impl HostRpcService {
             let cancel = self.inner.connections.cancellation(session)?;
             return Ok(self.device_subscribe(params, cancel).await);
         }
-        Ok(Response::from_result(self.request(session, call).await).into())
+        Ok(Response::from_result(
+            self.request(session, call, desktop_publisher_allowed).await,
+        )
+        .into())
     }
 
     /// The current policy snapshot, followed by semantic power or lease
@@ -1600,7 +1622,12 @@ impl HostRpcService {
             cancel,
         )
     }
-    async fn request(&self, session: SessionId, request: &Call) -> Result<Body, Failure> {
+    async fn request(
+        &self,
+        session: SessionId,
+        request: &Call,
+        desktop_publisher_allowed: bool,
+    ) -> Result<Body, Failure> {
         let resources = &self.inner.resources;
         let _workspace = if matches!(request, Call::CloneRepository(_)) {
             Some(resources.worktree_access.write().await)
@@ -2491,7 +2518,10 @@ impl HostRpcService {
                     .map_err(|error| Failure::new("invalid_params", error))?
                     .into(),
                 Call::ReportHostPowerState(params) => {
-                    resources.background.report_power(params.clone()).await;
+                    resources
+                        .background
+                        .report_power(params.clone(), desktop_publisher_allowed)
+                        .await;
                     agent_protocol::models::Empty {}.into()
                 }
                 Call::RemoveClientActivity(params) => resources
@@ -3381,7 +3411,7 @@ impl HostRpcService {
                             0,
                             1,
                             started.elapsed().as_millis() as u64,
-                        );
+                        ).await;
                         if let Err(error) = result {
                             tracing::debug!(target: "bex", operation = "host.vcs.background_refresh", cwd = %cwd, message = %error);
                         }
@@ -3429,7 +3459,7 @@ impl HostRpcService {
             0,
             1,
             started.elapsed().as_millis() as u64,
-        );
+        ).await;
         *self.inner.resources.provider_cache.write().await = Some(ProviderHealthCache {
             refreshed_at: Self::host_now(),
             providers: providers.clone(),

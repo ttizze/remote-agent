@@ -33,7 +33,7 @@ url.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["fs", "io-std", "net"] }
+tokio = { workspace = true, features = ["fs", "io-std", "net", "process", "time"] }
 async-tungstenite = { version = "0.35", default-features = false, features = ["handshake", "futures-03-sink", "tokio-rustls-platform-verifier"] }
 futures-io = "0.3"
 tokio-util.workspace = true
@@ -52,6 +52,15 @@ sysinfo = "=0.31.4"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_System_Power",
+    "Win32_System_StationsAndDesktops",
+    "Win32_System_SystemInformation",
+    "Win32_UI_Input_KeyboardAndMouse",
+] }
 
 [dev-dependencies]
 proptest = "1.11"

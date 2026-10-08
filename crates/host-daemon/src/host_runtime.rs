@@ -438,7 +438,7 @@ impl HostRuntime {
             .into());
         }
         self.service
-            .dispatch(session, message)
+            .dispatch_from_peer(session, message, node == self.local_node)
             .await
             .map_err(anyhow::Error::msg)
     }

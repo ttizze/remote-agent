@@ -19,11 +19,18 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
-use tokio::io::AsyncBufReadExt;
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt};
 use tokio::sync::{Mutex as TokioMutex, RwLock, broadcast};
 use tokio_util::sync::CancellationToken;
 
 const RESOURCE_HISTORY_LIMIT: usize = 720;
+const RESOURCE_HISTORY_MAX_AGE_MS: i64 = 60 * 60_000;
+const RESOURCE_HISTORY_MAX_BYTES: usize = 8 * 1024 * 1024;
+const RESOURCE_HISTORY_MAX_ENTRIES: usize = 20_000;
+const RESOURCE_PROCESS_LIMIT: usize = 256;
+const RESOURCE_CHILD_PID_LIMIT: usize = 256;
+const RESOURCE_TEXT_LIMIT: usize = 1_024;
+const RESOURCE_ATTRIBUTION_LIMIT: usize = 256;
 const TRACE_MAX_FILES: u32 = 16;
 const DESKTOP_POWER_HEALTH_TIMEOUT_MS: i64 = 10 * 60_000;
 
@@ -78,6 +85,8 @@ struct ResourceState {
     process_cpu_time_ms: BTreeMap<String, u64>,
     host_resources: Option<agent_domain::HostResourcesSnapshot>,
     host_resources_refreshed_at: Option<Instant>,
+    desktop_processes: Vec<ResourceProcess>,
+    desktop_processes_sampled_at: Option<Timestamp>,
     attribution: BTreeMap<(String, String), agent_domain::ResourceAttributionEntry>,
     health: ResourceHealth,
     lifecycle: ResourceLifecycleCounters,
@@ -115,6 +124,8 @@ impl ResourceOwner {
                 process_cpu_time_ms: BTreeMap::new(),
                 host_resources: None,
                 host_resources_refreshed_at: None,
+                desktop_processes: Vec::new(),
+                desktop_processes_sampled_at: None,
                 attribution: BTreeMap::new(),
                 health: ResourceHealth {
                     native: ResourceSourceHealth {
@@ -140,6 +151,19 @@ impl ResourceOwner {
         let host = sample_host_resources(&mut state, &sampled_at);
         let process_probe = sample_processes(&mut state, &sampled_at);
         let mut processes = process_probe.processes;
+        if state
+            .desktop_processes_sampled_at
+            .as_ref()
+            .is_some_and(|sampled| {
+                sampled_at
+                    .millis()
+                    .saturating_sub(sampled.millis())
+                    <= DESKTOP_POWER_HEALTH_TIMEOUT_MS
+            })
+        {
+            processes.extend(state.desktop_processes.iter().cloned());
+        }
+        bound_resource_processes(&mut processes, std::process::id());
         let previous = state.snapshots.back().map(|snapshot| {
             (
                 snapshot.read_at.millis(),
@@ -226,7 +250,19 @@ impl ResourceOwner {
             health: state.health.clone(),
         };
         state.snapshots.push_back(snapshot.clone());
-        while state.snapshots.len() > RESOURCE_HISTORY_LIMIT {
+        while state.snapshots.len() > RESOURCE_HISTORY_LIMIT
+            || resource_history_entries(&state.snapshots) > RESOURCE_HISTORY_MAX_ENTRIES
+            || state
+                .snapshots
+                .front()
+                .is_some_and(|oldest| {
+                    sampled_at
+                        .millis()
+                        .saturating_sub(oldest.read_at.millis())
+                        > RESOURCE_HISTORY_MAX_AGE_MS
+                })
+            || resource_history_bytes(&state.snapshots) > RESOURCE_HISTORY_MAX_BYTES
+        {
             state.snapshots.pop_front();
         }
         snapshot
@@ -339,18 +375,91 @@ impl ResourceOwner {
     }
 
     fn record_desktop_power(&self, snapshot: &HostPowerSnapshot) {
+        if snapshot.source != HostPowerSource::DesktopMain {
+            return;
+        }
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-        let unavailable = snapshot.stale || snapshot.source == HostPowerSource::Unknown;
+        state.desktop_processes = snapshot.desktop_processes.clone();
+        state.desktop_processes_sampled_at = (!state.desktop_processes.is_empty())
+            .then(|| snapshot.updated_at.clone());
+        let unavailable = snapshot.stale || !has_power_observation(snapshot);
         state.health.desktop.status = if unavailable {
             ResourceSourceStatus::Unavailable
         } else {
             ResourceSourceStatus::Healthy
         };
-        state.health.desktop.last_sample_at = Some(snapshot.updated_at.clone());
+        state.health.desktop.last_sample_at = (!unavailable).then(|| snapshot.updated_at.clone());
         state.health.desktop.last_error = unavailable.then(|| {
-            "The desktop power publisher did not provide a fresh native observation.".into()
+            "The desktop publisher did not provide a fresh native observation.".into()
         });
     }
+}
+
+/// Samples the GPUI desktop process tree on its own blocking owner. The Host
+/// cannot discover this tree through descendant scanning because the desktop
+/// and Host are sibling processes.
+pub struct DesktopProcessMonitor {
+    owner: ResourceOwner,
+}
+
+impl DesktopProcessMonitor {
+    pub fn new() -> Self {
+        Self {
+            owner: ResourceOwner::new(),
+        }
+    }
+
+    pub fn sample(&self) -> Vec<ResourceProcess> {
+        let mut processes = self.owner.snapshot(unknown_power(now())).processes;
+        for process in &mut processes {
+            // GPUI is a native desktop process, so keep it as the canonical
+            // unknown application category instead of claiming Electron
+            // ownership from a command-line guess.
+            process.category = ResourceProcessCategory::Unknown;
+        }
+        processes
+    }
+}
+
+fn has_power_observation(snapshot: &HostPowerSnapshot) -> bool {
+    snapshot.idle != BackgroundBooleanState::Unknown
+        || snapshot.locked != BackgroundBooleanState::Unknown
+        || snapshot.on_battery != BackgroundBooleanState::Unknown
+        || snapshot.low_power_mode != BackgroundBooleanState::Unknown
+        || snapshot.thermal_state != agent_domain::HostPowerThermalState::Unknown
+        || snapshot.speed_limit_percent.is_some()
+}
+
+fn desktop_power_sample_is_fresh(snapshot: &HostPowerSnapshot, at: &Timestamp) -> bool {
+    snapshot.source == HostPowerSource::DesktopMain
+        && !snapshot.stale
+        && has_power_observation(snapshot)
+        && snapshot.updated_at.millis() <= at.millis()
+        && at
+            .millis()
+            .saturating_sub(snapshot.updated_at.millis())
+            <= DESKTOP_POWER_HEALTH_TIMEOUT_MS
+}
+
+fn sanitize_desktop_processes(
+    processes: &[ResourceProcess],
+    sampled_at: &Timestamp,
+) -> Vec<ResourceProcess> {
+    let mut processes = processes.to_vec();
+    for process in &mut processes {
+        process.name = bounded_text(&process.name);
+        process.command = bounded_text(&process.command);
+        process.status = bounded_text(&process.status);
+        process.child_pids.truncate(RESOURCE_CHILD_PID_LIMIT);
+        if process.first_seen_at.millis() > sampled_at.millis() {
+            process.first_seen_at = sampled_at.clone();
+        }
+        if process.last_seen_at.millis() > sampled_at.millis() {
+            process.last_seen_at = sampled_at.clone();
+        }
+    }
+    bound_resource_processes(&mut processes, std::process::id());
+    processes
 }
 
 fn expire_desktop_health(health: &mut ResourceHealth, at: &Timestamp) {
@@ -377,24 +486,14 @@ fn sample_host_resources(
             available_memory_bytes = available;
         }
     }
-    #[cfg(target_os = "macos")]
-    if let Ok(output) = std::process::Command::new("/usr/bin/vm_stat")
-        .stdin(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .output()
-    {
-        if let Ok(output) = String::from_utf8(output.stdout) {
-            if let Some(available) = darwin_available_memory(&output) {
-                available_memory_bytes = available;
-            }
-        }
-    }
-
     let previous_cpu_at = state.host_cpu_refreshed_at.replace(Instant::now());
     state.system.refresh_cpu_usage();
     let cpu_utilization = previous_cpu_at
         .filter(|at| at.elapsed() >= sysinfo::MINIMUM_CPU_UPDATE_INTERVAL)
-        .map(|_| (state.system.global_cpu_usage() as f64 / 100.0).clamp(0.0, 1.0));
+        .and_then(|_| {
+            let value = state.system.global_cpu_usage() as f64 / 100.0;
+            value.is_finite().then(|| value.clamp(0.0, 1.0))
+        });
     let snapshot = agent_domain::HostResourcesSnapshot {
         sampled_at: sampled_at.millis().max(0) as u64,
         cpu_utilization,
@@ -415,26 +514,6 @@ fn parse_meminfo_bytes(contents: &str, name: &str) -> Option<u64> {
             .then(|| parts.next()?.parse::<u64>().ok()?.saturating_mul(1024))
             .flatten()
     })
-}
-
-fn darwin_available_memory(output: &str) -> Option<u64> {
-    let page_size = output
-        .lines()
-        .find_map(|line| line.strip_prefix("Mach Virtual Memory Statistics: (page size of "))
-        .and_then(|value| value.split_once(" bytes)")?.0.parse::<u64>().ok())
-        .filter(|page_size| *page_size > 0)?;
-    let page_count = ["Pages free:", "Pages inactive:", "Pages speculative:"]
-        .into_iter()
-        .map(|name| {
-            output.lines().find_map(|line| {
-                let rest = line.strip_prefix(name)?.trim();
-                rest.trim_end_matches('.').parse::<u64>().ok()
-            })
-        })
-        .collect::<Option<Vec<_>>>()?;
-    page_count
-        .into_iter()
-        .try_fold(0u64, |total, pages| total.checked_add(pages.checked_mul(page_size)?))
 }
 
 struct ProcessProbe {
@@ -488,7 +567,12 @@ fn sample_processes(state: &mut ResourceState, at: &Timestamp) -> ProcessProbe {
         let start_time_ms = process.start_time().saturating_mul(1_000);
         let identity = ResourceProcessIdentity { pid, start_time_ms };
         let identity_key = identity.key();
-        let cpu_percent = f64::from(process.cpu_usage()).max(0.0);
+        let cpu_percent = f64::from(process.cpu_usage());
+        let cpu_percent = if cpu_percent.is_finite() {
+            cpu_percent.max(0.0)
+        } else {
+            0.0
+        };
         let cpu_time_ms = state
             .process_cpu_time_ms
             .get(&identity_key)
@@ -509,16 +593,21 @@ fn sample_processes(state: &mut ResourceState, at: &Timestamp) -> ProcessProbe {
         state
             .process_cpu_time_ms
             .insert(identity_key, cpu_time_ms);
-        let name = process.name().to_string_lossy().into_owned();
+        let raw_name = process.name().to_string_lossy();
+        let name = if raw_name.is_empty() {
+            "unknown".to_owned()
+        } else {
+            bounded_text(&raw_name)
+        };
         let command = if process.cmd().is_empty() {
             name.clone()
         } else {
-            process
+            bounded_text(&process
                 .cmd()
                 .iter()
                 .map(|part| part.to_string_lossy().into_owned())
                 .collect::<Vec<_>>()
-                .join(" ")
+                .join(" "))
         };
         let lower = command.to_ascii_lowercase();
         let category = process_category(pid, root_pid, &lower);
@@ -530,9 +619,9 @@ fn sample_processes(state: &mut ResourceState, at: &Timestamp) -> ProcessProbe {
             depth: 0,
             name,
             command,
-            status: format!("{:?}", process.status()),
+            status: bounded_text(&format!("{:?}", process.status())),
             category,
-            cpu_percent: 0.0,
+            cpu_percent,
             cpu_time_ms,
             resident_bytes: process.memory(),
             peak_resident_bytes: process.memory(),
@@ -551,9 +640,6 @@ fn sample_processes(state: &mut ResourceState, at: &Timestamp) -> ProcessProbe {
             last_seen_at: at.clone(),
         });
     }
-    state.process_cpu_time_ms.retain(|key, _| {
-        processes.iter().any(|process| process.identity.key() == *key)
-    });
     let parent_map = processes
         .iter()
         .map(|process| (process.identity.pid, process.ppid))
@@ -578,13 +664,17 @@ fn sample_processes(state: &mut ResourceState, at: &Timestamp) -> ProcessProbe {
             .cloned()
             .unwrap_or_default();
     }
+    bound_resource_processes(&mut processes, root_pid);
+    state.process_cpu_time_ms.retain(|key, _| {
+        processes.iter().any(|process| process.identity.key() == *key)
+    });
     let inaccessible_process_count = selected_process_count(&rows, root_pid)
         .saturating_sub(processes.len()) as u64;
     let (status, error) = if inaccessible_process_count > 0 {
         (
             ResourceSourceStatus::Degraded,
             Some(format!(
-                "{} descendant process(es) could not be read.",
+                "{} tracked descendant process(es) were unavailable or outside the bounded resource view.",
                 inaccessible_process_count
             )),
         )
@@ -600,6 +690,24 @@ fn sample_processes(state: &mut ResourceState, at: &Timestamp) -> ProcessProbe {
     }
 }
 
+fn bound_resource_processes(processes: &mut Vec<ResourceProcess>, root_pid: u32) {
+    processes.sort_by(|left, right| {
+        (right.identity.pid == root_pid || right.depth == 0)
+            .cmp(&(left.identity.pid == root_pid || left.depth == 0))
+            .then_with(|| right.resident_bytes.cmp(&left.resident_bytes))
+            .then_with(|| left.identity.cmp(&right.identity))
+    });
+    processes.truncate(RESOURCE_PROCESS_LIMIT);
+    let retained = processes
+        .iter()
+        .map(|process| process.identity.pid)
+        .collect::<BTreeSet<_>>();
+    for process in processes {
+        process.child_pids.retain(|pid| retained.contains(pid));
+        process.child_pids.truncate(RESOURCE_CHILD_PID_LIMIT);
+    }
+}
+
 fn record_attribution(
     entries: &mut BTreeMap<(String, String), agent_domain::ResourceAttributionEntry>,
     component: &str,
@@ -609,10 +717,12 @@ fn record_attribution(
     count: u64,
     duration_ms: u64,
 ) {
-    let key = (component.to_owned(), operation.to_owned());
+    let component = bounded_text(component);
+    let operation = bounded_text(operation);
+    let key = (component.clone(), operation.clone());
     let entry = entries.entry(key).or_insert_with(|| agent_domain::ResourceAttributionEntry {
-        component: component.to_owned(),
-        operation: operation.to_owned(),
+        component,
+        operation,
         logical_read_bytes: 0,
         logical_write_bytes: 0,
         count: 0,
@@ -622,6 +732,20 @@ fn record_attribution(
     entry.logical_write_bytes = entry.logical_write_bytes.saturating_add(logical_write_bytes);
     entry.count = entry.count.saturating_add(count);
     entry.duration_ms = entry.duration_ms.saturating_add(duration_ms);
+    while entries.len() > RESOURCE_ATTRIBUTION_LIMIT {
+        let Some(key) = entries
+            .iter()
+            .min_by_key(|(_, entry)| {
+                entry
+                    .logical_read_bytes
+                    .saturating_add(entry.logical_write_bytes)
+            })
+            .map(|(key, _)| key.clone())
+        else {
+            break;
+        };
+        entries.remove(&key);
+    }
 }
 
 fn attribution_snapshot(
@@ -637,7 +761,44 @@ fn attribution_snapshot(
             .then_with(|| left.component.cmp(&right.component))
             .then_with(|| left.operation.cmp(&right.operation))
     });
+    entries.truncate(RESOURCE_ATTRIBUTION_LIMIT);
     ResourceAttributionSnapshot { read_at, entries }
+}
+
+fn bounded_text(value: &str) -> String {
+    if value.chars().count() <= RESOURCE_TEXT_LIMIT {
+        return value.to_owned();
+    }
+    value.chars().take(RESOURCE_TEXT_LIMIT).collect()
+}
+
+fn resource_snapshot_bytes(snapshot: &ResourceTelemetrySnapshot) -> usize {
+    let process_bytes = snapshot.processes.iter().fold(0usize, |total, process| {
+        total
+            .saturating_add(process.name.len())
+            .saturating_add(process.command.len())
+            .saturating_add(process.status.len())
+            .saturating_add(process.child_pids.len() * std::mem::size_of::<u32>())
+            .saturating_add(256)
+    });
+    let attribution_bytes = snapshot.attribution.entries.iter().fold(0usize, |total, entry| {
+        total
+            .saturating_add(entry.component.len())
+            .saturating_add(entry.operation.len())
+            .saturating_add(64)
+    });
+    process_bytes.saturating_add(attribution_bytes).saturating_add(512)
+}
+
+fn resource_history_bytes(snapshots: &VecDeque<ResourceTelemetrySnapshot>) -> usize {
+    snapshots.iter().map(resource_snapshot_bytes).sum()
+}
+
+fn resource_history_entries(snapshots: &VecDeque<ResourceTelemetrySnapshot>) -> usize {
+    snapshots
+        .iter()
+        .map(|snapshot| snapshot.processes.len())
+        .sum()
 }
 
 fn process_category(pid: u32, root_pid: u32, command: &str) -> ResourceProcessCategory {
@@ -1063,6 +1224,9 @@ fn resource_groups(
 /// One in-process owner for policy, power, resource, and trace state.
 pub(crate) struct BackgroundOwner {
     mutation: TokioMutex<()>,
+    power_probe: TokioMutex<()>,
+    resource_probe: TokioMutex<()>,
+    probe_stop: CancellationToken,
     policy: RwLock<BackgroundActivityPolicy>,
     leases: RwLock<BTreeMap<String, ClientActivityLease>>,
     power: Arc<HostPowerMonitor>,
@@ -1084,6 +1248,9 @@ impl BackgroundOwner {
         let (changes, _) = broadcast::channel(16);
         Arc::new(Self {
             mutation: TokioMutex::new(()),
+            power_probe: TokioMutex::new(()),
+            resource_probe: TokioMutex::new(()),
+            probe_stop: CancellationToken::new(),
             policy: RwLock::new(policy.normalized()),
             leases: RwLock::new(BTreeMap::new()),
             power: Arc::new(HostPowerMonitor::new()),
@@ -1108,17 +1275,62 @@ impl BackgroundOwner {
         self.publish().await
     }
 
-    pub(crate) async fn report_power(&self, snapshot: HostPowerSnapshot) -> BackgroundPolicySnapshot {
+    pub(crate) async fn report_power(
+        &self,
+        mut snapshot: HostPowerSnapshot,
+        desktop_publisher_allowed: bool,
+    ) -> BackgroundPolicySnapshot {
         let _mutation = self.mutation.lock().await;
+        // RPC clients cannot choose the Host's ordering clock.  A future
+        // client timestamp must not pin the monitor ahead of the Host's own
+        // native observation or make the publisher health look fresh forever.
         let previous = self.power.snapshot().await;
-        let accepted = snapshot.updated_at >= previous.updated_at;
-        if accepted {
-            self.resources.record_desktop_power(&snapshot);
+        let received_at = now();
+        // Keep the Host clock monotonic across a wall-clock rollback.  The
+        // sample is still received now; retaining the last timestamp only
+        // preserves ordering until the local clock catches up.
+        let observed_at = if received_at < previous.updated_at {
+            previous.updated_at.clone()
+        } else {
+            received_at
+        };
+        snapshot.updated_at = observed_at.clone();
+        // All client supplied power belongs to the supervised local desktop
+        // session.  A remote client must not replace this Host's native
+        // observation by relabeling its machine as NodeLinux or ElectronMain.
+        if !desktop_publisher_allowed {
+            return self.snapshot_at(&observed_at).await;
+        }
+        // The desktop process tree is meaningful only on the supervised
+        // DesktopMain publisher.  A Node power report must not smuggle a
+        // client-supplied tree into the Host's diagnostics snapshot. Bound
+        // the accepted tree before retaining it in the power monitor too.
+        if snapshot.source == HostPowerSource::DesktopMain {
+            snapshot.desktop_processes = sanitize_desktop_processes(
+                &snapshot.desktop_processes,
+                &snapshot.updated_at,
+            );
+        } else {
+            snapshot.desktop_processes.clear();
+        }
+        if snapshot.source == HostPowerSource::DesktopMain {
+            self.record_desktop_power(&snapshot).await;
+        }
+        // A desktop publisher can lose access to its native probe while the
+        // supervised Host still has a valid local observation.  Keep that
+        // observation authoritative rather than replacing it with a fresh
+        // timestamp that only says "the desktop probe failed".
+        if snapshot.source == HostPowerSource::DesktopMain
+            && (snapshot.stale || !has_power_observation(&snapshot))
+            && previous.source != HostPowerSource::DesktopMain
+            && !previous.stale
+        {
+            return self.snapshot_at(&observed_at).await;
         }
         if self.power.report(snapshot).await {
             self.publish().await
         } else {
-            self.snapshot_at(&now()).await
+            self.snapshot_at(&observed_at).await
         }
     }
 
@@ -1201,8 +1413,30 @@ impl BackgroundOwner {
     pub(crate) async fn sample_resources_if_demanded(&self) {
         let scope = BackgroundScope::Diagnostics;
         if self.should_run_scope_work(&scope).await {
-            let _ = self.resources.snapshot(self.power.snapshot().await);
+            let power = self.power.snapshot().await;
+            let _ = self.sample_resources(power).await;
         }
+    }
+
+    async fn sample_resources(&self, power: HostPowerSnapshot) -> ResourceTelemetrySnapshot {
+        let _probe = self.resource_probe.lock().await;
+        let resources = self.resources.clone();
+        tokio::task::spawn_blocking(move || resources.snapshot(power))
+            .await
+            .expect("resource sampling worker terminated")
+    }
+
+    async fn sample_resource_history(
+        &self,
+        power: HostPowerSnapshot,
+        window_ms: u64,
+        bucket_ms: u64,
+    ) -> ResourceTelemetryHistory {
+        let _probe = self.resource_probe.lock().await;
+        let resources = self.resources.clone();
+        tokio::task::spawn_blocking(move || resources.latest_history(power, window_ms, bucket_ms))
+            .await
+            .expect("resource history worker terminated")
     }
 
     pub(crate) async fn snapshot(&self) -> BackgroundPolicySnapshot {
@@ -1226,17 +1460,14 @@ impl BackgroundOwner {
     }
 
     async fn publish_power_sample(&self) -> bool {
+        let Ok(_probe) = self.power_probe.try_lock() else {
+            return false;
+        };
         let current = self.power.snapshot().await;
-        if current.source == HostPowerSource::DesktopMain
-            && !current.stale
-            && now()
-                .millis()
-                .saturating_sub(current.updated_at.millis())
-                <= DESKTOP_POWER_HEALTH_TIMEOUT_MS
-        {
+        if desktop_power_sample_is_fresh(&current, &now()) {
             return false;
         }
-        let sampled = sample_local_power(&current);
+        let sampled = sample_local_power(&self.probe_stop).await;
         self.power.report(sampled).await
     }
 
@@ -1288,10 +1519,23 @@ impl BackgroundOwner {
     }
 
     pub(crate) async fn host_resources(&self) -> agent_domain::HostResourcesSnapshot {
-        self.resources.host_resources()
+        let _probe = self.resource_probe.lock().await;
+        let resources = self.resources.clone();
+        tokio::task::spawn_blocking(move || resources.host_resources())
+            .await
+            .expect("host resource worker terminated")
     }
 
-    pub(crate) fn record_attribution(
+    async fn record_desktop_power(&self, snapshot: &HostPowerSnapshot) {
+        let _probe = self.resource_probe.lock().await;
+        let resources = self.resources.clone();
+        let snapshot = snapshot.clone();
+        tokio::task::spawn_blocking(move || resources.record_desktop_power(&snapshot))
+            .await
+            .expect("desktop resource worker terminated");
+    }
+
+    pub(crate) async fn record_attribution(
         &self,
         component: &str,
         operation: &str,
@@ -1300,18 +1544,26 @@ impl BackgroundOwner {
         count: u64,
         duration_ms: u64,
     ) {
-        self.resources.record_attribution(
-            component,
-            operation,
-            logical_read_bytes,
-            logical_write_bytes,
-            count,
-            duration_ms,
-        );
+        let _probe = self.resource_probe.lock().await;
+        let resources = self.resources.clone();
+        let component = component.to_owned();
+        let operation = operation.to_owned();
+        tokio::task::spawn_blocking(move || {
+            resources.record_attribution(
+                &component,
+                &operation,
+                logical_read_bytes,
+                logical_write_bytes,
+                count,
+                duration_ms,
+            )
+        })
+        .await
+        .expect("resource attribution worker terminated");
     }
 
     pub(crate) async fn process_diagnostics(&self) -> agent_domain::ProcessDiagnosticsResult {
-        let snapshot = self.resources.snapshot(self.power.snapshot().await);
+        let snapshot = self.sample_resources(self.power.snapshot().await).await;
         process_diagnostics(
             std::process::id(),
             snapshot.read_at.clone(),
@@ -1323,7 +1575,9 @@ impl BackgroundOwner {
     }
 
     pub(crate) async fn process_history(&self, window_ms: u64, bucket_ms: u64) -> agent_domain::ProcessResourceHistoryResult {
-        let history = self.resources.latest_history(self.power.snapshot().await, window_ms, bucket_ms);
+        let history = self
+            .sample_resource_history(self.power.snapshot().await, window_ms, bucket_ms)
+            .await;
         project_process_resource_history(&history)
     }
 
@@ -1389,7 +1643,8 @@ impl BackgroundOwner {
                 0,
                 1,
                 trace_started.elapsed().as_millis() as u64,
-            );
+            )
+            .await;
             return Ok(agent_domain::empty_trace_diagnostics(path.to_string_lossy(), paths, read_at, slow_span_threshold_ms, failure.unwrap_or(TraceDiagnosticsError { kind: TraceDiagnosticsErrorKind::TraceFileNotFound, message: "No local trace files were found.".into() })));
         }
         let partial_failure = failure.as_ref().map(|_| true);
@@ -1400,7 +1655,8 @@ impl BackgroundOwner {
             0,
             1,
             trace_started.elapsed().as_millis() as u64,
-        );
+        )
+        .await;
         Ok(aggregator.finish(path.to_string_lossy(), paths, read_at, failure, partial_failure))
     }
 
@@ -1424,41 +1680,55 @@ impl BackgroundOwner {
 
     pub(crate) fn spawn(self: &Arc<Self>, stop: CancellationToken) -> tokio_util::task::AbortOnDropHandle<()> {
         let owner = Arc::downgrade(self);
+        let probe_stop = self.probe_stop.clone();
         tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(15));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             let mut next_power_sample_ms = now().millis();
             loop {
                 tokio::select! {
-                    _ = stop.cancelled() => return,
+                    _ = stop.cancelled() => {
+                        probe_stop.cancel();
+                        return;
+                    },
                     _ = interval.tick() => {
                         let Some(owner) = owner.upgrade() else { return; };
-                        let _mutation = owner.mutation.lock().await;
-                        let current = now();
-                        let before_lease_count = owner.leases.read().await.len();
-                        owner.leases.write().await.retain(|_, lease| lease.expires_at > current);
-                        let leases_changed = owner.leases.read().await.len() != before_lease_count;
-                        let has_active_lease = owner
-                            .leases
-                            .read()
-                            .await
-                            .values()
-                            .any(|lease| lease.expires_at > current);
-                        let policy = owner.policy().await;
-                        let interval_ms = if has_active_lease {
-                            policy.host_power_monitor_active_interval_ms
-                        } else {
-                            policy.host_power_monitor_idle_interval_ms
-                        }
-                        .max(1)
-                        .min(i64::MAX as u64) as i64;
-                        let power_changed = if current.millis() >= next_power_sample_ms {
-                            next_power_sample_ms = current.millis().saturating_add(interval_ms);
-                            owner.publish_power_sample().await
+                        let (leases_changed, interval_ms, current_ms) = {
+                            let _mutation = owner.mutation.lock().await;
+                            let current = now();
+                            let before_lease_count = owner.leases.read().await.len();
+                            owner.leases.write().await.retain(|_, lease| lease.expires_at > current);
+                            let leases_changed = owner.leases.read().await.len() != before_lease_count;
+                            let has_active_lease = owner
+                                .leases
+                                .read()
+                                .await
+                                .values()
+                                .any(|lease| lease.expires_at > current);
+                            let policy = owner.policy().await;
+                            let interval_ms = if has_active_lease {
+                                policy.host_power_monitor_active_interval_ms
+                            } else {
+                                policy.host_power_monitor_idle_interval_ms
+                            }
+                            .max(1)
+                            .min(i64::MAX as u64) as i64;
+                            (leases_changed, interval_ms, current.millis())
+                        };
+                        let power_changed = if current_ms >= next_power_sample_ms {
+                            next_power_sample_ms = current_ms.saturating_add(interval_ms);
+                            tokio::select! {
+                                _ = stop.cancelled() => {
+                                    probe_stop.cancel();
+                                    return;
+                                }
+                                changed = owner.publish_power_sample() => changed,
+                            }
                         } else {
                             false
                         };
                         if leases_changed || power_changed {
+                            let _mutation = owner.mutation.lock().await;
                             let _ = owner.publish().await;
                         }
                     }
@@ -1468,11 +1738,17 @@ impl BackgroundOwner {
     }
 }
 
+const POWER_COMMAND_TIMEOUT: Duration = Duration::from_secs(1);
+const POWER_COMMAND_OUTPUT_LIMIT: u64 = 16 * 1024;
+
 struct PowerProbe {
     source: HostPowerSource,
     idle: BackgroundBooleanState,
     idle_seconds: Option<u64>,
     locked: BackgroundBooleanState,
+    // A running probe is evidence that the host is awake at this instant.
+    // Suspend is therefore false only for a contacted sample; an uncontacted
+    // sample is marked stale so callers cannot treat this field as observed.
     suspended: bool,
     on_battery: BackgroundBooleanState,
     low_power_mode: BackgroundBooleanState,
@@ -1498,18 +1774,135 @@ impl PowerProbe {
     }
 }
 
-pub fn sample_local_power(previous: &HostPowerSnapshot) -> HostPowerSnapshot {
-    let at = now();
-    let probe = if cfg!(target_os = "linux") {
-        sample_linux_power()
-    } else if cfg!(target_os = "windows") {
-        sample_windows_power()
-    } else if cfg!(target_os = "macos") {
-        sample_macos_power()
-    } else {
-        PowerProbe::unknown(HostPowerSource::Unknown)
-    };
-    let mut snapshot = HostPowerSnapshot {
+async fn read_power_output<R>(reader: R) -> Option<Vec<u8>>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut output = Vec::new();
+    reader
+        .take(POWER_COMMAND_OUTPUT_LIMIT + 1)
+        .read_to_end(&mut output)
+        .await
+        .ok()?;
+    (output.len() <= POWER_COMMAND_OUTPUT_LIMIT).then_some(output)
+}
+
+async fn stop_power_command(child: &mut tokio::process::Child) {
+    let _ = tokio::time::timeout(POWER_COMMAND_TIMEOUT, child.kill()).await;
+    let _ = tokio::time::timeout(POWER_COMMAND_TIMEOUT, child.wait()).await;
+}
+
+async fn finish_power_reader(
+    reader: &mut tokio::task::JoinHandle<Option<Vec<u8>>>,
+) -> Option<Vec<u8>> {
+    match tokio::time::timeout(POWER_COMMAND_TIMEOUT, reader).await {
+        Ok(Ok(output)) => output,
+        Ok(Err(_)) | Err(_) => {
+            reader.abort();
+            None
+        }
+    }
+}
+
+struct PowerReaderTasks {
+    stdout: Option<tokio::task::JoinHandle<Option<Vec<u8>>>>,
+    stderr: Option<tokio::task::JoinHandle<Option<Vec<u8>>>>,
+}
+
+impl PowerReaderTasks {
+    fn new(
+        stdout: tokio::task::JoinHandle<Option<Vec<u8>>>,
+        stderr: tokio::task::JoinHandle<Option<Vec<u8>>>,
+    ) -> Self {
+        Self {
+            stdout: Some(stdout),
+            stderr: Some(stderr),
+        }
+    }
+
+    async fn collect(&mut self) -> Option<Vec<u8>> {
+        let stdout = finish_power_reader(self.stdout.as_mut().expect("stdout reader exists"));
+        let stderr = finish_power_reader(self.stderr.as_mut().expect("stderr reader exists"));
+        let (stdout, _stderr) = tokio::join!(stdout, stderr);
+        stdout
+    }
+}
+
+impl Drop for PowerReaderTasks {
+    fn drop(&mut self) {
+        if let Some(stdout) = &self.stdout {
+            stdout.abort();
+        }
+        if let Some(stderr) = &self.stderr {
+            stderr.abort();
+        }
+    }
+}
+
+async fn wait_power_command(
+    child: &mut tokio::process::Child,
+    stop: &CancellationToken,
+) -> bool {
+    let deadline = Instant::now() + POWER_COMMAND_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) => {}
+            Err(_) => {
+                stop_power_command(child).await;
+                return false;
+            }
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            stop_power_command(child).await;
+            return false;
+        }
+        tokio::select! {
+            _ = stop.cancelled() => {
+                stop_power_command(child).await;
+                return false;
+            }
+            _ = tokio::time::sleep(remaining.min(Duration::from_millis(20))) => {}
+        }
+    }
+}
+
+/// Runs a short native helper without allowing it to retain a Tokio worker,
+/// leak a child process, or grow an unbounded output buffer.  The caller owns
+/// the cancellation token for its Host or desktop lifecycle.
+async fn run_power_command(
+    program: &str,
+    args: &[&str],
+    stop: &CancellationToken,
+) -> Option<Vec<u8>> {
+    if stop.is_cancelled() {
+        return None;
+    }
+    let mut child = tokio::process::Command::new(program)
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .ok()?;
+    let stdout = child.stdout.take()?;
+    let stderr = child.stderr.take()?;
+    let mut readers = PowerReaderTasks::new(
+        tokio::spawn(read_power_output(stdout)),
+        tokio::spawn(read_power_output(stderr)),
+    );
+    let status = wait_power_command(&mut child, stop).await;
+    let stdout = readers.collect().await;
+    if !status || stop.is_cancelled() {
+        return None;
+    }
+    stdout
+}
+
+fn snapshot_from_power_probe(probe: PowerProbe) -> HostPowerSnapshot {
+    HostPowerSnapshot {
         source: probe.source,
         idle: probe.idle,
         idle_seconds: probe.idle_seconds,
@@ -1519,76 +1912,57 @@ pub fn sample_local_power(previous: &HostPowerSnapshot) -> HostPowerSnapshot {
         low_power_mode: probe.low_power_mode,
         thermal_state: probe.thermal_state,
         speed_limit_percent: probe.speed_limit_percent,
+        desktop_processes: Vec::new(),
         stale: !probe.contact,
-        updated_at: at,
-    };
-    carry_forward_unobserved_power(previous, &mut snapshot);
-    snapshot
+        updated_at: now(),
+    }
 }
 
-/// The GPUI desktop uses the same native probe implementation as the Host,
-/// while retaining a source identity so the Host does not replace a fresh
-/// desktop observation with its own fallback sample.
-pub fn sample_desktop_power(previous: &HostPowerSnapshot) -> HostPowerSnapshot {
-    let mut snapshot = sample_local_power(previous);
+async fn sample_power_probe(stop: &CancellationToken) -> PowerProbe {
+    #[cfg(target_os = "linux")]
+    {
+        sample_linux_power(stop).await
+    }
+    #[cfg(target_os = "macos")]
+    {
+        sample_macos_power(stop).await
+    }
+    #[cfg(target_os = "windows")]
+    {
+        sample_windows_power(stop).await
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    {
+        let _ = stop;
+        PowerProbe::unknown(HostPowerSource::Unknown)
+    }
+}
+
+pub async fn sample_local_power(stop: &CancellationToken) -> HostPowerSnapshot {
+    snapshot_from_power_probe(sample_power_probe(stop).await)
+}
+
+/// Desktop sampling uses the same native observations as the Host, but marks
+/// the report so the Host can keep its own valid local observation authoritative
+/// when this publisher is stale.
+pub async fn sample_desktop_power(stop: &CancellationToken) -> HostPowerSnapshot {
+    let mut snapshot = sample_local_power(stop).await;
     snapshot.source = HostPowerSource::DesktopMain;
     snapshot
 }
 
-fn carry_forward_unobserved_power(previous: &HostPowerSnapshot, next: &mut HostPowerSnapshot) {
-    if next.stale {
-        return;
-    }
-    if next.idle == BackgroundBooleanState::Unknown {
-        next.idle = previous.idle;
-        next.idle_seconds = previous.idle_seconds;
-    }
-    if next.locked == BackgroundBooleanState::Unknown {
-        next.locked = previous.locked;
-    }
-    if next.on_battery == BackgroundBooleanState::Unknown {
-        next.on_battery = previous.on_battery;
-    }
-    if next.low_power_mode == BackgroundBooleanState::Unknown {
-        next.low_power_mode = previous.low_power_mode;
-    }
-    if next.thermal_state == agent_domain::HostPowerThermalState::Unknown {
-        next.thermal_state = previous.thermal_state;
-    }
-    if next.speed_limit_percent.is_none() {
-        next.speed_limit_percent = previous.speed_limit_percent;
-    }
-}
-
-fn sample_linux_power() -> PowerProbe {
+async fn sample_linux_power(stop: &CancellationToken) -> PowerProbe {
     let mut probe = PowerProbe::unknown(HostPowerSource::NodeLinux);
-    let Ok(entries) = std::fs::read_dir("/sys/class/power_supply") else {
-        return probe;
-    };
-    probe.contact = true;
-    for entry in entries.filter_map(Result::ok) {
-        let status = std::fs::read_to_string(entry.path().join("status"))
-            .ok()
-            .map(|value| value.trim().to_ascii_lowercase());
-        match status.as_deref() {
-            Some("discharging") => probe.on_battery = BackgroundBooleanState::True,
-            Some("charging" | "full" | "not charging")
-                if probe.on_battery != BackgroundBooleanState::True =>
-            {
-                probe.on_battery = BackgroundBooleanState::False;
-            }
-            _ => {}
-        }
-    }
-    let idle = std::process::Command::new("xprintidle")
-        .stdin(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .output()
-        .ok()
-        .filter(|output| output.status.success())
-        .and_then(|output| String::from_utf8(output.stdout).ok())
-        .and_then(|output| output.trim().parse::<u64>().ok());
-    if let Some(idle_ms) = idle {
+    let (observed_power_supply, on_battery, speed_limit_percent) =
+        tokio::task::spawn_blocking(sample_linux_native_power)
+            .await
+            .unwrap_or((false, BackgroundBooleanState::Unknown, None));
+    probe.on_battery = on_battery;
+    if let Some(output) = run_power_command("xprintidle", &[], stop).await
+        && let Ok(output) = String::from_utf8(output)
+        && let Ok(idle_ms) = output.trim().parse::<u64>()
+    {
+        probe.contact = true;
         probe.idle_seconds = Some(idle_ms / 1_000);
         probe.idle = if idle_ms >= 60_000 {
             BackgroundBooleanState::True
@@ -1596,8 +1970,54 @@ fn sample_linux_power() -> PowerProbe {
             BackgroundBooleanState::False
         };
     }
-    probe.speed_limit_percent = linux_speed_limit_percent();
+    probe.speed_limit_percent = speed_limit_percent;
+    probe.contact = linux_power_contact(
+        observed_power_supply,
+        probe.idle,
+        probe.speed_limit_percent.is_some(),
+    );
     probe
+}
+
+fn linux_power_contact(
+    observed_power_supply: bool,
+    idle: BackgroundBooleanState,
+    speed_observed: bool,
+) -> bool {
+    observed_power_supply || idle != BackgroundBooleanState::Unknown || speed_observed
+}
+
+fn sample_linux_native_power() -> (bool, BackgroundBooleanState, Option<u8>) {
+    let Ok(entries) = std::fs::read_dir("/sys/class/power_supply") else {
+        return (false, BackgroundBooleanState::Unknown, None);
+    };
+    let mut observed_power_supply = false;
+    let mut power_supply_entries = false;
+    let mut on_battery = BackgroundBooleanState::Unknown;
+    for entry in entries.filter_map(Result::ok) {
+        power_supply_entries = true;
+        let status = std::fs::read_to_string(entry.path().join("status"))
+            .ok()
+            .map(|value| value.trim().to_ascii_lowercase());
+        match status.as_deref() {
+            Some("discharging") => {
+                observed_power_supply = true;
+                on_battery = BackgroundBooleanState::True;
+            }
+            Some("charging" | "full" | "not charging")
+                if on_battery != BackgroundBooleanState::True =>
+            {
+                observed_power_supply = true;
+                on_battery = BackgroundBooleanState::False;
+            }
+            _ => {}
+        }
+    }
+    (
+        observed_power_supply,
+        on_battery,
+        power_supply_entries.then(linux_speed_limit_percent).flatten(),
+    )
 }
 
 fn linux_speed_limit_percent() -> Option<u8> {
@@ -1628,43 +2048,51 @@ fn linux_speed_limit_percent() -> Option<u8> {
     (count > 0).then(|| (total / count as f64).round().clamp(0.0, 100.0) as u8)
 }
 
-fn sample_macos_power() -> PowerProbe {
+async fn sample_macos_power(stop: &CancellationToken) -> PowerProbe {
     let mut probe = PowerProbe::unknown(HostPowerSource::NodeMacosShell);
-    let battery = std::process::Command::new("/usr/bin/pmset")
-        .args(["-g", "batt"])
-        .stdin(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .output()
-        .ok();
-    if let Some(output) = battery.filter(|output| output.status.success()) {
-        probe.contact = true;
-        if let Ok(output) = String::from_utf8(output.stdout) {
-            probe.on_battery = parse_macos_battery_state(&output);
-        }
+    let (battery, therm, low_power, idle, lock, thermal_state) = tokio::join!(
+        run_power_command("/usr/bin/pmset", &["-g", "batt"], stop),
+        run_power_command("/usr/bin/pmset", &["-g", "therm"], stop),
+        run_power_command("/usr/bin/pmset", &["-g", "custom"], stop),
+        run_power_command("/usr/sbin/ioreg", &["-c", "IOHIDSystem", "-d", "4"], stop),
+        run_power_command("/usr/sbin/ioreg", &["-n", "Root", "-d", "1", "-a"], stop),
+        run_power_command(
+            "/usr/sbin/sysctl",
+            &["-n", "machdep.xcpm.cpu_thermal_level"],
+            stop,
+        ),
+    );
+    if let Some(output) = battery.and_then(|output| String::from_utf8(output).ok()) {
+        probe.on_battery = parse_macos_battery_state(&output);
+        probe.contact |= probe.on_battery != BackgroundBooleanState::Unknown;
     }
-    let thermal = std::process::Command::new("/usr/bin/pmset")
-        .args(["-g", "therm"])
-        .stdin(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .output()
-        .ok();
-    if let Some(output) = thermal.filter(|output| output.status.success())
-        && let Ok(output) = String::from_utf8(output.stdout)
-    {
-        probe.contact = true;
+    if let Some(output) = therm.and_then(|output| String::from_utf8(output).ok()) {
         probe.speed_limit_percent = parse_macos_speed_limit(&output);
+        probe.contact |= probe.speed_limit_percent.is_some();
     }
-    let low_power = std::process::Command::new("/usr/bin/pmset")
-        .args(["-g", "custom"])
-        .stdin(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .output()
-        .ok();
-    if let Some(output) = low_power.filter(|output| output.status.success())
-        && let Ok(output) = String::from_utf8(output.stdout)
-    {
-        probe.contact = true;
+    if let Some(output) = low_power.and_then(|output| String::from_utf8(output).ok()) {
         probe.low_power_mode = parse_macos_low_power(&output);
+        probe.contact |= probe.low_power_mode != BackgroundBooleanState::Unknown;
+    }
+    if let Some(output) = idle.and_then(|output| String::from_utf8(output).ok())
+        && let Some(idle_ns) = parse_macos_idle_nanoseconds(&output)
+    {
+        let idle_ms = idle_ns / 1_000_000;
+        probe.contact = true;
+        probe.idle_seconds = Some(idle_ms / 1_000);
+        probe.idle = if idle_ms >= 60_000 {
+            BackgroundBooleanState::True
+        } else {
+            BackgroundBooleanState::False
+        };
+    }
+    if let Some(output) = lock.and_then(|output| String::from_utf8(output).ok()) {
+        probe.locked = parse_macos_locked(&output);
+        probe.contact |= probe.locked != BackgroundBooleanState::Unknown;
+    }
+    if let Some(output) = thermal_state.and_then(|output| String::from_utf8(output).ok()) {
+        probe.thermal_state = parse_macos_thermal_state(&output);
+        probe.contact |= probe.thermal_state != agent_domain::HostPowerThermalState::Unknown;
     }
     probe
 }
@@ -1703,79 +2131,168 @@ fn parse_macos_low_power(output: &str) -> BackgroundBooleanState {
     }) else {
         return BackgroundBooleanState::Unknown;
     };
-    match value {
-        "1" | "true" | "on" => BackgroundBooleanState::True,
-        "0" | "false" | "off" => BackgroundBooleanState::False,
+    parse_boolean_state(value)
+}
+
+fn parse_boolean_state(value: &str) -> BackgroundBooleanState {
+    match value.trim().trim_matches(|character| character == '"' || character == '\'') {
+        "1" | "true" | "on" | "yes" | "Yes" => BackgroundBooleanState::True,
+        "0" | "false" | "off" | "no" | "No" => BackgroundBooleanState::False,
         _ => BackgroundBooleanState::Unknown,
     }
 }
 
-fn sample_windows_power() -> PowerProbe {
-    let mut probe = PowerProbe::unknown(HostPowerSource::NodeWindows);
-    let output = std::process::Command::new("powershell.exe")
-        .args([
-            "-NoLogo",
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            "(Get-CimInstance Win32_Battery | Select-Object -ExpandProperty BatteryStatus) -join ','",
-        ])
-        .stdin(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .output()
-        .ok();
-    if let Some(output) = output.filter(|output| output.status.success()) {
-        probe.contact = true;
-        if let Ok(output) = String::from_utf8(output.stdout) {
-            probe.on_battery = parse_windows_battery_state(&output);
+fn parse_macos_idle_nanoseconds(output: &str) -> Option<u64> {
+    output.lines().find_map(|line| {
+        let (name, value) = line.split_once('=')?;
+        name.contains("HIDIdleTime")
+            .then(|| {
+                value
+                    .trim()
+                    .trim_matches(|character| character == '"' || character == '\'')
+                    .parse::<u64>()
+                    .ok()
+            })
+            .flatten()
+    })
+}
+
+fn parse_macos_locked(output: &str) -> BackgroundBooleanState {
+    if let Some(state) = parse_macos_xml_boolean(output, "CGSSessionScreenIsLocked") {
+        return state;
+    }
+    output.lines().find_map(|line| {
+        let (name, value) = line.split_once('=')?;
+        let name = name.trim();
+        if !(name.contains("CGSSessionScreenIsLocked") || name.contains("ScreenIsLocked")) {
+            return None;
+        }
+        let state = parse_boolean_state(value);
+        (state != BackgroundBooleanState::Unknown).then_some(state)
+    })
+    .unwrap_or(BackgroundBooleanState::Unknown)
+}
+
+fn parse_macos_xml_boolean(output: &str, key: &str) -> Option<BackgroundBooleanState> {
+    let marker = format!("<key>{key}</key>");
+    let value = output.split_once(&marker)?.1;
+    let value = value.split("<key>").next().unwrap_or(value);
+    if value.contains("<true") {
+        Some(BackgroundBooleanState::True)
+    } else if value.contains("<false") {
+        Some(BackgroundBooleanState::False)
+    } else {
+        None
+    }
+}
+
+fn parse_macos_thermal_state(output: &str) -> agent_domain::HostPowerThermalState {
+    match output.trim().parse::<u32>() {
+        Ok(0) => agent_domain::HostPowerThermalState::Nominal,
+        Ok(1) => agent_domain::HostPowerThermalState::Fair,
+        Ok(2) => agent_domain::HostPowerThermalState::Serious,
+        Ok(_) => agent_domain::HostPowerThermalState::Critical,
+        Err(_) => agent_domain::HostPowerThermalState::Unknown,
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn sample_windows_native_power(probe: &mut PowerProbe) {
+    use windows_sys::Win32::{
+        System::{
+            Power::{GetSystemPowerStatus, SYSTEM_POWER_STATUS},
+            SystemInformation::GetTickCount,
+            StationsAndDesktops::{
+                CloseDesktop, GetUserObjectInformationW, OpenInputDesktop,
+                DESKTOP_SWITCHDESKTOP, HDESK, UOI_NAME,
+            },
+        },
+        UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO},
+    };
+
+    unsafe {
+        let mut status = SYSTEM_POWER_STATUS::default();
+        if GetSystemPowerStatus(&mut status) != 0 {
+            probe.on_battery = parse_windows_ac_line_status(status.ACLineStatus);
+            probe.low_power_mode = parse_windows_system_status(status.SystemStatusFlag);
+            probe.contact = probe.on_battery != BackgroundBooleanState::Unknown
+                || probe.low_power_mode != BackgroundBooleanState::Unknown;
+        }
+
+        let mut last_input = LASTINPUTINFO {
+            cbSize: std::mem::size_of::<LASTINPUTINFO>() as u32,
+            dwTime: 0,
+        };
+        if GetLastInputInfo(&mut last_input) != 0 {
+            probe.contact = true;
+            let idle_ms = GetTickCount().wrapping_sub(last_input.dwTime) as u64;
+            probe.idle_seconds = Some(idle_ms / 1_000);
+            probe.idle = if idle_ms >= 60_000 {
+                BackgroundBooleanState::True
+            } else {
+                BackgroundBooleanState::False
+            };
+        }
+
+        let desktop: HDESK = OpenInputDesktop(0, 0, DESKTOP_SWITCHDESKTOP);
+        if !desktop.is_null() {
+            let mut name = [0u16; 64];
+            let mut needed = 0u32;
+            if GetUserObjectInformationW(
+                desktop,
+                UOI_NAME,
+                name.as_mut_ptr().cast(),
+                (name.len() * std::mem::size_of::<u16>()) as u32,
+                &mut needed,
+            ) != 0
+            {
+                let length = name.iter().position(|character| *character == 0).unwrap_or(name.len());
+                probe.locked = parse_windows_input_desktop_name(&name[..length]);
+                probe.contact |= probe.locked != BackgroundBooleanState::Unknown;
+            }
+            let _ = CloseDesktop(desktop);
         }
     }
-    let speed = std::process::Command::new("powershell.exe")
-        .args([
-            "-NoLogo",
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            "(Get-CimInstance Win32_Processor | ForEach-Object { if ($_.MaxClockSpeed -gt 0) { $_.CurrentClockSpeed * 100 / $_.MaxClockSpeed } }) -join ','",
-        ])
-        .stdin(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .output()
-        .ok();
-    if let Some(output) = speed.filter(|output| output.status.success())
-        && let Ok(output) = String::from_utf8(output.stdout)
-    {
-        probe.contact = true;
-        probe.speed_limit_percent = parse_windows_speed_limit(&output);
-    }
-    probe
 }
 
-fn parse_windows_battery_state(output: &str) -> BackgroundBooleanState {
-    let mut saw_battery = false;
-    let mut discharging = false;
-    for value in output.split(',').filter_map(|value| value.trim().parse::<u32>().ok()) {
-        saw_battery = true;
-        discharging |= matches!(value, 1 | 4 | 5 | 11);
-    }
-    if !saw_battery {
-        BackgroundBooleanState::Unknown
-    } else if discharging {
-        BackgroundBooleanState::True
-    } else {
-        BackgroundBooleanState::False
+#[cfg(target_os = "windows")]
+async fn sample_windows_power(_stop: &CancellationToken) -> PowerProbe {
+    tokio::task::spawn_blocking(|| {
+        let mut probe = PowerProbe::unknown(HostPowerSource::NodeWindows);
+        sample_windows_native_power(&mut probe);
+        probe
+    })
+    .await
+    .unwrap_or_else(|_| PowerProbe::unknown(HostPowerSource::NodeWindows))
+}
+
+#[cfg(not(target_os = "windows"))]
+async fn sample_windows_power(_stop: &CancellationToken) -> PowerProbe {
+    PowerProbe::unknown(HostPowerSource::NodeWindows)
+}
+
+fn parse_windows_ac_line_status(value: u8) -> BackgroundBooleanState {
+    match value {
+        0 => BackgroundBooleanState::True,
+        1 => BackgroundBooleanState::False,
+        _ => BackgroundBooleanState::Unknown,
     }
 }
 
-fn parse_windows_speed_limit(output: &str) -> Option<u8> {
-    let values = output
-        .split(',')
-        .filter_map(|value| value.trim().parse::<f64>().ok())
-        .filter(|value| value.is_finite() && *value >= 0.0);
-    let (total, count) = values.fold((0.0, 0u64), |(total, count), value| {
-        (total + value.clamp(0.0, 100.0), count + 1)
-    });
-    (count > 0).then(|| (total / count as f64).round() as u8)
+fn parse_windows_system_status(value: u8) -> BackgroundBooleanState {
+    match value {
+        0 => BackgroundBooleanState::False,
+        1 => BackgroundBooleanState::True,
+        _ => BackgroundBooleanState::Unknown,
+    }
+}
+
+fn parse_windows_input_desktop_name(name: &[u16]) -> BackgroundBooleanState {
+    match name {
+        [87, 105, 110, 108, 111, 103, 111, 110] => BackgroundBooleanState::True,
+        [68, 101, 102, 97, 117, 108, 116] => BackgroundBooleanState::False,
+        _ => BackgroundBooleanState::Unknown,
+    }
 }
 
 #[cfg(test)]
@@ -1803,13 +2320,120 @@ mod tests {
         let snapshot = HostPowerSnapshot {
             source: HostPowerSource::DesktopMain,
             stale: false,
+            on_battery: BackgroundBooleanState::False,
             updated_at: at.clone(),
             ..unknown_power(at)
         };
-        owner.report_power(snapshot).await;
+        owner.report_power(snapshot, true).await;
         let telemetry = owner.resources.snapshot(owner.power.snapshot().await);
         assert_eq!(telemetry.health.desktop.status, ResourceSourceStatus::Healthy);
         assert_eq!(telemetry.health.desktop.last_error, None);
+    }
+
+    #[tokio::test]
+    async fn stale_desktop_power_cannot_mask_a_fresh_host_observation() {
+        let owner = BackgroundOwner::new(std::env::temp_dir());
+        let at = now();
+        let host = HostPowerSnapshot {
+            source: HostPowerSource::NodeLinux,
+            stale: false,
+            updated_at: at.clone(),
+            ..unknown_power(at.clone())
+        };
+        owner.power.report(host).await;
+        owner
+            .report_power(HostPowerSnapshot {
+                source: HostPowerSource::DesktopMain,
+                stale: true,
+                updated_at: Timestamp::from_millis(at.millis() + 1).unwrap(),
+                ..unknown_power(at)
+            }, true)
+            .await;
+        assert_eq!(owner.power.snapshot().await.source, HostPowerSource::NodeLinux);
+        assert!(!owner.power.snapshot().await.stale);
+    }
+
+    #[tokio::test]
+    async fn remote_desktop_publisher_is_rejected_by_the_host_owner() {
+        let owner = BackgroundOwner::new(std::env::temp_dir());
+        let at = now();
+        owner
+            .report_power(
+                HostPowerSnapshot {
+                    source: HostPowerSource::DesktopMain,
+                    stale: false,
+                    updated_at: Timestamp::from_millis(at.millis() + 86_400_000).unwrap(),
+                    ..unknown_power(at)
+                },
+                false,
+            )
+            .await;
+        let snapshot = owner.power.snapshot().await;
+        assert_eq!(snapshot.source, HostPowerSource::Unknown);
+        assert!(snapshot.stale);
+    }
+
+    #[tokio::test]
+    async fn remote_native_power_report_is_rejected_even_with_a_host_source_label() {
+        let owner = BackgroundOwner::new(std::env::temp_dir());
+        let at = now();
+        owner
+            .report_power(
+                HostPowerSnapshot {
+                    source: HostPowerSource::NodeLinux,
+                    stale: false,
+                    on_battery: BackgroundBooleanState::True,
+                    updated_at: at.clone(),
+                    ..unknown_power(at)
+                },
+                false,
+            )
+            .await;
+        let snapshot = owner.power.snapshot().await;
+        assert_eq!(snapshot.source, HostPowerSource::Unknown);
+        assert!(snapshot.stale);
+    }
+
+    #[tokio::test]
+    async fn host_normalizes_future_power_timestamps_and_keeps_desktop_health_scoped() {
+        let owner = BackgroundOwner::new(std::env::temp_dir());
+        let now_before = now().millis();
+        let future = Timestamp::from_millis(now_before + 86_400_000).unwrap();
+        owner
+            .report_power(
+                HostPowerSnapshot {
+                    source: HostPowerSource::NodeLinux,
+                    stale: false,
+                    updated_at: future,
+                    ..unknown_power(Timestamp::from_millis(now_before).unwrap())
+                },
+                true,
+            )
+            .await;
+        let stored = owner.power.snapshot().await;
+        assert!(stored.updated_at.millis() >= now_before);
+        assert!(stored.updated_at.millis() < now_before + 10_000);
+        assert_eq!(owner.resources.snapshot(stored).health.desktop.status, ResourceSourceStatus::Unavailable);
+    }
+
+    #[tokio::test]
+    async fn node_power_reports_cannot_publish_desktop_process_rows() {
+        let owner = BackgroundOwner::new(std::env::temp_dir());
+        let at = now();
+        let monitor = DesktopProcessMonitor::new();
+        owner
+            .report_power(
+                HostPowerSnapshot {
+                    source: HostPowerSource::NodeLinux,
+                    stale: false,
+                    desktop_processes: monitor.sample(),
+                    updated_at: at.clone(),
+                    ..unknown_power(at)
+                },
+                true,
+            )
+            .await;
+        assert!(owner.power.snapshot().await.desktop_processes.is_empty());
     }
 
     #[tokio::test]
@@ -1941,6 +2565,50 @@ mod tests {
         let resources = owner.host_resources();
         assert!(resources.usable_for_load_balancing());
         assert!(snapshot.health.scanned_process_count >= snapshot.processes.len() as u64);
+        assert!(snapshot.processes.len() <= RESOURCE_PROCESS_LIMIT);
+        assert!(snapshot
+            .processes
+            .iter()
+            .all(|process| process.name.chars().count() <= RESOURCE_TEXT_LIMIT));
+        let history = owner.state.lock().unwrap();
+        assert!(history.snapshots.len() <= RESOURCE_HISTORY_LIMIT);
+        assert!(resource_history_entries(&history.snapshots) <= RESOURCE_HISTORY_MAX_ENTRIES);
+        assert!(resource_history_bytes(&history.snapshots) <= RESOURCE_HISTORY_MAX_BYTES);
+    }
+
+    #[test]
+    fn desktop_process_monitor_reports_the_gpui_root_process() {
+        let monitor = DesktopProcessMonitor::new();
+        let processes = monitor.sample();
+        assert!(processes.iter().any(|process| {
+            process.identity.pid == std::process::id()
+                && process.category == ResourceProcessCategory::Unknown
+        }));
+    }
+
+    #[tokio::test]
+    async fn desktop_process_rows_are_retained_when_host_power_is_local() {
+        let owner = BackgroundOwner::new(std::env::temp_dir());
+        let monitor = DesktopProcessMonitor::new();
+        let at = now();
+        owner
+            .report_power(
+                HostPowerSnapshot {
+                    source: HostPowerSource::DesktopMain,
+                    stale: false,
+                    on_battery: BackgroundBooleanState::False,
+                    desktop_processes: monitor.sample(),
+                    updated_at: at.clone(),
+                    ..unknown_power(at)
+                },
+                true,
+            )
+            .await;
+        let telemetry = owner.resources.snapshot(owner.power.snapshot().await);
+        assert!(telemetry
+            .processes
+            .iter()
+            .any(|process| process.category == ResourceProcessCategory::Unknown));
     }
 
     #[test]
@@ -1980,11 +2648,6 @@ mod tests {
             BackgroundBooleanState::Unknown
         );
         assert_eq!(
-            parse_windows_battery_state(""),
-            BackgroundBooleanState::Unknown
-        );
-        assert_eq!(parse_windows_speed_limit("50, 75\n"), Some(63));
-        assert_eq!(
             parse_macos_speed_limit("CPU_Speed_Limit = 65\n"),
             Some(65)
         );
@@ -1994,40 +2657,115 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn desktop_power_probe_marks_gpui_publisher_source_without_carrying_unknown_fields() {
+        let stop = CancellationToken::new();
+        let snapshot = sample_desktop_power(&stop).await;
+        assert_eq!(snapshot.source, HostPowerSource::DesktopMain);
+        assert!(snapshot.updated_at.millis() > 0);
+    }
+
     #[test]
-    fn power_sampling_keeps_known_event_state_when_a_probe_lacks_that_field() {
-        let at = Timestamp::from_millis(10).unwrap();
-        let previous = HostPowerSnapshot {
-            locked: BackgroundBooleanState::True,
-            low_power_mode: BackgroundBooleanState::True,
-            thermal_state: agent_domain::HostPowerThermalState::Serious,
-            speed_limit_percent: Some(65),
+    fn platform_power_parsers_report_native_observations_without_defaults() {
+        assert!(!linux_power_contact(
+            false,
+            BackgroundBooleanState::Unknown,
+            false
+        ));
+        assert!(linux_power_contact(
+            true,
+            BackgroundBooleanState::Unknown,
+            false
+        ));
+        assert_eq!(
+            parse_macos_idle_nanoseconds("\"HIDIdleTime\" = 60000000000"),
+            Some(60_000_000_000)
+        );
+        assert_eq!(
+            parse_macos_locked(
+                "<?xml version=\"1.0\"?><plist><dict><key>CGSSessionScreenIsLocked</key><true/></dict></plist>",
+            ),
+            BackgroundBooleanState::True
+        );
+        assert_eq!(
+            parse_macos_locked("\"CGSSessionScreenIsLocked\" = Yes"),
+            BackgroundBooleanState::True
+        );
+        assert_eq!(
+            parse_macos_locked("no lock field"),
+            BackgroundBooleanState::Unknown
+        );
+        assert_eq!(
+            parse_macos_thermal_state("2"),
+            agent_domain::HostPowerThermalState::Serious
+        );
+        assert_eq!(
+            parse_macos_thermal_state("unavailable"),
+            agent_domain::HostPowerThermalState::Unknown
+        );
+        assert_eq!(
+            parse_boolean_state("unknown"),
+            BackgroundBooleanState::Unknown
+        );
+        assert_eq!(
+            parse_windows_ac_line_status(0),
+            BackgroundBooleanState::True
+        );
+        assert_eq!(
+            parse_windows_system_status(1),
+            BackgroundBooleanState::True
+        );
+        assert_eq!(
+            parse_windows_input_desktop_name(&[87, 105, 110, 108, 111, 103, 111, 110]),
+            BackgroundBooleanState::True
+        );
+        assert_eq!(
+            parse_windows_input_desktop_name(&[68, 101, 102, 97, 117, 108, 116]),
+            BackgroundBooleanState::False
+        );
+    }
+
+    #[test]
+    fn desktop_freshness_requires_a_known_power_field_and_host_timestamp() {
+        let at = now();
+        let unknown = HostPowerSnapshot {
+            source: HostPowerSource::DesktopMain,
+            stale: false,
+            updated_at: at.clone(),
             ..unknown_power(at.clone())
         };
-        let mut next = HostPowerSnapshot {
-            source: HostPowerSource::NodeLinux,
-            stale: false,
-            updated_at: Timestamp::from_millis(20).unwrap(),
-            ..unknown_power(at)
+        assert!(!desktop_power_sample_is_fresh(&unknown, &at));
+        let observed = HostPowerSnapshot {
+            on_battery: BackgroundBooleanState::False,
+            ..unknown
         };
-        carry_forward_unobserved_power(&previous, &mut next);
-        assert_eq!(next.locked, BackgroundBooleanState::True);
-        assert_eq!(next.low_power_mode, BackgroundBooleanState::True);
-        assert_eq!(next.thermal_state, agent_domain::HostPowerThermalState::Serious);
-        assert_eq!(next.speed_limit_percent, Some(65));
+        assert!(desktop_power_sample_is_fresh(&observed, &at));
+        let future = Timestamp::from_millis(at.millis() + 1).unwrap();
+        assert!(!desktop_power_sample_is_fresh(
+            &HostPowerSnapshot {
+                updated_at: future,
+                ..observed
+            },
+            &at,
+        ));
     }
 
-    #[test]
-    fn desktop_power_probe_marks_gpui_publisher_source() {
-        let at = Timestamp::from_millis(10).unwrap();
-        let snapshot = sample_desktop_power(&unknown_power(at));
-        assert_eq!(snapshot.source, HostPowerSource::DesktopMain);
-    }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn power_command_cancellation_and_output_limits_cleanup_the_child() {
+        let stop = CancellationToken::new();
+        stop.cancel();
+        assert!(run_power_command("sh", &["-c", "printf ignored"], &stop)
+            .await
+            .is_none());
 
-    #[test]
-    fn darwin_memory_parser_requires_all_reclaimable_pages() {
-        let output = "Mach Virtual Memory Statistics: (page size of 4096 bytes)\nPages free: 2.\nPages inactive: 3.\nPages speculative: 1.\n";
-        assert_eq!(darwin_available_memory(output), Some(24_576));
-        assert_eq!(darwin_available_memory("Pages free: 2."), None);
+        let stop = CancellationToken::new();
+        assert!(run_power_command(
+            "sh",
+            &["-c", "head -c 20000 /dev/zero"],
+            &stop,
+        )
+        .await
+        .is_none());
     }
 }

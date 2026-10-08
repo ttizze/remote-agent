@@ -66,13 +66,15 @@ impl Default for HostPowerSource {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HostPowerSnapshot {
     pub source: HostPowerSource,
     pub idle: BackgroundBooleanState,
     pub idle_seconds: Option<u64>,
     pub locked: BackgroundBooleanState,
+    /// A false value is an observed awake state only when `stale` is false;
+    /// stale snapshots do not claim that suspend was observed.
     pub suspended: bool,
     pub on_battery: BackgroundBooleanState,
     pub low_power_mode: BackgroundBooleanState,
@@ -80,6 +82,10 @@ pub struct HostPowerSnapshot {
     /// The desktop power publisher supplies the OS thermal speed limit when
     /// it exposes one.  A missing value is different from a 100% limit.
     pub speed_limit_percent: Option<u8>,
+    /// Processes sampled by the supervised local desktop.  The Host keeps
+    /// this alongside its own process tree because the desktop is a sibling
+    /// process, not a Host child.
+    pub desktop_processes: Vec<ResourceProcess>,
     pub stale: bool,
     pub updated_at: Timestamp,
 }
@@ -95,6 +101,7 @@ impl HostPowerSnapshot {
             low_power_mode: BackgroundBooleanState::Unknown,
             thermal_state: HostPowerThermalState::Unknown,
             speed_limit_percent: None,
+            desktop_processes: Vec::new(),
             stale: true,
             updated_at,
         }
@@ -490,7 +497,7 @@ pub fn compute_background_snapshot(
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BackgroundPolicySnapshot {
     /// The normalized settings currently used by the Host's background owners.
@@ -820,6 +827,11 @@ fn signalable_category(category: ResourceProcessCategory) -> bool {
         ResourceProcessCategory::ServerChild
             | ResourceProcessCategory::ProviderRoot
             | ResourceProcessCategory::TerminalRoot
+            | ResourceProcessCategory::ElectronMain
+            | ResourceProcessCategory::ElectronRenderer
+            | ResourceProcessCategory::ElectronGpu
+            | ResourceProcessCategory::ElectronUtility
+            | ResourceProcessCategory::Unknown
     )
 }
 
@@ -926,6 +938,11 @@ pub fn project_process_resource_history(
                     | ResourceProcessCategory::ServerChild
                     | ResourceProcessCategory::ProviderRoot
                     | ResourceProcessCategory::TerminalRoot
+                    | ResourceProcessCategory::ElectronMain
+                    | ResourceProcessCategory::ElectronRenderer
+                    | ResourceProcessCategory::ElectronGpu
+                    | ResourceProcessCategory::ElectronUtility
+                    | ResourceProcessCategory::Unknown
             )
         })
         .map(|entry| ProcessResourceEntry {
