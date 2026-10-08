@@ -43,10 +43,29 @@ class MainActivity : ComponentActivity() {
         super.onResume()
         localNetworkGranted =
             checkSelfPermission(Manifest.permission.ACCESS_LOCAL_NETWORK) == PackageManager.PERMISSION_GRANTED
-        // Reconcile notification permission changes made in system settings
-        // and replay every retained Host registration after a background
-        // interval. This does not request permission by itself.
+        LocalNotifications.permissionResult(
+            this,
+            android.os.Build.VERSION.SDK_INT < 33 ||
+                checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED,
+        )
+        requestNotificationPermissionIfNeeded()
+        // Reconcile notification permission changes made in system settings and
+        // replay every retained Host registration after a background interval.
         model.refreshPushRegistration()
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray,
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == 1001) {
+            LocalNotifications.permissionResult(
+                this,
+                grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED,
+            )
+        }
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
@@ -119,6 +138,7 @@ class MainActivity : ComponentActivity() {
             Intent.ACTION_VIEW if intent.data?.scheme == "remote-agent" -> {
                 when (intent.data?.host) {
                     "new" -> model.newThreadFromShortcut()
+                    "thread" -> intent.data?.pathSegments?.firstOrNull()?.let(model::openThread)
                     "share" -> {
                         val uri = intent.data ?: return
                         val text = uri.getQueryParameter("text").orEmpty()

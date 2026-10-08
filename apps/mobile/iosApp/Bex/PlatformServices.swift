@@ -9,34 +9,83 @@ import UserNotifications
 
 enum LocalNotifications {
     private static var authorized: Bool?
+    private struct Pending {
+        let title: String
+        let body: String
+        let sound: Bool
+        let threadId: String?
+        let kind: String?
+        let soundKind: String?
+        let badge: Bool
+    }
+    private static var pending: [Pending] = []
 
-    private static func schedule(title: String, body: String, sound: Bool) {
+    private static func schedule(_ pendingRequest: Pending) {
         let content = UNMutableNotificationContent()
-        content.title = title
-        content.body = body
-        content.sound = sound ? .default : nil
-        content.badge = 1
+        content.title = pendingRequest.title
+        content.body = pendingRequest.body
+        content.sound = pendingRequest.sound ? .default : nil
+        content.badge = pendingRequest.badge ? 1 : nil
+        if let threadId = pendingRequest.threadId {
+            content.threadIdentifier = threadId
+            var userInfo: [AnyHashable: Any] = [
+                "threadId": threadId,
+                "deeplink": "remote-agent://thread/\(threadId)"
+            ]
+            if let kind = pendingRequest.kind { userInfo["kind"] = kind }
+            if let soundKind = pendingRequest.soundKind { userInfo["soundKind"] = soundKind }
+            content.userInfo = userInfo
+        }
         let trigger = UNTimeIntervalNotificationTrigger(timeInterval: 0.1, repeats: false)
-        let request = UNNotificationRequest(
+        let notificationRequest = UNNotificationRequest(
             identifier: "remoteagent.local.\(UUID().uuidString)", content: content, trigger: trigger
         )
-        UNUserNotificationCenter.current().add(request)
+        UNUserNotificationCenter.current().add(notificationRequest)
     }
 
-    static func deliver(title: String, body: String, sound: Bool) {
+    static func deliver(
+        title: String,
+        body: String,
+        sound: Bool,
+        threadId: String? = nil,
+        badge: Bool = true,
+        kind: String? = nil,
+        soundKind: String? = nil
+    ) {
+        let request = Pending(
+            title: title, body: body, sound: sound, threadId: threadId,
+            kind: kind, soundKind: soundKind, badge: badge
+        )
         if authorized == true {
-            schedule(title: title, body: body, sound: sound)
+            schedule(request)
             return
         }
+        pending.removeAll { $0.threadId == threadId }
+        pending.append(request)
         guard authorized == nil else { return }
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) {
             granted, _ in
             DispatchQueue.main.async {
                 Self.authorized = granted
-                guard granted else { return }
-                Self.schedule(title: title, body: body, sound: sound)
+                Self.flushPendingIfAuthorized()
             }
         }
+    }
+
+    static func refreshAuthorization() {
+        UNUserNotificationCenter.current().getNotificationSettings { settings in
+            DispatchQueue.main.async {
+                Self.authorized = settings.authorizationStatus == .authorized
+                Self.flushPendingIfAuthorized()
+            }
+        }
+    }
+
+    private static func flushPendingIfAuthorized() {
+        guard authorized == true else { return }
+        let requests = pending
+        pending.removeAll()
+        requests.forEach(schedule)
     }
 
     static func playSound() {

@@ -42,6 +42,8 @@ pub(super) struct GeneralState {
     browser_days_value: Option<(SettingsScope, u32)>,
     logs_days: Entity<InputState>,
     logs_days_value: Option<(SettingsScope, u32)>,
+    project_base: Entity<InputState>,
+    project_base_value: Option<(SettingsScope, String)>,
     folder: Entity<InputState>,
     folder_value: Option<String>,
     copy_paths: Entity<InputState>,
@@ -55,6 +57,7 @@ impl GeneralState {
         let storage_days = cx.new(|cx| InputState::new(window, cx));
         let browser_days = cx.new(|cx| InputState::new(window, cx));
         let logs_days = cx.new(|cx| InputState::new(window, cx));
+        let project_base = cx.new(|cx| InputState::new(window, cx));
         let folder = cx.new(|cx| InputState::new(window, cx));
         let copy_paths = cx.new(|cx| InputState::new(window, cx).placeholder(".env, .env.local"));
         let subscriptions = vec![
@@ -193,6 +196,24 @@ impl GeneralState {
                     }
                 },
             ),
+            cx.subscribe_in(
+                &project_base,
+                window,
+                |view, input, event: &InputEvent, _, cx| {
+                    let Some(scope) = view.settings_scope() else {
+                        return;
+                    };
+                    if matches!(event, InputEvent::Blur | InputEvent::PressEnter { .. }) {
+                        view.apply_setting(
+                            &scope,
+                            SettingId::AddProjectBaseDirectory,
+                            SettingValue::Text {
+                                value: input.read(cx).value().trim().to_owned(),
+                            },
+                        );
+                    }
+                },
+            ),
             cx.subscribe_in(&folder, window, |view, input, event: &InputEvent, _, cx| {
                 if matches!(event, InputEvent::Blur | InputEvent::PressEnter { .. }) {
                     let directory = input.read(cx).value().trim().to_owned();
@@ -226,6 +247,8 @@ impl GeneralState {
             browser_days_value: None,
             logs_days,
             logs_days_value: None,
+            project_base,
+            project_base_value: None,
             folder,
             folder_value: None,
             copy_paths,
@@ -418,6 +441,7 @@ impl Desktop {
         self.sync_storage_days_field(scope, sections, window, cx);
         self.sync_browser_days_field(scope, sections, window, cx);
         self.sync_logs_days_field(scope, sections, window, cx);
+        self.sync_project_base_field(scope, sections, window, cx);
         sections
             .iter()
             .map(|settings_section| {
@@ -568,6 +592,36 @@ impl Desktop {
         }
     }
 
+    fn sync_project_base_field(
+        &mut self,
+        scope: &SettingsScope,
+        sections: &[SettingsSection],
+        window: &mut Window,
+        cx: &mut Context<Desktop>,
+    ) {
+        let Some(value) = sections
+            .iter()
+            .flat_map(|section| &section.rows)
+            .find_map(|row| match &row.control {
+                SettingControl::Text { value, .. }
+                    if row.id == SettingId::AddProjectBaseDirectory =>
+                {
+                    Some(value.clone())
+                }
+                _ => None,
+            })
+        else {
+            return;
+        };
+        let shown = Some((scope.clone(), value.clone()));
+        if self.settings.general.project_base_value != shown {
+            self.settings.general.project_base_value = shown;
+            self.settings.general.project_base.update(cx, |input, cx| {
+                input.set_value(value, window, cx)
+            });
+        }
+    }
+
     fn render_setting_row(
         &mut self,
         scope: &SettingsScope,
@@ -644,6 +698,11 @@ impl Desktop {
                     .aria_label(row.title.clone())
                     .into_any_element()
             }
+            SettingControl::Text { .. } => Input::new(&self.settings.general.project_base)
+                .small()
+                .w(px(280.))
+                .aria_label(row.title.clone())
+                .into_any_element(),
             SettingControl::Model {
                 model_label,
                 traits_label,

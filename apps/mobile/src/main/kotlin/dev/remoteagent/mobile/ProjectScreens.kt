@@ -49,6 +49,9 @@ import dev.remoteagent.core.AddProjectTarget
 import dev.remoteagent.core.FolderBrowserView
 import dev.remoteagent.core.Intent
 import dev.remoteagent.core.ProjectPickerEmpty
+import dev.remoteagent.core.SettingControl
+import dev.remoteagent.core.SettingId
+import dev.remoteagent.core.SettingsScope
 import dev.remoteagent.core.addProjectInitialQuery
 
 /** "Choose project": "No project", the projects, or what to do when there are none. */
@@ -204,7 +207,14 @@ internal fun AddProjectScreen(model: AndroidAppModel) {
 @Composable
 internal fun LocalFolderScreen(model: AndroidAppModel) {
     val colors = AppTheme.colors
-    var path by remember { mutableStateOf(addProjectInitialQuery(null)) }
+    val configuredBase = model.snapshot.settings(SettingsScope.Host).sections
+        .flatMap { it.rows }
+        .firstOrNull { it.id == SettingId.AddProjectBaseDirectory }
+        ?.control
+        ?.let { it as? SettingControl.Text }
+        ?.value
+        ?.takeIf(String::isNotBlank)
+    var path by remember(configuredBase) { mutableStateOf(addProjectInitialQuery(configuredBase)) }
     var error by remember { mutableStateOf<String?>(null) }
     // The folder whose listing failed, and why.
     var failed by remember { mutableStateOf<Pair<String, String>?>(null) }

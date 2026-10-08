@@ -4,7 +4,7 @@ use super::{
     ProjectSettingKey, SettingChange, SettingChoice, SettingControl, SettingId, SettingSource,
     SettingValue, SettingsRow, SettingsScope, choice,
     registry::{Context, Section},
-    row, section, update,
+    resettable_for, row, section, update,
 };
 use crate::{
     models::HostSettings,
@@ -64,7 +64,10 @@ fn runtime_mode_choices() -> Vec<SettingChoice> {
 
 fn start_from_origin_row(on: bool, source: Option<SettingSource>) -> SettingsRow {
     SettingsRow {
-        resettable: on != HostSettings::default().new_worktrees_start_from_origin,
+        resettable: resettable_for(
+            source,
+            on != HostSettings::default().new_worktrees_start_from_origin,
+        ),
         source,
         ..row(
             SettingId::StartFromOrigin,

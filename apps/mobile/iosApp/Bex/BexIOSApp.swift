@@ -15,7 +15,13 @@ struct BexIOSApp: App {
                 .onReceive(NotificationCenter.default.publisher(for: .remoteAgentShortcut)) { notification in
                     if notification.userInfo?["type"] as? String == "new-thread" { model.handleShortcut() }
                 }
+                .onReceive(NotificationCenter.default.publisher(for: .remoteAgentNotificationThread)) { notification in
+                    guard let threadId = notification.userInfo?["threadId"] as? String,
+                          let url = URL(string: "remote-agent://thread/\(threadId)") else { return }
+                    model.handleSurfaceURL(url)
+                }
                 .onAppear {
+                    LocalNotifications.refreshAuthorization()
                     model.ingestIncomingShareHandoffs()
                     if AgentPushCenter.takePendingShortcut() == "new-thread" { model.handleShortcut() }
                     model.setActivityUpdater { [weak pushCenter] states in

@@ -35,6 +35,17 @@ impl Default for PreviewAppearance {
     }
 }
 
+/// Where a clicked link opens on a device with an in-app Preview surface.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BrowserLinkTarget {
+    /// The operating system's default browser.
+    #[default]
+    System,
+    /// A tab in the in-app Preview surface.
+    App,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum PreviewViewportPreset {

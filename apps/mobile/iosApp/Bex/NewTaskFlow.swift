@@ -24,6 +24,9 @@ struct NewTaskFlow: View {
             if draftOpen {
                 path = [model.snapshot.selectedProjectId() ?? "chats"]
             }
+            if projectPath.isEmpty {
+                projectPath = configuredProjectBaseDirectory() ?? ""
+            }
         }
         .onChange(of: model.selectedThreadId) { _, thread in
             if let thread {
@@ -79,7 +82,7 @@ struct NewTaskFlow: View {
             }
         }
         .alert("Add project", isPresented: $adding) {
-            TextField("Absolute path on the environment", text: $projectPath)
+            TextField(configuredProjectBaseDirectory() ?? "Absolute path on the environment", text: $projectPath)
                 .textInputAutocapitalization(.never).autocorrectionDisabled()
             Button("Add") {
                 model.perform(.addProject(path: projectPath))
@@ -96,6 +99,16 @@ struct NewTaskFlow: View {
             model.openNewThread(projectId: project)
         }
         path = [project ?? "chats"]
+    }
+
+    private func configuredProjectBaseDirectory() -> String? {
+        model.snapshot.settings(scope: .host).sections
+            .flatMap(\.rows)
+            .first(where: { $0.id == .addProjectBaseDirectory })
+            .flatMap { row in
+                guard case let .text(value, _) = row.control else { return nil }
+                return value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : value
+            }
     }
 }
 

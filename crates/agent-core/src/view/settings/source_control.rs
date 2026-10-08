@@ -3,7 +3,7 @@ use super::{
     ProjectSettingKey, SettingChange, SettingChoice, SettingControl, SettingId, SettingSource,
     SettingValue, SettingsRow, SettingsScope, choice,
     registry::{Context, Section},
-    row, section, update,
+    resettable_for, row, section, update,
 };
 use crate::models::HostSettings;
 use agent_domain::BranchNamingMode;
@@ -75,7 +75,10 @@ fn merge_choices() -> Vec<SettingChoice> {
 }
 fn merge_row(method: Option<PullRequestMergeMethod>, source: Option<SettingSource>) -> SettingsRow {
     SettingsRow {
-        resettable: method != HostSettings::default().pull_request_merge_method,
+        resettable: resettable_for(
+            source,
+            method != HostSettings::default().pull_request_merge_method,
+        ),
         source,
         ..row(
             SettingId::PullRequestMergeMethod,
@@ -90,7 +93,7 @@ fn merge_row(method: Option<PullRequestMergeMethod>, source: Option<SettingSourc
 }
 fn auto_pull_row(on: bool, source: Option<SettingSource>) -> SettingsRow {
     SettingsRow {
-        resettable: on != HostSettings::default().default_auto_pull,
+        resettable: resettable_for(source, on != HostSettings::default().default_auto_pull),
         source,
         ..row(
             SettingId::DefaultAutoPull,
@@ -102,7 +105,7 @@ fn auto_pull_row(on: bool, source: Option<SettingSource>) -> SettingsRow {
 }
 fn branch_row(mode: BranchNamingMode, source: Option<SettingSource>) -> SettingsRow {
     SettingsRow {
-        resettable: mode != HostSettings::default().branch_naming_mode,
+        resettable: resettable_for(source, mode != HostSettings::default().branch_naming_mode),
         source,
         ..row(
             SettingId::BranchNaming,
@@ -117,7 +120,10 @@ fn branch_row(mode: BranchNamingMode, source: Option<SettingSource>) -> Settings
 }
 fn style_row(mode: SourceControlWritingStyleMode, source: Option<SettingSource>) -> SettingsRow {
     SettingsRow {
-        resettable: mode != HostSettings::default().source_control_writing_style.mode,
+        resettable: resettable_for(
+            source,
+            mode != HostSettings::default().source_control_writing_style.mode,
+        ),
         source,
         ..row(
             SettingId::SourceControlWritingStyle,

@@ -1413,15 +1413,18 @@ impl Desktop {
                 );
             }
             if event.operating_system {
+                let thread_id = event.thread_id.clone();
                 let title = event.title.clone();
                 let body = event.body.clone();
+                let badge = event.badge;
                 self.runtime.handle.spawn(async move {
-                    let _ = platform::send_native_notification(&title, &body).await;
+                    let _ = platform::send_native_notification(&thread_id, &title, &body, badge).await;
                 });
             }
             if event.sound {
-                self.runtime.handle.spawn(async {
-                    let _ = platform::play_notification_sound().await;
+                let sound_kind = event.sound_kind;
+                self.runtime.handle.spawn(async move {
+                    let _ = platform::play_notification_sound(sound_kind).await;
                 });
             }
         }

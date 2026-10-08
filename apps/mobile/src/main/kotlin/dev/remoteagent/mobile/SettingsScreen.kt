@@ -25,6 +25,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
@@ -560,6 +561,19 @@ private fun SettingRow(row: SettingsRow, onReset: () -> Unit, onEdit: (SettingVa
                         style = AppTheme.footnote,
                         color = colors.foregroundSecondary,
                     )
+                is SettingControl.Text -> {
+                    var text by remember(row.id, control.value) { mutableStateOf(control.value) }
+                    OutlinedTextField(
+                        value = text,
+                        onValueChange = {
+                            text = it
+                            onEdit(SettingValue.Text(it))
+                        },
+                        modifier = Modifier.fillMaxWidth(0.58f),
+                        placeholder = { control.placeholder?.let { Text(it) } },
+                        singleLine = true,
+                    )
+                }
             }
         }
         val choice = row.control as? SettingControl.Choice

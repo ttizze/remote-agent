@@ -6,11 +6,20 @@ import SwiftUI
 /// accounts and new-thread defaults.
 struct SettingsScreen: View {
     @ObservedObject var model: BexAppViewModel
+    var projectId: String? = nil
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
         NavigationStack {
-            ScrollView {
+            if let projectId {
+                HostSettingsPage(
+                    model: model,
+                    title: "Project settings",
+                    sections: ["behavior", "auto-settle", "new-threads", "source-control"],
+                    projectId: projectId
+                )
+            } else {
+                ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
                     SettingsGroup(title: "Connections") {
                         SettingsLink(symbol: "point.3.connected.trianglepath.dotted", label: "Environments",
@@ -78,6 +87,7 @@ struct SettingsScreen: View {
                     }
                 }
                 .padding(.horizontal, 16).padding(.vertical, 12)
+            }
             }
             .background(AppTheme.sheet.ignoresSafeArea())
             .navigationTitle("Settings")
@@ -530,9 +540,18 @@ private struct HostSettingsPage: View {
     @ObservedObject var model: BexAppViewModel
     let title: String
     let sections: [String]
+    let projectId: String?
+
+    init(model: BexAppViewModel, title: String, sections: [String], projectId: String? = nil) {
+        self.model = model
+        self.title = title
+        self.sections = sections
+        self.projectId = projectId
+    }
 
     var body: some View {
-        let view = model.snapshot.settings(scope: .host)
+        let scope: SettingsScope = projectId.map { .project(projectId: $0) } ?? .host
+        let view = model.snapshot.settings(scope: scope)
         List {
             if !model.snapshot.hostSettingsLoaded() {
                 ProgressView().frame(maxWidth: .infinity)
@@ -540,7 +559,7 @@ private struct HostSettingsPage: View {
             ForEach(view.sections.filter { sections.contains($0.id) }, id: \.id) { section in
                 Section {
                     ForEach(section.rows, id: \.id) { row in
-                        SettingRowView(model: model, row: row)
+                        SettingRowView(model: model, row: row, scope: scope)
                     }
                 } header: {
                     Text(section.title)
@@ -612,6 +631,7 @@ private struct LoadBalancingSettingsPage: View {
 private struct SettingRowView: View {
     @ObservedObject var model: BexAppViewModel
     let row: SettingsRow
+    let scope: SettingsScope
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -649,6 +669,20 @@ private struct SettingRowView: View {
                     Text([modelLabel, traitsLabel].compactMap(\.self).joined(separator: " · "))
                         .foregroundStyle(AppTheme.muted)
                 }
+            case let .text(value, placeholder):
+                TextField(placeholder ?? row.title, text: Binding(
+                    get: { value },
+                    set: { apply(.text(value: $0)) }
+                ))
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+            }
+            if row.resettable, let intent = model.snapshot.settingReset(scope: scope, row: row) {
+                Button("Reset") {
+                    model.perform(intent)
+                }
+                .font(AppTheme.font(13))
+                .foregroundStyle(AppTheme.primary)
             }
             if let description = row.description {
                 Text(description).font(AppTheme.font(13)).foregroundStyle(AppTheme.muted)
@@ -658,7 +692,7 @@ private struct SettingRowView: View {
     }
 
     private func apply(_ value: SettingValue) {
-        if let intent = model.snapshot.settingIntent(scope: .host, id: row.id, value: value) {
+        if let intent = model.snapshot.settingIntent(scope: scope, id: row.id, value: value) {
             model.perform(intent)
         }
     }

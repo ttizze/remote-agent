@@ -1161,6 +1161,54 @@ impl Owner {
                 self.state.preferences.snapshot_capture.animations = enabled;
                 Next::Done
             }
+            Intent::SetBrowserRecordingFrameRate { frame_rate } => {
+                if !crate::view::browser::BROWSER_RECORDING_FRAME_RATES.contains(&frame_rate) {
+                    return Err(invalid("Browser recording frame rate must be 30 or 60."));
+                }
+                self.state.preferences.browser.recording_frame_rate = frame_rate;
+                Next::Done
+            }
+            Intent::SetBrowserViewport { viewport } => {
+                crate::view::browser::validate_browser_viewport(&viewport).map_err(invalid)?;
+                self.state.preferences.browser.viewport = viewport;
+                Next::Done
+            }
+            Intent::SetBrowserZoom { zoom } => {
+                self.state.preferences.browser.zoom = zoom;
+                Next::Done
+            }
+            Intent::SetBrowserAppearance { appearance } => {
+                self.state.preferences.browser.appearance = appearance;
+                Next::Done
+            }
+            Intent::SetBrowserLinkTarget { target } => {
+                self.state.preferences.browser.link_target = target;
+                Next::Done
+            }
+            Intent::SetBrowserAutoShowFloatingPreview { enabled } => {
+                self.state.preferences.browser.auto_show_floating_preview = enabled;
+                Next::Done
+            }
+            Intent::SetBrowserRecordingShowKeyPresses { enabled } => {
+                self.state.preferences.browser.recording_show_key_presses = enabled;
+                Next::Done
+            }
+            Intent::SetBrowserRecordingShowMousePresses { enabled } => {
+                self.state.preferences.browser.recording_show_mouse_presses = enabled;
+                Next::Done
+            }
+            Intent::SetBrowserProfiles { profiles } => {
+                let mut browser = self.state.preferences.browser.clone();
+                browser.profiles = profiles;
+                browser.validate().map_err(invalid)?;
+                self.state.preferences.browser = browser;
+                Next::Done
+            }
+            Intent::SetBrowserDefaultProfile { profile_id } => {
+                crate::view::browser::validate_browser_profile_id(&profile_id).map_err(invalid)?;
+                self.state.preferences.browser.default_profile_id = profile_id;
+                Next::Done
+            }
             Intent::ImportShare { content } => {
                 let incoming = crate::view::share::compose(&content);
                 if !incoming.is_empty() {

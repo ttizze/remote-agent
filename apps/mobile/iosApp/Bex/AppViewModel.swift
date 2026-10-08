@@ -292,6 +292,10 @@ final class BexAppViewModel: ObservableObject {
             handleShortcut()
             return
         }
+        if url.host == "thread", let threadId = url.pathComponents.dropFirst().first {
+            openThread(threadId)
+            return
+        }
         guard url.host == "share" else { return }
         let query = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
         let text = query.filter { $0.name == "text" }.compactMap(\.value).joined(separator: "\n")
@@ -1043,21 +1047,8 @@ extension BexAppViewModel {
             profiles[index].name = name
             do { try HostProfile.save(profiles) } catch { notice = error.localizedDescription }
         }
-        let becameUnavailable = snapshot.error() == nil && next.error() != nil
         if snapshot.error() != next.error() {
             notice = next.error()
-        }
-        if becameUnavailable && UIApplication.shared.applicationState != .active {
-            let mode = next.preferences().notificationMode
-            let notificationsEnabled = mode == .notifications || mode == .notificationsAndSound
-            let soundEnabled = mode == .sound || mode == .notificationsAndSound
-            if notificationsEnabled || soundEnabled {
-                LocalNotifications.deliver(
-                    title: "Bex needs your attention",
-                    body: next.error() ?? "The Host reported an error.",
-                    sound: soundEnabled
-                )
-            }
         }
         let threadChanged = snapshot.selectedThreadId() != next.selectedThreadId()
         snapshot = next
@@ -1104,7 +1095,11 @@ extension BexAppViewModel {
                 LocalNotifications.deliver(
                     title: event.title,
                     body: event.body,
-                    sound: event.sound
+                    sound: event.sound,
+                    threadId: event.threadId,
+                    badge: event.badge,
+                    kind: String(describing: event.kind),
+                    soundKind: String(describing: event.soundKind)
                 )
             } else if event.sound {
                 LocalNotifications.playSound()

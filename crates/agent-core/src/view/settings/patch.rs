@@ -197,6 +197,9 @@ pub enum SettingChange {
     StorageLogsAfterDays {
         days: Option<u32>,
     },
+    AddProjectBaseDirectory {
+        value: String,
+    },
     /// A project follows the Host's value again.
     Inherit {
         key: ProjectSettingKey,
@@ -368,6 +371,9 @@ pub fn plan_settings_update(
                     ..Default::default()
                 })
             }
+            SettingChange::AddProjectBaseDirectory { value } => {
+                patch.add_project_base_directory = Some(value.trim().to_owned())
+            }
             SettingChange::Inherit { .. } => return None,
         },
         SettingsScope::Project { project_id } => {
@@ -432,7 +438,8 @@ pub fn plan_settings_update(
                 | SettingChange::StorageWorktreeOnDelete { .. }
                 | SettingChange::StorageWorktreeUnchanged { .. } => return None,
                 SettingChange::StorageBrowserArtifactsAfterDays { .. }
-                | SettingChange::StorageLogsAfterDays { .. } => return None,
+                | SettingChange::StorageLogsAfterDays { .. }
+                | SettingChange::AddProjectBaseDirectory { .. } => return None,
             }
             patch = project_patch(project_id, overrides);
         }

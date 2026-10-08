@@ -122,6 +122,8 @@ pub struct Preferences {
     pub load_balancing_weights: BTreeMap<String, u8>,
     /// Device-local screenshot capture behavior.
     pub snapshot_capture: crate::view::snapshot_capture::SnapshotPreferences,
+    /// Device-local Preview browser defaults, recording options and profiles.
+    pub browser: crate::view::browser::BrowserSettings,
 }
 impl Default for Preferences {
     fn default() -> Self {
@@ -142,6 +144,7 @@ impl Default for Preferences {
             load_balancing_enabled: false,
             load_balancing_weights: BTreeMap::new(),
             snapshot_capture: Default::default(),
+            browser: Default::default(),
         }
     }
 }

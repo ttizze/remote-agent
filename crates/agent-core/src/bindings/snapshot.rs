@@ -278,6 +278,12 @@ impl Snapshot {
     pub fn restore(bytes: Vec<u8>) -> Result<Arc<Self>, AgentError> {
         Ok(Arc::new(crate::persistence::decode(&bytes).map_err(error)?))
     }
+    /// Device-local browser facts for a Preview opener. Native clients pass
+    /// these explicit values to their Host/browser owner instead of deriving
+    /// defaults or reading project settings themselves.
+    pub fn browser_defaults(&self) -> crate::view::browser::BrowserDefaults {
+        crate::view::preview::browser_defaults(self)
+    }
     pub fn serialize_model_preferences(&self) -> Result<Vec<u8>, AgentError> {
         crate::persistence::encode_model_preferences(self).map_err(error)
     }

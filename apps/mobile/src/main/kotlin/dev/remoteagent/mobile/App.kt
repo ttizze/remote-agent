@@ -565,13 +565,6 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
             else -> false
         }
 
-    private fun notificationSoundEnabled(): Boolean =
-        when (snapshot.preferences().notificationMode) {
-            dev.remoteagent.core.NotificationMode.SOUND,
-            dev.remoteagent.core.NotificationMode.NOTIFICATIONS_AND_SOUND -> true
-            else -> false
-        }
-
     fun editDraft(text: String) {
         composerText = text
         val (revision, base) = draftEdits.edit(text)
@@ -1016,19 +1009,6 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
     private fun publish(next: Snapshot) {
         if (!next.supersedes(snapshot)) return
         if (next === snapshot) return
-        val becameUnavailable = snapshot.error() == null && next.error() != null
-        if (
-            becameUnavailable &&
-                appInBackground &&
-                (notificationsEnabled() || notificationSoundEnabled())
-        ) {
-            LocalNotifications.deliver(
-                context,
-                "Bex needs your attention",
-                next.error() ?: "The Host reported an error.",
-                notificationSoundEnabled(),
-            )
-        }
         val name = next.hostName()
         if (name != null && profiles.any { it.id == profileId && it.name != name }) {
             profiles = profiles.map { if (it.id == profileId) it.copy(name = name) else it }
@@ -1067,7 +1047,16 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
         attentionEvents.forEach { event ->
             if (event.inApp) notice = event.body
             if (event.operatingSystem) {
-                LocalNotifications.deliver(context, event.title, event.body, event.sound)
+                LocalNotifications.deliver(
+                    context = context,
+                    title = event.title,
+                    body = event.body,
+                    sound = event.sound,
+                    threadId = event.threadId,
+                    badge = event.badge,
+                    kind = event.kind.toString(),
+                    soundKind = event.soundKind.toString(),
+                )
             } else if (event.sound) {
                 LocalNotifications.playSound(context)
             }

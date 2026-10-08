@@ -5,6 +5,13 @@ use agent_protocol::preview::{
     PreviewViewportPreset, PreviewViewportSetting, PreviewZoom, PREVIEW_VIEWPORT_PRESETS,
 };
 
+/// Resolves the device-local browser defaults for a Preview opener. The Host
+/// receives the resulting explicit viewport/appearance/zoom/profile values;
+/// it does not read project overrides for these client-owned settings.
+pub fn browser_defaults(snapshot: &Snapshot) -> crate::view::browser::BrowserDefaults {
+    snapshot.preferences.browser.resolved()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreviewView {
     pub sessions: Vec<PreviewSessionSnapshot>,

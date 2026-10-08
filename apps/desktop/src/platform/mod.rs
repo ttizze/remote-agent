@@ -1605,9 +1605,13 @@ pub(crate) struct NativeNotificationCommand {
 }
 
 pub(crate) fn native_notification_command(
+    thread_id: &str,
     title: &str,
     body: &str,
+    badge: bool,
 ) -> NativeNotificationCommand {
+    let deep_link = format!("remote-agent://thread/{thread_id}");
+    let badge = if badge { "1" } else { "0" };
     #[cfg(target_os = "macos")]
     {
         return NativeNotificationCommand {
@@ -1615,11 +1619,13 @@ pub(crate) fn native_notification_command(
             args: vec![
                 "-e".into(),
                 r#"on run argv
-display notification (item 2 of argv) with title (item 1 of argv)
+display notification (item 2 of argv) with title (item 1 of argv) subtitle (item 3 of argv)
 end run"#
                     .into(),
                 title.into(),
                 body.into(),
+                deep_link,
+                badge.into(),
             ],
         };
     }
@@ -1627,7 +1633,18 @@ end run"#
     {
         return NativeNotificationCommand {
             program: "notify-send",
-            args: vec!["--app-name".into(), "Remote Agent".into(), title.into(), body.into()],
+            args: vec![
+                "--app-name".into(),
+                "Remote Agent".into(),
+                "--wait".into(),
+                "--action=default=Open".into(),
+                "--hint".into(),
+                format!("string:x-remote-agent-deeplink:{deep_link}"),
+                "--hint".into(),
+                format!("int:x-remote-agent-badge:{badge}"),
+                title.into(),
+                body.into(),
+            ],
         };
     }
     #[cfg(target_os = "windows")]
@@ -1639,13 +1656,17 @@ end run"#
                 "-NonInteractive".into(),
                 "-Command".into(),
                 r#"$xml = New-Object Windows.Data.Xml.Dom.XmlDocument
-$xml.LoadXml("<toast><visual><binding template='ToastGeneric'><text>$([System.Security.SecurityElement]::Escape($args[0]))</text><text>$([System.Security.SecurityElement]::Escape($args[1]))</text></binding></visual></toast>")
+$launch = [System.Security.SecurityElement]::Escape($args[2])
+$tag = [System.Security.SecurityElement]::Escape($args[3])
+$xml.LoadXml("<toast launch='$launch' tag='$tag'><visual><binding template='ToastGeneric'><text>$([System.Security.SecurityElement]::Escape($args[0]))</text><text>$([System.Security.SecurityElement]::Escape($args[1]))</text></binding></visual></toast>")
 $toast = [Windows.UI.Notifications.ToastNotification]::new($xml)
 [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('Remote Agent').Show($toast)"#
                     .into(),
                 "--".into(),
                 title.into(),
                 body.into(),
+                deep_link,
+                badge.into(),
             ],
         };
     }
@@ -1654,28 +1675,62 @@ $toast = [Windows.UI.Notifications.ToastNotification]::new($xml)
 /// Delivers one already-decided OS notification. Permission prompts and
 /// policy decisions stay in the client/core layers; this function only runs
 /// the platform adapter selected for the current desktop target.
-pub(crate) async fn send_native_notification(title: &str, body: &str) -> Result<(), String> {
-    let command = native_notification_command(title, body);
+pub(crate) async fn send_native_notification(
+    thread_id: &str,
+    title: &str,
+    body: &str,
+    badge: bool,
+) -> Result<(), String> {
+    let command = native_notification_command(thread_id, title, body, badge);
     let mut child = tokio::process::Command::new(command.program)
         .args(command.args)
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .kill_on_drop(true)
         .spawn()
         .map_err(|error| format!("native notification could not start: {error}"))?;
-    let status = tokio::time::timeout(Duration::from_secs(5), child.wait())
+    let output = tokio::time::timeout(Duration::from_secs(5), child.wait_with_output())
         .await
         .map_err(|_| "native notification timed out".to_owned())?
         .map_err(|error| format!("native notification did not report its status: {error}"))?;
-    status
-        .success()
-        .then_some(())
-        .ok_or_else(|| format!("native notification exited with {status}"))
+    if !output.status.success() {
+        return Err(format!("native notification exited with {}", output.status));
+    }
+    #[cfg(target_os = "linux")]
+    if output.stdout.starts_with(b"default") {
+        let deep_link = format!("remote-agent://thread/{thread_id}");
+        let mut opener = tokio::process::Command::new("xdg-open")
+            .arg(deep_link)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|error| format!("notification route could not start: {error}"))?;
+        let status = tokio::time::timeout(Duration::from_secs(5), opener.wait())
+            .await
+            .map_err(|_| "notification route timed out".to_owned())?
+            .map_err(|error| format!("notification route did not report its status: {error}"))?;
+        if !status.success() {
+            return Err(format!("notification route exited with {status}"));
+        }
+    }
+    Ok(())
 }
 
-pub(crate) async fn play_notification_sound() -> Result<(), String> {
-    play_snapshot_sound(agent_core::view::snapshot_capture::SnapshotSound::SoftPop).await
+pub(crate) async fn play_notification_sound(
+    kind: agent_core::view::notifications::NotificationSoundKind,
+) -> Result<(), String> {
+    let sound = match kind {
+        agent_core::view::notifications::NotificationSoundKind::Input => {
+            agent_core::view::snapshot_capture::SnapshotSound::SoftPop
+        }
+        agent_core::view::notifications::NotificationSoundKind::Completion => {
+            agent_core::view::snapshot_capture::SnapshotSound::CameraShutter
+        }
+    };
+    play_snapshot_sound(sound).await
 }
 
 #[cfg(test)]
@@ -1729,10 +1784,11 @@ mod tests {
 
     #[test]
     fn native_notification_command_keeps_user_text_out_of_the_script() {
-        let command = native_notification_command("Thread $HOME", "Approval; required");
+        let command = native_notification_command("thread-1", "Thread $HOME", "Approval; required", true);
         assert!(!command.args.is_empty());
         assert!(command.args.iter().any(|arg| arg == "Thread $HOME"));
         assert!(command.args.iter().any(|arg| arg == "Approval; required"));
+        assert!(command.args.iter().any(|arg| arg.contains("thread-1")));
         #[cfg(target_os = "linux")]
         assert_eq!(command.program, "notify-send");
         #[cfg(target_os = "macos")]

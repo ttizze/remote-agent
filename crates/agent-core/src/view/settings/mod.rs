@@ -82,6 +82,7 @@ pub enum SettingId {
     StorageWorktreeUnchanged,
     StorageBrowserArtifactsAfterDays,
     StorageLogsAfterDays,
+    AddProjectBaseDirectory,
     LoadBalancing,
     SnapshotCapture,
     SnapshotIncludeAccessibility,
@@ -98,6 +99,13 @@ pub enum SettingId {
 pub enum SettingSource {
     Project,
     Host,
+}
+
+/// A project row can always clear its own override, even when the effective
+/// value happens to equal the Host default. Host rows reset only when they
+/// differ from their built-in value.
+pub(super) const fn resettable_for(source: Option<SettingSource>, differs: bool) -> bool {
+    matches!(source, Some(SettingSource::Project)) || (source.is_none() && differs)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -128,6 +136,11 @@ pub enum SettingControl {
     Model {
         model_label: String,
         traits_label: Option<String>,
+    },
+    /// A trimmed path or path prefix used by the add-project folder picker.
+    Text {
+        value: String,
+        placeholder: Option<String>,
     },
 }
 
@@ -177,6 +190,7 @@ pub enum SettingValue {
     Switch { on: bool },
     Choice { id: String },
     Number { value: u32 },
+    Text { value: String },
 }
 
 fn row(

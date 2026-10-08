@@ -2368,6 +2368,46 @@ pub enum Intent {
     SetSnapshotAnimations {
         enabled: bool,
     },
+    /// Sets the frame rate used by Preview recordings on this device.
+    SetBrowserRecordingFrameRate {
+        frame_rate: u32,
+    },
+    /// Sets the viewport used when a Preview tab is opened without one.
+    SetBrowserViewport {
+        viewport: agent_protocol::preview::PreviewViewportSetting,
+    },
+    /// Sets the zoom factor used when a Preview tab is opened without one.
+    SetBrowserZoom {
+        zoom: agent_protocol::preview::PreviewZoom,
+    },
+    /// Sets the color scheme used when a Preview tab is opened without one.
+    SetBrowserAppearance {
+        appearance: agent_protocol::preview::PreviewAppearance,
+    },
+    /// Sets where clicked links open on this device.
+    SetBrowserLinkTarget {
+        target: agent_protocol::preview::BrowserLinkTarget,
+    },
+    /// Controls whether agent opened Preview tabs are shown automatically.
+    SetBrowserAutoShowFloatingPreview {
+        enabled: bool,
+    },
+    /// Shows keyboard input in Preview recording overlays.
+    SetBrowserRecordingShowKeyPresses {
+        enabled: bool,
+    },
+    /// Shows pointer input in Preview recording overlays.
+    SetBrowserRecordingShowMousePresses {
+        enabled: bool,
+    },
+    /// Replaces the persisted custom browser profiles after validation.
+    SetBrowserProfiles {
+        profiles: Vec<crate::view::browser::BrowserProfile>,
+    },
+    /// Selects the profile used for newly opened Preview tabs.
+    SetBrowserDefaultProfile {
+        profile_id: String,
+    },
     /// The model new threads start with; an open thread keeps its own.
     SetDefaultModel {
         instance_id: String,

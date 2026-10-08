@@ -292,6 +292,7 @@ mod tests {
                         SettingId::StorageWorktreeOnMerge,
                         SettingId::StorageBrowserArtifactsAfterDays,
                         SettingId::StorageLogsAfterDays,
+                        SettingId::AddProjectBaseDirectory,
                         SettingId::StorageWorktreeOnDelete,
                         SettingId::StorageWorktreeUnchanged
                     ]

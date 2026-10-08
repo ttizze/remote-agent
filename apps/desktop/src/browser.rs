@@ -710,6 +710,7 @@ async fn host_browser_request(
         .unwrap_or_default();
     let action = match request {
         HostBrowserRequest::Open => {
+            let defaults = store.snapshot().preferences.browser.resolved();
             dispatch_preview(
                 &store,
                 Intent::PreviewOpen {

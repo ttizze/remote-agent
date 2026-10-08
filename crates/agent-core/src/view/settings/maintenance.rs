@@ -3,7 +3,7 @@ use super::{
     ProjectSettingKey, SettingChange, SettingChoice, SettingControl, SettingId, SettingSource,
     SettingValue, SettingsRow, SettingsScope, choice,
     registry::{Context, Section},
-    row, section, update,
+    resettable_for, row, section, update,
 };
 use crate::models::HostSettings;
 use agent_protocol::models::{BackgroundActivityProfileSelection, ResponseStreamingMode};
@@ -66,7 +66,7 @@ fn profile_choices() -> Vec<SettingChoice> {
 
 fn streaming_row(mode: ResponseStreamingMode, source: Option<SettingSource>) -> SettingsRow {
     SettingsRow {
-        resettable: mode != HostSettings::default().response_streaming_mode,
+        resettable: resettable_for(source, mode != HostSettings::default().response_streaming_mode),
         source,
         ..row(
             SettingId::ResponseStreaming,
@@ -82,7 +82,7 @@ fn streaming_row(mode: ResponseStreamingMode, source: Option<SettingSource>) -> 
 
 fn merge_row(on: bool, source: Option<SettingSource>) -> SettingsRow {
     SettingsRow {
-        resettable: on != HostSettings::default().auto_settle_on_merge,
+        resettable: resettable_for(source, on != HostSettings::default().auto_settle_on_merge),
         source,
         ..row(
             SettingId::AutoSettleOnMerge,

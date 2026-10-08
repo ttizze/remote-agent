@@ -66,6 +66,16 @@ pub enum NotificationEventKind {
     Completion,
 }
 
+/// The sound a client should play for an event. Keeping this separate from
+/// the delivery flags lets each native client choose its own sound asset
+/// without re-deriving the notification policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
+pub enum NotificationSoundKind {
+    Input,
+    Completion,
+}
+
 /// The delivery choices for one newly observed event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
@@ -86,6 +96,8 @@ pub struct NotificationEvent {
     pub thread_id: String,
     pub title: String,
     pub body: String,
+    pub kind: NotificationEventKind,
+    pub sound_kind: NotificationSoundKind,
     pub in_app: bool,
     pub operating_system: bool,
     pub sound: bool,
@@ -97,6 +109,7 @@ struct NotificationThread {
     id: String,
     title: String,
     status: ThreadNotificationStatus,
+    attention_key: Option<String>,
     completed_at: Option<i64>,
 }
 
@@ -106,17 +119,49 @@ fn notification_status(thread: &ThreadSummary) -> ThreadNotificationStatus {
         ThreadListStatus::Approval => ThreadNotificationStatus::Approval,
         ThreadListStatus::Failed => ThreadNotificationStatus::Failed,
         ThreadListStatus::Limited => ThreadNotificationStatus::Limited,
-        ThreadListStatus::Ready
-            if thread
-                .latest_run
-                .as_ref()
-                .is_some_and(|run| run.completed_at.is_some()) =>
-        {
-            ThreadNotificationStatus::Completed
-        }
+        ThreadListStatus::Ready if completed_run(thread).is_some() => ThreadNotificationStatus::Completed,
         ThreadListStatus::Working | ThreadListStatus::Waiting | ThreadListStatus::Ready => {
             ThreadNotificationStatus::Idle
         }
+    }
+}
+
+fn completed_run(thread: &ThreadSummary) -> Option<&crate::view::thread_summary::RunSummary> {
+    thread.latest_run.as_ref().filter(|run| {
+        run.status == crate::view::thread_summary::RuntimeStatus::Completed
+            && run.completed_at.is_some()
+    })
+}
+
+fn attention_key(thread: &ThreadSummary, status: ThreadNotificationStatus) -> Option<String> {
+    matches!(
+        status,
+        ThreadNotificationStatus::Input
+            | ThreadNotificationStatus::Approval
+            | ThreadNotificationStatus::Failed
+            | ThreadNotificationStatus::Limited
+    )
+    .then(|| {
+        format!(
+            "{}:{}",
+            thread
+                .latest_run
+                .as_ref()
+                .map(|run| run.id.as_str())
+                .unwrap_or_default(),
+            notification_status_id(status),
+        )
+    })
+}
+
+fn notification_status_id(status: ThreadNotificationStatus) -> &'static str {
+    match status {
+        ThreadNotificationStatus::Idle => "idle",
+        ThreadNotificationStatus::Input => "input",
+        ThreadNotificationStatus::Approval => "approval",
+        ThreadNotificationStatus::Failed => "failed",
+        ThreadNotificationStatus::Limited => "limited",
+        ThreadNotificationStatus::Completed => "completed",
     }
 }
 
@@ -133,13 +178,14 @@ fn notification_threads(snapshot: &Snapshot) -> BTreeMap<String, NotificationThr
         }
         let summary = ThreadSummary::from_shell(shell_thread);
         let status = notification_status(&summary);
-        let completed_at = summary.latest_run.as_ref().and_then(|run| run.completed_at);
+        let completed_at = completed_run(&summary).and_then(|run| run.completed_at);
         rows.insert(
             summary.id.clone(),
             NotificationThread {
                 id: summary.id,
                 title: summary.title,
                 status,
+                attention_key: attention_key(&summary, status),
                 completed_at,
             },
         );
@@ -176,16 +222,24 @@ pub fn between(
     let mut events = vec![];
     for (id, thread) in notification_threads(current) {
         let previous_thread = previous_threads.get(&id);
-        let previous_status = previous_thread.map(|thread| thread.status);
+        let Some(previous_thread) = previous_thread else {
+            // The first observation establishes the baseline. A cached Host
+            // can already contain pending work, which must not be replayed as
+            // a newly generated local event.
+            continue;
+        };
         let completion_changed = thread.completed_at.is_some()
-            && previous_thread.and_then(|thread| thread.completed_at) != thread.completed_at;
+            && previous_thread
+                .completed_at
+                .map_or(true, |previous| thread.completed_at > Some(previous));
         let Some(decision) = decide(
             current.preferences.notification_mode,
             current.preferences.in_app_notifications_enabled,
             app_visible,
             app_focused,
             selected_thread.as_deref() == Some(id.as_str()),
-            previous_status,
+            previous_thread.attention_key.as_deref(),
+            thread.attention_key.as_deref(),
             thread.status,
             completion_changed,
         ) else {
@@ -199,6 +253,8 @@ pub fn between(
             } else {
                 thread.title
             },
+            kind: decision.kind,
+            sound_kind: sound_kind(decision.kind),
             in_app: decision.in_app,
             operating_system: decision.operating_system,
             sound: decision.sound,
@@ -221,21 +277,30 @@ pub fn decide(
     app_visible: bool,
     app_focused: bool,
     selected_thread: bool,
-    previous: Option<ThreadNotificationStatus>,
+    previous_attention_key: Option<&str>,
+    attention_key: Option<&str>,
     current: ThreadNotificationStatus,
     completion_changed: bool,
 ) -> Option<NotificationDecision> {
     let kind = match current {
-        ThreadNotificationStatus::Input if previous != Some(current) => {
+        ThreadNotificationStatus::Input
+            if attention_key.is_some() && attention_key != previous_attention_key =>
+        {
             NotificationEventKind::Input
         }
-        ThreadNotificationStatus::Approval if previous != Some(current) => {
+        ThreadNotificationStatus::Approval
+            if attention_key.is_some() && attention_key != previous_attention_key =>
+        {
             NotificationEventKind::Approval
         }
-        ThreadNotificationStatus::Failed if previous != Some(current) => {
+        ThreadNotificationStatus::Failed
+            if attention_key.is_some() && attention_key != previous_attention_key =>
+        {
             NotificationEventKind::Failed
         }
-        ThreadNotificationStatus::Limited if previous != Some(current) => {
+        ThreadNotificationStatus::Limited
+            if attention_key.is_some() && attention_key != previous_attention_key =>
+        {
             NotificationEventKind::Limited
         }
         ThreadNotificationStatus::Completed if completion_changed => {
@@ -256,9 +321,21 @@ pub fn decide(
     })
 }
 
+fn sound_kind(kind: NotificationEventKind) -> NotificationSoundKind {
+    match kind {
+        NotificationEventKind::Completion => NotificationSoundKind::Completion,
+        NotificationEventKind::Input
+        | NotificationEventKind::Approval
+        | NotificationEventKind::Failed
+        | NotificationEventKind::Limited => NotificationSoundKind::Input,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::view::search::fixtures;
+    use agent_domain::{RunId, RunStatus, Timestamp};
 
     fn thread(
         id: &str,
@@ -269,6 +346,14 @@ mod tests {
             id: id.into(),
             title: id.into(),
             status,
+            attention_key: matches!(
+                status,
+                ThreadNotificationStatus::Input
+                    | ThreadNotificationStatus::Approval
+                    | ThreadNotificationStatus::Failed
+                    | ThreadNotificationStatus::Limited
+            )
+            .then(|| format!("{id}:{}", notification_status_id(status))),
             completed_at,
         }
     }
@@ -295,15 +380,20 @@ mod tests {
                     visible,
                     focused,
                     selected == Some(thread.id.as_str()),
-                    prior.map(|thread| thread.status),
+                    prior.and_then(|thread| thread.attention_key.as_deref()),
+                    thread.attention_key.as_deref(),
                     thread.status,
                     thread.completed_at.is_some()
-                        && prior.and_then(|thread| thread.completed_at) != thread.completed_at,
+                        && prior
+                            .and_then(|thread| thread.completed_at)
+                            .map_or(true, |previous| thread.completed_at > Some(previous)),
                 )?;
                 Some(NotificationEvent {
                     thread_id: thread.id.clone(),
                     title: thread.title.clone(),
                     body: thread.title.clone(),
+                    kind: decision.kind,
+                    sound_kind: sound_kind(decision.kind),
                     in_app: decision.in_app,
                     operating_system: decision.operating_system,
                     sound: decision.sound,
@@ -334,7 +424,8 @@ mod tests {
                 true,
                 true,
                 false,
-                Some(ThreadNotificationStatus::Input),
+                Some("input:input"),
+                Some("input:input"),
                 ThreadNotificationStatus::Input,
                 false,
             ),
@@ -343,10 +434,11 @@ mod tests {
         let decision = decide(
             NotificationMode::NotificationsAndSound,
             true,
-            true,
-            true,
-            false,
-            Some(ThreadNotificationStatus::Idle),
+                true,
+                true,
+                false,
+            None,
+            Some("input:input"),
             ThreadNotificationStatus::Input,
             false,
         )
@@ -363,7 +455,8 @@ mod tests {
             false,
             false,
             false,
-            Some(ThreadNotificationStatus::Idle),
+            None,
+            Some("failed:failed"),
             ThreadNotificationStatus::Failed,
             false,
         )
@@ -376,7 +469,8 @@ mod tests {
                 true,
                 true,
                 true,
-                Some(ThreadNotificationStatus::Idle),
+                None,
+                Some("failed:failed"),
                 ThreadNotificationStatus::Failed,
                 false,
             ),
@@ -393,7 +487,8 @@ mod tests {
                 false,
                 false,
                 false,
-                Some(ThreadNotificationStatus::Idle),
+                None,
+                None,
                 ThreadNotificationStatus::Completed,
                 false,
             )
@@ -406,7 +501,8 @@ mod tests {
                 false,
                 false,
                 false,
-                Some(ThreadNotificationStatus::Idle),
+                None,
+                None,
                 ThreadNotificationStatus::Completed,
                 true,
             )
@@ -419,7 +515,8 @@ mod tests {
                 false,
                 false,
                 false,
-                Some(ThreadNotificationStatus::Completed),
+                None,
+                None,
                 ThreadNotificationStatus::Completed,
                 true,
             )
@@ -429,7 +526,10 @@ mod tests {
 
     #[test]
     fn fold_deduplicates_attention_and_keeps_completion_edges() {
-        let previous = [thread("input", ThreadNotificationStatus::Input, None)];
+        let previous = [
+            thread("input", ThreadNotificationStatus::Input, None),
+            thread("done", ThreadNotificationStatus::Completed, Some(6)),
+        ];
         let current = [
             thread("input", ThreadNotificationStatus::Input, None),
             thread("done", ThreadNotificationStatus::Completed, Some(7)),
@@ -444,6 +544,8 @@ mod tests {
         );
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].thread_id, "done");
+        assert_eq!(events[0].kind, NotificationEventKind::Completion);
+        assert_eq!(events[0].sound_kind, NotificationSoundKind::Completion);
         assert!(events[0].operating_system && events[0].sound && events[0].badge);
         assert!(fold(
             &current,
@@ -478,5 +580,47 @@ mod tests {
         assert_eq!(events[0].thread_id, "other");
         assert!(events[0].in_app);
         assert!(!events[0].operating_system);
+    }
+
+    #[test]
+    fn a_new_run_with_the_same_attention_status_is_a_new_event() {
+        let old = Some("run-1:input");
+        let new = Some("run-2:input");
+        assert!(decide(
+            NotificationMode::Notifications,
+            true,
+            false,
+            false,
+            false,
+            old,
+            new,
+            ThreadNotificationStatus::Input,
+            false,
+        )
+        .is_some());
+    }
+
+    #[test]
+    fn first_seen_attention_is_a_baseline() {
+        let previous = fixtures::snapshot(vec![], vec![]);
+        let mut row = fixtures::row("thread", "project", "needs input");
+        row.latest_run = Some(RunId::new("run-1").unwrap());
+        row.status = Some(RunStatus::Failed);
+        let mut current = fixtures::snapshot(vec![], vec![row]);
+        current.preferences.notification_mode = NotificationMode::Notifications;
+        assert!(between(&previous, &current, false, false).is_empty());
+    }
+
+    #[test]
+    fn cancelled_runs_with_completion_stamps_do_not_become_completion_events() {
+        let mut row = fixtures::row("thread", "project", "cancelled");
+        row.latest_run = Some(RunId::new("run-1").unwrap());
+        row.status = Some(RunStatus::Cancelled);
+        row.latest_run_completed_at = Some(Timestamp::parse("2026-06-20T00:00:01Z").unwrap());
+        let mut previous = fixtures::snapshot(vec![], vec![row.clone()]);
+        let mut current = fixtures::snapshot(vec![], vec![row]);
+        previous.preferences.notification_mode = NotificationMode::Notifications;
+        current.preferences.notification_mode = NotificationMode::Notifications;
+        assert!(between(&previous, &current, false, false).is_empty());
     }
 }
