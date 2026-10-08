@@ -140,6 +140,7 @@ struct ThreadScreen: View {
 
     private func feed(_ view: ThreadView) -> some View {
         let rows = model.timelineRows
+        let feedActions = actions(threadId: view.threadId)
         let firstUserMessage = rows.firstIndex(where: \.isUserMessage)
         return LazyVStack(alignment: .leading, spacing: 0) {
             if view.history.hasMore || view.history.loading {
@@ -155,7 +156,7 @@ struct ThreadScreen: View {
                 setupCard(view)
             }
             ForEach(Array(rows.enumerated()), id: \.element.id) { index, row in
-                FeedRowView(row: row, actions: actions(view), forking: forkingRun != nil).equatable()
+                FeedRowView(row: row, actions: feedActions, forking: forkingRun != nil).equatable()
                 if index == firstUserMessage {
                     setupCard(view)
                 }
@@ -213,14 +214,14 @@ struct ThreadScreen: View {
         .animation(.easeOut(duration: 0.22), value: view.requests.questions?.requestId)
     }
 
-    private func actions(_ view: ThreadView) -> FeedActions {
+    private func actions(threadId: String) -> FeedActions {
         FeedActions(
             perform: { model.perform($0) },
             toggle: { model.toggle($0, $1) },
             fork: { run in
                 Haptics.selection()
                 forkingRun = run
-                model.perform(.fork(sourceThreadId: view.threadId, runId: run)) { result in
+                model.perform(.fork(sourceThreadId: threadId, runId: run)) { result in
                     forkingRun = nil
                     if case let .success(.startedThread(id)) = result {
                         model.openThread(id)
