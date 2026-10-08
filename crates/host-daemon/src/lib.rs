@@ -15,6 +15,7 @@ mod host_runtime;
 mod keybindings;
 pub mod local_host;
 pub mod platform;
+mod power_events;
 mod projects;
 mod repository;
 mod terminals;
