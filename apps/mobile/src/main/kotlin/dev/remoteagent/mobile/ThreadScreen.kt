@@ -110,6 +110,7 @@ internal fun ThreadScreen(model: AndroidAppModel, threadId: String) {
         }
     SideEffect { live = view?.let { it.working?.status != null || it.setup.card != null } ?: true }
     var sheet by remember { mutableStateOf<ThreadSheet?>(null) }
+    var contextPreview by remember { mutableStateOf<dev.remoteagent.core.ContextChip?>(null) }
     val copy = rememberCopy()
     val current = view
     val header = current?.header
@@ -160,6 +161,19 @@ internal fun ThreadScreen(model: AndroidAppModel, threadId: String) {
                         )
                 },
                 openThread = model::openThread,
+                openTerminal = { terminalId ->
+                    val terminal = current.terminals.firstOrNull { it.terminalId == terminalId }
+                        ?: current.terminals.firstOrNull()
+                    model.navigate(
+                        Route.Terminal(
+                            current.threadId,
+                            terminal?.terminalId ?: "",
+                            current.header?.project?.name,
+                            current.header?.cwd,
+                        )
+                    )
+                },
+                showContextPreview = { contextPreview = it; sheet = ThreadSheet.ContextPreview },
                 openDiff = { card ->
                     model.perform(Intent.SelectDiffTurn(card.run, card.openDiffPath))
                     model.navigate(Route.Workspace(WorkspaceTab.Diff))
@@ -218,6 +232,23 @@ internal fun ThreadScreen(model: AndroidAppModel, threadId: String) {
             ThreadSheet.Agents -> current.agents?.let { AgentsSheet(model, it) { sheet = null } }
             ThreadSheet.Settings -> ThreadSettingsSheet(model, current.composer) { sheet = null }
             ThreadSheet.Setup -> current.setup.card?.let { card -> SetupDetailsSheet(model, card) { sheet = null } }
+            ThreadSheet.ContextPreview ->
+                contextPreview?.let { chip ->
+                    ContextPreviewSheet(chip, onClose = { contextPreview = null; sheet = null }) { terminalId ->
+                        contextPreview = null
+                        sheet = null
+                        val terminal = current.terminals.firstOrNull { it.terminalId == terminalId }
+                            ?: current.terminals.firstOrNull()
+                        model.navigate(
+                            Route.Terminal(
+                                current.threadId,
+                                terminal?.terminalId ?: "",
+                                current.header?.project?.name,
+                                current.header?.cwd,
+                            )
+                        )
+                    }
+                }
             null -> Unit
         }
     }
@@ -228,6 +259,7 @@ private enum class ThreadSheet {
     Agents,
     Settings,
     Setup,
+    ContextPreview,
 }
 
 @Composable
@@ -283,6 +315,7 @@ private fun Feed(
         val anchor = rows.indexOfLast {
             it.kind is TimelineRowKind.UserMessage || it.kind is TimelineRowKind.PendingMessage
         }
+        if (setup != null && anchor < 0) item(key = "setup") { SetupCard(setup, onSetupDetails) }
         rows.forEachIndexed { index, row ->
             if (setup != null && index == anchor) item(key = "setup") { SetupCard(setup, onSetupDetails) }
             item(key = row.id) { FeedRow(model, row, now, actions) }

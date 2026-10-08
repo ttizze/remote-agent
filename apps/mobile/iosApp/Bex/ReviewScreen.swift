@@ -250,20 +250,23 @@ private struct DiffFileView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text(file.path).font(AppTheme.mono(12, weight: .bold)).padding(8)
+            Text(file.path).font(AppTheme.mono(13, weight: .bold)).padding(8)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(AppTheme.cardAlt)
             ScrollView(.horizontal) {
                 VStack(alignment: .leading, spacing: 0) {
                     ForEach(Array(file.rows.enumerated()), id: \.offset) { _, row in
                         HStack(spacing: 6) {
-                            Text(row.old.map(String.init) ?? "").frame(width: 34, alignment: .trailing)
-                            Text(row.new.map(String.init) ?? "").frame(width: 34, alignment: .trailing)
-                            Text(row.text).fixedSize()
+                            Text(row.old.map(String.init) ?? "")
+                                .font(.custom("Menlo", size: AppTheme.codeLineNumberFontSize))
+                                .frame(width: 34, alignment: .trailing)
+                            Text(row.new.map(String.init) ?? "")
+                                .font(.custom("Menlo", size: AppTheme.codeLineNumberFontSize))
+                                .frame(width: 34, alignment: .trailing)
+                            Text(row.text).font(AppTheme.mono(13)).fixedSize()
                         }
-                        .font(AppTheme.mono(12))
                         .foregroundStyle(row.kind == "@" ? AppTheme.muted : AppTheme.text)
-                        .frame(minHeight: 22, alignment: .leading)
+                        .frame(minHeight: AppTheme.codeLineHeight, alignment: .leading)
                         .background(background(row.kind))
                     }
                 }

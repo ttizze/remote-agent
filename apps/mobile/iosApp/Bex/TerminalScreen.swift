@@ -11,7 +11,7 @@ struct TerminalScreen: View {
     /// Changes when the user picks another terminal, replacing the view.
     @State private var session = UUID()
     @StateObject private var keys = TerminalKeys()
-    @AppStorage("terminal.fontSize") private var fontSize = 10.5
+    @AppStorage("terminal.fontSize") private var fontSize = AppTheme.terminalFontSize
     /// The terminal last seen running here, so its exit can leave it.
     @State private var runningTerminal: String?
     /// The visible lines captured for the attach sheet.
@@ -97,9 +97,17 @@ struct TerminalScreen: View {
     private var options: some View {
         Menu {
             Section("Text size") {
-                Button("A- \(String(format: "%.1f", stepped(-1))) pt") { fontSize = stepped(-1) }
+                Button("A- \(String(format: "%.1f", stepped(-1))) pt") {
+                    let next = stepped(-1)
+                    fontSize = next
+                    AppTheme.updateTerminalFontSize(next)
+                }
                     .disabled(fontSize <= 6)
-                Button("A+ \(String(format: "%.1f", stepped(1))) pt") { fontSize = stepped(1) }
+                Button("A+ \(String(format: "%.1f", stepped(1))) pt") {
+                    let next = stepped(1)
+                    fontSize = next
+                    AppTheme.updateTerminalFontSize(next)
+                }
                     .disabled(fontSize >= 14)
             }
             ForEach(tabs.filter { $0.running || $0.terminalId == terminalId }, id: \.terminalId) { tab in
@@ -144,9 +152,9 @@ struct TerminalScreen: View {
         }
     }
 
-    /// The text size one 0.5 pt step away, within 6–14 pt.
+    /// The text size one shared half-point step away.
     private func stepped(_ direction: Double) -> Double {
-        min(14, max(6, fontSize + direction * 0.5))
+        terminalFontSizeStep(current: fontSize, larger: direction > 0)
     }
 
     private var workspaceName: String {

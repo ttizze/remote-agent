@@ -14,6 +14,7 @@ struct ThreadSettingsSheet: View {
     @State private var expansionOverrides: [String] = []
     /// The model Save applies.
     @State private var staged: StagedModel?
+    @State private var unavailable = false
 
     var body: some View {
         let catalog = model.snapshot.catalogSheet(options: CatalogSheetOptions(
@@ -58,6 +59,11 @@ struct ThreadSettingsSheet: View {
             }
         }
         .tint(AppTheme.color("mobilePrimaryText"))
+        .alert("Model unavailable", isPresented: $unavailable) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text("Set up this provider on web or desktop, or select another model.")
+        }
     }
 
     /// Each provider header with the model rows under it.
@@ -132,7 +138,10 @@ struct ThreadSettingsSheet: View {
     private func save() {
         if let staged {
             Haptics.selection()
-            guard model.snapshot.canSaveStagedModel(staged: staged) else { return }
+            guard model.snapshot.canSaveStagedModel(staged: staged) else {
+                unavailable = true
+                return
+            }
             model.perform(.saveStagedModel(staged: staged))
         }
         dismiss()

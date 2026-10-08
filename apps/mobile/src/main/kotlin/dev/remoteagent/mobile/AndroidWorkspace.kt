@@ -2,8 +2,11 @@
 
 package dev.remoteagent.mobile
 
+import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Matrix
+import android.graphics.pdf.PdfRenderer
+import android.os.ParcelFileDescriptor
 import android.view.GestureDetector
 import android.view.MotionEvent
 import android.widget.ImageView
@@ -12,6 +15,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -22,6 +26,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -45,6 +50,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
@@ -52,12 +58,13 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
@@ -83,6 +90,83 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
 private const val BROWSER_REFRESH_MILLIS = 500L
+
+/** Downloads a Host PDF into the resource cache and renders its pages locally. */
+@Composable
+internal fun PdfScreen(model: AndroidAppModel, path: String) {
+    val context = LocalContext.current
+    var local by remember(path, model.profileId) { mutableStateOf<File?>(null) }
+    var error by remember(path, model.profileId) { mutableStateOf<String?>(null) }
+    LaunchedEffect(path, model.profileId) {
+        val temporary = File(context.cacheDir, "pdf-${UUID.randomUUID()}.pdf")
+        try {
+            model.download(path, temporary.path)
+            local = temporary
+        } catch (failure: Exception) {
+            temporary.delete()
+            error = failure.message ?: "Unable to open PDF"
+        }
+    }
+    DisposableEffect(local) {
+        onDispose { local?.delete() }
+    }
+    ScreenScaffold(File(path).name, onBack = model::back) {
+        when {
+            error != null -> Text(error!!, Modifier.padding(20.dp), color = AppTheme.colors.dangerForeground)
+            local == null -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                CircularProgressIndicator(color = AppTheme.colors.iconMuted)
+            }
+            else -> PdfPages(local!!)
+        }
+    }
+}
+
+@Composable
+private fun PdfPages(file: File) {
+    val rendered by produceState<Result<List<android.graphics.Bitmap>>?>(null, file.path) {
+        value = withContext(Dispatchers.IO) {
+            runCatching {
+                ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY).use { descriptor ->
+                    PdfRenderer(descriptor).use { renderer ->
+                        buildList(renderer.pageCount) {
+                            for (index in 0 until renderer.pageCount) {
+                                renderer.openPage(index).use { page ->
+                                    val width = 1200
+                                    val height = (width * page.height.toFloat() / page.width).toInt().coerceAtLeast(1)
+                                    Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888).also { bitmap ->
+                                        page.render(bitmap, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+                                        add(bitmap)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if (rendered == null) {
+        CircularProgressIndicator(Modifier.padding(20.dp), color = AppTheme.colors.iconMuted)
+    } else if (rendered!!.isFailure) {
+        Text(
+            rendered!!.exceptionOrNull()?.message ?: "Unable to render PDF",
+            Modifier.padding(20.dp),
+            color = AppTheme.colors.dangerForeground,
+        )
+    } else {
+        val pages = rendered!!.getOrThrow()
+        LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(12.dp)) {
+            items(pages, key = { it.hashCode() }) { page ->
+                Image(
+                    page.asImageBitmap(),
+                    "PDF page",
+                    Modifier.fillMaxWidth().padding(bottom = 12.dp),
+                    contentScale = androidx.compose.ui.layout.ContentScale.FillWidth,
+                )
+            }
+        }
+    }
+}
 
 /** The open thread's files, diff and browser, each as its own screen. */
 @Composable
@@ -247,16 +331,33 @@ private fun WorkspaceFiles(model: AndroidAppModel, linkedFile: String?, line: UL
                         val lines = text.split('\n')
                         val scroll = androidx.compose.foundation.lazy.rememberLazyListState()
                         LaunchedEffect(file, line, lines.size) {
-                            scroll.scrollToItem((line - 1uL).coerceAtMost((lines.size - 1).toULong()).toInt())
+                            val target = dev.remoteagent.core.markdownLineTarget(line, lines.size.toULong())
+                            if (target != null) scroll.scrollToItem((target - 1uL).toInt())
                         }
                         androidx.compose.foundation.text.selection.SelectionContainer(Modifier.weight(1f)) {
                             LazyColumn(state = scroll) {
                                 items(lines.size) { index ->
-                                    Text(
-                                        "${index + 1}  ${lines[index]}",
-                                        fontFamily = FontFamily.Monospace,
-                                        modifier = Modifier.fillMaxWidth().padding(4.dp),
-                                    )
+                                    Row(
+                                        Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 2.dp),
+                                        verticalAlignment = Alignment.Top,
+                                    ) {
+                                        Text(
+                                            (index + 1).toString(),
+                                            fontFamily = AppTheme.mono,
+                                            fontSize = AppTheme.codeLineNumberFontSize.sp,
+                                            lineHeight = AppTheme.codeLineHeight.sp,
+                                            color = AppTheme.colors.foregroundTertiary,
+                                            textAlign = TextAlign.End,
+                                            modifier = Modifier.width(36.dp),
+                                        )
+                                        Text(
+                                            lines[index].ifEmpty { " " },
+                                            fontFamily = AppTheme.mono,
+                                            fontSize = AppTheme.codeFontSize.sp,
+                                            lineHeight = AppTheme.codeLineHeight.sp,
+                                            modifier = Modifier.padding(start = 8.dp),
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -272,7 +373,11 @@ private fun WorkspaceFiles(model: AndroidAppModel, linkedFile: String?, line: UL
                                 }
                             },
                             Modifier.weight(1f).fillMaxWidth(),
-                            textStyle = AppTheme.footnote.copy(fontFamily = FontFamily.Monospace),
+                            textStyle = AppTheme.footnote.copy(
+                                fontFamily = AppTheme.mono,
+                                fontSize = AppTheme.codeFontSize.sp,
+                                lineHeight = AppTheme.codeLineHeight.sp,
+                            ),
                         )
                         Button(onClick = { model.perform(Intent.SaveFile(entry.path)) }) { Text("Save") }
                     }
@@ -407,8 +512,9 @@ private fun ReviewScreen(model: AndroidAppModel) {
                                 file.rows.forEach { row ->
                                     Text(
                                         row.text,
-                                        fontFamily = FontFamily.Monospace,
-                                        style = AppTheme.caption,
+                                        fontFamily = AppTheme.mono,
+                                        fontSize = AppTheme.codeFontSize.sp,
+                                        lineHeight = AppTheme.codeLineHeight.sp,
                                         color =
                                             when (row.kind) {
                                                 "+" -> colors.emerald

@@ -69,6 +69,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import dev.remoteagent.core.ArtifactTemplate
 import dev.remoteagent.core.ArtifactTemplateSymbol
+import dev.remoteagent.core.ContextChip
 import dev.remoteagent.core.MarkdownAlignment
 import dev.remoteagent.core.MarkdownBlock
 import dev.remoteagent.core.MarkdownImageSource
@@ -91,7 +92,10 @@ internal fun MarkdownText(
     modifier: Modifier = Modifier,
     color: Color = AppTheme.colors.foreground,
     onUseArtifactTemplate: ((ArtifactTemplate) -> Unit)? = null,
+    contextChips: List<ContextChip> = emptyList(),
+    onOpenContext: (ContextChip) -> Unit = {},
 ) {
+    val actions = LocalMarkdownActions.current
     val blocks by
         produceState(emptyList<MarkdownBlock>(), source) {
             value = withContext(Dispatchers.Default) { markdownBlocks(source) }
@@ -101,7 +105,7 @@ internal fun MarkdownText(
             when (block) {
                 is MarkdownBlock.Paragraph ->
                     if (block.style.code) CodeBlock(block.runs.joinToString("") { it.text })
-                    else Paragraph(block, color)
+                    else Paragraph(block, color, contextChips, onOpenContext, actions.open)
                 is MarkdownBlock.Visualization ->
                     Text(block.path, style = AppTheme.caption, color = AppTheme.colors.foregroundMuted)
                 is MarkdownBlock.Table -> MarkdownTable(block, index)
@@ -200,17 +204,15 @@ private fun ArtifactTemplateCard(template: ArtifactTemplate, onUse: ((ArtifactTe
 }
 
 @Composable
-private fun Paragraph(block: MarkdownBlock.Paragraph, color: Color) {
-    val size =
-        when (block.style.header?.toInt()) {
-            null -> 16
-            1 -> 21
-            2 -> 19
-            3 -> 17
-            else -> 15
-        }
+private fun Paragraph(
+    block: MarkdownBlock.Paragraph,
+    color: Color,
+    contextChips: List<ContextChip>,
+    onOpenContext: (ContextChip) -> Unit,
+    open: (String) -> Unit,
+) {
+    val size = AppTheme.markdownSize(block.style.header?.toInt())
     val quoted = block.style.quoted
-    val actions = LocalMarkdownActions.current
     val textRuns = block.runs.filter { it.image == null }
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Row {
@@ -221,12 +223,16 @@ private fun Paragraph(block: MarkdownBlock.Paragraph, color: Color) {
                     markdownText(
                         textRuns,
                         AppTheme.colors.mdLink,
-                        open = actions.open,
+                        open = { href ->
+                            val id = href.substringAfterLast('/')
+                            val chip = contextChips.firstOrNull { it.contextId == id }
+                            if (chip != null) onOpenContext(chip) else open(href)
+                        },
                         header = block.style.header != null,
                         marker = block.style.marker,
                     ),
                     Modifier.padding(start = if (quoted) 10.dp else 0.dp),
-                    style = AppTheme.body.copy(fontSize = size.sp, lineHeight = (size + 7).sp),
+                    style = AppTheme.body.copy(fontSize = size.sp, lineHeight = AppTheme.markdownBodyLineHeight.sp),
                     color = color,
                 )
             }
@@ -243,14 +249,24 @@ private fun CodeBlock(code: String) {
         border = BorderStroke(1.dp, AppTheme.colors.border),
     ) {
         SelectionContainer {
-            Text(
-                code,
-                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(12.dp),
-                fontFamily = AppTheme.mono,
-                fontSize = 13.sp,
-                lineHeight = 19.sp,
-                color = AppTheme.colors.foreground,
-            )
+            if (AppTheme.codeWordWrap)
+                Text(
+                    code,
+                    Modifier.fillMaxWidth().padding(12.dp),
+                    fontFamily = AppTheme.mono,
+                    fontSize = AppTheme.markdownCodeFontSize.sp,
+                    lineHeight = AppTheme.markdownCodeLineHeight.sp,
+                    color = AppTheme.colors.foreground,
+                )
+            else
+                Text(
+                    code,
+                    Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(12.dp),
+                    fontFamily = AppTheme.mono,
+                    fontSize = AppTheme.markdownCodeFontSize.sp,
+                    lineHeight = AppTheme.markdownCodeLineHeight.sp,
+                    color = AppTheme.colors.foreground,
+                )
         }
     }
 }
@@ -298,6 +314,7 @@ private fun markdownText(
                 fontWeight = if (header || run.strong) FontWeight.Bold else null,
                 fontStyle = if (run.emphasis) FontStyle.Italic else null,
                 fontFamily = if (run.code) AppTheme.mono else null,
+                fontSize = if (run.code) AppTheme.markdownCodeFontSize.sp else androidx.compose.ui.unit.TextUnit.Unspecified,
                 textDecoration = if (run.strikethrough) TextDecoration.LineThrough else TextDecoration.None,
             )
         ) {

@@ -68,7 +68,12 @@ internal sealed interface Route {
     /** `file` opens that file of the Files tab. */
     data class Workspace(val tab: WorkspaceTab, val file: String? = null, val line: ULong? = null) : Route
 
+    /** A resource-backed PDF preview; PDFs never enter the text file reader. */
+    data class Pdf(val file: String) : Route
+
     data class Settings(val projectId: String? = null) : Route
+
+    data object Appearance : Route
 
     data object Archived : Route
 }

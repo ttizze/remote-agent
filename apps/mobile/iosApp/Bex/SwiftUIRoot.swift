@@ -4,8 +4,10 @@ import UIKit
 
 struct BexSwiftUIRoot: View {
     @ObservedObject var model: BexAppViewModel
+    @State private var appearanceRevision = 0
 
     var body: some View {
+        _ = appearanceRevision
         Group {
             if model.profiles.isEmpty || model.screen == .pairing && model.profiles.isEmpty {
                 NavigationStack { pairingScreen }
@@ -30,6 +32,10 @@ struct BexSwiftUIRoot: View {
         }
         .tint(AppTheme.color("mobilePrimaryText"))
         .font(AppTheme.font())
+        .preferredColorScheme(AppTheme.preferredColorScheme)
+        .onReceive(NotificationCenter.default.publisher(for: .mobileAppearanceDidChange)) { _ in
+            appearanceRevision += 1
+        }
         .sheet(isPresented: $model.isScanning) {
             QRScannerSheet { model.scanned($0) }
                 .interactiveDismissDisabled()

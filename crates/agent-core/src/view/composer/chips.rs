@@ -72,6 +72,10 @@ pub struct ContextChip {
     pub size_label: Option<String>,
     pub path: Option<String>,
     pub thread_id: Option<String>,
+    /// The terminal selected by a terminal context record.
+    pub terminal_id: Option<String>,
+    /// Captured terminal output shown when the chip opens its preview.
+    pub preview_text: Option<String>,
     pub url: Option<String>,
 }
 
@@ -310,6 +314,8 @@ fn chip(
         size_label: None,
         path: None,
         thread_id: None,
+        terminal_id: None,
+        preview_text: None,
         url: None,
     }
 }
@@ -476,18 +482,22 @@ fn resolve_chip(
             })
         }
         "image" | "file" => attachment_chip(reference, record, attachments, surface),
-        "terminal" => Some(chip(
-            reference,
-            ContextChipKind::Terminal,
-            label,
-            format!("Terminal excerpt, {label}"),
-            None,
-            if field(record, "text").is_empty() {
-                ContextChipDetails::None
-            } else {
-                ContextChipDetails::Popover
-            },
-        )),
+        "terminal" => Some(ContextChip {
+            terminal_id: Some(field(record, "terminalId").into()),
+            preview_text: (!field(record, "text").is_empty()).then(|| field(record, "text").into()),
+            ..chip(
+                reference,
+                ContextChipKind::Terminal,
+                label,
+                format!("Terminal excerpt, {label}"),
+                None,
+                if field(record, "text").is_empty() {
+                    ContextChipDetails::None
+                } else {
+                    ContextChipDetails::Popover
+                },
+            )
+        }),
         "element" => Some(chip(
             reference,
             ContextChipKind::Element,

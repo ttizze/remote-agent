@@ -72,10 +72,12 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import dev.remoteagent.core.AssistantMessageRow
 import dev.remoteagent.core.AssistantMeta
 import dev.remoteagent.core.ChangedFileRowKind
 import dev.remoteagent.core.ChangedFilesCard
+import dev.remoteagent.core.ContextChip
 import dev.remoteagent.core.DividerTone
 import dev.remoteagent.core.FoldKind
 import dev.remoteagent.core.IntentTone
@@ -95,6 +97,8 @@ import dev.remoteagent.core.WorkLabelTone
 import dev.remoteagent.core.WorkLogRow
 import dev.remoteagent.core.WorkRowIcon
 import dev.remoteagent.core.workingTimerLabel
+import dev.remoteagent.core.mobileMessageContextChips
+import dev.remoteagent.core.mobileMessageMarkdown
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -111,6 +115,8 @@ internal class FeedActions(
     val toggleFolder: (ChangedFilesCard, String, Boolean) -> Unit,
     val toggleAllFolders: (ChangedFilesCard) -> Unit,
     val openThread: (String) -> Unit,
+    val openTerminal: (String?) -> Unit,
+    val showContextPreview: (ContextChip) -> Unit,
     val openDiff: (ChangedFilesCard) -> Unit,
     val fork: (String) -> Unit,
     val copy: (String) -> Unit,
@@ -145,8 +151,8 @@ internal fun Shimmer(text: String, modifier: Modifier = Modifier, color: Color =
 @Composable
 internal fun FeedRow(model: AndroidAppModel, row: TimelineRow, now: Long, actions: FeedActions) {
     when (val kind = row.kind) {
-        is TimelineRowKind.UserMessage -> UserBubble(model, kind.v1)
-        is TimelineRowKind.PendingMessage -> PendingBubble(model, kind.v1)
+        is TimelineRowKind.UserMessage -> UserBubble(model, kind.v1, actions)
+        is TimelineRowKind.PendingMessage -> PendingBubble(model, kind.v1, actions)
         is TimelineRowKind.AssistantMessage -> AssistantMessage(model, kind.v1, row.createdAt, actions)
         is TimelineRowKind.AssistantMeta -> MetaRow(kind.meta, row.createdAt, actions)
         is TimelineRowKind.Work -> kind.rows.forEach { WorkRow(model, it, actions) }
@@ -181,7 +187,7 @@ internal fun FeedRow(model: AndroidAppModel, row: TimelineRow, now: Long, action
         is TimelineRowKind.Lifecycle -> Lifecycle(kind.v1, actions)
         is TimelineRowKind.Subagents -> SubagentGroup(kind.v1, row.id, actions)
         is TimelineRowKind.Handoff -> Divider(kind.v1.label, null, kind.v1.tone)
-        is TimelineRowKind.ProposedPlan -> ProposedPlan(kind.v1)
+        is TimelineRowKind.ProposedPlan -> ProposedPlan(kind.v1, model::useArtifactTemplate)
         is TimelineRowKind.WorktreeSetup -> Unit
     }
 }
@@ -192,8 +198,12 @@ private fun Bubble(
     text: String,
     attachments: List<dev.remoteagent.core.Attachment>,
     above: (@Composable () -> Unit)?,
+    context: String?,
+    onOpenContext: (ContextChip) -> Unit,
     faded: Boolean = false,
 ) {
+    val source = mobileMessageMarkdown(text, context)
+    val contextChips = mobileMessageContextChips(text, context, attachments)
     BoxWithConstraints(Modifier.fillMaxWidth().padding(bottom = 17.5.dp)) {
         val bubbleWidth = maxWidth * 0.85f
         Column(
@@ -210,7 +220,12 @@ private fun Bubble(
                         .padding(horizontal = 12.25.dp, vertical = 8.75.dp)
                 ) {
                     SelectionContainer {
-                        Text(text, style = AppTheme.body, color = AppTheme.colors.userBubbleForeground)
+                        MarkdownText(
+                            source,
+                            color = AppTheme.colors.userBubbleForeground,
+                            contextChips = contextChips,
+                            onOpenContext = onOpenContext,
+                        )
                     }
                 }
         }
@@ -218,7 +233,7 @@ private fun Bubble(
 }
 
 @Composable
-private fun UserBubble(model: AndroidAppModel, row: UserMessageRow) {
+private fun UserBubble(model: AndroidAppModel, row: UserMessageRow, actions: FeedActions) {
     val above: (@Composable () -> Unit)? =
         if (row.badge == null && row.decorations.attribution == null) null
         else {
@@ -247,11 +262,26 @@ private fun UserBubble(model: AndroidAppModel, row: UserMessageRow) {
                 }
             }
         }
-    Bubble(model, row.text, row.attachments, above)
+    Bubble(
+        model,
+        row.text,
+        row.attachments,
+        above,
+        row.context,
+        { chip ->
+            when (chip.kind) {
+                dev.remoteagent.core.ContextChipKind.THREAD -> chip.threadId?.let(actions.openThread)
+                dev.remoteagent.core.ContextChipKind.TERMINAL ->
+                    if (chip.previewText?.isNotEmpty() == true) actions.showContextPreview(chip)
+                    else actions.openTerminal(chip.terminalId)
+                else -> Unit
+            }
+        },
+    )
 }
 
 @Composable
-private fun PendingBubble(model: AndroidAppModel, row: PendingMessageRow) {
+private fun PendingBubble(model: AndroidAppModel, row: PendingMessageRow, actions: FeedActions) {
     val status =
         when (val phase = row.phase) {
             is Phase.Uncertain -> "Delivery unconfirmed · ${phase.error}"
@@ -270,6 +300,16 @@ private fun PendingBubble(model: AndroidAppModel, row: PendingMessageRow) {
                     style = AppTheme.caption,
                     color = AppTheme.colors.foregroundMuted,
                 )
+            }
+        },
+        row.context,
+        { chip ->
+            when (chip.kind) {
+                dev.remoteagent.core.ContextChipKind.THREAD -> chip.threadId?.let(actions.openThread)
+                dev.remoteagent.core.ContextChipKind.TERMINAL ->
+                    if (chip.previewText?.isNotEmpty() == true) actions.showContextPreview(chip)
+                    else actions.openTerminal(chip.terminalId)
+                else -> Unit
             }
         },
         faded = true,
@@ -479,7 +519,7 @@ private fun WorkRow(model: AndroidAppModel, row: WorkLogRow, actions: FeedAction
                 if (activity.expanded)
                     activity.detail?.let { detail ->
                         detail.questionAnswer?.let { AnswerHistory(model, it) }
-                        WorkDetail(detail)
+                        WorkDetail(model, detail)
                     }
             }
         }
@@ -487,10 +527,12 @@ private fun WorkRow(model: AndroidAppModel, row: WorkLogRow, actions: FeedAction
 }
 
 @Composable
-private fun WorkDetail(detail: dev.remoteagent.core.WorkActivityDetail) {
+private fun WorkDetail(model: AndroidAppModel, detail: dev.remoteagent.core.WorkActivityDetail) {
+    detail.reasoning?.takeIf { it.isNotBlank() }?.let {
+        MarkdownText(it, onUseArtifactTemplate = model::useArtifactTemplate)
+    }
     val text =
         listOfNotNull(
-                detail.reasoning,
                 detail.call?.command,
                 detail.call?.argsText,
                 detail.call?.args?.joinToString("\n") { "${it.key}: ${it.value}" },
@@ -515,7 +557,8 @@ private fun WorkDetail(detail: dev.remoteagent.core.WorkActivityDetail) {
                     .horizontalScroll(rememberScrollState())
                     .padding(10.dp),
                 fontFamily = AppTheme.mono,
-                style = AppTheme.caption,
+                fontSize = AppTheme.codeFontSize.sp,
+                lineHeight = AppTheme.codeLineHeight.sp,
                 color = AppTheme.colors.foreground,
             )
         }
@@ -735,7 +778,7 @@ internal fun DiffStatText(stat: dev.remoteagent.core.DiffStatLabel) {
 }
 
 @Composable
-private fun ProposedPlan(card: PlanCard) {
+private fun ProposedPlan(card: PlanCard, useArtifactTemplate: (dev.remoteagent.core.ArtifactTemplate) -> Unit) {
     val colors = AppTheme.colors
     var expanded by
         androidx.compose.runtime.saveable.rememberSaveable(card.plan) { androidx.compose.runtime.mutableStateOf(false) }
@@ -763,7 +806,10 @@ private fun ProposedPlan(card: PlanCard) {
                 )
             }
             val preview = card.collapsedPreview
-            MarkdownText(if (expanded || preview == null) card.displayedMarkdown else preview)
+            MarkdownText(
+                if (expanded || preview == null) card.displayedMarkdown else preview,
+                onUseArtifactTemplate = useArtifactTemplate,
+            )
             if (preview != null)
                 Text(
                     if (expanded) "Collapse plan" else "Expand plan",

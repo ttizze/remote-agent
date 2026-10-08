@@ -23,6 +23,7 @@ import androidx.compose.material.icons.outlined.Computer
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
@@ -72,6 +73,12 @@ internal fun SettingsScreen(model: AndroidAppModel, projectId: String?) {
                 item {
                     SectionCard("Connections") {
                         NavigationRow(Icons.Outlined.Computer, "Environments") { model.showHosts() }
+                    }
+                }
+            if (projectId == null)
+                item {
+                    SectionCard("Interface") {
+                        NavigationRow(Icons.Outlined.Computer, "Appearance") { model.navigate(Route.Appearance) }
                     }
                 }
             if (projectId == null)
@@ -133,6 +140,131 @@ internal fun SettingsScreen(model: AndroidAppModel, projectId: String?) {
             if (projectId == null)
                 item { Text(privacyPolicy(), style = AppTheme.caption, color = AppTheme.colors.foregroundMuted) }
         }
+    }
+}
+
+@Composable
+internal fun AppearanceScreen(model: AndroidAppModel) {
+    val context = LocalContext.current
+    var appearance by remember { mutableStateOf(AppTheme.appearance) }
+    var themeTarget by remember { mutableStateOf("both") }
+    fun update(next: MobileAppearanceSettings) {
+        appearance = next.normalized()
+        AppTheme.update(context, appearance)
+        model.perform(Intent.SetTerminalFontSize(appearance.resolvedTerminalFontSize()))
+    }
+    ScreenScaffold("Appearance", onBack = model::back) {
+        LazyColumn(contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(20.dp)) {
+            item {
+                SectionCard("Color scheme") {
+                    MobileColorScheme.entries.forEach { scheme ->
+                        Row(
+                            Modifier.fillMaxWidth().clickable { update(appearance.copy(colorScheme = scheme)) }.padding(16.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            RadioButton(appearance.colorScheme == scheme, { update(appearance.copy(colorScheme = scheme)) })
+                            Text(scheme.name.lowercase().replaceFirstChar { it.uppercase() }, style = AppTheme.body)
+                        }
+                    }
+                }
+            }
+            item {
+                SectionCard("Themes") {
+                    Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        listOf("both" to "Both", "light" to "Light", "dark" to "Dark").forEach { (id, label) ->
+                            TextButton(onClick = { themeTarget = id }) {
+                                Text(label, color = if (themeTarget == id) AppTheme.colors.primaryText else AppTheme.colors.foregroundMuted)
+                            }
+                        }
+                    }
+                    listOf(null to "Bex", "chat" to "Chat", "grove" to "Grove", "ocean" to "Ocean",
+                        "ember" to "Ember", "iris" to "Iris", "material-you" to "Material You").forEach { (id, label) ->
+                        val selected = when (themeTarget) {
+                            "light" -> appearance.lightTheme == id
+                            "dark" -> appearance.darkTheme == id
+                            else -> appearance.theme == id && appearance.lightTheme == null && appearance.darkTheme == null
+                        }
+                        val pick = {
+                            update(
+                                when (themeTarget) {
+                                    "light" -> appearance.assigningTheme(false, id)
+                                    "dark" -> appearance.assigningTheme(true, id)
+                                    else -> appearance.copy(theme = id, lightTheme = null, darkTheme = null)
+                                }
+                            )
+                        }
+                        Row(
+                            Modifier.fillMaxWidth().clickable(onClick = pick)
+                                .padding(horizontal = 16.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            RadioButton(selected, pick)
+                            Text(label, style = AppTheme.body)
+                        }
+                    }
+                }
+            }
+            item {
+                SectionCard("Text") {
+                    SizeRow("Base size", appearance.baseFontSize, 11, 22) {
+                        update(appearance.copy(baseFontSize = it))
+                    }
+                }
+            }
+            item {
+                SectionCard("Code") {
+                    ToggleRow("Custom size", appearance.codeFontSize != null) {
+                        update(appearance.copy(codeFontSize = if (it) appearance.codeFontSize ?: 12 else null))
+                    }
+                    appearance.codeFontSize?.let { size ->
+                        SizeRow("Code size", size, 8, 18) { update(appearance.copy(codeFontSize = it)) }
+                    }
+                    ToggleRow("Wrap long lines", appearance.codeWordWrap) {
+                        update(appearance.copy(codeWordWrap = it))
+                    }
+                }
+            }
+            item {
+                SectionCard("Terminal") {
+                    ToggleRow("Custom size", appearance.terminalFontSize != null) {
+                        update(appearance.copy(terminalFontSize = if (it) appearance.terminalFontSize ?: 10.5 else null))
+                    }
+                    appearance.terminalFontSize?.let { size ->
+                        SizeRow("Terminal size", size, 6.0, 14.0, 0.5) {
+                            update(appearance.copy(terminalFontSize = it))
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ToggleRow(label: String, checked: Boolean, onCheckedChange: (Boolean) -> Unit) {
+    Row(Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+        Text(label, Modifier.weight(1f), style = AppTheme.body)
+        Switch(checked, onCheckedChange)
+    }
+}
+
+@Composable
+private fun SizeRow(label: String, value: Int, min: Int, max: Int, onChange: (Int) -> Unit) {
+    Row(Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+        Text(label, Modifier.weight(1f), style = AppTheme.body)
+        TextButton(onClick = { if (value > min) onChange(value - 1) }, enabled = value > min) { Text("−") }
+        Text(value.toString(), style = AppTheme.body.copy(fontFamily = AppTheme.mono))
+        TextButton(onClick = { if (value < max) onChange(value + 1) }, enabled = value < max) { Text("+") }
+    }
+}
+
+@Composable
+private fun SizeRow(label: String, value: Double, min: Double, max: Double, step: Double, onChange: (Double) -> Unit) {
+    Row(Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+        Text(label, Modifier.weight(1f), style = AppTheme.body)
+        TextButton(onClick = { if (value > min) onChange((value - step).coerceAtLeast(min)) }, enabled = value > min) { Text("−") }
+        Text(String.format("%.1f", value), style = AppTheme.body.copy(fontFamily = AppTheme.mono))
+        TextButton(onClick = { if (value < max) onChange((value + step).coerceAtMost(max)) }, enabled = value < max) { Text("+") }
     }
 }
 

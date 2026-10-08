@@ -44,7 +44,7 @@ use crate::view::{
     timeline::mobile_follow::{LiveFollowEvent, StreamHaptic, StreamingMessageMark},
     timeline::rows::{TimelineRow, TimelineUpdate},
 };
-use agent_domain::ThreadId;
+use agent_domain::{Attachment, MessageContext, ThreadId};
 use chrono::{Local, TimeZone};
 
 /// A project icon's image bytes.
@@ -545,6 +545,86 @@ pub fn markdown_link_action(
     workspace_root: Option<String>,
 ) -> crate::presentation::markdown::links::MarkdownLinkAction {
     crate::presentation::markdown::links::markdown_link_action(&href, workspace_root.as_deref())
+}
+
+/// Converts a sent mobile message into Markdown while preserving the
+/// context-link destinations and marking records that are no longer present.
+#[cfg_attr(feature = "bindings", uniffi::export)]
+pub fn mobile_message_markdown(text: String, context: Option<MessageContext>) -> String {
+    crate::view::composer::chips::mobile_message_markdown(&text, context.as_ref())
+}
+
+/// The resolved context records a native mobile feed can act on when a user
+/// taps a context link. Attachments are supplied so file and image records
+/// keep their attachment ids without native JSON parsing.
+#[cfg_attr(feature = "bindings", uniffi::export)]
+pub fn mobile_message_context_chips(
+    text: String,
+    context: Option<MessageContext>,
+    attachments: Vec<Attachment>,
+) -> Vec<crate::view::composer::chips::ContextChip> {
+    crate::view::composer::chips::context_chips(
+        &text,
+        context.as_ref(),
+        &attachments,
+        &[],
+        crate::view::composer::chips::ContextChipSurface::Message,
+    )
+}
+
+/// Whether a safe, one-based line target exists in a rendered file.
+#[cfg_attr(feature = "bindings", uniffi::export)]
+pub fn markdown_line_target(line: u64, line_count: u64) -> Option<u64> {
+    crate::presentation::markdown::links::markdown_line_target(line, line_count)
+}
+
+/// Defaults for the mobile-only appearance controls.
+#[cfg_attr(feature = "bindings", uniffi::export)]
+pub fn mobile_appearance_default() -> crate::view::appearance::MobileAppearance {
+    crate::view::appearance::MobileAppearance::default()
+}
+
+/// Normalizes mobile appearance values before a native client stores or uses
+/// them.
+#[cfg_attr(feature = "bindings", uniffi::export)]
+pub fn normalize_mobile_appearance(
+    appearance: crate::view::appearance::MobileAppearance,
+) -> crate::view::appearance::MobileAppearance {
+    crate::view::appearance::normalize_mobile_appearance(appearance)
+}
+
+/// Assigns one mobile appearance's theme while preserving an independent
+/// selection for the other appearance.
+#[cfg_attr(feature = "bindings", uniffi::export)]
+pub fn mobile_assign_theme(
+    appearance: crate::view::appearance::MobileAppearance,
+    dark: bool,
+    theme_id: Option<String>,
+) -> crate::view::appearance::MobileAppearance {
+    crate::view::appearance::mobile_assign_theme(appearance, dark, theme_id)
+}
+
+/// Resolves the mobile text and terminal sizes from appearance controls.
+#[cfg_attr(feature = "bindings", uniffi::export)]
+pub fn mobile_typography(
+    appearance: crate::view::appearance::MobileAppearance,
+) -> crate::view::appearance::MobileTypography {
+    crate::view::appearance::mobile_typography(appearance)
+}
+
+/// The hex role values a native client uses for a stock or built-in theme.
+#[cfg_attr(feature = "bindings", uniffi::export)]
+pub fn mobile_theme_colors(
+    theme_id: Option<String>,
+    dark: bool,
+) -> std::collections::HashMap<String, String> {
+    crate::view::appearance::mobile_theme_colors(theme_id.as_deref(), dark)
+}
+
+/// Steps a mobile terminal size through the shared bounded half-point scale.
+#[cfg_attr(feature = "bindings", uniffi::export)]
+pub fn terminal_font_size_step(current: f64, larger: bool) -> f64 {
+    crate::view::terminals::text_size::step_terminal_font_size(current, larger)
 }
 
 /// The file screen's subtitle for `path` in the project `project_name`.

@@ -60,11 +60,15 @@ internal fun RemoteAgentApp(
                 { href ->
                     when (val target = dev.remoteagent.core.markdownLinkAction(href, root)) {
                         is dev.remoteagent.core.MarkdownLinkAction.WorkspaceFile ->
-                            model.navigate(
-                                Route.Workspace(WorkspaceTab.Files, java.io.File(root, target.path).path, target.line)
-                            )
+                            if (target.path.lowercase().endsWith(".pdf"))
+                                model.navigate(Route.Pdf(java.io.File(root, target.path).path))
+                            else
+                                model.navigate(
+                                    Route.Workspace(WorkspaceTab.Files, java.io.File(root, target.path).path, target.line)
+                                )
                         is dev.remoteagent.core.MarkdownLinkAction.HostFile ->
-                            model.navigate(Route.Workspace(WorkspaceTab.Files, target.path, target.line))
+                            if (target.path.lowercase().endsWith(".pdf")) model.navigate(Route.Pdf(target.path))
+                            else model.navigate(Route.Workspace(WorkspaceTab.Files, target.path, target.line))
                         is dev.remoteagent.core.MarkdownLinkAction.External ->
                             runCatching {
                                     context.startActivity(
@@ -103,7 +107,9 @@ private fun AppSurface(model: AndroidAppModel, requestQrScan: (onContents: (Stri
                     is Route.Terminal ->
                         TerminalScreen(model, route.threadId, route.terminalId, route.project, route.cwd)
                     is Route.Workspace -> WorkspaceScreen(model, route.tab, route.file, route.line)
+                    is Route.Pdf -> PdfScreen(model, route.file)
                     is Route.Settings -> SettingsScreen(model, route.projectId)
+                    Route.Appearance -> AppearanceScreen(model)
                     Route.Archived -> ArchivedScreen(model)
                 }
             }

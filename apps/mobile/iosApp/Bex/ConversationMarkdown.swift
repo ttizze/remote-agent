@@ -6,6 +6,8 @@ struct ConversationMarkdown: View {
     let source: String
     /// Set where a card's "Use template" can reach the composer; plans and reasoning show cards without it.
     var useArtifactTemplate: ((ArtifactTemplate) -> Void)?
+    /// Handles context links in a user message after core resolves their records.
+    var openContext: ((String) -> Void)?
     @State private var blocks: [MarkdownBlock] = []
     @Environment(\.markdownLinks) private var links
     var body: some View {
@@ -19,10 +21,7 @@ struct ConversationMarkdown: View {
                                 Spacer(); Button("Copy") { Haptics.copy(runs.map(\.text).joined()) }
                                     .font(AppTheme.font(11))
                             }
-                            ScrollView(.horizontal) { Text(runs.map(\.text).joined()).font(.system(
-                                size: 13,
-                                design: .monospaced
-                            )).textSelection(.enabled) }
+                            codeBlock(runs.map(\.text).joined())
                         }.padding(12).background(
                             AppTheme.color("mobileMarkdownCode"),
                             in: RoundedRectangle(cornerRadius: 10)
@@ -36,7 +35,9 @@ struct ConversationMarkdown: View {
                                     .marker {
                                     Text(marker).font(AppTheme.font(16)).foregroundStyle(AppTheme.tertiary)
                                 }
-                                Text(attributed(text, header: style.header)).lineSpacing(4).textSelection(.enabled)
+                                Text(attributed(text, header: style.header))
+                                    .lineSpacing(max(0, AppTheme.markdownBodyLineHeight - AppTheme.markdownFontSize(style.header) * 1.2))
+                                    .textSelection(.enabled)
                                     .frame(maxWidth: .infinity, alignment: .leading)
                             }.padding(.leading, style.quoted ? 12 : 0)
                                 .overlay(alignment: .leading) {
@@ -70,7 +71,9 @@ struct ConversationMarkdown: View {
                 }
             }
         }.tint(AppTheme.color("mobileMarkdownLink"))
-            .environment(\.openURL, OpenURLAction { MarkdownLinkURL.open($0, links: links) })
+            .environment(\.openURL, OpenURLAction {
+                MarkdownLinkURL.open($0, links: links, contextAction: openContext)
+            })
             .task(id: source) {
                 let parsed = await Task.detached(priority: .userInitiated) { markdownBlocks(source: source) }.value
                 guard !Task.isCancelled else { return }
@@ -78,13 +81,30 @@ struct ConversationMarkdown: View {
             }
     }
 
+    @ViewBuilder
+    private func codeBlock(_ text: String) -> some View {
+        if AppTheme.codeWordWrap {
+            Text(text)
+                .font(AppTheme.markdownMono())
+                .lineSpacing(max(0, AppTheme.markdownCodeLineHeight - AppTheme.markdownCodeFontSize * 1.2))
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        } else {
+            ScrollView(.horizontal) {
+                Text(text)
+                    .font(AppTheme.markdownMono())
+                    .lineSpacing(max(0, AppTheme.markdownCodeLineHeight - AppTheme.markdownCodeFontSize * 1.2))
+                    .textSelection(.enabled)
+            }
+        }
+    }
+
     private func attributed(_ runs: [MarkdownRun], header: UInt8?) -> AttributedString {
         var result = AttributedString()
-        let size: CGFloat = header == 1 ? 21 : header == 2 ? 19 : header == 3 ? 17 : header != nil ? 15 : 16
         for run in runs {
             var text = AttributedString(run.text)
-            text.font = run.code ? .system(size: 13, design: .monospaced) : AppTheme.font(
-                size,
+            text.font = run.code ? AppTheme.markdownMono() : AppTheme.markdownFont(
+                header,
                 weight: run.strong || header != nil ? .bold : .regular
             )
             if run.emphasis {
