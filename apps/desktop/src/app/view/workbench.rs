@@ -312,7 +312,8 @@ impl Desktop {
             .into_any_element()
     }
     pub(super) fn workbench(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        const TOOLS: [(Panel, IconName, &str); 4] = [
+        const TOOLS: [(Panel, IconName, &str); 5] = [
+            (Panel::Agents, IconName::Network, "エージェント"),
             (Panel::Terminal, IconName::SquareTerminal, "ターミナル"),
             (Panel::SideChat, IconName::Bot, "サイドチャット"),
             (Panel::Browser, IconName::Globe, "ブラウザ"),
@@ -418,7 +419,7 @@ impl Desktop {
                         .h_10()
                         .bg(rgb(0x232323))
                         .disabled(
-                            panel != Panel::Browser
+                            !matches!(panel, Panel::Browser | Panel::Agents)
                                 && (!self.snapshot.connected
                                     || self.snapshot.navigation.cwd.is_empty()),
                         ),
@@ -432,6 +433,7 @@ impl Desktop {
                     .child(chooser)
                     .into_any_element()
             }
+            Panel::Agents => self.agents_panel(),
             Panel::Files => self.files(cx),
             Panel::Diff => v_flex()
                 .size_full()

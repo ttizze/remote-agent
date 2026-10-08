@@ -1,3 +1,4 @@
+mod agents;
 mod composer;
 mod conversation;
 mod media;
@@ -229,6 +230,20 @@ impl Desktop {
         );
         header = header.child(
             Self::icon_button(
+                "agents-toggle",
+                IconName::Network,
+                "エージェント",
+                cx,
+                |s, _, _| {
+                    s.panel = Panel::Agents;
+                    s.panel_open = true;
+                },
+            )
+            .debug_selector(|| "agents-toggle".into())
+            .selected(self.panel_open && self.panel == Panel::Agents),
+        );
+        header = header.child(
+            Self::icon_button(
                 "panel-toggle",
                 if self.panel_open {
                     IconName::PanelRightClose
@@ -239,6 +254,7 @@ impl Desktop {
                 cx,
                 |s, _, _| s.panel_open = !s.panel_open,
             )
+            .debug_selector(|| "panel-toggle".into())
             .selected(self.panel_open),
         );
         let content = if self.side_chat_mode {

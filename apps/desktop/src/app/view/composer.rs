@@ -215,7 +215,11 @@ impl Desktop {
         })
         .flex_1()
         .min_h_0();
-        let mut body = v_flex().flex_1().min_w_0().h_full();
+        let mut body = v_flex()
+            .debug_selector(|| "conversation-chat".into())
+            .flex_1()
+            .min_w_0()
+            .h_full();
         if let Some(notice) = self
             .thread()
             .and_then(|thread| agent_protocol::session::input_unavailable_reason(thread))

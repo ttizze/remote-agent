@@ -174,10 +174,11 @@ struct ThreadsScreen: View {
                     HStack(spacing: 5) {
                         if model.isConnecting || model.threadLoadState == .loading {
                             ProgressView().controlSize(.mini)
+                                .tint(model.isConnecting ? .red : .green)
                                 .accessibilityLabel(model.isConnecting ? "接続中" : "読み込み中")
                                 .accessibilityIdentifier("connection.progress")
                         } else {
-                            Circle().fill(model.isConnected ? Color.green : Color.secondary).frame(width: 6, height: 6)
+                            Circle().fill(model.isConnected ? Color.blue : Color.red).frame(width: 6, height: 6)
                         }
                         Image(systemName: "laptopcomputer")
                         Text(model.selectedProfileName ?? "PC Host").lineLimit(1)
@@ -290,7 +291,7 @@ private struct ThreadListRow: View {
                         )
                 }
             }
-            .padding(.leading, (indented ? 40 : 0) + CGFloat(thread.depth) * 20)
+            .padding(.leading, indented ? 40 : 0)
             .contentShape(Rectangle())
         }
         .accessibilityIdentifier("tasks.row.\(accessibilityID)")

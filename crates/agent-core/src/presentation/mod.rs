@@ -2,6 +2,7 @@
 //! Grouping borrows item metadata; body formatting runs only for changed items
 //! or explicit expansion. Native views own rendering and local expansion state.
 
+pub mod agents;
 pub mod connections;
 pub mod diff;
 pub mod error;

@@ -90,6 +90,7 @@ enum ModelPanel {
 #[derive(Clone, Copy, PartialEq)]
 enum Panel {
     Home,
+    Agents,
     Terminal,
     SideChat,
     Browser,
