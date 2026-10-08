@@ -11,6 +11,7 @@ use agent_protocol::{
         ClearTerminal, RestartTerminal, StartTerminal, TerminalMetadataEvent, TerminalSize,
         TerminalStatus, TerminalSummary, terminal_label, thread_terminal_handle_for,
     },
+    preview::PreviewTerminalOwner,
     protocol::{Call, Notification},
 };
 use agent_transport::peer::JsonlReader;
@@ -189,6 +190,7 @@ struct Record {
     status: TerminalStatus,
     pid: Option<u32>,
     exit_code: Option<i32>,
+    subprocess_pid: Option<u32>,
     subprocess: Subprocess,
     updated_at: Timestamp,
     channel: Arc<Channel>,
@@ -239,6 +241,8 @@ impl Record {
         self.cwd = cwd;
         self.worktree_path = worktree_path;
         self.env = env;
+        self.subprocess_pid = None;
+        self.subprocess = Subprocess::Idle;
         stopping
     }
 }
@@ -304,6 +308,7 @@ impl Inner {
         };
         record.process = None;
         record.pid = None;
+        record.subprocess_pid = None;
         record.subprocess = Subprocess::Idle;
         match outcome {
             Outcome::Exited(code) => {
@@ -347,8 +352,10 @@ impl Inner {
             let (TerminalStatus::Running, Some(pid)) = (record.status, record.pid) else {
                 continue;
             };
+            let next_pid = table.subprocess_pid(pid);
             let next = table.subprocess(pid);
-            if next != record.subprocess {
+            if next != record.subprocess || next_pid != record.subprocess_pid {
+                record.subprocess_pid = next_pid;
                 record.subprocess = next;
                 record.channel.activity.fetch_add(1, Ordering::AcqRel);
                 record.touch();
@@ -503,6 +510,29 @@ impl Terminals {
         Self::summaries(&self.inner.records.lock().unwrap())
     }
 
+    /// Process identities used by Preview ownership matching. A discovered
+    /// listener may belong to the shell or to its current child process.
+    pub(crate) fn preview_process_owners(&self) -> Vec<(u32, PreviewTerminalOwner)> {
+        let records = self.inner.records.lock().unwrap();
+        let mut owners = Vec::new();
+        for record in records.values() {
+            if record.status != TerminalStatus::Running {
+                continue;
+            }
+            let owner = PreviewTerminalOwner {
+                thread_id: record.thread.clone(),
+                terminal_id: record.terminal_id.clone(),
+            };
+            if let Some(pid) = record.pid {
+                owners.push((pid, owner.clone()));
+            }
+            if let Some(pid) = record.subprocess_pid {
+                owners.push((pid, owner));
+            }
+        }
+        owners
+    }
+
     fn summaries(records: &HashMap<String, Record>) -> Vec<TerminalSummary> {
         let mut terminals: Vec<_> = records.values().map(Record::summary).collect();
         terminals.sort_by(|a, b| {
@@ -563,6 +593,7 @@ impl Terminals {
             status: TerminalStatus::Starting,
             pid: None,
             exit_code: None,
+            subprocess_pid: None,
             subprocess: Subprocess::Idle,
             updated_at: now(),
             channel: Arc::new(Channel {
@@ -715,6 +746,7 @@ impl Terminals {
             record.pid = None;
             record.exit_code = None;
             record.failure = None;
+            record.subprocess_pid = None;
             record.subprocess = Subprocess::Idle;
             record.size = size;
             record.touch();

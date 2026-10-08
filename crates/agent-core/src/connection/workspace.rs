@@ -14,7 +14,7 @@ use crate::{
     protocol::Call,
     state::{
         DiffFilePatch, DiffFilesEntry, DiffPreviewEntry, DraftWorkspace, EntryQuery,
-        PROVIDER_COMMANDS_RETRY_MS, RefScope, RefsEntry, SearchRequest,
+        ContentSearchQuery, PROVIDER_COMMANDS_RETRY_MS, RefScope, RefsEntry, SearchRequest,
     },
     view::{
         checkpoints::DiffSelection,
@@ -279,6 +279,35 @@ impl Owner {
         let entries = &mut self.state.sources.entries;
         if entries.wanted.as_ref() == Some(&query) {
             entries.result = Some((query, found.entries));
+        }
+    }
+
+    pub(super) fn content_search_finished(
+        &mut self,
+        request: &w::SearchContents,
+        result: Result<w::ContentSearch, &PeerError>,
+    ) {
+        let query = ContentSearchQuery {
+            cwd: request.cwd.clone(),
+            query: request.query.clone(),
+            limit: request.limit,
+            case_sensitive: request.case_sensitive,
+            whole_word: request.whole_word,
+            use_regex: request.use_regex,
+        };
+        let state = &mut self.state.sources.content_search;
+        if state.wanted.as_ref() != Some(&query) {
+            return;
+        }
+        state.in_flight = false;
+        match result {
+            Ok(found) => {
+                state.error = None;
+                state.result = Some((query, found));
+            }
+            Err(error) => {
+                state.error = Some(crate::presentation::error::error_message(&error.to_string()));
+            }
         }
     }
 

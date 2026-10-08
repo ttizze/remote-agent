@@ -913,6 +913,7 @@ impl Render for Desktop {
                     .child(self.render_navigation(window, cx))
                     .child(main),
             )
+            .children(self.panels.render_preview_mini_player(cx))
             .children(gpui_kit::component::Root::render_dialog_layer(window, cx))
             .children(gpui_kit::component::Root::render_notification_layer(
                 window, cx,

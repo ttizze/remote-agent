@@ -73,6 +73,7 @@ pub(super) enum StreamKey {
     Archive,
     Thread(ThreadId),
     Setup(ThreadId),
+    Preview(ThreadId),
     TerminalMetadata,
     Keybindings,
     VcsStatus(String),

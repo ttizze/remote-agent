@@ -43,6 +43,24 @@ pub struct EntrySearchState {
     pub result: Option<(EntryQuery, Vec<w::WorkspaceEntry>)>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContentSearchQuery {
+    pub cwd: String,
+    pub query: String,
+    pub limit: u32,
+    pub case_sensitive: bool,
+    pub whole_word: bool,
+    pub use_regex: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ContentSearchState {
+    pub wanted: Option<ContentSearchQuery>,
+    pub result: Option<(ContentSearchQuery, w::ContentSearch)>,
+    pub in_flight: bool,
+    pub error: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum RefScope {
     Local,
@@ -145,6 +163,9 @@ pub struct WorkspaceSources {
     /// By provider instance and directory.
     pub provider_commands: BTreeMap<(String, String), ProviderCommandsEntry>,
     pub entries: EntrySearchState,
+    pub content_search: ContentSearchState,
+    /// By checkout directory.
+    pub vcs_status: BTreeMap<String, w::VcsStatus>,
     pub refs: BTreeMap<(String, RefScope), RefsEntry>,
     /// Increments whenever a new full diff preview is requested, so a late
     /// answer for the same request cannot replace a newer focus reload.

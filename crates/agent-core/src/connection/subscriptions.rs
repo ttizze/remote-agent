@@ -45,6 +45,7 @@ impl Owner {
             }
             StreamKey::Thread(_) => tokio::spawn(follow(target, call, Payload::Thread)),
             StreamKey::Setup(_) => tokio::spawn(follow(target, call, Payload::Setup)),
+            StreamKey::Preview(_) => tokio::spawn(follow(target, call, Payload::Preview)),
             StreamKey::TerminalMetadata => {
                 tokio::spawn(follow(target, call, Payload::TerminalMetadata))
             }
@@ -114,6 +115,7 @@ impl Owner {
                     Call::SubscribeThread(request),
                 );
                 self.subscribe_setup(thread);
+                self.subscribe_preview(thread);
             }
             None => self.close_thread_streams(thread),
         }
@@ -124,6 +126,20 @@ impl Owner {
             StreamKey::Setup(thread.clone()),
             Call::SetupStream(SubscribeSetup {
                 thread_id: thread.clone(),
+            }),
+        );
+    }
+
+    /// The selected thread's Host-owned Preview tabs and local-server cards.
+    pub(super) fn subscribe_preview(&mut self, thread: &ThreadId) {
+        if !self.connected() {
+            return;
+        }
+        self.open_stream(
+            StreamKey::Preview(thread.clone()),
+            Call::PreviewSubscribe(agent_protocol::preview::PreviewSubscribe {
+                thread_id: thread.clone(),
+                configured_urls: self.state.preview.configured_urls.clone(),
             }),
         );
     }
@@ -236,6 +252,7 @@ impl Owner {
     fn close_thread_streams(&mut self, thread: &ThreadId) {
         self.close_stream(&StreamKey::Thread(thread.clone()));
         self.close_stream(&StreamKey::Setup(thread.clone()));
+        self.close_stream(&StreamKey::Preview(thread.clone()));
     }
 
     /// The archive is subscribed only while it is shown.
@@ -396,6 +413,11 @@ impl Owner {
                     self.subscribe_setup(&thread);
                 }
             }
+            StreamKey::Preview(thread) => {
+                if self.state.selected_thread.as_ref() == Some(&thread) {
+                    self.subscribe_preview(&thread);
+                }
+            }
             StreamKey::TerminalMetadata => self.subscribe_terminal_metadata(),
             StreamKey::Keybindings => self.subscribe_keybindings(),
             StreamKey::VcsStatus(cwd) => self.subscribe_vcs_status(cwd),
@@ -434,6 +456,10 @@ impl Owner {
             (StreamKey::Setup(thread), Payload::Setup(setup)) => {
                 self.healthy(&StreamKey::Setup(thread.clone()));
                 self.setup_update(&thread, setup);
+            }
+            (StreamKey::Preview(thread), Payload::Preview(snapshot)) => {
+                self.healthy(&StreamKey::Preview(thread));
+                self.state.preview.apply_list(snapshot);
             }
             (StreamKey::TerminalMetadata, Payload::TerminalMetadata(event)) => {
                 self.healthy(&StreamKey::TerminalMetadata);
@@ -492,7 +518,8 @@ impl Owner {
                 | StreamKey::TerminalMetadata
                 | StreamKey::Keybindings
                 | StreamKey::VcsStatus(_)
-                | StreamKey::GitAction(_) => {}
+                | StreamKey::GitAction(_)
+                | StreamKey::Preview(_)
                 | StreamKey::ScheduledTasks => {}
             }
             self.schedule_resubscribe(key);

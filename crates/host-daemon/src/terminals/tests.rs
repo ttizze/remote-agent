@@ -96,6 +96,8 @@ fn one_process_snapshot_names_each_shells_command() {
         table.subprocess(9001),
         Subprocess::Running(Some("python3".into()))
     );
+    assert_eq!(table.subprocess_pid(9000), Some(100));
+    assert_eq!(table.subprocess_pid(9001), Some(200));
     assert_eq!(table.subprocess(9002), Subprocess::Idle);
     assert_eq!(
         processes::command_name("[kworker/0:1]").as_deref(),

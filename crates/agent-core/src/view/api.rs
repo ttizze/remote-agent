@@ -26,6 +26,7 @@ use crate::view::{
         picker::{ProjectPickerView, project_picker},
         scripts::{ProjectScriptsView, project_scripts},
     },
+    preview::PreviewView,
     search::{SearchOptions, SearchView, search_view},
     scheduled_tasks::{
         ScheduledTaskBranchView, ScheduledTaskListView, branch_view as scheduled_task_branch_view,
@@ -52,6 +53,7 @@ use crate::view::{
     time::TimestampFormat,
     timeline::mobile_follow::{LiveFollowEvent, StreamHaptic, StreamingMessageMark},
     timeline::rows::{TimelineRow, TimelineUpdate},
+    workspace_search::ContentSearchView,
 };
 use agent_domain::{Attachment, MessageContext, ThreadId};
 use chrono::{Local, TimeZone};
@@ -104,6 +106,12 @@ impl Snapshot {
         pull_request_diff(self, &key)
     }
 
+    pub fn preview(&self) -> PreviewView {
+        crate::view::preview::preview(self)
+    }
+    pub fn content_search(&self) -> ContentSearchView {
+        crate::view::workspace_search::content_search(self)
+    }
     fn picker_options(
         &self,
         query: String,

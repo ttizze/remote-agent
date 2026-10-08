@@ -239,6 +239,7 @@ pub(crate) struct PanelState {
     width: f32,
     launcher_focus: FocusHandle,
     browsers: HashMap<u64, Entity<crate::browser::Browser>>,
+    preview_browsers: HashMap<u64, Entity<crate::browser::HostBrowser>>,
     next_browser: u64,
     diff: diff::DiffState,
     files: files::FilesState,
@@ -255,6 +256,7 @@ impl PanelState {
             width: super::ui::metrics().panel_width,
             launcher_focus: cx.focus_handle(),
             browsers: HashMap::new(),
+            preview_browsers: HashMap::new(),
             next_browser: 0,
             diff: diff::DiffState::new(window, cx, &mut subscriptions),
             files: files::FilesState::new(window, cx, &mut subscriptions),
@@ -274,7 +276,14 @@ impl PanelState {
         for browser in self.browsers.values() {
             browser.update(cx, |browser, cx| browser.set_visible(false, cx));
         }
+        for browser in self.preview_browsers.values() {
+            browser.update(cx, |browser, cx| {
+                browser.close();
+                browser.set_visible(false, cx);
+            });
+        }
         self.browsers.clear();
+        self.preview_browsers.clear();
         self.threads.clear();
     }
 }
@@ -331,14 +340,24 @@ impl Desktop {
         let open = right.open;
         let body = match right.active_surface().cloned() {
             None => self.render_launcher(cx),
-            Some(Surface::Browser { id }) => match self.panels.browsers.get(&id) {
-                Some(browser) => div()
-                    .flex_1()
-                    .min_h_0()
-                    .child(browser.clone())
-                    .into_any_element(),
-                None => div().flex_1().into_any_element(),
-            },
+            Some(Surface::Browser { id }) => {
+                if let Some(browser) = self.panels.preview_browsers.get(&id) {
+                    div()
+                        .flex_1()
+                        .min_h_0()
+                        .child(browser.clone())
+                        .into_any_element()
+                } else {
+                    match self.panels.browsers.get(&id) {
+                        Some(browser) => div()
+                            .flex_1()
+                            .min_h_0()
+                            .child(browser.clone())
+                            .into_any_element(),
+                        None => div().flex_1().into_any_element(),
+                    }
+                }
+            }
             Some(surface @ Surface::Terminal { .. }) => {
                 self.render_terminals(Some(surface.id()), window, cx)
             }
@@ -402,14 +421,54 @@ impl Desktop {
         })
     }
 
+    /// Keeps the active Host Preview visible as a small player while the full
+    /// panel is closed. The same entity remains the source of frames and input.
+    pub(crate) fn render_preview_mini_player(
+        &self,
+        cx: &mut Context<Desktop>,
+    ) -> Option<AnyElement> {
+        let right = self.right();
+        if right.open {
+            return None;
+        }
+        let Surface::Browser { id } = right.active_surface()? else {
+            return None;
+        };
+        let browser = self.panels.preview_browsers.get(id)?.clone();
+        Some(
+            div()
+                .id("preview-mini-player")
+                .absolute()
+                .right_4()
+                .bottom_4()
+                .w(px(320.))
+                .h(px(220.))
+                .rounded_md()
+                .border_1()
+                .border_color(color("border"))
+                .bg(color("canvas"))
+                .shadow_lg()
+                .child(browser)
+                .into_any_element(),
+        )
+    }
+
     /// A surface's tab title.
     fn surface_title(&self, surface: &Surface, cx: &App) -> String {
         match surface {
             Surface::Browser { id } => self
                 .panels
-                .browsers
+                .preview_browsers
                 .get(id)
-                .map_or_else(|| "Browser".into(), |browser| browser.read(cx).title(cx)),
+                .map_or_else(
+                    || {
+                        self.panels
+                            .browsers
+                            .get(id)
+                            .map_or_else(|| "Browser".into(), |browser| browser.read(cx).title(cx))
+                    },
+                    |browser| browser.read(cx).title(cx),
+                ),
             Surface::Terminal { active, .. } => {
                 let thread = self.panel_thread();
                 self.snapshot
@@ -721,6 +780,10 @@ impl Desktop {
             let visible = shown == Some(*id);
             browser.update(cx, |browser, cx| browser.set_visible(visible, cx));
         }
+        for (id, browser) in &self.panels.preview_browsers {
+            let visible = shown == Some(*id);
+            browser.update(cx, |browser, cx| browser.set_visible(visible, cx));
+        }
     }
 
     /// Opens a surface of `tab`: Diff and Files once, a browser or terminal
@@ -739,24 +802,29 @@ impl Desktop {
             PanelTab::Files => self.right_mut().upsert(Surface::Files),
             PanelTab::PullRequests => self.right_mut().upsert(Surface::PullRequests),
             PanelTab::Browser => {
-                match crate::browser::Browser::new(
-                    wry::WebViewBuilder::new(),
-                    #[cfg(target_os = "macos")]
-                    crate::browser::ChromeProfileSource::default(),
-                    window,
-                    cx,
-                ) {
-                    Ok(browser) => {
-                        self.panels.next_browser += 1;
-                        let id = self.panels.next_browser;
-                        self.panels.browsers.insert(id, browser);
-                        self.right_mut().upsert(Surface::Browser { id });
-                    }
-                    Err(error) => {
-                        self.show_error(&error, window, cx);
-                        return;
+                self.panels.next_browser += 1;
+                let id = self.panels.next_browser;
+                if let (Some(store), Some(thread)) = (self.store(), self.thread_id()) {
+                    let browser = crate::browser::HostBrowser::new(store, thread, window, cx);
+                    self.panels.preview_browsers.insert(id, browser);
+                } else {
+                    match crate::browser::Browser::new(
+                        wry::WebViewBuilder::new(),
+                        #[cfg(target_os = "macos")]
+                        crate::browser::ChromeProfileSource::default(),
+                        window,
+                        cx,
+                    ) {
+                        Ok(browser) => {
+                            self.panels.browsers.insert(id, browser);
+                        }
+                        Err(error) => {
+                            self.show_error(&error, window, cx);
+                            return;
+                        }
                     }
                 }
+                self.right_mut().upsert(Surface::Browser { id });
             }
             PanelTab::Terminal => {
                 if !self.add_terminal_surface() {
@@ -875,6 +943,19 @@ impl Desktop {
             && let Some(browser) = self.panels.browsers.remove(&browser)
         {
             browser.update(cx, |browser, cx| browser.set_visible(false, cx));
+        }
+        if let Some(Surface::Browser { id: browser }) = self
+            .right()
+            .surfaces
+            .iter()
+            .find(|surface| surface.id() == id)
+            .cloned()
+            && let Some(browser) = self.panels.preview_browsers.remove(&browser)
+        {
+            browser.update(cx, |browser, cx| {
+                browser.close();
+                browser.set_visible(false, cx);
+            });
         }
         let right = self.right_mut();
         right.close(id);

@@ -20,6 +20,7 @@ pub(super) enum Payload {
     VcsStatus(agent_protocol::vcs::VcsStatusStreamEvent),
     ActionProgress(agent_protocol::vcs::ActionProgressEvent),
     ScheduledTasks(ScheduledTaskList),
+    Preview(agent_protocol::preview::PreviewListResult),
     /// The stream closed; `None` when it ended without an error.
     Ended(Option<PeerError>),
 }
