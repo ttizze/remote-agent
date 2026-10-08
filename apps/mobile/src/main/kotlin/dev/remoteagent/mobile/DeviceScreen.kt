@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -52,7 +53,10 @@ import dev.remoteagent.core.DeviceDuoCommandIntent
 import dev.remoteagent.core.DeviceDuoOrientationIntent
 import dev.remoteagent.core.DeviceDuoPhysicalIntent
 import dev.remoteagent.core.DeviceDuoPoseIntent
+import dev.remoteagent.core.DeviceEntryView
 import dev.remoteagent.core.DeviceFoldPostureIntent
+import dev.remoteagent.core.DeviceRecordingView
+import dev.remoteagent.core.DeviceSessionView
 import dev.remoteagent.core.DeviceView
 import dev.remoteagent.core.Intent
 import dev.remoteagent.core.projectTouchPoint
@@ -62,15 +66,22 @@ private data class StreamKey(val hostId: String, val deviceId: String, val scree
 
 private data class DeviceKeyFacts(val code: String, val key: String, val meta: Boolean, val ctrl: Boolean)
 
+private const val DEVICE_EVENT_LOG_LOAD_LIMIT = 100
+private const val DEVICE_DUO_HALF_OPEN_ANGLE = 90f
+private const val DEVICE_DUO_FULL_OPEN_ANGLE = 180f
+private const val DEVICE_ACCESSIBILITY_ELEMENT_LIMIT = 20
+private const val DEVICE_EVENT_LOG_PREVIEW_LIMIT = 20
+private const val DEVICE_ACCESSIBILITY_STROKE_WIDTH = 2f
+// This is the native overlay's fixed accessibility accent, matching the Host UI token.
+@Suppress("MagicNumber") private val DEVICE_ACCESSIBILITY_COLOR = Color(0xFF4F8CFF)
+
 /** Native device picker, setup and live frame surface for a conversation. */
 @Composable
 internal fun DeviceScreen(model: AndroidAppModel, threadId: String) {
     val view = model.snapshot.device()
-    val context = LocalContext.current
     val hostProfile = model.profileId
     val threadSessions = view.sessions.filter { it.threadId == threadId }
     val sessionKey = threadSessions.joinToString(",") { "${it.hostId}:${it.deviceId}:${it.sessionEpoch}" }
-    val liveEvents = view.videoEvents.filter { it.threadId == threadId }
     LaunchedEffect(threadId, hostProfile) {
         model.perform(Intent.OpenThread(threadId))
         model.perform(Intent.LoadDevices)
@@ -81,7 +92,9 @@ internal fun DeviceScreen(model: AndroidAppModel, threadId: String) {
             model.perform(Intent.LoadDeviceDetail(session.hostId, session.deviceId))
             model.perform(Intent.LoadDeviceAccessibility(session.hostId, session.deviceId))
             if (session.platform == "ios") {
-                model.perform(Intent.LoadDeviceEventLog(session.hostId, session.deviceId, 100u.toUShort()))
+                model.perform(
+                    Intent.LoadDeviceEventLog(session.hostId, session.deviceId, DEVICE_EVENT_LOG_LOAD_LIMIT.toUShort())
+                )
             }
         }
     }
@@ -95,510 +108,452 @@ internal fun DeviceScreen(model: AndroidAppModel, threadId: String) {
     }
     ScreenScaffold("Device", onBack = model::back) {
         if (!view.enabled) {
-            Column(Modifier.fillMaxSize().padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text("Device support is off")
-                Text("Enable it to discover simulators and emulators on the Host.")
-                Button(onClick = { model.perform(Intent.ConfigureDevices(true, null, false)) }) {
-                    Text("Enable device support")
-                }
-            }
+            DeviceOverviewSections.supportDisabled(model)
             return@ScreenScaffold
         }
         LazyColumn(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            item { Text("Host status: ${view.status}") }
-            view.error?.let { error -> item { Text("Device error: $error") } }
+            with(DeviceOverviewSections) {
+                statusItems(model, view)
+                pickerItems(model, view.devices, threadSessions)
+                sessionItems(model, view, threadId, threadSessions)
+            }
+            with(DeviceStreamSections) {
+                screenItems(view, threadId, threadSessions)
+                liveItems(model, view, threadId)
+                accessibilityItems(view, threadSessions)
+                eventLogItems(view, threadSessions)
+                recordingItems(model, threadId, view.lastRecording)
+            }
+        }
+    }
+}
+
+private object DeviceOverviewSections {
+    @Composable
+    fun supportDisabled(model: AndroidAppModel) {
+        Column(Modifier.fillMaxSize().padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Text("Device support is off")
+            Text("Enable it to discover simulators and emulators on the Host.")
+            Button(onClick = { model.perform(Intent.ConfigureDevices(true, null, false)) }) {
+                Text("Enable device support")
+            }
+        }
+    }
+
+    fun LazyListScope.statusItems(model: AndroidAppModel, view: DeviceView) {
+        item { Text("Host status: ${view.status}") }
+        view.error?.let { error -> item { Text("Device error: ${error}") } }
+        item {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(onClick = { model.perform(Intent.InspectDevices(null)) }) { Text("Inspect tools") }
+                Button(onClick = { model.perform(Intent.UpdateDeviceTool(null, "hub")) }) { Text("Update hub") }
+                Button(onClick = { model.perform(Intent.UpdateDeviceTool(null, "agent")) }) { Text("Update agent") }
+            }
+        }
+        view.statusDetail?.let { detail -> item { Text(detail) } }
+        items(view.hosts, key = { it.id }) { host ->
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(host.label + " · " + host.kind, Modifier.weight(1f))
+                Button(onClick = { model.perform(Intent.RetryDeviceHost(host.id)) }) { Text("Retry") }
+            }
+            host.unavailableReasons.forEach { reason -> Text(reason) }
+        }
+        if (!view.agentAccessEnabled) {
             item {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Button(onClick = { model.perform(Intent.InspectDevices(null)) }) { Text("Inspect tools") }
-                    Button(onClick = { model.perform(Intent.UpdateDeviceTool(null, "hub")) }) { Text("Update hub") }
-                    Button(onClick = { model.perform(Intent.UpdateDeviceTool(null, "agent")) }) { Text("Update agent") }
+                Button(onClick = { model.perform(Intent.ConfigureDevices(null, true, true)) }) {
+                    Text("Enable agent device access")
                 }
             }
-            view.statusDetail?.let { detail -> item { Text(detail) } }
-            items(view.hosts, key = { it.id }) { host ->
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text(host.label + " · " + host.kind, Modifier.weight(1f))
-                    Button(onClick = { model.perform(Intent.RetryDeviceHost(host.id)) }) { Text("Retry") }
-                }
-                host.unavailableReasons.forEach { reason -> Text(reason) }
-            }
-            if (view.enabled && !view.agentAccessEnabled) {
-                item {
-                    Button(onClick = { model.perform(Intent.ConfigureDevices(null, true, true)) }) {
-                        Text("Enable agent device access")
+        }
+    }
+
+    fun LazyListScope.pickerItems(
+        model: AndroidAppModel,
+        devices: List<DeviceEntryView>,
+        threadSessions: List<DeviceSessionView>,
+    ) {
+        items(devices, key = { "${it.hostId}:${it.id}" }) { device ->
+            val opened = threadSessions.any { it.hostId == device.hostId && it.deviceId == device.id }
+            Card(Modifier.fillMaxWidth()) {
+                Row(Modifier.fillMaxWidth().padding(12.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Column(Modifier.weight(1f)) {
+                        Text(device.name)
+                        Text("${device.platform} · ${device.version}")
                     }
-                }
-            }
-            items(view.devices, key = { "${it.hostId}:${it.id}" }) { device ->
-                val opened = threadSessions.any { it.hostId == device.hostId && it.deviceId == device.id }
-                Card(Modifier.fillMaxWidth()) {
-                    Row(Modifier.fillMaxWidth().padding(12.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        Column(Modifier.weight(1f)) {
-                            Text(device.name)
-                            Text("${device.platform} · ${device.version}")
-                        }
-                        Button(
-                            onClick = {
-                                if (opened) {
-                                    model.perform(
-                                        Intent.ReleaseDeviceInput(
-                                            device.hostId,
-                                            device.id,
-                                            threadSessions
-                                                .firstOrNull { it.hostId == device.hostId && it.deviceId == device.id }
-                                                ?.sessionEpoch,
-                                        )
-                                    )
-                                    model.perform(Intent.CloseDevice(device.hostId, device.id, false))
-                                } else {
-                                    model.perform(Intent.OpenDevice(device.hostId, device.id, device.platform, true))
-                                }
+                    Button(
+                        onClick = {
+                            val session = threadSessions.firstOrNull {
+                                it.hostId == device.hostId && it.deviceId == device.id
                             }
-                        ) {
-                            Text(if (opened) "Close" else "Open")
+                            if (opened) {
+                                model.perform(
+                                    Intent.ReleaseDeviceInput(device.hostId, device.id, session?.sessionEpoch)
+                                )
+                                model.perform(Intent.CloseDevice(device.hostId, device.id, false))
+                            } else {
+                                model.perform(Intent.OpenDevice(device.hostId, device.id, device.platform, true))
+                            }
                         }
+                    ) {
+                        Text(if (opened) "Close" else "Open")
                     }
                 }
             }
-            items(
-                threadSessions,
-                key = { session -> "controls:${session.hostId}:${session.deviceId}:${session.sessionEpoch}" },
-            ) { session ->
-                val detail = view.details.firstOrNull { it.hostId == session.hostId && it.deviceId == session.deviceId }
-                val activeRecording =
-                    view.recordings.firstOrNull {
-                        it.threadId == threadId &&
-                            it.hostId == session.hostId &&
-                            it.deviceId == session.deviceId &&
-                            it.sessionEpoch == session.sessionEpoch
-                    }
-                val foreground =
-                    view.foreground
-                        .firstOrNull { it.hostId == session.hostId && it.deviceId == session.deviceId }
-                        ?.appId ?: detail?.foregroundApp
-                val duo =
-                    view.duoControls.firstOrNull {
-                        it.threadId == threadId &&
-                            it.hostId == session.hostId &&
-                            it.deviceId == session.deviceId &&
-                            it.sessionEpoch == session.sessionEpoch
-                    }
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Button(
-                        onClick = {
-                            model.perform(
-                                Intent.DeviceAction(
-                                    session.hostId,
-                                    session.deviceId,
-                                    DeviceActionIntent.SetAppearance(true),
-                                )
-                            )
-                        }
-                    ) {
-                        Text("Dark")
-                    }
-                    Button(
-                        onClick = {
-                            model.perform(
-                                Intent.DeviceAction(
-                                    session.hostId,
-                                    session.deviceId,
-                                    DeviceActionIntent.SetAppearance(false),
-                                )
-                            )
-                        }
-                    ) {
-                        Text("Light")
-                    }
-                    Button(
-                        onClick = {
-                            model.perform(
-                                Intent.DeviceAction(
-                                    session.hostId,
-                                    session.deviceId,
-                                    DeviceActionIntent.SetTextSize("large"),
-                                )
-                            )
-                        }
-                    ) {
-                        Text("Text +")
-                    }
-                    if (session.platform == "android") {
-                        Button(
-                            onClick = {
-                                model.perform(
-                                    Intent.DeviceAction(
-                                        session.hostId,
-                                        session.deviceId,
-                                        DeviceActionIntent.SetOrientation("portrait"),
-                                    )
-                                )
-                            }
-                        ) {
-                            Text("Portrait")
-                        }
-                    }
-                    Button(
-                        onClick = {
-                            model.perform(
-                                Intent.DeviceAction(
-                                    session.hostId,
-                                    session.deviceId,
-                                    DeviceActionIntent.HardwareButton("home"),
-                                )
-                            )
-                        }
-                    ) {
-                        Text("Home")
-                    }
-                    Button(
-                        onClick = {
-                            model.perform(
-                                Intent.DeviceAction(session.hostId, session.deviceId, DeviceActionIntent.Rotate)
-                            )
-                        }
-                    ) {
-                        Text("Rotate")
-                    }
-                    Button(
-                        onClick = {
-                            model.perform(Intent.StartDeviceRecording(session.hostId, session.deviceId, "mp4"))
-                        }
-                    ) {
-                        Text("Record")
-                    }
-                    Button(
-                        onClick = {
-                            activeRecording?.let { recording ->
-                                model.perform(
-                                    Intent.StopDeviceRecording(
-                                        session.hostId,
-                                        session.deviceId,
-                                        recording.recordingId,
-                                        recording.sessionEpoch,
-                                    )
-                                )
-                            } ?: run { model.notice = "No active device recording" }
-                        }
-                    ) {
-                        Text("Stop record")
-                    }
-                    if (session.platform == "android") {
-                        Button(
-                            onClick = {
-                                model.perform(
-                                    Intent.DeviceAction(
-                                        session.hostId,
-                                        session.deviceId,
-                                        DeviceActionIntent.Fold(DeviceFoldPostureIntent.Closed),
-                                    )
-                                )
-                            }
-                        ) {
-                            Text("Close fold")
-                        }
-                        Button(
-                            onClick = {
-                                model.perform(
-                                    Intent.DeviceAction(
-                                        session.hostId,
-                                        session.deviceId,
-                                        DeviceActionIntent.Fold(DeviceFoldPostureIntent.Opened),
-                                    )
-                                )
-                            }
-                        ) {
-                            Text("Open fold")
-                        }
-                    }
-                    if (session.platform == "ios") {
-                        Button(
-                            onClick = {
-                                model.perform(
-                                    Intent.DeviceAction(
-                                        session.hostId,
-                                        session.deviceId,
-                                        DeviceActionIntent.Duo(DeviceDuoCommandIntent.Angle(90f)),
-                                    )
-                                )
-                            }
-                        ) {
-                            Text("Duo 90°")
-                        }
-                        Button(
-                            onClick = {
-                                model.perform(
-                                    Intent.DeviceAction(
-                                        session.hostId,
-                                        session.deviceId,
-                                        DeviceActionIntent.Duo(DeviceDuoCommandIntent.Angle(180f)),
-                                    )
-                                )
-                            }
-                        ) {
-                            Text("Duo 180°")
-                        }
-                        listOf(
-                                DeviceDuoPoseIntent.Closed to "Duo closed",
-                                DeviceDuoPoseIntent.Book to "Duo book",
-                                DeviceDuoPoseIntent.Open to "Duo open",
-                                DeviceDuoPoseIntent.Laptop to "Duo laptop",
-                                DeviceDuoPoseIntent.Tent to "Duo tent",
-                            )
-                            .forEach { (pose, label) ->
-                                Button(
-                                    onClick = {
-                                        model.perform(
-                                            Intent.DeviceAction(
-                                                session.hostId,
-                                                session.deviceId,
-                                                DeviceActionIntent.Duo(DeviceDuoCommandIntent.Pose(pose)),
-                                            )
-                                        )
-                                    }
-                                ) {
-                                    Text(label)
-                                }
-                            }
-                        Button(
-                            onClick = {
-                                model.perform(
-                                    Intent.DeviceAction(
-                                        session.hostId,
-                                        session.deviceId,
-                                        DeviceActionIntent.Duo(DeviceDuoCommandIntent.Table(true)),
-                                    )
-                                )
-                            }
-                        ) {
-                            Text("Table on")
-                        }
-                        Button(
-                            onClick = {
-                                model.perform(
-                                    Intent.DeviceAction(
-                                        session.hostId,
-                                        session.deviceId,
-                                        DeviceActionIntent.Duo(DeviceDuoCommandIntent.Table(false)),
-                                    )
-                                )
-                            }
-                        ) {
-                            Text("Table off")
-                        }
-                        listOf(
-                                DeviceDuoPhysicalIntent.Faceup to "Face up",
-                                DeviceDuoPhysicalIntent.Facedown to "Face down",
-                            )
-                            .forEach { (physical, label) ->
-                                Button(
-                                    onClick = {
-                                        model.perform(
-                                            Intent.DeviceAction(
-                                                session.hostId,
-                                                session.deviceId,
-                                                DeviceActionIntent.Duo(DeviceDuoCommandIntent.Physical(physical)),
-                                            )
-                                        )
-                                    }
-                                ) {
-                                    Text(label)
-                                }
-                            }
-                        listOf(
-                                DeviceDuoOrientationIntent.Portrait to "Portrait",
-                                DeviceDuoOrientationIntent.LandscapeLeft to "Landscape left",
-                                DeviceDuoOrientationIntent.PortraitUpsideDown to "Portrait upside down",
-                                DeviceDuoOrientationIntent.LandscapeRight to "Landscape right",
-                            )
-                            .forEach { (orientation, label) ->
-                                Button(
-                                    onClick = {
-                                        model.perform(
-                                            Intent.DeviceAction(
-                                                session.hostId,
-                                                session.deviceId,
-                                                DeviceActionIntent.Duo(DeviceDuoCommandIntent.Orientation(orientation)),
-                                            )
-                                        )
-                                    }
-                                ) {
-                                    Text(label)
-                                }
-                            }
-                    }
-                    Button(
-                        onClick = {
-                            model.perform(
-                                Intent.ReleaseDeviceInput(session.hostId, session.deviceId, session.sessionEpoch)
-                            )
-                            model.perform(Intent.CloseDevice(session.hostId, session.deviceId, true))
-                        }
-                    ) {
-                        Text("Power off")
-                    }
-                }
-                foreground?.let { app -> Text("Foreground: " + app) }
-                duo?.let { control ->
+        }
+    }
+
+    fun LazyListScope.sessionItems(
+        model: AndroidAppModel,
+        view: DeviceView,
+        threadId: String,
+        threadSessions: List<DeviceSessionView>,
+    ) {
+        items(
+            threadSessions,
+            key = { session -> "controls:${session.hostId}:${session.deviceId}:${session.sessionEpoch}" },
+        ) { session ->
+            val detail = view.details.firstOrNull { it.hostId == session.hostId && it.deviceId == session.deviceId }
+            val activeRecording =
+                view.recordings.firstOrNull {
                     when {
-                        control.pending -> Text("Duo control pending" + (control.requested?.let { ": $it" } ?: ""))
-                        control.error != null -> Text("Duo control failed: ${control.error}")
+                        it.threadId != threadId -> false
+                        it.hostId != session.hostId -> false
+                        it.deviceId != session.deviceId -> false
+                        else -> it.sessionEpoch == session.sessionEpoch
                     }
+                }
+            val foreground =
+                view.foreground.firstOrNull { it.hostId == session.hostId && it.deviceId == session.deviceId }?.appId
+                    ?: detail?.foregroundApp
+            val duo =
+                view.duoControls.firstOrNull {
+                    when {
+                        it.threadId != threadId -> false
+                        it.hostId != session.hostId -> false
+                        it.deviceId != session.deviceId -> false
+                        else -> it.sessionEpoch == session.sessionEpoch
+                    }
+                }
+            sessionControls(model, session, activeRecording, foreground, duo)
+        }
+    }
+
+    @Composable
+    fun sessionControls(
+        model: AndroidAppModel,
+        session: DeviceSessionView,
+        activeRecording: DeviceRecordingView?,
+        foreground: String?,
+        duo: dev.remoteagent.core.DeviceDuoControlView?,
+    ) {
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            appearanceControls(model, session)
+            recordingControls(model, session, activeRecording)
+            if (session.platform == "android") foldControls(model, session)
+            if (session.platform == "ios") duoControls(model, session)
+            powerControl(model, session)
+            foreground?.let { app -> Text("Foreground: ${app}") }
+            duo?.let { control ->
+                when {
+                    control.pending -> Text("Duo control pending" + (control.requested?.let { ": ${it}" } ?: ""))
+                    control.error != null -> Text("Duo control failed: ${control.error}")
                 }
             }
-            view.screens
-                .filter { screen ->
-                    screen.threadId == threadId &&
-                        threadSessions.any { session ->
-                            session.hostId == screen.hostId &&
-                                session.deviceId == screen.deviceId &&
-                                session.sessionEpoch == screen.sessionEpoch
-                        }
-                }
-                .sortedBy { it.screenId ?: 0 }
-                .forEach { screen ->
-                    item(
-                        key =
-                            "screen-${screen.hostId}-${screen.deviceId}-${screen.screenId ?: 0}-${screen.sessionEpoch}"
-                    ) {
-                        Text(
-                            "Screen ${screen.screenId ?: 0}: ${screen.width}×${screen.height} · " +
-                                "${screen.orientation}" +
-                                (screen.hingeAngle?.let { " · hinge ${it.toInt()}°" } ?: "")
-                        )
-                        if (screen.hingePose != null || screen.tableModeAvailable) {
-                            Text(
-                                "Duo readback: " +
-                                    listOfNotNull(
-                                            screen.hingePose?.let { "pose $it" },
-                                            screen.hingeAngle?.let { "angle ${it.toInt()}°" },
-                                            if (screen.tableModeAvailable) {
-                                                "table ${if (screen.tableMode) "on" else "off"}"
-                                            } else {
-                                                null
-                                            },
-                                        )
-                                        .joinToString(" · ")
+        }
+    }
+
+    @Composable
+    fun appearanceControls(model: AndroidAppModel, session: DeviceSessionView) {
+        fun send(action: DeviceActionIntent) {
+            model.perform(Intent.DeviceAction(session.hostId, session.deviceId, action))
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(onClick = { send(DeviceActionIntent.SetAppearance(true)) }) { Text("Dark") }
+            Button(onClick = { send(DeviceActionIntent.SetAppearance(false)) }) { Text("Light") }
+            Button(onClick = { send(DeviceActionIntent.SetTextSize("large")) }) { Text("Text +") }
+            if (session.platform == "android") {
+                Button(onClick = { send(DeviceActionIntent.SetOrientation("portrait")) }) { Text("Portrait") }
+            }
+            Button(onClick = { send(DeviceActionIntent.HardwareButton("home")) }) { Text("Home") }
+            Button(onClick = { send(DeviceActionIntent.Rotate) }) { Text("Rotate") }
+        }
+    }
+
+    @Composable
+    fun recordingControls(model: AndroidAppModel, session: DeviceSessionView, activeRecording: DeviceRecordingView?) {
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(onClick = { model.perform(Intent.StartDeviceRecording(session.hostId, session.deviceId, "mp4")) }) {
+                Text("Record")
+            }
+            Button(
+                onClick = {
+                    activeRecording?.let { recording ->
+                        model.perform(
+                            Intent.StopDeviceRecording(
+                                session.hostId,
+                                session.deviceId,
+                                recording.recordingId,
+                                recording.sessionEpoch,
                             )
-                        }
-                        if (screen.tableModeAvailable) {
-                            Text(if (screen.tableMode) "Table mode on" else "Table mode off")
-                        }
-                    }
+                        )
+                    } ?: run { model.notice = "No active device recording" }
                 }
-            liveEvents
-                .groupBy { StreamKey(it.hostId, it.deviceId, it.screenId?.toInt() ?: 0, it.sessionEpoch) }
-                .toSortedMap(compareBy({ it.hostId }, { it.deviceId }, { it.screenId }, { it.sessionEpoch }))
-                .forEach { (stream, events) ->
-                    val ordered = events.sortedBy { it.sequence }
-                    val frame = ordered.lastOrNull() ?: return@forEach
-                    val epoch = frame.sessionEpoch
-                    item(key = "video-frame-${stream.hostId}-${stream.deviceId}-${stream.screenId}-$epoch") {
-                        if (ordered.size > 1 || stream.screenId != 0) Text("Live screen ${stream.screenId}")
-                        when (frame.encoding) {
-                            "jpeg",
-                            "mjpeg" -> DeviceJpegFrame(model, view, frame, epoch, stream.screenId)
-                            "h264",
-                            "semu",
-                            "avcc-description" -> DeviceH264Frame(model, view, ordered, epoch, stream.screenId)
-                            else -> Text("Unsupported live device frame format: ${frame.encoding}")
-                        }
-                    }
+            ) {
+                Text("Stop record")
+            }
+        }
+    }
+
+    @Composable
+    fun foldControls(model: AndroidAppModel, session: DeviceSessionView) {
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(
+                onClick = {
+                    model.perform(
+                        Intent.DeviceAction(
+                            session.hostId,
+                            session.deviceId,
+                            DeviceActionIntent.Fold(DeviceFoldPostureIntent.Closed),
+                        )
+                    )
                 }
-            view.accessibility
-                .filter { tree -> threadSessions.any { it.hostId == tree.hostId && it.deviceId == tree.deviceId } }
-                .forEach { tree ->
-                    item(key = "accessibility-${tree.hostId}-${tree.deviceId}") {
-                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                            Text("Accessibility overlay")
-                            tree.errors.forEach { error -> Text("Accessibility error: $error") }
-                            tree.elements
-                                .filter { it.label.isNotEmpty() }
-                                .take(20)
-                                .forEach { element -> Text("${element.role} · ${element.label}") }
-                        }
-                    }
+            ) {
+                Text("Close fold")
+            }
+            Button(
+                onClick = {
+                    model.perform(
+                        Intent.DeviceAction(
+                            session.hostId,
+                            session.deviceId,
+                            DeviceActionIntent.Fold(DeviceFoldPostureIntent.Opened),
+                        )
+                    )
                 }
-            view.eventLog
-                .filter { entry -> threadSessions.any { it.hostId == entry.hostId && it.deviceId == entry.deviceId } }
-                .takeLast(20)
-                .forEach { entry ->
-                    item(key = "event-log-${entry.hostId}-${entry.deviceId}-${entry.id}") {
-                        Text("${entry.kind} · ${entry.summary}")
-                    }
+            ) {
+                Text("Open fold")
+            }
+        }
+    }
+
+    @Composable
+    fun duoControls(model: AndroidAppModel, session: DeviceSessionView) {
+        fun send(command: DeviceDuoCommandIntent) {
+            model.perform(Intent.DeviceAction(session.hostId, session.deviceId, DeviceActionIntent.Duo(command)))
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(onClick = { send(DeviceDuoCommandIntent.Angle(DEVICE_DUO_HALF_OPEN_ANGLE)) }) { Text("Duo 90°") }
+            Button(onClick = { send(DeviceDuoCommandIntent.Angle(DEVICE_DUO_FULL_OPEN_ANGLE)) }) { Text("Duo 180°") }
+            listOf(
+                    DeviceDuoPoseIntent.Closed to "Duo closed",
+                    DeviceDuoPoseIntent.Book to "Duo book",
+                    DeviceDuoPoseIntent.Open to "Duo open",
+                    DeviceDuoPoseIntent.Laptop to "Duo laptop",
+                    DeviceDuoPoseIntent.Tent to "Duo tent",
+                )
+                .forEach { (pose, label) ->
+                    Button(onClick = { send(DeviceDuoCommandIntent.Pose(pose)) }) { Text(label) }
                 }
-            view.lastRecording
-                ?.takeIf { it.threadId == threadId }
-                ?.let { recording ->
-                    item(key = "last-recording-${recording.deviceId}-${recording.byteCount}") {
-                        Text("Recording ready · ${recording.frameCount} frames · ${recording.byteCount} bytes")
-                        recording.error?.let { error -> Text("Recording failed: $error") }
-                        val fileName = recording.fileName
-                        val mimeType = recording.mimeType
-                        if (
-                            recording.error == null &&
-                                recording.bytes.isNotEmpty() &&
-                                fileName.isNotBlank() &&
-                                mimeType.isNotBlank()
-                        ) {
-                            var savedPath by remember(recording.byteCount) { mutableStateOf<String?>(null) }
-                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                Button(
-                                    onClick = {
-                                        val directory =
-                                            context.getExternalFilesDir(Environment.DIRECTORY_MOVIES)
-                                                ?: context.filesDir
-                                        val file = File(directory, fileName)
-                                        runCatching {
-                                                directory.mkdirs()
-                                                file.writeBytes(recording.bytes)
-                                                savedPath = file.absolutePath
-                                            }
-                                            .onFailure { model.notice = "Could not save recording: ${it.message}" }
-                                    }
-                                ) {
-                                    Text("Save")
-                                }
-                                Button(
-                                    onClick = {
-                                        val file = File(context.cacheDir, fileName)
-                                        runCatching { file.writeBytes(recording.bytes) }
-                                            .onSuccess {
-                                                model.perform(
-                                                    Intent.AttachFiles(
-                                                        threadId,
-                                                        listOf(
-                                                            dev.remoteagent.core.LocalFile(
-                                                                file.path,
-                                                                file.name,
-                                                                mimeType,
-                                                            )
-                                                        ),
-                                                    )
-                                                ) { result ->
-                                                    result.exceptionOrNull()?.let {
-                                                        model.notice = "Could not attach recording: ${it.message}"
-                                                    }
-                                                }
-                                            }
-                                            .onFailure { model.notice = "Could not prepare recording: ${it.message}" }
-                                    }
-                                ) {
-                                    Text("Attach")
-                                }
-                            }
-                            savedPath?.let { Text("Saved to $it") }
-                        }
-                        if (
-                            recording.error == null &&
-                                recording.bytes.isNotEmpty() &&
-                                (fileName.isBlank() || mimeType.isBlank())
-                        ) {
-                            Text("Recording is not a playable artifact; save and attach are unavailable")
-                        }
-                    }
+            Button(onClick = { send(DeviceDuoCommandIntent.Table(true)) }) { Text("Table on") }
+            Button(onClick = { send(DeviceDuoCommandIntent.Table(false)) }) { Text("Table off") }
+            listOf(DeviceDuoPhysicalIntent.Faceup to "Face up", DeviceDuoPhysicalIntent.Facedown to "Face down")
+                .forEach { (physical, label) ->
+                    Button(onClick = { send(DeviceDuoCommandIntent.Physical(physical)) }) { Text(label) }
+                }
+            listOf(
+                    DeviceDuoOrientationIntent.Portrait to "Portrait",
+                    DeviceDuoOrientationIntent.LandscapeLeft to "Landscape left",
+                    DeviceDuoOrientationIntent.PortraitUpsideDown to "Portrait upside down",
+                    DeviceDuoOrientationIntent.LandscapeRight to "Landscape right",
+                )
+                .forEach { (orientation, label) ->
+                    Button(onClick = { send(DeviceDuoCommandIntent.Orientation(orientation)) }) { Text(label) }
                 }
         }
+    }
+
+    @Composable
+    fun powerControl(model: AndroidAppModel, session: DeviceSessionView) {
+        Button(
+            onClick = {
+                model.perform(Intent.ReleaseDeviceInput(session.hostId, session.deviceId, session.sessionEpoch))
+                model.perform(Intent.CloseDevice(session.hostId, session.deviceId, true))
+            }
+        ) {
+            Text("Power off")
+        }
+    }
+}
+
+private object DeviceStreamSections {
+    fun LazyListScope.screenItems(view: DeviceView, threadId: String, threadSessions: List<DeviceSessionView>) {
+        view.screens
+            .filter { screen ->
+                screen.threadId == threadId &&
+                    threadSessions.any {
+                        when {
+                            it.hostId != screen.hostId -> false
+                            it.deviceId != screen.deviceId -> false
+                            else -> it.sessionEpoch == screen.sessionEpoch
+                        }
+                    }
+            }
+            .sortedBy { it.screenId ?: 0 }
+            .forEach { screen ->
+                item(
+                    key = "screen-${screen.hostId}-${screen.deviceId}-${screen.screenId ?: 0}-${screen.sessionEpoch}"
+                ) {
+                    Text(
+                        "Screen ${screen.screenId ?: 0}: ${screen.width}×${screen.height} · " +
+                            "${screen.orientation}" +
+                            (screen.hingeAngle?.let { " · hinge ${it.toInt()}°" } ?: "")
+                    )
+                    if (screen.hingePose != null || screen.tableModeAvailable) {
+                        Text(
+                            "Duo readback: " +
+                                listOfNotNull(
+                                        screen.hingePose?.let { "pose ${it}" },
+                                        screen.hingeAngle?.let { "angle ${it.toInt()}°" },
+                                        if (screen.tableModeAvailable) {
+                                            "table ${if (screen.tableMode) "on" else "off"}"
+                                        } else {
+                                            null
+                                        },
+                                    )
+                                    .joinToString(" · ")
+                        )
+                    }
+                    if (screen.tableModeAvailable) {
+                        Text(if (screen.tableMode) "Table mode on" else "Table mode off")
+                    }
+                }
+            }
+    }
+
+    fun LazyListScope.liveItems(model: AndroidAppModel, view: DeviceView, threadId: String) {
+        view.videoEvents
+            .filter { it.threadId == threadId }
+            .groupBy { StreamKey(it.hostId, it.deviceId, it.screenId?.toInt() ?: 0, it.sessionEpoch) }
+            .toSortedMap(compareBy({ it.hostId }, { it.deviceId }, { it.screenId }, { it.sessionEpoch }))
+            .forEach { (stream, events) ->
+                val ordered = events.sortedBy { it.sequence }
+                val frame = ordered.lastOrNull() ?: return@forEach
+                val epoch = frame.sessionEpoch
+                item(key = "video-frame-${stream.hostId}-${stream.deviceId}-${stream.screenId}-$epoch") {
+                    if (ordered.size > 1 || stream.screenId != 0) Text("Live screen ${stream.screenId}")
+                    when (frame.encoding) {
+                        "jpeg",
+                        "mjpeg" -> DeviceJpegFrame(model, view, frame, epoch, stream.screenId)
+                        "h264",
+                        "semu",
+                        "avcc-description" -> DeviceH264Frame(model, view, ordered, epoch, stream.screenId)
+                        else -> Text("Unsupported live device frame format: ${frame.encoding}")
+                    }
+                }
+            }
+    }
+
+    fun LazyListScope.accessibilityItems(view: DeviceView, threadSessions: List<DeviceSessionView>) {
+        view.accessibility
+            .filter { tree -> threadSessions.any { it.hostId == tree.hostId && it.deviceId == tree.deviceId } }
+            .forEach { tree ->
+                item(key = "accessibility-${tree.hostId}-${tree.deviceId}-${tree.sessionEpoch}") {
+                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text("Accessibility overlay")
+                        tree.errors.forEach { error -> Text("Accessibility error: ${error}") }
+                        tree.elements
+                            .filter { it.label.isNotEmpty() }
+                            .take(DEVICE_ACCESSIBILITY_ELEMENT_LIMIT)
+                            .forEach { element -> Text("${element.role} · ${element.label}") }
+                    }
+                }
+            }
+    }
+
+    fun LazyListScope.eventLogItems(view: DeviceView, threadSessions: List<DeviceSessionView>) {
+        view.eventLog
+            .filter { entry -> threadSessions.any { it.hostId == entry.hostId && it.deviceId == entry.deviceId } }
+            .takeLast(DEVICE_EVENT_LOG_PREVIEW_LIMIT)
+            .forEach { entry ->
+                item(key = "event-log-${entry.hostId}-${entry.deviceId}-${entry.sessionEpoch}-${entry.id}") {
+                    Text("${entry.kind} · ${entry.summary}")
+                }
+            }
+    }
+
+    fun LazyListScope.recordingItems(model: AndroidAppModel, threadId: String, recording: DeviceRecordingView?) {
+        recording
+            ?.takeIf { it.threadId == threadId }
+            ?.let { value ->
+                item(key = "last-recording-${value.deviceId}-${value.byteCount}-${value.recordingId}") {
+                    recordingItem(model, threadId, value)
+                }
+            }
+    }
+
+    @Composable
+    fun recordingItem(model: AndroidAppModel, threadId: String, recording: DeviceRecordingView) {
+        Text("Recording ready · ${recording.frameCount} frames · ${recording.byteCount} bytes")
+        recording.error?.let { error -> Text("Recording failed: ${error}") }
+        val fileName = recording.fileName
+        val mimeType = recording.mimeType
+        if (recording.error == null && recording.bytes.isNotEmpty()) {
+            if (fileName.isNotBlank() && mimeType.isNotBlank()) {
+                recordingActions(model, threadId, recording, fileName, mimeType)
+            } else {
+                Text("Recording is not a playable artifact; save and attach are unavailable")
+            }
+        }
+    }
+
+    @Composable
+    fun recordingActions(
+        model: AndroidAppModel,
+        threadId: String,
+        recording: DeviceRecordingView,
+        fileName: String,
+        mimeType: String,
+    ) {
+        val context = LocalContext.current
+        var savedPath by remember(recording.byteCount) { mutableStateOf<String?>(null) }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(
+                onClick = {
+                    val directory = context.getExternalFilesDir(Environment.DIRECTORY_MOVIES) ?: context.filesDir
+                    val file = File(directory, fileName)
+                    runCatching {
+                            directory.mkdirs()
+                            file.writeBytes(recording.bytes)
+                            savedPath = file.absolutePath
+                        }
+                        .onFailure { model.notice = "Could not save recording: ${it.message}" }
+                }
+            ) {
+                Text("Save")
+            }
+            Button(
+                onClick = {
+                    val file = File(context.cacheDir, fileName)
+                    runCatching { file.writeBytes(recording.bytes) }
+                        .onSuccess {
+                            model.perform(
+                                Intent.AttachFiles(
+                                    threadId,
+                                    listOf(dev.remoteagent.core.LocalFile(file.path, file.name, mimeType)),
+                                )
+                            ) { result ->
+                                result.exceptionOrNull()?.let {
+                                    model.notice = "Could not attach recording: ${it.message}"
+                                }
+                            }
+                        }
+                        .onFailure { model.notice = "Could not prepare recording: ${it.message}" }
+                }
+            ) {
+                Text("Attach")
+            }
+        }
+        savedPath?.let { Text("Saved to ${it}") }
     }
 }
 
@@ -661,53 +616,64 @@ private fun DeviceH264Frame(
                 frame.height.toInt(),
             )
     ) {
-        AndroidView(
-            modifier = Modifier.fillMaxSize(),
-            factory = { context ->
-                FrameLayout(context).apply {
-                    addView(
-                        TextureView(context).also { decoder.attach(it) },
-                        FrameLayout.LayoutParams(
-                            FrameLayout.LayoutParams.MATCH_PARENT,
-                            FrameLayout.LayoutParams.MATCH_PARENT,
-                        ),
-                    )
-                    addView(
-                        DeviceAccessibilityOverlayView(context),
-                        FrameLayout.LayoutParams(
-                            FrameLayout.LayoutParams.MATCH_PARENT,
-                            FrameLayout.LayoutParams.MATCH_PARENT,
-                        ),
-                    )
-                }
-            },
-            update = { container ->
-                val tree = view.accessibility.firstOrNull { it.hostId == frame.hostId && it.deviceId == frame.deviceId }
-                (container.getChildAt(1) as? DeviceAccessibilityOverlayView)?.rects =
-                    tree
-                        ?.elements
-                        ?.filter { it.label.isNotEmpty() }
-                        ?.map { element ->
-                            android.graphics.RectF(
-                                element.x,
-                                element.y,
-                                element.x + element.width,
-                                element.y + element.height,
-                            )
-                        } ?: emptyList()
-                decoder.reset(streamKey, frame.width.toInt(), frame.height.toInt())
-                frames.forEach { event ->
-                    decoder.submit(
-                        payload = event.payload.toByteArray(),
-                        encoding = event.encoding,
-                        sequence = event.sequence,
-                        timestampUs = event.timestampUs,
-                        keyframe = event.keyframe,
-                    )
-                }
-            },
-        )
+        DeviceH264Surface(decoder, view, frame, frames, streamKey)
     }
+}
+
+@Composable
+private fun DeviceH264Surface(
+    decoder: DeviceVideoDecoder,
+    view: DeviceView,
+    frame: dev.remoteagent.core.DeviceVideoFrameView,
+    frames: List<dev.remoteagent.core.DeviceVideoFrameView>,
+    streamKey: String,
+) {
+    AndroidView(
+        modifier = Modifier.fillMaxSize(),
+        factory = { context ->
+            FrameLayout(context).apply {
+                addView(
+                    TextureView(context).also { decoder.attach(it) },
+                    FrameLayout.LayoutParams(
+                        FrameLayout.LayoutParams.MATCH_PARENT,
+                        FrameLayout.LayoutParams.MATCH_PARENT,
+                    ),
+                )
+                addView(
+                    DeviceAccessibilityOverlayView(context),
+                    FrameLayout.LayoutParams(
+                        FrameLayout.LayoutParams.MATCH_PARENT,
+                        FrameLayout.LayoutParams.MATCH_PARENT,
+                    ),
+                )
+            }
+        },
+        update = { container ->
+            val tree = view.accessibility.firstOrNull { it.hostId == frame.hostId && it.deviceId == frame.deviceId }
+            (container.getChildAt(1) as? DeviceAccessibilityOverlayView)?.rects =
+                tree
+                    ?.elements
+                    ?.filter { it.label.isNotEmpty() }
+                    ?.map { element ->
+                        android.graphics.RectF(
+                            element.x,
+                            element.y,
+                            element.x + element.width,
+                            element.y + element.height,
+                        )
+                    } ?: emptyList()
+            decoder.reset(streamKey, frame.width.toInt(), frame.height.toInt())
+            frames.forEach { event ->
+                decoder.submit(
+                    payload = event.payload.toByteArray(),
+                    encoding = event.encoding,
+                    sequence = event.sequence,
+                    timestampUs = event.timestampUs,
+                    keyframe = event.keyframe,
+                )
+            }
+        },
+    )
 }
 
 @Composable
@@ -719,15 +685,18 @@ private fun DeviceAccessibilityOverlay(view: DeviceView, hostId: String, deviceI
             .filter { it.label.isNotEmpty() }
             .forEach { element ->
                 drawRect(
-                    color = Color(0xFF4F8CFF),
+                    color = DEVICE_ACCESSIBILITY_COLOR,
                     topLeft = Offset(size.width * element.x, size.height * element.y),
                     size = Size(size.width * element.width, size.height * element.height),
-                    style = Stroke(width = 2f),
+                    style = Stroke(width = DEVICE_ACCESSIBILITY_STROKE_WIDTH),
                 )
             }
     }
 }
 
+// Keep the frame dimensions and session identity explicit: core owns the
+// orientation/letterbox projection and must receive the exact gesture target.
+@Suppress("LongParameterList")
 private fun Modifier.deviceTouchInput(
     model: AndroidAppModel,
     hostId: String,
@@ -752,8 +721,8 @@ private fun Modifier.deviceTouchInput(
                                 position.y,
                                 size.width,
                                 size.height,
-                                frameWidth.toFloat(),
-                                frameHeight.toFloat(),
+                                contentWidth.toFloat(),
+                                contentHeight.toFloat(),
                             ) ?: return false
                         val x = point.x
                         val y = point.y
@@ -820,23 +789,28 @@ private fun Modifier.deviceKeyInput(model: AndroidAppModel, hostId: String, devi
         true
     }
 
+private fun androidSpecialKey(keyCode: Int): String? =
+    when (keyCode) {
+        AndroidKeyEvent.KEYCODE_DPAD_UP -> "ArrowUp"
+        AndroidKeyEvent.KEYCODE_DPAD_DOWN -> "ArrowDown"
+        AndroidKeyEvent.KEYCODE_DPAD_LEFT -> "ArrowLeft"
+        AndroidKeyEvent.KEYCODE_DPAD_RIGHT -> "ArrowRight"
+        AndroidKeyEvent.KEYCODE_ENTER -> "Enter"
+        AndroidKeyEvent.KEYCODE_DEL -> "Backspace"
+        AndroidKeyEvent.KEYCODE_FORWARD_DEL -> "Delete"
+        AndroidKeyEvent.KEYCODE_TAB -> "Tab"
+        AndroidKeyEvent.KEYCODE_ESCAPE -> "Escape"
+        AndroidKeyEvent.KEYCODE_MOVE_HOME -> "Home"
+        AndroidKeyEvent.KEYCODE_MOVE_END -> "End"
+        AndroidKeyEvent.KEYCODE_PAGE_UP -> "PageUp"
+        AndroidKeyEvent.KEYCODE_PAGE_DOWN -> "PageDown"
+        else -> null
+    }
+
 private fun deviceKeyFacts(event: AndroidKeyEvent): DeviceKeyFacts? {
     val key =
-        when (event.keyCode) {
-            AndroidKeyEvent.KEYCODE_DPAD_UP -> "ArrowUp"
-            AndroidKeyEvent.KEYCODE_DPAD_DOWN -> "ArrowDown"
-            AndroidKeyEvent.KEYCODE_DPAD_LEFT -> "ArrowLeft"
-            AndroidKeyEvent.KEYCODE_DPAD_RIGHT -> "ArrowRight"
-            AndroidKeyEvent.KEYCODE_ENTER -> "Enter"
-            AndroidKeyEvent.KEYCODE_DEL -> "Backspace"
-            AndroidKeyEvent.KEYCODE_FORWARD_DEL -> "Delete"
-            AndroidKeyEvent.KEYCODE_TAB -> "Tab"
-            AndroidKeyEvent.KEYCODE_ESCAPE -> "Escape"
-            AndroidKeyEvent.KEYCODE_MOVE_HOME -> "Home"
-            AndroidKeyEvent.KEYCODE_MOVE_END -> "End"
-            AndroidKeyEvent.KEYCODE_PAGE_UP -> "PageUp"
-            AndroidKeyEvent.KEYCODE_PAGE_DOWN -> "PageDown"
-            else -> {
+        androidSpecialKey(event.keyCode)
+            ?: run {
                 val unicode = event.unicodeChar
                 // The Android transport accepts the same UTF-16 single-unit key
                 // values as the reference stream. Supplementary characters are
@@ -845,7 +819,6 @@ private fun deviceKeyFacts(event: AndroidKeyEvent): DeviceKeyFacts? {
                     return null
                 String(Character.toChars(unicode))
             }
-        }
     return DeviceKeyFacts(
         code = AndroidKeyEvent.keyCodeToString(event.keyCode),
         key = key,

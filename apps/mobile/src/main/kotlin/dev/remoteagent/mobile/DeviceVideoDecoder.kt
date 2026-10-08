@@ -16,8 +16,36 @@ import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer
 import java.util.ArrayDeque
 
+private const val DEVICE_VIDEO_MAX_PENDING_FRAMES = 8
+private const val DEVICE_VIDEO_MAX_INGRESS_FRAMES = DEVICE_VIDEO_MAX_PENDING_FRAMES
+private const val DEVICE_VIDEO_MAX_INGRESS_BYTES = 16 * 1024 * 1024
+// This is the native accessibility overlay's fixed accent, shared with the Compose surface.
+@Suppress("MagicNumber") private val DEVICE_ACCESSIBILITY_COLOR = android.graphics.Color.rgb(79, 140, 255)
+private const val DEVICE_ACCESSIBILITY_STROKE_WIDTH = 2f
+private const val AVC_LENGTH_PREFIX_BYTES = 4
+private const val AVC_PARAMETER_SET_LENGTH_BYTES = 2
+private const val AVC_CONFIGURATION_MIN_BYTES = 7
+private const val AVC_CONFIGURATION_VERSION = 1
+private const val AVC_SPS_COUNT_OFFSET = 5
+private const val AVC_NAL_TYPE_MASK = 0x1f
+private const val AVC_SPS_NAL_TYPE = 7
+private const val AVC_PPS_NAL_TYPE = 8
+private const val BYTE_MASK = 0xff
+private const val BITS_PER_BYTE = 8
+private const val U16_HIGH_BYTE_SHIFT = BITS_PER_BYTE
+private const val U32_FIRST_BYTE_SHIFT = BITS_PER_BYTE * 3
+private const val U32_SECOND_BYTE_SHIFT = BITS_PER_BYTE * 2
+private const val U32_THIRD_BYTE_SHIFT = BITS_PER_BYTE
+private const val ANNEX_B_SHORT_START_CODE_BYTES = 3
+private const val ANNEX_B_LONG_START_CODE_BYTES = 4
+private const val ANNEX_B_START_CODE_ONE_BYTE = 1
+private const val NAL_LENGTH_BUFFER_SLACK = 16
+
 /** Bounds UI-to-worker handoff before payload copies and Handler posts occur. */
-internal class DeviceVideoIngressGate(private val maxFrames: Int = 8, private val maxBytes: Int = 16 * 1024 * 1024) {
+internal class DeviceVideoIngressGate(
+    private val maxFrames: Int = DEVICE_VIDEO_MAX_INGRESS_FRAMES,
+    private val maxBytes: Int = DEVICE_VIDEO_MAX_INGRESS_BYTES,
+) {
     data class Admission(val generation: Long, val bytes: Int)
 
     data class Completion(val current: Boolean, val resync: Boolean)
@@ -41,7 +69,10 @@ internal class DeviceVideoIngressGate(private val maxFrames: Int = 8, private va
         needsKeyframe = true
     }
 
+    // Admission intentionally keeps every rejection guard beside its counter update so
+    // overflow, stale sequence, and keyframe recovery remain one atomic policy.
     @Synchronized
+    @Suppress("CyclomaticComplexMethod", "ReturnCount")
     fun offer(sequence: ULong, encoding: String, keyframe: Boolean, bytes: Int): Admission? {
         if (closed || bytes < 0 || bytes > maxBytes) return null
         if (encoding != "h264" && encoding != "semu" && encoding != "avcc-description") return null
@@ -96,14 +127,22 @@ internal class DeviceVideoResetGate {
     private var applied: DeviceResetRequest? = null
     private var scheduled = false
 
+    // A request may replace pending work while a callback is already scheduled; the
+    // three-state transition is kept explicit for the exact callback ownership.
     @Synchronized
-    fun request(request: DeviceResetRequest): Boolean {
-        if (pending == request || (applied == request && !scheduled)) return false
-        pending = request
-        if (scheduled) return false
-        scheduled = true
-        return true
-    }
+    fun request(request: DeviceResetRequest): Boolean =
+        when {
+            pending == request || (applied == request && !scheduled) -> false
+            else -> {
+                pending = request
+                if (scheduled) {
+                    false
+                } else {
+                    scheduled = true
+                    true
+                }
+            }
+        }
 
     @Synchronized fun next(): DeviceResetRequest? = pending
 
@@ -153,6 +192,8 @@ internal class DeviceVideoPumpGate {
 }
 
 /** A bounded, stateful H.264 decoder for the Host's live device transport. */
+// This class is the single lifecycle owner for the TextureView, MediaCodec, pump, and queue.
+@Suppress("TooManyFunctions")
 internal class DeviceVideoDecoder : TextureView.SurfaceTextureListener {
     private data class Frame(val payload: ByteArray, val encoding: String, val timestampUs: Long, val keyframe: Boolean)
 
@@ -238,26 +279,33 @@ internal class DeviceVideoDecoder : TextureView.SurfaceTextureListener {
         if (lastSequence?.let { sequence <= it } == true) return
         if (lastSequence?.let { sequence - it > 1uL } == true) requestKeyframeResync()
         lastSequence = sequence
-        if (encoding == "avcc-description") {
-            if (codecDescription?.contentEquals(payload) == true) return
-            codecDescription = payload.copyOf()
-            requestKeyframeResync()
-            return
+        when (encoding) {
+            "avcc-description" -> {
+                if (codecDescription?.contentEquals(payload) != true) {
+                    codecDescription = payload.copyOf()
+                    requestKeyframeResync()
+                }
+            }
+
+            "h264",
+            "semu" -> {
+                pending.addLast(
+                    Frame(
+                        payload = payload,
+                        encoding = encoding,
+                        timestampUs = timestampUs?.toLong() ?: sequence.toLong(),
+                        keyframe = keyframe,
+                    )
+                )
+                while (pending.size > DEVICE_VIDEO_MAX_PENDING_FRAMES) {
+                    pending.removeFirst()
+                    requestKeyframeResync()
+                }
+                drainPending()
+            }
+
+            else -> Unit
         }
-        if (encoding != "h264" && encoding != "semu") return
-        pending.addLast(
-            Frame(
-                payload = payload,
-                encoding = encoding,
-                timestampUs = timestampUs?.toLong() ?: sequence.toLong(),
-                keyframe = keyframe,
-            )
-        )
-        while (pending.size > MAX_PENDING_FRAMES) {
-            pending.removeFirst()
-            requestKeyframeResync()
-        }
-        drainPending()
     }
 
     private fun requestKeyframeResync() {
@@ -314,8 +362,7 @@ internal class DeviceVideoDecoder : TextureView.SurfaceTextureListener {
 
     private fun configureCodecIfPossible() {
         if (codec != null || width <= 0 || height <= 0) return
-        val outputSurface = surface ?: return
-        if (!outputSurface.isValid) return
+        val outputSurface = surface?.takeIf { it.isValid } ?: return
         runCatching {
                 val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, width, height)
                 format.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, MAX_INPUT_SIZE)
@@ -325,19 +372,24 @@ internal class DeviceVideoDecoder : TextureView.SurfaceTextureListener {
                     pps?.let { format.setByteBuffer("csd-1", ByteBuffer.wrap(it)) }
                 }
                 val decoder = MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
-                try {
-                    decoder.configure(format, outputSurface, null, 0)
-                    decoder.start()
-                    codec = decoder
-                } catch (error: Throwable) {
-                    runCatching { decoder.stop() }
-                    runCatching { decoder.release() }
-                    throw error
-                }
+                runCatching {
+                        decoder.configure(format, outputSurface, null, 0)
+                        decoder.start()
+                    }
+                    .onFailure {
+                        runCatching { decoder.stop() }
+                        runCatching { decoder.release() }
+                    }
+                    .getOrThrow()
+                codec = decoder
             }
             .onFailure { closeCodec() }
     }
 
+    // The queue state machine deliberately keeps codec backpressure, stale
+    // frame drops, and resync exits adjacent so each ownership transition is
+    // visible before the next frame is admitted.
+    @Suppress("CyclomaticComplexMethod", "ReturnCount", "LoopWithTooManyJumpStatements")
     private fun drainPending() {
         configureCodecIfPossible()
         val decoder = codec ?: return
@@ -396,10 +448,12 @@ internal class DeviceVideoDecoder : TextureView.SurfaceTextureListener {
         val pump =
             object : Runnable {
                 override fun run() {
-                    if (!outputPumpGate.begin(this)) return
-                    if (closed || codec == null) return
-                    drainOutput(codec ?: return)
-                    drainPending()
+                    if (outputPumpGate.begin(this) && !closed) {
+                        codec?.let {
+                            drainOutput(it)
+                            drainPending()
+                        }
+                    }
                 }
             }
         if (!outputPumpGate.admit(pump)) return
@@ -411,22 +465,23 @@ internal class DeviceVideoDecoder : TextureView.SurfaceTextureListener {
 
     private fun drainOutput(decoder: MediaCodec) {
         val info = MediaCodec.BufferInfo()
-        while (true) {
-            val index =
-                runCatching { decoder.dequeueOutputBuffer(info, 0L) }
-                    .getOrElse {
+        var draining = true
+        while (draining) {
+            val result = runCatching { decoder.dequeueOutputBuffer(info, 0L) }
+            if (result.isFailure) {
+                closeCodec()
+                draining = false
+                continue
+            }
+            when (val index = result.getOrThrow()) {
+                MediaCodec.INFO_TRY_AGAIN_LATER -> draining = false
+                MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> Unit
+                else -> {
+                    if (index >= 0 && runCatching { decoder.releaseOutputBuffer(index, true) }.isFailure) {
                         closeCodec()
-                        return
+                        draining = false
                     }
-            when {
-                index == MediaCodec.INFO_TRY_AGAIN_LATER -> return
-                index == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> Unit
-                index >= 0 ->
-                    runCatching { decoder.releaseOutputBuffer(index, true) }
-                        .onFailure {
-                            closeCodec()
-                            return
-                        }
+                }
             }
         }
     }
@@ -454,7 +509,6 @@ internal class DeviceVideoDecoder : TextureView.SurfaceTextureListener {
     }
 
     private companion object {
-        const val MAX_PENDING_FRAMES = 8
         const val MAX_INPUT_SIZE = 8 * 1024 * 1024
         const val OUTPUT_PUMP_INTERVAL_MS = 16L
     }
@@ -464,9 +518,9 @@ internal class DeviceVideoDecoder : TextureView.SurfaceTextureListener {
 internal class DeviceAccessibilityOverlayView(context: Context) : View(context) {
     private val paint =
         Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = android.graphics.Color.rgb(79, 140, 255)
+            color = DEVICE_ACCESSIBILITY_COLOR
             style = Paint.Style.STROKE
-            strokeWidth = 2f
+            strokeWidth = DEVICE_ACCESSIBILITY_STROKE_WIDTH
         }
 
     var rects: List<RectF> = emptyList()
@@ -490,18 +544,19 @@ internal class DeviceAccessibilityOverlayView(context: Context) : View(context) 
 }
 
 /** Convert length-prefixed AVC access units to the Annex-B form MediaCodec accepts. */
-internal fun normalizeH264Payload(payload: ByteArray): ByteArray {
-    if (payload.startsWithAnnexB()) return payload
-    if (payload.size < 4) return payload
-    val converted = ByteArrayOutputStream(payload.size + 16)
+internal fun normalizeH264Payload(payload: ByteArray): ByteArray =
+    when {
+        payload.startsWithAnnexB() -> payload
+        payload.size < AVC_LENGTH_PREFIX_BYTES -> payload
+        else -> normalizeLengthPrefixedPayload(payload)
+    }
+
+private fun normalizeLengthPrefixedPayload(payload: ByteArray): ByteArray {
+    val converted = ByteArrayOutputStream(payload.size + NAL_LENGTH_BUFFER_SLACK)
     var offset = 0
-    while (offset + 4 <= payload.size) {
-        val length =
-            ((payload[offset].toInt() and 0xff) shl 24) or
-                ((payload[offset + 1].toInt() and 0xff) shl 16) or
-                ((payload[offset + 2].toInt() and 0xff) shl 8) or
-                (payload[offset + 3].toInt() and 0xff)
-        offset += 4
+    while (offset + AVC_LENGTH_PREFIX_BYTES <= payload.size) {
+        val length = readUInt32(payload, offset)
+        offset += AVC_LENGTH_PREFIX_BYTES
         if (length <= 0 || offset + length > payload.size) return payload
         converted.write(ANNEX_B_START_CODE)
         converted.write(payload, offset, length)
@@ -512,68 +567,84 @@ internal fun normalizeH264Payload(payload: ByteArray): ByteArray {
 
 /** Return the SPS and PPS buffers accepted by MediaFormat's AVC CSD fields. */
 internal fun splitCodecDescription(payload: ByteArray): Pair<ByteArray?, ByteArray?> {
-    if (payload.size >= 7 && payload[0].toInt() == 1) {
-        var offset = 5
-        val spsCount = payload[5].toInt() and 0x1f
-        offset++
-        var sps: ByteArray? = null
-        var valid = true
-        repeat(spsCount) {
-            if (!valid) return@repeat
-            if (offset + 2 > payload.size) {
-                valid = false
-                return@repeat
-            }
-            val length = ((payload[offset].toInt() and 0xff) shl 8) or (payload[offset + 1].toInt() and 0xff)
-            offset += 2
-            if (length <= 0 || offset + length > payload.size) {
-                valid = false
-                return@repeat
-            }
-            if (sps == null) sps = payload.copyOfRange(offset, offset + length)
-            offset += length
-        }
-        if (!valid) return null to null
-        if (offset >= payload.size) return sps to null
-        val ppsCount = payload[offset].toInt() and 0xff
-        offset++
-        var pps: ByteArray? = null
-        repeat(ppsCount) {
-            if (!valid) return@repeat
-            if (offset + 2 > payload.size) {
-                valid = false
-                return@repeat
-            }
-            val length = ((payload[offset].toInt() and 0xff) shl 8) or (payload[offset + 1].toInt() and 0xff)
-            offset += 2
-            if (length <= 0 || offset + length > payload.size) {
-                valid = false
-                return@repeat
-            }
-            if (pps == null) pps = payload.copyOfRange(offset, offset + length)
-            offset += length
-        }
-        if (!valid) return null to null
-        return sps?.withAnnexBPrefix() to pps?.withAnnexBPrefix()
+    if (isAvcConfiguration(payload)) {
+        return parseAvcConfiguration(payload) ?: (null to null)
     }
     val nalUnits = annexBNalUnits(payload)
-    return nalUnits.firstOrNull { it.isNotEmpty() && (it[0].toInt() and 0x1f) == 7 } to
-        nalUnits.firstOrNull { it.isNotEmpty() && (it[0].toInt() and 0x1f) == 8 }
+    return nalUnits.firstOrNull { it.isNotEmpty() && (it[0].toInt() and AVC_NAL_TYPE_MASK) == AVC_SPS_NAL_TYPE } to
+        nalUnits.firstOrNull { it.isNotEmpty() && (it[0].toInt() and AVC_NAL_TYPE_MASK) == AVC_PPS_NAL_TYPE }
 }
+
+private data class AvcParameterSetRead(val first: ByteArray?, val nextOffset: Int)
+
+private fun isAvcConfiguration(payload: ByteArray): Boolean =
+    payload.size >= AVC_CONFIGURATION_MIN_BYTES && payload[0].toInt() == AVC_CONFIGURATION_VERSION
+
+private fun parseAvcConfiguration(payload: ByteArray): Pair<ByteArray?, ByteArray?>? {
+    val sps =
+        readAvcParameterSets(
+            payload,
+            AVC_SPS_COUNT_OFFSET + 1,
+            payload[AVC_SPS_COUNT_OFFSET].toInt() and AVC_NAL_TYPE_MASK,
+        )
+    return sps?.let { value ->
+        if (value.nextOffset >= payload.size) {
+            value.first?.withAnnexBPrefix() to null
+        } else {
+            val ppsOffset = value.nextOffset
+            readAvcParameterSets(payload, ppsOffset + 1, payload[ppsOffset].toInt() and BYTE_MASK)?.let { pps ->
+                value.first?.withAnnexBPrefix() to pps.first?.withAnnexBPrefix()
+            }
+        }
+    }
+}
+
+private fun readAvcParameterSets(payload: ByteArray, startOffset: Int, count: Int): AvcParameterSetRead? {
+    var offset = startOffset
+    var first: ByteArray? = null
+    var valid = true
+    repeat(count) {
+        if (valid) {
+            if (offset + AVC_PARAMETER_SET_LENGTH_BYTES > payload.size) {
+                valid = false
+            } else {
+                val length = readUInt16(payload, offset)
+                offset += AVC_PARAMETER_SET_LENGTH_BYTES
+                if (length <= 0 || offset + length > payload.size) {
+                    valid = false
+                } else {
+                    if (first == null) first = payload.copyOfRange(offset, offset + length)
+                    offset += length
+                }
+            }
+        }
+    }
+    return if (valid) AvcParameterSetRead(first, offset) else null
+}
+
+private fun readUInt16(payload: ByteArray, offset: Int): Int =
+    ((payload[offset].toInt() and BYTE_MASK) shl U16_HIGH_BYTE_SHIFT) or (payload[offset + 1].toInt() and BYTE_MASK)
+
+private fun readUInt32(payload: ByteArray, offset: Int): Int =
+    ((payload[offset].toInt() and BYTE_MASK) shl U32_FIRST_BYTE_SHIFT) or
+        ((payload[offset + 1].toInt() and BYTE_MASK) shl U32_SECOND_BYTE_SHIFT) or
+        ((payload[offset + 2].toInt() and BYTE_MASK) shl U32_THIRD_BYTE_SHIFT) or
+        (payload[offset + 3].toInt() and BYTE_MASK)
 
 private fun annexBNalUnits(payload: ByteArray): List<ByteArray> {
     val starts = mutableListOf<Pair<Int, Int>>()
     var index = 0
-    while (index + 2 < payload.size) {
+    while (index + ANNEX_B_SHORT_START_CODE_BYTES - 1 < payload.size) {
         val length =
             when {
-                payload[index] == 0.toByte() && payload[index + 1] == 0.toByte() && payload[index + 2] == 1.toByte() ->
-                    3
-                index + 4 <= payload.size &&
+                payload[index] == 0.toByte() &&
+                    payload[index + 1] == 0.toByte() &&
+                    payload[index + 2] == ANNEX_B_START_CODE_ONE_BYTE.toByte() -> ANNEX_B_SHORT_START_CODE_BYTES
+                index + ANNEX_B_LONG_START_CODE_BYTES <= payload.size &&
                     payload[index] == 0.toByte() &&
                     payload[index + 1] == 0.toByte() &&
                     payload[index + 2] == 0.toByte() &&
-                    payload[index + 3] == 1.toByte() -> 4
+                    payload[index + 3] == ANNEX_B_START_CODE_ONE_BYTE.toByte() -> ANNEX_B_LONG_START_CODE_BYTES
                 else -> 0
             }
         if (length > 0) {
@@ -592,12 +663,12 @@ private fun annexBNalUnits(payload: ByteArray): List<ByteArray> {
 private fun ByteArray.withAnnexBPrefix(): ByteArray = ANNEX_B_START_CODE + this
 
 private fun ByteArray.startsWithAnnexB(): Boolean =
-    size >= 3 &&
-        ((this[0] == 0.toByte() && this[1] == 0.toByte() && this[2] == 1.toByte()) ||
-            (size >= 4 &&
+    size >= ANNEX_B_SHORT_START_CODE_BYTES &&
+        ((this[0] == 0.toByte() && this[1] == 0.toByte() && this[2] == ANNEX_B_START_CODE_ONE_BYTE.toByte()) ||
+            (size >= ANNEX_B_LONG_START_CODE_BYTES &&
                 this[0] == 0.toByte() &&
                 this[1] == 0.toByte() &&
                 this[2] == 0.toByte() &&
-                this[3] == 1.toByte()))
+                this[3] == ANNEX_B_START_CODE_ONE_BYTE.toByte()))
 
 private val ANNEX_B_START_CODE = byteArrayOf(0, 0, 0, 1)
