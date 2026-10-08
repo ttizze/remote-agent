@@ -249,11 +249,12 @@ private struct DiffFileView: View {
     let notice: String?
 
     var body: some View {
+        let wrapping = AppTheme.codeWordWrap
         VStack(alignment: .leading, spacing: 0) {
             Text(file.path).font(AppTheme.mono(13, weight: .bold)).padding(8)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(AppTheme.cardAlt)
-            ScrollView(.horizontal) {
+            ScrollView(wrapping ? .vertical : .horizontal) {
                 VStack(alignment: .leading, spacing: 0) {
                     ForEach(Array(file.rows.enumerated()), id: \.offset) { _, row in
                         HStack(spacing: 6) {
@@ -263,10 +264,12 @@ private struct DiffFileView: View {
                             Text(row.new.map(String.init) ?? "")
                                 .font(.custom("Menlo", size: AppTheme.codeLineNumberFontSize))
                                 .frame(width: 34, alignment: .trailing)
-                            Text(row.text).font(AppTheme.mono(13)).fixedSize()
+                            Text(row.text).font(AppTheme.mono(13))
+                                .fixedSize(horizontal: !wrapping, vertical: false)
+                                .frame(maxWidth: wrapping ? .infinity : nil, alignment: .leading)
                         }
                         .foregroundStyle(row.kind == "@" ? AppTheme.muted : AppTheme.text)
-                        .frame(minHeight: AppTheme.codeLineHeight, alignment: .leading)
+                        .frame(maxWidth: wrapping ? .infinity : nil, minHeight: AppTheme.codeLineHeight, alignment: .leading)
                         .background(background(row.kind))
                     }
                 }

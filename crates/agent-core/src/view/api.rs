@@ -598,6 +598,12 @@ pub fn markdown_line_target(line: u64, line_count: u64) -> Option<u64> {
     crate::presentation::markdown::links::markdown_line_target(line, line_count)
 }
 
+/// Whether a Host resource path should open in the PDF viewer.
+#[cfg_attr(feature = "bindings", uniffi::export)]
+pub fn is_pdf_file(path: String) -> bool {
+    crate::presentation::markdown::links::is_pdf_file(&path)
+}
+
 /// Defaults for the mobile-only appearance controls.
 #[cfg_attr(feature = "bindings", uniffi::export)]
 pub fn mobile_appearance_default() -> crate::view::appearance::MobileAppearance {
@@ -662,6 +668,22 @@ pub fn markdown_image_source(
     crate::view::work_log::media_source::classify_markdown_image_source(
         Some(&href),
         workspace_root.as_deref(),
+    )
+}
+
+/// Fits image or document pixels inside explicit rendering bounds.
+#[cfg_attr(feature = "bindings", uniffi::export)]
+pub fn fit_image_display_size(
+    source_width: f64,
+    source_height: f64,
+    max_width: f64,
+    max_height: f64,
+) -> Option<crate::presentation::markdown::image_size::ImageDisplaySize> {
+    crate::presentation::markdown::image_size::fit_image_display_size(
+        source_width,
+        source_height,
+        max_width,
+        max_height,
     )
 }
 
