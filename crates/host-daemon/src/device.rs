@@ -4,21 +4,22 @@
 //! command lines or talk to a device directly.  The only commands exposed to
 //! callers are the typed operations in `agent_protocol::device`; action
 //! command construction is kept pure and is covered with fake-runner tests.
+use agent_domain::ThreadId;
 use agent_protocol::device::{
     self, DeviceActionInput, DeviceActionKind, DeviceAppearance, DeviceColorFilter,
-    DevicePermission, DevicePermissionDecision,
     DeviceConfigureInput, DeviceDetail, DeviceDetailInput, DeviceEvent, DeviceForegroundApp,
     DeviceHostConfig, DeviceHostKind, DeviceHostStatus, DeviceHostStatusRecord, DeviceHostSummary,
-    DeviceListInput, DeviceOpenInput, DeviceOrientation, DevicePlatform, DevicePlatformAvailability,
-    DeviceScreenshot, DeviceScreenshotInput, DeviceServiceState, DeviceSession, DeviceSettings,
-    DeviceShutdownInput, DeviceSummary, DeviceTextSize, DeviceToolVersion,
-    DeviceToolVersions, DeviceHostsInput, DeviceAccessibilityInput, DeviceAccessibilityTree,
-    DeviceEventLogEntry, DeviceEventLogInput, DeviceFrameEncoding, DeviceInput, DeviceInputKind,
+    DeviceHostsInput, DeviceListInput, DeviceOpenInput, DeviceOrientation, DevicePermission,
+    DevicePermissionDecision, DevicePlatform, DevicePlatformAvailability, DeviceScreenshot,
+    DeviceScreenshotInput, DeviceServiceState, DeviceSession, DeviceSettings, DeviceShutdownInput,
+    DeviceSummary, DeviceTextSize, DeviceToolVersion, DeviceToolVersions, DeviceAccessibilityInput,
+    DeviceAccessibilityTree,
+    DeviceEventLogEntry, DeviceEventLogInput, DeviceForegroundUpdate, DeviceFrameEncoding, DeviceInput, DeviceInputKind,
     DeviceRecording, DeviceRecordingStartInput, DeviceRecordingStatus, DeviceRecordingStopInput,
-    DeviceScreenConfig, DeviceTouchPhase, DeviceVideoFrame, DeviceHardwareButton, DeviceRecordingFormat, LOCAL_DEVICE_HOST_ID,
+    DeviceScreenConfig, DeviceTouchPhase, DeviceVideoFrame, DeviceHardwareButton,
+    DeviceRecordingFormat, LOCAL_DEVICE_HOST_ID,
     DeviceDuoCommand, DeviceDuoPhysical, DeviceDuoPose, DeviceFoldPosture,
 };
-use agent_domain::ThreadId;
 use async_trait::async_trait;
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -356,18 +357,35 @@ trait DeviceHostRunner: Send + Sync {
     fn id(&self) -> &str;
     fn kind(&self) -> DeviceHostKind;
     fn label(&self) -> &str;
-    fn target(&self) -> Option<&str> { None }
-    fn identity_file(&self) -> Option<&str> { None }
-    fn port(&self) -> Option<u16> { None }
+    fn target(&self) -> Option<&str> {
+        None
+    }
+    fn identity_file(&self) -> Option<&str> {
+        None
+    }
+    fn port(&self) -> Option<u16> {
+        None
+    }
     fn helper_path(&self, helper: DeviceHelper) -> Option<String>;
     fn set_helper_paths(&self, _helpers: SshHelperPaths) {}
     fn set_probe(&self, _probe: RemoteHostProbe) {}
-    fn probe(&self) -> Option<RemoteHostProbe> { None }
+    fn probe(&self) -> Option<RemoteHostProbe> {
+        None
+    }
     fn set_probe_error(&self, _error: Option<String>) {}
-    fn probe_error(&self) -> Option<String> { None }
-    fn config_matches(&self, _config: &DeviceHostConfig) -> bool { false }
+    fn probe_error(&self) -> Option<String> {
+        None
+    }
+    fn config_matches(&self, _config: &DeviceHostConfig) -> bool {
+        false
+    }
     fn configure_process(&self, _process: &mut Command) {}
-    async fn run(&self, command: &str, args: &[String], stdin: Option<&[u8]>) -> Result<HostOutput, String>;
+    async fn run(
+        &self,
+        command: &str,
+        args: &[String],
+        stdin: Option<&[u8]>,
+    ) -> Result<HostOutput, String>;
     async fn start(&self, command: &str, args: &[String]) -> Result<(), String>;
     async fn forward(&self, remote_port: u16) -> Result<Option<ForwardedPort>, String>;
     async fn lifecycle(&self, mode: &str) -> Result<Option<HostOutput>, String>;
@@ -440,15 +458,34 @@ impl AndroidToolPaths {
 
 #[async_trait]
 impl DeviceHostRunner for LocalDeviceHost {
-    fn id(&self) -> &str { LOCAL_DEVICE_HOST_ID }
-    fn kind(&self) -> DeviceHostKind { DeviceHostKind::Local }
-    fn label(&self) -> &str { &self.label }
+    fn id(&self) -> &str {
+        LOCAL_DEVICE_HOST_ID
+    }
+    fn kind(&self) -> DeviceHostKind {
+        DeviceHostKind::Local
+    }
+    fn label(&self) -> &str {
+        &self.label
+    }
     fn helper_path(&self, helper: DeviceHelper) -> Option<String> {
         let entry = match helper {
-            DeviceHelper::ServeSimAxSettings => ["vendor", "serve-sim", "dist", "simax", "serve-sim-ax-settings"].as_slice(),
+            DeviceHelper::ServeSimAxSettings => [
+                "vendor",
+                "serve-sim",
+                "dist",
+                "simax",
+                "serve-sim-ax-settings",
+            ]
+            .as_slice(),
             DeviceHelper::ServeSimCli => ["vendor", "serve-sim", "dist", "serve-sim.js"].as_slice(),
         };
-        let mut path = self.state_root.join("tools").join(HUB_PACKAGE).join(HUB_VERSION).join("node_modules").join(HUB_PACKAGE);
+        let mut path = self
+            .state_root
+            .join("tools")
+            .join(HUB_PACKAGE)
+            .join(HUB_VERSION)
+            .join("node_modules")
+            .join(HUB_PACKAGE);
         for part in entry {
             path.push(part);
         }
@@ -462,7 +499,12 @@ impl DeviceHostRunner for LocalDeviceHost {
         configure_android_environment(process, &self.android);
     }
 
-    async fn run(&self, command: &str, args: &[String], stdin: Option<&[u8]>) -> Result<HostOutput, String> {
+    async fn run(
+        &self,
+        command: &str,
+        args: &[String],
+        stdin: Option<&[u8]>,
+    ) -> Result<HostOutput, String> {
         let resolved = self
             .android
             .command(command)
@@ -545,12 +587,24 @@ impl SshDeviceHost {
 
 #[async_trait]
 impl DeviceHostRunner for SshDeviceHost {
-    fn id(&self) -> &str { &self.config.id }
-    fn kind(&self) -> DeviceHostKind { DeviceHostKind::Ssh }
-    fn label(&self) -> &str { &self.config.label }
-    fn target(&self) -> Option<&str> { Some(&self.config.target) }
-    fn identity_file(&self) -> Option<&str> { self.config.identity_file.as_deref() }
-    fn port(&self) -> Option<u16> { self.config.port }
+    fn id(&self) -> &str {
+        &self.config.id
+    }
+    fn kind(&self) -> DeviceHostKind {
+        DeviceHostKind::Ssh
+    }
+    fn label(&self) -> &str {
+        &self.config.label
+    }
+    fn target(&self) -> Option<&str> {
+        Some(&self.config.target)
+    }
+    fn identity_file(&self) -> Option<&str> {
+        self.config.identity_file.as_deref()
+    }
+    fn port(&self) -> Option<u16> {
+        self.config.port
+    }
     fn helper_path(&self, helper: DeviceHelper) -> Option<String> {
         let helpers = self.helpers.read().ok()?.clone()?;
         match helper {
@@ -593,7 +647,13 @@ impl DeviceHostRunner for SshDeviceHost {
     async fn start(&self, command: &str, args: &[String]) -> Result<(), String> {
         let ssh_args = self.ssh_args();
         let remote = remote_shell_command(command, args, true);
-        let output = run_process("ssh", &ssh_args_with_command(ssh_args, vec![remote]), None, None).await?;
+        let output = run_process(
+            "ssh",
+            &ssh_args_with_command(ssh_args, vec![remote]),
+            None,
+            None,
+        )
+        .await?;
         if output.code == 0 {
             Ok(())
         } else {
@@ -661,7 +721,10 @@ impl DeviceHostRunner for SshDeviceHost {
     }
 
     async fn lifecycle(&self, mode: &str) -> Result<Option<HostOutput>, String> {
-        if !matches!(mode, "probe" | "hub-install" | "agent-install" | "hub" | "agent" | "stop" | "stop-agent") {
+        if !matches!(
+            mode,
+            "probe" | "hub-install" | "agent-install" | "hub" | "agent" | "stop" | "stop-agent"
+        ) {
             return Err("invalid remote device lifecycle mode".into());
         }
         let output = self
@@ -716,7 +779,10 @@ async fn run_process(
         let mut output = Vec::new();
         let mut buffer = [0_u8; 16 * 1024];
         loop {
-            let size = reader.read(&mut buffer).await.map_err(|error| error.to_string())?;
+            let size = reader
+                .read(&mut buffer)
+                .await
+                .map_err(|error| error.to_string())?;
             if size == 0 {
                 break;
             }
@@ -755,8 +821,8 @@ async fn run_process(
         .take()
         .ok_or_else(|| format!("{command} did not expose stderr"))?;
     let overflow = Arc::new(Notify::new());
-    let stdout_task = tokio::spawn(read_limited(stdout, overflow.clone()));
-    let stderr_task = tokio::spawn(read_limited(stderr, overflow.clone()));
+    let mut stdout_task = tokio::spawn(read_limited(stdout, overflow.clone()));
+    let mut stderr_task = tokio::spawn(read_limited(stderr, overflow.clone()));
 
     if let Some(input) = stdin {
         if let Some(mut writer) = child.stdin.take() {
@@ -809,7 +875,9 @@ async fn run_process(
         }
     };
     if stdout_truncated || stderr_truncated {
-        return Err(format!("{command} produced more than {HOST_OUTPUT_LIMIT} bytes of output"));
+        return Err(format!(
+            "{command} produced more than {HOST_OUTPUT_LIMIT} bytes of output"
+        ));
     }
     Ok(HostOutput {
         stdout,
@@ -830,14 +898,18 @@ async fn reap_stale_hub(path: &Path, host: &dyn DeviceHostRunner) {
     let output = host
         .run(
             "ps",
-            &["-p".into(), state.pid.to_string(), "-o".into(), "command=".into()],
+            &[
+                "-p".into(),
+                state.pid.to_string(),
+                "-o".into(),
+                "command=".into(),
+            ],
             None,
         )
         .await;
-    if output
-        .as_ref()
-        .is_ok_and(|output| output.code == 0 && String::from_utf8_lossy(&output.stdout).contains(&state.entry_path))
-    {
+    if output.as_ref().is_ok_and(|output| {
+        output.code == 0 && String::from_utf8_lossy(&output.stdout).contains(&state.entry_path)
+    }) {
         terminate_process(state.pid).await;
     }
     let _ = tokio::fs::remove_file(path).await;
@@ -930,7 +1002,11 @@ fn configure_android_environment(process: &mut Command, android: &AndroidToolPat
 
 fn tool_entry(root: &Path, package: &str, version: &str, entry: &[&str]) -> PathBuf {
     entry.iter().fold(
-        root.join("tools").join(package).join(version).join("node_modules").join(package),
+        root.join("tools")
+            .join(package)
+            .join(version)
+            .join("node_modules")
+            .join(package),
         |path, part| path.join(part),
     )
 }
@@ -976,23 +1052,28 @@ async fn ensure_pinned_tool(
     .await
     .map_err(|_| format!("{package} installation timed out"))?;
     let output = match npm {
-        Ok(output) if output.code != 0 && String::from_utf8_lossy(&output.stderr).contains("could not start npm") => {
-            match host.run(
-                "pnpm",
-                &[
-                    "--package=npm@11".into(),
-                    "dlx".into(),
-                    "npm".into(),
-                    "install".into(),
-                    "--prefix".into(),
-                    staging.to_string_lossy().into_owned(),
-                    "--no-fund".into(),
-                    "--no-audit".into(),
-                    package_version,
-                ],
-                None,
-            )
-            .await {
+        Ok(output)
+            if output.code != 0
+                && String::from_utf8_lossy(&output.stderr).contains("could not start npm") =>
+        {
+            match host
+                .run(
+                    "pnpm",
+                    &[
+                        "--package=npm@11".into(),
+                        "dlx".into(),
+                        "npm".into(),
+                        "install".into(),
+                        "--prefix".into(),
+                        staging.to_string_lossy().into_owned(),
+                        "--no-fund".into(),
+                        "--no-audit".into(),
+                        package_version,
+                    ],
+                    None,
+                )
+                .await
+            {
                 Ok(output) => output,
                 Err(error) => {
                     let _ = tokio::fs::remove_dir_all(&staging).await;
@@ -1002,22 +1083,24 @@ async fn ensure_pinned_tool(
         }
         Ok(output) => output,
         Err(error) if error.contains("could not start npm") => {
-            match host.run(
-                "pnpm",
-                &[
-                    "--package=npm@11".into(),
-                    "dlx".into(),
-                    "npm".into(),
-                    "install".into(),
-                    "--prefix".into(),
-                    staging.to_string_lossy().into_owned(),
-                    "--no-fund".into(),
-                    "--no-audit".into(),
-                    package_version,
-                ],
-                None,
-            )
-            .await {
+            match host
+                .run(
+                    "pnpm",
+                    &[
+                        "--package=npm@11".into(),
+                        "dlx".into(),
+                        "npm".into(),
+                        "install".into(),
+                        "--prefix".into(),
+                        staging.to_string_lossy().into_owned(),
+                        "--no-fund".into(),
+                        "--no-audit".into(),
+                        package_version,
+                    ],
+                    None,
+                )
+                .await
+            {
                 Ok(output) => output,
                 Err(error) => {
                     let _ = tokio::fs::remove_dir_all(&staging).await;
@@ -1038,15 +1121,20 @@ async fn ensure_pinned_tool(
             String::from_utf8_lossy(&output.stderr).trim()
         ));
     }
-    let staged_entry = entry.iter().fold(
-        staging.join("node_modules").join(package),
-        |path, part| path.join(part),
-    );
+    let staged_entry = entry
+        .iter()
+        .fold(staging.join("node_modules").join(package), |path, part| {
+            path.join(part)
+        });
     if tokio::fs::metadata(&staged_entry).await.is_err() {
         let _ = tokio::fs::remove_dir_all(&staging).await;
-        return Err(format!("{package} installation did not contain its entry point"));
+        return Err(format!(
+            "{package} installation did not contain its entry point"
+        ));
     }
-    if let Err(error) = tokio::fs::write(staging.join(".install-complete"), format!("{version}\n")).await {
+    if let Err(error) =
+        tokio::fs::write(staging.join(".install-complete"), format!("{version}\n")).await
+    {
         let _ = tokio::fs::remove_dir_all(&staging).await;
         return Err(error.to_string());
     }
@@ -1058,7 +1146,12 @@ async fn ensure_pinned_tool(
     Ok(entry_path)
 }
 
-async fn prune_tool_versions(host: &dyn DeviceHostRunner, root: &Path, package: &str, required: &str) {
+async fn prune_tool_versions(
+    host: &dyn DeviceHostRunner,
+    root: &Path,
+    package: &str,
+    required: &str,
+) {
     let output = match host
         .run("ps", &["-ax".into(), "-o".into(), "command=".into()], None)
         .await
@@ -1112,7 +1205,11 @@ async fn prune_tool_versions(host: &dyn DeviceHostRunner, root: &Path, package: 
     for (version, directory, _) in completed {
         if version == required
             || previous.as_deref() == Some(version.as_str())
-            || running.contains(&format!("{}{}", directory.to_string_lossy(), std::path::MAIN_SEPARATOR))
+            || running.contains(&format!(
+                "{}{}",
+                directory.to_string_lossy(),
+                std::path::MAIN_SEPARATOR
+            ))
         {
             continue;
         }
@@ -1137,7 +1234,10 @@ pub struct DeviceCommand {
 }
 
 fn command(program: &str, args: impl IntoIterator<Item = String>) -> DeviceCommand {
-    DeviceCommand { program: program.into(), args: args.into_iter().collect() }
+    DeviceCommand {
+        program: program.into(),
+        args: args.into_iter().collect(),
+    }
 }
 
 macro_rules! argv {
@@ -1146,7 +1246,11 @@ macro_rules! argv {
 
 /// The allowlisted commands for one typed action.  No caller-supplied command
 /// or shell fragment reaches a host runner.
-pub fn action_commands(platform: DevicePlatform, device_id: &str, action: &DeviceActionKind) -> Result<Vec<DeviceCommand>, String> {
+pub fn action_commands(
+    platform: DevicePlatform,
+    device_id: &str,
+    action: &DeviceActionKind,
+) -> Result<Vec<DeviceCommand>, String> {
     action_commands_with_helpers(platform, device_id, action, None, None)
 }
 
@@ -1159,58 +1263,280 @@ fn action_commands_with_helpers(
 ) -> Result<Vec<DeviceCommand>, String> {
     let mut commands = Vec::new();
     match (platform, action) {
-        (DevicePlatform::Ios, DeviceActionKind::SetAppearance(value)) => commands.push(command("xcrun", argv!["simctl", "ui", device_id, "appearance", match value { DeviceAppearance::Light => "light", DeviceAppearance::Dark => "dark" }])),
-        (DevicePlatform::Ios, DeviceActionKind::SetTextSize(value)) => commands.push(command("xcrun", argv!["simctl", "ui", device_id, "content_size", ios_text_size(*value)])),
-        (DevicePlatform::Ios, DeviceActionKind::SetToggle { setting, value }) if setting == "increaseContrast" => commands.push(command("xcrun", argv!["simctl", "ui", device_id, "increase_contrast", if *value { "enabled" } else { "disabled" }])),
-        (DevicePlatform::Ios, DeviceActionKind::SetToggle { setting, value }) if ["reduceMotion", "reduceTransparency", "showBorders", "voiceOver"].contains(&setting.as_str()) => {
-            let helper = serve_sim_ax_settings.ok_or("iOS accessibility helper is not installed")?;
-            commands.push(command("xcrun", argv!["simctl", "spawn", device_id, helper, "set", ios_toggle(setting), if *value { "on" } else { "off" }]));
+        (DevicePlatform::Ios, DeviceActionKind::SetAppearance(value)) => commands.push(command(
+            "xcrun",
+            argv![
+                "simctl",
+                "ui",
+                device_id,
+                "appearance",
+                match value {
+                    DeviceAppearance::Light => "light",
+                    DeviceAppearance::Dark => "dark",
+                }
+            ],
+        )),
+        (DevicePlatform::Ios, DeviceActionKind::SetTextSize(value)) => commands.push(command(
+            "xcrun",
+            argv![
+                "simctl",
+                "ui",
+                device_id,
+                "content_size",
+                ios_text_size(*value)
+            ],
+        )),
+        (DevicePlatform::Ios, DeviceActionKind::SetToggle { setting, value })
+            if setting == "increaseContrast" =>
+        {
+            commands.push(command(
+                "xcrun",
+                argv![
+                    "simctl",
+                    "ui",
+                    device_id,
+                    "increase_contrast",
+                    if *value { "enabled" } else { "disabled" }
+                ],
+            ))
+        }
+        (DevicePlatform::Ios, DeviceActionKind::SetToggle { setting, value })
+            if [
+                "reduceMotion",
+                "reduceTransparency",
+                "showBorders",
+                "voiceOver",
+            ]
+            .contains(&setting.as_str()) =>
+        {
+            let helper =
+                serve_sim_ax_settings.ok_or("iOS accessibility helper is not installed")?;
+            commands.push(command(
+                "xcrun",
+                argv![
+                    "simctl",
+                    "spawn",
+                    device_id,
+                    helper,
+                    "set",
+                    ios_toggle(setting),
+                    if *value { "on" } else { "off" }
+                ],
+            ));
         }
         (DevicePlatform::Ios, DeviceActionKind::SetLiquidGlass(value)) => {
-            let helper = serve_sim_ax_settings.ok_or("iOS accessibility helper is not installed")?;
-            commands.push(command("xcrun", argv!["simctl", "spawn", device_id, helper, "set", "liquid-glass", value]));
+            let helper =
+                serve_sim_ax_settings.ok_or("iOS accessibility helper is not installed")?;
+            commands.push(command(
+                "xcrun",
+                argv![
+                    "simctl",
+                    "spawn",
+                    device_id,
+                    helper,
+                    "set",
+                    "liquid-glass",
+                    value
+                ],
+            ));
         }
         (DevicePlatform::Ios, DeviceActionKind::SetColorFilter(value)) => {
-            let helper = serve_sim_ax_settings.ok_or("iOS accessibility helper is not installed")?;
-            commands.push(command("xcrun", argv!["simctl", "spawn", device_id, helper, "set", "color-filter", ios_color_filter(*value)]));
+            let helper =
+                serve_sim_ax_settings.ok_or("iOS accessibility helper is not installed")?;
+            commands.push(command(
+                "xcrun",
+                argv![
+                    "simctl",
+                    "spawn",
+                    device_id,
+                    helper,
+                    "set",
+                    "color-filter",
+                    ios_color_filter(*value)
+                ],
+            ));
         }
-        (DevicePlatform::Ios, DeviceActionKind::SetLocation { latitude, longitude }) => commands.push(command("xcrun", argv!["simctl", "location", device_id, "set", format!("{latitude},{longitude}")])),
-        (DevicePlatform::Ios, DeviceActionKind::ClearLocation) => commands.push(command("xcrun", argv!["simctl", "location", device_id, "clear"])),
-        (DevicePlatform::Ios, DeviceActionKind::SetPermission { app_id, permission: device::DevicePermission::Notifications, decision }) => {
+        (
+            DevicePlatform::Ios,
+            DeviceActionKind::SetLocation {
+                latitude,
+                longitude,
+            },
+        ) => commands.push(command(
+            "xcrun",
+            argv![
+                "simctl",
+                "location",
+                device_id,
+                "set",
+                format!("{latitude},{longitude}")
+            ],
+        )),
+        (DevicePlatform::Ios, DeviceActionKind::ClearLocation) => commands.push(command(
+            "xcrun",
+            argv!["simctl", "location", device_id, "clear"],
+        )),
+        (
+            DevicePlatform::Ios,
+            DeviceActionKind::SetPermission {
+                app_id,
+                permission: device::DevicePermission::Notifications,
+                decision,
+            },
+        ) => {
             let helper = serve_sim_cli.ok_or("iOS device helper is not installed")?;
-            commands.push(command("node", argv![helper, "permissions", ios_permission_decision(*decision), "notifications", app_id, "-d", device_id]));
+            commands.push(command(
+                "node",
+                argv![
+                    helper,
+                    "permissions",
+                    ios_permission_decision(*decision),
+                    "notifications",
+                    app_id,
+                    "-d",
+                    device_id
+                ],
+            ));
         }
-        (DevicePlatform::Ios, DeviceActionKind::SetPermission { app_id, permission, decision }) => commands.push(command("xcrun", argv!["simctl", "privacy", ios_permission_decision(*decision), ios_permission(*permission)?, app_id])),
-        (DevicePlatform::Ios, DeviceActionKind::OpenUrl(url)) => commands.push(command("xcrun", argv!["simctl", "openurl", device_id, url])),
-        (DevicePlatform::Ios, DeviceActionKind::LaunchApp(app)) => commands.push(command("xcrun", argv!["simctl", "launch", device_id, app])),
-        (DevicePlatform::Ios, DeviceActionKind::TerminateApp(app)) => commands.push(command("xcrun", argv!["simctl", "terminate", device_id, app])),
-        (DevicePlatform::Ios, DeviceActionKind::SendPush { app_id, .. }) => commands.push(command("xcrun", argv!["simctl", "push", device_id, app_id, "-"])),
-        (DevicePlatform::Android, DeviceActionKind::SetAppearance(value)) => commands.push(adb_shell(device_id, argv!["cmd", "uimode", "night", if matches!(value, DeviceAppearance::Dark) { "yes" } else { "no" }])),
-        (DevicePlatform::Android, DeviceActionKind::SetTextSize(value)) => commands.push(adb_shell(device_id, argv!["settings", "put", "system", "font_scale", android_text_size(*value)])),
-        (DevicePlatform::Android, DeviceActionKind::SetToggle { setting, value }) if setting == "networkEnabled" => {
+        (
+            DevicePlatform::Ios,
+            DeviceActionKind::SetPermission {
+                app_id,
+                permission,
+                decision,
+            },
+        ) => commands.push(command(
+            "xcrun",
+            argv![
+                "simctl",
+                "privacy",
+                ios_permission_decision(*decision),
+                ios_permission(*permission)?,
+                app_id
+            ],
+        )),
+        (DevicePlatform::Ios, DeviceActionKind::OpenUrl(url)) => {
+            commands.push(command("xcrun", argv!["simctl", "openurl", device_id, url]))
+        }
+        (DevicePlatform::Ios, DeviceActionKind::LaunchApp(app)) => {
+            commands.push(command("xcrun", argv!["simctl", "launch", device_id, app]))
+        }
+        (DevicePlatform::Ios, DeviceActionKind::TerminateApp(app)) => commands.push(command(
+            "xcrun",
+            argv!["simctl", "terminate", device_id, app],
+        )),
+        (DevicePlatform::Ios, DeviceActionKind::SendPush { app_id, .. }) => commands.push(command(
+            "xcrun",
+            argv!["simctl", "push", device_id, app_id, "-"],
+        )),
+        (DevicePlatform::Android, DeviceActionKind::SetAppearance(value)) => {
+            commands.push(adb_shell(
+                device_id,
+                argv![
+                    "cmd",
+                    "uimode",
+                    "night",
+                    if matches!(value, DeviceAppearance::Dark) {
+                        "yes"
+                    } else {
+                        "no"
+                    }
+                ],
+            ))
+        }
+        (DevicePlatform::Android, DeviceActionKind::SetTextSize(value)) => {
+            commands.push(adb_shell(
+                device_id,
+                argv![
+                    "settings",
+                    "put",
+                    "system",
+                    "font_scale",
+                    android_text_size(*value)
+                ],
+            ))
+        }
+        (DevicePlatform::Android, DeviceActionKind::SetToggle { setting, value })
+            if setting == "networkEnabled" =>
+        {
             let enabled = if *value { "enable" } else { "disable" };
             commands.push(adb_shell(device_id, argv!["svc", "wifi", enabled]));
             commands.push(adb_shell(device_id, argv!["svc", "data", enabled]));
         }
-        (DevicePlatform::Android, DeviceActionKind::SetToggle { setting, value }) if setting == "reduceMotion" => {
+        (DevicePlatform::Android, DeviceActionKind::SetToggle { setting, value })
+            if setting == "reduceMotion" =>
+        {
             let scale = if *value { "0" } else { "1" };
-            for key in ["animator_duration_scale", "transition_animation_scale", "window_animation_scale"] {
-                commands.push(adb_shell(device_id, argv!["settings", "put", "global", key, scale]));
+            for key in [
+                "animator_duration_scale",
+                "transition_animation_scale",
+                "window_animation_scale",
+            ] {
+                commands.push(adb_shell(
+                    device_id,
+                    argv!["settings", "put", "global", key, scale],
+                ));
             }
         }
         (DevicePlatform::Android, DeviceActionKind::SetOrientation(value)) => {
             if device_id.starts_with("emulator-") {
-                commands.push(adb_shell(device_id, argv!["settings", "put", "system", "accelerometer_rotation", "1"]));
-                commands.push(adb_shell(device_id, argv!["cmd", "window", "user-rotation", "free"]));
-                commands.push(command("adb", argv!["-s", device_id, "emu", "sensor", "set", "acceleration", android_gravity(*value)]));
+                commands.push(adb_shell(
+                    device_id,
+                    argv!["settings", "put", "system", "accelerometer_rotation", "1"],
+                ));
+                commands.push(adb_shell(
+                    device_id,
+                    argv!["cmd", "window", "user-rotation", "free"],
+                ));
+                commands.push(command(
+                    "adb",
+                    argv![
+                        "-s",
+                        device_id,
+                        "emu",
+                        "sensor",
+                        "set",
+                        "acceleration",
+                        android_gravity(*value)
+                    ],
+                ));
             } else {
-                commands.push(adb_shell(device_id, argv!["cmd", "window", "user-rotation", "lock", android_rotation(*value)]));
+                commands.push(adb_shell(
+                    device_id,
+                    argv![
+                        "cmd",
+                        "window",
+                        "user-rotation",
+                        "lock",
+                        android_rotation(*value)
+                    ],
+                ));
             }
         }
-        (DevicePlatform::Android, DeviceActionKind::SetLocation { latitude, longitude }) => commands.push(command("adb", argv!["-s", device_id, "emu", "geo", "fix", longitude, latitude])),
+        (
+            DevicePlatform::Android,
+            DeviceActionKind::SetLocation {
+                latitude,
+                longitude,
+            },
+        ) => commands.push(command(
+            "adb",
+            argv!["-s", device_id, "emu", "geo", "fix", longitude, latitude],
+        )),
         (DevicePlatform::Android, DeviceActionKind::ClearLocation) => {}
-        (DevicePlatform::Android, DeviceActionKind::SetPermission { app_id, permission, decision }) => {
-            let verb = if matches!(decision, device::DevicePermissionDecision::Grant) { "grant" } else { "revoke" };
+        (
+            DevicePlatform::Android,
+            DeviceActionKind::SetPermission {
+                app_id,
+                permission,
+                decision,
+            },
+        ) => {
+            let verb = if matches!(decision, device::DevicePermissionDecision::Grant) {
+                "grant"
+            } else {
+                "revoke"
+            };
             let permissions = android_permissions(*permission);
             if permissions.is_empty() {
                 return Err("permission is unsupported on Android".into());
@@ -1236,23 +1562,53 @@ fn action_commands_with_helpers(
 fn adb_shell(device: &str, args: impl IntoIterator<Item = String>) -> DeviceCommand {
     let mut command = vec!["-s".to_owned(), device.to_owned(), "shell".to_owned()];
     command.extend(args);
-    DeviceCommand { program: "adb".into(), args: command }
+    DeviceCommand {
+        program: "adb".into(),
+        args: command,
+    }
 }
 
 fn ios_text_size(value: DeviceTextSize) -> &'static str {
-    match value { DeviceTextSize::Small => "small", DeviceTextSize::Default => "large", DeviceTextSize::Large => "extra-extra-large", DeviceTextSize::ExtraLarge => "accessibility-large" }
+    match value {
+        DeviceTextSize::Small => "small",
+        DeviceTextSize::Default => "large",
+        DeviceTextSize::Large => "extra-extra-large",
+        DeviceTextSize::ExtraLarge => "accessibility-large",
+    }
 }
 fn android_text_size(value: DeviceTextSize) -> &'static str {
-    match value { DeviceTextSize::Small => "0.85", DeviceTextSize::Default => "1.0", DeviceTextSize::Large => "1.15", DeviceTextSize::ExtraLarge => "1.3" }
+    match value {
+        DeviceTextSize::Small => "0.85",
+        DeviceTextSize::Default => "1.0",
+        DeviceTextSize::Large => "1.15",
+        DeviceTextSize::ExtraLarge => "1.3",
+    }
 }
 fn ios_toggle(value: &str) -> &'static str {
-    match value { "reduceMotion" => "reduce-motion", "reduceTransparency" => "reduce-transparency", "showBorders" => "show-borders", "voiceOver" => "voiceover", _ => "increase-contrast" }
+    match value {
+        "reduceMotion" => "reduce-motion",
+        "reduceTransparency" => "reduce-transparency",
+        "showBorders" => "show-borders",
+        "voiceOver" => "voiceover",
+        _ => "increase-contrast",
+    }
 }
 fn ios_color_filter(value: DeviceColorFilter) -> &'static str {
-    match value { DeviceColorFilter::None => "none", DeviceColorFilter::Grayscale => "grayscale", DeviceColorFilter::RedGreen => "red-green", DeviceColorFilter::GreenRed => "green-red", DeviceColorFilter::BlueYellow => "blue-yellow" }
+    match value {
+        DeviceColorFilter::None => "none",
+        DeviceColorFilter::Grayscale => "grayscale",
+        DeviceColorFilter::RedGreen => "red-green",
+        DeviceColorFilter::GreenRed => "green-red",
+        DeviceColorFilter::BlueYellow => "blue-yellow",
+    }
 }
 fn android_rotation(value: DeviceOrientation) -> &'static str {
-    match value { DeviceOrientation::Portrait => "0", DeviceOrientation::LandscapeLeft => "1", DeviceOrientation::PortraitUpsideDown => "2", DeviceOrientation::LandscapeRight => "3" }
+    match value {
+        DeviceOrientation::Portrait => "0",
+        DeviceOrientation::LandscapeLeft => "1",
+        DeviceOrientation::PortraitUpsideDown => "2",
+        DeviceOrientation::LandscapeRight => "3",
+    }
 }
 
 fn next_orientation(value: DeviceOrientation) -> DeviceOrientation {
@@ -1307,7 +1663,10 @@ fn duo_command_wire(command: &DeviceDuoCommand) -> serde_json::Value {
     }
 }
 
-fn rotate_touch(screen: Option<&DeviceScreenConfig>, x: f32, y: f32) -> (f32, f32) {
+fn rotate_touch(screen: Option<&DeviceScreenConfig>, x: f32, y: f32, raw: bool) -> (f32, f32) {
+    if raw {
+        return (x, y);
+    }
     let Some(screen) = screen else { return (x, y); };
     if screen.width > screen.height { return (x, y); }
     match screen.orientation {
@@ -1326,19 +1685,49 @@ fn android_gravity(value: DeviceOrientation) -> &'static str {
     }
 }
 fn ios_permission_decision(value: device::DevicePermissionDecision) -> &'static str {
-    match value { device::DevicePermissionDecision::Grant => "grant", device::DevicePermissionDecision::Revoke => "revoke", device::DevicePermissionDecision::Reset => "reset" }
+    match value {
+        device::DevicePermissionDecision::Grant => "grant",
+        device::DevicePermissionDecision::Revoke => "revoke",
+        device::DevicePermissionDecision::Reset => "reset",
+    }
 }
 fn ios_permission(value: device::DevicePermission) -> Result<&'static str, String> {
-    Ok(match value { device::DevicePermission::Camera => "camera", device::DevicePermission::Microphone => "microphone", device::DevicePermission::Photos => "photos", device::DevicePermission::Contacts => "contacts", device::DevicePermission::Calendar => "calendar", device::DevicePermission::Reminders => "reminders", device::DevicePermission::Location => "location", device::DevicePermission::Motion => "motion", device::DevicePermission::MediaLibrary => "media-library", device::DevicePermission::FaceId => "faceid", device::DevicePermission::Notifications => return Err("notifications need the platform helper".into()) })
+    Ok(match value {
+        device::DevicePermission::Camera => "camera",
+        device::DevicePermission::Microphone => "microphone",
+        device::DevicePermission::Photos => "photos",
+        device::DevicePermission::Contacts => "contacts",
+        device::DevicePermission::Calendar => "calendar",
+        device::DevicePermission::Reminders => "reminders",
+        device::DevicePermission::Location => "location",
+        device::DevicePermission::Motion => "motion",
+        device::DevicePermission::MediaLibrary => "media-library",
+        device::DevicePermission::FaceId => "faceid",
+        device::DevicePermission::Notifications => {
+            return Err("notifications need the platform helper".into());
+        }
+    })
 }
 fn android_permissions(value: device::DevicePermission) -> &'static [&'static str] {
     match value {
         device::DevicePermission::Camera => &["android.permission.CAMERA"],
         device::DevicePermission::Microphone => &["android.permission.RECORD_AUDIO"],
-        device::DevicePermission::Photos => &["android.permission.READ_MEDIA_IMAGES", "android.permission.READ_EXTERNAL_STORAGE"],
-        device::DevicePermission::Contacts => &["android.permission.READ_CONTACTS", "android.permission.WRITE_CONTACTS"],
-        device::DevicePermission::Calendar => &["android.permission.READ_CALENDAR", "android.permission.WRITE_CALENDAR"],
-        device::DevicePermission::Location => &["android.permission.ACCESS_FINE_LOCATION", "android.permission.ACCESS_COARSE_LOCATION"],
+        device::DevicePermission::Photos => &[
+            "android.permission.READ_MEDIA_IMAGES",
+            "android.permission.READ_EXTERNAL_STORAGE",
+        ],
+        device::DevicePermission::Contacts => &[
+            "android.permission.READ_CONTACTS",
+            "android.permission.WRITE_CONTACTS",
+        ],
+        device::DevicePermission::Calendar => &[
+            "android.permission.READ_CALENDAR",
+            "android.permission.WRITE_CALENDAR",
+        ],
+        device::DevicePermission::Location => &[
+            "android.permission.ACCESS_FINE_LOCATION",
+            "android.permission.ACCESS_COARSE_LOCATION",
+        ],
         device::DevicePermission::Notifications => &["android.permission.POST_NOTIFICATIONS"],
         device::DevicePermission::Motion => &["android.permission.ACTIVITY_RECOGNITION"],
         _ => &[],
@@ -1346,9 +1735,17 @@ fn android_permissions(value: device::DevicePermission) -> &'static [&'static st
 }
 
 #[derive(Debug, Deserialize)]
-struct SimctlList { devices: BTreeMap<String, Vec<SimctlDevice>> }
+struct SimctlList {
+    devices: BTreeMap<String, Vec<SimctlDevice>>,
+}
 #[derive(Debug, Deserialize)]
-struct SimctlDevice { name: String, udid: String, state: String, #[serde(rename = "isAvailable")] is_available: Option<bool> }
+struct SimctlDevice {
+    name: String,
+    udid: String,
+    state: String,
+    #[serde(rename = "isAvailable")]
+    is_available: Option<bool>,
+}
 
 #[derive(Debug, Deserialize)]
 struct HubDeviceList {
@@ -1472,14 +1869,14 @@ struct PersistedAgentState {
 
 struct RemoteHubRuntime {
     local_port: u16,
-    tunnel: tokio::process::Child,
+    tunnel: ForwardedPort,
 }
 
 struct AgentRuntime {
     host_id: String,
     state_dir: PathBuf,
     entry: PathBuf,
-    tunnel: Option<tokio::process::Child>,
+    tunnel: Option<ForwardedPort>,
     configured: bool,
 }
 
@@ -1575,7 +1972,11 @@ pub struct AgentDeviceTarget {
 impl DeviceService {
     pub fn new(state_root: PathBuf) -> Arc<Self> {
         let (events, _) = broadcast::channel(128);
-        let local: Arc<dyn DeviceHostRunner> = Arc::new(LocalDeviceHost { label: "This machine".into(), state_root: state_root.clone(), android: discover_android_tools() });
+        let local: Arc<dyn DeviceHostRunner> = Arc::new(LocalDeviceHost {
+            label: "This machine".into(),
+            state_root: state_root.clone(),
+            android: discover_android_tools(),
+        });
         let mut hosts = BTreeMap::new();
         hosts.insert(LOCAL_DEVICE_HOST_ID.into(), local);
         let mut state = DeviceServiceState::default();
@@ -1583,7 +1984,11 @@ impl DeviceService {
         if let Ok(bytes) = std::fs::read(state_root.join("settings.json"))
             && let Ok(settings) = serde_json::from_slice::<PersistedDeviceSettings>(&bytes)
         {
-            state.host_status = if settings.enabled { DeviceHostStatus::Idle } else { DeviceHostStatus::Disabled };
+            state.host_status = if settings.enabled {
+                DeviceHostStatus::Idle
+            } else {
+                DeviceHostStatus::Disabled
+            };
             state.agent_access_enabled = settings.agent_access_enabled;
             state.onboarding_completed = settings.onboarding_completed;
         }
@@ -1601,6 +2006,13 @@ impl DeviceService {
             .fetch_add(1, Ordering::Relaxed)
             .saturating_add(1);
         format!("{}-{sequence}", now_iso())
+    }
+
+    async fn next_frame_sequence(&self, host_id: &str, device_id: &str, screen_id: Option<u8>) -> u64 {
+        let mut sequences = self.inner.frame_sequences.lock().await;
+        let sequence = sequences.entry((host_id.to_owned(), device_id.to_owned(), screen_id)).or_insert(0);
+        *sequence = sequence.saturating_add(1).max(1);
+        *sequence
     }
 
     fn next_recording_id(&self) -> u64 {
@@ -1677,7 +2089,7 @@ impl DeviceService {
                 runtime
                     .tunnel
                     .as_mut()
-                    .map(|tunnel| matches!(tunnel.try_wait(), Ok(None)))
+                    .map(|tunnel| tunnel.child.try_wait().ok().flatten().is_none())
                     .unwrap_or(true)
             });
             agents
@@ -1706,15 +2118,22 @@ impl DeviceService {
         let previous = self.inner.agents.lock().await.remove(host_id);
         if let Some(mut previous) = previous {
             if let Some(mut tunnel) = previous.tunnel.take() {
-                let _ = tunnel.kill().await;
-                let _ = tunnel.wait().await;
+                let _ = tunnel.child.kill().await;
+                let _ = tunnel.child.wait().await;
             }
         }
 
         let state_dir = root.join("agent-device").join("hosts").join(host_id);
 
         let _tool_guard = self.inner.tool_install.lock().await;
-        let entry = ensure_pinned_tool(local_host.as_ref(), &root, AGENT_PACKAGE, AGENT_VERSION, AGENT_ENTRY).await?;
+        let entry = ensure_pinned_tool(
+            local_host.as_ref(),
+            &root,
+            AGENT_PACKAGE,
+            AGENT_VERSION,
+            AGENT_ENTRY,
+        )
+        .await?;
         drop(_tool_guard);
 
         let (local_port, token, tunnel) = match host.kind() {
@@ -1743,7 +2162,7 @@ impl DeviceService {
                             return Err(format!("remote agent-device returned invalid state: {error}"));
                         }
                     };
-                    let daemon: AgentDaemonState = match serde_json::from_value(remote.clone()) {
+                    let daemon: AgentDaemonState = match serde_json::from_value::<AgentDaemonState>(remote.clone()) {
                         Ok(daemon) if daemon.http_port != 0 && !daemon.token.is_empty() => daemon,
                         Ok(_) => {
                             self.cleanup_agent_activation(host.as_ref(), &entry, &state_dir, None).await;
@@ -1800,14 +2219,16 @@ impl DeviceService {
         }
         let config_path = state_dir.join("config.json");
         if let Err(error) = write_agent_config(&config_path, local_port, &token).await {
-            self.cleanup_agent_activation(host.as_ref(), &entry, &state_dir, tunnel).await;
+            self.cleanup_agent_activation(host.as_ref(), &entry, &state_dir, tunnel)
+                .await;
             return Err(error);
         }
         let node = node_command();
         let command_path = match write_agent_launcher(&root, &entry, &node).await {
             Ok(path) => path,
             Err(error) => {
-                self.cleanup_agent_activation(host.as_ref(), &entry, &state_dir, tunnel).await;
+                self.cleanup_agent_activation(host.as_ref(), &entry, &state_dir, tunnel)
+                    .await;
                 return Err(error);
             }
         };
@@ -1853,11 +2274,11 @@ impl DeviceService {
         host: &dyn DeviceHostRunner,
         entry: &Path,
         state_dir: &Path,
-        mut tunnel: Option<tokio::process::Child>,
+        mut tunnel: Option<ForwardedPort>,
     ) {
         if let Some(mut tunnel) = tunnel.take() {
-            let _ = tunnel.kill().await;
-            let _ = tunnel.wait().await;
+            let _ = tunnel.child.kill().await;
+            let _ = tunnel.child.wait().await;
         }
         match host.kind() {
             DeviceHostKind::Local => {
@@ -1878,20 +2299,38 @@ impl DeviceService {
         }
     }
 
-    async fn ensure_remote_hub_running(&self, host: &Arc<dyn DeviceHostRunner>) -> Result<(), String> {
+    async fn ensure_remote_hub_running(
+        &self,
+        host: &Arc<dyn DeviceHostRunner>,
+    ) -> Result<(), String> {
         if host.kind() != DeviceHostKind::Ssh {
             return Ok(());
         }
+        self.ensure_remote_hub_running_inner(host).await?;
+        self.ensure_remote_recovery_task(host.id()).await;
+        Ok(())
+    }
+
+    async fn ensure_remote_hub_running_inner(
+        &self,
+        host: &Arc<dyn DeviceHostRunner>,
+    ) -> Result<(), String> {
         let _start_guard = self.inner.remote_hub_operation.lock().await;
         let stale = {
             let mut hubs = self.inner.remote_hubs.lock().await;
             let live_port = hubs.get_mut(host.id()).and_then(|runtime| {
-                runtime.tunnel.try_wait().ok().flatten().is_none().then_some(runtime.local_port)
+                runtime
+                    .tunnel
+                    .child
+                    .try_wait()
+                    .ok()
+                    .flatten()
+                    .is_none()
+                    .then_some(runtime.local_port)
             });
             if let Some(port) = live_port {
                 drop(hubs);
                 if loopback_http_ok(port, "/readyz").await {
-                    self.ensure_remote_recovery_task(host.id()).await;
                     return Ok(());
                 }
                 hubs = self.inner.remote_hubs.lock().await;
@@ -1899,8 +2338,8 @@ impl DeviceService {
             hubs.remove(host.id())
         };
         if let Some(mut stale) = stale {
-            let _ = stale.tunnel.kill().await;
-            let _ = stale.tunnel.wait().await;
+            let _ = stale.tunnel.child.kill().await;
+            let _ = stale.tunnel.child.wait().await;
         }
         let output = host
             .lifecycle("hub")
@@ -1949,7 +2388,9 @@ impl DeviceService {
             if let Some(status) = tunnel_status {
                 let _ = tunnel.child.kill().await;
                 let _ = tunnel.child.wait().await;
-                return Err(format!("device hub tunnel exited before becoming ready ({status})"));
+                return Err(format!(
+                    "device hub tunnel exited before becoming ready ({status})"
+                ));
             }
             if tokio::time::Instant::now() >= deadline {
                 let _ = tunnel.child.kill().await;
@@ -1959,14 +2400,14 @@ impl DeviceService {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
         let mut hubs = self.inner.remote_hubs.lock().await;
-        let duplicate = hubs.get_mut(host.id()).is_some_and(|current| {
-            current.tunnel.try_wait().ok().flatten().is_none()
-        });
+        let duplicate = hubs
+            .get_mut(host.id())
+            .is_some_and(|current| current.tunnel.child.try_wait().ok().flatten().is_none());
         if duplicate {
             drop(hubs);
             let mut tunnel = tunnel;
-            let _ = tunnel.kill().await;
-            let _ = tunnel.wait().await;
+            let _ = tunnel.child.kill().await;
+            let _ = tunnel.child.wait().await;
             return Ok(());
         }
         hubs.insert(
@@ -1977,7 +2418,6 @@ impl DeviceService {
             },
         );
         drop(hubs);
-        self.ensure_remote_recovery_task(host.id()).await;
         Ok(())
     }
 
@@ -1998,7 +2438,7 @@ impl DeviceService {
                 };
                 if healthy { continue; }
                 host.set_probe_error(Some("SSH device hub tunnel is unavailable; reconnecting".into()));
-                let recovered = service.ensure_remote_hub_running(&host).await.is_ok();
+                let recovered = service.ensure_remote_hub_running_inner(&host).await.is_ok();
                 if recovered {
                     host.set_probe_error(None);
                 }
@@ -2064,11 +2504,16 @@ impl DeviceService {
             .parent()
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("."));
-        let _ = ensure_pinned_tool(host.as_ref(), &root, HUB_PACKAGE, HUB_VERSION, HUB_ENTRY).await?;
+        let _ =
+            ensure_pinned_tool(host.as_ref(), &root, HUB_PACKAGE, HUB_VERSION, HUB_ENTRY).await?;
         Ok(())
     }
 
-    async fn ensure_agent_tool(&self, host: &Arc<dyn DeviceHostRunner>, start: bool) -> Result<(), String> {
+    async fn ensure_agent_tool(
+        &self,
+        host: &Arc<dyn DeviceHostRunner>,
+        start: bool,
+    ) -> Result<(), String> {
         if host.kind() == DeviceHostKind::Ssh {
             let output = host
                 .lifecycle(if start { "agent" } else { "agent-install" })
@@ -2149,7 +2594,14 @@ impl DeviceService {
             .parent()
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("."));
-        let _ = ensure_pinned_tool(host.as_ref(), &root, AGENT_PACKAGE, AGENT_VERSION, AGENT_ENTRY).await?;
+        let _ = ensure_pinned_tool(
+            host.as_ref(),
+            &root,
+            AGENT_PACKAGE,
+            AGENT_VERSION,
+            AGENT_ENTRY,
+        )
+        .await?;
         Ok(())
     }
 
@@ -2177,7 +2629,14 @@ impl DeviceService {
                 self.ensure_hub_running(host).await?;
                 if entry.as_os_str().is_empty() {
                     let _guard = self.inner.tool_install.lock().await;
-                    entry = ensure_pinned_tool(host.as_ref(), &root, AGENT_PACKAGE, AGENT_VERSION, AGENT_ENTRY).await?;
+                    entry = ensure_pinned_tool(
+                        host.as_ref(),
+                        &root,
+                        AGENT_PACKAGE,
+                        AGENT_VERSION,
+                        AGENT_ENTRY,
+                    )
+                    .await?;
                 }
                 let _ = ensure_agent_daemon(host.as_ref(), &entry, &state_dir).await?;
             } else {
@@ -2210,7 +2669,14 @@ impl DeviceService {
         if host.kind() == DeviceHostKind::Local {
             self.ensure_hub_running(host).await?;
             let _guard = self.inner.tool_install.lock().await;
-            let entry = ensure_pinned_tool(host.as_ref(), &root, AGENT_PACKAGE, AGENT_VERSION, AGENT_ENTRY).await?;
+            let entry = ensure_pinned_tool(
+                host.as_ref(),
+                &root,
+                AGENT_PACKAGE,
+                AGENT_VERSION,
+                AGENT_ENTRY,
+            )
+            .await?;
             drop(_guard);
             let state_dir = root.join("agent-device").join("hosts").join(host.id());
             let _ = ensure_agent_daemon(host.as_ref(), &entry, &state_dir).await?;
@@ -2275,7 +2741,12 @@ impl DeviceService {
         let persisted_path = root.join("hub.json");
         let mut running = self.inner.hub.lock().await;
         if let Some(current) = running.as_mut() {
-            if current.child.try_wait().map_err(|error| error.to_string())?.is_none() {
+            if current
+                .child
+                .try_wait()
+                .map_err(|error| error.to_string())?
+                .is_none()
+            {
                 return Ok(());
             }
             *running = None;
@@ -2290,7 +2761,9 @@ impl DeviceService {
                 .map_err(|error| error.to_string())?
                 .port();
             drop(listener);
-            let mut child = Command::new(node_command())
+            let node = node_command();
+            let mut child = Command::new(&node);
+            child
                 .arg(&entry)
                 .args([
                     "--port".to_owned(),
@@ -2324,7 +2797,9 @@ impl DeviceService {
                 }
                 if let Some(status) = child.try_wait().map_err(|error| error.to_string())? {
                     if attempt == 4 {
-                        return Err(format!("device hub exited before becoming ready ({status})"));
+                        return Err(format!(
+                            "device hub exited before becoming ready ({status})"
+                        ));
                     }
                     break;
                 }
@@ -2400,10 +2875,17 @@ impl DeviceService {
             std::mem::take(&mut *hubs)
         };
         for (_, mut hub) in remote_hubs {
-            let _ = hub.tunnel.kill().await;
-            let _ = hub.tunnel.wait().await;
+            let _ = hub.tunnel.child.kill().await;
+            let _ = hub.tunnel.child.wait().await;
         }
-        let hosts = self.inner.hosts.read().await.values().cloned().collect::<Vec<_>>();
+        let hosts = self
+            .inner
+            .hosts
+            .read()
+            .await
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
         for host in hosts {
             if host.kind() == DeviceHostKind::Ssh {
                 let _ = host.lifecycle("stop").await;
@@ -2418,8 +2900,8 @@ impl DeviceService {
         };
         for (_, mut agent) in agents {
             if let Some(mut tunnel) = agent.tunnel.take() {
-                let _ = tunnel.kill().await;
-                let _ = tunnel.wait().await;
+                let _ = tunnel.child.kill().await;
+                let _ = tunnel.child.wait().await;
             }
             if let Ok(host) = self.host(&agent.host_id).await {
                 match host.kind() {
@@ -2443,7 +2925,9 @@ impl DeviceService {
         }
     }
 
-    pub fn subscribe(&self) -> broadcast::Receiver<DeviceEvent> { self.inner.events.subscribe() }
+    pub fn subscribe(&self) -> broadcast::Receiver<DeviceEvent> {
+        self.inner.events.subscribe()
+    }
 
     async fn publish_state(&self, mut state: DeviceServiceState) -> DeviceServiceState {
         let mut current = self.inner.state.write().await;
@@ -2492,20 +2976,36 @@ impl DeviceService {
     }
 
     async fn load_hosts(&self) {
-        let Ok(bytes) = tokio::fs::read(&self.inner.config_path).await else { return; };
-        let Ok(configs) = serde_json::from_slice::<Vec<DeviceHostConfig>>(&bytes) else { return; };
+        let Ok(bytes) = tokio::fs::read(&self.inner.config_path).await else {
+            return;
+        };
+        let Ok(configs) = serde_json::from_slice::<Vec<DeviceHostConfig>>(&bytes) else {
+            return;
+        };
         let configs = configs
             .into_iter()
             .map(DeviceHostConfig::normalized)
             .collect::<Vec<_>>();
-        if configs.iter().any(|config| config.validate().is_err()) || configs.iter().map(|config| &config.id).collect::<BTreeSet<_>>().len() != configs.len() { return; }
+        if configs.iter().any(|config| config.validate().is_err())
+            || configs
+                .iter()
+                .map(|config| &config.id)
+                .collect::<BTreeSet<_>>()
+                .len()
+                != configs.len()
+        {
+            return;
+        }
         let owner_root = self
             .inner
             .config_path
             .parent()
             .unwrap_or_else(|| Path::new("."));
         let mut hosts = self.inner.hosts.write().await;
-        let ids = configs.iter().map(|config| config.id.as_str()).collect::<BTreeSet<_>>();
+        let ids = configs
+            .iter()
+            .map(|config| config.id.as_str())
+            .collect::<BTreeSet<_>>();
         hosts.retain(|id, _| id == LOCAL_DEVICE_HOST_ID || ids.contains(id.as_str()));
         for config in configs {
             let retain = hosts
@@ -2531,17 +3031,31 @@ impl DeviceService {
             .parent()
             .unwrap_or_else(|| Path::new("."));
         let local = local_summary(root);
-        state.hosts = std::iter::once(local).chain(hosts.values().filter(|host| host.id() != LOCAL_DEVICE_HOST_ID).map(|host| host_summary(host.as_ref()))).collect();
+        state.hosts = std::iter::once(local)
+            .chain(
+                hosts
+                    .values()
+                    .filter(|host| host.id() != LOCAL_DEVICE_HOST_ID)
+                    .map(|host| host_summary(host.as_ref())),
+            )
+            .collect();
     }
 
-    pub async fn configure(&self, input: DeviceConfigureInput) -> Result<DeviceServiceState, String> {
+    pub async fn configure(
+        &self,
+        input: DeviceConfigureInput,
+    ) -> Result<DeviceServiceState, String> {
         let refresh = input.enabled == Some(true);
         let disable_support = input.enabled == Some(false);
         let disable_agent = input.agent_access_enabled == Some(false);
         let guard = self.inner.operation.lock().await;
         let mut state = self.inner.state.read().await.clone();
         if let Some(enabled) = input.enabled {
-            state.host_status = if enabled { DeviceHostStatus::Idle } else { DeviceHostStatus::Disabled };
+            state.host_status = if enabled {
+                DeviceHostStatus::Idle
+            } else {
+                DeviceHostStatus::Disabled
+            };
             state.host_status_detail = None;
             state.host_statuses.clear();
             if !enabled {
@@ -2550,8 +3064,12 @@ impl DeviceService {
                 state.booting_devices.clear();
             }
         }
-        if let Some(enabled) = input.agent_access_enabled { state.agent_access_enabled = enabled; }
-        if let Some(completed) = input.onboarding_completed { state.onboarding_completed = completed; }
+        if let Some(enabled) = input.agent_access_enabled {
+            state.agent_access_enabled = enabled;
+        }
+        if let Some(completed) = input.onboarding_completed {
+            state.onboarding_completed = completed;
+        }
         self.persist_settings(&state).await?;
         let start_agents = state.host_status != DeviceHostStatus::Disabled
             && state.agent_access_enabled
@@ -2564,7 +3082,14 @@ impl DeviceService {
             self.shutdown_agents().await;
         }
         if start_agents {
-            let hosts = self.inner.hosts.read().await.values().cloned().collect::<Vec<_>>();
+            let hosts = self
+                .inner
+                .hosts
+                .read()
+                .await
+                .values()
+                .cloned()
+                .collect::<Vec<_>>();
             for host in hosts {
                 if host.kind() == DeviceHostKind::Local {
                     let root = self
@@ -2601,7 +3126,10 @@ impl DeviceService {
         }
     }
 
-    pub async fn update_hosts(&self, input: DeviceHostsInput) -> Result<DeviceServiceState, String> {
+    pub async fn update_hosts(
+        &self,
+        input: DeviceHostsInput,
+    ) -> Result<DeviceServiceState, String> {
         let input = DeviceHostsInput {
             hosts: input
                 .hosts
@@ -2609,19 +3137,32 @@ impl DeviceService {
                 .map(DeviceHostConfig::normalized)
                 .collect(),
         };
-        input.validate().map_err(|error| format!("invalid device host configuration: {error}"))?;
+        input
+            .validate()
+            .map_err(|error| format!("invalid device host configuration: {error}"))?;
         let _guard = self.inner.operation.lock().await;
         self.shutdown_owned().await;
         let bytes = serde_json::to_vec_pretty(&input.hosts).map_err(|error| error.to_string())?;
-        if let Some(parent) = self.inner.config_path.parent() { tokio::fs::create_dir_all(parent).await.map_err(|error| error.to_string())?; }
+        if let Some(parent) = self.inner.config_path.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|error| error.to_string())?;
+        }
         let temporary = self.inner.config_path.with_extension("json.tmp");
-        tokio::fs::write(&temporary, bytes).await.map_err(|error| error.to_string())?;
+        tokio::fs::write(&temporary, bytes)
+            .await
+            .map_err(|error| error.to_string())?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mut permissions = tokio::fs::metadata(&temporary).await.map_err(|error| error.to_string())?.permissions();
+            let mut permissions = tokio::fs::metadata(&temporary)
+                .await
+                .map_err(|error| error.to_string())?
+                .permissions();
             permissions.set_mode(0o600);
-            tokio::fs::set_permissions(&temporary, permissions).await.map_err(|error| error.to_string())?;
+            tokio::fs::set_permissions(&temporary, permissions)
+                .await
+                .map_err(|error| error.to_string())?;
         }
         #[cfg(windows)]
         let _ = tokio::fs::remove_file(&self.inner.config_path).await;
@@ -2646,9 +3187,9 @@ impl DeviceService {
             booting.device.host_id == LOCAL_DEVICE_HOST_ID
                 || configured.contains(booting.device.host_id.as_str())
         });
-        state.host_statuses.retain(|id, _| {
-            id == LOCAL_DEVICE_HOST_ID || configured.contains(id.as_str())
-        });
+        state
+            .host_statuses
+            .retain(|id, _| id == LOCAL_DEVICE_HOST_ID || configured.contains(id.as_str()));
         Ok(self.publish_state(state).await)
     }
 
@@ -2679,7 +3220,14 @@ impl DeviceService {
                 .map(PathBuf::from)
                 .unwrap_or_else(|| PathBuf::from("."));
             let mut inspected = current;
-            let hosts = self.inner.hosts.read().await.values().cloned().collect::<Vec<_>>();
+            let hosts = self
+                .inner
+                .hosts
+                .read()
+                .await
+                .values()
+                .cloned()
+                .collect::<Vec<_>>();
             for host in &hosts {
                 if host.kind() != DeviceHostKind::Ssh {
                     continue;
@@ -2707,7 +3255,13 @@ impl DeviceService {
             }
             inspected.hosts = hosts
                 .iter()
-                .map(|host| if host.kind() == DeviceHostKind::Local { local_summary(&root) } else { host_summary(host.as_ref()) })
+                .map(|host| {
+                    if host.kind() == DeviceHostKind::Local {
+                        local_summary(&root)
+                    } else {
+                        host_summary(host.as_ref())
+                    }
+                })
                 .collect();
             return Ok(self.publish_state(inspected).await);
         }
@@ -2725,7 +3279,11 @@ impl DeviceService {
         }
         let hosts: Vec<Arc<dyn DeviceHostRunner>> = {
             let map = self.inner.hosts.read().await;
-            if ids.is_empty() { map.values().cloned().collect() } else { ids.iter().filter_map(|id| map.get(id).cloned()).collect() }
+            if ids.is_empty() {
+                map.values().cloned().collect()
+            } else {
+                ids.iter().filter_map(|id| map.get(id).cloned()).collect()
+            }
         };
         let mut devices = Vec::new();
         let mut summaries = Vec::new();
@@ -2767,10 +3325,7 @@ impl DeviceService {
                 continue;
             }
             let mut host_ready = false;
-            if retry_host_id.is_some()
-                && update_tool.is_none()
-                && current.agent_access_enabled
-            {
+            if retry_host_id.is_some() && update_tool.is_none() && current.agent_access_enabled {
                 if let Err(error) = self.ensure_agent_running(&host).await {
                     statuses.insert(
                         host.id().into(),
@@ -2797,12 +3352,20 @@ impl DeviceService {
             }
             if !host_ready && update_tool != Some(agent_protocol::device::DeviceTool::Agent) {
                 if let Err(error) = self.ensure_hub_tool(&host, !tool_update).await {
-                    statuses.insert(host.id().into(), DeviceHostStatusRecord { status: DeviceHostStatus::Failed, detail: Some(error) });
+                    statuses.insert(
+                        host.id().into(),
+                        DeviceHostStatusRecord {
+                            status: DeviceHostStatus::Failed,
+                            detail: Some(error),
+                        },
+                    );
                     summaries.push(summary);
                     continue;
                 }
             }
-            if host.kind() == DeviceHostKind::Local && update_tool != Some(agent_protocol::device::DeviceTool::Agent) {
+            if host.kind() == DeviceHostKind::Local
+                && update_tool != Some(agent_protocol::device::DeviceTool::Agent)
+            {
                 let root = self
                     .inner
                     .config_path
@@ -2810,12 +3373,20 @@ impl DeviceService {
                     .map(PathBuf::from)
                     .unwrap_or_else(|| PathBuf::from("."));
                 summary = local_summary(&root);
-            } else if host.kind() == DeviceHostKind::Ssh && update_tool != Some(agent_protocol::device::DeviceTool::Agent) {
+            } else if host.kind() == DeviceHostKind::Ssh
+                && update_tool != Some(agent_protocol::device::DeviceTool::Agent)
+            {
                 summary = host_summary(host.as_ref());
             }
             if update_tool == Some(agent_protocol::device::DeviceTool::Agent) {
                 if let Err(error) = self.ensure_agent_tool(&host, false).await {
-                    statuses.insert(host.id().into(), DeviceHostStatusRecord { status: DeviceHostStatus::Failed, detail: Some(error) });
+                    statuses.insert(
+                        host.id().into(),
+                        DeviceHostStatusRecord {
+                            status: DeviceHostStatus::Failed,
+                            detail: Some(error),
+                        },
+                    );
                     summaries.push(summary);
                     continue;
                 }
@@ -2833,14 +3404,37 @@ impl DeviceService {
                 continue;
             }
             if let Err(error) = self.ensure_hub_running(&host).await {
-                statuses.insert(host.id().into(), DeviceHostStatusRecord { status: DeviceHostStatus::Failed, detail: Some(error) });
+                statuses.insert(
+                    host.id().into(),
+                    DeviceHostStatusRecord {
+                        status: DeviceHostStatus::Failed,
+                        detail: Some(error),
+                    },
+                );
                 summaries.push(summary);
                 continue;
             }
             let hub_port = self.hub_port(host.id()).await;
             match discover_host(host.clone(), hub_port).await {
-                Ok(found) => { devices.extend(found); statuses.insert(host.id().into(), DeviceHostStatusRecord { status: DeviceHostStatus::Ready, detail: None }); }
-                Err(error) => { statuses.insert(host.id().into(), DeviceHostStatusRecord { status: DeviceHostStatus::Failed, detail: Some(error.clone()) }); }
+                Ok(found) => {
+                    devices.extend(found);
+                    statuses.insert(
+                        host.id().into(),
+                        DeviceHostStatusRecord {
+                            status: DeviceHostStatus::Ready,
+                            detail: None,
+                        },
+                    );
+                }
+                Err(error) => {
+                    statuses.insert(
+                        host.id().into(),
+                        DeviceHostStatusRecord {
+                            status: DeviceHostStatus::Failed,
+                            detail: Some(error.clone()),
+                        },
+                    );
+                }
             }
             summaries.push(summary);
         }
@@ -2855,17 +3449,27 @@ impl DeviceService {
                 .chain(summaries)
                 .collect()
         };
-        state.devices = if ids.is_empty() { devices } else { state.devices.into_iter().filter(|device| !ids.contains(&device.host_id)).chain(devices).collect() };
+        state.devices = if ids.is_empty() {
+            devices
+        } else {
+            state
+                .devices
+                .into_iter()
+                .filter(|device| !ids.contains(&device.host_id))
+                .chain(devices)
+                .collect()
+        };
         if ids.is_empty() {
             state.host_statuses = statuses;
         } else {
             state.host_statuses.retain(|id, _| !ids.contains(id));
             state.host_statuses.extend(statuses);
         }
-        let failure = state
-            .host_statuses
-            .values()
-            .find_map(|status| (status.status == DeviceHostStatus::Failed).then(|| status.detail.clone()).flatten());
+        let failure = state.host_statuses.values().find_map(|status| {
+            (status.status == DeviceHostStatus::Failed)
+                .then(|| status.detail.clone())
+                .flatten()
+        });
         let local_status = state.host_statuses.get(LOCAL_DEVICE_HOST_ID).cloned();
         state.host_status = if tool_update {
             current.host_status
@@ -2876,17 +3480,25 @@ impl DeviceService {
         } else {
             DeviceHostStatus::Ready
         };
-        state.host_status_detail = failure.or_else(|| local_status.and_then(|status| status.detail));
+        state.host_status_detail =
+            failure.or_else(|| local_status.and_then(|status| status.detail));
         Ok(self.publish_state(state).await)
     }
 
     pub async fn open(&self, mut input: DeviceOpenInput) -> Result<DeviceSession, String> {
         let _guard = self.inner.operation.lock().await;
-        let host_id = input.host_id.take().unwrap_or_else(|| LOCAL_DEVICE_HOST_ID.into());
+        let host_id = input
+            .host_id
+            .take()
+            .unwrap_or_else(|| LOCAL_DEVICE_HOST_ID.into());
         let host = self.host(&host_id).await?;
         // Refresh before every open so an AVD that booted or was removed
         // outside this process cannot leave a stale session in the panel.
-        self.list_inner(DeviceListInput { retry_host_id: Some(host_id.clone()), ..Default::default() }).await?;
+        self.list_inner(DeviceListInput {
+            retry_host_id: Some(host_id.clone()),
+            ..Default::default()
+        })
+        .await?;
         let mut state = self.inner.state.read().await.clone();
         let mut device = state
             .devices
@@ -2894,12 +3506,20 @@ impl DeviceService {
             .find(|device| device.host_id == host_id && device.id == input.device_id)
             .cloned()
             .ok_or_else(|| format!("device {} was not found on host {host_id}", input.device_id))?;
-        if device.platform != input.platform { return Err("device platform does not match the requested platform".into()); }
+        if device.platform != input.platform {
+            return Err("device platform does not match the requested platform".into());
+        }
         if !device.booted && input.boot {
             let requested_id = device.id.clone();
             let requested_name = device.name.clone();
-            let booting = agent_protocol::device::BootingDevice { device: device.clone(), thread_id: input.thread_id.clone() };
-            state.booting_devices.retain(|entry| entry.device.host_id != booting.device.host_id || entry.device.id != booting.device.id);
+            let booting = agent_protocol::device::BootingDevice {
+                device: device.clone(),
+                thread_id: input.thread_id.clone(),
+            };
+            state.booting_devices.retain(|entry| {
+                entry.device.host_id != booting.device.host_id
+                    || entry.device.id != booting.device.id
+            });
             state.booting_devices.push(booting);
             self.publish_state(state.clone()).await;
             let mut booted_through_hub = false;
@@ -2944,11 +3564,21 @@ impl DeviceService {
                 }
             }
             if !booted_through_hub {
-                let command = match device.platform { DevicePlatform::Ios => command("xcrun", argv!["simctl", "boot", device.id]), DevicePlatform::Android => command("emulator", argv!["-avd", device.id]) };
+                let device_command = match device.platform {
+                    DevicePlatform::Ios => command("xcrun", argv!["simctl", "boot", device.id]),
+                    DevicePlatform::Android => command("emulator", argv!["-avd", device.id]),
+                };
                 if device.platform == DevicePlatform::Android {
-                    if let Err(error) = host.start(&command.program, &command.args).await {
+                    if let Err(error) = host
+                        .start(&device_command.program, &device_command.args)
+                        .await
+                    {
                         let mut failed = self.inner.state.read().await.clone();
-                        failed.booting_devices.retain(|entry| entry.thread_id != input.thread_id || entry.device.host_id != host_id || entry.device.id != input.device_id);
+                        failed.booting_devices.retain(|entry| {
+                            entry.thread_id != input.thread_id
+                                || entry.device.host_id != host_id
+                                || entry.device.id != input.device_id
+                        });
                         self.publish_state(failed).await;
                         return Err(error);
                     }
@@ -2958,16 +3588,26 @@ impl DeviceService {
                         Err(error) => {
                             stop_android_emulator(host.as_ref(), &avd_name).await;
                             let mut failed = self.inner.state.read().await.clone();
-                            failed.booting_devices.retain(|entry| entry.thread_id != input.thread_id || entry.device.host_id != host_id || entry.device.id != input.device_id);
+                            failed.booting_devices.retain(|entry| {
+                                entry.thread_id != input.thread_id
+                                    || entry.device.host_id != host_id
+                                    || entry.device.id != input.device_id
+                            });
                             self.publish_state(failed).await;
                             return Err(error);
                         }
                     };
                     device.id = serial;
                 } else {
-                    if let Err(error) = run_device_command(host.as_ref(), &command, None).await {
+                    if let Err(error) =
+                        run_device_command(host.as_ref(), &device_command, None).await
+                    {
                         let mut failed = self.inner.state.read().await.clone();
-                        failed.booting_devices.retain(|entry| entry.thread_id != input.thread_id || entry.device.host_id != host_id || entry.device.id != input.device_id);
+                        failed.booting_devices.retain(|entry| {
+                            entry.thread_id != input.thread_id
+                                || entry.device.host_id != host_id
+                                || entry.device.id != input.device_id
+                        });
                         self.publish_state(failed).await;
                         return Err(error);
                     }
@@ -2979,7 +3619,11 @@ impl DeviceService {
                         )
                         .await;
                         let mut failed = self.inner.state.read().await.clone();
-                        failed.booting_devices.retain(|entry| entry.thread_id != input.thread_id || entry.device.host_id != host_id || entry.device.id != input.device_id);
+                        failed.booting_devices.retain(|entry| {
+                            entry.thread_id != input.thread_id
+                                || entry.device.host_id != host_id
+                                || entry.device.id != input.device_id
+                        });
                         self.publish_state(failed).await;
                         return Err(error);
                     }
@@ -2993,13 +3637,15 @@ impl DeviceService {
                     retry_host_id: Some(host_id.clone()),
                     ..Default::default()
                 })
-                .await {
-                    Ok(refreshed) => refreshed,
-                    Err(error) => {
-                        self.clear_booting(&input.thread_id, &host_id, &input.device_id).await;
-                        return Err(error);
-                    }
-                };
+                .await
+            {
+                Ok(refreshed) => refreshed,
+                Err(error) => {
+                    self.clear_booting(&input.thread_id, &host_id, &input.device_id)
+                        .await;
+                    return Err(error);
+                }
+            };
             if let Some(authoritative) = refreshed.devices.into_iter().find(|candidate| {
                 candidate.host_id == host_id
                     && candidate.platform == device.platform
@@ -3012,9 +3658,16 @@ impl DeviceService {
             }
             device.booted = true;
             state = self.inner.state.read().await.clone();
-            state.devices.retain(|candidate| !(candidate.host_id == host_id && (candidate.id == input.device_id || candidate.id == device.id)));
+            state.devices.retain(|candidate| {
+                !(candidate.host_id == host_id
+                    && (candidate.id == input.device_id || candidate.id == device.id))
+            });
             state.devices.push(device.clone());
-            state.booting_devices.retain(|entry| entry.thread_id != input.thread_id || entry.device.host_id != host_id || entry.device.id != input.device_id);
+            state.booting_devices.retain(|entry| {
+                entry.thread_id != input.thread_id
+                    || entry.device.host_id != host_id
+                    || entry.device.id != input.device_id
+            });
         } else if device.platform == DevicePlatform::Ios && device.booted {
             // An iOS simulator booted outside this service has no serve-sim
             // capture session yet. Attach the helper during open just like
@@ -3065,10 +3718,28 @@ impl DeviceService {
         self.publish_state(state).await;
     }
 
-    pub async fn close(&self, input: agent_protocol::device::DeviceCloseInput) -> Result<(), String> {
+    pub async fn close(
+        &self,
+        input: agent_protocol::device::DeviceCloseInput,
+    ) -> Result<(), String> {
         let _guard = self.inner.operation.lock().await;
         let current = self.inner.state.read().await.clone();
-        let closing: Vec<DeviceSession> = current.sessions.iter().filter(|session| session.thread_id == input.thread_id && input.host_id.as_ref().is_none_or(|id| id == &session.host_id) && input.device_id.as_ref().is_none_or(|id| id == &session.device_id)).cloned().collect();
+        let closing: Vec<DeviceSession> = current
+            .sessions
+            .iter()
+            .filter(|session| {
+                session.thread_id == input.thread_id
+                    && input
+                        .host_id
+                        .as_ref()
+                        .is_none_or(|id| id == &session.host_id)
+                    && input
+                        .device_id
+                        .as_ref()
+                        .is_none_or(|id| id == &session.device_id)
+            })
+            .cloned()
+            .collect();
         if closing.is_empty() {
             return Ok(());
         }
@@ -3138,10 +3809,20 @@ impl DeviceService {
 
     pub async fn shutdown(&self, input: DeviceShutdownInput) -> Result<(), String> {
         let _guard = self.inner.operation.lock().await;
-        self.shutdown_device(input.host_id.unwrap_or_else(|| LOCAL_DEVICE_HOST_ID.into()), input.device_id, input.platform).await
+        self.shutdown_device(
+            input.host_id.unwrap_or_else(|| LOCAL_DEVICE_HOST_ID.into()),
+            input.device_id,
+            input.platform,
+        )
+        .await
     }
 
-    async fn shutdown_device(&self, host_id: String, device_id: String, platform: DevicePlatform) -> Result<(), String> {
+    async fn shutdown_device(
+        &self,
+        host_id: String,
+        device_id: String,
+        platform: DevicePlatform,
+    ) -> Result<(), String> {
         let host = self.host(&host_id).await?;
         let mut shutdown_through_hub = false;
         if let Some(port) = self.hub_port(&host_id).await {
@@ -3160,7 +3841,10 @@ impl DeviceService {
                 .is_ok_and(|result| result.ok);
         }
         if !shutdown_through_hub {
-            let command = match platform { DevicePlatform::Ios => command("xcrun", argv!["simctl", "shutdown", device_id]), DevicePlatform::Android => command("adb", argv!["-s", device_id, "emu", "kill"]) };
+            let command = match platform {
+                DevicePlatform::Ios => command("xcrun", argv!["simctl", "shutdown", device_id]),
+                DevicePlatform::Android => command("adb", argv!["-s", device_id, "emu", "kill"]),
+            };
             if let Err(error) = run_device_command(host.as_ref(), &command, None).await {
                 let observed = discover_host(host.clone(), self.hub_port(&host_id).await)
                     .await
@@ -3173,8 +3857,23 @@ impl DeviceService {
             }
         }
         let mut state = self.inner.state.read().await.clone();
-        state.sessions.retain(|session| !(session.host_id == host_id && session.device_id == device_id));
-        state.devices = state.devices.into_iter().map(|device| if device.host_id == host_id && device.id == device_id { DeviceSummary { booted: false, ..device } } else { device }).collect();
+        state
+            .sessions
+            .retain(|session| !(session.host_id == host_id && session.device_id == device_id));
+        state.devices = state
+            .devices
+            .into_iter()
+            .map(|device| {
+                if device.host_id == host_id && device.id == device_id {
+                    DeviceSummary {
+                        booted: false,
+                        ..device
+                    }
+                } else {
+                    device
+                }
+            })
+            .collect();
         self.publish_state(state).await;
         Ok(())
     }
@@ -3188,22 +3887,49 @@ impl DeviceService {
         let host_id = input.host_id.unwrap_or_else(|| LOCAL_DEVICE_HOST_ID.into());
         let host = self.host(&host_id).await?;
         let device = self.find_device(&host_id, &input.device_id).await?;
-        let (settings, foreground_app) = read_settings(host.as_ref(), device.platform, &device.id).await;
-        Ok(DeviceDetail { host_id, device_id: device.id, settings, foreground_app, read_at: now_iso() })
+        let (settings, foreground_app) =
+            read_settings(host.as_ref(), device.platform, &device.id).await;
+        Ok(DeviceDetail {
+            host_id,
+            device_id: device.id,
+            settings,
+            foreground_app,
+            read_at: now_iso(),
+        })
     }
 
     pub async fn action(&self, input: DeviceActionInput) -> Result<DeviceDetail, String> {
         input.validate()?;
         let _guard = self.inner.operation.lock().await;
-        let host_id = input.host_id.clone().unwrap_or_else(|| LOCAL_DEVICE_HOST_ID.into());
+        let host_id = input
+            .host_id
+            .clone()
+            .unwrap_or_else(|| LOCAL_DEVICE_HOST_ID.into());
+        self.require_session_target(
+            &input.thread_id,
+            &host_id,
+            &input.device_id,
+            &input.session_epoch,
+        )
+        .await?;
+        if let DeviceActionKind::Input(device_input) = &input.action {
+            self.input_inner(DeviceInput {
+                thread_id: input.thread_id.clone(),
+                host_id: input.host_id.clone(),
+                device_id: input.device_id.clone(),
+                session_epoch: input.session_epoch.clone(),
+                input: device_input.clone(),
+            })
+            .await?;
+            return self
+                .detail_inner(DeviceDetailInput {
+                    host_id: Some(host_id),
+                    device_id: input.device_id,
+                })
+                .await;
+        }
         let host = self.host(&host_id).await?;
         let device = self.find_device(&host_id, &input.device_id).await?;
-        if let DeviceActionKind::Input(device_input) = &input.action {
-            let port = self.hub_port(&host_id).await.ok_or_else(|| "device hub is not running".to_owned())?;
-            let request_id = self.next_control_request_id(device_input);
-            hub_input(port, device.platform, &device.id, device_input, request_id).await?;
-            return self.detail_inner(DeviceDetailInput { host_id: Some(host_id), device_id: device.id }).await;
-        }
         let push_payload = match &input.action {
             DeviceActionKind::SendPush { payload, .. } => {
                 let payload = if let Some(alert) = payload.as_str() {
@@ -3219,7 +3945,10 @@ impl DeviceService {
         let cli_helper = host.helper_path(DeviceHelper::ServeSimCli);
         let ignore_permission_failures = matches!(
             (&device.platform, &input.action),
-            (DevicePlatform::Android, DeviceActionKind::SetPermission { .. })
+            (
+                DevicePlatform::Android,
+                DeviceActionKind::SetPermission { .. }
+            )
         );
         for planned in action_commands_with_helpers(
             device.platform,
@@ -3228,16 +3957,24 @@ impl DeviceService {
             ax_helper.as_deref(),
             cli_helper.as_deref(),
         )? {
-            if let Err(error) = run_device_command(host.as_ref(), &planned, push_payload.as_deref()).await
+            if let Err(error) =
+                run_device_command(host.as_ref(), &planned, push_payload.as_deref()).await
                 && !ignore_permission_failures
             {
                 return Err(error);
             }
         }
-        self.detail_inner(DeviceDetailInput { host_id: Some(host_id), device_id: device.id }).await
+        self.detail_inner(DeviceDetailInput {
+            host_id: Some(host_id),
+            device_id: device.id,
+        })
+        .await
     }
 
-    pub async fn screenshot(&self, input: DeviceScreenshotInput) -> Result<DeviceScreenshot, String> {
+    pub async fn screenshot(
+        &self,
+        input: DeviceScreenshotInput,
+    ) -> Result<DeviceScreenshot, String> {
         let _guard = self.inner.operation.lock().await;
         let host_id = input.host_id.unwrap_or_else(|| LOCAL_DEVICE_HOST_ID.into());
         let host = self.host(&host_id).await?;
@@ -3246,9 +3983,21 @@ impl DeviceService {
             && let Ok(png) = hub_screenshot(port, device.platform, &device.id).await
         {
             let (width, height) = device::png_dimensions(&png);
-            return Ok(DeviceScreenshot { device, png, width, height });
+            return Ok(DeviceScreenshot {
+                device,
+                png,
+                width,
+                height,
+            });
         }
-        let command = match device.platform { DevicePlatform::Ios => command("xcrun", argv!["simctl", "io", device.id, "screenshot", "-"]), DevicePlatform::Android => command("adb", argv!["-s", device.id, "exec-out", "screencap", "-p"]) };
+        let command = match device.platform {
+            DevicePlatform::Ios => {
+                command("xcrun", argv!["simctl", "io", device.id, "screenshot", "-"])
+            }
+            DevicePlatform::Android => {
+                command("adb", argv!["-s", device.id, "exec-out", "screencap", "-p"])
+            }
+        };
         let png = tokio::time::timeout(
             std::time::Duration::from_secs(20),
             run_device_command(host.as_ref(), &command, None),
@@ -3256,10 +4005,25 @@ impl DeviceService {
         .await
         .map_err(|_| "device screenshot timed out".to_owned())??;
         let (width, height) = device::png_dimensions(&png);
-        Ok(DeviceScreenshot { device, png, width, height })
+        Ok(DeviceScreenshot {
+            device,
+            png,
+            width,
+            height,
+        })
     }
 
-    pub async fn sessions_for_thread(&self, thread: &ThreadId) -> Vec<DeviceSession> { self.inner.state.read().await.sessions.iter().filter(|session| &session.thread_id == thread).cloned().collect() }
+    pub async fn sessions_for_thread(&self, thread: &ThreadId) -> Vec<DeviceSession> {
+        self.inner
+            .state
+            .read()
+            .await
+            .sessions
+            .iter()
+            .filter(|session| &session.thread_id == thread)
+            .cloned()
+            .collect()
+    }
 
     /// Retains one capture source per host/device resource. The source is
     /// owned by the Host and keeps recording even when a viewer disconnects;
@@ -3460,44 +4224,44 @@ impl DeviceService {
                             persistent_avcc_reader(port, device_id, panel_id, epoch, width, height, sender, child_cancel).await;
                         }));
                     }
-                    let sender = sender.clone();
+                    let mjpeg_sender = sender.clone();
                     let child_cancel = generation_cancel.clone();
                     let epoch = owner.session_epoch.clone();
                     let device_id = device.id.clone();
                     children.push(tokio::spawn(async move {
-                        persistent_mjpeg_reader(port, device_id, epoch, width, height, sender, child_cancel).await;
+                        persistent_mjpeg_reader(port, device_id, epoch, width, height, mjpeg_sender, child_cancel).await;
                     }));
-                    let sender = sender.clone();
+                    let foreground_sender = sender.clone();
                     let child_cancel = generation_cancel.clone();
                     let epoch = owner.session_epoch.clone();
                     let device_id = device.id.clone();
                     children.push(tokio::spawn(async move {
-                        foreground_reader(port, device_id, epoch, sender, child_cancel).await;
+                        foreground_reader(port, device_id, epoch, foreground_sender, child_cancel).await;
                     }));
-                    let sender = sender.clone();
+                    let screen_sender = sender.clone();
                     let child_cancel = generation_cancel.clone();
                     let epoch = owner.session_epoch.clone();
                     let device_id = device.id.clone();
                     let platform = device.platform;
                     children.push(tokio::spawn(async move {
-                        screen_config_reader(port, platform, device_id, epoch, sender, child_cancel).await;
+                        screen_config_reader(port, platform, device_id, epoch, screen_sender, child_cancel).await;
                     }));
                 }
                 DevicePlatform::Android => {
-                    let sender = sender.clone();
+                    let semu_sender = sender.clone();
                     let child_cancel = generation_cancel.clone();
                     let epoch = owner.session_epoch.clone();
                     let device_id = device.id.clone();
                     children.push(tokio::spawn(async move {
-                        persistent_semu_reader(port, device_id, epoch, width, height, sender, child_cancel).await;
+                        persistent_semu_reader(port, device_id, epoch, width, height, semu_sender, child_cancel).await;
                     }));
-                    let sender = sender.clone();
+                    let screen_sender = sender.clone();
                     let child_cancel = generation_cancel.clone();
                     let epoch = owner.session_epoch.clone();
                     let device_id = device.id.clone();
                     let platform = device.platform;
                     children.push(tokio::spawn(async move {
-                        screen_config_reader(port, platform, device_id, epoch, sender, child_cancel).await;
+                        screen_config_reader(port, platform, device_id, epoch, screen_sender, child_cancel).await;
                     }));
                 }
             }
@@ -3709,9 +4473,10 @@ impl DeviceService {
         }
         let alive = Arc::new(AtomicBool::new(true));
         let task_alive = alive.clone();
+        let task_epoch = epoch.clone();
         let task = tokio::spawn(async move {
             loop {
-                if !task_alive.load(Ordering::Acquire) || !service.session_epoch_is_current(&host, &device, &epoch).await {
+                if !task_alive.load(Ordering::Acquire) || !service.session_epoch_is_current(&host, &device, &task_epoch).await {
                     break;
                 }
                 let response = match reqwest::Client::new()
@@ -3722,16 +4487,16 @@ impl DeviceService {
                 {
                     Ok(response) => response,
                     Err(error) => {
-                        if task_alive.load(Ordering::Acquire) && service.session_epoch_is_current(&host, &device, &epoch).await {
-                        let _ = events.send(event_log_error(&host, &device, &epoch, format!("event log request failed: {error}")));
+                        if task_alive.load(Ordering::Acquire) && service.session_epoch_is_current(&host, &device, &task_epoch).await {
+                        let _ = events.send(event_log_error(&host, &device, &task_epoch, format!("event log request failed: {error}")));
                         }
                         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                         continue;
                     }
                 };
                 if !response.status().is_success() {
-                    if task_alive.load(Ordering::Acquire) && service.session_epoch_is_current(&host, &device, &epoch).await {
-                        let _ = events.send(event_log_error(&host, &device, &epoch, format!("event log request returned {}", response.status())));
+                    if task_alive.load(Ordering::Acquire) && service.session_epoch_is_current(&host, &device, &task_epoch).await {
+                        let _ = events.send(event_log_error(&host, &device, &task_epoch, format!("event log request returned {}", response.status())));
                     }
                     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                     continue;
@@ -3742,8 +4507,8 @@ impl DeviceService {
                     let chunk = match chunk {
                         Ok(chunk) => chunk,
                         Err(error) => {
-                            if task_alive.load(Ordering::Acquire) && service.session_epoch_is_current(&host, &device, &epoch).await {
-                                let _ = events.send(event_log_error(&host, &device, &epoch, format!("event log stream failed: {error}")));
+                            if task_alive.load(Ordering::Acquire) && service.session_epoch_is_current(&host, &device, &task_epoch).await {
+                                let _ = events.send(event_log_error(&host, &device, &task_epoch, format!("event log stream failed: {error}")));
                             }
                             break;
                         }
@@ -3754,8 +4519,8 @@ impl DeviceService {
                         // ownership map would silently disable event updates
                         // until the device session is reopened.
                         pending.clear();
-                        if task_alive.load(Ordering::Acquire) && service.session_epoch_is_current(&host, &device, &epoch).await {
-                            let _ = events.send(event_log_error(&host, &device, &epoch, "event log response exceeded the Host limit"));
+                        if task_alive.load(Ordering::Acquire) && service.session_epoch_is_current(&host, &device, &task_epoch).await {
+                            let _ = events.send(event_log_error(&host, &device, &task_epoch, "event log response exceeded the Host limit"));
                         }
                         break;
                     }
@@ -3767,16 +4532,16 @@ impl DeviceService {
                         let raw = match serde_json::from_str::<serde_json::Value>(data.trim()) {
                             Ok(raw) => raw,
                             Err(error) => {
-                                if task_alive.load(Ordering::Acquire) && service.session_epoch_is_current(&host, &device, &epoch).await {
-                                    let _ = events.send(event_log_error(&host, &device, &epoch, format!("event log event was invalid: {error}")));
+                                if task_alive.load(Ordering::Acquire) && service.session_epoch_is_current(&host, &device, &task_epoch).await {
+                                    let _ = events.send(event_log_error(&host, &device, &task_epoch, format!("event log event was invalid: {error}")));
                                 }
                                 continue;
                             }
                         };
-                        if !task_alive.load(Ordering::Acquire) || !service.session_epoch_is_current(&host, &device, &epoch).await {
+                        if !task_alive.load(Ordering::Acquire) || !service.session_epoch_is_current(&host, &device, &task_epoch).await {
                             return;
                         }
-                        for entry in normalize_event_log(&host, &device, &epoch, raw) {
+                        for entry in normalize_event_log(&host, &device, &task_epoch, raw) {
                             if !task_alive.load(Ordering::Acquire) {
                                 return;
                             }
@@ -3849,9 +4614,15 @@ impl DeviceService {
     }
 
     pub async fn input(&self, input: DeviceInput) -> Result<(), String> {
+        let _guard = self.inner.operation.lock().await;
+        self.input_inner(input).await
+    }
+
+    async fn input_inner(&self, input: DeviceInput) -> Result<(), String> {
         input.validate()?;
         let host_id = input.host_id.clone().unwrap_or_else(|| LOCAL_DEVICE_HOST_ID.into());
-        let _guard = self.inner.operation.lock().await;
+        self.require_session_target(&input.thread_id, &host_id, &input.device_id, &input.session_epoch)
+            .await?;
         let host = self.host(&host_id).await?;
         let device = self.find_device(&host_id, &input.device_id).await?;
         if let Some(port) = self.hub_port(&host_id).await {
@@ -3869,7 +4640,7 @@ impl DeviceService {
                     return Err("device does not expose physical Duo orientation".into());
                 }
             }
-            let input = match &input.input {
+            let transformed_input = match &input.input {
                 DeviceInputKind::Rotate => {
                     let orientation = next_orientation(screen.as_ref().map(|screen| screen.orientation).unwrap_or(DeviceOrientation::Portrait));
                     if device.platform == DevicePlatform::Ios && screen.as_ref().is_some_and(|screen| screen.supports_hinge_angle) {
@@ -3880,14 +4651,16 @@ impl DeviceService {
                         DeviceInputKind::SetOrientation(orientation)
                     }
                 }
-                DeviceInputKind::Touch { phase, x, y } if device.platform == DevicePlatform::Ios => {
-                    let (x, y) = rotate_touch(screen.as_ref(), *x, *y);
-                    DeviceInputKind::Touch { phase: *phase, x, y }
+                DeviceInputKind::Touch { phase, x, y, raw } if device.platform == DevicePlatform::Ios => {
+                    let (x, y) = rotate_touch(screen.as_ref(), *x, *y, *raw);
+                    DeviceInputKind::Touch { phase: *phase, x, y, raw: *raw }
                 }
                 _ => input.input.clone(),
             };
-            let request_id = self.next_control_request_id(&input);
-            if hub_input(port, device.platform, &device.id, &input, request_id).await.is_ok() {
+            let request_id = self.next_control_request_id(&transformed_input);
+            self.require_session_target(&input.thread_id, &host_id, &input.device_id, &input.session_epoch)
+                .await?;
+            if hub_input(port, device.platform, &device.id, &transformed_input, request_id).await.is_ok() {
                 return Ok(());
             }
         }
@@ -3953,8 +4726,7 @@ impl DeviceService {
         let session = session.unwrap_or(DeviceSession { thread_id: input.thread_id.clone(), host_id: host_id.clone(), device_id: device.id.clone(), platform: device.platform, opened_at: started_at.clone(), session_epoch: started_at.clone() });
         let session_epoch = session.session_epoch.clone();
         let recording_id = self.next_recording_id();
-        let status = DeviceRecordingStatus { thread_id: input.thread_id.clone(), host_id: host_id.clone(), device_id: device.id.clone(), format: input.format, file_name: DEVICE_RECORDING_FILE_NAME.into(), mime_type: DEVICE_RECORDING_MIME_TYPE.into(), active: true, started_at: started_at.clone(), frame_count: 0, byte_count: 0, error: None };
-        let status = DeviceRecordingStatus { recording_id, session_epoch: session_epoch.clone(), ..status };
+        let status = DeviceRecordingStatus { thread_id: input.thread_id.clone(), host_id: host_id.clone(), device_id: device.id.clone(), recording_id, session_epoch: session_epoch.clone(), format: input.format, file_name: DEVICE_RECORDING_FILE_NAME.into(), mime_type: DEVICE_RECORDING_MIME_TYPE.into(), active: true, started_at: started_at.clone(), frame_count: 0, byte_count: 0, error: None };
         self.inner.recordings.lock().await.insert(key.clone(), ActiveDeviceRecording { recorder: Mp4Recorder::new(started_at), error: None, recording_id, session_epoch });
         let _ = self
             .retain_capture_source(&session, false)
@@ -4001,7 +4773,7 @@ impl DeviceService {
             return None;
         }
         let mut hubs = self.inner.remote_hubs.lock().await;
-        let port = hubs.get_mut(host_id).and_then(|current| match current.tunnel.try_wait() {
+        let port = hubs.get_mut(host_id).and_then(|current| match current.tunnel.child.try_wait() {
             Ok(None) => Some(current.local_port),
             Ok(Some(_)) | Err(_) => None,
         });
@@ -4011,12 +4783,20 @@ impl DeviceService {
         let stale = hubs.remove(host_id);
         drop(hubs);
         if let Some(mut stale) = stale {
-            let _ = stale.tunnel.wait().await;
+            let _ = stale.tunnel.child.wait().await;
         }
         None
     }
 
-    async fn host(&self, id: &str) -> Result<Arc<dyn DeviceHostRunner>, String> { self.inner.hosts.read().await.get(id).cloned().ok_or_else(|| format!("unknown device host {id}")) }
+    async fn host(&self, id: &str) -> Result<Arc<dyn DeviceHostRunner>, String> {
+        self.inner
+            .hosts
+            .read()
+            .await
+            .get(id)
+            .cloned()
+            .ok_or_else(|| format!("unknown device host {id}"))
+    }
     async fn find_device(&self, host_id: &str, device_id: &str) -> Result<DeviceSummary, String> {
         if let Some(device) = self
             .inner
@@ -4052,11 +4832,17 @@ impl DeviceService {
 
 async fn loopback_http_ok(port: u16, route: &str) -> bool {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let Ok(mut stream) = TcpStream::connect(("127.0.0.1", port)).await else { return false; };
+    let Ok(mut stream) = TcpStream::connect(("127.0.0.1", port)).await else {
+        return false;
+    };
     let request = format!("GET {route} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
-    if stream.write_all(request.as_bytes()).await.is_err() { return false; }
+    if stream.write_all(request.as_bytes()).await.is_err() {
+        return false;
+    }
     let mut response = [0; 256];
-    let Ok(size) = stream.read(&mut response).await else { return false; };
+    let Ok(size) = stream.read(&mut response).await else {
+        return false;
+    };
     let response = String::from_utf8_lossy(&response[..size]);
     response.starts_with("HTTP/1.1 200 ") || response.starts_with("HTTP/1.0 200 ")
 }
@@ -4195,7 +4981,9 @@ async fn ensure_agent_daemon(
             }
         }
         if let Some(status) = child.try_wait().map_err(|error| error.to_string())? {
-            return Err(format!("agent-device daemon exited before becoming ready ({status})"));
+            return Err(format!(
+                "agent-device daemon exited before becoming ready ({status})"
+            ));
         }
         if tokio::time::Instant::now() >= deadline {
             let _ = child.kill().await;
@@ -4208,7 +4996,9 @@ async fn ensure_agent_daemon(
 
 async fn write_agent_config(path: &Path, local_port: u16, token: &str) -> Result<(), String> {
     if let Some(parent) = path.parent() {
-        tokio::fs::create_dir_all(parent).await.map_err(|error| error.to_string())?;
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|error| error.to_string())?;
     }
     let content = serde_json::to_vec(&AgentDeviceConfig {
         daemon_base_url: format!("http://127.0.0.1:{local_port}"),
@@ -4216,13 +5006,20 @@ async fn write_agent_config(path: &Path, local_port: u16, token: &str) -> Result
     })
     .map_err(|error| error.to_string())?;
     let temporary = path.with_extension("json.tmp");
-    tokio::fs::write(&temporary, content).await.map_err(|error| error.to_string())?;
+    tokio::fs::write(&temporary, content)
+        .await
+        .map_err(|error| error.to_string())?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let mut permissions = tokio::fs::metadata(&temporary).await.map_err(|error| error.to_string())?.permissions();
+        let mut permissions = tokio::fs::metadata(&temporary)
+            .await
+            .map_err(|error| error.to_string())?
+            .permissions();
         permissions.set_mode(0o600);
-        tokio::fs::set_permissions(&temporary, permissions).await.map_err(|error| error.to_string())?;
+        tokio::fs::set_permissions(&temporary, permissions)
+            .await
+            .map_err(|error| error.to_string())?;
     }
     if let Err(error) = tokio::fs::rename(&temporary, path).await {
         let _ = tokio::fs::remove_file(&temporary).await;
@@ -4231,17 +5028,26 @@ async fn write_agent_config(path: &Path, local_port: u16, token: &str) -> Result
     Ok(())
 }
 
-async fn write_agent_launcher(root: &Path, entry: &Path, node_path: &Path) -> Result<PathBuf, String> {
+async fn write_agent_launcher(
+    root: &Path,
+    entry: &Path,
+    node_path: &Path,
+) -> Result<PathBuf, String> {
     let bin = root.join("bin");
-    tokio::fs::create_dir_all(&bin).await.map_err(|error| error.to_string())?;
+    tokio::fs::create_dir_all(&bin)
+        .await
+        .map_err(|error| error.to_string())?;
     let launcher = bin.join("agent-device-launcher.mjs");
     let node = serde_json::to_string(node_path.to_string_lossy().as_ref())
         .map_err(|error| error.to_string())?;
-    let entry = serde_json::to_string(entry.to_string_lossy().as_ref()).map_err(|error| error.to_string())?;
+    let entry = serde_json::to_string(entry.to_string_lossy().as_ref())
+        .map_err(|error| error.to_string())?;
     let script = format!(
         "import {{ spawn }} from 'node:child_process';\nconst args = process.argv.slice(2);\nconst informational = args.length === 1 && ['help', '--help', '-h', '--version', 'version'].includes(args[0]);\nconst hasValue = flag => {{ const index = args.indexOf(flag); return index >= 0 && !!args[index + 1] && !args[index + 1].startsWith('--'); }};\nif (!informational && !(hasValue('--config') && hasValue('--session'))) {{ console.error('Call device_open first and include its --config and --session flags.'); process.exit(1); }}\nconst env = {{ ...process.env }};\ndelete env.AGENT_DEVICE_DAEMON_BASE_URL;\ndelete env.AGENT_DEVICE_DAEMON_AUTH_TOKEN;\ndelete env.AGENT_DEVICE_CONFIG;\nconst child = spawn({node}, [{entry}, ...args], {{ stdio: 'inherit', env }});\nchild.on('error', error => {{ console.error(error.message); process.exitCode = 1; }});\nchild.on('exit', code => {{ process.exitCode = code ?? 1; }});\n"
     );
-    tokio::fs::write(&launcher, script).await.map_err(|error| error.to_string())?;
+    tokio::fs::write(&launcher, script)
+        .await
+        .map_err(|error| error.to_string())?;
     #[cfg(windows)]
     {
         let command = bin.join("agent-device.cmd");
@@ -4253,8 +5059,8 @@ async fn write_agent_launcher(root: &Path, entry: &Path, node_path: &Path) -> Re
                 launcher.display()
             ),
         )
-            .await
-            .map_err(|error| error.to_string())?;
+        .await
+        .map_err(|error| error.to_string())?;
         return Ok(command);
     }
     #[cfg(not(windows))]
@@ -4265,23 +5071,44 @@ async fn write_agent_launcher(root: &Path, entry: &Path, node_path: &Path) -> Re
             shell_quote(node_path.to_string_lossy().as_ref()),
             shell_quote(launcher.to_string_lossy().as_ref())
         );
-        tokio::fs::write(&command, script).await.map_err(|error| error.to_string())?;
+        tokio::fs::write(&command, script)
+            .await
+            .map_err(|error| error.to_string())?;
         use std::os::unix::fs::PermissionsExt;
-        let mut permissions = tokio::fs::metadata(&command).await.map_err(|error| error.to_string())?.permissions();
+        let mut permissions = tokio::fs::metadata(&command)
+            .await
+            .map_err(|error| error.to_string())?
+            .permissions();
         permissions.set_mode(0o755);
-        tokio::fs::set_permissions(&command, permissions).await.map_err(|error| error.to_string())?;
+        tokio::fs::set_permissions(&command, permissions)
+            .await
+            .map_err(|error| error.to_string())?;
         Ok(command)
     }
 }
 
 fn agent_device_session(thread_id: &ThreadId, host_id: &str, device_id: &str) -> String {
     let key = format!("{thread_id}\0{host_id}\0{device_id}");
-    format!("device-{}", uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, key.as_bytes()).simple())
+    format!(
+        "device-{}",
+        uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, key.as_bytes()).simple()
+    )
 }
 
-async fn run_device_command(host: &dyn DeviceHostRunner, command: &DeviceCommand, stdin: Option<&[u8]>) -> Result<Vec<u8>, String> {
+async fn run_device_command(
+    host: &dyn DeviceHostRunner,
+    command: &DeviceCommand,
+    stdin: Option<&[u8]>,
+) -> Result<Vec<u8>, String> {
     let output = host.run(&command.program, &command.args, stdin).await?;
-    if output.code != 0 { return Err(format!("{} failed ({}): {}", command.program, output.code, String::from_utf8_lossy(&output.stderr).trim())); }
+    if output.code != 0 {
+        return Err(format!(
+            "{} failed ({}): {}",
+            command.program,
+            output.code,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
     Ok(output.stdout)
 }
 
@@ -4290,10 +5117,31 @@ fn local_summary(state_root: &Path) -> DeviceHostSummary {
     let ios_available = cfg!(target_os = "macos") && executable_available("xcrun");
     let android = discover_android_tools();
     let android_reason = android.availability_reason();
-    DeviceHostSummary { id: LOCAL_DEVICE_HOST_ID.into(), kind: DeviceHostKind::Local, label: "This machine".into(), target: None, identity_file: None, port: None, platforms: vec![
-        DevicePlatformAvailability { platform: DevicePlatform::Ios, available: ios_available, reason: (!ios_available).then_some("iOS simulators require macOS with xcrun.".into()) },
-        DevicePlatformAvailability { platform: DevicePlatform::Android, available: android_reason.is_none(), reason: android_reason },
-    ], hub_installed: tools.0, agent_device_installed: tools.1, tools: Some(tools.2), tool_inspection_error: None }
+    DeviceHostSummary {
+        id: LOCAL_DEVICE_HOST_ID.into(),
+        kind: DeviceHostKind::Local,
+        label: "This machine".into(),
+        target: None,
+        identity_file: None,
+        port: None,
+        platforms: vec![
+            DevicePlatformAvailability {
+                platform: DevicePlatform::Ios,
+                available: ios_available,
+                reason: (!ios_available)
+                    .then_some("iOS simulators require macOS with xcrun.".into()),
+            },
+            DevicePlatformAvailability {
+                platform: DevicePlatform::Android,
+                available: android_reason.is_none(),
+                reason: android_reason,
+            },
+        ],
+        hub_installed: tools.0,
+        agent_device_installed: tools.1,
+        tools: Some(tools.2),
+        tool_inspection_error: None,
+    }
 }
 
 fn executable_available(name: &str) -> bool {
@@ -4331,17 +5179,26 @@ fn android_executable_name(name: &str) -> String {
 }
 
 fn android_tool_paths_at(root: &Path) -> AndroidToolPaths {
-    let adb = root.join("platform-tools").join(android_executable_name("adb"));
-    let emulator = root.join("emulator").join(android_executable_name("emulator"));
+    let adb = root
+        .join("platform-tools")
+        .join(android_executable_name("adb"));
+    let emulator = root
+        .join("emulator")
+        .join(android_executable_name("emulator"));
     let avdmanager = root
         .join("cmdline-tools")
         .join("latest")
         .join("bin")
-        .join(if cfg!(windows) { "avdmanager.bat" } else { "avdmanager" });
-    let legacy_avdmanager = root
-        .join("tools")
-        .join("bin")
-        .join(if cfg!(windows) { "avdmanager.bat" } else { "avdmanager" });
+        .join(if cfg!(windows) {
+            "avdmanager.bat"
+        } else {
+            "avdmanager"
+        });
+    let legacy_avdmanager = root.join("tools").join("bin").join(if cfg!(windows) {
+        "avdmanager.bat"
+    } else {
+        "avdmanager"
+    });
     AndroidToolPaths {
         root: Some(root.to_owned()),
         adb: adb.is_file().then_some(adb),
@@ -4352,12 +5209,14 @@ fn android_tool_paths_at(root: &Path) -> AndroidToolPaths {
 }
 
 fn discover_android_tools() -> AndroidToolPaths {
-    let explicit = ["ANDROID_HOME", "ANDROID_SDK_ROOT"].into_iter().find_map(|name| {
-        std::env::var_os(name).and_then(|value| {
-            let value = value.to_string_lossy().trim().to_owned();
-            (!value.is_empty()).then_some(PathBuf::from(value))
-        })
-    });
+    let explicit = ["ANDROID_HOME", "ANDROID_SDK_ROOT"]
+        .into_iter()
+        .find_map(|name| {
+            std::env::var_os(name).and_then(|value| {
+                let value = value.to_string_lossy().trim().to_owned();
+                (!value.is_empty()).then_some(PathBuf::from(value))
+            })
+        });
     let home = std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
         .map(PathBuf::from)
@@ -4398,19 +5257,41 @@ fn host_summary(host: &dyn DeviceHostRunner) -> DeviceHostSummary {
         .as_ref()
         .filter(|probe| !probe.platforms.is_empty())
         .map(|probe| probe.platforms.clone())
-        .unwrap_or_else(|| vec![
-            DevicePlatformAvailability { platform: DevicePlatform::Ios, available: true, reason: None },
-            DevicePlatformAvailability { platform: DevicePlatform::Android, available: true, reason: None },
-        ]);
+        .unwrap_or_else(|| {
+            vec![
+                DevicePlatformAvailability {
+                    platform: DevicePlatform::Ios,
+                    available: true,
+                    reason: None,
+                },
+                DevicePlatformAvailability {
+                    platform: DevicePlatform::Android,
+                    available: true,
+                    reason: None,
+                },
+            ]
+        });
     let tools = probe
         .as_ref()
         .and_then(|probe| probe.tools.clone())
-        .or_else(|| Some(DeviceToolVersions {
-            hub: DeviceToolVersion { required_version: HUB_VERSION.into(), installed_versions: vec![], running_version: None },
-            agent: DeviceToolVersion { required_version: AGENT_VERSION.into(), installed_versions: vec![], running_version: None },
-        }));
+        .or_else(|| {
+            Some(DeviceToolVersions {
+                hub: DeviceToolVersion {
+                    required_version: HUB_VERSION.into(),
+                    installed_versions: vec![],
+                    running_version: None,
+                },
+                agent: DeviceToolVersion {
+                    required_version: AGENT_VERSION.into(),
+                    installed_versions: vec![],
+                    running_version: None,
+                },
+            })
+        });
     let hub_installed = probe.as_ref().is_some_and(|probe| probe.hub_installed);
-    let agent_device_installed = probe.as_ref().is_some_and(|probe| probe.agent_device_installed);
+    let agent_device_installed = probe
+        .as_ref()
+        .is_some_and(|probe| probe.agent_device_installed);
     DeviceHostSummary {
         id: host.id().into(),
         kind: host.kind(),
@@ -4442,7 +5323,8 @@ fn inspect_toolchain(state_root: &Path) -> (bool, bool, DeviceToolVersions) {
         state_root.to_path_buf()
     };
     let hub_versions = installed_tool_versions(&root, HUB_PACKAGE, &["dist", "server", "cli.mjs"]);
-    let agent_versions = installed_tool_versions(&root, AGENT_PACKAGE, &["bin", "agent-device.mjs"]);
+    let agent_versions =
+        installed_tool_versions(&root, AGENT_PACKAGE, &["bin", "agent-device.mjs"]);
     let hub_installed = hub_versions.iter().any(|version| version == HUB_VERSION);
     let agent_installed = agent_versions.iter().any(|version| version == AGENT_VERSION);
     let hub_running = std::fs::read(root.join("hub.json"))
@@ -4494,7 +5376,9 @@ fn process_for_port_is_alive(_port: u16, entry: &str) -> bool {
 
 fn installed_tool_versions(root: &Path, package: &str, entry: &[&str]) -> Vec<String> {
     let directory = root.join("tools").join(package);
-    let Ok(entries) = std::fs::read_dir(directory) else { return Vec::new(); };
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return Vec::new();
+    };
     let mut versions = entries
         .filter_map(Result::ok)
         .filter_map(|directory_entry| {
@@ -4503,7 +5387,12 @@ fn installed_tool_versions(root: &Path, package: &str, entry: &[&str]) -> Vec<St
                 return None;
             }
             let path = directory_entry.path();
-            if !path.is_dir() || std::fs::read_to_string(path.join(".install-complete")).ok()?.trim() != version {
+            if !path.is_dir()
+                || std::fs::read_to_string(path.join(".install-complete"))
+                    .ok()?
+                    .trim()
+                    != version
+            {
                 return None;
             }
             let entry_path = entry.iter().fold(path, |path, part| path.join(part));
@@ -4525,17 +5414,19 @@ fn version_sort_key(value: &str) -> Vec<u64> {
 }
 
 fn is_tool_version(value: &str) -> bool {
-    let (core, prerelease) = value.split_once('-').map_or((value, None), |(core, suffix)| (core, Some(suffix)));
+    let (core, prerelease) = value
+        .split_once('-')
+        .map_or((value, None), |(core, suffix)| (core, Some(suffix)));
     let core_parts = core.split('.').collect::<Vec<_>>();
     core_parts.len() == 3
-        && core_parts
-            .iter()
-            .all(|part| !part.is_empty() && part.chars().all(|character| character.is_ascii_digit()))
+        && core_parts.iter().all(|part| {
+            !part.is_empty() && part.chars().all(|character| character.is_ascii_digit())
+        })
         && prerelease.is_none_or(|suffix| {
             !suffix.is_empty()
-                && suffix
-                    .chars()
-                    .all(|character| character.is_ascii_alphanumeric() || character == '.' || character == '-')
+                && suffix.chars().all(|character| {
+                    character.is_ascii_alphanumeric() || character == '.' || character == '-'
+                })
         })
 }
 
@@ -4562,7 +5453,10 @@ async fn hub_devices(port: u16, host_id: &str) -> Result<Vec<DeviceSummary>, Str
         .await
         .map_err(|error| format!("device hub discovery failed: {error}"))?;
     if !response.status().is_success() {
-        return Err(format!("device hub discovery returned {}", response.status()));
+        return Err(format!(
+            "device hub discovery returned {}",
+            response.status()
+        ));
     }
     let list = response
         .json::<HubDeviceList>()
@@ -4600,14 +5494,19 @@ async fn hub_screenshot(
         DevicePlatform::Android => "serve-emu",
     };
     let response = reqwest::Client::new()
-        .post(format!("http://127.0.0.1:{port}/vendor/{vendor}/api/screenshot"))
+        .post(format!(
+            "http://127.0.0.1:{port}/vendor/{vendor}/api/screenshot"
+        ))
         .query(&[("device", device_id)])
         .timeout(std::time::Duration::from_secs(20))
         .send()
         .await
         .map_err(|error| format!("device hub screenshot failed: {error}"))?;
     if !response.status().is_success() {
-        return Err(format!("device hub screenshot returned {}", response.status()));
+        return Err(format!(
+            "device hub screenshot returned {}",
+            response.status()
+        ));
     }
     response
         .bytes()
@@ -4701,6 +5600,21 @@ async fn abort_and_join(task: tokio::task::JoinHandle<()>) {
 
 fn session_matches_generation(generation: &BTreeMap<String, String>, session: &DeviceSession) -> bool {
     generation.get(session.thread_id.as_str()) == Some(&session.session_epoch)
+}
+
+fn session_matches_target(
+    sessions: &[DeviceSession],
+    thread_id: &ThreadId,
+    host_id: &str,
+    device_id: &str,
+    session_epoch: &str,
+) -> bool {
+    sessions.iter().any(|session| {
+        &session.thread_id == thread_id
+            && session.host_id == host_id
+            && session.device_id == device_id
+            && session.session_epoch == session_epoch
+    })
 }
 
 async fn send_source_message(sender: &mpsc::Sender<SourceMessage>, message: SourceMessage, cancel: &CancellationToken) -> bool {
@@ -4922,11 +5836,12 @@ async fn foreground_reader(
     sender: mpsc::Sender<SourceMessage>,
     cancel: CancellationToken,
 ) {
+    let query = [("device", device_id.as_str())];
     loop {
         if cancel.is_cancelled() { return; }
         let raw = tokio::select! {
             _ = cancel.cancelled() => return,
-            result = tokio::time::timeout(Duration::from_secs(10), hub_sse_first_json(port, "/vendor/serve-sim/appstate", &[("device", device_id.as_str())], "foreground")) => result,
+            result = tokio::time::timeout(Duration::from_secs(10), hub_sse_first_json(port, "/vendor/serve-sim/appstate", &query, "foreground")) => result,
         };
         if let Ok(Ok(raw)) = raw {
             let app = raw.get("bundleId").and_then(serde_json::Value::as_str)
@@ -5180,7 +6095,7 @@ async fn hub_input(
     .map_err(|_| "device input stream connection timed out".to_owned())?
     .map_err(|error| format!("device input stream failed: {error}"))?;
     let message = match (platform, input) {
-        (DevicePlatform::Ios, DeviceInputKind::Touch { phase, x, y }) => {
+        (DevicePlatform::Ios, DeviceInputKind::Touch { phase, x, y, .. }) => {
             let phase = match phase { DeviceTouchPhase::Begin => "begin", DeviceTouchPhase::Move => "move", DeviceTouchPhase::End => "end" };
             async_tungstenite::tungstenite::Message::binary([vec![0x03], serde_json::to_vec(&serde_json::json!({"type": phase, "x": x, "y": y})).map_err(|error| error.to_string())?].concat())
         }
@@ -5188,7 +6103,7 @@ async fn hub_input(
             let usage = ios_hid_usage(code).ok_or_else(|| format!("unsupported iOS keyboard code {code}"))?;
             async_tungstenite::tungstenite::Message::binary([vec![0x06], serde_json::to_vec(&serde_json::json!({"type": if *down { "down" } else { "up" }, "usage": usage})).map_err(|error| error.to_string())?].concat())
         }
-        (_, DeviceInputKind::Touch { phase, x, y }) => {
+        (_, DeviceInputKind::Touch { phase, x, y, .. }) => {
             let action = match phase { DeviceTouchPhase::Begin => "down", DeviceTouchPhase::Move => "move", DeviceTouchPhase::End => "up" };
             async_tungstenite::tungstenite::Message::Text(serde_json::json!({"type":"touch", "action": action, "x": x, "y": y}).to_string().into())
         }
@@ -5376,7 +6291,10 @@ async fn hub_action(
         .map_err(|error| format!("device hub returned invalid action result: {error}"))
 }
 
-async fn discover_host(host: Arc<dyn DeviceHostRunner>, hub_port: Option<u16>) -> Result<Vec<DeviceSummary>, String> {
+async fn discover_host(
+    host: Arc<dyn DeviceHostRunner>,
+    hub_port: Option<u16>,
+) -> Result<Vec<DeviceSummary>, String> {
     if let Some(port) = hub_port
         && let Ok(mut devices) = hub_devices(port, host.id()).await
     {
@@ -5419,26 +6337,58 @@ async fn discover_host(host: Arc<dyn DeviceHostRunner>, hub_port: Option<u16>) -
     }
     let mut devices = Vec::new();
     let mut tool_seen = false;
-    if let Ok(output) = host.run("xcrun", &["simctl".into(), "list".into(), "devices".into(), "--json".into()], None).await
+    if let Ok(output) = host
+        .run(
+            "xcrun",
+            &[
+                String::from("simctl"),
+                "list".into(),
+                "devices".into(),
+                "--json".into(),
+            ],
+            None,
+        )
+        .await
         && output.code == 0
     {
         tool_seen = true;
         if let Ok(list) = serde_json::from_slice::<SimctlList>(&output.stdout) {
             for (runtime, values) in list.devices {
-                for value in values.into_iter().filter(|value| value.is_available != Some(false)) {
-                    devices.push(DeviceSummary { host_id: host.id().into(), id: value.udid, platform: DevicePlatform::Ios, name: value.name, version: ios_runtime_label(&runtime), booted: value.state.eq_ignore_ascii_case("booted"), physical: false });
+                for value in values
+                    .into_iter()
+                    .filter(|value| value.is_available != Some(false))
+                {
+                    devices.push(DeviceSummary {
+                        host_id: host.id().into(),
+                        id: value.udid,
+                        platform: DevicePlatform::Ios,
+                        name: value.name,
+                        version: ios_runtime_label(&runtime),
+                        booted: value.state.eq_ignore_ascii_case("booted"),
+                        physical: false,
+                    });
                 }
             }
         }
     }
     let mut active_avds = BTreeSet::new();
-    if let Ok(output) = host.run("adb", &["devices".into(), "-l".into()], None).await && output.code == 0 {
+    if let Ok(output) = host
+        .run("adb", &["devices".into(), "-l".into()], None)
+        .await
+        && output.code == 0
+    {
         tool_seen = true;
         for line in String::from_utf8_lossy(&output.stdout).lines().skip(1) {
             let mut parts = line.split_whitespace();
-            let Some(id) = parts.next() else { continue; };
-            let Some(status) = parts.next() else { continue; };
-            if status != "device" { continue; }
+            let Some(id) = parts.next() else {
+                continue;
+            };
+            let Some(status) = parts.next() else {
+                continue;
+            };
+            if status != "device" {
+                continue;
+            }
             let physical = !id.starts_with("emulator-");
             let avd_name = if !physical {
                 let name = android_avd_name(host.as_ref(), id).await;
@@ -5449,15 +6399,44 @@ async fn discover_host(host: Arc<dyn DeviceHostRunner>, hub_port: Option<u16>) -
             } else {
                 None
             };
-            let model = parts.find_map(|part| part.strip_prefix("model:")).unwrap_or(id).replace('_', " ");
-            devices.push(DeviceSummary { host_id: host.id().into(), id: id.into(), platform: DevicePlatform::Android, name: avd_name.unwrap_or(model), version: "Android".into(), booted: true, physical });
+            let model = parts
+                .find_map(|part| part.strip_prefix("model:"))
+                .unwrap_or(id)
+                .replace('_', " ");
+            devices.push(DeviceSummary {
+                host_id: host.id().into(),
+                id: id.into(),
+                platform: DevicePlatform::Android,
+                name: avd_name.unwrap_or(model),
+                version: "Android".into(),
+                booted: true,
+                physical,
+            });
         }
     }
-    if let Ok(output) = host.run("emulator", &["-list-avds".into()], None).await && output.code == 0 {
+    if let Ok(output) = host.run("emulator", &["-list-avds".into()], None).await
+        && output.code == 0
+    {
         tool_seen = true;
-        for name in String::from_utf8_lossy(&output.stdout).lines().map(str::trim).filter(|line| !line.is_empty()) {
-            if !active_avds.contains(name) && !devices.iter().any(|device| device.platform == DevicePlatform::Android && device.name == name) {
-                devices.push(DeviceSummary { host_id: host.id().into(), id: name.into(), platform: DevicePlatform::Android, name: name.into(), version: "Android".into(), booted: false, physical: false });
+        for name in String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+        {
+            if !active_avds.contains(name)
+                && !devices
+                    .iter()
+                    .any(|device| device.platform == DevicePlatform::Android && device.name == name)
+            {
+                devices.push(DeviceSummary {
+                    host_id: host.id().into(),
+                    id: name.into(),
+                    platform: DevicePlatform::Android,
+                    name: name.into(),
+                    version: "Android".into(),
+                    booted: false,
+                    physical: false,
+                });
             }
         }
     }
@@ -5470,7 +6449,17 @@ async fn discover_host(host: Arc<dyn DeviceHostRunner>, hub_port: Option<u16>) -
 
 async fn android_avd_name(host: &dyn DeviceHostRunner, serial: &str) -> Option<String> {
     let output = host
-        .run("adb", &["-s".into(), serial.into(), "emu".into(), "avd".into(), "name".into()], None)
+        .run(
+            "adb",
+            &[
+                "-s".into(),
+                serial.into(),
+                "emu".into(),
+                "avd".into(),
+                "name".into(),
+            ],
+            None,
+        )
         .await
         .ok()?;
     (output.code == 0)
@@ -5485,28 +6474,48 @@ async fn android_avd_name(host: &dyn DeviceHostRunner, serial: &str) -> Option<S
         .filter(|name| !name.is_empty())
 }
 
-async fn wait_for_android_emulator(host: &dyn DeviceHostRunner, avd_name: &str) -> Result<String, String> {
+async fn wait_for_android_emulator(
+    host: &dyn DeviceHostRunner,
+    avd_name: &str,
+) -> Result<String, String> {
     let deadline = tokio::time::Instant::now() + ANDROID_BOOT_TIMEOUT;
     loop {
-        if let Ok(output) = host.run("adb", &["devices".into(), "-l".into()], None).await && output.code == 0 {
+        if let Ok(output) = host
+            .run("adb", &["devices".into(), "-l".into()], None)
+            .await
+            && output.code == 0
+        {
             for line in String::from_utf8_lossy(&output.stdout).lines().skip(1) {
                 let mut parts = line.split_whitespace();
-                let Some(serial) = parts.next() else { continue; };
-                let Some(status) = parts.next() else { continue; };
-                if status == "device" && serial.starts_with("emulator-") && android_avd_name(host, serial).await.as_deref() == Some(avd_name) {
+                let Some(serial) = parts.next() else {
+                    continue;
+                };
+                let Some(status) = parts.next() else {
+                    continue;
+                };
+                if status == "device"
+                    && serial.starts_with("emulator-")
+                    && android_avd_name(host, serial).await.as_deref() == Some(avd_name)
+                {
                     return Ok(serial.to_owned());
                 }
             }
         }
         if tokio::time::Instant::now() >= deadline {
-            return Err(format!("Android emulator {avd_name} did not become ready within {} seconds", ANDROID_BOOT_TIMEOUT.as_secs()));
+            return Err(format!(
+                "Android emulator {avd_name} did not become ready within {} seconds",
+                ANDROID_BOOT_TIMEOUT.as_secs()
+            ));
         }
         tokio::time::sleep(ANDROID_BOOT_POLL).await;
     }
 }
 
 async fn stop_android_emulator(host: &dyn DeviceHostRunner, avd_name: &str) {
-    let Ok(output) = host.run("adb", &["devices".into(), "-l".into()], None).await else {
+    let Ok(output) = host
+        .run("adb", &["devices".into(), "-l".into()], None)
+        .await
+    else {
         return;
     };
     if output.code != 0 {
@@ -5535,27 +6544,114 @@ async fn wait_for_ios_boot(host: &dyn DeviceHostRunner, device_id: &str) -> Resu
     let command = command("xcrun", argv!["simctl", "bootstatus", device_id, "-b"]);
     tokio::time::timeout(IOS_BOOT_TIMEOUT, run_device_command(host, &command, None))
         .await
-        .map_err(|_| format!("iOS simulator {device_id} did not become ready within {} seconds", IOS_BOOT_TIMEOUT.as_secs()))?
+        .map_err(|_| {
+            format!(
+                "iOS simulator {device_id} did not become ready within {} seconds",
+                IOS_BOOT_TIMEOUT.as_secs()
+            )
+        })?
         .map(|_| ())
 }
 
-async fn read_settings(host: &dyn DeviceHostRunner, platform: DevicePlatform, device_id: &str) -> (DeviceSettings, Option<DeviceForegroundApp>) {
+async fn read_settings(
+    host: &dyn DeviceHostRunner,
+    platform: DevicePlatform,
+    device_id: &str,
+) -> (DeviceSettings, Option<DeviceForegroundApp>) {
     match platform {
         DevicePlatform::Ios => {
-            let appearance = host.run("xcrun", &["simctl".into(), "ui".into(), device_id.into(), "appearance".into()], None).await.ok().and_then(command_stdout).map(|value| if value.trim().eq_ignore_ascii_case("dark") { DeviceAppearance::Dark } else { DeviceAppearance::Light });
-            let text_size = host.run("xcrun", &["simctl".into(), "ui".into(), device_id.into(), "content_size".into()], None).await.ok().and_then(command_stdout).and_then(|value| ios_text_size_from(value.trim()));
-            let increase_contrast = host.run("xcrun", &["simctl".into(), "ui".into(), device_id.into(), "increase_contrast".into()], None).await.ok().and_then(command_stdout).map(|value| value.trim().eq_ignore_ascii_case("enabled"));
+            let appearance = host
+                .run(
+                    "xcrun",
+                    &[
+                        "simctl".into(),
+                        "ui".into(),
+                        device_id.into(),
+                        "appearance".into(),
+                    ],
+                    None,
+                )
+                .await
+                .ok()
+                .and_then(command_stdout)
+                .map(|value| {
+                    if value.trim().eq_ignore_ascii_case("dark") {
+                        DeviceAppearance::Dark
+                    } else {
+                        DeviceAppearance::Light
+                    }
+                });
+            let text_size = host
+                .run(
+                    "xcrun",
+                    &[
+                        "simctl".into(),
+                        "ui".into(),
+                        device_id.into(),
+                        "content_size".into(),
+                    ],
+                    None,
+                )
+                .await
+                .ok()
+                .and_then(command_stdout)
+                .and_then(|value| ios_text_size_from(value.trim()));
+            let increase_contrast = host
+                .run(
+                    "xcrun",
+                    &[
+                        "simctl".into(),
+                        "ui".into(),
+                        device_id.into(),
+                        "increase_contrast".into(),
+                    ],
+                    None,
+                )
+                .await
+                .ok()
+                .and_then(command_stdout)
+                .map(|value| value.trim().eq_ignore_ascii_case("enabled"));
             let ax = if let Some(helper) = host.helper_path(DeviceHelper::ServeSimAxSettings) {
-                host.run("xcrun", &["simctl".into(), "spawn".into(), device_id.into(), helper, "status".into()], None)
-                    .await
-                    .ok()
-                    .filter(|output| output.code == 0)
-                    .and_then(|output| serde_json::from_slice::<BTreeMap<String, String>>(&output.stdout).ok())
+                host.run(
+                    "xcrun",
+                    &[
+                        "simctl".into(),
+                        "spawn".into(),
+                        device_id.into(),
+                        helper,
+                        "status".into(),
+                    ],
+                    None,
+                )
+                .await
+                .ok()
+                .filter(|output| output.code == 0)
+                .and_then(|output| {
+                    serde_json::from_slice::<BTreeMap<String, String>>(&output.stdout).ok()
+                })
             } else {
                 None
             };
-            let on_off = |name: &str| ax.as_ref().and_then(|values| values.get(name)).and_then(|value| match value.as_str() { "on" => Some(true), "off" => Some(false), _ => None });
-            let color_filter = ax.as_ref().and_then(|values| values.get("color-filter")).and_then(|value| match value.as_str() { "none" => Some(DeviceColorFilter::None), "grayscale" => Some(DeviceColorFilter::Grayscale), "red-green" => Some(DeviceColorFilter::RedGreen), "green-red" => Some(DeviceColorFilter::GreenRed), "blue-yellow" => Some(DeviceColorFilter::BlueYellow), _ => None });
+            let on_off = |name: &str| {
+                ax.as_ref()
+                    .and_then(|values| values.get(name))
+                    .and_then(|value| match value.as_str() {
+                        "on" => Some(true),
+                        "off" => Some(false),
+                        _ => None,
+                    })
+            };
+            let color_filter = ax
+                .as_ref()
+                .and_then(|values| values.get("color-filter"))
+                .and_then(|value| match value.as_str() {
+                    "none" => Some(DeviceColorFilter::None),
+                    "grayscale" => Some(DeviceColorFilter::Grayscale),
+                    "red-green" => Some(DeviceColorFilter::RedGreen),
+                    "green-red" => Some(DeviceColorFilter::GreenRed),
+                    "blue-yellow" => Some(DeviceColorFilter::BlueYellow),
+                    _ => None,
+                });
             let settings = DeviceSettings {
                 appearance,
                 text_size,
@@ -5564,28 +6660,136 @@ async fn read_settings(host: &dyn DeviceHostRunner, platform: DevicePlatform, de
                 reduce_transparency: on_off("reduce-transparency"),
                 show_borders: on_off("show-borders"),
                 voice_over: on_off("voiceover"),
-                liquid_glass: ax.as_ref().and_then(|values| values.get("liquid-glass")).and_then(|value| {
-                    matches!(value.as_str(), "clear" | "tinted").then(|| value.clone())
-                }),
+                liquid_glass: ax
+                    .as_ref()
+                    .and_then(|values| values.get("liquid-glass"))
+                    .and_then(|value| {
+                        matches!(value.as_str(), "clear" | "tinted").then(|| value.clone())
+                    }),
                 color_filter,
                 ..Default::default()
             };
             (settings, None)
         }
         DevicePlatform::Android => {
-            let output = host.run("adb", &["-s".into(), device_id.into(), "shell".into(), "cmd".into(), "uimode".into(), "night".into()], None).await.ok();
-            let appearance = output.and_then(command_stdout).and_then(|value| if value.contains("yes") { Some(DeviceAppearance::Dark) } else if value.contains("no") { Some(DeviceAppearance::Light) } else { None });
-            let text_size = host.run("adb", &["-s".into(), device_id.into(), "shell".into(), "settings".into(), "get".into(), "system".into(), "font_scale".into()], None).await.ok().and_then(command_stdout).and_then(|value| value.trim().parse::<f64>().ok()).and_then(android_text_size_from);
-            let reduce_motion = host.run("adb", &["-s".into(), device_id.into(), "shell".into(), "settings".into(), "get".into(), "global".into(), "animator_duration_scale".into()], None).await.ok().and_then(command_stdout).and_then(|value| value.trim().parse::<f64>().ok()).map(|value| value == 0.0);
-            let network_enabled = host.run("adb", &["-s".into(), device_id.into(), "shell".into(), "settings".into(), "get".into(), "global".into(), "wifi_on".into()], None).await.ok().and_then(command_stdout).and_then(|value| match value.trim() { "1" => Some(true), "0" => Some(false), _ => None });
-            let foreground_app = host.run("adb", &["-s".into(), device_id.into(), "shell".into(), "dumpsys".into(), "window".into()], None).await.ok().and_then(command_stdout).and_then(|value| android_foreground_app(&value));
-            (DeviceSettings { appearance, text_size, reduce_motion, network_enabled, ..Default::default() }, foreground_app)
+            let output = host
+                .run(
+                    "adb",
+                    &[
+                        "-s".into(),
+                        device_id.into(),
+                        "shell".into(),
+                        "cmd".into(),
+                        "uimode".into(),
+                        "night".into(),
+                    ],
+                    None,
+                )
+                .await
+                .ok();
+            let appearance = output.and_then(command_stdout).and_then(|value| {
+                if value.contains("yes") {
+                    Some(DeviceAppearance::Dark)
+                } else if value.contains("no") {
+                    Some(DeviceAppearance::Light)
+                } else {
+                    None
+                }
+            });
+            let text_size = host
+                .run(
+                    "adb",
+                    &[
+                        "-s".into(),
+                        device_id.into(),
+                        "shell".into(),
+                        "settings".into(),
+                        "get".into(),
+                        "system".into(),
+                        "font_scale".into(),
+                    ],
+                    None,
+                )
+                .await
+                .ok()
+                .and_then(command_stdout)
+                .and_then(|value| value.trim().parse::<f64>().ok())
+                .and_then(android_text_size_from);
+            let reduce_motion = host
+                .run(
+                    "adb",
+                    &[
+                        "-s".into(),
+                        device_id.into(),
+                        "shell".into(),
+                        "settings".into(),
+                        "get".into(),
+                        "global".into(),
+                        "animator_duration_scale".into(),
+                    ],
+                    None,
+                )
+                .await
+                .ok()
+                .and_then(command_stdout)
+                .and_then(|value| value.trim().parse::<f64>().ok())
+                .map(|value| value == 0.0);
+            let network_enabled = host
+                .run(
+                    "adb",
+                    &[
+                        "-s".into(),
+                        device_id.into(),
+                        "shell".into(),
+                        "settings".into(),
+                        "get".into(),
+                        "global".into(),
+                        "wifi_on".into(),
+                    ],
+                    None,
+                )
+                .await
+                .ok()
+                .and_then(command_stdout)
+                .and_then(|value| match value.trim() {
+                    "1" => Some(true),
+                    "0" => Some(false),
+                    _ => None,
+                });
+            let foreground_app = host
+                .run(
+                    "adb",
+                    &[
+                        "-s".into(),
+                        device_id.into(),
+                        "shell".into(),
+                        "dumpsys".into(),
+                        "window".into(),
+                    ],
+                    None,
+                )
+                .await
+                .ok()
+                .and_then(command_stdout)
+                .and_then(|value| android_foreground_app(&value));
+            (
+                DeviceSettings {
+                    appearance,
+                    text_size,
+                    reduce_motion,
+                    network_enabled,
+                    ..Default::default()
+                },
+                foreground_app,
+            )
         }
     }
 }
 
 fn command_stdout(output: HostOutput) -> Option<String> {
-    (output.code == 0).then(|| String::from_utf8(output.stdout).ok()).flatten()
+    (output.code == 0)
+        .then(|| String::from_utf8(output.stdout).ok())
+        .flatten()
 }
 
 fn ios_text_size_from(value: &str) -> Option<DeviceTextSize> {
@@ -5599,16 +6803,32 @@ fn ios_text_size_from(value: &str) -> Option<DeviceTextSize> {
 }
 
 fn android_text_size_from(value: f64) -> Option<DeviceTextSize> {
-    Some(if value <= 0.9 { DeviceTextSize::Small } else if value >= 1.25 { DeviceTextSize::ExtraLarge } else if value >= 1.1 { DeviceTextSize::Large } else { DeviceTextSize::Default })
+    Some(if value <= 0.9 {
+        DeviceTextSize::Small
+    } else if value >= 1.25 {
+        DeviceTextSize::ExtraLarge
+    } else if value >= 1.1 {
+        DeviceTextSize::Large
+    } else {
+        DeviceTextSize::Default
+    })
 }
 
 fn android_foreground_app(value: &str) -> Option<DeviceForegroundApp> {
     let mut tokens = value.split_whitespace();
     while let Some(token) = tokens.next() {
-        if token.starts_with('u') && token[1..].chars().all(|character| character.is_ascii_digit()) {
+        if token.starts_with('u')
+            && token[1..]
+                .chars()
+                .all(|character| character.is_ascii_digit())
+        {
             let package = tokens.next()?.split('/').next()?.trim();
             if !package.is_empty() {
-                return Some(DeviceForegroundApp { id: package.into(), name: None, version: None });
+                return Some(DeviceForegroundApp {
+                    id: package.into(),
+                    name: None,
+                    version: None,
+                });
             }
         }
     }
@@ -5616,7 +6836,10 @@ fn android_foreground_app(value: &str) -> Option<DeviceForegroundApp> {
 }
 
 fn now_iso() -> String {
-    let millis = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis();
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
     format!("{millis}")
 }
 
@@ -5818,22 +7041,81 @@ mod tests {
 
     #[test]
     fn action_commands_are_typed_and_platform_specific() {
-        let ios = action_commands(DevicePlatform::Ios, "sim", &DeviceActionKind::SetAppearance(DeviceAppearance::Dark)).unwrap();
-        assert_eq!(ios, vec![DeviceCommand { program: "xcrun".into(), args: vec!["simctl".into(), "ui".into(), "sim".into(), "appearance".into(), "dark".into()] }]);
-        let push = action_commands(DevicePlatform::Ios, "sim", &DeviceActionKind::SendPush { app_id: "app.example".into(), payload: serde_json::json!({"aps": {"alert": "hello"}}) }).unwrap();
+        let ios = action_commands(
+            DevicePlatform::Ios,
+            "sim",
+            &DeviceActionKind::SetAppearance(DeviceAppearance::Dark),
+        )
+        .unwrap();
+        assert_eq!(
+            ios,
+            vec![DeviceCommand {
+                program: "xcrun".into(),
+                args: vec![
+                    String::from("simctl"),
+                    "ui".into(),
+                    "sim".into(),
+                    "appearance".into(),
+                    "dark".into()
+                ]
+            }]
+        );
+        let push = action_commands(
+            DevicePlatform::Ios,
+            "sim",
+            &DeviceActionKind::SendPush {
+                app_id: "app.example".into(),
+                payload: serde_json::json!({"aps": {"alert": "hello"}}),
+            },
+        )
+        .unwrap();
         assert_eq!(push[0].program, "xcrun");
-        assert_eq!(push[0].args, vec!["simctl".into(), "push".into(), "sim".into(), "app.example".into(), "-".into()]);
-        let android = action_commands(DevicePlatform::Android, "emu", &DeviceActionKind::SetToggle { setting: "reduceMotion".into(), value: true }).unwrap();
+        assert_eq!(
+            push[0].args,
+            vec![
+                String::from("simctl"),
+                "push".into(),
+                "sim".into(),
+                "app.example".into(),
+                "-".into()
+            ]
+        );
+        let android = action_commands(
+            DevicePlatform::Android,
+            "emu",
+            &DeviceActionKind::SetToggle {
+                setting: "reduceMotion".into(),
+                value: true,
+            },
+        )
+        .unwrap();
         assert_eq!(android.len(), 3);
-        let orientation = action_commands(DevicePlatform::Android, "emulator-5554", &DeviceActionKind::SetOrientation(DeviceOrientation::LandscapeLeft)).unwrap();
+        let orientation = action_commands(
+            DevicePlatform::Android,
+            "emulator-5554",
+            &DeviceActionKind::SetOrientation(DeviceOrientation::LandscapeLeft),
+        )
+        .unwrap();
         assert_eq!(orientation.len(), 3);
-        assert!(action_commands(DevicePlatform::Android, "emu", &DeviceActionKind::SetColorFilter(DeviceColorFilter::None)).is_err());
+        assert!(
+            action_commands(
+                DevicePlatform::Android,
+                "emu",
+                &DeviceActionKind::SetColorFilter(DeviceColorFilter::None)
+            )
+            .is_err()
+        );
     }
 
     #[test]
     fn helper_backed_actions_never_fall_back_to_an_untyped_command() {
-        let action = DeviceActionKind::SetToggle { setting: "reduceMotion".into(), value: true };
-        assert!(action_commands_with_helpers(DevicePlatform::Ios, "sim", &action, None, None).is_err());
+        let action = DeviceActionKind::SetToggle {
+            setting: "reduceMotion".into(),
+            value: true,
+        };
+        assert!(
+            action_commands_with_helpers(DevicePlatform::Ios, "sim", &action, None, None).is_err()
+        );
         let commands = action_commands_with_helpers(
             DevicePlatform::Ios,
             "sim",
@@ -5843,15 +7125,18 @@ mod tests {
         )
         .unwrap();
         assert_eq!(commands[0].program, "xcrun");
-        assert_eq!(commands[0].args, vec![
-            "simctl".into(),
-            "spawn".into(),
-            "sim".into(),
-            "/hub/serve-sim-ax-settings".into(),
-            "set".into(),
-            "reduce-motion".into(),
-            "on".into(),
-        ]);
+        assert_eq!(
+            commands[0].args,
+            vec![
+                String::from("simctl"),
+                "spawn".into(),
+                "sim".into(),
+                "/hub/serve-sim-ax-settings".into(),
+                "set".into(),
+                "reduce-motion".into(),
+                "on".into(),
+            ]
+        );
 
         let permissions = action_commands(
             DevicePlatform::Android,
@@ -5878,29 +7163,56 @@ mod tests {
     #[test]
     fn agent_session_identity_includes_the_host_and_device() {
         let thread = ThreadId::new("thread").unwrap();
-        assert_eq!(agent_device_session(&thread, "host", "device"), agent_device_session(&thread, "host", "device"));
-        assert_ne!(agent_device_session(&thread, "host", "device"), agent_device_session(&thread, "other", "device"));
-        assert_ne!(agent_device_session(&thread, "host", "device"), agent_device_session(&thread, "host", "other"));
+        assert_eq!(
+            agent_device_session(&thread, "host", "device"),
+            agent_device_session(&thread, "host", "device")
+        );
+        assert_ne!(
+            agent_device_session(&thread, "host", "device"),
+            agent_device_session(&thread, "other", "device")
+        );
+        assert_ne!(
+            agent_device_session(&thread, "host", "device"),
+            agent_device_session(&thread, "host", "other")
+        );
     }
 
     #[test]
     fn ios_runtime_labels_keep_the_platform_and_version() {
-        assert_eq!(ios_runtime_label("com.apple.CoreSimulator.SimRuntime.iOS-18-0"), "iOS 18.0");
-        assert_eq!(ios_runtime_label("com.apple.CoreSimulator.SimRuntime.iOS-17-5"), "iOS 17.5");
+        assert_eq!(
+            ios_runtime_label("com.apple.CoreSimulator.SimRuntime.iOS-18-0"),
+            "iOS 18.0"
+        );
+        assert_eq!(
+            ios_runtime_label("com.apple.CoreSimulator.SimRuntime.iOS-17-5"),
+            "iOS 17.5"
+        );
     }
 
     #[test]
     fn ios_accessibility_text_sizes_are_not_collapsed_into_extra_large() {
-        assert_eq!(ios_text_size_from("accessibility-extra-extra-large"), Some(DeviceTextSize::ExtraLarge));
-        assert_eq!(ios_text_size_from("extra-extra-large"), Some(DeviceTextSize::Large));
+        assert_eq!(
+            ios_text_size_from("accessibility-extra-extra-large"),
+            Some(DeviceTextSize::ExtraLarge)
+        );
+        assert_eq!(
+            ios_text_size_from("extra-extra-large"),
+            Some(DeviceTextSize::Large)
+        );
     }
 
     #[test]
     fn android_sdk_commands_are_resolved_under_the_sdk_root() {
         let tools = android_tool_paths_at(Path::new("/sdk"));
         assert_eq!(tools.root.as_deref(), Some(Path::new("/sdk")));
-        assert_eq!(tools.command("adb"), Some(Path::new("/sdk/platform-tools/adb")));
-        assert_eq!(tools.command("emulator"), Some(Path::new("/sdk/emulator/emulator")));
+        assert_eq!(
+            tools.command("adb"),
+            Some(Path::new("/sdk/platform-tools/adb"))
+        );
+        assert_eq!(
+            tools.command("emulator"),
+            Some(Path::new("/sdk/emulator/emulator"))
+        );
         assert!(tools.command("xcrun").is_none());
     }
 
@@ -5915,9 +7227,35 @@ mod tests {
     #[test]
     fn remote_owner_is_stable_per_state_root_and_host() {
         let root = Path::new("/state/device");
-        assert_eq!(device_host_owner(root, "one"), device_host_owner(root, "one"));
-        assert_ne!(device_host_owner(root, "one"), device_host_owner(root, "two"));
-        assert_ne!(device_host_owner(root, "one"), device_host_owner(Path::new("/other"), "one"));
+        assert_eq!(
+            device_host_owner(root, "one"),
+            device_host_owner(root, "one")
+        );
+        assert_ne!(
+            device_host_owner(root, "one"),
+            device_host_owner(root, "two")
+        );
+        assert_ne!(
+            device_host_owner(root, "one"),
+            device_host_owner(Path::new("/other"), "one")
+        );
+    }
+
+    #[tokio::test]
+    async fn active_device_session_blocks_handoff_probe_without_starting_a_host() {
+        let directory = tempfile::tempdir().unwrap();
+        let service = DeviceService::new(directory.path().to_owned());
+        assert!(!service.has_active_tasks());
+
+        service.inner.state.write().await.sessions.push(DeviceSession {
+            thread_id: ThreadId::new("thread").unwrap(),
+            host_id: LOCAL_DEVICE_HOST_ID.into(),
+            device_id: "simulator".into(),
+            platform: DevicePlatform::Ios,
+            opened_at: "now".into(),
+        });
+
+        assert!(service.has_active_tasks());
     }
 
     #[test]
@@ -6020,7 +7358,8 @@ mod tests {
             table_mode: false,
             table_mode_available: false,
         };
-        assert_eq!(rotate_touch(Some(&screen), 0.25, 0.75), (0.75, 0.75));
+        assert_eq!(rotate_touch(Some(&screen), 0.25, 0.75, false), (0.75, 0.75));
+        assert_eq!(rotate_touch(Some(&screen), 0.25, 0.75, true), (0.25, 0.75));
     }
 
     #[tokio::test]
@@ -6101,6 +7440,41 @@ mod tests {
         let reopened = DeviceSession { session_epoch: "epoch-3".into(), ..first.clone() };
         assert!(!session_matches_generation(&generation, &reopened));
         assert!(session_matches_generation(&generation, &second));
+    }
+
+    #[test]
+    fn input_target_requires_the_original_thread_and_session_epoch() {
+        let thread = ThreadId::new("input-target").unwrap();
+        let session = DeviceSession {
+            thread_id: thread.clone(),
+            host_id: "local".into(),
+            device_id: "sim".into(),
+            platform: DevicePlatform::Ios,
+            opened_at: "open".into(),
+            session_epoch: "epoch-new".into(),
+        };
+        let sessions = vec![session];
+        assert!(session_matches_target(
+            &sessions,
+            &thread,
+            "local",
+            "sim",
+            "epoch-new",
+        ));
+        assert!(!session_matches_target(
+            &sessions,
+            &thread,
+            "local",
+            "sim",
+            "epoch-old",
+        ));
+        assert!(!session_matches_target(
+            &sessions,
+            &ThreadId::new("other-thread").unwrap(),
+            "local",
+            "sim",
+            "epoch-new",
+        ));
     }
 
     #[tokio::test]
@@ -6296,7 +7670,7 @@ mod tests {
             port,
             DevicePlatform::Ios,
             "sim",
-            &DeviceInputKind::Touch { phase: DeviceTouchPhase::Begin, x: 0.25, y: 0.75 },
+            &DeviceInputKind::Touch { phase: DeviceTouchPhase::Begin, x: 0.25, y: 0.75, raw: false },
             0,
         )
         .await
@@ -6398,7 +7772,7 @@ mod tests {
             port,
             DevicePlatform::Android,
             "emu",
-            &DeviceInputKind::Touch { phase: DeviceTouchPhase::End, x: 0.2, y: 0.1 },
+            &DeviceInputKind::Touch { phase: DeviceTouchPhase::End, x: 0.2, y: 0.1, raw: false },
             0,
         )
         .await
