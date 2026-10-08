@@ -724,8 +724,13 @@ private struct ProviderAccountsPage: View {
                             }
                             if advisory.canUpdate {
                                 Button("Update provider") {
-                                    model.perform(.updateProvider(instance: advisory.instanceId, targetVersion: nil))
-                                    model.perform(.loadProviders)
+                                    model.perform(
+                                        .updateProvider(instance: advisory.instanceId, targetVersion: nil)
+                                    ) { result in
+                                        if case .success = result {
+                                            model.perform(.loadProviders)
+                                        }
+                                    }
                                 }
                                 .buttonStyle(.borderless)
                             }

@@ -687,8 +687,9 @@ private fun AccountsSection(model: AndroidAppModel) {
                 }
                 if (advisory.canUpdate) {
                     TextButton(onClick = {
-                        model.perform(Intent.UpdateProvider(advisory.instanceId, null))
-                        model.perform(Intent.LoadProviders)
+                        model.perform(Intent.UpdateProvider(advisory.instanceId, null)) { result ->
+                            if (result.isSuccess) model.perform(Intent.LoadProviders)
+                        }
                     }) {
                         Text("Update provider", color = colors.primaryText)
                     }

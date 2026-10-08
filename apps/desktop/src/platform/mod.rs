@@ -1220,7 +1220,87 @@ pub(crate) fn acknowledge_snapshot(id: &str) -> Result<(), String> {
 /// bridge deliberately records only the foreground application and window;
 /// accessibility text is collected only when the setting is enabled and the
 /// platform grants access.
-fn active_window_metadata(include_accessibility: bool) -> Option<agent_domain::CapturedWindow> {
+const SNAPSHOT_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
+const SNAPSHOT_MAX_OUTPUT_BYTES: usize = 128 * 1024;
+
+struct SnapshotCommandOutput {
+    status: std::process::ExitStatus,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+async fn read_snapshot_output<R: tokio::io::AsyncRead + Unpin>(
+    mut reader: R,
+) -> Result<Vec<u8>, String> {
+    use tokio::io::AsyncReadExt;
+
+    let mut kept = Vec::with_capacity(SNAPSHOT_MAX_OUTPUT_BYTES);
+    let mut buffer = [0u8; 4096];
+    loop {
+        let read = reader
+            .read(&mut buffer)
+            .await
+            .map_err(|error| format!("screen capture output could not be read: {error}"))?;
+        if read == 0 {
+            return Ok(kept);
+        }
+        let remaining = SNAPSHOT_MAX_OUTPUT_BYTES.saturating_sub(kept.len());
+        kept.extend_from_slice(&buffer[..read.min(remaining)]);
+    }
+}
+
+async fn run_snapshot_command(
+    mut command: tokio::process::Command,
+) -> Result<SnapshotCommandOutput, String> {
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("screen capture could not start: {error}"))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "screen capture stdout is unavailable".to_owned())?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "screen capture stderr is unavailable".to_owned())?;
+    let result = tokio::time::timeout(SNAPSHOT_COMMAND_TIMEOUT, async {
+        let (stdout, stderr, status) = tokio::join!(
+            read_snapshot_output(stdout),
+            read_snapshot_output(stderr),
+            child.wait(),
+        );
+        Ok::<_, String>((
+            stdout?,
+            stderr?,
+            status.map_err(|error| format!("screen capture did not report its status: {error}"))?,
+        ))
+    })
+    .await
+    .map_err(|_| "screen capture timed out".to_owned())??;
+    Ok(SnapshotCommandOutput {
+        stdout: result.0,
+        stderr: result.1,
+        status: result.2,
+    })
+}
+
+fn snapshot_command_failed(name: &str, output: &SnapshotCommandOutput) -> String {
+    let detail = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+    if detail.is_empty() {
+        format!("{name} exited with {}", output.status)
+    } else {
+        format!("{name} exited with {}: {detail}", output.status)
+    }
+}
+
+async fn active_window_metadata(
+    include_accessibility: bool,
+) -> Option<agent_domain::CapturedWindow> {
     #[cfg(target_os = "macos")]
     {
         let accessibility = if include_accessibility {
@@ -1231,10 +1311,10 @@ fn active_window_metadata(include_accessibility: bool) -> Option<agent_domain::C
         let script = format!(
             "tell application \"System Events\"\n    set frontProcess to first application process whose frontmost is true\n    set appName to name of frontProcess\n    set windowTitle to \"\"\n    try\n        set windowTitle to name of front window of frontProcess\n    end try\n    {accessibility}\n    return appName & linefeed & windowTitle & linefeed & capturedText\nend tell"
         );
-        let output = Command::new("osascript")
-            .args(["-e", &script])
-            .output()
-            .ok()?;
+        let output =
+            run_snapshot_command(tokio::process::Command::new("osascript").args(["-e", &script]))
+                .await
+                .ok()?;
         if !output.status.success() {
             return None;
         }
@@ -1261,34 +1341,36 @@ fn active_window_metadata(include_accessibility: bool) -> Option<agent_domain::C
     }
     #[cfg(target_os = "linux")]
     {
-        let id = Command::new("xdotool")
-            .arg("getactivewindow")
-            .output()
-            .ok()
-            .filter(|output| output.status.success())?;
+        let id =
+            run_snapshot_command(tokio::process::Command::new("xdotool").arg("getactivewindow"))
+                .await
+                .ok()
+                .filter(|output| output.status.success())?;
         let id = String::from_utf8_lossy(&id.stdout).trim().to_owned();
         if id.is_empty() {
             return None;
         }
-        let title = Command::new("xdotool")
-            .args(["getwindowname", &id])
-            .output()
-            .ok()
-            .filter(|output| output.status.success())
-            .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
-            .unwrap_or_default();
-        let app_name = Command::new("xprop")
-            .args(["-id", &id, "WM_CLASS"])
-            .output()
-            .ok()
-            .filter(|output| output.status.success())
-            .and_then(|output| {
-                String::from_utf8_lossy(&output.stdout)
-                    .split('"')
-                    .nth(3)
-                    .map(str::to_owned)
-            })
-            .unwrap_or_default();
+        let title = run_snapshot_command(
+            tokio::process::Command::new("xdotool").args(["getwindowname", &id]),
+        )
+        .await
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+        .unwrap_or_default();
+        let app_name = run_snapshot_command(
+            tokio::process::Command::new("xprop").args(["-id", &id, "WM_CLASS"]),
+        )
+        .await
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| {
+            String::from_utf8_lossy(&output.stdout)
+                .split('"')
+                .nth(3)
+                .map(str::to_owned)
+        })
+        .unwrap_or_default();
         (!app_name.is_empty() || !title.is_empty()).then_some(agent_domain::CapturedWindow {
             app_name,
             window_title: title,
@@ -1319,14 +1401,20 @@ try { $app = [Diagnostics.Process]::GetProcessById($processId).ProcessName } cat
 Write-Output $app
 Write-Output $titleBuffer.ToString()
 "#;
-        let output = Command::new("powershell")
-            .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script])
-            .stdin(Stdio::null())
-            .stderr(Stdio::null())
-            .output()
-            .ok()
-            .filter(|output| output.status.success())?;
-        let mut lines = String::from_utf8_lossy(&output.stdout).lines().map(str::trim);
+        let output = run_snapshot_command(tokio::process::Command::new("powershell").args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            script,
+        ]))
+        .await
+        .ok()
+        .filter(|output| output.status.success())?;
+        let mut lines = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(str::trim);
         let app_name = lines.next().unwrap_or_default().to_owned();
         let window_title = lines.next().unwrap_or_default().to_owned();
         (!app_name.is_empty() || !window_title.is_empty()).then_some(agent_domain::CapturedWindow {
@@ -1338,17 +1426,16 @@ Write-Output $titleBuffer.ToString()
     }
 }
 
-pub(crate) fn snapshot_permission_granted(include_accessibility: bool) -> bool {
+pub(crate) async fn snapshot_permission_granted(include_accessibility: bool) -> bool {
     #[cfg(target_os = "macos")]
     {
         !include_accessibility
-            || Command::new("osascript")
-                .args([
-                    "-e",
-                    "tell application \"System Events\" to get name of first application process whose frontmost is true",
-                ])
-                .output()
-                .is_ok_and(|output| output.status.success())
+            || run_snapshot_command(tokio::process::Command::new("osascript").args([
+                "-e",
+                "tell application \"System Events\" to get name of first application process whose frontmost is true",
+            ]))
+            .await
+            .is_ok_and(|output| output.status.success())
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -1375,43 +1462,43 @@ fn write_snapshot_metadata(
 /// Captures the desktop into a caller-owned path using the platform's native
 /// screen capture utility. The caller feeds the resulting file into the same
 /// attachment admission path as a picked image.
-pub(crate) fn capture_snapshot(
+pub(crate) async fn capture_snapshot(
     path: &std::path::Path,
     include_accessibility: bool,
 ) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
-        let window = active_window_metadata(include_accessibility);
-        let mut command = Command::new("screencapture");
-        command.args(["-x", "-w", "-t", "png"]).arg(path);
-        let status = command
-            .status()
-            .map_err(|error| format!("screen capture could not start: {error}"))?;
-        status
+        let window = active_window_metadata(include_accessibility).await;
+        let command = tokio::process::Command::new("screencapture")
+            .args(["-x", "-w", "-t", "png"])
+            .arg(path);
+        let output = run_snapshot_command(command).await?;
+        output
+            .status
             .success()
             .then_some(())
-            .ok_or_else(|| format!("screen capture exited with {status}"))?;
-        let _ = write_snapshot_metadata(path, window.as_ref());
+            .ok_or_else(|| snapshot_command_failed("screencapture", &output))?;
+        write_snapshot_metadata(path, window.as_ref())?;
         return Ok(());
     }
     #[cfg(target_os = "linux")]
     {
-        let window = active_window_metadata(include_accessibility);
-        let mut command = Command::new("gnome-screenshot");
-        command.args(["-w", "-f"]).arg(path);
-        let status = command
-            .status()
-            .map_err(|error| format!("screen capture could not start: {error}"))?;
-        status
+        let window = active_window_metadata(include_accessibility).await;
+        let command = tokio::process::Command::new("gnome-screenshot")
+            .args(["-w", "-f"])
+            .arg(path);
+        let output = run_snapshot_command(command).await?;
+        output
+            .status
             .success()
             .then_some(())
-            .ok_or_else(|| format!("screen capture exited with {status}"))?;
-        let _ = write_snapshot_metadata(path, window.as_ref());
+            .ok_or_else(|| snapshot_command_failed("gnome-screenshot", &output))?;
+        write_snapshot_metadata(path, window.as_ref())?;
         return Ok(());
     }
     #[cfg(target_os = "windows")]
     {
-        let window = active_window_metadata(include_accessibility);
+        let window = active_window_metadata(include_accessibility).await;
         let script = r#"
 Add-Type -AssemblyName System.Drawing
 Add-Type @"
@@ -1437,19 +1524,23 @@ $bitmap.Save($env:REMOTE_AGENT_CAPTURE_PATH, [Drawing.Imaging.ImageFormat]::Png)
 $graphics.Dispose()
 $bitmap.Dispose()
 "#;
-        let status = Command::new("powershell")
-            .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script])
-            .env("REMOTE_AGENT_CAPTURE_PATH", path)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .status()
-            .map_err(|error| format!("screen capture could not start: {error}"))?;
-        status
+        let command = tokio::process::Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                script,
+            ])
+            .env("REMOTE_AGENT_CAPTURE_PATH", path);
+        let output = run_snapshot_command(command).await?;
+        output
+            .status
             .success()
             .then_some(())
-            .ok_or_else(|| format!("screen capture exited with {status}"))?;
-        let _ = write_snapshot_metadata(path, window.as_ref());
+            .ok_or_else(|| snapshot_command_failed("powershell", &output))?;
+        write_snapshot_metadata(path, window.as_ref())?;
         Ok(())
     }
 }
@@ -1457,7 +1548,7 @@ $bitmap.Dispose()
 /// Plays the user's selected capture feedback without making sound a
 /// prerequisite for attaching the image. Desktop environments may omit the
 /// optional player; the capture itself remains successful in that case.
-pub(crate) fn play_snapshot_sound(
+pub(crate) async fn play_snapshot_sound(
     sound: agent_core::view::snapshot_capture::SnapshotSound,
 ) -> Result<(), String> {
     #[cfg(target_os = "macos")]
@@ -1470,13 +1561,12 @@ pub(crate) fn play_snapshot_sound(
                 "/System/Library/Sounds/Camera Shutter.aiff"
             }
         };
-        Command::new("afplay")
-            .arg(file)
-            .status()
-            .map_err(|error| format!("capture sound could not start: {error}"))?
+        let output = run_snapshot_command(tokio::process::Command::new("afplay").arg(file)).await?;
+        output
+            .status
             .success()
             .then_some(())
-            .ok_or_else(|| "capture sound failed".into())
+            .ok_or_else(|| snapshot_command_failed("afplay", &output))
     }
     #[cfg(target_os = "linux")]
     {
@@ -1484,13 +1574,15 @@ pub(crate) fn play_snapshot_sound(
             agent_core::view::snapshot_capture::SnapshotSound::SoftPop => "message-new-instant",
             agent_core::view::snapshot_capture::SnapshotSound::CameraShutter => "camera-shutter",
         };
-        Command::new("canberra-gtk-play")
-            .args(["-i", id])
-            .status()
-            .map_err(|error| format!("capture sound could not start: {error}"))?
+        let output = run_snapshot_command(
+            tokio::process::Command::new("canberra-gtk-play").args(["-i", id]),
+        )
+        .await?;
+        output
+            .status
             .success()
             .then_some(())
-            .ok_or_else(|| "capture sound failed".into())
+            .ok_or_else(|| snapshot_command_failed("canberra-gtk-play", &output))
     }
     #[cfg(target_os = "windows")]
     {
@@ -1501,7 +1593,10 @@ pub(crate) fn play_snapshot_sound(
 
 #[cfg(test)]
 mod tests {
-    use super::{decode_snapshot_accessibility, valid_snapshot_id};
+    use super::{
+        SNAPSHOT_MAX_OUTPUT_BYTES, decode_snapshot_accessibility, read_snapshot_output,
+        valid_snapshot_id,
+    };
 
     #[test]
     fn external_snapshot_ids_cannot_escape_the_queue_directory() {
@@ -1527,5 +1622,21 @@ mod tests {
         });
         assert!(decode_snapshot_accessibility(Some(reference)).is_some());
         assert!(decode_snapshot_accessibility(Some(domain)).is_some());
+    }
+
+    #[tokio::test]
+    async fn snapshot_command_output_keeps_a_bound_while_draining_the_child() {
+        use tokio::io::AsyncWriteExt;
+
+        let (mut writer, reader) = tokio::io::duplex(4096);
+        let writer = tokio::spawn(async move {
+            writer
+                .write_all(&vec![b'x'; SNAPSHOT_MAX_OUTPUT_BYTES * 2])
+                .await
+                .unwrap();
+        });
+        let output = read_snapshot_output(reader).await.unwrap();
+        writer.await.unwrap();
+        assert_eq!(output.len(), SNAPSHOT_MAX_OUTPUT_BYTES);
     }
 }

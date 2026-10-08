@@ -21,6 +21,18 @@ pub(super) struct JobResult {
     pub diff_generation: Option<u64>,
 }
 
+fn provider_update_outcome(update: op::ProviderUpdate) -> Result<Outcome, PeerError> {
+    if update.status == agent_protocol::operations::ProviderUpdateStatus::Failed {
+        Err(invalid(update.message))
+    } else {
+        Ok(Outcome::ProviderUpdated {
+            status: format!("{:?}", update.status).to_ascii_lowercase(),
+            version: update.version,
+            message: update.message,
+        })
+    }
+}
+
 pub(super) enum Reply {
     Search(Vec<c::SearchMatch>),
     Providers(Vec<m::ProviderInstance>),
@@ -492,6 +504,10 @@ impl Owner {
         if matches!(&call, Call::ReadHostResources(_)) {
             self.load_balancing_resources_in_flight = false;
         }
+        let provider_update = match &result {
+            Ok(Reply::ProviderUpdate(update)) => Some(update.clone()),
+            _ => None,
+        };
         let paired = match &result {
             Ok(Reply::Remote(host)) => Some(Outcome::RemoteHostPaired {
                 id: host.id.clone(),
@@ -690,7 +706,11 @@ impl Owner {
                     self.state.error = None;
                 }
                 self.reply(&call, reply, sent, diff_generation);
-                Ok(paired.unwrap_or_default())
+                if let Some(update) = provider_update {
+                    provider_update_outcome(update)
+                } else {
+                    Ok(paired.unwrap_or_default())
+                }
             }
         };
         if let Some(complete) = complete {
@@ -1253,4 +1273,42 @@ fn pull_request_operation_thread(call: &Call) -> Option<agent_domain::ThreadId> 
         _ => return None,
     };
     agent_domain::ThreadId::new(thread.clone()).ok()
+}
+
+#[cfg(test)]
+mod provider_update_tests {
+    use super::{Outcome, op, provider_update_outcome};
+
+    #[test]
+    fn successful_update_receipt_keeps_status_and_version_for_clients() {
+        let outcome = provider_update_outcome(op::ProviderUpdate {
+            instance: "codex".into(),
+            status: op::ProviderUpdateStatus::Updated,
+            version: Some("2.1.300".into()),
+            message: "Provider updated.".into(),
+            output: None,
+        })
+        .unwrap();
+        assert_eq!(
+            outcome,
+            Outcome::ProviderUpdated {
+                status: "updated".into(),
+                version: Some("2.1.300".into()),
+                message: "Provider updated.".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn failed_update_receipt_is_an_error_and_cannot_trigger_a_refresh() {
+        let error = provider_update_outcome(op::ProviderUpdate {
+            instance: "codex".into(),
+            status: op::ProviderUpdateStatus::Failed,
+            version: None,
+            message: "provider updater failed".into(),
+            output: Some("details".into()),
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("provider updater failed"));
+    }
 }

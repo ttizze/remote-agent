@@ -3561,26 +3561,39 @@ impl HostRpcService {
             })?;
         match driver {
             Driver::Codex => {
-                let shares_tokens =
+                // A configured Codex instance owns its executable, home,
+                // environment and launch arguments. Reusing the built-in
+                // CodexResources process would scan the wrong skills tree.
+                let shares_tokens = if configured.is_none() {
                     crate::conversation::CodexCredentials::shares_tokens(resources.codex.as_ref())
-                        .await;
+                        .await
+                } else {
+                    false
+                };
                 scan.slash_commands = commands::codex_commands(shares_tokens);
-                if resources.codex.availability().is_ok() {
-                    let listed: Result<serde_json::Value, _> = tokio::time::timeout(
-                        std::time::Duration::from_secs(20),
-                        resources
-                            .codex
-                            .request("skills/list", &serde_json::json!({"cwds": [params.cwd]})),
-                    )
-                    .await
-                    .map_err(|_| Failure::new("provider_failed", "skills/list timed out"))
-                    .and_then(|result| result);
-                    match listed {
-                        Ok(listed) => scan.skills = commands::codex_skills(&listed, &params.cwd),
-                        Err(error) => {
-                            tracing::warn!(operation = "host.provider.skills", message = %error)
-                        }
-                    }
+                let listed: Result<serde_json::Value, String> =
+                    if let Some(config) = configured.as_ref() {
+                        custom_codex_skills(config, &params.cwd).await
+                    } else if resources.codex.availability().is_ok() {
+                        tokio::time::timeout(
+                            std::time::Duration::from_secs(20),
+                            resources
+                                .codex
+                                .request("skills/list", &serde_json::json!({"cwds": [params.cwd]})),
+                        )
+                        .await
+                        .map_err(|_| "skills/list timed out".to_owned())
+                        .and_then(|result| result.map_err(|error| error.message))
+                    } else {
+                        Err("Codex is unavailable on this Host.".to_owned())
+                    };
+                match listed {
+                    Ok(listed) => scan.skills = commands::codex_skills(&listed, &params.cwd),
+                    Err(error) => tracing::warn!(
+                        operation = "host.provider.skills",
+                        instance = %params.instance,
+                        message = %error
+                    ),
                 }
             }
             Driver::Claude => {
@@ -4081,7 +4094,13 @@ impl HostRpcService {
                 .and_then(|config| config.home_path.as_deref())
                 .map(crate::projects::expand_home);
             let environment = configured
-                .map(|config| config.environment.iter().map(|(key, value)| (key.clone(), value.clone())).collect::<Vec<_>>())
+                .map(|config| {
+                    config
+                        .environment
+                        .iter()
+                        .map(|(key, value)| (key.clone(), value.clone()))
+                        .collect::<Vec<_>>()
+                })
                 .unwrap_or_default();
             provider.version_advisory = Some(
                 crate::provider_maintenance::advisory(
@@ -4255,10 +4274,10 @@ fn provider_key(provider: ProviderKind) -> String {
 /// configured instance may have a different home, environment, or launch
 /// arguments, so sharing the built-in catalogue would silently route custom
 /// instances through the wrong installation.
-async fn custom_codex_models(
+fn configured_codex_server_config(
     config: &agent_protocol::models::ProviderInstanceConfig,
-) -> Result<Vec<agent_protocol::models::Model>, String> {
-    let server = codex_app_server::CodexAppServer::spawn(codex_app_server::AppServerConfig {
+) -> codex_app_server::AppServerConfig {
+    codex_app_server::AppServerConfig {
         program: config
             .binary_path
             .as_deref()
@@ -4271,9 +4290,62 @@ async fn custom_codex_models(
         environment: config.environment.clone(),
         launch_args: config.launch_args.clone(),
         ..Default::default()
-    })
-    .await
-    .map_err(|error| format!("configured Codex instance could not start: {error}"))?;
+    }
+}
+
+#[cfg(test)]
+mod configured_codex_tests {
+    use super::configured_codex_server_config;
+    use agent_protocol::models::ProviderInstanceConfig;
+    use std::collections::BTreeMap;
+    use std::path::PathBuf;
+
+    #[test]
+    fn command_scans_keep_each_instance_launch_context() {
+        let config = ProviderInstanceConfig {
+            binary_path: Some("/tmp/bin/codex-build".into()),
+            home_path: Some("/tmp/codex-build".into()),
+            environment: BTreeMap::from([("PROFILE".into(), "build".into())]),
+            launch_args: vec!["--profile".into(), "build".into()],
+            ..Default::default()
+        };
+        let app = configured_codex_server_config(&config);
+        assert_eq!(app.program, PathBuf::from("/tmp/bin/codex-build"));
+        assert_eq!(app.codex_home, Some(PathBuf::from("/tmp/codex-build")));
+        assert_eq!(app.environment, config.environment);
+        assert_eq!(app.launch_args, config.launch_args);
+    }
+}
+
+/// Read one configured Codex instance's skills list and shut down the
+/// temporary app-server even when the request fails.
+async fn custom_codex_skills(
+    config: &agent_protocol::models::ProviderInstanceConfig,
+    cwd: &str,
+) -> Result<serde_json::Value, String> {
+    let server = codex_app_server::CodexAppServer::spawn(configured_codex_server_config(config))
+        .await
+        .map_err(|error| format!("configured Codex instance could not start: {error}"))?;
+    let result = async {
+        let response = server
+            .request::<_, serde_json::Value>("skills/list", &serde_json::json!({"cwds": [cwd]}))
+            .await
+            .map_err(|error| format!("configured Codex skills/list failed: {error}"))?;
+        response
+            .outcome
+            .map_err(|error| format!("configured Codex skills/list failed: {}", error.get()))
+    }
+    .await;
+    let _ = server.shutdown().await;
+    result
+}
+
+async fn custom_codex_models(
+    config: &agent_protocol::models::ProviderInstanceConfig,
+) -> Result<Vec<agent_protocol::models::Model>, String> {
+    let server = codex_app_server::CodexAppServer::spawn(configured_codex_server_config(config))
+        .await
+        .map_err(|error| format!("configured Codex instance could not start: {error}"))?;
     let result = async {
         let mut native = Vec::new();
         let mut cursor: Option<String> = None;

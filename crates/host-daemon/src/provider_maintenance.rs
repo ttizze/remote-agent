@@ -42,6 +42,35 @@ fn package_name(driver: Driver) -> &'static str {
     }
 }
 
+fn version_environment(
+    driver: Driver,
+    home: Option<&Path>,
+    environment: &[(String, String)],
+) -> Vec<(String, String)> {
+    let mut values = Vec::with_capacity(environment.len() + usize::from(home.is_some()));
+    if let Some(home) = home {
+        values.push((
+            match driver {
+                Driver::Codex => "CODEX_HOME",
+                Driver::Claude => "CLAUDE_CONFIG_DIR",
+            }
+            .to_owned(),
+            home.to_string_lossy().into_owned(),
+        ));
+    }
+    values.extend(
+        environment
+            .iter()
+            .filter(|(key, _)| {
+                home.is_none()
+                    || (!key.eq_ignore_ascii_case("CODEX_HOME")
+                        && !key.eq_ignore_ascii_case("CLAUDE_CONFIG_DIR"))
+            })
+            .cloned(),
+    );
+    values
+}
+
 fn normalized(path: &Path) -> String {
     path.to_string_lossy()
         .replace('\\', "/")
@@ -597,6 +626,14 @@ pub(crate) async fn advisory(
     current_version: Option<String>,
     check_for_updates: bool,
 ) -> ProviderVersionAdvisory {
+    let version_environment = version_environment(driver, home, environment);
+    // The app-server health path cannot provide a CLI version for Codex, so
+    // resolve it from the same executable and provider environment before
+    // deciding whether a latest-version lookup is meaningful.
+    let current_version = match current_version {
+        Some(version) => Some(version),
+        None => verify_provider_version(binary, &version_environment).await,
+    };
     let package = package_name(driver);
     let resolved = update_command(driver, binary, home, None);
     let (mut display_command, mut can_update, mut can_install_version, mut ownership_message) =
@@ -672,25 +709,28 @@ async fn verify_provider_version(
     binary: &Path,
     environment: &[(String, String)],
 ) -> Option<String> {
-    let output = tokio::time::timeout(
-        Duration::from_secs(30),
-        tokio::process::Command::new(binary)
-            .arg("--version")
-            .envs(environment.iter().map(|(key, value)| (key, value)))
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true)
-            .output(),
-    )
+    let mut child = tokio::process::Command::new(binary)
+        .arg("--version")
+        .envs(environment.iter().map(|(key, value)| (key, value)))
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .ok()?;
+    let stdout = child.stdout.take()?;
+    let stderr = child.stderr.take()?;
+    let (stdout, stderr, status) = tokio::time::timeout(Duration::from_secs(30), async {
+        tokio::join!(read_capped(stdout), read_capped(stderr), child.wait())
+    })
     .await
-    .ok()?
     .ok()?;
-    output.status.success().then(|| {
+    let (stdout, stderr, status) = (stdout.ok()?, stderr.ok()?, status.ok()?);
+    status.success().then(|| {
         reported_version(&format!(
             "{}\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
+            String::from_utf8_lossy(&stdout),
+            String::from_utf8_lossy(&stderr)
         ))
     })?
 }
@@ -969,5 +1009,24 @@ mod tests {
         );
         assert_eq!(reported_version("provider latest"), None);
         assert_eq!(reported_version("provider 2.1"), None);
+    }
+
+    #[test]
+    fn version_lookup_uses_the_instance_home_and_preserves_other_environment() {
+        let values = version_environment(
+            Driver::Codex,
+            Some(Path::new("/tmp/codex-instance")),
+            &[
+                ("CODEX_HOME".into(), "/wrong/home".into()),
+                ("HTTPS_PROXY".into(), "http://proxy.invalid".into()),
+            ],
+        );
+        assert_eq!(
+            values,
+            [
+                ("CODEX_HOME".into(), "/tmp/codex-instance".into()),
+                ("HTTPS_PROXY".into(), "http://proxy.invalid".into()),
+            ]
+        );
     }
 }

@@ -67,6 +67,13 @@ pub enum Outcome {
     GitRepositoryPublished {
         result: crate::state::GitPublishOutcome,
     },
+    /// One provider updater completed and its Host-owned result is available
+    /// to native clients before they refresh the provider catalog.
+    ProviderUpdated {
+        status: String,
+        version: Option<String>,
+        message: String,
+    },
 }
 pub type Receipt = oneshot::Receiver<Result<Outcome, PeerError>>;
 
