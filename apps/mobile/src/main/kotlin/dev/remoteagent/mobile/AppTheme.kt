@@ -27,6 +27,7 @@ import androidx.compose.ui.unit.sp
 import dev.remoteagent.core.MobileAppearance
 import dev.remoteagent.core.MobileColorScheme
 import dev.remoteagent.core.mobileAssignTheme
+import dev.remoteagent.core.mobileAppearanceDefault
 import dev.remoteagent.core.mobileThemeColors
 import dev.remoteagent.core.mobileTypography
 import dev.remoteagent.core.normalizeMobileAppearance
@@ -113,7 +114,7 @@ private val LightPalette by lazy { Palette(false, mobileThemeColors(null, false)
 internal val LocalPalette = staticCompositionLocalOf { LightPalette }
 
 internal object AppTheme {
-    var appearance by mutableStateOf(MobileAppearanceSettings())
+    var appearance by mutableStateOf(MobileAppearanceSettings.fromCore(mobileAppearanceDefault()))
         private set
 
     private var loaded = false
@@ -370,14 +371,14 @@ private fun Color.toHex(): String {
 }
 
 internal data class MobileAppearanceSettings(
-    val colorScheme: MobileColorScheme = MobileColorScheme.SYSTEM,
-    val theme: String? = null,
-    val lightTheme: String? = null,
-    val darkTheme: String? = null,
-    val baseFontSize: Int = 16,
-    val codeFontSize: Int? = null,
-    val terminalFontSize: Double? = null,
-    val codeWordWrap: Boolean = false,
+    val colorScheme: MobileColorScheme,
+    val theme: String?,
+    val lightTheme: String?,
+    val darkTheme: String?,
+    val baseFontSize: Int,
+    val codeFontSize: Int?,
+    val terminalFontSize: Double?,
+    val codeWordWrap: Boolean,
 ) {
     fun themeFor(dark: Boolean): String? = if (dark) darkTheme ?: theme else lightTheme ?: theme
 
@@ -387,8 +388,8 @@ internal data class MobileAppearanceSettings(
             theme = theme,
             lightTheme = lightTheme,
             darkTheme = darkTheme,
-            baseFontSize = baseFontSize.toUInt(),
-            codeFontSize = codeFontSize?.toUInt(),
+            baseFontSize = baseFontSize.coerceAtLeast(0).toUInt(),
+            codeFontSize = codeFontSize?.coerceAtLeast(0)?.toUInt(),
             terminalFontSize = terminalFontSize,
             codeWordWrap = codeWordWrap,
         )
@@ -416,7 +417,7 @@ internal data class MobileAppearanceSettings(
     }
 
     companion object {
-        private fun fromCore(value: MobileAppearance): MobileAppearanceSettings =
+        internal fun fromCore(value: MobileAppearance): MobileAppearanceSettings =
             MobileAppearanceSettings(
                 colorScheme = value.colorScheme,
                 theme = value.theme,
@@ -430,17 +431,21 @@ internal data class MobileAppearanceSettings(
 
         fun load(context: android.content.Context): MobileAppearanceSettings {
             val prefs = context.getSharedPreferences("mobile-appearance", android.content.Context.MODE_PRIVATE)
+            val defaults = mobileAppearanceDefault()
             return MobileAppearanceSettings(
                     colorScheme =
-                        runCatching { MobileColorScheme.valueOf(prefs.getString("colorScheme", null) ?: "SYSTEM") }
-                            .getOrDefault(MobileColorScheme.SYSTEM),
+                        runCatching {
+                            MobileColorScheme.valueOf(
+                                prefs.getString("colorScheme", null) ?: defaults.colorScheme.name
+                            )
+                        }.getOrDefault(defaults.colorScheme),
                     theme = prefs.getString("theme", null),
                     lightTheme = prefs.getString("lightTheme", null),
                     darkTheme = prefs.getString("darkTheme", null),
-                    baseFontSize = prefs.getInt("baseFontSize", 16),
+                    baseFontSize = prefs.getInt("baseFontSize", defaults.baseFontSize.toInt()),
                     codeFontSize = prefs.getInt("codeFontSize", 0).takeIf { it != 0 },
                     terminalFontSize = prefs.getString("terminalFontSize", null)?.toDoubleOrNull(),
-                    codeWordWrap = prefs.getBoolean("codeWordWrap", false),
+                    codeWordWrap = prefs.getBoolean("codeWordWrap", defaults.codeWordWrap),
                 )
                 .normalized()
         }

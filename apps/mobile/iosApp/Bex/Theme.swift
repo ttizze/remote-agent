@@ -292,6 +292,10 @@ struct MobileAppearanceState: Equatable {
         mobileTypography(appearance: coreValue).terminalFontSize
     }
 
+    var resolvedCodeFontSize: Int {
+        Int(mobileTypography(appearance: coreValue).codeFontSize)
+    }
+
     func normalized() -> Self {
         Self(core: normalizeMobileAppearance(appearance: coreValue))
     }
