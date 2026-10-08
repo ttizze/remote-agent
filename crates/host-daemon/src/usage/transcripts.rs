@@ -117,9 +117,11 @@ pub(crate) fn parse_claude_value(value: &Value) -> Option<Record> {
             reasoning_tokens: 0,
         },
         reported_cost_usd: cost,
-        speed: (usage.get("speed").and_then(Value::as_str) == Some("fast"))
-            .then_some(Speed::Fast)
-            .unwrap_or(Speed::Standard),
+        speed: if usage.get("speed").and_then(Value::as_str) == Some("fast") {
+            Speed::Fast
+        } else {
+            Speed::Standard
+        },
         dedupe_key,
     })
 }
@@ -214,11 +216,11 @@ pub(crate) fn parse_codex_value(value: &Value, state: &mut CodexState) -> Option
         {
             state.session_id = id.into();
         }
-        if forked_session(payload) {
-            if let Some(at) = timestamp_ms(value.get("timestamp")) {
-                state.suppressing_fork_copies = true;
-                state.fork_copy_anchor_ms = at;
-            }
+        if forked_session(payload)
+            && let Some(at) = timestamp_ms(value.get("timestamp"))
+        {
+            state.suppressing_fork_copies = true;
+            state.fork_copy_anchor_ms = at;
         }
         return None;
     }

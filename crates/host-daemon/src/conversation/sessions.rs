@@ -126,6 +126,13 @@ pub(crate) struct ProviderPrograms {
 pub(crate) type BrowserConfig =
     Arc<dyn Fn(&ThreadId, Option<&str>) -> Option<Result<Value, String>> + Send + Sync>;
 
+type CodexLaunchConfig = (
+    PathBuf,
+    Option<PathBuf>,
+    Vec<String>,
+    BTreeMap<String, String>,
+);
+
 pub(crate) struct ProviderHost {
     pub(crate) spawner: Arc<dyn Spawner>,
     pub(crate) programs: ProviderPrograms,
@@ -151,18 +158,7 @@ impl ProviderHost {
             .cloned()
     }
 
-    fn codex_launch(
-        &self,
-        instance: &str,
-    ) -> Result<
-        (
-            PathBuf,
-            Option<PathBuf>,
-            Vec<String>,
-            BTreeMap<String, String>,
-        ),
-        String,
-    > {
+    fn codex_launch(&self, instance: &str) -> Result<CodexLaunchConfig, String> {
         let configured = self.configured_provider(instance);
         if configured
             .as_ref()

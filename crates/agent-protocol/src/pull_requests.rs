@@ -39,19 +39,14 @@ impl PullRequestRef {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum PullRequestListState {
     All,
+    #[default]
     Open,
     Closed,
     Merged,
-}
-
-impl Default for PullRequestListState {
-    fn default() -> Self {
-        Self::Open
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

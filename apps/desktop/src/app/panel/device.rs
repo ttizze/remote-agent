@@ -156,6 +156,9 @@ impl Desktop {
         }
     }
 
+    // Touch needs the target identity, session epoch, phase, frame geometry,
+    // and UI context as separate facts for the core projection and release path.
+    #[allow(clippy::too_many_arguments)]
     fn device_touch(
         &mut self,
         host_id: String,
@@ -323,16 +326,15 @@ impl Desktop {
             device_id.clone(),
             session_epoch.clone(),
         );
-        if self.panels.device.keyboard_target.as_ref() != Some(&target) {
-            if let Some((_old_thread, old_host, old_device, old_epoch)) =
+        if self.panels.device.keyboard_target.as_ref() != Some(&target)
+            && let Some((_old_thread, old_host, old_device, old_epoch)) =
                 self.panels.device.keyboard_target.replace(target)
-            {
-                self.perform(Intent::ReleaseDeviceInput {
-                    host_id: Some(old_host),
-                    device_id: old_device,
-                    session_epoch: Some(old_epoch),
-                });
-            }
+        {
+            self.perform(Intent::ReleaseDeviceInput {
+                host_id: Some(old_host),
+                device_id: old_device,
+                session_epoch: Some(old_epoch),
+            });
         }
         self.perform(Intent::DeviceAction {
             host_id: Some(host_id),
@@ -479,7 +481,7 @@ impl Desktop {
                 vec![agent_core::state::LocalFile {
                     path: path.to_string_lossy().into_owned(),
                     name,
-                    mime_type: mime_type.into(),
+                    mime_type,
                 }],
                 None,
             ))

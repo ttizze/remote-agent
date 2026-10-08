@@ -23,10 +23,11 @@ const UPDATE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const VERSION_LOOKUP_TIMEOUT: Duration = Duration::from_secs(4);
 const VERSION_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
 
-static NPM_VERSION_CACHE: OnceLock<Mutex<HashMap<String, (Instant, Option<String>)>>> =
-    OnceLock::new();
-static HOMEBREW_VERSION_CACHE: OnceLock<Mutex<HashMap<String, (Instant, Option<String>)>>> =
-    OnceLock::new();
+type VersionCacheEntry = (Instant, Option<String>);
+type VersionCache = OnceLock<Mutex<HashMap<String, VersionCacheEntry>>>;
+
+static NPM_VERSION_CACHE: VersionCache = OnceLock::new();
+static HOMEBREW_VERSION_CACHE: VersionCache = OnceLock::new();
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct UpdateCommand {

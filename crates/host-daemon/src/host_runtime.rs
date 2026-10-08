@@ -110,10 +110,10 @@ impl HostRuntime {
                         if health {
                             next_health = now + Duration::from_millis(activity.provider_health_refresh_interval_ms);
                         }
-                        if fetch || health {
-                            if let Err(error) = service.background_activity_tick(fetch, health).await {
-                                tracing::warn!(target: "bex", operation = "host.background_activity", message = %error);
-                            }
+                        if (fetch || health)
+                            && let Err(error) = service.background_activity_tick(fetch, health).await
+                        {
+                            tracing::warn!(target: "bex", operation = "host.background_activity", message = %error);
                         }
                         if now >= next_cleanup {
                             next_cleanup = now + Duration::from_secs(60);

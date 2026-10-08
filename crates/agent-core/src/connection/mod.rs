@@ -171,10 +171,9 @@ impl Store {
             .inner
             .intents
             .send(Event::ReportHostPower(snapshot, sender))
+            && let Event::ReportHostPower(_, complete) = error.0
         {
-            if let Event::ReportHostPower(_, complete) = error.0 {
-                let _ = complete.send(Err(invalid("Host connection is unavailable")));
-            }
+            let _ = complete.send(Err(invalid("Host connection is unavailable")));
         }
         receiver
     }
@@ -217,7 +216,7 @@ impl Store {
             .send(Event::Attach {
                 peer: peer.clone(),
                 host_name,
-                environment,
+                environment: Box::new(environment),
                 awareness_registration,
                 ticket: ticket.clone(),
                 session,

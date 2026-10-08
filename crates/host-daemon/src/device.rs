@@ -849,15 +849,14 @@ async fn run_process(
     let mut stdout_task = tokio::spawn(read_limited(stdout, overflow.clone()));
     let mut stderr_task = tokio::spawn(read_limited(stderr, overflow.clone()));
 
-    if let Some(input) = stdin {
-        if let Some(mut writer) = child.stdin.take() {
-            if let Err(error) = writer.write_all(input).await {
-                stop_child(&mut child).await;
-                stdout_task.abort();
-                stderr_task.abort();
-                return Err(error.to_string());
-            }
-        }
+    if let Some(input) = stdin
+        && let Some(mut writer) = child.stdin.take()
+        && let Err(error) = writer.write_all(input).await
+    {
+        stop_child(&mut child).await;
+        stdout_task.abort();
+        stderr_task.abort();
+        return Err(error.to_string());
     }
 
     let status = tokio::select! {
@@ -1851,7 +1850,7 @@ struct Inner {
     hosts: RwLock<BTreeMap<String, Arc<dyn DeviceHostRunner>>>,
     state: RwLock<DeviceServiceState>,
     events: broadcast::Sender<DeviceEvent>,
-    frame_sequences: Mutex<BTreeMap<(String, String, Option<u8>), u64>>,
+    frame_sequences: Mutex<BTreeMap<FrameSequenceKey, u64>>,
     session_epoch: AtomicU64,
     recording_sequence: AtomicU64,
     control_sequence: AtomicU64,
@@ -1866,6 +1865,8 @@ struct Inner {
     event_log_tasks: Mutex<BTreeMap<(String, String), EventLogTask>>,
     recovery_tasks: Mutex<BTreeMap<String, tokio::task::JoinHandle<()>>>,
 }
+
+type FrameSequenceKey = (String, String, Option<u8>);
 
 struct CaptureSource {
     references: Arc<AtomicUsize>,
@@ -1974,10 +1975,10 @@ fn finish_recording(
     mut recording: ActiveDeviceRecording,
 ) -> DeviceRecording {
     recording.recorder.finish();
-    if let Some(error) = recording.recorder.finish_error() {
-        if recording.error.is_none() {
-            recording.error = Some(error.to_owned());
-        }
+    if let Some(error) = recording.recorder.finish_error()
+        && recording.error.is_none()
+    {
+        recording.error = Some(error.to_owned());
     }
     let status = DeviceRecordingStatus {
         thread_id,
@@ -2062,8 +2063,10 @@ impl DeviceService {
         });
         let mut hosts = BTreeMap::new();
         hosts.insert(LOCAL_DEVICE_HOST_ID.into(), local);
-        let mut state = DeviceServiceState::default();
-        state.hosts = vec![local_summary(&state_root)];
+        let mut state = DeviceServiceState {
+            hosts: vec![local_summary(&state_root)],
+            ..DeviceServiceState::default()
+        };
         if let Ok(bytes) = std::fs::read(state_root.join("settings.json"))
             && let Ok(settings) = serde_json::from_slice::<PersistedDeviceSettings>(&bytes)
         {
@@ -2231,11 +2234,11 @@ impl DeviceService {
         }
 
         let previous = self.inner.agents.lock().await.remove(host_id);
-        if let Some(mut previous) = previous {
-            if let Some(mut tunnel) = previous.tunnel.take() {
-                let _ = tunnel.child.kill().await;
-                let _ = tunnel.child.wait().await;
-            }
+        if let Some(mut previous) = previous
+            && let Some(mut tunnel) = previous.tunnel.take()
+        {
+            let _ = tunnel.child.kill().await;
+            let _ = tunnel.child.wait().await;
         }
 
         let state_dir = root.join("agent-device").join("hosts").join(host_id);
@@ -3538,18 +3541,19 @@ impl DeviceService {
                 };
                 host_ready = true;
             }
-            if !host_ready && update_tool != Some(agent_protocol::device::DeviceTool::Agent) {
-                if let Err(error) = self.ensure_hub_tool(&host, !tool_update).await {
-                    statuses.insert(
-                        host.id().into(),
-                        DeviceHostStatusRecord {
-                            status: DeviceHostStatus::Failed,
-                            detail: Some(error),
-                        },
-                    );
-                    summaries.push(summary);
-                    continue;
-                }
+            if !host_ready
+                && update_tool != Some(agent_protocol::device::DeviceTool::Agent)
+                && let Err(error) = self.ensure_hub_tool(&host, !tool_update).await
+            {
+                statuses.insert(
+                    host.id().into(),
+                    DeviceHostStatusRecord {
+                        status: DeviceHostStatus::Failed,
+                        detail: Some(error),
+                    },
+                );
+                summaries.push(summary);
+                continue;
             }
             if host.kind() == DeviceHostKind::Local
                 && update_tool != Some(agent_protocol::device::DeviceTool::Agent)
@@ -3578,12 +3582,12 @@ impl DeviceService {
                     summaries.push(summary);
                     continue;
                 }
-                if host.kind() == DeviceHostKind::Ssh {
-                    if let Some(mut probe) = host.probe() {
-                        probe.agent_device_installed = true;
-                        host.set_probe(probe);
-                        summary = host_summary(host.as_ref());
-                    }
+                if host.kind() == DeviceHostKind::Ssh
+                    && let Some(mut probe) = host.probe()
+                {
+                    probe.agent_device_installed = true;
+                    host.set_probe(probe);
+                    summary = host_summary(host.as_ref());
                 }
                 summary.agent_device_installed = true;
             }
@@ -3955,7 +3959,7 @@ impl DeviceService {
             let mut remaining = BTreeMap::new();
             for ((thread, host_id, device_id), recording) in current {
                 if closing.iter().any(|session| {
-                    &session.thread_id == &thread
+                    session.thread_id == thread
                         && session.host_id == host_id
                         && session.device_id == device_id
                 }) {
@@ -4647,6 +4651,9 @@ impl DeviceService {
         }
     }
 
+    // Keep source identity, generation, transport, dimensions, and preference
+    // separate: each is independently validated before an event is published.
+    #[allow(clippy::too_many_arguments)]
     async fn publish_source_frame(
         &self,
         key: &(String, String),
@@ -4695,7 +4702,7 @@ impl DeviceService {
             .next_frame_sequence(&owner.host_id, &owner.device_id, frame.screen_id)
             .await;
         for session in sessions {
-            if !session_matches_generation(&generation_sessions, &session) {
+            if !session_matches_generation(generation_sessions, &session) {
                 continue;
             }
             let _ = self.inner.events.send(DeviceEvent::Video(DeviceVideoFrame {
@@ -4731,7 +4738,7 @@ impl DeviceService {
             .cloned()
             .collect::<Vec<_>>();
         for session in sessions {
-            if !session_matches_generation(&generation_sessions, &session) {
+            if !session_matches_generation(generation_sessions, &session) {
                 continue;
             }
             screen.thread_id = Some(session.thread_id.clone());
@@ -5577,29 +5584,28 @@ async fn ensure_agent_daemon(
         .map_err(|error| format!("could not start agent-device daemon: {error}"))?;
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
     loop {
-        if let Ok(bytes) = tokio::fs::read(&daemon_file).await {
-            if let Ok(daemon) = serde_json::from_slice::<AgentDaemonState>(&bytes)
-                && loopback_http_ok(daemon.http_port, "/health").await
+        if let Ok(bytes) = tokio::fs::read(&daemon_file).await
+            && let Ok(daemon) = serde_json::from_slice::<AgentDaemonState>(&bytes)
+            && loopback_http_ok(daemon.http_port, "/health").await
+        {
+            if let Err(error) = write_private_json(
+                &agent_file,
+                &PersistedAgentState {
+                    entry_path: entry_string.clone(),
+                    version: AGENT_VERSION.into(),
+                },
+            )
+            .await
             {
-                if let Err(error) = write_private_json(
-                    &agent_file,
-                    &PersistedAgentState {
-                        entry_path: entry_string.clone(),
-                        version: AGENT_VERSION.into(),
-                    },
-                )
-                .await
-                {
-                    let _ = child.kill().await;
-                    let _ = child.wait().await;
-                    let _ = tokio::fs::remove_file(&daemon_file).await;
-                    return Err(error);
-                }
-                tokio::spawn(async move {
-                    let _ = child.wait().await;
-                });
-                return Ok(daemon);
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                let _ = tokio::fs::remove_file(&daemon_file).await;
+                return Err(error);
             }
+            tokio::spawn(async move {
+                let _ = child.wait().await;
+            });
+            return Ok(daemon);
         }
         if let Some(status) = child.try_wait().map_err(|error| error.to_string())? {
             return Err(format!(
@@ -6048,7 +6054,7 @@ fn installed_tool_versions(root: &Path, package: &str, entry: &[&str]) -> Vec<St
             entry_path.is_file().then_some(version)
         })
         .collect::<Vec<_>>();
-    versions.sort_by(|left, right| version_sort_key(left).cmp(&version_sort_key(right)));
+    versions.sort_by_key(|left| version_sort_key(left));
     versions
 }
 
@@ -6289,6 +6295,9 @@ async fn send_source_message(
     }
 }
 
+// The reader receives the complete source identity and cancellation handle so
+// it can own one transport without consulting mutable session state.
+#[allow(clippy::too_many_arguments)]
 async fn persistent_avcc_reader(
     port: u16,
     device_id: String,
@@ -6563,8 +6572,8 @@ async fn screen_config_reader(
             _ = cancel.cancelled() => return,
             result = tokio::time::timeout(Duration::from_secs(10), hub_screen_config(port, platform, &device_id)) => result,
         };
-        if let Ok(Ok(screen)) = screen {
-            if !send_source_message(
+        if let Ok(Ok(screen)) = screen
+            && !send_source_message(
                 &sender,
                 SourceMessage::Screen {
                     epoch: epoch.clone(),
@@ -6573,9 +6582,8 @@ async fn screen_config_reader(
                 &cancel,
             )
             .await
-            {
-                return;
-            }
+        {
+            return;
         }
         if !sleep_until_cancelled(&cancel, Duration::from_secs(1)).await {
             return;
@@ -8982,7 +8990,7 @@ mod tests {
             .unwrap();
         match message {
             async_tungstenite::tungstenite::Message::Text(text) => {
-                let payload: serde_json::Value = serde_json::from_str(&text.to_string()).unwrap();
+                let payload: serde_json::Value = serde_json::from_str(text.as_ref()).unwrap();
                 assert_eq!(payload, serde_json::json!({"type": "text", "text": "!"}));
             }
             other => panic!("unexpected Android text frame: {other:?}"),
@@ -9011,7 +9019,7 @@ mod tests {
             .unwrap();
         match message {
             async_tungstenite::tungstenite::Message::Text(text) => {
-                let payload: serde_json::Value = serde_json::from_str(&text.to_string()).unwrap();
+                let payload: serde_json::Value = serde_json::from_str(text.as_ref()).unwrap();
                 assert_eq!(payload, serde_json::json!({"type": "text", "text": "é"}));
             }
             other => panic!("unexpected Android Unicode frame: {other:?}"),
@@ -9058,7 +9066,7 @@ mod tests {
             .unwrap();
         match message {
             async_tungstenite::tungstenite::Message::Text(text) => {
-                let payload: serde_json::Value = serde_json::from_str(&text.to_string()).unwrap();
+                let payload: serde_json::Value = serde_json::from_str(text.as_ref()).unwrap();
                 assert_eq!(payload["type"], "touch");
                 assert_eq!(payload["action"], "up");
                 // JSON preserves the exact f32 wire value; compare after the
@@ -9092,7 +9100,7 @@ mod tests {
             .unwrap();
         match message {
             async_tungstenite::tungstenite::Message::Text(text) => {
-                let payload: serde_json::Value = serde_json::from_str(&text.to_string()).unwrap();
+                let payload: serde_json::Value = serde_json::from_str(text.as_ref()).unwrap();
                 assert_eq!(payload["type"], "key");
                 assert_eq!(payload["keycode"], 21);
             }
@@ -9545,7 +9553,7 @@ mod tests {
             })
             .await
             .unwrap();
-        assert_eq!(recording.status.active, false);
+        assert!(!recording.status.active);
         assert!(recording.status.error.unwrap().contains("byte limit"));
         assert!(recording.bytes.is_empty());
     }

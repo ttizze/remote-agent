@@ -55,82 +55,6 @@ impl Next {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn registration() -> PushDeviceRegistration {
-        PushDeviceRegistration {
-            device_id: "device".into(),
-            platform: "ios".into(),
-            token: "token".into(),
-            live_activity_token: Some("activity".into()),
-            push_to_start_token: Some("start".into()),
-            bundle_id: Some("dev.remoteagent.mobile".into()),
-            apns_environment: Some("sandbox".into()),
-            push_available: true,
-            notifications_authorized: true,
-            live_activities_available: true,
-        }
-    }
-
-    #[test]
-    fn push_registration_maps_native_values_to_host_contract() {
-        let value = push_registration(registration(), true).unwrap();
-        assert_eq!(value.platform, agent_protocol::push::PushPlatform::Ios);
-        assert_eq!(
-            value.apns_environment,
-            Some(agent_protocol::push::ApnsEnvironment::Sandbox)
-        );
-        assert!(value.preferences.notifications_enabled);
-        assert!(value.preferences.notify_on_approval);
-        assert!(value.preferences.notify_on_input);
-        assert!(value.preferences.notify_on_completion);
-        assert!(value.preferences.notify_on_failure);
-        assert!(value.preferences.live_activities_enabled);
-    }
-
-    #[test]
-    fn push_registration_combines_provider_and_os_facts_once() {
-        let mut value = registration();
-        value.notifications_authorized = false;
-        let request = push_registration(value, true).unwrap();
-        assert!(!request.preferences.notifications_enabled);
-        assert!(request.preferences.live_activities_enabled);
-        assert!(request.preferences.notify_on_approval);
-        assert!(request.preferences.notify_on_input);
-        assert!(request.preferences.notify_on_completion);
-        assert!(request.preferences.notify_on_failure);
-
-        let mut value = registration();
-        value.push_available = false;
-        value.notifications_authorized = true;
-        let request = push_registration(value, true).unwrap();
-        assert!(!request.preferences.notifications_enabled);
-        assert!(!request.preferences.live_activities_enabled);
-
-        let request = push_registration(registration(), false).unwrap();
-        assert!(request.preferences.notifications_enabled);
-        assert!(!request.preferences.live_activities_enabled);
-
-        let mut value = registration();
-        value.live_activities_available = false;
-        let request = push_registration(value, true).unwrap();
-        assert!(request.preferences.notifications_enabled);
-        assert!(!request.preferences.live_activities_enabled);
-    }
-
-    #[test]
-    fn push_registration_rejects_unknown_provider_values() {
-        let mut value = registration();
-        value.platform = "web".into();
-        assert!(push_registration(value, true).is_err());
-        let mut value = registration();
-        value.apns_environment = Some("staging".into());
-        assert!(push_registration(value, true).is_err());
-    }
-}
-
 pub(super) fn invalid(error: impl std::fmt::Display) -> PeerError {
     super::invalid(error)
 }
@@ -822,7 +746,7 @@ impl Owner {
                 url,
                 enabled,
             } => Next::call(
-                Call::SetPullRequestWatch(pr::SetPullRequestWatch {
+                Call::SetPullRequestWatch(Box::new(pr::SetPullRequestWatch {
                     thread_id,
                     project_id,
                     link: agent_domain::PullRequestLink {
@@ -834,13 +758,13 @@ impl Owner {
                         linked_at: agent_domain::Timestamp::from_millis(
                             super::owner::now_ms() as i64
                         )
-                        .map_err(|error| invalid(error))?,
+                        .map_err(invalid)?,
                         snapshot: None,
                         stack: None,
                         watch: None,
                     },
                     enabled,
-                }),
+                })),
                 None,
             ),
             Intent::LoadSourceControlAuth { cwd } => Next::call(
@@ -3021,5 +2945,81 @@ fn parse_pull_request_verdict(value: &str) -> Result<pr::PullRequestReviewVerdic
         "request_changes" | "changes" => Ok(pr::PullRequestReviewVerdict::RequestChanges),
         "comment" => Ok(pr::PullRequestReviewVerdict::Comment),
         _ => Err(invalid("unknown pull request review verdict")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn registration() -> PushDeviceRegistration {
+        PushDeviceRegistration {
+            device_id: "device".into(),
+            platform: "ios".into(),
+            token: "token".into(),
+            live_activity_token: Some("activity".into()),
+            push_to_start_token: Some("start".into()),
+            bundle_id: Some("dev.remoteagent.mobile".into()),
+            apns_environment: Some("sandbox".into()),
+            push_available: true,
+            notifications_authorized: true,
+            live_activities_available: true,
+        }
+    }
+
+    #[test]
+    fn push_registration_maps_native_values_to_host_contract() {
+        let value = push_registration(registration(), true).unwrap();
+        assert_eq!(value.platform, agent_protocol::push::PushPlatform::Ios);
+        assert_eq!(
+            value.apns_environment,
+            Some(agent_protocol::push::ApnsEnvironment::Sandbox)
+        );
+        assert!(value.preferences.notifications_enabled);
+        assert!(value.preferences.notify_on_approval);
+        assert!(value.preferences.notify_on_input);
+        assert!(value.preferences.notify_on_completion);
+        assert!(value.preferences.notify_on_failure);
+        assert!(value.preferences.live_activities_enabled);
+    }
+
+    #[test]
+    fn push_registration_combines_provider_and_os_facts_once() {
+        let mut value = registration();
+        value.notifications_authorized = false;
+        let request = push_registration(value, true).unwrap();
+        assert!(!request.preferences.notifications_enabled);
+        assert!(request.preferences.live_activities_enabled);
+        assert!(request.preferences.notify_on_approval);
+        assert!(request.preferences.notify_on_input);
+        assert!(request.preferences.notify_on_completion);
+        assert!(request.preferences.notify_on_failure);
+
+        let mut value = registration();
+        value.push_available = false;
+        value.notifications_authorized = true;
+        let request = push_registration(value, true).unwrap();
+        assert!(!request.preferences.notifications_enabled);
+        assert!(!request.preferences.live_activities_enabled);
+
+        let request = push_registration(registration(), false).unwrap();
+        assert!(request.preferences.notifications_enabled);
+        assert!(!request.preferences.live_activities_enabled);
+
+        let mut value = registration();
+        value.live_activities_available = false;
+        let request = push_registration(value, true).unwrap();
+        assert!(request.preferences.notifications_enabled);
+        assert!(!request.preferences.live_activities_enabled);
+    }
+
+    #[test]
+    fn push_registration_rejects_unknown_provider_values() {
+        let mut value = registration();
+        value.platform = "web".into();
+        assert!(push_registration(value, true).is_err());
+        let mut value = registration();
+        value.apns_environment = Some("staging".into());
+        assert!(push_registration(value, true).is_err());
     }
 }

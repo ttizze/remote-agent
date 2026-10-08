@@ -169,15 +169,14 @@ pub fn update_watch_detail(
         .iter()
         .map(|comment| comment.created_at.millis())
         .max()
+        && let Ok(timestamp) = Timestamp::from_millis(latest)
     {
-        if let Ok(timestamp) = Timestamp::from_millis(latest) {
-            watch.remarks_through = Some(timestamp);
-            watch.remark_ids = fresh
-                .iter()
-                .filter(|comment| comment.created_at.millis() == latest)
-                .map(|comment| comment.id.clone())
-                .collect();
-        }
+        watch.remarks_through = Some(timestamp);
+        watch.remark_ids = fresh
+            .iter()
+            .filter(|comment| comment.created_at.millis() == latest)
+            .map(|comment| comment.id.clone())
+            .collect();
     }
 
     let progress = detail.summary.head_sha != before.head_sha

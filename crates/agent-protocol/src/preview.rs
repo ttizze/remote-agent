@@ -21,17 +21,13 @@ pub const COMMON_DEV_PORTS: &[u16] = &[
     3000, 3001, 3333, 4173, 4200, 4321, 5000, 5173, 5174, 5175, 5500, 8000, 8080, 8081, 8888, 9000,
 ];
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PreviewAppearance {
+    #[default]
     System,
     Light,
     Dark,
-}
-impl Default for PreviewAppearance {
-    fn default() -> Self {
-        Self::System
-    }
 }
 
 /// Where links open when a client offers an in-app Preview surface.
@@ -161,9 +157,10 @@ const fn p(
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "_tag", rename_all = "lowercase")]
 pub enum PreviewViewportSetting {
+    #[default]
     Fill,
     Freeform {
         width: u32,
@@ -175,11 +172,6 @@ pub enum PreviewViewportSetting {
         width: u32,
         height: u32,
     },
-}
-impl Default for PreviewViewportSetting {
-    fn default() -> Self {
-        Self::Fill
-    }
 }
 impl PreviewViewportSetting {
     pub fn dimensions(self) -> Option<(u32, u32)> {
@@ -214,7 +206,7 @@ pub fn validate_viewport_dimensions(width: u32, height: u32) -> Result<(), Strin
     Ok(())
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum PreviewZoom {
     X25,
     X33,
@@ -223,6 +215,7 @@ pub enum PreviewZoom {
     X75,
     X80,
     X90,
+    #[default]
     X100,
     X110,
     X125,
@@ -311,15 +304,11 @@ impl PreviewZoom {
         Self::LEVELS[next]
     }
 }
-impl Default for PreviewZoom {
-    fn default() -> Self {
-        Self::X100
-    }
-}
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "_tag", rename_all = "PascalCase")]
 pub enum PreviewNavStatus {
+    #[default]
     Idle,
     Loading {
         url: String,
@@ -335,11 +324,6 @@ pub enum PreviewNavStatus {
         code: i32,
         description: String,
     },
-}
-impl Default for PreviewNavStatus {
-    fn default() -> Self {
-        Self::Idle
-    }
 }
 impl PreviewNavStatus {
     pub fn validate(&self) -> Result<(), String> {

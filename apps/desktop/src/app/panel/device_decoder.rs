@@ -126,11 +126,8 @@ impl DecoderWorker {
     }
 
     fn drain(&self, output: &mut Vec<WorkerOutput>) {
-        loop {
-            match self.output.try_recv() {
-                Ok(item) => output.push(item),
-                Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
-            }
+        while let Ok(item) = self.output.try_recv() {
+            output.push(item);
         }
     }
 
@@ -155,6 +152,7 @@ impl Drop for DecoderWorker {
     }
 }
 
+#[derive(Default)]
 pub(super) struct DeviceVideoDecoder {
     latest_sequence: BTreeMap<StreamKey, u64>,
     awaiting_keyframe: BTreeSet<StreamKey>,
@@ -162,19 +160,6 @@ pub(super) struct DeviceVideoDecoder {
     decoded_sequence: BTreeMap<StreamKey, u64>,
     workers: BTreeMap<StreamKey, DecoderWorker>,
     error: Option<String>,
-}
-
-impl Default for DeviceVideoDecoder {
-    fn default() -> Self {
-        Self {
-            latest_sequence: BTreeMap::new(),
-            awaiting_keyframe: BTreeSet::new(),
-            descriptions: BTreeMap::new(),
-            decoded_sequence: BTreeMap::new(),
-            workers: BTreeMap::new(),
-            error: None,
-        }
-    }
 }
 
 impl DeviceVideoDecoder {
@@ -753,14 +738,13 @@ fn drain_reader(
     loop {
         match reader.try_recv() {
             Ok(ReaderEvent::Image(bytes)) => {
-                if let Some(sequence) = pending.pop_front() {
-                    if output
+                if let Some(sequence) = pending.pop_front()
+                    && output
                         .try_send(WorkerOutput::Image { sequence, bytes })
                         .is_err()
-                    {
-                        ended = true;
-                        break;
-                    }
+                {
+                    ended = true;
+                    break;
                 }
             }
             Ok(ReaderEvent::Error(error)) => {

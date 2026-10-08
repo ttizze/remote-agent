@@ -909,49 +909,47 @@ impl HostRpcService {
                             },
                         ) => {}
                     }
-                    if detail.summary.state == agent_domain::PullRequestState::Open {
-                        if let Some(wake) = wake.filter(|wake| !wake.text.trim().is_empty()) {
-                            let message_id = MessageId::new(format!(
-                                "pull-request-watch:{}",
-                                uuid::Uuid::new_v4()
-                            ))
-                            .expect("generated watch message ids are nonempty");
-                            let notification = Notification {
-                                source: NotificationSource::Native(BackgroundKind::Monitor),
-                                child_thread: None,
-                                outcome: if wake.failed {
-                                    NotificationOutcome::Failed
-                                } else {
-                                    NotificationOutcome::Updated
-                                },
-                                summary: wake.detail.clone(),
-                                detail: Some(wake.detail.clone()),
-                            };
-                            tokio::select! {
-                                _ = stop.cancelled() => return,
-                                _ = conversation.dispatch_host_command(
-                                    thread,
-                                    Command::PullRequestWake {
-                                        message: SendMessage {
-                                            context: None,
-                                            created_by: MessageAuthor::Agent,
-                                            creation_source: "pull-request-watch".into(),
-                                            id: message_id,
-                                            text: wake.text,
-                                            attachments: vec![],
-                                            selection: None,
-                                            mode: DispatchMode::QueueAfterActive,
-                                            scheduled_task: None,
-                                            intent: None,
-                                            source_plan: None,
-                                            resolved_plan: None,
-                                            continuation: None,
-                                            title_seed: None,
-                                        },
-                                        notification,
+                    if detail.summary.state == agent_domain::PullRequestState::Open
+                        && let Some(wake) = wake.filter(|wake| !wake.text.trim().is_empty())
+                    {
+                        let message_id =
+                            MessageId::new(format!("pull-request-watch:{}", uuid::Uuid::new_v4()))
+                                .expect("generated watch message ids are nonempty");
+                        let notification = Notification {
+                            source: NotificationSource::Native(BackgroundKind::Monitor),
+                            child_thread: None,
+                            outcome: if wake.failed {
+                                NotificationOutcome::Failed
+                            } else {
+                                NotificationOutcome::Updated
+                            },
+                            summary: wake.detail.clone(),
+                            detail: Some(wake.detail.clone()),
+                        };
+                        tokio::select! {
+                            _ = stop.cancelled() => return,
+                            _ = conversation.dispatch_host_command(
+                                thread,
+                                Command::PullRequestWake {
+                                    message: SendMessage {
+                                        context: None,
+                                        created_by: MessageAuthor::Agent,
+                                        creation_source: "pull-request-watch".into(),
+                                        id: message_id,
+                                        text: wake.text,
+                                        attachments: vec![],
+                                        selection: None,
+                                        mode: DispatchMode::QueueAfterActive,
+                                        scheduled_task: None,
+                                        intent: None,
+                                        source_plan: None,
+                                        resolved_plan: None,
+                                        continuation: None,
+                                        title_seed: None,
                                     },
-                                ) => {}
-                            }
+                                    notification,
+                                },
+                            ) => {}
                         }
                     }
                 }
@@ -2436,15 +2434,14 @@ impl HostRpcService {
                         .await;
                         match setup {
                             Ok(SetupRun::Started(started)) => {
-                                if !started.run_async {
-                                    if let Some(completion) = started.completion {
-                                        if completion.await != Some(0) {
-                                            tracing::warn!(
-                                                operation = "host.vcs.pull_request_setup",
-                                                "pull request setup script did not complete successfully"
-                                            );
-                                        }
-                                    }
+                                if !started.run_async
+                                    && let Some(completion) = started.completion
+                                    && completion.await != Some(0)
+                                {
+                                    tracing::warn!(
+                                        operation = "host.vcs.pull_request_setup",
+                                        "pull request setup script did not complete successfully"
+                                    );
                                 }
                             }
                             Ok(SetupRun::NoScript) => {}
@@ -3685,7 +3682,7 @@ impl HostRpcService {
         let driver = configured
             .as_ref()
             .map(|config| config.driver)
-            .or_else(|| match params.instance.as_str() {
+            .or(match params.instance.as_str() {
                 "codex" => Some(Driver::Codex),
                 "claude" => Some(Driver::Claude),
                 _ => None,
@@ -3821,7 +3818,7 @@ impl HostRpcService {
         let driver = configured
             .as_ref()
             .map(|config| config.driver)
-            .or_else(|| match params.instance.as_str() {
+            .or(match params.instance.as_str() {
                 "codex" => Some(Driver::Codex),
                 "claude" => Some(Driver::Claude),
                 _ => None,

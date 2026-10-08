@@ -19,6 +19,7 @@ use std::{
 use tokio::sync::{Mutex, watch};
 use tokio_util::sync::CancellationToken;
 
+#[derive(Default)]
 struct Page {
     tabs: Vec<String>,
     active: String,
@@ -42,21 +43,6 @@ struct Page {
         ),
     >,
 }
-impl Default for Page {
-    fn default() -> Self {
-        Self {
-            tabs: Vec::new(),
-            active: String::new(),
-            active_by_owner: HashMap::new(),
-            viewports: HashMap::new(),
-            preview_tabs: HashSet::new(),
-            preview_profiles: HashMap::new(),
-            preview_profile_owners: HashMap::new(),
-            preview_settings: HashMap::new(),
-        }
-    }
-}
-
 impl Page {
     fn viewport(&self) -> (u32, u32) {
         self.viewports
@@ -307,10 +293,10 @@ impl Browser {
         }
     }
 
-    fn chrome_for_key<'a>(
-        state: &'a mut State,
+    fn chrome_for_key(
+        state: &mut State,
         key: Option<PreviewChromeKey>,
-    ) -> Result<&'a mut cdp::Chrome, String> {
+    ) -> Result<&mut cdp::Chrome, String> {
         match key {
             Some(key) => state
                 .preview_chromes
@@ -789,7 +775,7 @@ impl Browser {
                 wait_for_recording_startup(&mut startup),
             )
             .await;
-            if let Err(_) = startup_result {
+            if startup_result.is_err() {
                 abort.abort();
                 return Err(format!(
                     "recording startup did not settle before stopping for preview tab {tab_id}"
@@ -1457,6 +1443,10 @@ impl Browser {
     /// Creates a Host browser tab for the Preview surface and returns its
     /// first frame. Existing agent browser tabs remain in the same conversation
     /// scope and are never replaced.
+    // Keep the tab identity, viewport, client owner, and profile explicit at
+    // this resource boundary; bundling them would hide which owner controls
+    // the browser partition and rendered dimensions.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn open_preview_tab_for_owner(
         &self,
         owner: &str,
@@ -1752,9 +1742,7 @@ impl Browser {
                 return Err(format!("closing Preview tab {tab_id} was cancelled"));
             }
         };
-        if let Err(error) = close_result {
-            return Err(error);
-        }
+        close_result?;
         let page = state.pages.get_mut(thread).unwrap();
         page.tabs.retain(|id| id != tab_id);
         page.viewports.remove(tab_id);
@@ -2232,7 +2220,7 @@ impl Browser {
         };
         let selected = owner.and_then(|owner| page.selected_for_owner(Some(owner)));
         let active = preferred
-            .filter(|tab_id| authorized(*tab_id))
+            .filter(|tab_id| authorized(tab_id))
             .or_else(|| selected.filter(|tab_id| authorized(tab_id)))
             .or_else(|| owned_preview().map(String::as_str))
             .or_else(|| {

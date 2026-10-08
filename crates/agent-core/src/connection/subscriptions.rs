@@ -1,7 +1,7 @@
 //! Shell, thread and setup subscriptions: opening them from the folded cursor,
 //! applying their items, retrying refusals and keeping recent threads.
 use super::{
-    owner::{Event, Owner, Stream, StreamKey, new_id, now_ms, timestamp},
+    owner::{DetailResult, Event, Owner, Stream, StreamKey, new_id, now_ms, timestamp},
     streams::{Payload, Target, follow, rpc_failure},
 };
 use crate::{
@@ -14,7 +14,7 @@ use crate::{
     },
 };
 use agent_domain::WorktreeSetupSnapshot;
-use agent_domain::{Item, RunStatus, ThreadId, TurnItemId};
+use agent_domain::{RunStatus, ThreadId, TurnItemId};
 use agent_protocol::conversation::{
     GetTurnItem, HistoryPage, ReadHistory, ShellLocation, ShellUpdate, SubscribeSetup, ThreadUpdate,
 };
@@ -642,11 +642,7 @@ impl Owner {
                 state_after.as_deref(),
             );
         self.stream_publish_deferred = !should_publish;
-        if should_publish {
-            self.stream_publish_pending = false;
-        } else {
-            self.stream_publish_pending = true;
-        }
+        self.stream_publish_pending = !should_publish;
         self.thread_applied(thread, applied);
         failed.then_some(deleted)
     }
@@ -969,7 +965,7 @@ impl Owner {
         &mut self,
         thread: &ThreadId,
         item: &TurnItemId,
-        result: Result<Option<(Item, Option<agent_domain::Task>)>, PeerError>,
+        result: DetailResult,
     ) {
         let Some(sync) = self.state.threads.get_mut(thread) else {
             return;

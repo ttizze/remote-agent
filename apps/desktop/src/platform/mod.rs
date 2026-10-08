@@ -658,17 +658,6 @@ fn write_desktop_handoff_attempt(
     Ok(true)
 }
 
-fn acknowledge_desktop_handoff_at(
-    directory: &std::path::Path,
-    current_executable: &std::path::Path,
-) -> anyhow::Result<bool> {
-    if !desktop_handoff_attempt_matches(directory, current_executable)? {
-        return Ok(false);
-    }
-    std::fs::remove_file(desktop_handoff_attempt_path(directory))?;
-    Ok(true)
-}
-
 fn desktop_handoff_attempt_matches(
     directory: &std::path::Path,
     current_executable: &std::path::Path,
@@ -737,7 +726,7 @@ fn desktop_handoff_attempt_is_live(attempt: &DesktopHandoffAttempt) -> bool {
     #[cfg(unix)]
     {
         let result = unsafe { libc::kill(attempt.owner_pid as libc::pid_t, 0) };
-        return result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
+        result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
     }
     #[cfg(not(unix))]
     {
@@ -867,9 +856,8 @@ pub(crate) fn handoff_installed_desktop() -> anyhow::Result<bool> {
 #[cfg(test)]
 mod update_handoff_tests {
     use super::{
-        DesktopHandoffAttempt, acknowledge_desktop_handoff_at,
-        resolve_installed_desktop_executable, resolve_installed_host_executable,
-        write_desktop_handoff_attempt,
+        DesktopHandoffAttempt, resolve_installed_desktop_executable,
+        resolve_installed_host_executable,
     };
     use std::{fs, path::PathBuf};
 
@@ -1002,26 +990,6 @@ mod update_handoff_tests {
             resolve_installed_desktop_executable(directory.path()).expect("handoff read"),
             Some(executable),
         );
-    }
-
-    #[test]
-    fn desktop_handoff_waits_for_the_installed_process_to_acknowledge() {
-        let directory = tempfile::tempdir().expect("temporary Desktop state directory");
-        let expected = directory.path().join("installed-desktop");
-        let current = directory.path().join("current-desktop");
-        fs::write(&expected, b"installed").expect("installed executable");
-        fs::write(&current, b"current").expect("current executable");
-        assert!(
-            write_desktop_handoff_attempt(directory.path(), &expected, "1.0.0")
-                .expect("write marker")
-        );
-        assert!(
-            !write_desktop_handoff_attempt(directory.path(), &current, "1.0.0")
-                .expect("claim marker")
-        );
-        assert!(!acknowledge_desktop_handoff_at(directory.path(), &current).expect("old app"));
-        assert!(acknowledge_desktop_handoff_at(directory.path(), &expected).expect("new app"));
-        assert!(!super::desktop_handoff_attempt_path(directory.path()).exists());
     }
 
     #[test]
@@ -1497,7 +1465,7 @@ pub(crate) async fn capture_snapshot(
             .then_some(())
             .ok_or_else(|| snapshot_command_failed("screencapture", &output))?;
         write_snapshot_metadata(path, window.as_ref())?;
-        return Ok(());
+        Ok(())
     }
     #[cfg(target_os = "linux")]
     {
@@ -1512,7 +1480,7 @@ pub(crate) async fn capture_snapshot(
             .then_some(())
             .ok_or_else(|| snapshot_command_failed("gnome-screenshot", &output))?;
         write_snapshot_metadata(path, window.as_ref())?;
-        return Ok(());
+        Ok(())
     }
     #[cfg(target_os = "windows")]
     {

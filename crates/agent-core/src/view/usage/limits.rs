@@ -325,6 +325,17 @@ fn order_reset(account: &UsageLimitAccount, kind: &str, id: &str) -> i64 {
         .unwrap_or(i64::MAX)
 }
 
+struct WindowGroup {
+    kind: String,
+    id: String,
+    members: Vec<WindowGroupMember>,
+}
+
+struct WindowGroupMember {
+    account_index: usize,
+    window: UsageLimitWindow,
+}
+
 fn pool_windows(accounts: &[UsageLimitAccount], now_ms: i64) -> Vec<UsageLimitPoolWindow> {
     let order_window = accounts
         .iter()
@@ -344,52 +355,60 @@ fn pool_windows(accounts: &[UsageLimitAccount], now_ms: i64) -> Vec<UsageLimitPo
             .then_with(|| left.id.cmp(&right.id))
     });
 
-    let mut groups: Vec<(String, String, Vec<(usize, UsageLimitWindow)>)> = Vec::new();
+    let mut groups: Vec<WindowGroup> = Vec::new();
     for (account_index, account) in sorted_accounts.iter().enumerate() {
         for window in &account.windows {
             let group = groups
                 .iter_mut()
-                .find(|(kind, id, _)| kind == &window.kind && id == &window.id);
-            if let Some((_, _, members)) = group {
-                members.push((account_index, window.clone()));
+                .find(|group| group.kind == window.kind && group.id == window.id);
+            if let Some(group) = group {
+                group.members.push(WindowGroupMember {
+                    account_index,
+                    window: window.clone(),
+                });
             } else {
-                groups.push((
-                    window.kind.clone(),
-                    window.id.clone(),
-                    vec![(account_index, window.clone())],
-                ));
+                groups.push(WindowGroup {
+                    kind: window.kind.clone(),
+                    id: window.id.clone(),
+                    members: vec![WindowGroupMember {
+                        account_index,
+                        window: window.clone(),
+                    }],
+                });
             }
         }
     }
-    groups.sort_by_key(|(kind, _, _)| kind_rank(kind));
+    groups.sort_by_key(|group| kind_rank(&group.kind));
 
     groups
         .into_iter()
-        .map(|(kind, id, members)| {
-            let first = &members[0].1;
+        .map(|group| {
+            let WindowGroup { kind, id, members } = group;
+            let first = &members[0].window;
             let used_average = members
                 .iter()
-                .map(|(_, window)| window.used_percent)
+                .map(|member| member.window.used_percent)
                 .sum::<f64>()
                 / members.len() as f64;
             let used_percent = used_average.round() as u32;
             let mut resets = members
                 .iter()
-                .filter_map(|(index, window)| {
-                    reset_millis(window).map(|at| UsageLimitPoolReset {
-                        account_id: sorted_accounts[*index].id.clone(),
-                        label: account_label(&sorted_accounts[*index]),
+                .filter_map(|member| {
+                    reset_millis(&member.window).map(|at| UsageLimitPoolReset {
+                        account_id: sorted_accounts[member.account_index].id.clone(),
+                        label: account_label(&sorted_accounts[member.account_index]),
                         at,
-                        restores_percent: (window.used_percent / members.len() as f64).round()
-                            as u32,
+                        restores_percent: (member.window.used_percent / members.len() as f64)
+                            .round() as u32,
                     })
                 })
                 .collect::<Vec<_>>();
             resets.sort_by_key(|reset| reset.at);
             let timed = members
                 .iter()
-                .filter_map(|(_, window)| {
-                    elapsed_share(window, now_ms).map(|elapsed| (window.used_percent, elapsed))
+                .filter_map(|member| {
+                    elapsed_share(&member.window, now_ms)
+                        .map(|elapsed| (member.window.used_percent, elapsed))
                 })
                 .collect::<Vec<_>>();
             let pace = (!timed.is_empty()).then(|| {
@@ -400,10 +419,10 @@ fn pool_windows(accounts: &[UsageLimitAccount], now_ms: i64) -> Vec<UsageLimitPo
             });
             let members = members
                 .iter()
-                .map(|(index, window)| UsageLimitPoolMember {
-                    account_id: sorted_accounts[*index].id.clone(),
-                    label: account_label(&sorted_accounts[*index]),
-                    window: window.clone(),
+                .map(|member| UsageLimitPoolMember {
+                    account_id: sorted_accounts[member.account_index].id.clone(),
+                    label: account_label(&sorted_accounts[member.account_index]),
+                    window: member.window.clone(),
                 })
                 .collect::<Vec<_>>();
             let columns = sorted_accounts

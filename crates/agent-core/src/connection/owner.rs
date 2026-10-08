@@ -28,6 +28,9 @@ use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 
 pub type Waiter = oneshot::Sender<Result<Outcome, PeerError>>;
 
+pub(super) type DetailResult =
+    Result<Option<(agent_domain::Item, Option<agent_domain::Task>)>, PeerError>;
+
 /// Admission order for native input plans.  A mutex around the wire call
 /// would serialize whichever spawned task gets scheduled first; the owner
 /// assigns order before spawning and advances this per-connection watch
@@ -142,7 +145,7 @@ pub(super) enum Event {
     Attach {
         peer: Peer,
         host_name: String,
-        environment: m::EnvironmentDescriptor,
+        environment: Box<m::EnvironmentDescriptor>,
         awareness_registration: m::AwarenessRegistration,
         ticket: transport::Ticket,
         session: transport::Session,
@@ -179,7 +182,7 @@ pub(super) enum Event {
         epoch: u64,
         thread: ThreadId,
         item: TurnItemId,
-        result: Box<Result<Option<(agent_domain::Item, Option<agent_domain::Task>)>, PeerError>>,
+        result: Box<DetailResult>,
     },
     Written(Written, bool),
     /// Resolves once the latest device state is written.
@@ -293,9 +296,7 @@ pub(super) const USAGE_REFRESH_INTERVAL_MS: u64 = 5 * 60 * 1_000;
 
 fn usage_refresh_due(last_attempt_ms: Option<u64>, in_flight: bool, now: u64) -> bool {
     !in_flight
-        && last_attempt_ms.map_or(true, |last| {
-            now.saturating_sub(last) >= USAGE_REFRESH_INTERVAL_MS
-        })
+        && last_attempt_ms.is_none_or(|last| now.saturating_sub(last) >= USAGE_REFRESH_INTERVAL_MS)
 }
 
 fn usage_refresh_deadline(last_attempt_ms: Option<u64>, in_flight: bool, now: u64) -> Option<u64> {
@@ -657,7 +658,7 @@ impl Owner {
                 self.attach(
                     peer,
                     host_name,
-                    environment,
+                    *environment,
                     awareness_registration,
                     ticket,
                     session,
@@ -808,6 +809,9 @@ impl Owner {
         self.refresh_accounts_if_due(now_ms());
     }
 
+    // Keep each connection fact explicit at this state boundary so the owner
+    // can reset and publish them together with the new epoch.
+    #[allow(clippy::too_many_arguments)]
     fn attach(
         &mut self,
         peer: Peer,

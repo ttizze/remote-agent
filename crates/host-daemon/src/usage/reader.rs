@@ -570,7 +570,7 @@ pub(crate) fn volume_id(path: &Path) -> String {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        return format!("{}:{}", metadata.dev(), metadata.ino());
+        format!("{}:{}", metadata.dev(), metadata.ino())
     }
     #[cfg(not(unix))]
     {

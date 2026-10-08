@@ -38,7 +38,7 @@ pub fn should_publish(mode: ResponseStreamingMode, state: Option<&State>) -> boo
 fn paragraph_boundary(text: &str) -> bool {
     // Keep paragraph separators while ignoring only horizontal/trailing
     // whitespace after the separator.
-    let trimmed = text.trim_end_matches(|character: char| matches!(character, ' ' | '\t' | '\r'));
+    let trimmed = text.trim_end_matches([' ', '\t', '\r']);
     trimmed.ends_with("\n\n")
         || (trimmed.ends_with('`')
             && trimmed.matches("```").count() >= 2

@@ -1205,9 +1205,7 @@ impl DeviceState {
                         && session.host_id == key.1
                         && session.device_id == key.2
                         && session.session_epoch != recording.status.session_epoch
-                }) {
-                    return;
-                } else if self.closed_recordings.get(&key).is_none_or(
+                }) || self.closed_recordings.get(&key).is_none_or(
                     |(recording_id, session_epoch)| {
                         *recording_id != recording.status.recording_id
                             || session_epoch != &recording.status.session_epoch

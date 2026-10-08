@@ -1,31 +1,23 @@
 //! Shared screenshot preferences and shortcut decisions.
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 #[serde(rename_all = "kebab-case")]
 pub enum SnapshotShortcut {
+    #[default]
     BothShiftKeys,
     CommandShiftFour,
     ControlShiftS,
 }
-impl Default for SnapshotShortcut {
-    fn default() -> Self {
-        Self::BothShiftKeys
-    }
-}
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 #[serde(rename_all = "kebab-case")]
 pub enum SnapshotSound {
+    #[default]
     SoftPop,
     CameraShutter,
-}
-impl Default for SnapshotSound {
-    fn default() -> Self {
-        Self::SoftPop
-    }
 }
 
 /// Device-local screenshot behavior. The Host never needs these preferences:

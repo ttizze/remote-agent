@@ -751,8 +751,10 @@ mod settings_tests {
 
     #[test]
     fn automatic_pull_resolves_a_project_override() {
-        let mut saved = agent_protocol::models::HostSettings::default();
-        saved.default_auto_pull = true;
+        let mut saved = agent_protocol::models::HostSettings {
+            default_auto_pull: true,
+            ..Default::default()
+        };
         assert!(resolve_default_auto_pull(&saved, "other"));
         saved.project_overrides.insert(
             "project".into(),

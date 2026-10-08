@@ -308,10 +308,10 @@ impl Chrome {
                 first_error.get_or_insert(error);
             }
         }
-        if let Some(target) = temporary_target {
-            if let Err(error) = self.close_target(&target).await {
-                first_error.get_or_insert(error);
-            }
+        if let Some(target) = temporary_target
+            && let Err(error) = self.close_target(&target).await
+        {
+            first_error.get_or_insert(error);
         }
         first_error.map_or(Ok(()), Err)
     }

@@ -295,7 +295,7 @@ impl Desktop {
             .usage
             .error
             .clone()
-            .map(|error| notice(error))
+            .map(notice)
             .unwrap_or_else(|| div().into_any_element());
         let mut preference_rows = vec![preference_error];
         preference_rows.extend([
@@ -386,7 +386,7 @@ impl Desktop {
                 let provider = source_accounts
                     .iter()
                     .find(|source| source.id == reset_id)
-                    .map(|source| source.provider.clone());
+                    .map(|source| source.provider);
                 let can_reset = account.reset_credit_count > 0 && provider.is_some();
                 let action_index = limit_rows.len();
                 let mut row = Row::new(account.email.unwrap_or(account.id)).description(details);
@@ -428,7 +428,7 @@ impl Desktop {
             let provider = source_accounts
                 .iter()
                 .find(|source| source.id == reset_id)
-                .map(|source| source.provider.clone());
+                .map(|source| source.provider);
             let can_reset = account.reset_credit_count > 0 && provider.is_some();
             let action_index = limit_rows.len();
             let mut row = Row::new(account.email.unwrap_or(account.id)).description(description);

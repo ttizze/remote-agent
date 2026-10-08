@@ -865,6 +865,7 @@ impl GitHubCli {
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn list_pull_requests_by_head_with_cancel(
         &self,
         cwd: &Path,
@@ -919,6 +920,7 @@ impl GitHubCli {
         decode_pull_request(&output.stdout)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn create_pull_request_with_cancel(
         &self,
         cwd: &Path,

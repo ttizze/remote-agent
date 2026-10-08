@@ -362,6 +362,9 @@ pub(crate) struct StartResult {
     pub(crate) overlay: OverlayHandle,
 }
 
+// Keep recording identity, dimensions, storage protection, and cancellation
+// handles explicit so the capture owner cannot accidentally mix lifetimes.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn start(
     endpoint: String,
     tab_id: String,
@@ -416,6 +419,9 @@ pub(crate) async fn await_startup(
         .map_err(|_| "recording startup was cancelled".to_owned())?
 }
 
+// These are separate capture resources with distinct cleanup ownership; a
+// context struct would hide the session and cancellation values from callers.
+#[allow(clippy::too_many_arguments)]
 async fn run(
     endpoint: String,
     tab_id: String,
@@ -489,6 +495,7 @@ impl Drop for PartialArtifactCleanup {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_capture(
     endpoint: &str,
     tab_id: &str,
@@ -701,8 +708,8 @@ async fn run_capture(
                 encoded_frames = encoded_frames.saturating_add(repeats);
                 encoded_input_bytes = encoded_input_bytes.saturating_add(added_bytes);
                 frames = frames.saturating_add(1);
-                if let Some(session_id) = session_id {
-                    if let Err(error) = send_command_with_cancel(
+                if let Some(session_id) = session_id
+                    && let Err(error) = send_command_with_cancel(
                         &mut socket,
                         &mut next_id,
                         tab_id,
@@ -711,14 +718,14 @@ async fn run_capture(
                         json!({"sessionId":session_id}),
                         &cancel,
                         &stop,
-                    ).await {
-                        if is_target_detached_error(&error) {
-                            externally_detached.store(true, Ordering::Release);
-                            detached = true;
-                            break capture_termination_result(CaptureTermination::Detached);
-                        }
-                        break Err(error);
+                    ).await
+                {
+                    if is_target_detached_error(&error) {
+                        externally_detached.store(true, Ordering::Release);
+                        detached = true;
+                        break capture_termination_result(CaptureTermination::Detached);
                     }
+                    break Err(error);
                 }
             }
         }
@@ -1047,6 +1054,7 @@ async fn command_inner(
     Err(format!("recording {method} connection closed"))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn command_with_cancel(
     socket: &mut WebSocketStream<ConnectStream>,
     next_id: &mut u64,
@@ -1092,6 +1100,7 @@ async fn send_command(
     Ok(id)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn send_command_with_cancel(
     socket: &mut WebSocketStream<ConnectStream>,
     next_id: &mut u64,
@@ -1353,7 +1362,7 @@ mod tests {
             id.bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
         );
-        assert_eq!(format!("{id}.webm").ends_with(".webm"), true);
+        assert!(format!("{id}.webm").ends_with(".webm"));
     }
 
     #[test]

@@ -377,6 +377,10 @@ pub struct ActionProgressEvent {
     pub kind: ActionProgressKind,
 }
 
+// Keep the terminal result inline: this public wire event is constructed and
+// matched by the Host and every client, and boxing it would add an allocation
+// and migration to every caller without a meaningful runtime ownership role.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", rename_all_fields = "camelCase")]
 pub enum ActionProgressKind {

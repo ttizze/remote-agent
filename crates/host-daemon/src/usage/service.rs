@@ -111,26 +111,25 @@ impl UsageService {
             .unwrap_or_else(|error| error.into_inner())
             .fetched_at
             .is_none();
-        if should_read_disk {
-            if let Ok(bytes) = tokio::fs::read(&self.rates_path).await
-                && let Ok(file) = serde_json::from_slice::<RatesFile>(&bytes)
-            {
-                let table = pricing::parse_rate_table(&file.document);
-                if !table.is_empty() {
-                    let fetched_at = if file.fetched_at_ms > 0 {
-                        SystemTime::UNIX_EPOCH + Duration::from_millis(file.fetched_at_ms as u64)
-                    } else {
-                        now
-                    };
-                    let fresh = now.duration_since(fetched_at).unwrap_or_default()
-                        < if force { REFRESH_FLOOR } else { RATES_TTL };
-                    let mut rates = self.rates.lock().unwrap_or_else(|error| error.into_inner());
-                    rates.fetched_at = Some(fetched_at);
-                    rates.table = table;
-                    rates.status = PricingStatus::Cached;
-                    if fresh {
-                        return;
-                    }
+        if should_read_disk
+            && let Ok(bytes) = tokio::fs::read(&self.rates_path).await
+            && let Ok(file) = serde_json::from_slice::<RatesFile>(&bytes)
+        {
+            let table = pricing::parse_rate_table(&file.document);
+            if !table.is_empty() {
+                let fetched_at = if file.fetched_at_ms > 0 {
+                    SystemTime::UNIX_EPOCH + Duration::from_millis(file.fetched_at_ms as u64)
+                } else {
+                    now
+                };
+                let fresh = now.duration_since(fetched_at).unwrap_or_default()
+                    < if force { REFRESH_FLOOR } else { RATES_TTL };
+                let mut rates = self.rates.lock().unwrap_or_else(|error| error.into_inner());
+                rates.fetched_at = Some(fetched_at);
+                rates.table = table;
+                rates.status = PricingStatus::Cached;
+                if fresh {
+                    return;
                 }
             }
         }

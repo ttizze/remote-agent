@@ -300,7 +300,7 @@ impl Browser {
 enum HostBrowserRequest {
     Open,
     Action(BrowserAction),
-    Intent(Intent),
+    Intent(Box<Intent>),
 }
 
 /// Resolved client browser settings captured when a Preview surface is
@@ -467,12 +467,12 @@ impl HostBrowser {
             return;
         }
         self.request(
-            HostBrowserRequest::Intent(Intent::PreviewResize {
+            HostBrowserRequest::Intent(Box::new(Intent::PreviewResize {
                 tab_id,
                 viewport,
                 rendered_width: None,
                 rendered_height: None,
-            }),
+            })),
             window,
             cx,
         );
@@ -753,7 +753,7 @@ async fn host_browser_request(
             BrowserAction::Read
         }
         HostBrowserRequest::Intent(intent) => {
-            dispatch_preview(&store, intent).await?;
+            dispatch_preview(&store, *intent).await?;
             BrowserAction::Read
         }
         HostBrowserRequest::Action(action) => action,
@@ -839,20 +839,19 @@ impl Render for HostBrowser {
                 .and_then(|frame| preview.session(&frame.tab_id))
                 .is_some_and(|session| matches!(session.viewport, PreviewViewportSetting::Fill))
             && self.last_fill_size != Some((width, height))
+            && let Some(tab_id) = self.frame.as_ref().map(|frame| frame.tab_id.clone())
         {
-            if let Some(tab_id) = self.frame.as_ref().map(|frame| frame.tab_id.clone()) {
-                self.last_fill_size = Some((width, height));
-                self.request(
-                    HostBrowserRequest::Intent(Intent::PreviewResize {
-                        tab_id,
-                        viewport: PreviewViewportSetting::Fill,
-                        rendered_width: Some(width),
-                        rendered_height: Some(height),
-                    }),
-                    window,
-                    cx,
-                );
-            }
+            self.last_fill_size = Some((width, height));
+            self.request(
+                HostBrowserRequest::Intent(Box::new(Intent::PreviewResize {
+                    tab_id,
+                    viewport: PreviewViewportSetting::Fill,
+                    rendered_width: Some(width),
+                    rendered_height: Some(height),
+                })),
+                window,
+                cx,
+            );
         }
         let image = self.image.clone();
         let frame = self.frame.as_ref();
@@ -943,10 +942,10 @@ impl Render for HostBrowser {
                                     .map_or(PreviewZoom::X100, |session| session.zoom)
                                     .stepped(-1);
                                 s.request(
-                                    HostBrowserRequest::Intent(Intent::PreviewSetZoom {
+                                    HostBrowserRequest::Intent(Box::new(Intent::PreviewSetZoom {
                                         tab_id,
                                         zoom,
-                                    }),
+                                    })),
                                     window,
                                     cx,
                                 );
@@ -973,10 +972,10 @@ impl Render for HostBrowser {
                                     .map_or(PreviewZoom::X100, |session| session.zoom)
                                     .stepped(1);
                                 s.request(
-                                    HostBrowserRequest::Intent(Intent::PreviewSetZoom {
+                                    HostBrowserRequest::Intent(Box::new(Intent::PreviewSetZoom {
                                         tab_id,
                                         zoom,
-                                    }),
+                                    })),
                                     window,
                                     cx,
                                 );
@@ -1004,12 +1003,12 @@ impl Render for HostBrowser {
                                         session.viewport
                                     });
                                 s.request(
-                                    HostBrowserRequest::Intent(Intent::PreviewResize {
+                                    HostBrowserRequest::Intent(Box::new(Intent::PreviewResize {
                                         tab_id,
                                         viewport: next_viewport(viewport),
                                         rendered_width: None,
                                         rendered_height: None,
-                                    }),
+                                    })),
                                     window,
                                     cx,
                                 );
@@ -1037,10 +1036,12 @@ impl Render for HostBrowser {
                                         session.appearance
                                     });
                                 s.request(
-                                    HostBrowserRequest::Intent(Intent::PreviewSetAppearance {
-                                        tab_id,
-                                        appearance: next_appearance(appearance),
-                                    }),
+                                    HostBrowserRequest::Intent(Box::new(
+                                        Intent::PreviewSetAppearance {
+                                            tab_id,
+                                            appearance: next_appearance(appearance),
+                                        },
+                                    )),
                                     window,
                                     cx,
                                 );
@@ -1106,14 +1107,14 @@ impl Render for HostBrowser {
                                     return;
                                 };
                                 s.request(
-                                    HostBrowserRequest::Intent(if recording {
+                                    HostBrowserRequest::Intent(Box::new(if recording {
                                         Intent::PreviewRecordingStop { tab_id }
                                     } else {
                                         Intent::PreviewRecordingStart {
                                             tab_id,
                                             options: s.defaults.recording_options,
                                         }
-                                    }),
+                                    })),
                                     window,
                                     cx,
                                 );

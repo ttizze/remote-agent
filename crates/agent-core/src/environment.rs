@@ -1066,6 +1066,9 @@ impl EnvironmentRegistry {
     /// repository identity and selected provider participate. The returned
     /// route carries the target's local project id because equal project ids
     /// across Hosts are not interchangeable.
+    // Keep routing inputs explicit so this pure decision boundary cannot
+    // accidentally depend on mutable draft state.
+    #[allow(clippy::too_many_arguments)]
     pub fn evaluate_load_balancing(
         &self,
         source_environment_id: &str,
@@ -1386,8 +1389,10 @@ mod tests {
 
     #[test]
     fn capability_checks_and_wire_names_are_explicit() {
-        let mut capabilities = EnvironmentCapabilities::default();
-        capabilities.agent_activity_publishing = true;
+        let capabilities = EnvironmentCapabilities {
+            agent_activity_publishing: true,
+            ..Default::default()
+        };
         assert!(supports_capability(
             &capabilities,
             EnvironmentCapability::AgentActivityPublishing

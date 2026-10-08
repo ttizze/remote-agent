@@ -69,10 +69,7 @@ pub(crate) fn sanitize_pr_content(mut content: GeneratedPrContent) -> GeneratedP
 
 fn strip_html_comments(value: &str) -> String {
     let mut result = value.to_owned();
-    loop {
-        let Some(start) = result.find("<!--") else {
-            break;
-        };
+    while let Some(start) = result.find("<!--") {
         let end = result[start + 4..]
             .find("-->")
             .map(|offset| start + 4 + offset + 3)

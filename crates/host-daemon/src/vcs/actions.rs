@@ -602,7 +602,7 @@ async fn commit(
     }
     let message = format_commit_message(message);
     let subject = message.lines().next().unwrap_or_default().to_owned();
-    let args = vec!["commit".to_owned(), "-m".to_owned(), message];
+    let args = ["commit".to_owned(), "-m".to_owned(), message];
     let refs: Vec<&str> = args.iter().map(String::as_str).collect();
     let mut report = |progress: Progress| {
         let kind = match progress {
@@ -643,6 +643,247 @@ async fn commit(
         status: CommitStepStatus::Created,
         commit_sha: stdout(cwd, &["rev-parse", "HEAD"]),
         subject: Some(subject),
+    })
+}
+
+async fn push(
+    cwd: &Path,
+    request: &RunStackedAction,
+    sender: &Sender<ActionProgressEvent>,
+    cancel: &CancellationToken,
+) -> Result<PushStep, ActionError> {
+    ensure_active(cancel)?;
+    let branch = stdout(cwd, &["branch", "--show-current"])
+        .filter(|branch| !branch.is_empty())
+        .ok_or_else(|| ActionError::at(ActionPhase::Push, "Cannot push a detached HEAD."))?;
+    let upstream = stdout(
+        cwd,
+        &[
+            "rev-parse",
+            "--abbrev-ref",
+            "--symbolic-full-name",
+            "@{upstream}",
+        ],
+    );
+    let upstream_branch = upstream
+        .as_deref()
+        .and_then(|value| split_remote_ref(value, &remote_names(cwd)))
+        .map(|(_, branch)| branch)
+        .or_else(|| upstream.clone());
+    if upstream.is_some() {
+        let counts = stdout(
+            cwd,
+            &["rev-list", "--left-right", "--count", "@{upstream}...HEAD"],
+        )
+        .unwrap_or_default();
+        let mut numbers = counts
+            .split_whitespace()
+            .filter_map(|part| part.parse::<u64>().ok());
+        let _behind = numbers.next().unwrap_or(0);
+        let ahead = numbers.next().unwrap_or(1);
+        if ahead == 0 {
+            return Ok(PushStep {
+                status: PushStepStatus::SkippedUpToDate,
+                branch: Some(branch),
+                upstream_branch,
+                set_upstream: Some(false),
+            });
+        }
+    }
+    let mut args = vec!["push".to_owned()];
+    if upstream.is_none() {
+        let remote = primary_remote(cwd)
+            .ok_or_else(|| ActionError::at(ActionPhase::Push, "No Git remote is configured."))?;
+        args.extend(["--set-upstream".into(), remote, branch.clone()]);
+    }
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let mut report = |progress: Progress| {
+        if let Progress::Output { stream, line } = progress {
+            let _ = sender.try_send(event(
+                request,
+                ActionProgressKind::HookOutput {
+                    hook_name: None,
+                    stream,
+                    text: line.chars().take(OUTPUT_LIMIT).collect(),
+                },
+            ));
+        }
+    };
+    let pushed = execute_with_cancel(
+        cancel,
+        Execute {
+            env: &NON_INTERACTIVE_ENV,
+            timeout: Some(PUSH_TIMEOUT),
+            progress: Some(&mut report),
+            ..Execute::new(cwd, &refs)
+        },
+    )
+    .await
+    .map_err(|error| ActionError::at(ActionPhase::Push, error))?;
+    if !pushed.ok() {
+        return Err(ActionError::at(ActionPhase::Push, "Git push failed."));
+    }
+    let current_upstream = stdout(
+        cwd,
+        &[
+            "rev-parse",
+            "--abbrev-ref",
+            "--symbolic-full-name",
+            "@{upstream}",
+        ],
+    );
+    Ok(PushStep {
+        status: PushStepStatus::Pushed,
+        branch: Some(branch),
+        upstream_branch: current_upstream
+            .as_deref()
+            .and_then(|value| split_remote_ref(value, &remote_names(cwd)))
+            .map(|(_, branch)| branch)
+            .or(current_upstream),
+        set_upstream: Some(upstream.is_none()),
+    })
+}
+
+async fn pull_request(
+    cwd: &Path,
+    request: &RunStackedAction,
+    github: Option<&crate::github::cli::GitHubCli>,
+    text: Option<&TextGenerator>,
+    cancel: &CancellationToken,
+) -> Result<PrStep, ActionError> {
+    ensure_active(cancel)?;
+    let github =
+        github.ok_or_else(|| ActionError::at(ActionPhase::Pr, "GitHub CLI is unavailable."))?;
+    let branch = stdout(cwd, &["branch", "--show-current"])
+        .filter(|branch| !branch.is_empty())
+        .ok_or_else(|| {
+            ActionError::at(
+                ActionPhase::Pr,
+                "Cannot create a pull request from a detached HEAD.",
+            )
+        })?;
+    let upstream = stdout(
+        cwd,
+        &[
+            "rev-parse",
+            "--abbrev-ref",
+            "--symbolic-full-name",
+            "@{upstream}",
+        ],
+    );
+    if upstream.is_none() {
+        return Err(ActionError::at(
+            ActionPhase::Pr,
+            "Push the branch with an upstream before creating a pull request.",
+        ));
+    }
+    let context = branch_head_context(cwd, &branch, upstream.as_deref(), None);
+    let (repository, host) = github_scope(cwd);
+    let default = match repository.as_deref() {
+        Some(repository) => github
+            .default_branch_with_cancel(cwd, repository, host.as_deref(), Some(cancel))
+            .await
+            .map_err(|error| ActionError::at(ActionPhase::Pr, error))?,
+        None => None,
+    }
+    .or_else(|| default_branch(cwd, &primary_remote(cwd).unwrap_or_else(|| "origin".into())))
+    .unwrap_or_else(|| "main".into());
+    let existing = find_open_pr_with_cancel(github, cwd, &context, host.as_deref(), Some(cancel))
+        .await
+        .map_err(|error| ActionError::at(ActionPhase::Pr, error))?;
+    if let Some(existing) = existing {
+        return Ok(PrStep {
+            status: PrStepStatus::OpenedExisting,
+            url: Some(existing.url),
+            number: Some(existing.number),
+            base_branch: Some(existing.base_ref_name),
+            head_branch: Some(existing.head_ref_name),
+            title: Some(existing.title),
+        });
+    }
+    let commit_subject =
+        stdout(cwd, &["log", "-1", "--format=%s"]).unwrap_or_else(|| "Update project files".into());
+    let template = pull_request_template(cwd, &default).ok().flatten();
+    let commits =
+        stdout(cwd, &["log", "--format=%s", &format!("{default}..HEAD")]).unwrap_or_default();
+    let stat = stdout(cwd, &["diff", "--stat", &format!("{default}...HEAD")]).unwrap_or_default();
+    let patch =
+        stdout(cwd, &["diff", "--no-color", &format!("{default}...HEAD")]).unwrap_or_default();
+    let generation = text
+        .map(|text| {
+            text.generation_settings(
+                request.project_id.as_deref().unwrap_or_default(),
+                "generatePullRequestContent",
+            )
+        })
+        .unwrap_or_default();
+    let mut content = GeneratedPrContent {
+        title: commit_subject,
+        body: template
+            .clone()
+            .unwrap_or_else(|| "## Summary\n\n## Testing\n".into()),
+    };
+    if let Some(text) = text {
+        let raw = tokio::select! {
+            _ = cancel.cancelled() => return Err(ActionError::plain("Git action cancelled.")),
+            raw = text.generate(TextGenerationRequest {
+                    operation: "git-pull-request-content",
+                    project: request.project_id.clone().unwrap_or_default(),
+                    cwd: request.cwd.clone(),
+                    prompt: pr_content_prompt(
+                        &default,
+                        &branch,
+                        &commits,
+                        &stat,
+                        &patch,
+                        template.as_deref(),
+                    ),
+                    attachments: vec![],
+                    model: generation.model,
+                    instructions: generation.instructions,
+                    output_schema: pr_content_schema(),
+                }) => raw,
+        };
+        if let Ok(raw) = raw
+            && let Ok(generated) = serde_json::from_str::<GeneratedPrContent>(&raw)
+        {
+            content = generated;
+        }
+    }
+    content = sanitize_pr_content(content);
+    let body = tempfile::NamedTempFile::new_in(cwd)
+        .map_err(|error| ActionError::at(ActionPhase::Pr, error))?;
+    std::fs::write(body.path(), &content.body)
+        .map_err(|error| ActionError::at(ActionPhase::Pr, error))?;
+    github
+        .create_pull_request_with_cancel(
+            cwd,
+            &default,
+            &branch,
+            &content.title,
+            body.path(),
+            repository.as_deref(),
+            host.as_deref(),
+            Some(cancel),
+        )
+        .await
+        .map_err(|error| ActionError::at(ActionPhase::Pr, error))?;
+    let created = find_open_pr_with_cancel(github, cwd, &context, host.as_deref(), Some(cancel))
+        .await
+        .map_err(|error| ActionError::at(ActionPhase::Pr, error))?
+        .ok_or_else(|| {
+            ActionError::at(
+                ActionPhase::Pr,
+                "GitHub did not return the created pull request.",
+            )
+        })?;
+    Ok(PrStep {
+        status: PrStepStatus::Created,
+        url: Some(created.url),
+        number: Some(created.number),
+        base_branch: Some(created.base_ref_name),
+        head_branch: Some(created.head_ref_name),
+        title: Some(created.title),
     })
 }
 
@@ -859,245 +1100,4 @@ mod tests {
         .await
         .expect("the action permit was not released after terminal delivery");
     }
-}
-
-async fn push(
-    cwd: &Path,
-    request: &RunStackedAction,
-    sender: &Sender<ActionProgressEvent>,
-    cancel: &CancellationToken,
-) -> Result<PushStep, ActionError> {
-    ensure_active(cancel)?;
-    let branch = stdout(cwd, &["branch", "--show-current"])
-        .filter(|branch| !branch.is_empty())
-        .ok_or_else(|| ActionError::at(ActionPhase::Push, "Cannot push a detached HEAD."))?;
-    let upstream = stdout(
-        cwd,
-        &[
-            "rev-parse",
-            "--abbrev-ref",
-            "--symbolic-full-name",
-            "@{upstream}",
-        ],
-    );
-    let upstream_branch = upstream
-        .as_deref()
-        .and_then(|value| split_remote_ref(value, &remote_names(cwd)))
-        .map(|(_, branch)| branch)
-        .or_else(|| upstream.clone());
-    if upstream.is_some() {
-        let counts = stdout(
-            cwd,
-            &["rev-list", "--left-right", "--count", "@{upstream}...HEAD"],
-        )
-        .unwrap_or_default();
-        let mut numbers = counts
-            .split_whitespace()
-            .filter_map(|part| part.parse::<u64>().ok());
-        let _behind = numbers.next().unwrap_or(0);
-        let ahead = numbers.next().unwrap_or(1);
-        if ahead == 0 {
-            return Ok(PushStep {
-                status: PushStepStatus::SkippedUpToDate,
-                branch: Some(branch),
-                upstream_branch,
-                set_upstream: Some(false),
-            });
-        }
-    }
-    let mut args = vec!["push".to_owned()];
-    if upstream.is_none() {
-        let remote = primary_remote(cwd)
-            .ok_or_else(|| ActionError::at(ActionPhase::Push, "No Git remote is configured."))?;
-        args.extend(["--set-upstream".into(), remote, branch.clone()]);
-    }
-    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    let mut report = |progress: Progress| {
-        if let Progress::Output { stream, line } = progress {
-            let _ = sender.try_send(event(
-                request,
-                ActionProgressKind::HookOutput {
-                    hook_name: None,
-                    stream,
-                    text: line.chars().take(OUTPUT_LIMIT).collect(),
-                },
-            ));
-        }
-    };
-    let pushed = execute_with_cancel(
-        cancel,
-        Execute {
-            env: &NON_INTERACTIVE_ENV,
-            timeout: Some(PUSH_TIMEOUT),
-            progress: Some(&mut report),
-            ..Execute::new(cwd, &refs)
-        },
-    )
-    .await
-    .map_err(|error| ActionError::at(ActionPhase::Push, error))?;
-    if !pushed.ok() {
-        return Err(ActionError::at(ActionPhase::Push, "Git push failed."));
-    }
-    let current_upstream = stdout(
-        cwd,
-        &[
-            "rev-parse",
-            "--abbrev-ref",
-            "--symbolic-full-name",
-            "@{upstream}",
-        ],
-    );
-    Ok(PushStep {
-        status: PushStepStatus::Pushed,
-        branch: Some(branch),
-        upstream_branch: current_upstream
-            .as_deref()
-            .and_then(|value| split_remote_ref(value, &remote_names(cwd)))
-            .map(|(_, branch)| branch)
-            .or(current_upstream),
-        set_upstream: Some(upstream.is_none()),
-    })
-}
-
-async fn pull_request(
-    cwd: &Path,
-    request: &RunStackedAction,
-    github: Option<&crate::github::cli::GitHubCli>,
-    text: Option<&TextGenerator>,
-    cancel: &CancellationToken,
-) -> Result<PrStep, ActionError> {
-    ensure_active(cancel)?;
-    let github =
-        github.ok_or_else(|| ActionError::at(ActionPhase::Pr, "GitHub CLI is unavailable."))?;
-    let branch = stdout(cwd, &["branch", "--show-current"])
-        .filter(|branch| !branch.is_empty())
-        .ok_or_else(|| {
-            ActionError::at(
-                ActionPhase::Pr,
-                "Cannot create a pull request from a detached HEAD.",
-            )
-        })?;
-    let upstream = stdout(
-        cwd,
-        &[
-            "rev-parse",
-            "--abbrev-ref",
-            "--symbolic-full-name",
-            "@{upstream}",
-        ],
-    );
-    if upstream.is_none() {
-        return Err(ActionError::at(
-            ActionPhase::Pr,
-            "Push the branch with an upstream before creating a pull request.",
-        ));
-    }
-    let context = branch_head_context(cwd, &branch, upstream.as_deref(), None);
-    let (repository, host) = github_scope(cwd);
-    let default = match repository.as_deref() {
-        Some(repository) => github
-            .default_branch_with_cancel(cwd, repository, host.as_deref(), Some(cancel))
-            .await
-            .map_err(|error| ActionError::at(ActionPhase::Pr, error))?,
-        None => None,
-    }
-    .or_else(|| default_branch(cwd, &primary_remote(cwd).unwrap_or_else(|| "origin".into())))
-    .unwrap_or_else(|| "main".into());
-    let existing = find_open_pr_with_cancel(github, cwd, &context, host.as_deref(), Some(cancel))
-        .await
-        .map_err(|error| ActionError::at(ActionPhase::Pr, error))?;
-    if let Some(existing) = existing {
-        return Ok(PrStep {
-            status: PrStepStatus::OpenedExisting,
-            url: Some(existing.url),
-            number: Some(existing.number),
-            base_branch: Some(existing.base_ref_name),
-            head_branch: Some(existing.head_ref_name),
-            title: Some(existing.title),
-        });
-    }
-    let commit_subject =
-        stdout(cwd, &["log", "-1", "--format=%s"]).unwrap_or_else(|| "Update project files".into());
-    let template = pull_request_template(cwd, &default).ok().flatten();
-    let commits =
-        stdout(cwd, &["log", "--format=%s", &format!("{default}..HEAD")]).unwrap_or_default();
-    let stat = stdout(cwd, &["diff", "--stat", &format!("{default}...HEAD")]).unwrap_or_default();
-    let patch =
-        stdout(cwd, &["diff", "--no-color", &format!("{default}...HEAD")]).unwrap_or_default();
-    let generation = text
-        .map(|text| {
-            text.generation_settings(
-                request.project_id.as_deref().unwrap_or_default(),
-                "generatePullRequestContent",
-            )
-        })
-        .unwrap_or_default();
-    let mut content = GeneratedPrContent {
-        title: commit_subject,
-        body: template
-            .clone()
-            .unwrap_or_else(|| "## Summary\n\n## Testing\n".into()),
-    };
-    if let Some(text) = text {
-        let raw = tokio::select! {
-            _ = cancel.cancelled() => return Err(ActionError::plain("Git action cancelled.")),
-            raw = text.generate(TextGenerationRequest {
-                    operation: "git-pull-request-content",
-                    project: request.project_id.clone().unwrap_or_default(),
-                    cwd: request.cwd.clone(),
-                    prompt: pr_content_prompt(
-                        &default,
-                        &branch,
-                        &commits,
-                        &stat,
-                        &patch,
-                        template.as_deref(),
-                    ),
-                    attachments: vec![],
-                    model: generation.model,
-                    instructions: generation.instructions,
-                    output_schema: pr_content_schema(),
-                }) => raw,
-        };
-        if let Ok(raw) = raw {
-            if let Ok(generated) = serde_json::from_str::<GeneratedPrContent>(&raw) {
-                content = generated;
-            }
-        }
-    }
-    content = sanitize_pr_content(content);
-    let body = tempfile::NamedTempFile::new_in(cwd)
-        .map_err(|error| ActionError::at(ActionPhase::Pr, error))?;
-    std::fs::write(body.path(), &content.body)
-        .map_err(|error| ActionError::at(ActionPhase::Pr, error))?;
-    github
-        .create_pull_request_with_cancel(
-            cwd,
-            &default,
-            &branch,
-            &content.title,
-            body.path(),
-            repository.as_deref(),
-            host.as_deref(),
-            Some(cancel),
-        )
-        .await
-        .map_err(|error| ActionError::at(ActionPhase::Pr, error))?;
-    let created = find_open_pr_with_cancel(github, cwd, &context, host.as_deref(), Some(cancel))
-        .await
-        .map_err(|error| ActionError::at(ActionPhase::Pr, error))?
-        .ok_or_else(|| {
-            ActionError::at(
-                ActionPhase::Pr,
-                "GitHub did not return the created pull request.",
-            )
-        })?;
-    Ok(PrStep {
-        status: PrStepStatus::Created,
-        url: Some(created.url),
-        number: Some(created.number),
-        base_branch: Some(created.base_ref_name),
-        head_branch: Some(created.head_ref_name),
-        title: Some(created.title),
-    })
 }

@@ -1,7 +1,13 @@
 // Run on macOS with `cargo test -p bex-desktop --test chrome_cookie_webview`.
 // Each WebKit persistence phase runs in a fresh process with a unique data store.
 #[cfg(target_os = "macos")]
-include!("../src/browser.rs");
+#[allow(dead_code)]
+mod browser_source {
+    include!("../src/browser.rs");
+}
+
+#[cfg(target_os = "macos")]
+use browser_source::{Browser, ChromeProfileSource};
 
 #[cfg(not(target_os = "macos"))]
 fn main() {

@@ -69,7 +69,7 @@ pub fn composer_menu(snapshot: &Snapshot, text: &str, cursor: u32) -> ComposerMe
         snapshot
             .selected_project
             .as_deref()
-            .or_else(|| snapshot.pull_requests.selected_project.as_deref())
+            .or(snapshot.pull_requests.selected_project.as_deref())
             .is_some_and(|project| !snapshot.pull_requests.by_project.contains_key(project))
     } else {
         trigger.kind == ComposerTriggerKind::Path
@@ -189,7 +189,7 @@ pub(crate) fn composer_menu_items(
         let project_id = snapshot
             .selected_project
             .as_deref()
-            .or_else(|| snapshot.pull_requests.selected_project.as_deref());
+            .or(snapshot.pull_requests.selected_project.as_deref());
         items = project_id
             .map(|project_id| {
                 pull_request_items(&crate::view::pull_requests::composer_pull_request_matches(

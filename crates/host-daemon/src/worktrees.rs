@@ -770,6 +770,9 @@ fn registered(root: &Path, destination: &Path) -> Result<bool> {
 
 /// Creates the managed checkout of the repository containing `cwd` for `thread`
 /// and records it; returns the one recorded or left by an earlier attempt.
+// These inputs represent separate checkout decisions (state, branch, base,
+// submodules, and cancellation); combining them would obscure ownership.
+#[allow(clippy::too_many_arguments)]
 fn checkout(
     path: &Path,
     state: &mut State,

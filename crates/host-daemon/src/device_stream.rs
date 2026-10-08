@@ -871,13 +871,7 @@ fn sps_dimensions(sps: &[u8]) -> Option<(u32, u32)> {
     } else {
         chroma_format
     };
-    let crop_unit_x = if chroma_array == 0 {
-        1
-    } else if chroma_array == 3 {
-        1
-    } else {
-        2
-    };
+    let crop_unit_x = if matches!(chroma_array, 0 | 3) { 1 } else { 2 };
     let crop_unit_y = if chroma_array == 0 {
         2 - u32::from(frame_mbs_only)
     } else if chroma_array == 1 {
@@ -900,7 +894,7 @@ fn skip_scaling_list(bits: &mut BitReader<'_>, size: usize) -> Option<()> {
     let mut next = 8_i32;
     for _ in 0..size {
         if next != 0 {
-            let delta = bits.read_se()? as i32;
+            let delta = bits.read_se()?;
             next = (last + delta + 256) % 256;
         }
         last = if next == 0 { last } else { next };
@@ -1127,7 +1121,7 @@ mod tests {
             return Err("MP4 trun sample table has an invalid length".into());
         }
         let mut samples = Vec::with_capacity(count);
-        for chunk in item.payload[12..].chunks_exact(12) {
+        for chunk in item.payload[12..].as_chunks::<12>().0 {
             samples.push(ParsedSample {
                 duration: read_u32(&chunk[..4])?,
                 size: read_u32(&chunk[4..8])?,

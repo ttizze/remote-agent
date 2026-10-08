@@ -689,7 +689,7 @@ impl GitHubPullRequestService {
         Ok(nodes
             .iter()
             .enumerate()
-            .filter_map(|(index, node)| {
+            .map(|(index, node)| {
                 let id = node
                     .get("id")
                     .and_then(|value| value.as_str())
@@ -1024,7 +1024,7 @@ impl GitHubPullRequestService {
             .get("html_url")
             .or_else(|| stack.get("url"))
             .and_then(|value| value.as_str())
-            .unwrap_or_else(|| "")
+            .unwrap_or("")
             .to_owned();
         Ok(Some(agent_domain::PullRequestStack {
             id: number.to_string(),
@@ -1647,9 +1647,11 @@ fn diff_file_section(
     status: &str,
     patch: Option<&str>,
 ) -> String {
-    let old_path = (status == "renamed")
-        .then_some(old_path.unwrap_or(path))
-        .unwrap_or(path);
+    let old_path = if status == "renamed" {
+        old_path.unwrap_or(path)
+    } else {
+        path
+    };
     let old_header = quote_git_patch_path(&format!("a/{old_path}"));
     let new_header = quote_git_patch_path(&format!("b/{path}"));
     let mut section = format!("diff --git {old_header} {new_header}\n");

@@ -18,18 +18,18 @@ pub fn merge_pull_request_snapshot(
                 link.url = snapshot.url.clone();
                 link.stack = snapshot.stack.clone();
             }
-            if let Some(watch) = link.watch.as_mut() {
-                if let Some(snapshot) = link.snapshot.as_ref() {
-                    let previous = watch.clone();
-                    update_watch(watch, snapshot);
-                    if watch.wakes == 0
-                        && (watch.head_sha != previous.head_sha
-                            || watch.failed_checks != previous.failed_checks
-                            || watch.passed != previous.passed
-                            || watch.conflicting != previous.conflicting)
-                    {
-                        watch.started_at = observed_at.clone();
-                    }
+            if let Some(watch) = link.watch.as_mut()
+                && let Some(snapshot) = link.snapshot.as_ref()
+            {
+                let previous = watch.clone();
+                update_watch(watch, snapshot);
+                if watch.wakes == 0
+                    && (watch.head_sha != previous.head_sha
+                        || watch.failed_checks != previous.failed_checks
+                        || watch.passed != previous.passed
+                        || watch.conflicting != previous.conflicting)
+                {
+                    watch.started_at = observed_at.clone();
                 }
             }
             if link.snapshot.is_none() {

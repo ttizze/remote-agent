@@ -387,6 +387,10 @@ pub(super) async fn execute(input: Execute<'_>) -> Result<Executed> {
     .await
 }
 
+// Keep process, output, cancellation, and trace controls explicit: each is an
+// independent resource decision owned by this runner, so a wrapper would hide
+// the cancellation and pipe-lifetime contract from its callers.
+#[allow(clippy::too_many_arguments)]
 async fn run_command(
     program: &Path,
     cwd: &Path,
@@ -428,7 +432,7 @@ async fn run_command(
     }
     let mut child = command.spawn().context("failed to run command")?;
     let cancellation_enabled = cancel.is_some();
-    let process_cancel = cancel.take().unwrap_or_else(CancellationToken::new);
+    let process_cancel = cancel.take().unwrap_or_default();
     let reader_cancel = CancellationToken::new();
     let (sender, mut lines) = tokio::sync::mpsc::channel(OUTPUT_CHANNEL_CAPACITY);
     let stdout_task = child.stdout.take().map(|pipe| {
@@ -700,10 +704,10 @@ mod tests {
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
         let mut ready_tx = Some(ready_tx);
         let mut progress = move |event: Progress| {
-            if matches!(event, Progress::Output { line, .. } if line == "started") {
-                if let Some(ready_tx) = ready_tx.take() {
-                    let _ = ready_tx.send(());
-                }
+            if matches!(event, Progress::Output { line, .. } if line == "started")
+                && let Some(ready_tx) = ready_tx.take()
+            {
+                let _ = ready_tx.send(());
             }
         };
         let mut running = Box::pin(execute(Execute {

@@ -48,6 +48,9 @@ impl PreviewManager {
         self.events.subscribe()
     }
 
+    // Preview creation carries independent session, viewport, profile, and
+    // appearance facts; a wrapper would obscure the owner of each value.
+    #[allow(clippy::too_many_arguments)]
     pub fn open(
         &self,
         thread_id: ThreadId,

@@ -318,7 +318,7 @@ impl UpdateManager {
                 "stable" => Some(UpdateChannel::Stable),
                 _ => None,
             })
-            .or_else(|| match option_env!("APP_RELEASE_CHANNEL") {
+            .or(match option_env!("APP_RELEASE_CHANNEL") {
                 Some("nightly") => Some(UpdateChannel::Nightly),
                 Some("preview") => Some(UpdateChannel::Preview),
                 Some("stable") => Some(UpdateChannel::Stable),
@@ -768,10 +768,9 @@ impl UpdateManager {
                     .staged
                     .as_ref()
                     .is_some_and(|staged| !available || staged.version != metadata.version)
+                    && let Some(staged) = record.staged.take()
                 {
-                    if let Some(staged) = record.staged.take() {
-                        let _ = fs::remove_file(staged.path).await;
-                    }
+                    let _ = fs::remove_file(staged.path).await;
                 }
                 let (release_notes, omitted_release_count) =
                     bounded_release_notes(&metadata.release_notes);

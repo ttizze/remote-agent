@@ -333,7 +333,7 @@ impl DeviceDuoCommand {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct DeviceSettings {
     pub appearance: Option<DeviceAppearance>,
     pub text_size: Option<DeviceTextSize>,
@@ -346,24 +346,6 @@ pub struct DeviceSettings {
     pub color_filter: Option<DeviceColorFilter>,
     pub network_enabled: Option<bool>,
     pub location: Option<(f64, f64)>,
-}
-
-impl Default for DeviceSettings {
-    fn default() -> Self {
-        Self {
-            appearance: None,
-            text_size: None,
-            reduce_motion: None,
-            increase_contrast: None,
-            reduce_transparency: None,
-            show_borders: None,
-            voice_over: None,
-            liquid_glass: None,
-            color_filter: None,
-            network_enabled: None,
-            location: None,
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

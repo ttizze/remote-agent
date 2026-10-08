@@ -121,7 +121,7 @@ impl BrowserSettings {
             .map(|profile| profile.id.clone())
             .unwrap_or_else(|| DEFAULT_BROWSER_PROFILE_ID.into());
         BrowserDefaults {
-            viewport: self.viewport.clone(),
+            viewport: self.viewport,
             zoom: self.zoom,
             appearance: self.appearance,
             link_target: self.link_target,

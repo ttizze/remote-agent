@@ -898,7 +898,7 @@ impl Serialize for ProviderCustomModel {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Default, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 struct ProviderCustomModelFields {
     #[serde(deserialize_with = "trimmed")]
@@ -918,21 +918,6 @@ struct ProviderCustomModelFields {
 struct ProviderCustomModelCapabilities {
     option_descriptors: Vec<agent_domain::OptionDescriptor>,
 }
-impl Default for ProviderCustomModelFields {
-    fn default() -> Self {
-        Self {
-            slug: String::new(),
-            name: String::new(),
-            aliases: vec![],
-            badge: None,
-            is_default: false,
-            is_legacy: false,
-            option_descriptors: vec![],
-            capabilities: None,
-        }
-    }
-}
-
 impl<'de> Deserialize<'de> for ProviderCustomModel {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         #[derive(Deserialize)]
@@ -2333,7 +2318,7 @@ mod settings_tests {
             ..Default::default()
         });
         assert_eq!(settings.provider_instances.get("build"), Some(&custom));
-        assert!(settings.provider_instances.get("codex").is_none());
+        assert!(!settings.provider_instances.contains_key("codex"));
         assert!(settings.validate().is_ok());
         assert_eq!(
             settings.provider_instances["build"].environment["PROVIDER_MODE"],

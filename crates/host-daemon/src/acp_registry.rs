@@ -114,7 +114,7 @@ fn valid_version(value: &str) -> bool {
     };
     let second_dot = first_dot + 1 + second_dot;
     let suffix_start = value[second_dot + 1..]
-        .find(|character| matches!(character, '-' | '+'))
+        .find(|character| ['-', '+'].contains(character))
         .map(|index| second_dot + 1 + index)
         .unwrap_or(value.len());
     let core = [
@@ -1068,18 +1068,18 @@ fn normalize_auth_methods(
                 _ => "agent",
             }
             .to_owned();
-            let env_var_names = (auth_type == "env_var")
-                .then(|| {
-                    method
-                        .get("vars")
-                        .and_then(serde_json::Value::as_array)
-                        .into_iter()
-                        .flatten()
-                        .filter_map(|variable| bounded_value(variable, "name", 128))
-                        .take(16)
-                        .collect()
-                })
-                .unwrap_or_default();
+            let env_var_names = if auth_type == "env_var" {
+                method
+                    .get("vars")
+                    .and_then(serde_json::Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|variable| bounded_value(variable, "name", 128))
+                    .take(16)
+                    .collect()
+            } else {
+                Vec::new()
+            };
             let link = (auth_type == "env_var")
                 .then(|| bounded_value(method, "link", 2_048))
                 .flatten()
