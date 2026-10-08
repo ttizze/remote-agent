@@ -764,7 +764,6 @@ async fn title_lists_stop_after_visible_sections_and_merge_provider_pages_in_ord
             .all(|entry| entry["ancestorThreadId"].is_null()),
         "root titles must not trigger descendant reads"
     );
-
     let expanded = local
         .peer
         .call(&op::ListSessions::new(agent_protocol::models::ListQuery {
