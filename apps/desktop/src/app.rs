@@ -40,7 +40,11 @@ use gpui_kit::{
     *,
 };
 use hosts::{HostEvent, Hosts};
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    path::PathBuf,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 /// Runs once a dispatched intent resolves.
 type Done = Box<
@@ -113,7 +117,9 @@ pub(crate) struct Desktop {
     pub(crate) hosts: Entity<Hosts>,
     pub(crate) route: Route,
     pub(crate) sidebar_hidden: bool,
-    sidebar_animation_runs: u64,
+    sidebar_animation: PanelAnimationState,
+    right_panel_animation: PanelAnimationState,
+    terminal_drawer_animation: PanelAnimationState,
     generation: u64,
     views_running: bool,
     shown_error: Option<String>,
@@ -130,6 +136,119 @@ pub(crate) struct Desktop {
     pub(crate) project_icons: std::cell::RefCell<std::collections::HashMap<String, Arc<Image>>>,
     tick: Option<tokio_util::task::AbortOnDropHandle<()>>,
     _subscriptions: Vec<Subscription>,
+}
+
+/// A duration-based transition that can retarget from its current visual
+/// value. GPUI's ordinary animation state is keyed by element id and only
+/// tracks elapsed time, so changing an open/closed id would restart from an
+/// endpoint and visibly jump when a panel is toggled mid-transition.
+#[derive(Default)]
+struct PanelAnimationState {
+    scope: Option<String>,
+    from: f32,
+    target: f32,
+    started: Option<Instant>,
+    duration: Duration,
+    run: u64,
+}
+
+#[derive(Clone, Copy)]
+struct PanelAnimation {
+    from: f32,
+    target: f32,
+    run: u64,
+    duration: Duration,
+}
+
+impl PanelAnimationState {
+    fn reset(&mut self) {
+        *self = Self::default();
+    }
+
+    /// Returns the animation inputs for this frame, or `None` when the target
+    /// is already settled. A scope change is rendered immediately so restored
+    /// panel state does not flash through an enter animation.
+    fn prepare(&mut self, scope: &str, target: f32, duration: Duration) -> Option<PanelAnimation> {
+        let now = Instant::now();
+        if self.scope.as_deref() != Some(scope) {
+            self.scope = Some(scope.to_owned());
+            self.from = target;
+            self.target = target;
+            self.started = None;
+            self.duration = duration;
+            return None;
+        }
+
+        if duration.is_zero() {
+            self.from = target;
+            self.target = target;
+            self.started = None;
+            self.duration = duration;
+            return None;
+        }
+
+        if (target - self.target).abs() > f32::EPSILON {
+            self.from = self.value_at(now);
+            self.target = target;
+            self.started = Some(now);
+            self.duration = duration;
+            self.run = self.run.wrapping_add(1);
+        } else if let Some(started) = self.started {
+            if now.duration_since(started) >= self.duration {
+                self.from = self.target;
+                self.started = None;
+            }
+        }
+
+        self.started.map(|_| PanelAnimation {
+            from: self.from,
+            target: self.target,
+            run: self.run,
+            duration: self.duration,
+        })
+    }
+
+    fn value_at(&self, now: Instant) -> f32 {
+        let Some(started) = self.started else {
+            return self.target;
+        };
+        if self.duration.is_zero() {
+            return self.target;
+        }
+        let delta =
+            (now.duration_since(started).as_secs_f32() / self.duration.as_secs_f32()).min(1.);
+        self.from + (self.target - self.from) * panel_ease_out(delta)
+    }
+}
+
+/// Match the web panel transitions' CSS `ease-out` curve
+/// (`cubic-bezier(0, 0, .58, 1)`).
+fn panel_ease_out(time: f32) -> f32 {
+    let time = time.clamp(0., 1.);
+    let mut parameter = time;
+    for _ in 0..5 {
+        let x = cubic_bezier(parameter, 0., 0.58);
+        let derivative = cubic_bezier_derivative(parameter, 0., 0.58);
+        if derivative.abs() < f32::EPSILON {
+            break;
+        }
+        parameter = (parameter - (x - time) / derivative).clamp(0., 1.);
+    }
+    cubic_bezier(parameter, 0., 1.)
+}
+
+fn cubic_bezier(parameter: f32, first_control: f32, second_control: f32) -> f32 {
+    let inverse = 1. - parameter;
+    3. * inverse * inverse * parameter * first_control
+        + 3. * inverse * parameter * parameter * second_control
+        + parameter * parameter * parameter
+}
+
+fn cubic_bezier_derivative(parameter: f32, first_control: f32, second_control: f32) -> f32 {
+    let inverse = 1. - parameter;
+    3. * inverse * inverse * first_control
+        + 6. * inverse * parameter * (second_control - first_control)
+        + 3. * parameter * parameter * (1. - second_control)
 }
 
 /// Keys every window binds; screens handle their own focus-specific keys.
@@ -212,7 +331,9 @@ impl Desktop {
             hosts,
             route: Route::Chat,
             sidebar_hidden: false,
-            sidebar_animation_runs: 0,
+            sidebar_animation: PanelAnimationState::default(),
+            right_panel_animation: PanelAnimationState::default(),
+            terminal_drawer_animation: PanelAnimationState::default(),
             generation: 0,
             views_running: false,
             shown_error: None,
@@ -552,6 +673,9 @@ impl Desktop {
     fn disconnected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.timeline.reset();
         self.panels.reset(window, cx);
+        self.sidebar_animation.reset();
+        self.right_panel_animation.reset();
+        self.terminal_drawer_animation.reset();
         self.sync_composer(window, cx);
     }
 
@@ -625,7 +749,6 @@ impl Desktop {
         match command {
             "sidebar.toggle" => {
                 self.sidebar_hidden = !self.sidebar_hidden;
-                self.sidebar_animation_runs += 1;
                 cx.notify();
             }
             "rightPanel.toggle" => self.toggle_right_panel(window, cx),
@@ -696,7 +819,6 @@ impl Desktop {
         };
         let width = ui::metrics().sidebar_width;
         let hidden = self.sidebar_hidden;
-        let runs = self.sidebar_animation_runs;
         let duration = Self::panel_animation_duration();
         let navigation = div()
             .id("desktop-navigation")
@@ -705,19 +827,21 @@ impl Desktop {
             .overflow_hidden()
             .w(px(if hidden { 0. } else { width }))
             .child(navigation);
-        if runs == 0 || duration.is_zero() {
-            navigation.into_any_element()
-        } else {
-            navigation
+        match self
+            .sidebar_animation
+            .prepare("navigation", if hidden { 0. } else { 1. }, duration)
+        {
+            Some(animation) => navigation
                 .with_animation(
-                    ("desktop-navigation-animation", runs),
-                    Animation::new(duration),
+                    ("desktop-navigation-animation", animation.run),
+                    Animation::new(animation.duration).with_easing(panel_ease_out),
                     move |navigation, delta| {
-                        let progress = if hidden { 1. - delta } else { delta };
+                        let progress = animation.from + (animation.target - animation.from) * delta;
                         navigation.w(px(width * progress))
                     },
                 )
-                .into_any_element()
+                .into_any_element(),
+            None => navigation.into_any_element(),
         }
     }
 }

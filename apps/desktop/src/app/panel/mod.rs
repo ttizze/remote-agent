@@ -304,6 +304,12 @@ impl Desktop {
     ) -> Option<AnyElement> {
         let panel_key = self.panel_thread();
         let right = self.right().clone();
+        let duration = Desktop::panel_animation_duration();
+        let animation = self.right_panel_animation.prepare(
+            &panel_key,
+            if right.open { 1. } else { 0. },
+            duration,
+        );
         if !right.open && !self.panels.threads.contains_key(&panel_key) {
             return None;
         }
@@ -367,20 +373,18 @@ impl Desktop {
                         }
                     })),
             );
-        let duration = Desktop::panel_animation_duration();
-        Some(if duration.is_zero() {
-            panel.into_any_element()
-        } else {
-            panel
+        Some(match animation {
+            Some(animation) => panel
                 .with_animation(
-                    ("desktop-right-panel-animation", open),
-                    Animation::new(duration),
+                    ("desktop-right-panel-animation", animation.run),
+                    Animation::new(animation.duration).with_easing(super::panel_ease_out),
                     move |panel, delta| {
-                        let progress = if open { delta } else { 1. - delta };
+                        let progress = animation.from + (animation.target - animation.from) * delta;
                         panel.w(px(width * progress))
                     },
                 )
-                .into_any_element()
+                .into_any_element(),
+            None => panel.into_any_element(),
         })
     }
 
@@ -644,6 +648,13 @@ impl Desktop {
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let open = self.panels.terminals.drawer_open();
+        let thread_key = self.thread_id().unwrap_or_default();
+        let duration = Desktop::panel_animation_duration();
+        let animation = self.terminal_drawer_animation.prepare(
+            &thread_key,
+            if open { 1. } else { 0. },
+            duration,
+        );
         if !open && !self.panels.terminals.drawer_present() {
             return None;
         }
@@ -657,20 +668,18 @@ impl Desktop {
             .flex_shrink_0()
             .overflow_hidden()
             .child(self.render_terminals(None, window, cx));
-        let duration = Desktop::panel_animation_duration();
-        Some(if duration.is_zero() {
-            drawer.into_any_element()
-        } else {
-            drawer
+        Some(match animation {
+            Some(animation) => drawer
                 .with_animation(
-                    ("desktop-terminal-drawer-animation", open),
-                    Animation::new(duration),
+                    ("desktop-terminal-drawer-animation", animation.run),
+                    Animation::new(animation.duration).with_easing(super::panel_ease_out),
                     move |drawer, delta| {
-                        let progress = if open { delta } else { 1. - delta };
+                        let progress = animation.from + (animation.target - animation.from) * delta;
                         drawer.h(px(height * progress))
                     },
                 )
-                .into_any_element()
+                .into_any_element(),
+            None => drawer.into_any_element(),
         })
     }
 

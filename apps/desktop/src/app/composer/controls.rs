@@ -166,39 +166,69 @@ fn separator() -> Div {
 const MODEL_PICKER_MAX_LABEL_WIDTH: f32 = 200.;
 const MODEL_PICKER_MIN_LABEL_WIDTH: f32 = 48.;
 
-fn model_picker_label_width(window: &Window, label: &str) -> f32 {
+#[derive(Clone, Copy)]
+struct ModelPickerWidths {
+    natural: f32,
+    minimum: f32,
+}
+
+impl ModelPickerWidths {
+    /// Keep the fixed controls' minimum while replacing the estimated natural
+    /// width with the actual laid-out width.
+    fn with_natural(self, natural: f32) -> Self {
+        Self {
+            natural,
+            minimum: self.minimum.min(natural),
+        }
+    }
+}
+
+fn model_picker_label_measurement(
+    window: &Window,
+    instance_id: &str,
+    label: &str,
+) -> (f32, String) {
     let style = window.text_style();
+    let font_size = px(f32::from(window.rem_size()) * 0.875);
+    let mut label_font = font(style.font_family.clone());
+    label_font.features = style.font_features.clone();
+    label_font.fallbacks = style.font_fallbacks.clone();
+    label_font.style = style.font_style;
+    label_font.weight = FontWeight::MEDIUM;
     let run = TextRun {
         len: label.len(),
-        font: font(style.font_family.clone()),
+        font: label_font,
         color: Hsla::default(),
         background_color: None,
         underline: None,
         strikethrough: None,
     };
-    f32::from(
+    let width = f32::from(
         window
             .text_system()
-            .shape_line(label.into(), px(14.), &[run], None)
+            .shape_line(label.into(), font_size, &[run], None)
             .width,
-    )
+    );
+    let key = format!(
+        "{instance_id}:{label}:{:?}:{font_size:?}:{:?}:{:?}:{:?}",
+        style.font_family, style.font_features, style.font_fallbacks, style.font_style,
+    );
+    (width, key)
 }
 
-fn model_picker_minimum_width(natural_width: f32, label_width: f32) -> f32 {
-    ((natural_width - label_width.min(MODEL_PICKER_MAX_LABEL_WIDTH)).max(0.)
-        + MODEL_PICKER_MIN_LABEL_WIDTH)
-        .min(natural_width)
-}
-
-fn estimated_model_picker_widths(window: &Window, trigger: &ModelPickerTrigger) -> (f32, f32) {
+fn model_picker_fixed_width(trigger: &ModelPickerTrigger) -> f32 {
     // The button has 20px of horizontal padding, a 16px caret and a 4px
     // content gap. The instance mark is 20px wide and adds one more gap; the
     // trigger keeps its existing -10px leading margin.
-    let fixed = 20. + 16. + 4. + if trigger.instance.is_some() { 24. } else { 0. } - 10.;
-    let label = model_picker_label_width(window, &trigger.label);
-    let natural = fixed + label.min(MODEL_PICKER_MAX_LABEL_WIDTH);
-    let minimum = (fixed + MODEL_PICKER_MIN_LABEL_WIDTH).min(natural);
-    (natural, minimum)
+    20. + 16. + 4. + if trigger.instance.is_some() { 24. } else { 0. } - 10.
+}
+
+fn model_picker_widths(fixed_width: f32, label_width: f32) -> ModelPickerWidths {
+    let natural = fixed_width + label_width.min(MODEL_PICKER_MAX_LABEL_WIDTH);
+    ModelPickerWidths {
+        natural,
+        minimum: (fixed_width + MODEL_PICKER_MIN_LABEL_WIDTH).min(natural),
+    }
 }
 
 /// An `#rrggbb` accent color.
@@ -622,11 +652,13 @@ impl Desktop {
         let hidden = layout.hidden_count.min(block_count);
         let picker_compact = hidden == block_count;
         let picker_label = composer.model_trigger.label.clone();
-        let picker_measurement_key =
-            format!("{}:{picker_label}", composer.model_trigger.instance_id);
-        let picker_label_width = model_picker_label_width(window, &picker_label);
-        let estimated_picker_widths =
-            estimated_model_picker_widths(window, &composer.model_trigger);
+        let (picker_label_width, picker_measurement_key) = model_picker_label_measurement(
+            window,
+            &composer.model_trigger.instance_id,
+            &picker_label,
+        );
+        let picker_fixed_width = model_picker_fixed_width(&composer.model_trigger);
+        let estimated_picker_widths = model_picker_widths(picker_fixed_width, picker_label_width);
         let traits_hidden = has_traits && hidden >= block_count;
         let mode_hidden = hidden >= 1;
         let overflow =
@@ -688,11 +720,14 @@ impl Desktop {
                             .as_ref()
                             .filter(|(key, _, _)| key == &picker_measurement_key)
                             .map(|(_, natural, minimum)| (*natural, *minimum))
-                            .unwrap_or(estimated_picker_widths)
+                            .unwrap_or((
+                                estimated_picker_widths.natural,
+                                estimated_picker_widths.minimum,
+                            ))
                     } else {
                         let natural = widths[0];
-                        let minimum = model_picker_minimum_width(natural, picker_label_width);
-                        (natural, minimum)
+                        let measured = estimated_picker_widths.with_natural(natural);
+                        (measured.natural, measured.minimum)
                     };
                     view.composer.footer_picker_measurement = Some((
                         picker_measurement_key.clone(),
@@ -1730,17 +1765,18 @@ fn model_row(
 
 #[cfg(test)]
 mod tests {
-    use super::model_picker_minimum_width;
+    use super::model_picker_widths;
 
     #[test]
     fn model_picker_measurement_keeps_a_distinct_readable_minimum() {
-        let minimum = model_picker_minimum_width(260., 200.);
-        assert_eq!(minimum, 108.);
-        assert!(minimum < 260.);
+        let widths = model_picker_widths(60., 200.);
+        assert_eq!(widths.natural, 260.);
+        assert_eq!(widths.minimum, 108.);
+        assert!(widths.minimum < widths.natural);
     }
 
     #[test]
     fn model_picker_minimum_does_not_exceed_a_short_label() {
-        assert_eq!(model_picker_minimum_width(90., 24.), 90.);
+        assert_eq!(model_picker_widths(60., 24.).minimum, 84.);
     }
 }
