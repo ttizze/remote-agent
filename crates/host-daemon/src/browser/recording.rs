@@ -17,6 +17,10 @@ use serde_json::{Value, json};
 use std::{
     path::{Path, PathBuf},
     process::{Output, Stdio},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     time::Duration,
 };
 use tokio::{
@@ -66,6 +70,7 @@ enum ScreencastEvent {
 pub(crate) struct StartResult {
     pub(crate) started_at: String,
     pub(crate) artifact_path: PathBuf,
+    pub(crate) externally_detached: Arc<AtomicBool>,
     pub(crate) startup: oneshot::Receiver<Result<(), String>>,
     pub(crate) task: tokio::task::JoinHandle<Result<PreviewRecordingArtifact, String>>,
 }
@@ -88,6 +93,7 @@ pub(crate) fn start(
     let artifact_path = recording_directory.join(format!("{id}.webm"));
     let started_at = chrono::Utc::now().to_rfc3339();
     let (startup_sender, startup) = oneshot::channel();
+    let externally_detached = Arc::new(AtomicBool::new(false));
     let task = tokio::spawn(run(
         endpoint,
         tab_id,
@@ -98,10 +104,12 @@ pub(crate) fn start(
         cancel,
         stop,
         startup_sender,
+        externally_detached.clone(),
     ));
     Ok(StartResult {
         started_at,
         artifact_path,
+        externally_detached,
         startup,
         task,
     })
@@ -126,6 +134,7 @@ async fn run(
     cancel: tokio_util::sync::CancellationToken,
     stop: tokio_util::sync::CancellationToken,
     startup: oneshot::Sender<Result<(), String>>,
+    externally_detached: Arc<AtomicBool>,
 ) -> Result<PreviewRecordingArtifact, String> {
     let final_path = recording_directory.join(format!("{id}.webm"));
     let partial_path = recording_directory.join(format!("{id}.part.webm"));
@@ -139,6 +148,7 @@ async fn run(
         cancel,
         stop,
         startup,
+        externally_detached,
     )
     .await;
     match result {
@@ -193,6 +203,7 @@ async fn run_capture(
     cancel: tokio_util::sync::CancellationToken,
     stop: tokio_util::sync::CancellationToken,
     startup: oneshot::Sender<Result<(), String>>,
+    externally_detached: Arc<AtomicBool>,
 ) -> Result<u64, String> {
     let mut startup = Some(startup);
     let (mut socket, _) = match async_tungstenite::tokio::connect_async(endpoint).await {
@@ -224,6 +235,7 @@ async fn run_capture(
             }
         },
         Err(error) => {
+            note_target_detached(&error, &externally_detached);
             notify_startup(&mut startup, Err(error.clone()));
             return Err(error);
         }
@@ -240,6 +252,7 @@ async fn run_capture(
     .await
     {
         cleanup_cdp(&mut socket, &mut next_id, &session).await;
+        note_target_detached(&error, &externally_detached);
         notify_startup(&mut startup, Err(error.clone()));
         return Err(error);
     }
@@ -270,6 +283,7 @@ async fn run_capture(
     {
         cleanup_cdp(&mut socket, &mut next_id, &session).await;
         encoder.abort().await;
+        note_target_detached(&error, &externally_detached);
         notify_startup(&mut startup, Err(error.clone()));
         return Err(error);
     }
@@ -309,6 +323,7 @@ async fn run_capture(
                         (frame, timestamp, session_id)
                     }
                     Ok(ScreencastEvent::Detached) => {
+                        externally_detached.store(true, Ordering::Release);
                         detached = true;
                         break capture_termination_result(CaptureTermination::Detached);
                     }
@@ -439,6 +454,12 @@ async fn next_screencast_frame(
 
 fn is_detached_event(value: &Value) -> bool {
     value["method"] == "Target.detachedFromTarget" || value["method"] == "Target.targetCrashed"
+}
+
+fn note_target_detached(error: &str, externally_detached: &AtomicBool) {
+    if error.contains("target detached") {
+        externally_detached.store(true, Ordering::Release);
+    }
 }
 
 async fn cleanup_cdp(

@@ -237,6 +237,7 @@ impl Browser {
         let recording::StartResult {
             started_at,
             artifact_path,
+            externally_detached,
             startup,
             task,
         } = started;
@@ -265,6 +266,7 @@ impl Browser {
         let recording_artifacts = self.recording_artifacts.clone();
         let browser_state = self.state.clone();
         let preview = self.preview.get().cloned();
+        let monitor_external_detached = externally_detached.clone();
         let monitor_key = key.clone();
         let monitor_tab_id = tab_id.to_owned();
         let monitor_thread = thread.to_owned();
@@ -275,18 +277,6 @@ impl Browser {
             };
             let mut paths_to_remove = Vec::new();
             if let Ok(artifact) = &result {
-                let open_recording_keys = {
-                    let state = browser_state.lock().await;
-                    state
-                        .pages
-                        .iter()
-                        .flat_map(|(thread, page)| {
-                            page.preview_tabs
-                                .iter()
-                                .map(|tab_id| (thread.clone(), tab_id.clone()))
-                        })
-                        .collect::<HashSet<_>>()
-                };
                 let mut artifacts = recording_artifacts.lock().await;
                 let entries = artifacts.entry(monitor_key.clone()).or_default();
                 entries.push(artifact.clone());
@@ -295,38 +285,32 @@ impl Browser {
                 while entries.len() > 1 {
                     paths_to_remove.push(PathBuf::from(entries.remove(0).path));
                 }
-                while artifacts.len() > MAX_RETAINED_RECORDINGS {
-                    let Some(oldest_key) = artifacts
-                        .iter()
-                        .filter(|(key, _)| !open_recording_keys.contains(*key))
-                        .filter_map(|(key, entries)| {
-                            entries
-                                .first()
-                                .map(|artifact| (key.clone(), artifact.created_at.clone()))
-                        })
-                        .min_by(|(_, left), (_, right)| left.cmp(right))
-                        .map(|(key, _)| key)
-                    else {
-                        break;
-                    };
-                    if let Some(entries) = artifacts.remove(&oldest_key) {
-                        paths_to_remove.extend(
-                            entries
-                                .into_iter()
-                                .map(|artifact| PathBuf::from(artifact.path)),
-                        );
-                    }
-                }
+                paths_to_remove.extend(prune_completed_recordings(
+                    &mut artifacts,
+                    MAX_RETAINED_RECORDINGS,
+                ));
             }
             drop(recording_artifacts);
             for path in paths_to_remove {
                 let _ = tokio::fs::remove_file(path).await;
             }
             done.send_replace(Some(result));
-            if let Some(preview) = preview
-                && let Ok(thread_id) = agent_domain::ThreadId::new(monitor_thread)
+            let externally_detached = monitor_external_detached
+                .load(std::sync::atomic::Ordering::Acquire);
+            if externally_detached {
+                let mut state = browser_state.lock().await;
+                forget_detached_preview_target(&mut state, &monitor_thread, &monitor_tab_id);
+            }
+            if let Some(preview) = preview.as_ref()
+                && let Ok(thread_id) = agent_domain::ThreadId::new(monitor_thread.clone())
             {
                 preview.recording_finished(&thread_id, &monitor_tab_id);
+            }
+            if externally_detached
+                && let Some(preview) = preview.as_ref()
+                && let Ok(thread_id) = agent_domain::ThreadId::new(monitor_thread.clone())
+            {
+                preview.close(&thread_id, Some(&monitor_tab_id));
             }
             recordings.lock().await.remove(&monitor_key);
         });
@@ -540,19 +524,21 @@ impl Browser {
 
     async fn discard_recording_artifact_path(&self, key: &RecordingKey, path: &PathBuf) {
         let target = path.to_string_lossy().into_owned();
-        let is_offered = self
-            .recording_artifacts
-            .lock()
-            .await
-            .get(key)
-            .is_some_and(|entries| {
-                entries
-                    .iter()
-                    .any(|artifact| artifact.path.as_str() == target.as_str())
-            });
-        if !is_offered {
-            let _ = tokio::fs::remove_file(path).await;
+        let mut artifacts = self.recording_artifacts.lock().await;
+        let remove_key = if let Some(entries) = artifacts.get_mut(key) {
+            entries.retain(|artifact| artifact.path.as_str() != target.as_str());
+            entries.is_empty()
+        } else {
+            false
+        };
+        if remove_key {
+            artifacts.remove(key);
         }
+        drop(artifacts);
+        // A cancelled start owns this freshly allocated path even if the
+        // monitor completed and briefly offered it before cancellation was
+        // observed.  The caller is intentionally discarding that output.
+        let _ = tokio::fs::remove_file(path).await;
     }
 
     async fn clear_replaced_recording_artifacts(
@@ -1214,6 +1200,62 @@ impl Browser {
             dialog: chrome.dialog(&session),
         })
     }
+}
+
+fn forget_detached_preview_target(state: &mut State, thread: &str, tab_id: &str) -> bool {
+    if let Some(chrome) = state.chrome.as_mut() {
+        chrome.forget_target(tab_id);
+    }
+    let Some(page) = state.pages.get_mut(thread) else {
+        return false;
+    };
+    let known = page.tabs.iter().any(|id| id == tab_id)
+        || page.preview_tabs.contains(tab_id);
+    page.tabs.retain(|id| id != tab_id);
+    page.viewports.remove(tab_id);
+    page.preview_tabs.remove(tab_id);
+    page.preview_settings.remove(tab_id);
+    if page.active == tab_id {
+        page.active = page.tabs.last().cloned().unwrap_or_default();
+    }
+    known
+}
+
+fn prune_completed_recordings(
+    artifacts: &mut HashMap<RecordingKey, Vec<RecordingArtifact>>,
+    maximum: usize,
+) -> Vec<PathBuf> {
+    let mut removed = Vec::new();
+    while artifacts.values().map(Vec::len).sum::<usize>() > maximum {
+        let Some((key, index, _)) = artifacts
+            .iter()
+            .flat_map(|(key, entries)| {
+                entries.iter().enumerate().map(|(index, artifact)| {
+                    (key.clone(), index, artifact.created_at.clone())
+                })
+            })
+            .min_by(|left, right| {
+                left.2
+                    .cmp(&right.2)
+                    .then_with(|| left.0.cmp(&right.0))
+                    .then_with(|| left.1.cmp(&right.1))
+            })
+        else {
+            break;
+        };
+        let (path, empty) = {
+            let entries = artifacts
+                .get_mut(&key)
+                .expect("the selected recording key remains owned");
+            let path = PathBuf::from(entries.remove(index).path);
+            (path, entries.is_empty())
+        };
+        removed.push(path);
+        if empty {
+            artifacts.remove(&key);
+        }
+    }
+    removed
 }
 
 fn begin_recording_stop(stopping: &mut bool) -> bool {

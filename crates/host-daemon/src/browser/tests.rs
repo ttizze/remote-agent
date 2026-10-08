@@ -62,6 +62,86 @@ async fn stop_waits_for_startup_before_cancelling_capture() {
     assert_eq!(waiting.await.unwrap().unwrap(), RecordingStartupState::Started);
 }
 
+#[tokio::test]
+async fn cancelled_start_discards_an_artifact_already_offered_by_the_monitor() {
+    let root = tempfile::tempdir().unwrap();
+    let browser = Browser::start(root.path().join("profile")).await.unwrap();
+    let key = ("thread".to_owned(), "tab".to_owned());
+    let path = root.path().join("recording.webm");
+    std::fs::write(&path, b"cancelled").unwrap();
+    browser.recording_artifacts.lock().await.insert(
+        key.clone(),
+        vec![agent_protocol::preview::PreviewRecordingArtifact {
+            id: "cancelled".into(),
+            tab_id: key.1.clone(),
+            path: path.to_string_lossy().into_owned(),
+            mime_type: "video/webm;codecs=vp9".into(),
+            size_bytes: 9,
+            created_at: "2026-01-01T00:00:00Z".into(),
+        }],
+    );
+
+    browser.discard_recording_artifact_path(&key, &path).await;
+
+    assert!(!path.exists());
+    assert!(browser.completed_recording(&key).await.is_none());
+    browser.shutdown().await;
+}
+
+#[test]
+fn completed_recording_retention_is_global_across_open_preview_tabs() {
+    let mut artifacts = std::collections::HashMap::new();
+    for index in 0..6 {
+        let tab = format!("tab-{index}");
+        artifacts.insert(
+            ("thread".to_owned(), tab.clone()),
+            vec![agent_protocol::preview::PreviewRecordingArtifact {
+                id: format!("recording-{index}"),
+                tab_id: tab,
+                path: format!("/tmp/recording-{index}.webm"),
+                mime_type: "video/webm;codecs=vp9".into(),
+                size_bytes: 1,
+                created_at: format!("2026-01-01T00:00:0{index}Z"),
+            }],
+        );
+    }
+
+    let removed = prune_completed_recordings(&mut artifacts, MAX_RETAINED_RECORDINGS);
+
+    assert_eq!(artifacts.len(), MAX_RETAINED_RECORDINGS);
+    assert_eq!(removed.len(), 2);
+    assert_eq!(removed[0], std::path::PathBuf::from("/tmp/recording-0.webm"));
+    assert_eq!(removed[1], std::path::PathBuf::from("/tmp/recording-1.webm"));
+}
+
+#[test]
+fn detached_preview_target_cleanup_removes_host_page_metadata() {
+    let mut state = State::default();
+    state.pages.insert(
+        "thread".into(),
+        Page {
+            tabs: vec!["other".into(), "tab".into()],
+            active: "tab".into(),
+            viewports: [("tab".into(), (800, 600))].into_iter().collect(),
+            preview_tabs: ["tab".into()].into_iter().collect(),
+            preview_settings: [("tab".into(), (
+                PreviewAppearance::System,
+                PreviewZoom::X100,
+            ))]
+            .into_iter()
+            .collect(),
+        },
+    );
+
+    assert!(forget_detached_preview_target(&mut state, "thread", "tab"));
+    let page = state.pages.get("thread").unwrap();
+    assert_eq!(page.tabs, ["other"]);
+    assert_eq!(page.active, "other");
+    assert!(page.viewports.is_empty());
+    assert!(page.preview_tabs.is_empty());
+    assert!(page.preview_settings.is_empty());
+}
+
 #[test]
 fn duplicate_stop_requests_share_one_completion_owner() {
     let mut stopping = false;
