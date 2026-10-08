@@ -1119,8 +1119,8 @@ impl HostRpcService {
             self.inner.resources.background_consumers_task.lock().await.take(),
             self.inner.resources.background_task.lock().await.take(),
         ];
-        for mut task in tasks.into_iter().flatten() {
-            let _ = (&mut task).await;
+        for task in tasks.into_iter().flatten() {
+            let _ = task.await;
         }
     }
     fn conversation(&self) -> Result<&Arc<Conversation>, Failure> {
@@ -3507,7 +3507,7 @@ impl HostRpcService {
         Ok(resources.commands.put(scan))
     }
     fn spawn_background_consumers(&self) -> tokio_util::task::AbortOnDropHandle<()> {
-        let service = self.clone();
+        let service_inner = Arc::downgrade(&self.inner);
         let stop = self.inner.resources.background_stop.clone();
         tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
             let mut last_git_fetch = std::collections::BTreeMap::<String, Timestamp>::new();
@@ -3519,6 +3519,10 @@ impl HostRpcService {
                     _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {}
                 }
 
+                let Some(inner) = service_inner.upgrade() else {
+                    return;
+                };
+                let service = HostRpcService { inner };
                 let gate = tokio::select! {
                     _ = stop.cancelled() => return,
                     result = service.acquire_handoff_gate(false) => result,
