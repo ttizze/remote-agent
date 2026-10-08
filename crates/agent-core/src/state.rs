@@ -1289,6 +1289,51 @@ pub struct DeviceHostInput {
     pub port: Option<u16>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
+pub enum DeviceFoldPostureIntent {
+    Closed,
+    Opened,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
+pub enum DeviceDuoPoseIntent {
+    Closed,
+    Book,
+    Open,
+    Laptop,
+    Tent,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
+pub enum DeviceDuoPhysicalIntent {
+    Faceup,
+    Facedown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
+pub enum DeviceDuoOrientationIntent {
+    Portrait,
+    LandscapeLeft,
+    PortraitUpsideDown,
+    LandscapeRight,
+}
+
+/// The finite set of controls supported by the Duo stream.  Values remain
+/// typed until the Host serializes the single source-defined wire command.
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
+pub enum DeviceDuoCommandIntent {
+    Angle { value: f32 },
+    Pose { value: DeviceDuoPoseIntent },
+    Table { value: bool },
+    Physical { value: DeviceDuoPhysicalIntent },
+    Orientation { value: DeviceDuoOrientationIntent },
+}
+
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum DeviceActionIntent {
@@ -1316,8 +1361,8 @@ pub enum DeviceActionIntent {
     },
     HardwareButton { button: String },
     Rotate,
-    Fold { command: String },
-    Duo { command: String },
+    Fold { command: DeviceFoldPostureIntent },
+    Duo { command: DeviceDuoCommandIntent },
 }
 
 #[derive(Debug, Clone)]
