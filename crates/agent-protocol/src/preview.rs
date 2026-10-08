@@ -405,11 +405,16 @@ pub struct PreviewList {
 pub struct PreviewRecordingStart {
     pub thread_id: agent_domain::ThreadId,
     pub tab_id: String,
+    /// Stable identity for this capture operation.  It is echoed by every
+    /// status and artifact so a late reply cannot affect a later recording on
+    /// the same tab.
+    pub recording_id: String,
     pub options: PreviewRecordingOptions,
 }
 impl PreviewRecordingStart {
     pub fn validate(&self) -> Result<(), String> {
         validate_tab_id(&self.tab_id)?;
+        validate_recording_id(&self.recording_id)?;
         self.options.validate()
     }
 }
@@ -448,10 +453,13 @@ impl PreviewRecordingOptions {
 pub struct PreviewRecordingStop {
     pub thread_id: agent_domain::ThreadId,
     pub tab_id: String,
+    /// The active recording lifetime the caller intends to stop.
+    pub recording_id: String,
 }
 impl PreviewRecordingStop {
     pub fn validate(&self) -> Result<(), String> {
-        validate_tab_id(&self.tab_id)
+        validate_tab_id(&self.tab_id)?;
+        validate_recording_id(&self.recording_id)
     }
 }
 
@@ -459,6 +467,7 @@ impl PreviewRecordingStop {
 #[serde(rename_all = "camelCase")]
 pub struct PreviewRecordingStatus {
     pub tab_id: String,
+    pub recording_id: String,
     pub recording: bool,
     pub started_at: Option<String>,
 }
@@ -467,6 +476,7 @@ pub struct PreviewRecordingStatus {
 #[serde(rename_all = "camelCase")]
 pub struct PreviewRecordingArtifact {
     pub id: String,
+    pub recording_id: String,
     pub tab_id: String,
     pub path: String,
     pub mime_type: String,
@@ -657,6 +667,19 @@ fn validate_tab_id(tab_id: &str) -> Result<(), String> {
     }
 }
 
+fn validate_recording_id(recording_id: &str) -> Result<(), String> {
+    if recording_id.trim().is_empty()
+        || recording_id.len() > 128
+        || recording_id
+            .chars()
+            .any(|character| character.is_control() || matches!(character, '/' | '\\'))
+    {
+        Err("preview recording id is invalid".into())
+    } else {
+        Ok(())
+    }
+}
+
 pub fn validate_profile_id(profile_id: &str) -> Result<(), String> {
     if profile_id.trim().is_empty()
         || profile_id.len() > PREVIEW_PROFILE_ID_MAX_LENGTH
@@ -796,10 +819,10 @@ mod tests {
     #[test]
     fn recording_requests_require_a_tab_id() {
         let thread_id = agent_domain::ThreadId::new("thread").unwrap();
-        assert!(PreviewRecordingStart { thread_id: thread_id.clone(), tab_id: "tab".into(), options: PreviewRecordingOptions::default() }
+        assert!(PreviewRecordingStart { thread_id: thread_id.clone(), tab_id: "tab".into(), recording_id: "recording".into(), options: PreviewRecordingOptions::default() }
             .validate()
             .is_ok());
-        assert!(PreviewRecordingStop { thread_id, tab_id: String::new() }
+        assert!(PreviewRecordingStop { thread_id, tab_id: String::new(), recording_id: "recording".into() }
             .validate()
             .is_err());
     }

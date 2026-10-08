@@ -28,6 +28,47 @@ use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 
 pub type Waiter = oneshot::Sender<Result<Outcome, PeerError>>;
 
+/// Admission order for native input plans.  A mutex around the wire call
+/// would serialize whichever spawned task gets scheduled first; this
+/// sequence assigns order in the owner before spawning and advances a
+/// per-connection watch cursor after each plan completes.
+pub(super) struct DeviceInputSequencer {
+    next_ticket: std::sync::Mutex<u64>,
+    turn: watch::Sender<u64>,
+}
+impl DeviceInputSequencer {
+    pub(super) fn new() -> Self {
+        let (turn, _) = watch::channel(0);
+        Self {
+            next_ticket: std::sync::Mutex::new(0),
+            turn,
+        }
+    }
+
+    pub(super) fn ticket(&self) -> u64 {
+        let mut next = self.next_ticket.lock().unwrap_or_else(|error| error.into_inner());
+        let ticket = *next;
+        *next = (*next).saturating_add(1);
+        ticket
+    }
+
+    pub(super) async fn wait_turn(&self, ticket: u64) {
+        let mut turn = self.turn.subscribe();
+        loop {
+            if *turn.borrow() == ticket {
+                return;
+            }
+            if turn.changed().await.is_err() {
+                return;
+            }
+        }
+    }
+
+    pub(super) fn complete(&self, ticket: u64) {
+        let _ = self.turn.send(ticket.saturating_add(1));
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct StoreOptions {
     /// Recorded as the creation source of threads and messages.
@@ -313,7 +354,7 @@ impl Owner {
             visited: BTreeMap::new(),
             waiters: BTreeMap::new(),
             dictations: BTreeMap::new(),
-            device_input_serial: Arc::new(tokio::sync::Mutex::new(())),
+            device_input_queue: Arc::new(DeviceInputSequencer::new()),
             observed_list: None,
             work_locally: None,
             stream_publish_pending: false,

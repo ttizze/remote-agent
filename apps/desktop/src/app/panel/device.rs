@@ -46,7 +46,7 @@ pub(super) struct DeviceState {
     frame_epochs: BTreeMap<(String, String, u8), String>,
     frame_bounds: BTreeMap<(String, String, u8), Bounds<Pixels>>,
     active_touch: Option<ActiveDeviceTouch>,
-    keyboard_target: Option<(String, String, String)>,
+    keyboard_target: Option<(String, String, String, String)>,
     decoder: device_decoder::DeviceVideoDecoder,
     focus: FocusHandle,
     ssh_label: Entity<InputState>,
@@ -123,12 +123,17 @@ impl Desktop {
     }
 
     fn release_device_input_for(&mut self, host_id: &str, device_id: &str) {
+        let Some(thread) = self.thread_id() else { return };
         let session_epoch = self
             .snapshot
             .device()
             .sessions
             .iter()
-            .find(|session| session.host_id == host_id && session.device_id == device_id)
+            .find(|session| {
+                session.thread_id == thread
+                    && session.host_id == host_id
+                    && session.device_id == device_id
+            })
             .map(|session| session.session_epoch.clone());
         self.perform(Intent::ReleaseDeviceInput {
             host_id: Some(host_id.to_owned()),
@@ -140,8 +145,10 @@ impl Desktop {
             .device
             .keyboard_target
             .as_ref()
-            .is_some_and(|(current_host, current_device, _)| {
-                current_host == host_id && current_device == device_id
+            .is_some_and(|(current_thread, current_host, current_device, _)| {
+                current_thread == thread.as_str()
+                    && current_host == host_id
+                    && current_device == device_id
             })
         {
             self.panels.device.keyboard_target = None;
@@ -309,9 +316,9 @@ impl Desktop {
         }) {
             return;
         }
-        let target = (host_id.clone(), device_id.clone(), session_epoch);
+        let target = (thread_id.clone(), host_id.clone(), device_id.clone(), session_epoch.clone());
         if self.panels.device.keyboard_target.as_ref() != Some(&target) {
-            if let Some((old_host, old_device, old_epoch)) =
+            if let Some((_old_thread, old_host, old_device, old_epoch)) =
                 self.panels.device.keyboard_target.replace(target)
             {
                 self.perform(Intent::ReleaseDeviceInput {
@@ -327,6 +334,7 @@ impl Desktop {
             action: DeviceActionIntent::Key {
                 code: facts.code,
                 key: facts.key,
+                session_epoch,
                 down,
                 meta: keystroke.modifiers.platform,
                 ctrl: keystroke.modifiers.control,
@@ -585,8 +593,9 @@ impl Desktop {
             .device
             .keyboard_target
             .as_ref()
-            .is_some_and(|(host_id, device_id, epoch)| {
-                live_epochs.get(&(host_id.clone(), device_id.clone())) != Some(epoch)
+            .is_some_and(|(thread_id, host_id, device_id, epoch)| {
+                thread_id != thread.as_str()
+                    || live_epochs.get(&(host_id.clone(), device_id.clone())) != Some(epoch)
             })
         {
             self.panels.device.keyboard_target = None;
@@ -739,6 +748,7 @@ impl Desktop {
                     session.host_id.clone(),
                     session.device_id.clone(),
                     session.platform.clone(),
+                    session.session_epoch.clone(),
                 )
             })
             .collect::<Vec<_>>();
@@ -848,7 +858,7 @@ impl Desktop {
         let device_controls =
             action_targets
                 .into_iter()
-                .map(|(host_id, device_id, platform)| {
+                .map(|(host_id, device_id, platform, session_epoch)| {
                     let target = format!("{host_id}:{device_id}");
                     let is_ios = platform == "ios";
                     let is_android = platform == "android";
@@ -1047,6 +1057,7 @@ impl Desktop {
                                         action: DeviceActionIntent::Key {
                                             code: "Enter".into(),
                                             key: "Enter".into(),
+                                            session_epoch: session_epoch.clone(),
                                             down: true,
                                             meta: false,
                                             ctrl: false,
@@ -1060,6 +1071,7 @@ impl Desktop {
                                         action: DeviceActionIntent::Key {
                                             code: "Enter".into(),
                                             key: "Enter".into(),
+                                            session_epoch,
                                             down: false,
                                             meta: false,
                                             ctrl: false,

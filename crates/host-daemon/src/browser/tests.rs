@@ -55,8 +55,11 @@ fn owner_frame_selection_does_not_follow_another_preview_owner() {
         Browser::activate_tab_for_owner(&mut page, Some("client-a"), None).unwrap(),
         "owner-a"
     );
+    // The provider browser is the collaborative surface for this thread, so
+    // its local owner can operate the human-visible shared tab alongside the
+    // authenticated Preview owners.
     assert_eq!(
-        Browser::activate_tab_for_owner(&mut page, Some("mcp:thread"), None).unwrap(),
+        Browser::activate_tab_for_owner(&mut page, Some("local"), None).unwrap(),
         "shared"
     );
 }
@@ -70,6 +73,7 @@ async fn recording_completion_is_replayable_after_startup_receiver_drops() {
     done.send_replace(Some(Ok(
         agent_protocol::preview::PreviewRecordingArtifact {
             id: "browser-recording-test".into(),
+            recording_id: "browser-recording-test".into(),
             tab_id: "tab".into(),
             path: "/tmp/browser-recording-test.webm".into(),
             mime_type: "video/webm;codecs=vp9".into(),
@@ -114,6 +118,7 @@ async fn cancelled_start_discards_an_artifact_already_offered_by_the_monitor() {
         vec![
             agent_protocol::preview::PreviewRecordingArtifact {
                 id: "previous".into(),
+                recording_id: "previous".into(),
                 tab_id: key.1.clone(),
                 path: previous.to_string_lossy().into_owned(),
                 mime_type: "video/webm;codecs=vp9".into(),
@@ -122,6 +127,7 @@ async fn cancelled_start_discards_an_artifact_already_offered_by_the_monitor() {
             },
             agent_protocol::preview::PreviewRecordingArtifact {
                 id: "cancelled".into(),
+                recording_id: "cancelled".into(),
                 tab_id: key.1.clone(),
                 path: path.to_string_lossy().into_owned(),
                 mime_type: "video/webm;codecs=vp9".into(),
@@ -136,7 +142,7 @@ async fn cancelled_start_discards_an_artifact_already_offered_by_the_monitor() {
     assert!(!path.exists());
     assert!(previous.exists());
     assert_eq!(
-        browser.completed_recording(&key).await.unwrap().id,
+        browser.completed_recording(&key, None).await.unwrap().id,
         "previous"
     );
     let _ = std::fs::remove_file(previous);
@@ -152,6 +158,7 @@ fn completed_recording_retention_is_global_across_open_preview_tabs() {
             ("thread".to_owned(), tab.clone()),
             vec![agent_protocol::preview::PreviewRecordingArtifact {
                 id: format!("recording-{index}"),
+                recording_id: format!("recording-{index}"),
                 tab_id: tab,
                 path: format!("/tmp/recording-{index}.webm"),
                 mime_type: "video/webm;codecs=vp9".into(),

@@ -240,6 +240,9 @@ impl PreviewManager {
         if status.tab_id.trim().is_empty() {
             return Err("preview recording tab id is invalid".into());
         }
+        if status.recording_id.trim().is_empty() {
+            return Err("preview recording id is invalid".into());
+        }
         let tab_id = status.tab_id.clone();
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         if !state
@@ -266,21 +269,25 @@ impl PreviewManager {
         Ok(())
     }
 
-    pub fn recording_finished(&self, thread_id: &ThreadId, tab_id: &str) {
+    pub fn recording_finished(&self, thread_id: &ThreadId, tab_id: &str, recording_id: &str) {
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-        if state
-            .recordings
-            .remove(&(thread_id.clone(), tab_id.to_owned()))
-            .is_none()
-        {
+        let key = (thread_id.clone(), tab_id.to_owned());
+        let Some(active) = state.recordings.get(&key) else {
             // A close can remove the session after the recording task has
             // published its completion but before its monitor publishes this
             // final status. Do not resurrect a recording for a closed tab.
             return;
+        };
+        if active.recording_id != recording_id {
+            // A detached or otherwise late monitor must not finish a newer
+            // capture that reused the same tab.
+            return;
         }
+        state.recordings.remove(&key);
         state.revision = state.revision.saturating_add(1);
         let status = PreviewRecordingStatus {
             tab_id: tab_id.to_owned(),
+            recording_id: recording_id.to_owned(),
             recording: false,
             started_at: None,
         };
@@ -510,6 +517,7 @@ mod tests {
                 id.clone(),
                 PreviewRecordingStatus {
                     tab_id: "tab".into(),
+                    recording_id: "recording".into(),
                     recording: true,
                     started_at: Some("2026-01-01T00:00:00Z".into()),
                 },
@@ -518,7 +526,7 @@ mod tests {
         assert_eq!(manager.list(&id).recordings.len(), 1);
         assert!(manager.list(&other).recordings.is_empty());
         assert!(manager.list(&id).revision > before);
-        manager.recording_finished(&id, "tab");
+        manager.recording_finished(&id, "tab", "recording");
         assert!(manager.list(&id).recordings.is_empty());
     }
 
@@ -544,6 +552,7 @@ mod tests {
             id.clone(),
             PreviewRecordingStatus {
                 tab_id: "tab".into(),
+                recording_id: "recording".into(),
                 recording: true,
                 started_at: Some("2026-01-01T00:00:00Z".into()),
             },
@@ -572,14 +581,59 @@ mod tests {
                 id.clone(),
                 PreviewRecordingStatus {
                     tab_id: "tab".into(),
+                    recording_id: "recording".into(),
                     recording: true,
                     started_at: Some("2026-01-01T00:00:00Z".into()),
                 },
             )
             .unwrap();
         manager.close(&id, Some("tab"));
-        manager.recording_finished(&id, "tab");
+        manager.recording_finished(&id, "tab", "recording");
         assert!(manager.list(&id).sessions.is_empty());
         assert!(manager.list(&id).recordings.is_empty());
+    }
+
+    #[test]
+    fn late_monitor_completion_cannot_finish_a_reused_tab() {
+        let manager = PreviewManager::new();
+        let id = thread("one");
+        manager
+            .open(
+                id.clone(),
+                "tab".into(),
+                Some("http://localhost:5173"),
+                PreviewViewportSetting::Fill,
+                PreviewAppearance::System,
+                PreviewZoom::X100,
+                None,
+            )
+            .unwrap();
+        manager
+            .recording_started(
+                id.clone(),
+                PreviewRecordingStatus {
+                    tab_id: "tab".into(),
+                    recording_id: "old".into(),
+                    recording: true,
+                    started_at: Some("old".into()),
+                },
+            )
+            .unwrap();
+        manager.recording_finished(&id, "tab", "other");
+        assert_eq!(manager.list(&id).recordings[0].recording_id, "old");
+
+        manager
+            .recording_started(
+                id.clone(),
+                PreviewRecordingStatus {
+                    tab_id: "tab".into(),
+                    recording_id: "new".into(),
+                    recording: true,
+                    started_at: Some("new".into()),
+                },
+            )
+            .unwrap();
+        manager.recording_finished(&id, "tab", "old");
+        assert_eq!(manager.list(&id).recordings[0].recording_id, "new");
     }
 }
