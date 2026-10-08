@@ -373,10 +373,12 @@ enum ToolCall {
 }
 
 fn parse_tool_call(name: &str, value: &Value) -> Result<ToolCall, String> {
-    let optional_tab_id = || match value.get("tab_id") {
-        None => Ok(None),
-        Some(Value::String(tab_id)) => Ok(Some(tab_id.clone())),
-        Some(_) => Err("tab_id must be a string when provided".into()),
+    let optional_tab_id = || -> Result<Option<String>, String> {
+        match value.get("tab_id") {
+            None => Ok(None),
+            Some(Value::String(tab_id)) => Ok(Some(tab_id.clone())),
+            Some(_) => Err("tab_id must be a string when provided".into()),
+        }
     };
     let recording_options = || {
         let frame_rate = value

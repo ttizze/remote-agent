@@ -339,7 +339,8 @@ impl Browser {
                 }
             });
         let bridge_directory = {
-            let builder = tempfile::Builder::new().prefix("bex-browser-");
+            let mut builder = tempfile::Builder::new();
+            builder.prefix("bex-browser-");
             #[cfg(unix)]
             {
                 // macOS Unix sockets have a 104-byte path limit. Nix's TMPDIR
@@ -963,8 +964,8 @@ impl Browser {
         let recordings = self.recordings.lock().await;
         let mut tabs = recordings
             .iter()
-            .filter(|(scope, tab_id)| {
-                scope == thread
+            .filter(|((scope_thread, tab_id), _active)| {
+                scope_thread == thread
                     && state
                         .pages
                         .get(thread)
@@ -1979,17 +1980,18 @@ impl Browser {
                 .into_iter()
                 .filter(|target| tabs.contains(&target.target_id))
                 .map(|target| {
+                    let tab_id = target.target_id.clone();
                     let (width, height) = viewports
-                        .get(&target.target_id)
+                        .get(&tab_id)
                         .copied()
                         .unwrap_or((WIDTH, HEIGHT));
-                    let (appearance, zoom) = settings.get(&target.target_id).copied().unwrap_or((
+                    let (appearance, zoom) = settings.get(&tab_id).copied().unwrap_or((
                         agent_protocol::preview::PreviewAppearance::System,
                         agent_protocol::preview::PreviewZoom::X100,
                     ));
                     agent_protocol::preview::PreviewSessionSnapshot {
                         thread_id: thread_id.clone(),
-                        tab_id: target.target_id,
+                        tab_id: tab_id.clone(),
                         nav_status: if target.url.is_empty() || target.url == "about:blank" {
                             agent_protocol::preview::PreviewNavStatus::Idle
                         } else {
@@ -2006,7 +2008,7 @@ impl Browser {
                         },
                         zoom,
                         appearance,
-                        profile_id: profiles.get(&target.target_id).cloned().flatten(),
+                        profile_id: profiles.get(&tab_id).cloned().flatten(),
                         updated_at: String::new(),
                     }
                 })
@@ -2402,7 +2404,7 @@ fn prune_completed_recordings(
             let path = PathBuf::from(entries.remove(index).path);
             (path, entries.is_empty())
         };
-        removed.push((key, path));
+        removed.push((key.clone(), path));
         if empty {
             artifacts.remove(&key);
         }
