@@ -19,25 +19,21 @@ final class TaskLiveActivities {
     private var stateObservers: [String: Task<Void, Never>] = [:]
     private var tokens: [String: Data] = [:]
     private var remote = Set<String>()
-    private struct Candidate: Equatable {
-        let attributes: TaskActivityAttributes
-        let state: TaskActivityAttributes.ContentState
-        let ongoing: Bool
-    }
-
     private struct Input: Equatable {
         let hostID: String?
         let connected: Bool
         let foreground: Bool
-        let candidates: [Candidate]
+        let state: TaskActivityAttributes.ContentState
     }
 
     private var pending: Input?
     private var previous: Input?
     private var worker: Task<Void, Never>?
-    // A dismissed activity stays dismissed until that task finishes.
-    private var started = Set<TaskActivityAttributes>()
-    private let logger = Logger(subsystem: "com.ttizze.b-codex", category: "LiveActivity")
+    // User dismissal lasts until this host's active task set becomes empty.
+    private var started = Set<String>()
+    private(set) var hostID: String?
+    private(set) var sessions: [SessionRef] = []
+    private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "dev.remoteagent.mobile.ios", category: "LiveActivity")
 
     init() {
         (requests, output) = AsyncStream.makeStream()
@@ -77,16 +73,11 @@ final class TaskLiveActivities {
             previous = nil
         }
         tokens[activity.id] = token
-        let identity = activity.attributes
         let environment: PushEnvironment = Bundle.main
             .object(forInfoDictionaryKey: "BexAPNSEnvironment") as? String == "production"
             ? .production : .sandbox
-        output.yield(Request(hostID: identity.hostID, activityID: activity.id, token: token,
+        output.yield(Request(hostID: activity.attributes.hostID, activityID: activity.id, token: token,
                              intent: .registerLiveActivity(RegisterLiveActivity(
-                                 session: SessionRef(
-                                     provider: identity.provider == "codex" ? .codex : .claude,
-                                     id: identity.sessionID
-                                 ),
                                  activityId: activity.id, token: token, environment: environment
                              ))))
     }
@@ -108,6 +99,9 @@ final class TaskLiveActivities {
             for await state in activity.activityStateUpdates {
                 guard !Task.isCancelled else { break }
                 if state == .ended || state == .dismissed {
+                    if state == .ended {
+                        self?.started.remove(activity.attributes.hostID)
+                    }
                     self?.retire(activity)
                     break
                 }
@@ -125,23 +119,16 @@ final class TaskLiveActivities {
                              intent: .unregisterLiveActivity(UnregisterLiveActivity(activityId: activity.id))))
     }
 
-    func synchronize(hostID: String?, hostName: String, connected: Bool, foreground: Bool, tasks: [TaskActivity]) {
-        let input = Input(hostID: hostID, connected: connected, foreground: foreground, candidates: tasks.map { task in
-            Candidate(
-                attributes: TaskActivityAttributes(
-                    hostID: hostID ?? "",
-                    provider: task.session.provider == .codex ? "codex" : "claude", sessionID: task.session.id
-                ),
-                state: .init(
-                    title: task.title,
-                    status: task.status,
-                    statusLabel: task.statusLabel,
-                    connected: connected,
-                    hostName: String(hostName.unicodeScalars.prefix(120))
-                ),
-                ongoing: task.ongoing
-            )
-        })
+    func synchronize(hostID: String?, hostName: String, connected: Bool, foreground: Bool,
+                     overview: TaskActivityOverview) {
+        self.hostID = hostID
+        sessions = overview.sessions
+        let input = Input(hostID: hostID, connected: connected, foreground: foreground,
+                          state: .init(summary: .init(running: overview.summary.running,
+                                                    waiting: overview.summary.waiting,
+                                                    unknown: overview.summary.unknown),
+                                       connected: connected && overview.summary.unknown == 0,
+                                       hostName: String(hostName.unicodeScalars.prefix(120))))
         guard input != (pending ?? previous) else { return }
         pending = input
         guard worker == nil else { return }
@@ -163,53 +150,44 @@ final class TaskLiveActivities {
         let activities = Activity<TaskActivityAttributes>.activities
         for activity in activities where activity.activityState == .active || activity.activityState == .stale {
             observe(activity)
-            let identity = activity.attributes
-            started.insert(identity)
-            guard activity.attributes.hostID == input.hostID else {
+            let host = activity.attributes.hostID
+            started.insert(host)
+            guard host == input.hostID else {
                 await activity.end(nil, dismissalPolicy: .immediate)
-                started.remove(identity)
+                started.remove(host)
                 continue
             }
-            let candidate = input.candidates.first { $0.attributes == identity }
-            // A missing/search-filtered row or offline snapshot is not completion evidence.
-            guard input.connected, let candidate, candidate.state.status != "unknown" else {
-                if remote.contains(activity.id) {
-                    continue
-                }
+            guard input.connected else {
+                if remote.contains(activity.id) { continue }
                 var state = activity.content.state
                 state.connected = false
                 await activity.update(ActivityContent(state: state, staleDate: .now))
                 continue
             }
-            if candidate.ongoing {
-                let usesPush = remote.contains(activity.id)
-                let updated = content(candidate.state, foreground: input.foreground, remote: usesPush)
-                await activity.update(updated)
+            if input.state.summary.total > 0 {
+                await activity.update(content(input.state, foreground: input.foreground,
+                                              remote: remote.contains(activity.id)))
             } else {
-                await activity.end(
-                    ActivityContent(state: candidate.state, staleDate: nil),
-                    dismissalPolicy: .after(.now.addingTimeInterval(60))
-                )
+                await activity.end(ActivityContent(state: input.state, staleDate: nil),
+                                   dismissalPolicy: .after(.now.addingTimeInterval(60)))
             }
         }
-        guard input.connected else { return }
-        for candidate in input.candidates where candidate.state.status != "unknown" {
-            let identity = candidate.attributes
-            if !candidate.ongoing {
-                started.remove(identity)
-                continue
-            }
-            guard input.foreground, input.hostID != nil, ActivityAuthorizationInfo().areActivitiesEnabled,
-                  !started.contains(identity) else { continue }
-            do {
-                let activity = try Activity.request(attributes: candidate.attributes,
-                                                    content: content(candidate.state, foreground: true),
-                                                    pushType: .token)
-                started.insert(identity)
-                observe(activity)
-            } catch {
-                logger.error("Could not start task activity: \(error.localizedDescription)")
-            }
+        guard input.connected, let host = input.hostID else { return }
+        guard input.state.summary.total > 0 else {
+            started.remove(host)
+            return
+        }
+        guard input.state.summary.running + input.state.summary.waiting > 0,
+              input.foreground, ActivityAuthorizationInfo().areActivitiesEnabled,
+              !started.contains(host) else { return }
+        do {
+            let activity = try Activity.request(attributes: TaskActivityAttributes(hostID: host),
+                                                content: content(input.state, foreground: true),
+                                                pushType: .token)
+            started.insert(host)
+            observe(activity)
+        } catch {
+            logger.error("Could not start task activity: \(error.localizedDescription)")
         }
     }
 
@@ -217,7 +195,7 @@ final class TaskLiveActivities {
         -> ActivityContent<TaskActivityAttributes.ContentState> {
         let staleDate: Date? = remote ? .now.addingTimeInterval(120) : foreground ? nil : .now.addingTimeInterval(30)
         return ActivityContent(state: state, staleDate: staleDate,
-                               relevanceScore: state.status == "waiting" ? 100 : 50)
+                               relevanceScore: state.summary.waiting > 0 ? 100 : 50)
     }
 }
 
@@ -225,7 +203,8 @@ extension BexAppViewModel {
     func synchronizeLiveActivities(foreground: Bool) {
         liveActivities.synchronize(hostID: selectedProfileId, hostName: selectedProfileName ?? "PC Host",
                                    connected: snapshot.connected(), foreground: foreground,
-                                   tasks: snapshot.taskActivities())
+                                   overview: snapshot.taskActivityOverview(previousSessions:
+                                       liveActivities.hostID == selectedProfileId ? liveActivities.sessions : []))
     }
 
     func observeLiveActivityRequests() {

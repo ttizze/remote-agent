@@ -1,4 +1,4 @@
-appId: com.ttizze.b-codex
+appId: dev.remoteagent.mobile.ios
 name: testSimulatorUsesNativeHostNavigationAndPairingDismissal
 ---
 - runFlow: connect.yaml

@@ -4,24 +4,17 @@ import WidgetKit
 
 @main
 struct BexTaskWidgets: WidgetBundle {
-    var body: some Widget {
-        BexTaskActivity()
-    }
+    var body: some Widget { BexTaskActivity() }
 }
 
 private struct BexTaskActivity: Widget {
     var body: some WidgetConfiguration {
         ActivityConfiguration(for: TaskActivityAttributes.self) { context in
-            HStack(spacing: 14) {
-                TaskStatusIcon(state: context.state, stale: context.isStale)
-                    .font(.title)
-                VStack(alignment: .leading, spacing: 5) {
-                    Text(context.state.title).font(.headline).lineLimit(2).privacySensitive()
-                    Text(statusLabel(context)).font(.subheadline)
-                    Text("Bex · \(context.state.hostName)")
-                        .font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                }
-                Spacer(minLength: 0)
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Bex · \(context.state.hostName)").font(.headline).lineLimit(1)
+                TaskIconRow(icons: context.state.summary.icons, stale: context.isStale || !context.state.connected)
+                    .frame(height: 22)
+                Text(statusLabel(context)).font(.subheadline)
             }
             .padding(16)
             .activityBackgroundTint(Color(.secondarySystemBackground))
@@ -30,42 +23,66 @@ private struct BexTaskActivity: Widget {
         } dynamicIsland: { context in
             DynamicIsland {
                 DynamicIslandExpandedRegion(.leading) {
-                    TaskStatusIcon(state: context.state, stale: context.isStale)
+                    Text("Bex").font(.headline)
                 }
                 DynamicIslandExpandedRegion(.trailing) {
-                    Text(statusLabel(context)).font(.caption)
+                    Text("\(context.state.summary.total)件").font(.caption)
                 }
                 DynamicIslandExpandedRegion(.bottom) {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(context.state.title).font(.headline).lineLimit(2).privacySensitive()
-                        Text("Bex · \(context.state.hostName)")
-                            .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                    VStack(alignment: .leading, spacing: 8) {
+                        TaskIconRow(icons: context.state.summary.icons,
+                                    stale: context.isStale || !context.state.connected).frame(height: 22)
+                        Text(statusLabel(context)).font(.subheadline)
+                        Text(context.state.hostName).font(.caption).foregroundStyle(.secondary).lineLimit(1)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
             } compactLeading: {
-                TaskStatusIcon(state: context.state, stale: context.isStale)
+                compactIcons(context, leading: true)
             } compactTrailing: {
-                Text(statusLabel(context)).font(.caption2).lineLimit(1)
+                compactIcons(context, leading: false)
             } minimal: {
-                TaskStatusIcon(state: context.state, stale: context.isStale)
+                Image(systemName: context.state.summary.waiting > 0
+                      ? "person.crop.circle.badge.questionmark" : "circle.dotted")
+                    .foregroundStyle(context.state.summary.waiting > 0 ? .orange : .primary)
+                    .accessibilityLabel(statusLabel(context))
             }
             .widgetURL(context.attributes.url)
         }
     }
 
+    private func compactIcons(_ context: ActivityViewContext<TaskActivityAttributes>, leading: Bool) -> some View {
+        let icons = context.state.summary.icons
+        let middle = (icons.count + 1) / 2
+        let half = leading ? Array(icons.prefix(middle)) : Array(icons.dropFirst(middle))
+        return HStack(spacing: 2) {
+            TaskIconRow(icons: half, stale: context.isStale || !context.state.connected)
+                .frame(width: CGFloat(max(half.count, 1)) * 10, height: 22)
+            if !leading && context.state.summary.total > icons.count {
+                Text("+\(context.state.summary.total - icons.count)").font(.caption2).monospacedDigit()
+            }
+        }
+    }
+
     private func statusLabel(_ context: ActivityViewContext<TaskActivityAttributes>) -> String {
-        context.isStale || !context.state.connected ? "更新待ち" : context.state.statusLabel
+        context.isStale || !context.state.connected ? "更新待ち" : context.state.summary.statusLabel
     }
 }
 
-private struct TaskStatusIcon: View {
-    let state: TaskActivityAttributes.ContentState
+private struct TaskIconRow: View {
+    let icons: [String]
     let stale: Bool
 
     var body: some View {
-        Image(systemName: stale || !state.connected ? "arrow.clockwise.circle" : state.symbol)
-            .foregroundStyle(state.status == "waiting" || state.status == "failed" ? .orange : .primary)
-            .accessibilityLabel(stale || !state.connected ? "更新待ち" : state.statusLabel)
+        HStack(spacing: 1) {
+            ForEach(icons.indices, id: \.self) { index in
+                Image(systemName: stale ? "arrow.clockwise.circle" : icons[index])
+                    .resizable().scaledToFit()
+                    .foregroundStyle(icons[index] == "person.crop.circle.badge.questionmark" ? .orange : .primary)
+                    .accessibilityLabel(stale ? "更新待ち" : icons[index] == "person.crop.circle.badge.questionmark" ? "確認待ち" : "実行中")
+                    .frame(maxWidth: 22)
+            }
+            if icons.isEmpty { Image(systemName: "checkmark.circle.fill") }
+        }
     }
 }

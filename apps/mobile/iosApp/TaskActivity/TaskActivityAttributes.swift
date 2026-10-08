@@ -2,38 +2,48 @@ import ActivityKit
 import Foundation
 
 struct TaskActivityAttributes: ActivityAttributes, Hashable {
-    struct ContentState: Codable, Hashable {
-        var title: String
-        var status: String
-        var statusLabel: String
-        var connected: Bool
-        var hostName: String
+    struct Summary: Codable, Hashable {
+        var running: UInt32
+        var waiting: UInt32
+        var unknown: UInt32
 
-        var symbol: String {
-            switch status {
-            case "waiting": "person.crop.circle.badge.questionmark"
-            case "completed": "checkmark.circle.fill"
-            case "failed": "exclamationmark.circle.fill"
-            case "interrupted": "stop.circle.fill"
-            case "finished": "flag.checkered"
-            default: "bolt.circle.fill"
+        var total: Int { Int(running) + Int(waiting) + Int(unknown) }
+        var statusLabel: String {
+            if total == 0 { return "すべてのタスクが終了" }
+            if unknown > 0 { return "更新待ち" }
+            if waiting > 0 { return "確認待ち \(waiting)件 · 実行中 \(running)件" }
+            return "実行中 \(running)件"
+        }
+
+        // Keep the widget cheap and legible; additional tasks share a count badge.
+        var icons: [String] {
+            var result = [String]()
+            for (count, symbol) in [(waiting, "person.crop.circle.badge.questionmark"),
+                                    (running, "circle.dotted"), (unknown, "arrow.clockwise.circle")] {
+                result += Array(repeating: symbol, count: min(Int(count), 12 - result.count))
             }
+            return result
         }
     }
 
+    struct ContentState: Codable, Hashable {
+        var summary: Summary
+        var connected: Bool
+        var hostName: String
+    }
+
+    static var urlScheme: String? {
+        Bundle.main.object(forInfoDictionaryKey: "BexTaskURLScheme") as? String
+    }
+
     var hostID: String
-    var provider: String
-    var sessionID: String
 
     var url: URL? {
+        guard let scheme = Self.urlScheme else { return nil }
         var components = URLComponents()
-        components.scheme = "bex"
-        components.host = "task"
-        components.queryItems = [
-            URLQueryItem(name: "host", value: hostID),
-            URLQueryItem(name: "provider", value: provider),
-            URLQueryItem(name: "session", value: sessionID)
-        ]
+        components.scheme = scheme
+        components.host = "tasks"
+        components.queryItems = [URLQueryItem(name: "host", value: hostID)]
         return components.url
     }
 }

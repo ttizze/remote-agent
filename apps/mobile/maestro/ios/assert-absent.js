@@ -2,7 +2,7 @@
 // existence assertions rather than substituting a viewport visibility check.
 const response = http.post(BEX_IOS_DRIVER_URL + "/viewHierarchy", {
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ appIds: ["com.ttizze.b-codex"], excludeKeyboardElements: false })
+    body: JSON.stringify({ appIds: ["dev.remoteagent.mobile.ios"], excludeKeyboardElements: false })
 });
 if (response.status !== 200) {
     throw new Error("The iOS driver could not read the accessibility hierarchy");

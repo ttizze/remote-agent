@@ -1,6 +1,6 @@
 # BEX Dev for iOS
 
-BEX Dev is a separate TestFlight app (`com.ttizze.b-codex.dev`). It can be
+BEX Dev is a separate TestFlight app (`dev.remoteagent.mobile.ios.dev`). It can be
 installed alongside BEX; its preferences, snapshots, and default Keychain
 access group are separate. Pair it with the development Host explicitly.
 
@@ -26,7 +26,7 @@ and the keychain containing that development identity. Install the app from
 `BexDev.xcarchive/Products/Applications`, verify its signature, and launch it on
 the device.
 
-Before upload, verify `CFBundleIdentifier = com.ttizze.b-codex.dev` and
+Before upload, verify `CFBundleIdentifier = dev.remoteagent.mobile.ios.dev` and
 `CFBundleDisplayName = BEX Dev` in the archive. Export using the distribution
 profile registered for that bundle ID. Upload to the **BEX Dev** App Store
 Connect record, then verify both Apple processing (`VALID`) and the internal

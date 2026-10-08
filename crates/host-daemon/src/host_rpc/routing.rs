@@ -214,44 +214,46 @@ impl SessionRouter {
         &self,
         connection: SessionId,
         params: &agent_protocol::live_activity::RegisterLiveActivity,
-        native: Thread,
+        native: Vec<Thread>,
     ) -> Result<(), String> {
-        if native.id.as_ref() != Some(&params.session) {
-            return Err("native session ID does not match".into());
-        }
-        let actor = self.actor(&params.session);
-        let owned = lock_state(&actor);
-        let thread = owned.overlay(native);
+        let tasks = native
+            .into_iter()
+            .filter_map(|thread| {
+                let target = thread.id.clone()?;
+                let actor = self.actor(&target);
+                let thread = lock_state(&actor).overlay(thread);
+                let phase = agent_protocol::live_activity::task_phase(
+                    !matches!(
+                        thread.status,
+                        agent_protocol::models::SessionStatus::Unknown
+                            | agent_protocol::models::SessionStatus::Unavailable
+                    ),
+                    thread.status == agent_protocol::models::SessionStatus::Running,
+                    thread.requests.values().any(|request| {
+                        request.delivery == agent_protocol::session::RequestDelivery::Awaiting
+                    }),
+                    thread
+                        .turns
+                        .as_ref()
+                        .and_then(|turns| turns.last())
+                        .map(|turn| turn.status),
+                );
+                self.prune(&target, &actor);
+                Some((target, phase.0.to_owned()))
+            })
+            .collect();
         let state = lock_state(&self.state);
         let principal = state
             .sessions
             .get(&connection)
             .filter(|output| output.alive.load(Relaxed))
             .ok_or("connection is closed")?;
-        let apns = state.apns.as_ref().ok_or("APNs is unavailable")?;
-        let phase = agent_protocol::live_activity::task_phase(
-            !matches!(
-                thread.status,
-                agent_protocol::models::SessionStatus::Unknown
-                    | agent_protocol::models::SessionStatus::Unavailable
-            ),
-            thread.status == agent_protocol::models::SessionStatus::Running,
-            thread.requests.values().any(|request| {
-                request.delivery == agent_protocol::session::RequestDelivery::Awaiting
-            }),
-            thread
-                .turns
-                .as_ref()
-                .and_then(|turns| turns.last())
-                .map(|turn| turn.status),
-        );
-        apns.register(
-            &principal.principal,
-            params,
-            agent_protocol::models::task_title(thread.name.as_deref(), thread.preview.as_deref()),
-            phase,
-        )
-        .map_err(str::to_owned)
+        state
+            .apns
+            .as_ref()
+            .ok_or("APNs is unavailable")?
+            .register(&principal.principal, params, tasks)
+            .map_err(str::to_owned)
     }
     pub(crate) fn new() -> Self {
         Self {
@@ -984,7 +986,8 @@ impl SessionRouter {
                         .as_ref()
                         .and_then(|turns| turns.last())
                         .map(|turn| turn.status),
-                ),
+                )
+                .0,
             );
         }
         actor.release();
@@ -1011,7 +1014,6 @@ mod tests {
             id: "task".into(),
         };
         let params = RegisterLiveActivity {
-            session: target.clone(),
             activity_id: "activity".into(),
             token: vec![1; 32],
             environment: PushEnvironment::Sandbox,
@@ -1031,17 +1033,16 @@ mod tests {
             .register_live_activity(
                 phone.id(),
                 &params,
-                Thread {
+                vec![Thread {
                     id: Some(target.clone()),
-                    name: Some("タスク".into()),
                     status: SessionStatus::Idle,
                     ..Default::default()
-                },
+                }],
             )
             .unwrap();
         assert_eq!(
-            apns.test_payloads(crate::apns::now())[0]["aps"]["content-state"]["status"],
-            "running"
+            apns.test_payloads(crate::apns::now())[0]["aps"]["content-state"]["summary"]["running"],
+            1
         );
         drop(phone);
         router.session_change(
@@ -1058,7 +1059,7 @@ mod tests {
         assert!(router.execution_targets().is_empty());
         let final_payload = &apns.test_payloads(crate::apns::now() + 2)[0]["aps"];
         assert_eq!(final_payload["event"], "end");
-        assert_eq!(final_payload["content-state"]["status"], "failed");
+        assert_eq!(final_payload["content-state"]["summary"]["running"], 0);
         let replacement = router.open_authenticated_session(Some("phone".into()));
         router.revoke_device("phone");
         assert!(apns.test_payloads(crate::apns::now() + 3).is_empty());
@@ -1067,10 +1068,10 @@ mod tests {
                 .register_live_activity(
                     replacement.id(),
                     &params,
-                    Thread {
+                    vec![Thread {
                         id: Some(target),
                         ..Default::default()
-                    }
+                    }]
                 )
                 .is_err()
         );

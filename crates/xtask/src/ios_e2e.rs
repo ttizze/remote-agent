@@ -660,7 +660,7 @@ async fn worker(
             }
             preparation.push(("install", args![vec; "xcrun", "simctl", "install", simulator, products.join("Debug-iphonesimulator/Bex.app")]));
             if tests.iter().any(|test| test == "testSimulatorOpensOnlyTheTappedImageAndSavesIt") {
-                preparation.push(("photos-add permission", args![vec; "xcrun", "simctl", "privacy", simulator, "grant", "photos-add", "com.ttizze.b-codex"]));
+                preparation.push(("photos-add permission", args![vec; "xcrun", "simctl", "privacy", simulator, "grant", "photos-add", "dev.remoteagent.mobile.ios"]));
             }
             for (phase, arguments) in preparation {
                 println!("{label}: {phase}");
@@ -672,7 +672,7 @@ async fn worker(
                 }
             }
             if tests.iter().any(|test| test == "testSimulatorCanAttachDownloadAndPrepareAIEdit") {
-                let container = supervision::run(&args!["xcrun", "simctl", "get_app_container", simulator, "com.ttizze.b-codex", "data"], &cwd, Io::Capture, &cancel, SETUP_TIMEOUT).await?;
+                let container = supervision::run(&args!["xcrun", "simctl", "get_app_container", simulator, "dev.remoteagent.mobile.ios", "data"], &cwd, Io::Capture, &cancel, SETUP_TIMEOUT).await?;
                 let documents = Path::new(std::str::from_utf8(&container.stdout)?.trim()).join("Documents");
                 fs::create_dir_all(&documents)?;
                 fs::write(documents.join("attachment-fixture.txt"), "Isolated attachment upload fixture.\n")?;

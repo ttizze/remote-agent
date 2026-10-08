@@ -13,10 +13,15 @@ enum PushEnvironment {
 }
 #[uniffi::remote(Record)]
 struct RegisterLiveActivity {
-    pub session: SessionRef,
     pub activity_id: String,
     pub token: Vec<u8>,
     pub environment: PushEnvironment,
+}
+#[uniffi::remote(Record)]
+struct TaskActivitySummary {
+    pub running: u32,
+    pub waiting: u32,
+    pub unknown: u32,
 }
 #[uniffi::remote(Record)]
 struct UnregisterLiveActivity {

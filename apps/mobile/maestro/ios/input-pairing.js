@@ -14,7 +14,7 @@ if (!output.pairingInvitation) {
 }
 const input = http.post(BEX_IOS_DRIVER_URL + "/inputText", {
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ text: output.pairingInvitation, appIds: ["com.ttizze.b-codex"] })
+    body: JSON.stringify({ text: output.pairingInvitation, appIds: ["dev.remoteagent.mobile.ios"] })
 });
 if (input.status !== 200) {
     throw new Error("The iOS driver could not enter the pairing invitation");

@@ -62,8 +62,8 @@ macro_rules! contracts {
     };
 }
 contracts! {
-    RegisterLiveActivity, "host/session/liveActivity/register" => (crate::live_activity::RegisterLiveActivity, crate::live_activity::LiveActivityRegistration) [clone],
-    UnregisterLiveActivity, "host/session/liveActivity/unregister" => (crate::live_activity::UnregisterLiveActivity, m::Empty) [clone],
+    RegisterLiveActivity, "host/liveActivity/register" => (crate::live_activity::RegisterLiveActivity, crate::live_activity::LiveActivityRegistration) [clone],
+    UnregisterLiveActivity, "host/liveActivity/unregister" => (crate::live_activity::UnregisterLiveActivity, m::Empty) [clone],
     OpenSession, "host/session/open" => (s::OpenSession, s::OpenedSession),
     ReadHistory, "host/session/history/read" => (s::ReadHistory, s::HistoryPage) [clone],
     ReadTurnItems, "host/session/turn/items" => (s::ReadTurnItems, m::Empty) [clone],
