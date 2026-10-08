@@ -149,6 +149,8 @@ mod tests {
                 ("CLAUDE_CODE_SDK_READS_SESSION_STATE".into(), "1".into()),
             ]),
         );
+    }
+
     #[test]
     fn instance_environment_overrides_safe_values_and_protects_session_paths() {
         let program = ClaudeProgram {
