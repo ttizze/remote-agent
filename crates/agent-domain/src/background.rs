@@ -474,6 +474,7 @@ pub fn compute_background_snapshot(
             .iter()
             .any(|lease| lease_foreground(lease, now) && !client_power_constrained(lease, policy));
     BackgroundPolicySnapshot {
+        policy: policy.clone(),
         host_power,
         leases: active,
         active_foreground_lease_count,
@@ -486,6 +487,10 @@ pub fn compute_background_snapshot(
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BackgroundPolicySnapshot {
+    /// The normalized settings currently used by the Host's background owners.
+    /// Keeping this beside the derived demand state lets native settings and
+    /// diagnostics render the same values that gate work.
+    pub policy: BackgroundActivityPolicy,
     pub host_power: HostPowerSnapshot,
     pub leases: Vec<ClientActivityLease>,
     pub active_foreground_lease_count: usize,

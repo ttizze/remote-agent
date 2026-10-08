@@ -11,7 +11,7 @@ use crate::conversation::{
     ClaudeCredentials, Conversation, ConversationConfig, ProjectCatalog, ProviderPrograms,
     SharedResources, SupervisedSpawner, tools::ModelCatalog,
 };
-use agent_domain::Driver;
+use agent_domain::{Driver, Timestamp, background_work_due};
 use agent_protocol::{
     operations as op,
     protocol::{Body, Call, Response},
@@ -102,6 +102,14 @@ struct HostResources {
     background: Arc<BackgroundOwner>,
     background_task: OnceLock<tokio_util::task::AbortOnDropHandle<()>>,
     background_stop: tokio_util::sync::CancellationToken,
+    background_consumers_task: OnceLock<tokio_util::task::AbortOnDropHandle<()>>,
+    provider_cache: tokio::sync::RwLock<Option<ProviderHealthCache>>,
+    provider_refresh: tokio::sync::Mutex<()>,
+}
+
+struct ProviderHealthCache {
+    refreshed_at: Timestamp,
+    providers: Vec<agent_protocol::models::ProviderInstance>,
 }
 
 /// The live model catalog for the agent tools, without keeping the service alive.
@@ -168,6 +176,9 @@ impl HostRpcService {
             background,
             background_task: OnceLock::new(),
             background_stop: tokio_util::sync::CancellationToken::new(),
+            background_consumers_task: OnceLock::new(),
+            provider_cache: tokio::sync::RwLock::new(None),
+            provider_refresh: tokio::sync::Mutex::new(()),
         });
         Ok(Self {
             inner: Arc::new(ServiceInner {
@@ -335,6 +346,9 @@ impl HostRpcService {
                 .resources
                 .background
                 .spawn(self.inner.resources.background_stop.clone()),
+        );
+        let _ = self.inner.resources.background_consumers_task.set(
+            self.spawn_background_consumers(),
         );
         if let Some(task) = self.inner.resources.codex.auth_requests() {
             let _ = self.inner.resources.auth_task.set(task);
@@ -690,6 +704,11 @@ impl HostRpcService {
                     agent_protocol::models::Empty {}.into()
                 }
                 Call::ReadBackground(_) => resources.background.snapshot().await.into(),
+                Call::UpdateBackgroundPolicy(params) => resources
+                    .background
+                    .set_policy(params.policy.clone())
+                    .await
+                    .into(),
                 Call::ReportClientActivity(params) => resources
                     .background
                     .report_activity(session, params.clone())
@@ -1026,8 +1045,122 @@ impl HostRpcService {
         }
         Ok(resources.commands.put(scan))
     }
-    /// Codex and Claude as the composer offers them, with their models.
+    fn spawn_background_consumers(
+        &self,
+    ) -> tokio_util::task::AbortOnDropHandle<()> {
+        let service = self.clone();
+        let stop = self.inner.resources.background_stop.clone();
+        tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
+            let mut last_git_fetch = std::collections::BTreeMap::<String, Timestamp>::new();
+            let mut last_provider_refresh = None::<Timestamp>;
+            let mut last_resource_sample = None::<Timestamp>;
+            loop {
+                tokio::select! {
+                    _ = stop.cancelled() => return,
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {}
+                }
+
+                let policy = service.inner.resources.background.policy().await;
+                let now = Self::host_now();
+
+                if policy.provider_health_refresh_interval_ms > 0
+                    && background_work_due(
+                        last_provider_refresh.as_ref(),
+                        &now,
+                        policy.provider_health_refresh_interval_ms,
+                    )
+                    && service.inner.resources.background.has_provider_status_demand().await
+                {
+                    // Record the attempt before starting the read. A failed
+                    // provider probe therefore observes the configured cadence
+                    // instead of creating a tight retry loop.
+                    last_provider_refresh = Some(now.clone());
+                    let _ = service.refresh_provider_cache().await;
+                }
+
+                if policy.automatic_git_fetch_interval_ms > 0 {
+                    let demanded = service
+                        .inner
+                        .resources
+                        .background
+                        .demanded_vcs_workspaces()
+                        .await;
+                    last_git_fetch.retain(|cwd, _| demanded.iter().any(|candidate| candidate == cwd));
+                    for cwd in demanded {
+                        if !background_work_due(
+                            last_git_fetch.get(&cwd),
+                            &now,
+                            policy.automatic_git_fetch_interval_ms,
+                        ) {
+                            continue;
+                        }
+                        last_git_fetch.insert(cwd.clone(), now.clone());
+                        if let Err(error) = crate::vcs::refresh_remote(cwd.clone(), stop.clone()).await {
+                            tracing::debug!(target: "bex", operation = "host.vcs.background_refresh", cwd = %cwd, message = %error);
+                        }
+                    }
+                } else {
+                    last_git_fetch.clear();
+                }
+
+                if background_work_due(
+                    last_resource_sample.as_ref(),
+                    &now,
+                    5_000,
+                ) {
+                    last_resource_sample = Some(now);
+                    service
+                        .inner
+                        .resources
+                        .background
+                        .sample_resources_if_demanded()
+                        .await;
+                }
+            }
+        }))
+    }
+
+    fn host_now() -> Timestamp {
+        let millis = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64;
+        Timestamp::from_millis(millis).expect("system time is within timestamp range")
+    }
+
+    async fn refresh_provider_cache(&self) -> Vec<agent_protocol::models::ProviderInstance> {
+        let _refresh = self.inner.resources.provider_refresh.lock().await;
+        let providers = self.providers_uncached().await;
+        *self.inner.resources.provider_cache.write().await = Some(ProviderHealthCache {
+            refreshed_at: Self::host_now(),
+            providers: providers.clone(),
+        });
+        providers
+    }
+
+    /// Codex and Claude as the composer offers them, with their models. A
+    /// background health refresh owns the cache when a client has demand;
+    /// direct reads refresh it when there is no usable cached result.
     async fn providers(&self) -> Vec<agent_protocol::models::ProviderInstance> {
+        let policy = self.inner.resources.background.policy().await;
+        let now = Self::host_now();
+        if let Some(cache) = self.inner.resources.provider_cache.read().await.as_ref()
+            && policy.provider_health_refresh_interval_ms > 0
+            && !background_work_due(
+                Some(&cache.refreshed_at),
+                &now,
+                policy.provider_health_refresh_interval_ms,
+            )
+        {
+            return cache.providers.clone();
+        }
+        self.refresh_provider_cache().await
+    }
+
+    /// Reads both provider installations and their model catalogs without
+    /// consulting the cache. The periodic owner calls this after its policy
+    /// gate fires so it remains the sole health refresh scheduler.
+    async fn providers_uncached(&self) -> Vec<agent_protocol::models::ProviderInstance> {
         use agent_protocol::models::{ProviderInstance, ProviderStatus};
         let resources = &self.inner.resources;
         let instance = |driver: Driver, name: &str| ProviderInstance {

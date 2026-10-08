@@ -508,6 +508,79 @@ impl Owner {
             Intent::LoadConversationSettings => {
                 Next::call(Call::ReadConversationSettings(m::Empty {}), None)
             }
+            Intent::LoadBackgroundPolicy => {
+                Next::call(Call::ReadBackground(agent_protocol::background::ReadBackground {}), None)
+            }
+            Intent::LoadDiagnostics { trace_file_path } => {
+                self.job(Call::ReadBackground(agent_protocol::background::ReadBackground {}), None, None);
+                self.job(Call::ReadHostResources(agent_protocol::background::ReadHostResources {}), None, None);
+                self.job(Call::ReadProcessDiagnostics(agent_protocol::background::ReadProcessDiagnostics {}), None, None);
+                self.job(
+                    Call::ReadProcessResourceHistory(
+                        agent_protocol::background::ReadProcessResourceHistory {
+                            window_ms: 60 * 60_000,
+                            bucket_ms: 60_000,
+                        },
+                    ),
+                    None,
+                    None,
+                );
+                self.job(
+                    Call::ReadTraceDiagnostics(agent_protocol::background::ReadTraceDiagnostics {
+                        trace_file_path,
+                        max_files: 16,
+                        slow_span_threshold_ms: Some(1_000.0),
+                    }),
+                    None,
+                    None,
+                );
+                Next::Done
+            }
+            Intent::SetBackgroundProfile { profile } => {
+                if self.state.background_policy.is_none() {
+                    return Next::Done;
+                }
+                let profile = match profile.as_str() {
+                    "balanced" => agent_domain::BackgroundActivityProfile::Balanced,
+                    "performance" => agent_domain::BackgroundActivityProfile::Performance,
+                    "battery-saver" => agent_domain::BackgroundActivityProfile::BatterySaver,
+                    _ => return Next::Done,
+                };
+                let policy = agent_domain::BackgroundActivityPolicy::preset(profile);
+                Next::call(
+                    Call::UpdateBackgroundPolicy(
+                        agent_protocol::background::UpdateBackgroundPolicy { policy },
+                    ),
+                    None,
+                )
+            }
+            Intent::SetAutomaticGitFetchInterval { seconds } => {
+                let Some(current) = self.state.background_policy.as_ref() else {
+                    return Next::Done;
+                };
+                let mut policy = current.policy.clone();
+                policy.automatic_git_fetch_interval_ms = u64::from(seconds).saturating_mul(1_000);
+                Next::call(
+                    Call::UpdateBackgroundPolicy(
+                        agent_protocol::background::UpdateBackgroundPolicy { policy },
+                    ),
+                    None,
+                )
+            }
+            Intent::SetProviderHealthRefreshInterval { seconds } => {
+                let Some(current) = self.state.background_policy.as_ref() else {
+                    return Next::Done;
+                };
+                let mut policy = current.policy.clone();
+                policy.provider_health_refresh_interval_ms =
+                    u64::from(seconds).saturating_mul(1_000);
+                Next::call(
+                    Call::UpdateBackgroundPolicy(
+                        agent_protocol::background::UpdateBackgroundPolicy { policy },
+                    ),
+                    None,
+                )
+            }
             Intent::UpdateConversationSettings { scope, change } => {
                 match plan_conversation_settings_update(&scope, &change) {
                     Some(patch) => Next::call(Call::UpdateConversationSettings(patch), None),

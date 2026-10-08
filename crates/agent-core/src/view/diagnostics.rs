@@ -12,8 +12,53 @@ pub struct DiagnosticRow {
     pub value: String,
 }
 
+fn profile_id(profile: agent_domain::BackgroundActivityProfile) -> &'static str {
+    match profile {
+        agent_domain::BackgroundActivityProfile::Balanced => "balanced",
+        agent_domain::BackgroundActivityProfile::Performance => "performance",
+        agent_domain::BackgroundActivityProfile::BatterySaver => "battery-saver",
+    }
+}
+
 pub fn background_rows(snapshot: &BackgroundPolicySnapshot) -> Vec<DiagnosticRow> {
     vec![
+        DiagnosticRow { key: "profile".into(), value: profile_id(snapshot.policy.profile).into() },
+        DiagnosticRow {
+            key: "automaticGitFetchIntervalMs".into(),
+            value: snapshot.policy.automatic_git_fetch_interval_ms.to_string(),
+        },
+        DiagnosticRow {
+            key: "providerHealthRefreshIntervalMs".into(),
+            value: snapshot.policy.provider_health_refresh_interval_ms.to_string(),
+        },
+        DiagnosticRow {
+            key: "hostPowerMonitorActiveIntervalMs".into(),
+            value: snapshot.policy.host_power_monitor_active_interval_ms.to_string(),
+        },
+        DiagnosticRow {
+            key: "hostPowerMonitorIdleIntervalMs".into(),
+            value: snapshot.policy.host_power_monitor_idle_interval_ms.to_string(),
+        },
+        DiagnosticRow {
+            key: "idleClientTtlMs".into(),
+            value: snapshot.policy.idle_client_ttl_ms.to_string(),
+        },
+        DiagnosticRow {
+            key: "pauseWhenHostLocked".into(),
+            value: snapshot.policy.pause_when_host_locked.to_string(),
+        },
+        DiagnosticRow {
+            key: "pauseWhenHostLowPower".into(),
+            value: snapshot.policy.pause_when_host_low_power.to_string(),
+        },
+        DiagnosticRow {
+            key: "pauseWhenClientLowPower".into(),
+            value: snapshot.policy.pause_when_client_low_power.to_string(),
+        },
+        DiagnosticRow {
+            key: "pauseWhenOnBattery".into(),
+            value: snapshot.policy.pause_when_on_battery.to_string(),
+        },
         DiagnosticRow { key: "activeLeases".into(), value: snapshot.leases.len().to_string() },
         DiagnosticRow { key: "activeScopes".into(), value: snapshot.active_scope_keys.len().to_string() },
         DiagnosticRow { key: "foregroundLeases".into(), value: snapshot.active_foreground_lease_count.to_string() },
@@ -66,12 +111,13 @@ pub fn trace_rows(result: &TraceDiagnosticsResult) -> Vec<DiagnosticRow> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_domain::{HostPowerSnapshot, Timestamp};
+    use agent_domain::{BackgroundActivityPolicy, BackgroundActivityProfile, HostPowerSnapshot, Timestamp};
 
     #[test]
     fn background_rows_keep_policy_projection_stable() {
         let at = Timestamp::from_millis(1).unwrap();
         let snapshot = BackgroundPolicySnapshot {
+            policy: BackgroundActivityPolicy::preset(BackgroundActivityProfile::Balanced),
             host_power: HostPowerSnapshot::unknown(at.clone()),
             leases: vec![],
             active_foreground_lease_count: 0,
@@ -79,6 +125,6 @@ mod tests {
             should_run_opportunistic_work: false,
             updated_at: at,
         };
-        assert_eq!(background_rows(&snapshot)[0].value, "0");
+        assert_eq!(background_rows(&snapshot)[0].value, "balanced");
     }
 }

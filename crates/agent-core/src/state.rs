@@ -403,6 +403,11 @@ pub struct Snapshot {
     pub host_status: Option<crate::models::HostStatus>,
     /// The Host's current background activity and power policy snapshot.
     pub background_policy: Option<agent_protocol::background::BackgroundPolicySnapshot>,
+    pub host_resources: Option<agent_protocol::background::HostResourcesSnapshot>,
+    pub process_diagnostics: Option<agent_protocol::background::ProcessDiagnosticsResult>,
+    pub process_resource_history:
+        Option<agent_protocol::background::ProcessResourceHistoryResult>,
+    pub trace_diagnostics: Option<agent_protocol::background::TraceDiagnosticsResult>,
     pub remote_hosts: Vec<crate::models::RemoteHost>,
     pub invitation: Option<crate::models::Invitation>,
     pub preferences: Preferences,
@@ -1273,6 +1278,19 @@ pub enum Intent {
         rule: crate::view::keybindings::KeybindingTarget,
     },
     LoadConversationSettings,
+    LoadBackgroundPolicy,
+    LoadDiagnostics {
+        trace_file_path: String,
+    },
+    SetBackgroundProfile {
+        profile: String,
+    },
+    SetAutomaticGitFetchInterval {
+        seconds: u32,
+    },
+    SetProviderHealthRefreshInterval {
+        seconds: u32,
+    },
     UpdateConversationSettings {
         scope: crate::view::settings::SettingsScope,
         change: crate::view::settings::ConversationSettingChange,

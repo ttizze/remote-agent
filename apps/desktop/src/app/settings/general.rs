@@ -184,7 +184,112 @@ impl Desktop {
         if let Some(worktrees) = self.render_worktrees(window, cx) {
             sections.push(worktrees);
         }
+        sections.push(self.render_background_diagnostics(cx));
         page_container(896., sections)
+    }
+
+    fn render_background_diagnostics(&mut self, cx: &mut Context<Desktop>) -> AnyElement {
+        let background_rows = self.snapshot.background_rows();
+        let selected_profile = background_rows
+            .iter()
+            .find(|row| row.key == "profile")
+            .map(|row| row.value.to_ascii_lowercase());
+        let git_fetch_seconds = background_interval_seconds(
+            &background_rows,
+            "automaticGitFetchIntervalMs",
+        );
+        let provider_health_seconds = background_interval_seconds(
+            &background_rows,
+            "providerHealthRefreshIntervalMs",
+        );
+        let choices = ["balanced", "performance", "battery-saver"]
+            .into_iter()
+            .map(|id| Choice {
+                id: id.into(),
+                label: id.replace('-', " "),
+                description: None,
+                icon: None,
+                selected: selected_profile.as_deref() == Some(id),
+            })
+            .collect();
+        let profile = select(
+            "background-profile",
+            selected_profile
+                .clone()
+                .unwrap_or_else(|| "balanced".into()),
+            choices,
+            |view, profile, _, _| view.perform(Intent::SetBackgroundProfile { profile }),
+            cx,
+        );
+        let mut rows = vec![
+            Row::new("Profile")
+                .description("Controls whether Host background work follows foreground demand or keeps running.")
+                .control(profile)
+                .render(),
+            Row::new("Git fetch interval")
+                .description("Refreshes remote branch status for active VCS leases.")
+                .control(background_interval_select(
+                    "background-git-fetch-interval",
+                    git_fetch_seconds,
+                    &[0, 15, 30, 60, 300, 900],
+                    |view, seconds, _, _| {
+                        view.perform(Intent::SetAutomaticGitFetchInterval { seconds })
+                    },
+                    cx,
+                ))
+                .render(),
+            Row::new("Provider health interval")
+                .description("Refreshes provider availability and model metadata for active provider leases.")
+                .control(background_interval_select(
+                    "background-provider-health-interval",
+                    provider_health_seconds,
+                    &[0, 60, 300, 900, 1800],
+                    |view, seconds, _, _| {
+                        view.perform(Intent::SetProviderHealthRefreshInterval { seconds })
+                    },
+                    cx,
+                ))
+                .render(),
+        ];
+        rows.extend(
+            background_rows
+                .into_iter()
+                .filter(|row| {
+                    !matches!(
+                        row.key.as_str(),
+                        "profile"
+                            | "automaticGitFetchIntervalMs"
+                            | "providerHealthRefreshIntervalMs"
+                    )
+                })
+                .map(|row| Row::new(row.key).description(row.value).render()),
+        );
+        rows.extend(
+            self.snapshot
+                .host_resource_rows()
+                .into_iter()
+                .chain(self.snapshot.process_rows())
+                .chain(self.snapshot.process_history_rows())
+                .chain(self.snapshot.trace_rows())
+                .map(|row| Row::new(row.key).description(row.value).render()),
+        );
+        let refresh = Button::new("refresh-background-diagnostics")
+            .outline()
+            .small()
+            .label("Refresh")
+            .on_click(cx.listener(|view, _, _, _| {
+                view.perform(Intent::LoadDiagnostics {
+                    trace_file_path: String::new(),
+                })
+            }))
+            .into_any_element();
+        section(
+            Some("Background activity & diagnostics".into()),
+            None,
+            Some(refresh),
+            rows,
+        )
+        .into_any_element()
     }
 
     /// The sections of a settings view, for the Host or one project.
@@ -564,4 +669,52 @@ impl Desktop {
         )
         .render()
     }
+}
+
+fn background_interval_seconds(rows: &[agent_core::view::diagnostics::DiagnosticRow], key: &str) -> u32 {
+    rows.iter()
+        .find(|row| row.key == key)
+        .and_then(|row| row.value.parse::<u64>().ok())
+        .map(|milliseconds| (milliseconds / 1_000).min(u32::MAX as u64) as u32)
+        .unwrap_or_default()
+}
+
+fn background_interval_select(
+    id: &'static str,
+    selected_seconds: u32,
+    options: &'static [u32],
+    pick: impl Fn(&mut Desktop, u32, &mut Window, &mut Context<Desktop>) + 'static,
+    cx: &mut Context<Desktop>,
+) -> AnyElement {
+    let choices = options
+        .iter()
+        .copied()
+        .map(|seconds| Choice {
+            id: seconds.to_string(),
+            label: if seconds == 0 {
+                "Disabled".into()
+            } else {
+                format!("{seconds} seconds")
+            },
+            description: None,
+            icon: None,
+            selected: seconds == selected_seconds,
+        })
+        .collect();
+    select(
+        id,
+        if selected_seconds == 0 {
+            "Disabled".into()
+        } else {
+            format!("{selected_seconds} seconds")
+        },
+        choices,
+        move |view, value, window, cx| {
+            if let Ok(seconds) = value.parse::<u32>() {
+                pick(view, seconds, window, cx);
+            }
+        },
+        cx,
+    )
+    .into_any_element()
 }

@@ -381,6 +381,7 @@ impl Desktop {
                 self.perform(Intent::LoadConversationSettings);
                 self.perform(Intent::LoadWorktreeSettings);
                 self.perform(Intent::ListWorktrees);
+                self.perform(Intent::LoadDiagnostics { trace_file_path: String::new() });
             }
             SettingsPage::Projects { .. } => self.perform(Intent::LoadConversationSettings),
             SettingsPage::Providers => self.perform(Intent::LoadAccounts),

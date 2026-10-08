@@ -987,6 +987,28 @@ pub(crate) async fn diff_preview(request: DiffPreview) -> Result<DiffPreviewResu
     tokio::task::spawn_blocking(move || preview(&request)).await?
 }
 
+/// Refreshes remote tracking refs for a demanded checkout. This is kept next
+/// to status reads so automatic Git work and the diff panel share the same
+/// repository validation and Git command wrapper.
+pub(crate) async fn refresh_remote(
+    cwd: String,
+    cancel: tokio_util::sync::CancellationToken,
+) -> Result<()> {
+    tokio::task::spawn_blocking(move || {
+        let path = Path::new(&cwd);
+        if !path.is_dir() || repository(path).is_none() {
+            return Ok(());
+        }
+        crate::git::cancellable(
+            path,
+            &["fetch", "--quiet", "--all", "--no-prune"],
+            &cancel,
+        )?;
+        Ok(())
+    })
+    .await?
+}
+
 pub(crate) async fn read_status(cwd: String) -> Result<VcsStatus> {
     tokio::task::spawn_blocking(move || status(Path::new(&cwd))).await?
 }
