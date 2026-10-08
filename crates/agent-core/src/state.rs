@@ -388,6 +388,10 @@ pub struct Snapshot {
     pub frozen_open_draft: Option<FrozenDraft>,
     /// The Host's provider instances and their models; `None` until listed.
     pub providers: Option<Vec<crate::models::ProviderInstance>>,
+    /// Host-owned Agent Client Protocol registry state. Search and preparation
+    /// are asynchronous requests, so the UI keeps the last successful result
+    /// while a newer request is in flight.
+    pub acp_registry: AcpRegistryState,
     pub workspace: Workspace,
     pub terminals: BTreeMap<String, Terminal>,
     /// Provider commands, path search, Git status, refs and diff previews.
@@ -401,6 +405,10 @@ pub struct Snapshot {
     pub accounts: Option<agent_protocol::operations::Accounts>,
     pub account_login: Option<agent_protocol::operations::AccountLogin>,
     pub host_status: Option<crate::models::HostStatus>,
+    /// The most recent whole-host sample used by environment routing.
+    pub host_resources: Option<crate::models::HostResourcesSnapshot>,
+    /// Client receipt time for the sample; host clocks are not compared.
+    pub host_resources_received_at: Option<u64>,
     pub remote_hosts: Vec<crate::models::RemoteHost>,
     pub invitation: Option<crate::models::Invitation>,
     pub preferences: Preferences,
@@ -425,6 +433,20 @@ pub struct Snapshot {
     pub thread_undo: crate::commands::undo::ThreadUndo,
     /// Timeline rows already built; every snapshot of the store shares them.
     pub timelines: Arc<std::sync::Mutex<crate::view::timeline::rows::TimelineCache>>,
+}
+
+/// The client projection of the Host's ACP registry operations.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AcpRegistryState {
+    pub query: String,
+    pub results: Option<agent_protocol::operations::AcpRegistrySearchResult>,
+    pub search_pending: bool,
+    pub prepare_pending: Option<String>,
+    pub prepared: BTreeMap<String, agent_protocol::operations::PreparedAcpAgent>,
+    pub uninstall_pending: Option<String>,
+    pub probe_pending: Option<String>,
+    pub probes: BTreeMap<String, agent_protocol::operations::AcpProbeResult>,
+    pub error: Option<String>,
 }
 
 impl Snapshot {
@@ -562,12 +584,43 @@ impl Snapshot {
             let seed = crate::view::load_balancing::seed(
                 self.selected_project.as_deref().unwrap_or(CHATS_PROJECT),
             );
-            if let Some(instance) = crate::view::load_balancing::select_instance(
-                &candidates,
-                draft.driver,
-                &self.preferences.load_balancing_weights,
-                seed,
-            ) {
+            let resource_instance = self.host_resources.as_ref().and_then(|resources| {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis()
+                    .min(u128::from(u64::MAX)) as u64;
+                let resource_candidates = candidates
+                    .iter()
+                    .filter(|candidate| candidate.driver == draft.driver && candidate.ready)
+                    .map(|candidate| crate::view::load_balancing::ResourceCandidate {
+                        environment_id: candidate.instance_id.clone(),
+                        resources: Some(*resources),
+                        received_at: self.host_resources_received_at,
+                        weight: f64::from(
+                            self.preferences
+                                .load_balancing_weights
+                                .get(&candidate.instance_id)
+                                .copied()
+                                .map(|weight| {
+                                    crate::view::load_balancing::preference_weight(Some(weight))
+                                })
+                                .unwrap_or(crate::view::load_balancing::DEFAULT_WEIGHT),
+                        ),
+                    })
+                    .collect::<Vec<_>>();
+                crate::view::load_balancing::select_resource_balanced(&resource_candidates, now)
+                    .map(str::to_owned)
+            });
+            if let Some(instance) = resource_instance.or_else(|| {
+                crate::view::load_balancing::select_instance(
+                    &candidates,
+                    draft.driver,
+                    &self.preferences.load_balancing_weights,
+                    seed,
+                )
+                .map(str::to_owned)
+            }) {
                 if let Some(provider) = providers
                     .iter()
                     .find(|provider| provider.instance == instance)
@@ -1438,6 +1491,28 @@ pub enum Intent {
     // Accounts and Hosts.
     LoadAccounts,
     LoadProviders,
+    /// Runs the updater owned by a configured provider installation.
+    UpdateProvider {
+        instance: String,
+        target_version: Option<String>,
+    },
+    /// Searches the Host's credential-free ACP registry.
+    SearchAcpRegistry {
+        query: String,
+    },
+    /// Installs or prepares one ACP registry agent on the Host.
+    PrepareAcpAgent {
+        agent_id: String,
+    },
+    /// Removes the Host-managed installation for one ACP registry agent.
+    UninstallAcpAgent {
+        agent_id: String,
+    },
+    /// Probes the prepared ACP agent and records its advertised capabilities.
+    ProbeAcpAgent {
+        agent_id: String,
+        cwd: String,
+    },
     SelectAccount {
         provider: crate::provider::ProviderKind,
         id: String,
@@ -1673,6 +1748,7 @@ mod tests {
                 enabled: true,
                 installed: true,
                 version: None,
+                version_advisory: None,
                 status: crate::models::ProviderStatus::Ready,
                 message: None,
                 unavailable_reason: None,
@@ -1697,6 +1773,7 @@ mod tests {
                 enabled: true,
                 installed: true,
                 version: None,
+                version_advisory: None,
                 status: crate::models::ProviderStatus::Ready,
                 message: None,
                 unavailable_reason: None,

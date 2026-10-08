@@ -47,7 +47,7 @@ use gpui_kit::{
     *,
 };
 use hosts::{HostEvent, Hosts};
-use std::{path::PathBuf, sync::Arc};
+use std::{collections::BTreeSet, path::PathBuf, sync::Arc};
 
 /// Runs once a dispatched intent resolves.
 type Done = Box<
@@ -63,6 +63,7 @@ enum Update {
     Attachments(attachments::Update),
     Recording(uuid::Uuid, platform::RecordingEvent),
     Transcribed(uuid::Uuid, Result<Outcome, String>),
+    ExternalSnapshot(String),
     Tick,
 }
 
@@ -136,6 +137,10 @@ pub(crate) struct Desktop {
     /// modifier state but not left/right identity, so the desktop surface
     /// keeps this small edge-triggered latch for the both-Shift shortcut.
     snapshot_shift_presses: u8,
+    snapshot_feedback_until: Option<std::time::Instant>,
+    snapshot_feedback_id: u64,
+    snapshot_feedback_animated: bool,
+    external_snapshot_ids: BTreeSet<String>,
     pub(crate) attachments: attachments::AttachmentCache,
     pub(crate) dictation: Option<dictation::Dictation>,
     /// Decoded project icons, by content hash.
@@ -248,6 +253,10 @@ impl Desktop {
             command_palette_query,
             command_palette_open: false,
             snapshot_shift_presses: 0,
+            snapshot_feedback_until: None,
+            snapshot_feedback_id: 0,
+            snapshot_feedback_animated: true,
+            external_snapshot_ids: BTreeSet::new(),
             attachments: attachments::AttachmentCache::new(),
             dictation: None,
             project_icons: Default::default(),
@@ -275,6 +284,7 @@ impl Desktop {
         self.views_running = false;
         self.connecting = true;
         self.remote = remote;
+        self.external_snapshot_ids.clear();
         self.session.take();
         self.snapshot = Arc::default();
         self.disconnected(window, cx);
@@ -341,6 +351,15 @@ impl Desktop {
                     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                     if updates.send((epoch, Update::Tick)).await.is_err() {
                         break;
+                    }
+                    for snapshot in platform::pending_snapshots().unwrap_or_default() {
+                        if updates
+                            .send((epoch, Update::ExternalSnapshot(snapshot.id)))
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
                     }
                 }
             }),
@@ -532,6 +551,22 @@ impl Desktop {
             }
             Update::PersistenceError(error) => self.show_error(&error, window, cx),
             Update::Attachments(update) => self.attachments_update(update, window, cx),
+            Update::ExternalSnapshot(id) => {
+                if self.session.is_none() {
+                    return;
+                }
+                if self.external_snapshot_ids.insert(id.clone()) {
+                    match platform::read_pending_snapshot(&id) {
+                        Ok(snapshot) => {
+                            let draft_key = self.snapshot.draft_key();
+                            self.attach_external_snapshot(draft_key, snapshot);
+                        }
+                        Err(_) => {
+                            self.external_snapshot_ids.remove(&id);
+                        }
+                    }
+                }
+            }
             Update::Recording(id, event) => self.recording_update(id, event, window, cx),
             Update::Transcribed(id, result) => {
                 if self.dictation.as_ref().is_some_and(|d| d.id == id) {
@@ -873,6 +908,27 @@ impl Render for Desktop {
                     .into_any_element()
             }
         };
+        let snapshot_flash = self
+            .snapshot_feedback_until
+            .is_some_and(|until| until > std::time::Instant::now());
+        let snapshot_overlay = snapshot_flash.then(|| {
+            let overlay = div()
+                .id(("snapshot-feedback", self.snapshot_feedback_id))
+                .absolute()
+                .inset_0()
+                .bg(tint("text", 0.12));
+            if self.snapshot_feedback_animated {
+                overlay
+                    .with_animation(
+                        ("snapshot-feedback-fade", self.snapshot_feedback_id),
+                        Animation::new(std::time::Duration::from_millis(220)),
+                        |overlay, progress| overlay.opacity(1. - progress),
+                    )
+                    .into_any_element()
+            } else {
+                overlay.into_any_element()
+            }
+        });
         div()
             .id("desktop")
             .key_context("Desktop")
@@ -903,6 +959,7 @@ impl Render for Desktop {
                     })
                     .child(main),
             )
+            .children(snapshot_overlay)
             .children(gpui_kit::component::Root::render_dialog_layer(window, cx))
             .children(gpui_kit::component::Root::render_notification_layer(
                 window, cx,

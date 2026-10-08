@@ -17,6 +17,7 @@ use gpui_kit::{
         button::{Button, ButtonVariants},
         h_flex,
         input::{Input, InputState},
+        notification::Notification,
         switch::Switch,
         v_flex,
     },
@@ -231,18 +232,54 @@ impl Desktop {
                     if provider.models.len() == 1 { "" } else { "s" },
                     weight
                 );
+                let update_id = id.clone();
+                let switch_id = id.clone();
+                let can_update = provider.installed && provider.enabled;
                 Row::new(format!("route-{index}"))
                     .description(detail)
                     .control(
-                        Switch::new(SharedString::from(format!("route-switch-{id}")))
-                            .checked(enabled && weight > 0)
-                            .accessibility_label(format!("Use {} for load balancing", title))
-                            .on_click(cx.listener(move |view, checked: &bool, _, _| {
-                                view.perform(Intent::SetLoadBalancingWeight {
-                                    instance_id: id.clone(),
-                                    weight: if *checked { 100 } else { 0 },
-                                });
-                            })),
+                        h_flex()
+                            .gap_2()
+                            .child(
+                                Switch::new(SharedString::from(format!("route-switch-{id}")))
+                                    .checked(enabled && weight > 0)
+                                    .accessibility_label(format!(
+                                        "Use {} for load balancing",
+                                        title
+                                    ))
+                                    .on_click(cx.listener(move |view, checked: &bool, _, _| {
+                                        view.perform(Intent::SetLoadBalancingWeight {
+                                            instance_id: switch_id.clone(),
+                                            weight: if *checked { 100 } else { 0 },
+                                        });
+                                    })),
+                            )
+                            .child(
+                                Button::new(SharedString::from(format!("update-provider-{id}")))
+                                    .ghost()
+                                    .xsmall()
+                                    .label("Update")
+                                    .disabled(!can_update)
+                                    .tooltip("Update this provider installation")
+                                    .on_click(cx.listener(move |view, _, window, cx| {
+                                        view.perform_then(
+                                            Intent::UpdateProvider {
+                                                instance: update_id.clone(),
+                                                target_version: None,
+                                            },
+                                            |view, result, window, cx| match result {
+                                                Ok(_) => {
+                                                    window.push_notification(
+                                                        Notification::success("Provider updated."),
+                                                        cx,
+                                                    );
+                                                    view.perform(Intent::LoadProviders);
+                                                }
+                                                Err(error) => view.show_error(error, window, cx),
+                                            },
+                                        );
+                                    })),
+                            ),
                     )
                     .render()
             })

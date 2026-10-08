@@ -114,6 +114,8 @@ pub enum SetupRun {
 pub struct ConversationSettings {
     /// Settle a thread this many days after its last activity; `None` never.
     pub auto_settle_after_days: Option<u64>,
+    /// Settle a thread when its linked pull request is merged.
+    pub auto_settle_on_merge: bool,
     /// Continue a turn a Host restart cut.
     pub continue_after_restart: bool,
     pub snooze_limited_threads: bool,
@@ -123,6 +125,7 @@ impl Default for ConversationSettings {
     fn default() -> Self {
         Self {
             auto_settle_after_days: Some(3),
+            auto_settle_on_merge: true,
             continue_after_restart: false,
             snooze_limited_threads: false,
             auto_resume_limited_threads: false,

@@ -36,6 +36,18 @@ pub struct HostStatus {
     pub provider_errors: Option<Map<String, Value>>,
 }
 
+/// A client-time receipt of one Host's whole-machine resource sample. The
+/// receiver timestamp is owned by the caller; sampledAt is the Host's clock.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HostResourcesSnapshot {
+    pub sampled_at: u64,
+    pub cpu_utilization: Option<f64>,
+    pub cpu_count: u64,
+    pub available_memory_bytes: u64,
+    pub total_memory_bytes: u64,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Project {
@@ -178,6 +190,28 @@ pub enum ProviderStatus {
     Disabled,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderVersionAdvisoryStatus {
+    Unknown,
+    Current,
+    BehindLatest,
+}
+
+/// The updater capabilities and version comparison for one installed provider.
+/// The Host derives every action from the executable's proven owner.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderVersionAdvisory {
+    pub status: ProviderVersionAdvisoryStatus,
+    pub current_version: Option<String>,
+    pub latest_version: Option<String>,
+    pub update_command: Option<String>,
+    pub can_update: bool,
+    pub can_install_version: bool,
+    pub message: Option<String>,
+}
+
 /// One provider instance as the composer and settings show it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -190,6 +224,7 @@ pub struct ProviderInstance {
     pub enabled: bool,
     pub installed: bool,
     pub version: Option<String>,
+    pub version_advisory: Option<ProviderVersionAdvisory>,
     pub status: ProviderStatus,
     /// Why the status is not ready, or advice such as an upgrade.
     pub message: Option<String>,
@@ -309,9 +344,29 @@ impl ProviderInstanceConfig {
                 ));
             }
         }
+        if self.environment.values().any(|value| {
+            value.len() > 8 * 1024 || value.bytes().any(|byte| byte.is_ascii_control())
+        }) {
+            return Err("provider environment values must be at most 8192 characters".into());
+        }
+        if self.launch_args.len() > 64
+            || self.launch_args.iter().any(|argument| {
+                argument.len() > 1_024 || argument.bytes().any(|byte| byte.is_ascii_control())
+            })
+        {
+            return Err(
+                "provider launch arguments are limited to 64 values of 1024 characters".into(),
+            );
+        }
         let mut slugs = std::collections::BTreeSet::new();
         for model in &self.custom_models {
-            if model.slug.trim().is_empty() || model.name.trim().is_empty() {
+            if model.slug.trim().is_empty()
+                || model.slug.len() > 256
+                || model.name.trim().is_empty()
+                || model.name.len() > 256
+                || model.aliases.len() > 16
+                || model.aliases.iter().any(|alias| alias.len() > 128)
+            {
                 return Err("custom provider models need a slug and name".into());
             }
             if !slugs.insert(model.slug.trim().to_owned()) {

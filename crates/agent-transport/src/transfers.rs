@@ -34,7 +34,7 @@ where
     F: FnOnce() -> Fut,
     Fut: Future<Output = std::io::Result<S>>,
 {
-    upload_with_purpose(peer, open_stream, source, directory, file_name, None).await
+    upload_with_purpose(peer, open_stream, source, directory, file_name, None, None).await
 }
 pub async fn upload_attachment<S, F, Fut>(
     peer: &Client,
@@ -48,6 +48,25 @@ where
     F: FnOnce() -> Fut,
     Fut: Future<Output = std::io::Result<S>>,
 {
+    upload_attachment_with_source(peer, open_stream, source, name, mime, None).await
+}
+
+/// Uploads an attachment and preserves optional screenshot window metadata.
+/// The metadata travels in the grant request; the image bytes remain a
+/// digest-checked stream.
+pub async fn upload_attachment_with_source<S, F, Fut>(
+    peer: &Client,
+    open_stream: F,
+    source: &Path,
+    name: &str,
+    mime: &str,
+    captured_window: Option<agent_domain::CapturedWindow>,
+) -> Result<crate::models::UploadedFile, TransferError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = std::io::Result<S>>,
+{
     upload_with_purpose(
         peer,
         open_stream,
@@ -55,6 +74,7 @@ where
         Path::new(""),
         name,
         Some(mime.to_ascii_lowercase()),
+        captured_window,
     )
     .await
 }
@@ -65,6 +85,7 @@ async fn upload_with_purpose<S, F, Fut>(
     directory: &Path,
     file_name: &str,
     attachment_mime_type: Option<String>,
+    captured_window: Option<agent_domain::CapturedWindow>,
 ) -> Result<crate::models::UploadedFile, TransferError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -97,6 +118,7 @@ where
         .request::<TransferGrant>(&crate::protocol::Call::Upload(
             agent_protocol::operations::Upload {
                 attachment_mime_type,
+                source: captured_window,
                 directory: directory
                     .to_str()
                     .ok_or_else(|| TransferError::Protocol("directory is not UTF-8".into()))?

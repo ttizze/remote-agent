@@ -222,6 +222,9 @@ pub(super) struct Owner {
     /// publication boundary has not arrived yet.
     stream_publish_pending: bool,
     stream_publish_deferred: bool,
+    /// Host resource receipts are refreshed independently from provider
+    /// catalogues so load balancing does not keep routing from an old sample.
+    host_resources_requested_at: u64,
 }
 
 pub(super) type ObservedList = (Arc<ShellCache>, Arc<crate::commands::outbox::Outbox>, bool);
@@ -281,6 +284,7 @@ impl Owner {
             work_locally: None,
             stream_publish_pending: false,
             stream_publish_deferred: false,
+            host_resources_requested_at: 0,
         };
         if let Some(thread) = owner.state.selected_thread.clone() {
             owner.open_thread(&thread);
@@ -383,6 +387,10 @@ impl Owner {
     pub fn tick(&mut self) {
         let now = now_ms();
         self.sources_tick(now);
+        if self.network.is_some() && now.saturating_sub(self.host_resources_requested_at) >= 5_000 {
+            self.host_resources_requested_at = now;
+            self.job(Call::ReadHostResources(m::Empty {}), None, None);
+        }
         self.write_device_state(now);
         if let Some((revision, shell)) = self.shell_cache.due(now) {
             self.write_cache(Written::Shell(revision), move |cache| {

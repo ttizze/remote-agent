@@ -55,6 +55,7 @@ enum GrantFile {
         directory: PathBuf,
         file_name: String,
         attachment_mime_type: Option<String>,
+        source: Option<agent_domain::CapturedWindow>,
     },
     Download(File),
 }
@@ -245,6 +246,7 @@ impl WorkspaceFiles {
                         &params.file_name,
                         mime,
                         params.size,
+                        params.source.clone(),
                     )?;
                 }
                 self.grant(Grant {
@@ -254,6 +256,7 @@ impl WorkspaceFiles {
                         directory,
                         file_name: params.file_name,
                         attachment_mime_type: params.attachment_mime_type,
+                        source: params.source,
                     },
                     size: params.size,
                     digest: params.sha256,
@@ -334,6 +337,7 @@ impl WorkspaceFiles {
                     directory,
                     file_name,
                     attachment_mime_type,
+                    source,
                 } => {
                     let output = tempfile::NamedTempFile::new_in(&directory)?;
                     let async_file = output.reopen()?;
@@ -379,6 +383,7 @@ impl WorkspaceFiles {
                             &mime,
                             grant.size,
                             grant.digest,
+                            source,
                         ) {
                             Ok(attachment) => Some(attachment),
                             Err(error) => {
@@ -666,6 +671,7 @@ mod tests {
                         1,
                         Call::Upload(Upload {
                             attachment_mime_type: None,
+                            source: None,
                             directory: directory.path().to_str().unwrap().into(),
                             file_name: "safe.txt".into(),
                             size: 5,
@@ -689,6 +695,7 @@ mod tests {
                         1,
                         Call::Upload(Upload {
                             attachment_mime_type: None,
+                            source: None,
                             directory: directory.path().to_str().unwrap().into(),
                             file_name: "../escape".into(),
                             size: 0,
@@ -701,6 +708,7 @@ mod tests {
                 assert!(matches!(
                     files.dispatch(1, Call::Upload(Upload {
                             attachment_mime_type: None,
+                        source: None,
                         directory: path.into(),
                         file_name: "safe.txt".into(),
                         size: 0,

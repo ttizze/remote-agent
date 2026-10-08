@@ -11,6 +11,7 @@ use agent_domain::{
 use agent_protocol::conversation::{
     Committed, ConversationError, ShellLocation, ShellSnapshot, ShellUpdate, ThreadUpdate,
 };
+use agent_protocol::operations as op;
 use calls::{JobResult, Reply as CallReply};
 use intents::Next;
 use owner::{Network, StoreOptions};
@@ -142,7 +143,10 @@ fn an_incoming_share_targets_the_thread_selected_at_arrival() {
         owner.state.drafts.get(selected.as_str()).unwrap().text,
         "selected draft"
     );
-    assert_eq!(owner.state.current_draft().text, "other draft\n\nincoming text");
+    assert_eq!(
+        owner.state.current_draft().text,
+        "other draft\n\nincoming text"
+    );
 }
 
 fn committed(sequence: u64, reply: Reply) -> Delivered {
@@ -1076,6 +1080,43 @@ fn a_remote_pairing_receipt_observes_the_registered_host() {
         }
     );
     assert_eq!(owner.state.remote_hosts[0].id, "remote");
+}
+
+#[test]
+fn late_acp_replies_cannot_clear_a_newer_operation() {
+    let mut owner = owner(Snapshot::default());
+    owner.state.acp_registry.query = "new".into();
+    owner.state.acp_registry.search_pending = true;
+    owner.finished(job(
+        Call::SearchAcpRegistry(op::SearchAcpRegistry {
+            query: "old".into(),
+        }),
+        Ok(CallReply::AcpRegistrySearch(op::AcpRegistrySearchResult {
+            agents: vec![],
+        })),
+        None,
+    ));
+    assert!(owner.state.acp_registry.search_pending);
+    assert!(owner.state.acp_registry.results.is_none());
+
+    owner.state.acp_registry.prepare_pending = Some("new-agent".into());
+    owner.finished(job(
+        Call::PrepareAcpAgent(op::PrepareAcpAgent {
+            agent_id: "old-agent".into(),
+        }),
+        Ok(CallReply::PreparedAcpAgent(op::PreparedAcpAgent {
+            agent_id: "old-agent".into(),
+            version: "1.0.0".into(),
+            distribution: "npx".into(),
+            prepared: true,
+        })),
+        None,
+    ));
+    assert_eq!(
+        owner.state.acp_registry.prepare_pending.as_deref(),
+        Some("new-agent")
+    );
+    assert!(owner.state.acp_registry.prepared.is_empty());
 }
 
 #[test]

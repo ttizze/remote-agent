@@ -4,12 +4,138 @@ use agent_protocol::{models::Model, operations as op, provider::ProviderKind};
 use codex_app_server::CodexAppServer;
 use serde::Serialize;
 use serde_json::Value;
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    path::PathBuf,
+    sync::{Arc, Mutex, OnceLock},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+};
 pub(super) struct CodexResources {
     accounts: tokio::sync::Mutex<Option<crate::codex_accounts::Accounts>>,
     restoration_error: tokio::sync::watch::Sender<Option<String>>,
     process: Result<Arc<CodexAppServer>, String>,
     pub directory: PathBuf,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CpuCounters {
+    total: u64,
+    idle: u64,
+    count: u64,
+    at: Instant,
+}
+
+static CPU_COUNTERS: OnceLock<Mutex<Option<CpuCounters>>> = OnceLock::new();
+
+fn linux_cpu_counters() -> Option<(u64, u64, u64)> {
+    let line = std::fs::read_to_string("/proc/stat")
+        .ok()?
+        .lines()
+        .find(|line| line.starts_with("cpu "))?;
+    let values: Vec<u64> = line
+        .split_whitespace()
+        .skip(1)
+        .filter_map(|value| value.parse().ok())
+        .collect();
+    let total = values.iter().copied().sum();
+    let idle =
+        values.get(3).copied().unwrap_or_default() + values.get(4).copied().unwrap_or_default();
+    let count = std::thread::available_parallelism().ok()?.get() as u64;
+    (total > 0 && count > 0).then_some((total, idle, count))
+}
+
+fn linux_memory() -> Option<(u64, u64)> {
+    let text = std::fs::read_to_string("/proc/meminfo").ok()?;
+    let value = |name: &str| {
+        text.lines()
+            .find_map(|line| line.strip_prefix(name))?
+            .split_whitespace()
+            .next()?
+            .parse::<u64>()
+            .ok()
+            .map(|kb| kb.saturating_mul(1024))
+    };
+    Some((value("MemAvailable:")?, value("MemTotal:")?))
+}
+
+#[cfg(target_os = "macos")]
+fn mac_cpu_utilization() -> Option<f64> {
+    let count = std::thread::available_parallelism().ok()?.get() as f64;
+    let mut load = 0.0;
+    // `getloadavg` is the only process-free whole-host CPU signal available
+    // through the standard macOS libc surface. A one-minute load normalized by
+    // logical CPUs is a conservative routing signal.
+    let result = unsafe { libc::getloadavg(&mut load, 1) };
+    (result == 1).then_some((load / count).clamp(0.0, 1.0))
+}
+
+#[cfg(target_os = "macos")]
+fn mac_memory() -> Option<(u64, u64)> {
+    let pagesize = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    let physical = unsafe { libc::sysconf(libc::_SC_PHYS_PAGES) };
+    let available = unsafe { libc::sysconf(libc::_SC_AVPHYS_PAGES) };
+    (pagesize > 0 && physical > 0 && available > 0).then_some((
+        (available as u64).saturating_mul(pagesize as u64),
+        (physical as u64).saturating_mul(pagesize as u64),
+    ))
+}
+
+pub(super) async fn host_resources() -> agent_protocol::models::HostResourcesSnapshot {
+    tokio::task::spawn_blocking(|| {
+        let sampled_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+            .min(u128::from(u64::MAX)) as u64;
+        #[cfg(target_os = "linux")]
+        let cpu_utilization = linux_cpu_counters().and_then(|(total, idle, count)| {
+            let now = Instant::now();
+            let state = CPU_COUNTERS.get_or_init(|| Mutex::new(None));
+            let mut previous = state.lock().ok()?;
+            let current = CpuCounters {
+                total,
+                idle,
+                count,
+                at: now,
+            };
+            let utilization = previous.as_ref().and_then(|old| {
+                let total_delta = total.saturating_sub(old.total);
+                let idle_delta = idle.saturating_sub(old.idle);
+                (old.count == count
+                    && total_delta > 0
+                    && now.duration_since(old.at) >= Duration::from_millis(20))
+                .then(|| (1.0 - idle_delta as f64 / total_delta as f64).clamp(0.0, 1.0))
+            });
+            *previous = Some(current);
+            utilization
+        });
+        #[cfg(target_os = "macos")]
+        let cpu_utilization = mac_cpu_utilization();
+        let cpu_count = std::thread::available_parallelism()
+            .map(|count| count.get() as u64)
+            .unwrap_or_default();
+        #[cfg(target_os = "linux")]
+        let memory = linux_memory();
+        #[cfg(target_os = "macos")]
+        let memory = mac_memory();
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        let memory = None;
+        let (available_memory_bytes, total_memory_bytes) = memory.unwrap_or((0, 0));
+        agent_protocol::models::HostResourcesSnapshot {
+            sampled_at,
+            cpu_utilization,
+            cpu_count,
+            available_memory_bytes,
+            total_memory_bytes,
+        }
+    })
+    .await
+    .unwrap_or(agent_protocol::models::HostResourcesSnapshot {
+        sampled_at: 0,
+        cpu_utilization: None,
+        cpu_count: 0,
+        available_memory_bytes: 0,
+        total_memory_bytes: 0,
+    })
 }
 impl CodexResources {
     pub fn new(process: Result<Arc<CodexAppServer>, String>) -> Self {

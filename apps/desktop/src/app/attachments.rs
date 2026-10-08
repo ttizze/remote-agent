@@ -24,6 +24,8 @@ pub(crate) enum Update {
         draft_key: String,
         files: Vec<LocalFile>,
         error: Option<String>,
+        snapshot_feedback: Option<(bool, bool)>,
+        snapshot_id: Option<String>,
     },
     Downloaded {
         id: String,
@@ -53,7 +55,7 @@ impl Desktop {
     /// Opens the file picker and attaches the chosen files to `draft_key`.
     pub(crate) fn pick_attachments(&self, draft_key: String) {
         let existing = self.draft_attachments(&draft_key);
-        self.stage(draft_key, move || {
+        self.stage(draft_key, None, None, move || {
             rfd::FileDialog::new()
                 .pick_files()
                 .map(|paths| stage_paths(paths, &existing))
@@ -64,7 +66,7 @@ impl Desktop {
     /// Attaches dropped files to `draft_key`.
     pub(crate) fn attach_paths(&self, draft_key: String, paths: Vec<PathBuf>) {
         let existing = self.draft_attachments(&draft_key);
-        self.stage(draft_key, move || stage_paths(paths, &existing));
+        self.stage(draft_key, None, None, move || stage_paths(paths, &existing));
     }
 
     /// Captures the desktop through the platform bridge and sends its PNG
@@ -72,13 +74,44 @@ impl Desktop {
     pub(crate) fn capture_snapshot(&self, draft_key: String) {
         let existing = self.draft_attachments(&draft_key);
         let settings = self.snapshot.preferences.snapshot_capture.clone();
-        self.stage(draft_key, move || {
+        let feedback = Some((settings.flash, settings.animations));
+        self.stage(draft_key, feedback, None, move || {
             let path = staging_directory()?.join(format!("Snapshot-{}.png", uuid::Uuid::new_v4()));
-            crate::platform::capture_snapshot(&path)?;
+            let permission =
+                crate::platform::snapshot_permission_granted(settings.include_accessibility);
+            if !agent_core::view::snapshot_capture::capture_is_allowed(&settings, permission) {
+                return Err("Screen capture permission is required for this setting.".into());
+            }
+            crate::platform::capture_snapshot(&path, settings.include_accessibility)?;
             if settings.play_sound {
                 let _ = crate::platform::play_snapshot_sound(settings.sound);
             }
             stage_paths(vec![path], &existing)
+        });
+    }
+
+    /// Imports one capture produced by a native desktop helper. The helper
+    /// owns the queue files until this staging operation succeeds.
+    pub(crate) fn attach_external_snapshot(
+        &self,
+        draft_key: String,
+        snapshot: crate::platform::PendingSnapshot,
+    ) {
+        let existing = self.draft_attachments(&draft_key);
+        let snapshot_id = snapshot.id.clone();
+        self.stage(draft_key, None, Some(snapshot_id), move || {
+            let source_directory = staging_directory()?;
+            let source = source_directory.join(&snapshot.name);
+            std::fs::copy(&snapshot.path, &source)
+                .map_err(|error| format!("snapshot image could not be staged: {error}"))?;
+            let metadata_path = crate::platform::snapshot_metadata_path(&source);
+            let metadata = serde_json::to_vec(&snapshot.source)
+                .map_err(|error| format!("snapshot metadata could not be encoded: {error}"))?;
+            std::fs::write(&metadata_path, metadata)
+                .map_err(|error| format!("snapshot metadata could not be staged: {error}"))?;
+            let result = stage_paths(vec![source], &existing);
+            let _ = std::fs::remove_dir_all(source_directory);
+            result
         });
     }
 
@@ -94,7 +127,9 @@ impl Desktop {
             return false;
         }
         let existing = self.draft_attachments(&draft_key);
-        self.stage(draft_key, move || stage_clipboard(item, &existing));
+        self.stage(draft_key, None, None, move || {
+            stage_clipboard(item, &existing)
+        });
         true
     }
 
@@ -170,12 +205,26 @@ impl Desktop {
                 draft_key,
                 files,
                 error,
+                snapshot_feedback,
+                snapshot_id,
             } => {
+                let succeeded = error.is_none();
                 if let Some(error) = error {
                     self.show_error(&error, window, cx);
                 }
                 if !files.is_empty() {
                     self.perform(Intent::AttachFiles { draft_key, files });
+                }
+                if let Some((flash, animations)) = snapshot_feedback {
+                    self.snapshot_feedback(flash, animations, cx);
+                }
+                if let Some(id) = snapshot_id {
+                    if succeeded {
+                        if let Err(error) = crate::platform::acknowledge_snapshot(&id) {
+                            self.show_error(&error, window, cx);
+                        }
+                    }
+                    self.external_snapshot_ids.remove(&id);
                 }
             }
             Update::Downloaded { id, result } => match result {
@@ -205,6 +254,8 @@ impl Desktop {
     fn stage(
         &self,
         draft_key: String,
+        snapshot_feedback: Option<(bool, bool)>,
+        snapshot_id: Option<String>,
         work: impl FnOnce() -> Result<(Vec<LocalFile>, Option<String>), String> + Send + 'static,
     ) {
         let updates = self.updates.clone();
@@ -222,10 +273,35 @@ impl Desktop {
                         draft_key,
                         files,
                         error,
+                        snapshot_feedback,
+                        snapshot_id,
                     }),
                 ))
                 .await;
         });
+    }
+}
+
+impl Desktop {
+    fn snapshot_feedback(&mut self, flash: bool, animations: bool, cx: &mut Context<Self>) {
+        if flash {
+            let duration = std::time::Duration::from_millis(220);
+            self.snapshot_feedback_until = Some(std::time::Instant::now() + duration);
+            self.snapshot_feedback_id = self.snapshot_feedback_id.wrapping_add(1);
+            self.snapshot_feedback_animated = animations;
+            let id = self.snapshot_feedback_id;
+            cx.spawn(async move |view, cx| {
+                cx.background_executor().timer(duration).await;
+                let _ = view.update(cx, |view, cx| {
+                    if view.snapshot_feedback_id == id {
+                        view.snapshot_feedback_until = None;
+                        cx.notify();
+                    }
+                });
+            })
+            .detach();
+            cx.notify();
+        }
     }
 }
 
@@ -317,9 +393,23 @@ fn stage_paths(
                 mime_type: admitted.mime_type,
             }
         };
+        copy_snapshot_metadata(source, Path::new(&staged.path));
         files.push(staged);
     }
     Ok((files, error))
+}
+
+fn copy_snapshot_metadata(source: &Path, target: &Path) {
+    let source_metadata = crate::platform::snapshot_metadata_path(source);
+    let Ok(bytes) = std::fs::read(&source_metadata) else {
+        return;
+    };
+    if bytes.len() > 128 * 1024
+        || serde_json::from_slice::<agent_domain::CapturedWindow>(&bytes).is_err()
+    {
+        return;
+    }
+    let _ = std::fs::write(crate::platform::snapshot_metadata_path(target), bytes);
 }
 
 fn stage_clipboard(

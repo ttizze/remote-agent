@@ -1,4 +1,6 @@
 mod account_usage;
+mod acp_registry;
+mod acp_runtime;
 pub mod browser;
 mod checkpoints;
 mod claude;
@@ -14,6 +16,7 @@ mod keybindings;
 pub mod local_host;
 pub mod platform;
 mod projects;
+mod provider_maintenance;
 mod repository;
 mod terminals;
 mod vcs;

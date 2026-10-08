@@ -35,7 +35,8 @@ pub struct Preferences {
     pub in_app_notifications_enabled: bool,
     /// Routes new threads across ready provider instances on this device.
     pub load_balancing_enabled: bool,
-    /// Integer weights by provider instance; omitted instances use 100.
+    /// Integer preferences by provider instance; omitted instances use the
+    /// reference Normal weight (50).
     pub load_balancing_weights: BTreeMap<String, u8>,
     /// Device-local screenshot capture behavior.
     pub snapshot_capture: crate::view::snapshot_capture::SnapshotPreferences,

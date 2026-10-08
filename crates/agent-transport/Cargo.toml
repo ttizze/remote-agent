@@ -6,6 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+agent-domain = { path = "../agent-domain" }
 agent-protocol = { path = "../agent-protocol" }
 url.workspace = true
 tracing.workspace = true

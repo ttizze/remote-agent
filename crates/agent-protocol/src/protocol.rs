@@ -104,12 +104,18 @@ results! {
     Login(crate::operations::AccountLogin), LoginStatus(crate::operations::AccountLoginStatus),
     TerminalMetadata(crate::operations::TerminalMetadataEvent),
     ProviderCommands(crate::workspace::ProviderCommands), EntrySearch(crate::workspace::EntrySearch),
+    ProviderUpdate(crate::operations::ProviderUpdate),
+    AcpRegistrySearch(crate::operations::AcpRegistrySearchResult),
+    PreparedAcpAgent(crate::operations::PreparedAcpAgent),
+    UninstalledAcpAgent(crate::operations::UninstalledAcpAgent),
+    AcpProbe(crate::operations::AcpProbeResult),
     VcsStatus(crate::workspace::VcsStatus), RefList(crate::workspace::RefList),
     SwitchedRef(crate::workspace::SwitchedRef),
     DiffPreview(crate::workspace::DiffPreviewResult),
     Files(crate::models::FileList), File(crate::models::FileContent), Grant(crate::models::TransferGrant),
     Transcription(crate::operations::Transcription),
     HostStatus(crate::models::HostStatus), Invitation(crate::models::Invitation),
+    HostResources(crate::models::HostResourcesSnapshot),
     Remotes(Vec<crate::models::RemoteHost>), Remote(crate::models::RemoteHost),
     Unit(()), Text(String)
 }

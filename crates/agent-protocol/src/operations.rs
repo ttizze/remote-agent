@@ -81,6 +81,178 @@ pub struct DictationPreparation {
     pub id: String,
 }
 
+/// Runs the updater owned by one configured provider installation. The Host
+/// re-derives installer ownership immediately before spawning the command.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateProvider {
+    pub instance: String,
+    pub target_version: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderUpdate {
+    pub instance: String,
+    pub status: ProviderUpdateStatus,
+    pub version: Option<String>,
+    pub message: String,
+    pub output: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderUpdateStatus {
+    Updated,
+    Unchanged,
+    Failed,
+}
+
+/// Search the credential-free Agent Client Protocol registry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchAcpRegistry {
+    pub query: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AcpRegistryAgent {
+    pub id: String,
+    pub name: String,
+    pub version: String,
+    pub description: String,
+    pub authors: Vec<String>,
+    pub license: Option<String>,
+    pub website: Option<String>,
+    pub repository: Option<String>,
+    pub icon: Option<String>,
+    pub distribution: String,
+    pub integrity: String,
+    /// Host-only launch metadata used to resolve a prepared runner. These
+    /// fields never cross the wire; registry search results expose only the
+    /// bounded public metadata above.
+    #[serde(skip)]
+    pub command: String,
+    #[serde(skip)]
+    pub args: Vec<String>,
+    #[serde(skip)]
+    pub environment: std::collections::BTreeMap<String, String>,
+    #[serde(skip)]
+    pub archive: Option<String>,
+    #[serde(skip)]
+    pub sha256: Option<String>,
+    #[serde(skip)]
+    pub package_spec: Option<String>,
+    #[serde(skip)]
+    pub runtime_args: Vec<String>,
+}
+
+/// Public contract names used by the registry implementation. The shorter
+/// aliases remain available to Host code that only needs the probe result.
+pub type AcpRegistrySearchAgent = AcpRegistryAgent;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AcpRegistrySearchResult {
+    pub agents: Vec<AcpRegistryAgent>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrepareAcpAgent {
+    pub agent_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreparedAcpAgent {
+    pub agent_id: String,
+    pub version: String,
+    pub distribution: String,
+    pub prepared: bool,
+}
+
+pub type AcpRegistryPrepareResult = PreparedAcpAgent;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UninstallAcpAgent {
+    pub agent_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UninstalledAcpAgent {
+    pub agent_id: String,
+    pub removed: bool,
+}
+
+pub type AcpRegistryManagedBinaryUninstallInput = UninstallAcpAgent;
+pub type AcpRegistryManagedBinaryUninstallResult = UninstalledAcpAgent;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProbeAcpAgent {
+    pub agent_id: String,
+    pub cwd: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AcpProbeResult {
+    pub agent_id: String,
+    pub ready: bool,
+    pub icon: Option<String>,
+    pub auth_methods: Vec<AcpProbeAuthMethod>,
+    pub models: Vec<AcpProbeModel>,
+    pub current_model_id: Option<String>,
+    pub config_options: Vec<agent_domain::OptionDescriptor>,
+    pub session_management: AcpSessionManagement,
+}
+
+pub type AcpRegistryProbeResult = AcpProbeResult;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AcpProbeAuthMethod {
+    pub id: String,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(rename = "type")]
+    pub auth_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub env_var_names: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub link: Option<String>,
+}
+
+pub type AcpRegistryProbeAuthMethod = AcpProbeAuthMethod;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AcpProbeModel {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+}
+
+pub type AcpRegistryProbeModel = AcpProbeModel;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AcpSessionManagement {
+    pub can_list: bool,
+    pub can_load: bool,
+    pub can_resume: bool,
+    pub can_logout: bool,
+    pub can_delete: bool,
+    pub can_configure_providers: bool,
+}
+
 #[derive(Debug, Serialize, Clone, Deserialize)]
 pub struct WriteFile {
     pub path: String,
@@ -421,6 +593,10 @@ pub struct LoadVisualization {
 #[serde(rename_all = "camelCase")]
 pub struct Upload {
     pub attachment_mime_type: Option<String>,
+    /// Metadata captured by a desktop screenshot. Ordinary uploads leave this
+    /// absent and follow the same attachment path as before.
+    #[serde(default)]
+    pub source: Option<agent_domain::CapturedWindow>,
     pub directory: String,
     pub file_name: String,
     pub size: u64,
