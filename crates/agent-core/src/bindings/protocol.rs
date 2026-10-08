@@ -383,7 +383,7 @@ struct UsageWindow {
     pub id: Option<String>,
     pub kind: Option<UsageWindowKind>,
     pub label: String,
-    pub used_percent: Option<u32>,
+    pub used_percent: Option<f64>,
     pub remaining_percent: u32,
     pub window_duration_mins: Option<u32>,
     pub resets_at: Option<i64>,

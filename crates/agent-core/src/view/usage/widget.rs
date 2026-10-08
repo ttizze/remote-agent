@@ -284,7 +284,7 @@ mod tests {
                     id: Some("session".into()),
                     kind: Some(WindowKind::Session),
                     label: "5 hours".into(),
-                    used_percent: Some(used),
+                    used_percent: Some(f64::from(used)),
                     remaining_percent: 100 - used,
                     window_duration_mins: Some(300),
                     resets_at: Some((NOW + 10 * 60_000) / 1000),
@@ -380,7 +380,7 @@ mod tests {
             } else {
                 WindowKind::Other
             });
-            window.used_percent = Some(95 - index);
+            window.used_percent = Some(f64::from(95 - index));
             usage.windows.push(window);
         }
         let view = subscription_widget(&[first, second], &[], NOW, usize::MAX);

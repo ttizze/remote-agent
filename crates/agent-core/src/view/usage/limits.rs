@@ -5,19 +5,19 @@ use agent_protocol::{
 };
 use std::collections::{BTreeMap, HashMap};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct UsageLimitWindow {
     pub id: String,
     pub label: String,
     pub kind: String,
-    pub used_percent: u32,
+    pub used_percent: f64,
     pub remaining_percent: u32,
     pub duration_minutes: Option<u32>,
     pub resets_at: Option<i64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct UsageLimitAccount {
     pub id: String,
@@ -36,7 +36,7 @@ pub struct UsageLimitAccount {
     pub fetched_at: i64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct ComposerUsageLimits {
     pub account_id: String,
@@ -47,7 +47,7 @@ pub struct ComposerUsageLimits {
     pub external_url: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct UsageLimitPoolMember {
     pub account_id: String,
@@ -55,7 +55,7 @@ pub struct UsageLimitPoolMember {
     pub window: UsageLimitWindow,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct UsageLimitPoolColumn {
     pub account_id: String,
@@ -63,7 +63,7 @@ pub struct UsageLimitPoolColumn {
     pub window: Option<UsageLimitWindow>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct UsageLimitPoolReset {
     pub account_id: String,
@@ -72,7 +72,7 @@ pub struct UsageLimitPoolReset {
     pub restores_percent: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct UsageLimitPoolWindow {
     pub id: String,
@@ -88,7 +88,7 @@ pub struct UsageLimitPoolWindow {
     pub resets: Vec<UsageLimitPoolReset>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct UsageLimitPool {
     pub provider: String,
@@ -224,14 +224,20 @@ fn kind_rank(kind: &str) -> u8 {
 fn window(value: &UsageWindow) -> UsageLimitWindow {
     let used_percent = value
         .used_percent
-        .unwrap_or_else(|| 100u32.saturating_sub(value.remaining_percent))
-        .min(100);
+        .filter(|used| used.is_finite())
+        .map(|used| used.clamp(0.0, 100.0))
+        .unwrap_or_else(|| 100u32.saturating_sub(value.remaining_percent) as f64);
+    let remaining_percent = value
+        .used_percent
+        .filter(|used| used.is_finite())
+        .map(|used| (100.0 - used.clamp(0.0, 100.0)).round() as u32)
+        .unwrap_or_else(|| value.remaining_percent.min(100));
     UsageLimitWindow {
         id: value.id.clone().unwrap_or_else(|| value.label.clone()),
         label: value.label.clone(),
         kind: kind_name(value.kind).into(),
         used_percent,
-        remaining_percent: value.remaining_percent.min(100),
+        remaining_percent,
         duration_minutes: value.window_duration_mins,
         resets_at: value.resets_at,
     }
@@ -363,7 +369,7 @@ fn pool_windows(accounts: &[UsageLimitAccount], now_ms: i64) -> Vec<UsageLimitPo
             let first = &members[0].1;
             let used_average = members
                 .iter()
-                .map(|(_, window)| f64::from(window.used_percent))
+                .map(|(_, window)| window.used_percent)
                 .sum::<f64>()
                 / members.len() as f64;
             let used_percent = used_average.round() as u32;
@@ -374,8 +380,8 @@ fn pool_windows(accounts: &[UsageLimitAccount], now_ms: i64) -> Vec<UsageLimitPo
                         account_id: sorted_accounts[*index].id.clone(),
                         label: account_label(&sorted_accounts[*index]),
                         at,
-                        restores_percent: (f64::from(window.used_percent) / members.len() as f64)
-                            .round() as u32,
+                        restores_percent: (window.used_percent / members.len() as f64).round()
+                            as u32,
                     })
                 })
                 .collect::<Vec<_>>();
@@ -387,8 +393,7 @@ fn pool_windows(accounts: &[UsageLimitAccount], now_ms: i64) -> Vec<UsageLimitPo
                 })
                 .collect::<Vec<_>>();
             let pace = (!timed.is_empty()).then(|| {
-                let used = timed.iter().map(|(used, _)| f64::from(*used)).sum::<f64>()
-                    / timed.len() as f64;
+                let used = timed.iter().map(|(used, _)| *used).sum::<f64>() / timed.len() as f64;
                 let elapsed =
                     timed.iter().map(|(_, elapsed)| elapsed).sum::<f64>() / timed.len() as f64;
                 pace(used, elapsed)
@@ -502,7 +507,7 @@ mod tests {
     use agent_protocol::operations::AccountUsage;
 
     fn usage(
-        used: u32,
+        used: f64,
         fetched_at: i64,
         fingerprint: Option<&str>,
         kind: WindowKind,
@@ -515,7 +520,7 @@ mod tests {
                 kind: Some(kind),
                 label: id.into(),
                 used_percent: Some(used),
-                remaining_percent: 100 - used,
+                remaining_percent: (100.0 - used).round() as u32,
                 window_duration_mins: Some(300),
                 resets_at: reset,
             }],
@@ -618,6 +623,46 @@ mod tests {
     }
 
     #[test]
+    fn pooling_keeps_fractional_usage_until_display_rounding() {
+        let accounts = vec![account(
+            "fractional",
+            Some("fractional@example.test"),
+            usage(35.9, 10, None, WindowKind::Session, "primary", Some(2_000)),
+        )];
+        let account_view = usage_limits(Some(&Accounts {
+            accounts: accounts.clone(),
+            selected: HashMap::new(),
+            error: None,
+        }));
+        assert_eq!(account_view[0].windows[0].used_percent, 35.9);
+        assert_eq!(account_view[0].windows[0].remaining_percent, 64);
+
+        let pool = &pooled_usage_limits(&accounts, 820)[0];
+        assert_eq!(pool.windows[0].used_percent, 36);
+        assert_eq!(pool.windows[0].remaining_percent, 64);
+        assert_eq!(pool.windows[0].resets[0].restores_percent, 36);
+    }
+
+    #[test]
+    fn nonfinite_wire_usage_falls_back_to_the_finite_remaining_value() {
+        let mut account = account(
+            "invalid",
+            Some("invalid@example.test"),
+            usage(20.0, 10, None, WindowKind::Session, "primary", None),
+        );
+        let window = &mut account.usage.as_mut().unwrap().windows[0];
+        window.used_percent = Some(f64::NAN);
+        window.remaining_percent = 20;
+        let view = usage_limits(Some(&Accounts {
+            accounts: vec![account],
+            selected: HashMap::new(),
+            error: None,
+        }));
+        assert_eq!(view[0].windows[0].used_percent, 80.0);
+        assert_eq!(view[0].windows[0].remaining_percent, 20);
+    }
+
+    #[test]
     fn composer_uses_the_selected_account_instead_of_the_first_provider_row() {
         let accounts = Accounts {
             accounts: vec![
@@ -657,7 +702,7 @@ mod tests {
             id: Some("weekly".into()),
             kind: Some(WindowKind::Weekly),
             label: "weekly".into(),
-            used_percent: Some(10),
+            used_percent: Some(10.0),
             remaining_percent: 90,
             window_duration_mins: Some(10_080),
             resets_at: Some(2_000),
@@ -693,6 +738,9 @@ mod tests {
     proptest::proptest! {
         #[test]
         fn pooled_percentages_and_columns_stay_bounded(used in proptest::collection::vec(0u32..=100, 1..8)) {
+            let average = used.iter().map(|value| f64::from(*value)).sum::<f64>()
+                / used.len() as f64
+                / 10.0;
             let accounts = used
                 .into_iter()
                 .enumerate()
@@ -702,7 +750,14 @@ mod tests {
                     account(
                         &id,
                         Some(&email),
-                        usage(used, index as i64, None, WindowKind::Session, "primary", None),
+                        usage(
+                            f64::from(used) / 10.0,
+                            index as i64,
+                            None,
+                            WindowKind::Session,
+                            "primary",
+                            None,
+                        ),
                     )
                 })
                 .collect::<Vec<_>>();
@@ -711,6 +766,11 @@ mod tests {
             for window in &pool.windows {
                 proptest::prop_assert!(window.used_percent <= 100);
                 proptest::prop_assert!(window.remaining_percent <= 100);
+                proptest::prop_assert_eq!(window.used_percent, average.round() as u32);
+                proptest::prop_assert_eq!(
+                    window.remaining_percent,
+                    (100.0 - average).round() as u32
+                );
                 proptest::prop_assert_eq!(window.columns.len(), pool.accounts.len());
             }
         }
