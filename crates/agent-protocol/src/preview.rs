@@ -340,6 +340,7 @@ pub struct PreviewTerminalOwner {
 #[serde(rename_all = "camelCase")]
 pub struct PreviewListResult {
     pub sessions: Vec<PreviewSessionSnapshot>,
+    pub recordings: Vec<PreviewRecordingStatus>,
     pub local_servers: Vec<DiscoveredLocalServer>,
     pub scanned_at: String,
     pub server_epoch: String,
@@ -627,6 +628,14 @@ pub enum PreviewEvent {
         revision: u64,
         server_epoch: String,
         created_at: String,
+    },
+    RecordingChanged {
+        thread_id: agent_domain::ThreadId,
+        tab_id: String,
+        revision: u64,
+        server_epoch: String,
+        created_at: String,
+        status: PreviewRecordingStatus,
     },
 }
 

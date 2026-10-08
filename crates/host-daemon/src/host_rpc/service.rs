@@ -1488,7 +1488,8 @@ fn preview_event_thread(event: &agent_protocol::preview::PreviewEvent) -> &agent
         | agent_protocol::preview::PreviewEvent::Navigated { thread_id, .. }
         | agent_protocol::preview::PreviewEvent::Resized { thread_id, .. }
         | agent_protocol::preview::PreviewEvent::Failed { thread_id, .. }
-        | agent_protocol::preview::PreviewEvent::Closed { thread_id, .. } => thread_id,
+        | agent_protocol::preview::PreviewEvent::Closed { thread_id, .. }
+        | agent_protocol::preview::PreviewEvent::RecordingChanged { thread_id, .. } => thread_id,
     }
 }
 

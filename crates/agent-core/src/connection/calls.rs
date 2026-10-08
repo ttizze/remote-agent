@@ -353,6 +353,30 @@ impl Owner {
         };
         let outcome = match result {
             Err(error) => {
+                match &call {
+                    Call::PreviewRecordingStart(request) => {
+                        self.state.preview.recordings.insert(
+                            request.tab_id.clone(),
+                            agent_protocol::preview::PreviewRecordingStatus {
+                                tab_id: request.tab_id.clone(),
+                                recording: false,
+                                started_at: None,
+                            },
+                        );
+                        self.state.preview.last_recordings.remove(&request.tab_id);
+                    }
+                    Call::PreviewRecordingStop(request) => {
+                        self.state.preview.recordings.insert(
+                            request.tab_id.clone(),
+                            agent_protocol::preview::PreviewRecordingStatus {
+                                tab_id: request.tab_id.clone(),
+                                recording: false,
+                                started_at: None,
+                            },
+                        );
+                    }
+                    _ => {}
+                }
                 if !cancelled
                     && (complete.is_some()
                         || matches!(
@@ -509,16 +533,28 @@ impl Owner {
             Reply::PreviewList(result) => self.state.preview.apply_list(result),
             Reply::PreviewSession(session) => self.state.preview.upsert(session),
             Reply::PreviewRecordingStatus(status) => {
-                self.state.preview.recording = Some(status);
-                self.state.preview.last_recording = None;
+                self.state
+                    .preview
+                    .last_recordings
+                    .remove(&status.tab_id);
+                self.state
+                    .preview
+                    .recordings
+                    .insert(status.tab_id.clone(), status);
             }
             Reply::PreviewRecordingArtifact(artifact) => {
-                self.state.preview.recording = Some(agent_protocol::preview::PreviewRecordingStatus {
-                    tab_id: artifact.tab_id.clone(),
-                    recording: false,
-                    started_at: None,
-                });
-                self.state.preview.last_recording = Some(artifact);
+                self.state.preview.recordings.insert(
+                    artifact.tab_id.clone(),
+                    agent_protocol::preview::PreviewRecordingStatus {
+                        tab_id: artifact.tab_id.clone(),
+                        recording: false,
+                        started_at: None,
+                    },
+                );
+                self.state
+                    .preview
+                    .last_recordings
+                    .insert(artifact.tab_id.clone(), artifact);
             }
             Reply::ConversationSettings(settings) => {
                 self.state.conversation_settings = Some(settings)

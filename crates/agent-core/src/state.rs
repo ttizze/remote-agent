@@ -443,9 +443,9 @@ pub struct PreviewState {
     pub scanner_revision: u64,
     pub configured_urls: Vec<String>,
     #[serde(skip)]
-    pub recording: Option<agent_protocol::preview::PreviewRecordingStatus>,
+    pub recordings: BTreeMap<String, agent_protocol::preview::PreviewRecordingStatus>,
     #[serde(skip)]
-    pub last_recording: Option<agent_protocol::preview::PreviewRecordingArtifact>,
+    pub last_recordings: BTreeMap<String, agent_protocol::preview::PreviewRecordingArtifact>,
     #[serde(skip)]
     closed_tabs: BTreeSet<String>,
 }
@@ -470,6 +470,11 @@ impl PreviewState {
             .sessions
             .into_iter()
             .map(|session| (session.tab_id.clone(), session))
+            .collect();
+        self.recordings = result
+            .recordings
+            .into_iter()
+            .map(|status| (status.tab_id.clone(), status))
             .collect();
         self.closed_tabs
             .retain(|tab_id| !self.sessions.contains_key(tab_id));
@@ -534,22 +539,14 @@ impl PreviewState {
             if self.active_tab.as_deref() == Some(tab_id) {
                 self.active_tab = self.sessions.keys().next().cloned();
             }
-            if self.recording.as_ref().is_some_and(|recording| recording.tab_id == tab_id) {
-                self.recording = None;
-            }
-            if self
-                .last_recording
-                .as_ref()
-                .is_some_and(|artifact| artifact.tab_id == tab_id)
-            {
-                self.last_recording = None;
-            }
+            self.recordings.remove(tab_id);
+            self.last_recordings.remove(tab_id);
         } else {
             self.closed_tabs.extend(self.sessions.keys().cloned());
             self.sessions.clear();
             self.active_tab = None;
-            self.recording = None;
-            self.last_recording = None;
+            self.recordings.clear();
+            self.last_recordings.clear();
         }
     }
     pub fn session(&self, tab_id: &str) -> Option<&agent_protocol::preview::PreviewSessionSnapshot> {
@@ -557,9 +554,11 @@ impl PreviewState {
     }
 
     pub fn recording_for(&self, tab_id: &str) -> Option<&agent_protocol::preview::PreviewRecordingStatus> {
-        self.recording
-            .as_ref()
-            .filter(|recording| recording.tab_id == tab_id)
+        self.recordings.get(tab_id)
+    }
+
+    pub fn last_recording_for(&self, tab_id: &str) -> Option<&agent_protocol::preview::PreviewRecordingArtifact> {
+        self.last_recordings.get(tab_id)
     }
 }
 
@@ -582,6 +581,7 @@ mod preview_state_tests {
                 appearance: agent_protocol::preview::PreviewAppearance::System,
                 updated_at: String::new(),
             }],
+            recordings: vec![],
             local_servers: vec![],
             scanned_at: String::new(),
             server_epoch: epoch.into(),
@@ -639,6 +639,38 @@ mod preview_state_tests {
     }
 
     #[test]
+    fn applies_independent_recording_slots_for_each_preview_tab() {
+        let mut state = PreviewState::default();
+        let mut result = list("epoch", 1, "tab-a");
+        result.sessions.push(agent_protocol::preview::PreviewSessionSnapshot {
+            thread_id: ThreadId::new("thread").unwrap(),
+            tab_id: "tab-b".into(),
+            nav_status: agent_protocol::preview::PreviewNavStatus::Idle,
+            can_go_back: false,
+            can_go_forward: false,
+            viewport: PreviewViewportSetting::Fill,
+            zoom: agent_protocol::preview::PreviewZoom::X100,
+            appearance: agent_protocol::preview::PreviewAppearance::System,
+            updated_at: String::new(),
+        });
+        result.recordings = vec![
+            agent_protocol::preview::PreviewRecordingStatus {
+                tab_id: "tab-a".into(),
+                recording: true,
+                started_at: Some("2026-01-01T00:00:00Z".into()),
+            },
+            agent_protocol::preview::PreviewRecordingStatus {
+                tab_id: "tab-b".into(),
+                recording: true,
+                started_at: Some("2026-01-01T00:00:01Z".into()),
+            },
+        ];
+        state.apply_list(result);
+        assert!(state.recording_for("tab-a").is_some_and(|status| status.recording));
+        assert!(state.recording_for("tab-b").is_some_and(|status| status.recording));
+    }
+
+    #[test]
     fn ignores_a_late_session_reply_after_a_local_close() {
         let mut state = PreviewState::default();
         state.apply_list(list("epoch", 1, "tab"));
@@ -651,12 +683,12 @@ mod preview_state_tests {
     #[test]
     fn closing_the_recorded_tab_discards_ephemeral_recording_state() {
         let mut state = PreviewState::default();
-        state.recording = Some(agent_protocol::preview::PreviewRecordingStatus {
+        state.recordings.insert("tab".into(), agent_protocol::preview::PreviewRecordingStatus {
             tab_id: "tab".into(),
             recording: true,
             started_at: Some("2026-01-01T00:00:00Z".into()),
         });
-        state.last_recording = Some(agent_protocol::preview::PreviewRecordingArtifact {
+        state.last_recordings.insert("tab".into(), agent_protocol::preview::PreviewRecordingArtifact {
             id: "browser-recording-test".into(),
             tab_id: "tab".into(),
             path: "/tmp/browser-recording-test.webm".into(),
@@ -665,8 +697,8 @@ mod preview_state_tests {
             created_at: "2026-01-01T00:00:01Z".into(),
         });
         state.close(Some("tab"));
-        assert!(state.recording.is_none());
-        assert!(state.last_recording.is_none());
+        assert!(state.recordings.is_empty());
+        assert!(state.last_recordings.is_empty());
     }
 }
 

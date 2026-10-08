@@ -14,6 +14,7 @@ use std::{
     collections::{HashMap, HashSet},
     path::PathBuf,
     sync::{Arc, OnceLock},
+    time::Duration,
 };
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
@@ -67,7 +68,12 @@ struct State {
 
 struct ActiveRecording {
     cancel: CancellationToken,
-    task: tokio::task::JoinHandle<Result<agent_protocol::preview::PreviewRecordingArtifact, String>>,
+    abort: tokio::task::AbortHandle,
+    done: tokio::sync::broadcast::Sender<
+        Result<agent_protocol::preview::PreviewRecordingArtifact, String>,
+    >,
+    started_at: String,
+    stopping: bool,
 }
 
 pub struct Browser {
@@ -163,9 +169,9 @@ impl Browser {
         };
         let key = (thread.to_owned(), tab_id.to_owned());
         let mut recordings = self.recordings.lock().await;
-        if let Some(((_, active_tab), _)) = recordings.iter().next() {
+        if recordings.contains_key(&key) {
             return Err(format!(
-                "recording conflict: tab {tab_id} cannot be recorded while tab {active_tab} is already being recorded"
+                "recording is already active for preview tab {tab_id}"
             ));
         }
         let cancel = CancellationToken::new();
@@ -178,32 +184,68 @@ impl Browser {
             cancel.clone(),
             self.stop.clone(),
         )?;
-        let started_at = started.started_at.clone();
+        let recording::StartResult {
+            started_at,
+            startup,
+            task,
+        } = started;
+        let abort = task.abort_handle();
+        let (done, _) = tokio::sync::broadcast::channel(2);
+        let mut done_receiver = done.subscribe();
         recordings.insert(
             key.clone(),
             ActiveRecording {
                 cancel,
-                task: started.task,
+                abort,
+                done: done.clone(),
+                started_at: started_at.clone(),
+                stopping: false,
             },
         );
         drop(recordings);
-        if let Err(error) = recording::await_startup(started.startup).await {
-            if let Some(mut active) = self.recordings.lock().await.remove(&key) {
-                active.cancel.cancel();
-                if tokio::time::timeout(std::time::Duration::from_secs(5), &mut active.task)
-                    .await
-                    .is_err()
-                {
-                    active.task.abort();
-                }
+        let recordings = self.recordings.clone();
+        let preview = self.preview.get().cloned();
+        let monitor_key = key.clone();
+        let monitor_tab_id = tab_id.to_owned();
+        let monitor_thread = thread.to_owned();
+        tokio::spawn(async move {
+            let result = match task.await {
+                Ok(result) => result,
+                Err(error) => Err(format!("recording task terminated: {error}")),
+            };
+            let _ = done.send(result);
+            if let Some(preview) = preview
+                && let Ok(thread_id) = agent_domain::ThreadId::new(monitor_thread)
+            {
+                preview.recording_finished(&thread_id, &monitor_tab_id);
             }
+            recordings.lock().await.remove(&monitor_key);
+        });
+        if let Err(error) = recording::await_startup(startup).await {
+            self.cancel_recording(&key, &mut done_receiver, Duration::from_secs(5))
+                .await;
             return Err(format!("recording failed for tab {tab_id}: {error}"));
         }
-        Ok(agent_protocol::preview::PreviewRecordingStatus {
+        let status = agent_protocol::preview::PreviewRecordingStatus {
             tab_id: tab_id.to_owned(),
             recording: true,
             started_at: Some(started_at),
-        })
+        };
+        if !self.recordings.lock().await.contains_key(&key) {
+            return Err(format!("recording stopped during startup for tab {tab_id}"));
+        }
+        if let Some(preview) = self.preview.get()
+            && let Ok(thread_id) = agent_domain::ThreadId::new(thread.to_owned())
+        {
+            preview.recording_started(thread_id, status.clone())?;
+            if !self.recordings.lock().await.contains_key(&key) {
+                if let Ok(thread_id) = agent_domain::ThreadId::new(thread.to_owned()) {
+                    preview.recording_finished(&thread_id, tab_id);
+                }
+                return Err(format!("recording stopped during startup for tab {tab_id}"));
+            }
+        }
+        Ok(status)
     }
 
     pub async fn stop_preview_recording(
@@ -212,23 +254,70 @@ impl Browser {
         tab_id: &str,
     ) -> Result<agent_protocol::preview::PreviewRecordingArtifact, String> {
         let key = (thread.to_owned(), tab_id.to_owned());
-        let active = self
-            .recordings
-            .lock()
-            .await
-            .remove(&key)
-            .ok_or_else(|| format!("recording is not active for preview tab {tab_id}"))?;
-        active.cancel.cancel();
+        let (cancel, abort, mut done) = {
+            let mut recordings = self.recordings.lock().await;
+            let active = recordings
+                .get_mut(&key)
+                .ok_or_else(|| format!("recording is not active for preview tab {tab_id}"))?;
+            if active.stopping {
+                return Err(format!("recording is already stopping for preview tab {tab_id}"));
+            }
+            active.stopping = true;
+            (active.cancel.clone(), active.abort.clone(), active.done.subscribe())
+        };
+        cancel.cancel();
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(
                 agent_protocol::preview::PREVIEW_RECORDING_MAX_DURATION_SECONDS,
             ),
-            active.task,
+            done.recv(),
         )
         .await
-        .map_err(|_| format!("recording stop timeout for tab {tab_id} after 120000ms"))?
-        .map_err(|error| format!("recording cleanup failed for tab {tab_id}: {error}"))?;
+        .map_err(|_| format!("recording stop timeout for tab {tab_id} after 120000ms"));
+        let result = match result {
+            Ok(Ok(result)) => result,
+            Ok(Err(error)) => Err(format!("recording cleanup failed for tab {tab_id}: {error}")),
+            Err(error) => {
+                abort.abort();
+                let _ = tokio::time::timeout(Duration::from_secs(5), done.recv()).await;
+                return Err(error);
+            }
+        }?;
         result
+    }
+
+    async fn cancel_recording(
+        &self,
+        key: &(String, String),
+        done: &mut tokio::sync::broadcast::Receiver<
+            Result<agent_protocol::preview::PreviewRecordingArtifact, String>,
+        >,
+        timeout: Duration,
+    ) {
+        let (cancel, abort) = {
+            let mut recordings = self.recordings.lock().await;
+            let Some(active) = recordings.get_mut(key) else { return; };
+            active.stopping = true;
+            (active.cancel.clone(), active.abort.clone())
+        };
+        cancel.cancel();
+        if tokio::time::timeout(timeout, done.recv()).await.is_err() {
+            abort.abort();
+            let _ = tokio::time::timeout(Duration::from_secs(5), done.recv()).await;
+        }
+    }
+
+    pub async fn active_recording_tab(&self, thread: &str) -> Result<String, String> {
+        let recordings = self.recordings.lock().await;
+        let mut tabs = recordings
+            .keys()
+            .filter(|(scope, _)| scope == thread)
+            .map(|(_, tab)| tab.clone());
+        match (tabs.next(), tabs.next()) {
+            (Some(tab), None) => Ok(tab),
+            (None, _) => Err("no Preview recording is active for this conversation".into()),
+            (Some(_), Some(_)) => Err("multiple Preview recordings are active; specify tab_id".into()),
+        }
     }
 
     pub async fn preview_active_tab(&self, thread: &str) -> Result<String, String> {
@@ -256,14 +345,23 @@ impl Browser {
     }
     pub async fn shutdown(&self) {
         self.stop.cancel();
-        let active = std::mem::take(&mut *self.recordings.lock().await);
-        for (_, mut recording) in active {
-            recording.cancel.cancel();
-            if tokio::time::timeout(std::time::Duration::from_secs(10), &mut recording.task)
+        let keys = self.recordings.lock().await.keys().cloned().collect::<Vec<_>>();
+        for key in keys {
+            let mut done = {
+                let mut recordings = self.recordings.lock().await;
+                let Some(active) = recordings.get_mut(&key) else { continue; };
+                active.stopping = true;
+                active.cancel.cancel();
+                active.done.subscribe()
+            };
+            if tokio::time::timeout(Duration::from_secs(10), done.recv())
                 .await
                 .is_err()
             {
-                recording.task.abort();
+                if let Some(active) = self.recordings.lock().await.get(&key) {
+                    active.abort.abort();
+                }
+                let _ = tokio::time::timeout(Duration::from_secs(5), done.recv()).await;
             }
         }
         if let Some(chrome) = self.state.lock().await.chrome.take() {
@@ -552,7 +650,7 @@ impl Browser {
     ) -> Result<agent_protocol::preview::PreviewListResult, String> {
         let thread_id = agent_domain::ThreadId::new(thread.to_owned())
             .map_err(|_| "browser scope is invalid".to_owned())?;
-        let browser_result = {
+        let mut browser_result = {
             let mut state = self.state.lock().await;
             self.ensure(&mut state, thread).await?;
             let (tabs, viewports, settings) = {
@@ -605,6 +703,7 @@ impl Browser {
                 .collect();
             agent_protocol::preview::PreviewListResult {
                 sessions,
+                recordings: Vec::new(),
                 local_servers: Vec::new(),
                 scanned_at: String::new(),
                 server_epoch: String::new(),
@@ -613,6 +712,18 @@ impl Browser {
                 scanner_revision: 0,
             }
         };
+        browser_result.recordings = self
+            .recordings
+            .lock()
+            .await
+            .iter()
+            .filter(|((scope, _), active)| scope == thread && !active.stopping)
+            .map(|((_, tab_id), active)| agent_protocol::preview::PreviewRecordingStatus {
+                tab_id: tab_id.clone(),
+                recording: true,
+                started_at: Some(active.started_at.clone()),
+            })
+            .collect();
         let (Some(preview), Some(preview_ports), Some(terminals)) = (
             self.preview.get(),
             self.preview_ports.get(),

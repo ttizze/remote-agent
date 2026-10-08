@@ -117,7 +117,7 @@ async fn bridge_request(browser: &Browser, request: BridgeRequest) -> Result<Bri
         BridgeRequest::PreviewRecordingStop { thread, tab_id } => {
             let tab_id = match tab_id {
                 Some(tab_id) => tab_id,
-                None => browser.preview_active_tab(&thread).await?,
+                None => browser.active_recording_tab(&thread).await?,
             };
             browser
                 .stop_preview_recording(&thread, &tab_id)
@@ -226,18 +226,17 @@ enum ToolCall {
 }
 
 fn parse_tool_call(name: &str, value: &Value) -> Result<ToolCall, String> {
+    let optional_tab_id = || match value.get("tab_id") {
+        None => Ok(None),
+        Some(Value::String(tab_id)) => Ok(Some(tab_id.clone())),
+        Some(_) => Err("tab_id must be a string when provided".into()),
+    };
     match name {
         "bex_browser" => parse_action(value).map(ToolCall::Browser),
         "preview_list" => Ok(ToolCall::PreviewList),
-        "preview_close" => Ok(ToolCall::PreviewClose(
-            value.get("tab_id").and_then(Value::as_str).map(str::to_owned),
-        )),
-        "preview_recording_start" => Ok(ToolCall::PreviewRecordingStart(
-            value.get("tab_id").and_then(Value::as_str).map(str::to_owned),
-        )),
-        "preview_recording_stop" => Ok(ToolCall::PreviewRecordingStop(
-            value.get("tab_id").and_then(Value::as_str).map(str::to_owned),
-        )),
+        "preview_close" => Ok(ToolCall::PreviewClose(optional_tab_id()?)),
+        "preview_recording_start" => Ok(ToolCall::PreviewRecordingStart(optional_tab_id()?)),
+        "preview_recording_stop" => Ok(ToolCall::PreviewRecordingStop(optional_tab_id()?)),
         _ => Err("unknown browser tool".into()),
     }
 }
@@ -338,5 +337,31 @@ async fn bridge(socket: &Path, request: BridgeRequest) -> Result<BridgeResponse,
     {
         let _ = (socket, request);
         Err("Shared BEX browser currently requires a Unix Host.".into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recording_tool_rejects_non_string_tab_ids() {
+        let error = match parse_tool_call("preview_recording_stop", &json!({"tab_id": 7})) {
+            Ok(_) => panic!("numeric tab ids must be rejected"),
+            Err(error) => error,
+        };
+        assert!(error.contains("tab_id must be a string"));
+    }
+
+    #[test]
+    fn recording_tool_omits_tab_id_only_when_requested() {
+        assert!(matches!(
+            parse_tool_call("preview_recording_stop", &json!({})).unwrap(),
+            ToolCall::PreviewRecordingStop(None)
+        ));
+        assert!(matches!(
+            parse_tool_call("preview_recording_stop", &json!({"tab_id": "tab"})).unwrap(),
+            ToolCall::PreviewRecordingStop(Some(tab)) if tab == "tab"
+        ));
     }
 }

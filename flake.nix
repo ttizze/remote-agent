@@ -22,6 +22,7 @@
     {
       packages = forEachSystem (pkgs: {
         agent-peer = pkgs.callPackage ./tools/agent-peer/package.nix { };
+        ffmpeg = pkgs.ffmpeg;
         kani = pkgs.callPackage ./tools/kani/package.nix { };
         kache = pkgs.callPackage ./tools/kache/package.nix { };
       });

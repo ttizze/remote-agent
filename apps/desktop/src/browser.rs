@@ -475,12 +475,10 @@ impl HostBrowser {
 
     fn save_recording(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(artifact) = self
-            .store
-            .snapshot()
-            .preview
-            .last_recording
-            .clone()
-            .filter(|artifact| self.frame.as_ref().is_some_and(|frame| frame.tab_id == artifact.tab_id))
+            .frame
+            .as_ref()
+            .and_then(|frame| self.store.snapshot().preview.last_recording_for(&frame.tab_id))
+            .cloned()
         else {
             self.error = "No finished Preview recording is available.".into();
             cx.notify();
@@ -518,22 +516,25 @@ impl HostBrowser {
 
     fn attach_recording(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(artifact) = self
-            .store
-            .snapshot()
-            .preview
-            .last_recording
-            .clone()
-            .filter(|artifact| self.frame.as_ref().is_some_and(|frame| frame.tab_id == artifact.tab_id))
+            .frame
+            .as_ref()
+            .and_then(|frame| self.store.snapshot().preview.last_recording_for(&frame.tab_id))
+            .cloned()
         else {
             self.error = "No finished Preview recording is available.".into();
             cx.notify();
             return;
         };
         let store = self.store.clone();
-        let draft_key = self.thread_id.clone();
+        let draft_key = self.store.snapshot().draft_key();
+        let cleanup_draft_key = draft_key.clone();
         let local_path = std::env::temp_dir()
             .join("bex-preview-recordings")
-            .join(format!("{}.webm", artifact.id));
+            .join(format!(
+                "{}-{}.webm",
+                artifact.id,
+                uuid::Uuid::new_v4().simple()
+            ));
         cx.spawn_in(window, async move |view, cx| {
             let result = async {
                 if let Some(parent) = local_path.parent() {
@@ -547,7 +548,7 @@ impl HostBrowser {
                     .map_err(|error| error.to_string())?;
                 store
                     .dispatch(Intent::AttachFiles {
-                        draft_key,
+                        draft_key: draft_key.clone(),
                         files: vec![LocalFile {
                             path: local_path.to_string_lossy().into_owned(),
                             name: format!("{}.webm", artifact.id),
@@ -560,6 +561,11 @@ impl HostBrowser {
                 Ok::<(), String>(())
             }
             .await;
+            if result.is_ok() {
+                wait_for_attachment_release(store.clone(), cleanup_draft_key, local_path.clone()).await;
+            } else {
+                let _ = tokio::fs::remove_file(&local_path).await;
+            }
             let _ = view.update_in(cx, |view, _, cx| {
                 if let Err(error) = result {
                     view.error = error;
@@ -741,6 +747,33 @@ async fn dispatch_preview(store: &Store, intent: Intent) -> Result<(), String> {
     Ok(())
 }
 
+async fn wait_for_attachment_release(store: Arc<Store>, draft_key: String, path: std::path::PathBuf) {
+    let mut updates = store.subscribe();
+    let path_string = path.to_string_lossy().into_owned();
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(120), async {
+        let mut observed = false;
+        loop {
+            let snapshot = store.snapshot();
+            let status = snapshot
+                .drafts
+                .get(&draft_key)
+                .and_then(|draft| draft.attachments.iter().find(|attachment| attachment.local_path == path_string.as_str()))
+                .map(|attachment| attachment.status.as_str());
+            match status {
+                Some("ready") | Some("failed") => break,
+                Some(_) => observed = true,
+                None if observed => break,
+                None => {}
+            }
+            if updates.changed().await.is_err() {
+                break;
+            }
+        }
+    })
+    .await;
+    let _ = tokio::fs::remove_file(path).await;
+}
+
 impl Render for HostBrowser {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if let Some((width, height)) = measured_frame_size(self.frame_bounds)
@@ -780,7 +813,7 @@ impl Render for HostBrowser {
             .and_then(|tab_id| preview.recording_for(tab_id))
             .is_some_and(|status| status.recording);
         let recording_artifact = frame
-            .and_then(|frame| preview.last_recording.as_ref().filter(|artifact| artifact.tab_id == frame.tab_id))
+            .and_then(|frame| preview.last_recording_for(&frame.tab_id))
             .is_some();
         let local_servers = preview.local_servers;
         let recent_urls = preview.recent_urls;
