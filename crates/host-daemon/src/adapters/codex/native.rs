@@ -30,7 +30,10 @@ pub(super) fn parse_model(
 ) -> Result<agent_protocol::models::Model, serde_json::Error> {
     if let Some(tiers) = value["serviceTiers"].as_array_mut() {
         for tier in tiers {
-            tier["fast"] = serde_json::json!(tier["id"] == "priority");
+            if let Some(tier) = tier.as_object_mut() {
+                let fast = tier.get("id").and_then(Value::as_str) == Some("priority");
+                tier.insert("fast".into(), fast.into());
+            }
         }
     }
     let id = value["model"].take();
@@ -554,6 +557,14 @@ mod tests {
             [true, false, false]
         );
         assert_eq!(tiers[0].name.as_deref(), Some("Fast"));
+        assert!(
+            parse_model(json!({
+                "id":"entry","model":"native-model","displayName":"Model",
+                "defaultReasoningEffort":"medium","supportedReasoningEfforts":[],
+                "serviceTiers":["invalid"]
+            }))
+            .is_err()
+        );
     }
 
     #[test]
