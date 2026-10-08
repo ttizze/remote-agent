@@ -618,6 +618,10 @@ mod tests {
             browser_profile_removal_decision(&plan, 7, &["host-a".into()], true),
             BrowserProfileRemovalDecision::Failed
         );
+        assert_eq!(
+            browser_profile_removal_decision(&plan, 7, &["host-a".into(), "host-b".into()], false,),
+            BrowserProfileRemovalDecision::Ready
+        );
     }
 
     #[test]

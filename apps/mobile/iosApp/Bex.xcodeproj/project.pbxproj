@@ -24,7 +24,20 @@
         C30000000000000000000003 /* TerminalScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = C30000000000000000000004; };
 		A10000000000000000000007 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000018 /* Assets.xcassets */; };
 		A10000000000000000000001 /* BexIOSApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000011 /* BexIOSApp.swift */; };
-		A10000000000000000000002 /* PlatformServices.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000012 /* PlatformServices.swift */; };
+		B00000000000000000000021 /* PlatformNotifications.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000001 /* PlatformNotifications.swift */; };
+		B00000000000000000000022 /* PlatformSharing.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000002 /* PlatformSharing.swift */; };
+		B00000000000000000000023 /* PlatformPersistence.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000003 /* PlatformPersistence.swift */; };
+		B00000000000000000000024 /* DictationRecorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000004 /* DictationRecorder.swift */; };
+		B00000000000000000000025 /* PlatformUI.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000005 /* PlatformUI.swift */; };
+		B00000000000000000000026 /* AppViewModelRouting.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000006 /* AppViewModelRouting.swift */; };
+		B00000000000000000000027 /* AppViewModelConnection.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000007 /* AppViewModelConnection.swift */; };
+		B00000000000000000000028 /* AppViewModelActions.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000008 /* AppViewModelActions.swift */; };
+		B00000000000000000000029 /* AppViewModelObservation.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000009 /* AppViewModelObservation.swift */; };
+		B0000000000000000000002A /* SettingsControls.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0000000000000000000000A /* SettingsControls.swift */; };
+		B0000000000000000000002B /* RemoteFolderPicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0000000000000000000000B /* RemoteFolderPicker.swift */; };
+		B0000000000000000000002C /* SettingsAccounts.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0000000000000000000000C /* SettingsAccounts.swift */; };
+		B0000000000000000000002D /* AppViewModelEnvironment.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0000000000000000000000D /* AppViewModelEnvironment.swift */; };
+		B0000000000000000000002E /* SettingsAuxiliaryPages.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0000000000000000000000E /* SettingsAuxiliaryPages.swift */; };
 		A10000000000000000000003 /* QRCodeCaptureViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000013 /* QRCodeCaptureViewController.swift */; };
 		A10000000000000000000006 /* SwiftUIRoot.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000017 /* SwiftUIRoot.swift */; };
 		FD93084AF1873DEF927C9EDC /* AppViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1DBDDA3779489C57B929936E /* AppViewModel.swift */; };
@@ -115,11 +128,19 @@
 		A10000000000000000000018 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		A10000000000000000000010 /* Bex.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Bex.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A10000000000000000000011 /* BexIOSApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BexIOSApp.swift; sourceTree = "<group>"; };
-		A10000000000000000000012 /* PlatformServices.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlatformServices.swift; sourceTree = "<group>"; };
+		B00000000000000000000001 /* PlatformNotifications.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlatformNotifications.swift; sourceTree = "<group>"; };
+		B00000000000000000000002 /* PlatformSharing.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlatformSharing.swift; sourceTree = "<group>"; };
+		B00000000000000000000003 /* PlatformPersistence.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlatformPersistence.swift; sourceTree = "<group>"; };
+		B00000000000000000000004 /* DictationRecorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DictationRecorder.swift; sourceTree = "<group>"; };
+		B00000000000000000000005 /* PlatformUI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlatformUI.swift; sourceTree = "<group>"; };
 		A10000000000000000000013 /* QRCodeCaptureViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QRCodeCaptureViewController.swift; sourceTree = "<group>"; };
 		A10000000000000000000016 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		A10000000000000000000017 /* SwiftUIRoot.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SwiftUIRoot.swift; sourceTree = "<group>"; };
 		1DBDDA3779489C57B929936E /* AppViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppViewModel.swift; sourceTree = "<group>"; };
+		B00000000000000000000006 /* AppViewModelRouting.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppViewModelRouting.swift; sourceTree = "<group>"; };
+		B00000000000000000000007 /* AppViewModelConnection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppViewModelConnection.swift; sourceTree = "<group>"; };
+		B00000000000000000000008 /* AppViewModelActions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppViewModelActions.swift; sourceTree = "<group>"; };
+		B00000000000000000000009 /* AppViewModelObservation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppViewModelObservation.swift; sourceTree = "<group>"; };
 		D074DC0F6B272156A6A39ED4 /* ConversationMarkdown.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationMarkdown.swift; sourceTree = "<group>"; };
 		CBC18567B9147FCC8D6134EF /* WorkspaceViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceViews.swift; sourceTree = "<group>"; };
 		2036041A039EEBAA78D55844 /* AppPresentationData.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppPresentationData.swift; sourceTree = "<group>"; };
@@ -142,6 +163,11 @@
 		5A5C8EB7A315858408A45DD4 /* RequestCards.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RequestCards.swift; sourceTree = "<group>"; };
 		5A71C55BC1248CBB94BBCA63 /* ReviewScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReviewScreen.swift; sourceTree = "<group>"; };
 		5A7F9C1E57CCEFA4413DFD7C /* SettingsScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsScreen.swift; sourceTree = "<group>"; };
+		B0000000000000000000000A /* SettingsControls.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsControls.swift; sourceTree = "<group>"; };
+		B0000000000000000000000B /* RemoteFolderPicker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteFolderPicker.swift; sourceTree = "<group>"; };
+		B0000000000000000000000C /* SettingsAccounts.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsAccounts.swift; sourceTree = "<group>"; };
+		B0000000000000000000000D /* AppViewModelEnvironment.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppViewModelEnvironment.swift; sourceTree = "<group>"; };
+		B0000000000000000000000E /* SettingsAuxiliaryPages.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsAuxiliaryPages.swift; sourceTree = "<group>"; };
 		5A7F9C1E57CCEFA4413DFD7D /* UsageScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UsageScreen.swift; sourceTree = "<group>"; };
 		5A84E28D9598398CE73A1B57 /* SetupCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SetupCard.swift; sourceTree = "<group>"; };
 		5A70A17BFA716640470D90FE /* SnoozeSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SnoozeSheet.swift; sourceTree = "<group>"; };
@@ -215,11 +241,20 @@
 				D10000000000000000000002 /* AgentPushCenter.swift */,
                 D10000000000000000000003 /* RemoteAgent.entitlements */,
                 A10000000000000000000011 /* BexIOSApp.swift */,
-				A10000000000000000000012 /* PlatformServices.swift */,
+				B00000000000000000000001 /* PlatformNotifications.swift */,
+				B00000000000000000000002 /* PlatformSharing.swift */,
+				B00000000000000000000003 /* PlatformPersistence.swift */,
+				B00000000000000000000004 /* DictationRecorder.swift */,
+				B00000000000000000000005 /* PlatformUI.swift */,
 				A10000000000000000000013 /* QRCodeCaptureViewController.swift */,
 				A10000000000000000000017 /* SwiftUIRoot.swift */,
 				2036041A039EEBAA78D55844 /* AppPresentationData.swift */,
 				1DBDDA3779489C57B929936E /* AppViewModel.swift */,
+				B00000000000000000000006 /* AppViewModelRouting.swift */,
+				B00000000000000000000007 /* AppViewModelConnection.swift */,
+				B00000000000000000000008 /* AppViewModelActions.swift */,
+				B00000000000000000000009 /* AppViewModelObservation.swift */,
+				B0000000000000000000000D /* AppViewModelEnvironment.swift */,
 				C0DE00000000000000000003 /* AppViewActions.swift */,
 				C0DE00000000000000000203 /* AccountViews.swift */,
 				25A49FEF4CFAB482E889EBDF /* WorktreeSettings.swift */,
@@ -240,6 +275,10 @@
 				5A5C8EB7A315858408A45DD4 /* RequestCards.swift */,
 				5A71C55BC1248CBB94BBCA63 /* ReviewScreen.swift */,
 				5A7F9C1E57CCEFA4413DFD7C /* SettingsScreen.swift */,
+				B0000000000000000000000A /* SettingsControls.swift */,
+				B0000000000000000000000B /* RemoteFolderPicker.swift */,
+				B0000000000000000000000C /* SettingsAccounts.swift */,
+				B0000000000000000000000E /* SettingsAuxiliaryPages.swift */,
 				5A7F9C1E57CCEFA4413DFD7D /* UsageScreen.swift */,
 				5A84E28D9598398CE73A1B57 /* SetupCard.swift */,
 				5A70A17BFA716640470D90FE /* SnoozeSheet.swift */,
@@ -404,11 +443,20 @@
                 D10000000000000000000001 /* AgentPushCenter.swift in Sources */,
 				A71000000000000000000015, A71000000000000000000016, A71000000000000000000017,
                 A10000000000000000000001 /* BexIOSApp.swift in Sources */,
-				A10000000000000000000002 /* PlatformServices.swift in Sources */,
+				B00000000000000000000021 /* PlatformNotifications.swift in Sources */,
+				B00000000000000000000022 /* PlatformSharing.swift in Sources */,
+				B00000000000000000000023 /* PlatformPersistence.swift in Sources */,
+				B00000000000000000000024 /* DictationRecorder.swift in Sources */,
+				B00000000000000000000025 /* PlatformUI.swift in Sources */,
 				A10000000000000000000003 /* QRCodeCaptureViewController.swift in Sources */,
 				A10000000000000000000006 /* SwiftUIRoot.swift in Sources */,
 				B5EDE65C803E4BD5CE028DE5 /* AppPresentationData.swift in Sources */,
 				FD93084AF1873DEF927C9EDC /* AppViewModel.swift in Sources */,
+				B00000000000000000000026 /* AppViewModelRouting.swift in Sources */,
+				B00000000000000000000027 /* AppViewModelConnection.swift in Sources */,
+				B00000000000000000000028 /* AppViewModelActions.swift in Sources */,
+				B00000000000000000000029 /* AppViewModelObservation.swift in Sources */,
+				B0000000000000000000002D /* AppViewModelEnvironment.swift in Sources */,
 				C0DE00000000000000000103 /* AppViewActions.swift in Sources */,
 				C0DE00000000000000000202 /* AccountViews.swift in Sources */,
 				0FF3408BDCB920A7C06397A8 /* WorktreeSettings.swift in Sources */,
@@ -429,6 +477,10 @@
 				5AAAD5B74E2B6EA71FB97E12 /* RequestCards.swift in Sources */,
 				5AA51108FD3338DF7260477D /* ReviewScreen.swift in Sources */,
 				5AC745F7F218DE3C213121D1 /* SettingsScreen.swift in Sources */,
+				B0000000000000000000002A /* SettingsControls.swift in Sources */,
+				B0000000000000000000002B /* RemoteFolderPicker.swift in Sources */,
+				B0000000000000000000002C /* SettingsAccounts.swift in Sources */,
+				B0000000000000000000002E /* SettingsAuxiliaryPages.swift in Sources */,
 				5AC745F7F218DE3C213121D2 /* UsageScreen.swift in Sources */,
 				5A93A711C7F8F640D6399526 /* SetupCard.swift in Sources */,
 				5A8D5783B4484B7A52BBFE4C /* SnoozeSheet.swift in Sources */,

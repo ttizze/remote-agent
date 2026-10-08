@@ -975,11 +975,11 @@ impl Desktop {
                     .map(|store| (environment_id.clone(), store.clone()))
             })
             .collect::<Vec<_>>();
-        let removal_profile_id = plan.profile_id.clone();
+        let clear_targets = targets.clone();
         self.spawn_task(
             async move {
-                let cleared = join_all(targets.into_iter().map(|(environment_id, store)| {
-                    let profile_id = removal_profile_id.clone();
+                let cleared = join_all(clear_targets.into_iter().map(|(environment_id, store)| {
+                    let profile_id = plan.profile_id.clone();
                     async move {
                         let result = store
                             .dispatch(Intent::PreviewClearProfileData { profile_id })
@@ -1007,17 +1007,47 @@ impl Desktop {
                     &cleared_environment_ids,
                     failed,
                 );
-                (plan, decision)
+                let removed = if decision
+                    == agent_core::view::browser::BrowserProfileRemovalDecision::Ready
+                {
+                    let profile_id = plan.profile_id.clone();
+                    join_all(targets.into_iter().map(|(environment_id, store)| {
+                        let profile_id = profile_id.clone();
+                        async move {
+                            let result = store
+                                .dispatch(Intent::RemoveBrowserProfile { profile_id })
+                                .await
+                                .map_err(|error| error.to_string())
+                                .and_then(|result| {
+                                    result.map(|_| ()).map_err(|error| error.to_string())
+                                });
+                            (environment_id, result)
+                        }
+                    }))
+                    .await
+                } else {
+                    Vec::new()
+                };
+                (plan, decision, removed)
             },
-            move |view, (plan, decision), window, cx| {
+            move |view, (_plan, decision, removed), window, cx| {
                 if view.browser_profile_removal_generation != generation {
                     return;
                 }
                 match decision {
                     agent_core::view::browser::BrowserProfileRemovalDecision::Ready => {
-                        view.perform(Intent::RemoveBrowserProfile {
-                            profile_id: plan.profile_id,
-                        });
+                        if let Some((environment_id, error)) =
+                            removed.into_iter().find(|(_, result)| result.is_err())
+                        {
+                            let detail = error.unwrap_err();
+                            view.show_error(
+                                &format!(
+                                    "Browser profile could not be removed from Host {environment_id}: {detail}"
+                                ),
+                                window,
+                                cx,
+                            );
+                        }
                     }
                     agent_core::view::browser::BrowserProfileRemovalDecision::Failed => {
                         view.show_error(
@@ -1352,6 +1382,14 @@ impl Desktop {
                 if !snapshot.accepts_after(&self.snapshot) {
                     return;
                 }
+                let disconnected_environment_id = (self.snapshot.connected && !snapshot.connected)
+                    .then(|| {
+                        self.snapshot
+                            .environment
+                            .as_ref()
+                            .map(|environment| environment.environment_id.clone())
+                    })
+                    .flatten();
                 if let Some(power) = snapshot
                     .background_policy
                     .as_ref()
@@ -1364,6 +1402,9 @@ impl Desktop {
                     session.save(self.snapshot.clone());
                 }
                 self.snapshot_changed(window, cx);
+                if let Some(environment_id) = disconnected_environment_id {
+                    self.dismiss_environment_notifications(&environment_id, cx);
+                }
             }
             Update::Views(views) => {
                 self.views_running = false;
@@ -1568,6 +1609,15 @@ impl Desktop {
         cx: &mut Context<Self>,
     ) {
         let focused = window.is_window_active();
+        let mode_changed =
+            previous.preferences.notification_mode != current.preferences.notification_mode;
+        if mode_changed {
+            // The web coordinator dismisses every posted notice whenever the
+            // mode changes. Clear the owner registry before posting events
+            // from the new snapshot so stale tags cannot survive a
+            // Notifications <-> NotificationsAndSound transition.
+            self.dismiss_active_notifications(cx);
+        }
         let events = agent_core::view::notifications::between(
             previous,
             current,
