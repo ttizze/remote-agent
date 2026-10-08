@@ -1,4 +1,5 @@
 import AgentCore
+import Foundation
 import SwiftUI
 
 struct ScheduledTaskEditor: View {
@@ -218,7 +219,7 @@ private struct ScheduledTaskScheduleSection: View {
                                 .buttonStyle(.borderedProminent)
                                 .tint(isSelected ? AppTheme.primary : AppTheme.groupedCard)
                                 .foregroundStyle(
-                                    isSelected ? AppTheme.primaryForeground : AppTheme.text
+                                    isSelected ? AppTheme.color("mobilePrimaryForeground") : AppTheme.text
                                 )
                         }
                     }
@@ -248,7 +249,7 @@ private struct ScheduledTaskScheduleSection: View {
         return "09:00"
     }
 
-    private var fixedDays: [UInt8] {
+    private var fixedDays: Data {
         if case let .fixedTime(_, days) = draft.schedule {
             return days
         }
@@ -260,7 +261,7 @@ private struct ScheduledTaskScheduleSection: View {
             ? .interval(everyMs: max(60000, intervalMinutes * 60000))
             : .fixedTime(
                 timeOfDay: fixedTime,
-                weekdays: fixedDays.isEmpty ? [1, 2, 3, 4, 5] : fixedDays
+                weekdays: fixedDays.isEmpty ? Data([1, 2, 3, 4, 5]) : fixedDays
             )
     }
 
@@ -279,7 +280,7 @@ private struct ScheduledTaskScheduleSection: View {
         } else {
             days.append(day)
         }
-        draft.schedule = .fixedTime(timeOfDay: fixedTime, weekdays: days.sorted())
+        draft.schedule = .fixedTime(timeOfDay: fixedTime, weekdays: Data(days.sorted()))
     }
 }
 
