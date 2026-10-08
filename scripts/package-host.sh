@@ -30,6 +30,19 @@ resource=Claude-Agent-SDK-LICENSE.md
 source="$target_dir/release/$resource"
 [[ -f $source ]] || { echo "missing Host runtime resource: $source" >&2; exit 1; }
 cp "$source" "$stage/$resource"
+scripts_dir=$(cd "$(dirname "$0")" && pwd)
+if [[ $platform == macos && -x "$target_dir/release/ffmpeg" && -f "$target_dir/release/FFMPEG-RUNTIME.txt" ]]; then
+    cp "$target_dir/release/ffmpeg" "$stage/ffmpeg"
+    [[ ! -e "$target_dir/release/ffmpeg-bin" ]] || cp "$target_dir/release/ffmpeg-bin" "$stage/ffmpeg-bin"
+    cp "$target_dir/release/FFMPEG-RUNTIME.txt" "$stage/FFMPEG-RUNTIME.txt"
+    [[ ! -d "$target_dir/release/lib" ]] || cp -R "$target_dir/release/lib" "$stage/lib"
+    for license in "$target_dir/release"/FFMPEG-LICENSE-*; do
+        [[ -e $license ]] || continue
+        cp "$license" "$stage/$(basename "$license")"
+    done
+else
+    "$scripts_dir/stage-ffmpeg-runtime.sh" "$platform" "$stage"
+fi
 node_version=$(node --version 2>/dev/null || true)
 [[ $node_version =~ ^v([0-9]+)\. ]] || {
     echo 'Node.js 18 or newer must be available while packaging the Host.' >&2

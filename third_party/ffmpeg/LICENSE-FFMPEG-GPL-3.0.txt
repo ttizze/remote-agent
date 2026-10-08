@@ -1,0 +1,12 @@
+FFmpeg runtime notice
+
+The release FFmpeg runtime is distributed under the GNU General Public
+License, version 3 (GPL-3.0-only), as stated by the pinned upstream build.
+The complete license text is available from the Free Software Foundation:
+https://www.gnu.org/licenses/gpl-3.0.txt
+
+Upstream source and build information:
+https://ffmpeg.org/
+https://www.gyan.dev/ffmpeg/builds/
+
+This notice is shipped with every artifact that carries the runtime.

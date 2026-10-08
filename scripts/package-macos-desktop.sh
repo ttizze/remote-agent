@@ -30,6 +30,18 @@ valid_version "$version" || {
 }
 [[ -d $app_path ]] || { echo "desktop bundle does not exist: $app_path" >&2; exit 1; }
 [[ $(uname -s) == Darwin ]] || { echo 'macOS desktop packaging requires macOS' >&2; exit 2; }
+[[ -x $app_path/Contents/MacOS/ffmpeg ]] || {
+    echo 'macOS desktop bundle is missing its sibling FFmpeg executable' >&2
+    exit 1
+}
+[[ -f $app_path/Contents/MacOS/FFMPEG-RUNTIME.txt ]] || {
+    echo 'macOS desktop bundle is missing its FFmpeg runtime manifest' >&2
+    exit 1
+}
+grep -Fq 'encoder=libvpx-vp9' "$app_path/Contents/MacOS/FFMPEG-RUNTIME.txt" || {
+    echo 'macOS desktop bundle FFmpeg does not declare libvpx-vp9' >&2
+    exit 1
+}
 mkdir -p "$output_dir"
 
 zip_path="$output_dir/desktop-macos-arm64.zip"

@@ -61,13 +61,37 @@ scripts/release-manifest.sh "$temporary/nightly.json" "$temporary/manifest.json"
 jq -e '.assets | length == 2 and all(.[]; .sha256 | test("^[0-9a-f]{64}$"))' "$temporary/manifest.json" >/dev/null
 
 mkdir -p "$temporary/target/release"
-for binary in host-daemon bex-provider-supervisor Claude-Agent-SDK-LICENSE.md; do
-    printf '%s\n' "$binary" > "$temporary/target/release/$binary"
+for binary in host-daemon bex-provider-supervisor; do
+    printf '%s\n' "$binary" > "$temporary/target/release/$binary.exe"
 done
-scripts/package-host.sh linux x86_64 "$temporary/host" "$temporary/target" >/dev/null
-tar -tzf "$temporary/host/host-linux-x86_64.tar.gz" | grep -Fx './host-daemon' >/dev/null
-tar -tzf "$temporary/host/host-linux-x86_64.tar.gz" | grep -Fx './Claude-Agent-SDK-LICENSE.md' >/dev/null
-tar -tzf "$temporary/host/host-linux-x86_64.tar.gz" | grep -Fx './NODE-RUNTIME-REQUIREMENT.txt' >/dev/null
+printf '%s\n' 'Claude-Agent-SDK-LICENSE.md' > "$temporary/target/release/Claude-Agent-SDK-LICENSE.md"
+cat > "$temporary/ffmpeg.exe" <<'EOF'
+#!/usr/bin/env bash
+case " $* " in
+    *' -version '*) printf '%s\n' 'ffmpeg version 9.0.2-fixture' ;;
+    *' -encoders '*) printf '%s\n' ' V..... libvpx-vp9           libvpx VP9' ;;
+esac
+EOF
+chmod +x "$temporary/ffmpeg.exe"
+printf '%s\n' 'FFmpeg GPLv3 fixture license' > "$temporary/LICENSE.txt"
+printf '%s\n' 'libvpx BSD fixture license' > "$temporary/COPYING.libvpx.txt"
+AGENT_FFMPEG_EXECUTABLE="$temporary/ffmpeg.exe" AGENT_FFMPEG_RUNTIME_DIR="$temporary" AGENT_FFMPEG_LICENSE_DIR="$temporary" \
+scripts/package-host.sh windows x86_64 "$temporary/host" "$temporary/target" >/dev/null
+tar -tzf "$temporary/host/host-windows-x86_64.tar.gz" | grep -Fx './host-daemon.exe' >/dev/null
+tar -tzf "$temporary/host/host-windows-x86_64.tar.gz" | grep -Fx './Claude-Agent-SDK-LICENSE.md' >/dev/null
+tar -tzf "$temporary/host/host-windows-x86_64.tar.gz" | grep -Fx './NODE-RUNTIME-REQUIREMENT.txt' >/dev/null
+tar -tzf "$temporary/host/host-windows-x86_64.tar.gz" | grep -Fx './ffmpeg.exe' >/dev/null
+tar -tzf "$temporary/host/host-windows-x86_64.tar.gz" | grep -Fx './FFMPEG-RUNTIME.txt' >/dev/null
+tar -tzf "$temporary/host/host-windows-x86_64.tar.gz" | grep -F './FFMPEG-LICENSE-' >/dev/null
+printf 'desktop\n' > "$temporary/target/release/bex-desktop.exe"
+AGENT_FFMPEG_EXECUTABLE="$temporary/ffmpeg.exe" AGENT_FFMPEG_RUNTIME_DIR="$temporary" AGENT_FFMPEG_LICENSE_DIR="$temporary" \
+    scripts/package-native-desktop.sh windows x86_64 "$temporary/desktop" "$temporary/target" >/dev/null
+tar -tzf "$temporary/desktop/desktop-windows-x86_64.tar.gz" | grep -Fx './desktop.exe' >/dev/null
+tar -tzf "$temporary/desktop/desktop-windows-x86_64.tar.gz" | grep -Fx './ffmpeg.exe' >/dev/null
+tar -xOf "$temporary/desktop/desktop-windows-x86_64.tar.gz" ./FFMPEG-RUNTIME.txt |
+    grep -Fx 'encoder=libvpx-vp9' >/dev/null
+tar -xOf "$temporary/desktop/desktop-windows-x86_64.tar.gz" ./FFMPEG-RUNTIME.txt |
+    grep -F 'license_files=FFMPEG-LICENSE-' >/dev/null
 
 if scripts/release-metadata.sh --channel invalid >/dev/null 2>&1; then
     echo 'invalid channel unexpectedly succeeded' >&2
@@ -83,7 +107,7 @@ for version in 01.2.3 1.2.3-nightly.01 1.2.3-a..b; do
         exit 1
     fi
 done
-for store_url in 'https://' 'http://play.google.com/store/apps/details?id=dev.remoteagent.mobile' 'https://user:password@play.google.com/store/apps/details?id=dev.remoteagent.mobile'; do
+for store_url in 'https://' 'http://play.google.com/store/apps/details?id=dev.remoteagent.mobile' 'https://user:password@play.google.com/store/apps/details?id=dev.remoteagent.mobile' 'https://example.invalid/store'; do
     if scripts/release-metadata.sh \
         --channel nightly \
         --date 20261008 \

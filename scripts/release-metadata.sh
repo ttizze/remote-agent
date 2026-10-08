@@ -78,22 +78,25 @@ validate_semver() {
     fi
 }
 
-validate_https_url() {
+validate_store_url() {
     local value=$1
     local label=$2
+    local allowed_hosts=$3
     [[ -z $value ]] && return 0
-    URL_TO_VALIDATE=$value URL_LABEL=$label node <<'NODE'
+    URL_TO_VALIDATE=$value URL_LABEL=$label URL_ALLOWED_HOSTS=$allowed_hosts node <<'NODE'
 const value = process.env.URL_TO_VALIDATE;
 const label = process.env.URL_LABEL;
+const allowedHosts = new Set((process.env.URL_ALLOWED_HOSTS ?? '').split(',').filter(Boolean));
 let url;
 try {
   url = new URL(value);
 } catch {
-  console.error(`${label} must be an absolute HTTPS URL with a host`);
+  console.error(`${label} must be an absolute HTTPS URL on an approved store host`);
   process.exit(1);
 }
-if (url.protocol !== "https:" || !url.hostname || url.username || url.password) {
-  console.error(`${label} must be an absolute HTTPS URL with a host`);
+const hostname = url.hostname.toLowerCase().replace(/\.$/u, '');
+if (url.protocol !== 'https:' || !hostname || url.username || url.password || !allowedHosts.has(hostname)) {
+  console.error(`${label} must be an absolute HTTPS URL on an approved store host`);
   process.exit(1);
 }
 NODE
@@ -148,9 +151,8 @@ if [[ -n $repository ]]; then
     update_url="https://github.com/$repository/releases/download/$tag/$manifest"
 fi
 
-for store_url in "$android_store_url" "$ios_store_url"; do
-    validate_https_url "$store_url" "native store URL"
-done
+validate_store_url "$android_store_url" "Android store URL" 'play.google.com'
+validate_store_url "$ios_store_url" "iOS store URL" 'apps.apple.com,testflight.apple.com'
 native_updates='{}'
 if [[ -n $android_store_url ]]; then
     native_updates=$(jq -cn --arg url "$android_store_url" '{android: {url: $url}}')
