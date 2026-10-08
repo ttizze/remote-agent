@@ -214,7 +214,8 @@ mod tests {
             &json!({"rateLimitsByLimitId":{"codex":{"primary":{"usedPercent":28.2,"windowDurationMins":300,"resetsAt":1900000000},"secondary":null},"other":{"limitName":"Extra","primary":{"usedPercent":110,"windowDurationMins":10080}}}}),
         );
         assert_eq!(windows.len(), 1);
-        assert_eq!(windows[0].remaining_percent, 71);
+        assert_eq!(windows[0].used_percent, Some(28.2));
+        assert_eq!(windows[0].remaining_percent, 72);
         assert_eq!(windows[0].label, "5時間枠");
         let fallback = codex(&json!({
             "rateLimits": {
