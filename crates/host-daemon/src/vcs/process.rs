@@ -2,14 +2,21 @@
 //! as they arrive, and the hooks a commit runs, read from Git's trace.
 use agent_protocol::vcs::OutputStream;
 use anyhow::{Context as _, Result, anyhow};
+use std::io::{Read as _, Seek as _, SeekFrom};
 use std::path::Path;
 use std::process::Stdio;
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncBufReadExt as _, BufReader};
+use tokio::io::{AsyncRead, AsyncReadExt as _};
+use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 
 pub(super) const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 pub(super) const DEFAULT_MAX_OUTPUT_BYTES: usize = 1_000_000;
 const TRACE_POLL: Duration = Duration::from_millis(50);
+const OUTPUT_CHANNEL_CAPACITY: usize = 64;
+const READ_CHUNK_BYTES: usize = 8 * 1024;
+const MAX_LINE_BYTES: usize = 64 * 1024;
+const TRACE_READ_CHUNK_BYTES: usize = 64 * 1024;
 
 /// Variables that keep a background remote operation from waiting on a
 /// prompt nobody can answer.
@@ -48,6 +55,9 @@ pub(super) struct Execute<'a> {
     /// Receives the output lines, and the hooks when `trace_hooks` is set.
     pub progress: Option<&'a mut dyn FnMut(Progress)>,
     pub trace_hooks: bool,
+    /// Cancellation owned by the process runner. The runner kills and waits
+    /// for the child, then joins its pipe readers before returning.
+    pub cancel: Option<CancellationToken>,
 }
 
 impl<'a> Execute<'a> {
@@ -60,20 +70,31 @@ impl<'a> Execute<'a> {
             max_output_bytes: DEFAULT_MAX_OUTPUT_BYTES,
             progress: None,
             trace_hooks: false,
+            cancel: None,
         }
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct Executed {
+pub(crate) struct Executed {
     pub code: i32,
     pub stdout: String,
     pub stderr: String,
     pub stdout_truncated: bool,
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("external command cancelled")]
+pub(crate) struct CommandCancelled;
+
+#[derive(Debug, thiserror::Error)]
+#[error("external command timed out after {timeout:?}")]
+pub(crate) struct CommandTimedOut {
+    pub timeout: Duration,
+}
+
 impl Executed {
-    pub(super) fn ok(&self) -> bool {
+    pub(crate) fn ok(&self) -> bool {
         self.code == 0
     }
 }
@@ -114,19 +135,49 @@ impl HookTrace {
     }
 
     fn read(&mut self, progress: &mut dyn FnMut(Progress)) {
-        let Ok(contents) = std::fs::read(self.file.path()) else {
+        let Ok(mut file) = std::fs::File::open(self.file.path()) else {
             return;
         };
-        if contents.len() <= self.processed {
+        let Ok(length) = file.metadata().map(|metadata| metadata.len()) else {
+            return;
+        };
+        if length < self.processed as u64 {
+            // Git can replace a trace file between polls. Treat that as a
+            // fresh stream rather than indexing past the new file.
+            self.processed = 0;
+            self.remainder.clear();
+            self.started.clear();
+        }
+        if length <= self.processed as u64
+            || file
+                .seek(SeekFrom::Start(self.processed as u64))
+                .is_err()
+        {
             return;
         }
-        let appended = String::from_utf8_lossy(&contents[self.processed..]).into_owned();
-        self.processed = contents.len();
+        let mut bytes = Vec::with_capacity(TRACE_READ_CHUNK_BYTES);
+        if file
+            .take(TRACE_READ_CHUNK_BYTES as u64)
+            .read_to_end(&mut bytes)
+            .is_err()
+        {
+            return;
+        }
+        self.processed = self.processed.saturating_add(bytes.len());
+        let appended = String::from_utf8_lossy(&bytes);
+        if self.remainder.len() > MAX_LINE_BYTES {
+            self.remainder.clear();
+        }
         let combined = format!("{}{appended}", self.remainder);
         let mut lines: Vec<&str> = combined.split('\n').collect();
         self.remainder = lines.pop().unwrap_or_default().to_owned();
+        if self.remainder.len() > MAX_LINE_BYTES {
+            self.remainder.clear();
+        }
         for line in lines {
-            self.line(line.trim_end_matches('\r'), progress);
+            if line.len() <= MAX_LINE_BYTES {
+                self.line(line.trim_end_matches('\r'), progress);
+            }
         }
     }
 
@@ -184,23 +235,123 @@ impl HookTrace {
 }
 
 async fn read_lines(
-    pipe: impl tokio::io::AsyncRead + Unpin,
+    mut pipe: impl AsyncRead + Unpin,
     stream: OutputStream,
-    sender: tokio::sync::mpsc::UnboundedSender<(OutputStream, Vec<u8>)>,
+    sender: tokio::sync::mpsc::Sender<(OutputStream, Vec<u8>)>,
+    cancel: CancellationToken,
 ) {
-    let mut reader = BufReader::new(pipe);
-    let mut line = Vec::new();
+    let mut chunk = [0_u8; READ_CHUNK_BYTES];
+    let mut line = Vec::with_capacity(MAX_LINE_BYTES.min(READ_CHUNK_BYTES));
+    let mut truncated = false;
     loop {
-        line.clear();
-        match reader.read_until(b'\n', &mut line).await {
-            Ok(0) | Err(_) => return,
-            Ok(_) => {
-                if sender.send((stream, line.clone())).is_err() {
+        let read = tokio::select! {
+            _ = cancel.cancelled() => return,
+            result = pipe.read(&mut chunk) => match result {
+                Ok(0) | Err(_) => {
+                    if !line.is_empty() || truncated {
+                        let _ = send_line(&sender, stream, finish_line(&mut line, &mut truncated), &cancel).await;
+                    }
                     return;
                 }
+                Ok(read) => read,
+            },
+        };
+        for byte in &chunk[..read] {
+            if *byte == b'\n' {
+                let output = finish_line(&mut line, &mut truncated);
+                if !send_line(&sender, stream, output, &cancel).await {
+                    return;
+                }
+            } else if line.len() < MAX_LINE_BYTES {
+                line.push(*byte);
+            } else {
+                // Keep consuming until the newline while retaining only a
+                // bounded prefix. A command that never emits a newline can
+                // therefore never grow this task's memory without limit.
+                truncated = true;
             }
         }
     }
+}
+
+fn finish_line(line: &mut Vec<u8>, truncated: &mut bool) -> Vec<u8> {
+    if *truncated {
+        const MARKER: &[u8] = b"...[truncated]";
+        let keep = MAX_LINE_BYTES.saturating_sub(MARKER.len());
+        line.truncate(keep);
+        line.extend_from_slice(MARKER);
+    }
+    line.push(b'\n');
+    let output = std::mem::take(line);
+    *truncated = false;
+    output
+}
+
+async fn send_line(
+    sender: &tokio::sync::mpsc::Sender<(OutputStream, Vec<u8>)>,
+    stream: OutputStream,
+    line: Vec<u8>,
+    cancel: &CancellationToken,
+) -> bool {
+    tokio::select! {
+        _ = cancel.cancelled() => false,
+        result = sender.send((stream, line)) => result.is_ok(),
+    }
+}
+
+async fn join_reader(task: &mut Option<JoinHandle<()>>) {
+    if let Some(task) = task.take() {
+        let _ = task.await;
+    }
+}
+
+async fn stop_process(
+    child: &mut tokio::process::Child,
+    stdout_task: &mut Option<JoinHandle<()>>,
+    stderr_task: &mut Option<JoinHandle<()>>,
+    cancel: &CancellationToken,
+) {
+    // Wake readers blocked on the bounded channel before waiting for them.
+    // The child is still killed and awaited even if it has already exited;
+    // this closes the ownership window before the action permit is released.
+    cancel.cancel();
+    let _ = child.kill().await;
+    let _ = child.wait().await;
+    if let Some(task) = stdout_task.take() {
+        task.abort();
+        let _ = task.await;
+    }
+    if let Some(task) = stderr_task.take() {
+        task.abort();
+        let _ = task.await;
+    }
+}
+
+/// Runs an arbitrary executable with the same bounded, cancellation-safe
+/// ownership used by Git. GitHub's CLI uses this so dropping an action future
+/// can never leave a child or its pipe readers detached.
+pub(crate) async fn execute_program(
+    program: &Path,
+    cwd: &Path,
+    args: &[&str],
+    env: &[(&str, &str)],
+    timeout: Option<Duration>,
+    max_output_bytes: usize,
+    cancel: Option<CancellationToken>,
+) -> Result<Executed> {
+    run_command(
+        program,
+        cwd,
+        args,
+        env,
+        timeout,
+        max_output_bytes,
+        cancel,
+        None,
+        false,
+        false,
+    )
+    .await
 }
 
 /// Runs Git in `cwd` and waits for it; the command is killed when the timeout
@@ -212,17 +363,50 @@ pub(super) async fn execute(input: Execute<'_>) -> Result<Executed> {
         env,
         timeout,
         max_output_bytes,
-        mut progress,
+        progress,
         trace_hooks,
+        cancel,
     } = input;
+    run_command(
+        Path::new("git"),
+        cwd,
+        args,
+        env,
+        timeout,
+        max_output_bytes,
+        cancel,
+        progress,
+        trace_hooks,
+        true,
+    )
+    .await
+}
+
+async fn run_command(
+    program: &Path,
+    cwd: &Path,
+    args: &[&str],
+    env: &[(&str, &str)],
+    timeout: Option<Duration>,
+    max_output_bytes: usize,
+    mut cancel: Option<CancellationToken>,
+    mut progress: Option<&mut dyn FnMut(Progress)>,
+    trace_hooks: bool,
+    prefix_git_options: bool,
+) -> Result<Executed> {
+    if cancel.as_ref().is_some_and(CancellationToken::is_cancelled) {
+        return Err(anyhow!(CommandCancelled));
+    }
     let mut trace = if trace_hooks && progress.is_some() {
         Some(HookTrace::new()?)
     } else {
         None
     };
-    let mut command = tokio::process::Command::new("git");
+    let mut command = tokio::process::Command::new(program);
+    if prefix_git_options {
+        command.arg("--no-optional-locks");
+    }
     command
-        .arg("--no-optional-locks")
         .args(args)
         .current_dir(cwd)
         .stdin(Stdio::null())
@@ -237,16 +421,31 @@ pub(super) async fn execute(input: Execute<'_>) -> Result<Executed> {
             .env("GIT_TRACE2_EVENT", trace.file.path())
             .env("GIT_TRACE2_EVENT_NESTING", "5");
     }
-    let mut child = command.spawn().context("failed to run git")?;
-    let (sender, mut lines) = tokio::sync::mpsc::unbounded_channel();
+    let mut child = command.spawn().context("failed to run command")?;
+    let cancellation_enabled = cancel.is_some();
+    let process_cancel = cancel.take().unwrap_or_else(CancellationToken::new);
+    let reader_cancel = CancellationToken::new();
+    let (sender, mut lines) = tokio::sync::mpsc::channel(OUTPUT_CHANNEL_CAPACITY);
     let stdout_task = child
         .stdout
         .take()
-        .map(|pipe| tokio::spawn(read_lines(pipe, OutputStream::Stdout, sender.clone())));
+        .map(|pipe| tokio::spawn(read_lines(
+            pipe,
+            OutputStream::Stdout,
+            sender.clone(),
+            reader_cancel.clone(),
+        )));
     let stderr_task = child
         .stderr
         .take()
-        .map(|pipe| tokio::spawn(read_lines(pipe, OutputStream::Stderr, sender)));
+        .map(|pipe| tokio::spawn(read_lines(
+            pipe,
+            OutputStream::Stderr,
+            sender,
+            reader_cancel.clone(),
+        )));
+    let mut stdout_task = stdout_task;
+    let mut stderr_task = stderr_task;
     let deadline = timeout.map(|timeout| tokio::time::Instant::now() + timeout);
     let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
     let mut stdout_truncated = false;
@@ -256,9 +455,10 @@ pub(super) async fn execute(input: Execute<'_>) -> Result<Executed> {
             OutputStream::Stdout => &mut stdout,
             OutputStream::Stderr => &mut stderr,
         };
-        if buffer.len() + line.len() <= max_output_bytes {
-            buffer.extend_from_slice(&line);
-        } else if stream == OutputStream::Stdout {
+        let remaining = max_output_bytes.saturating_sub(buffer.len());
+        let retained = remaining.min(line.len());
+        buffer.extend_from_slice(&line[..retained]);
+        if retained < line.len() && stream == OutputStream::Stdout {
             stdout_truncated = true;
         }
         if let Some(progress) = progress.as_mut() {
@@ -279,12 +479,34 @@ pub(super) async fn execute(input: Execute<'_>) -> Result<Executed> {
         };
         tokio::select! {
             biased;
+            _ = process_cancel.cancelled(), if cancellation_enabled => {
+                stop_process(
+                    &mut child,
+                    &mut stdout_task,
+                    &mut stderr_task,
+                    &reader_cancel,
+                )
+                .await;
+                return Err(anyhow!(CommandCancelled));
+            }
             line = lines.recv() => match line {
                 Some((stream, line)) => collect(stream, line, &mut progress),
                 None => break,
             },
             exited = child.wait(), if status.is_none() => {
-                status = Some(exited?);
+                match exited {
+                    Ok(exited) => status = Some(exited),
+                    Err(error) => {
+                        stop_process(
+                            &mut child,
+                            &mut stdout_task,
+                            &mut stderr_task,
+                            &reader_cancel,
+                        )
+                        .await;
+                        return Err(error.into());
+                    }
+                }
             }
             _ = ticker.tick() => {
                 if let (Some(trace), Some(progress)) = (trace.as_mut(), progress.as_mut()) {
@@ -292,27 +514,37 @@ pub(super) async fn execute(input: Execute<'_>) -> Result<Executed> {
                 }
             }
             _ = timed_out => {
-                let _ = child.kill().await;
-                if let Some(task) = stdout_task { task.abort(); }
-                if let Some(task) = stderr_task { task.abort(); }
-                return Err(anyhow!(
-                    "Git command timed out after {}s in {}.",
-                    timeout.map_or(0, |t| t.as_secs()),
-                    cwd.display()
-                ));
+                stop_process(
+                    &mut child,
+                    &mut stdout_task,
+                    &mut stderr_task,
+                    &reader_cancel,
+                )
+                .await;
+                return Err(anyhow!(CommandTimedOut {
+                    timeout: timeout.unwrap_or_default(),
+                }));
             }
         }
     }
     let status = match status {
         Some(status) => status,
-        None => child.wait().await?,
+        None => match child.wait().await {
+            Ok(status) => status,
+            Err(error) => {
+                stop_process(
+                    &mut child,
+                    &mut stdout_task,
+                    &mut stderr_task,
+                    &reader_cancel,
+                )
+                .await;
+                return Err(error.into());
+            }
+        },
     };
-    if let Some(task) = stdout_task {
-        let _ = task.await;
-    }
-    if let Some(task) = stderr_task {
-        let _ = task.await;
-    }
+    join_reader(&mut stdout_task).await;
+    join_reader(&mut stderr_task).await;
     if let (Some(trace), Some(progress)) = (trace.as_mut(), progress.as_mut()) {
         trace.read(*progress);
         let open: Vec<(String, Instant)> = trace.started.drain().map(|(_, v)| v).collect();
@@ -424,5 +656,92 @@ mod tests {
         .await
         .unwrap_err();
         assert!(error.to_string().contains("timed out"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancellation_kills_and_joins_an_active_fake_git_process() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let executable = directory.path().join("git");
+        std::fs::write(
+            &executable,
+            "#!/bin/sh\nprintf 'started\\n'\nwhile :; do sleep 1; done\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut paths = vec![directory.path().to_path_buf()];
+        if let Some(existing) = std::env::var_os("PATH") {
+            paths.extend(std::env::split_paths(&existing));
+        }
+        let path = std::env::join_paths(paths).unwrap();
+        let path = path.to_string_lossy().into_owned();
+        let env = [("PATH", path.as_str())];
+        let cancel = CancellationToken::new();
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let mut ready_tx = Some(ready_tx);
+        let mut progress = move |event: Progress| {
+            if matches!(event, Progress::Output { line, .. } if line == "started") {
+                if let Some(ready_tx) = ready_tx.take() {
+                    let _ = ready_tx.send(());
+                }
+            }
+        };
+        let mut running = Box::pin(execute(Execute {
+            env: &env,
+            progress: Some(&mut progress),
+            cancel: Some(cancel.clone()),
+            timeout: Some(Duration::from_secs(5)),
+            ..Execute::new(directory.path(), &[])
+        }));
+        tokio::time::timeout(Duration::from_secs(1), ready_rx)
+            .await
+            .expect("fake git did not start")
+            .expect("fake git readiness signal was dropped");
+        cancel.cancel();
+        let error = tokio::time::timeout(Duration::from_secs(2), &mut running)
+            .await
+            .expect("cancellation left the process owned forever")
+            .expect_err("a cancelled process must return an error");
+        assert!(error.downcast_ref::<CommandCancelled>().is_some(), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_newline_free_fake_output_is_bounded() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let executable = directory.path().join("git");
+        std::fs::write(
+            &executable,
+            "#!/bin/sh\nprintf 'started\\n'\nhead -c 2000000 /dev/zero\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut paths = vec![directory.path().to_path_buf()];
+        if let Some(existing) = std::env::var_os("PATH") {
+            paths.extend(std::env::split_paths(&existing));
+        }
+        let path = std::env::join_paths(paths).unwrap();
+        let path = path.to_string_lossy().into_owned();
+        let env = [("PATH", path.as_str())];
+        let mut seen = vec![];
+        let mut progress = |event: Progress| seen.push(event);
+        let executed = execute(Execute {
+            env: &env,
+            max_output_bytes: 1024,
+            progress: Some(&mut progress),
+            ..Execute::new(directory.path(), &[])
+        })
+        .await
+        .unwrap();
+        assert!(executed.ok(), "{executed:?}");
+        assert!(executed.stdout_truncated);
+        assert!(seen.iter().all(|event| match event {
+            Progress::Output { line, .. } => line.len() <= MAX_LINE_BYTES,
+            _ => true,
+        }));
     }
 }

@@ -6,7 +6,7 @@
 mod broadcaster;
 mod actions;
 mod diff;
-mod process;
+pub(crate) mod process;
 mod pull;
 mod pull_requests;
 mod pr_checkout;

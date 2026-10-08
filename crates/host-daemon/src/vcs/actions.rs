@@ -1,7 +1,9 @@
 //! The Git action owner. It performs the commands and emits the protocol's
 //! progress records; clients only render those records.
-use super::process::{Execute, Executed, NON_INTERACTIVE_ENV, Progress, execute};
-use super::pull_requests::{branch_head_context, find_open_pr};
+use super::process::{
+    CommandCancelled, Execute, Executed, NON_INTERACTIVE_ENV, Progress, execute,
+};
+use super::pull_requests::{branch_head_context, find_open_pr_with_cancel};
 use super::{VcsStatusBroadcaster, default_branch, git, primary_remote, remote_names, split_remote_ref, stdout};
 use crate::conversation::TextGenerator;
 use crate::text_generation::{
@@ -118,19 +120,29 @@ pub(crate) fn start(
         .await;
         match result {
             Ok(result) => {
-                let _ = sender.try_send(event(
-                    &task_request,
-                    ActionProgressKind::ActionFinished { result },
-                ));
+                send_terminal(
+                    &sender,
+                    event(
+                        &task_request,
+                        ActionProgressKind::ActionFinished { result },
+                    ),
+                    &action_cancel,
+                )
+                .await;
             }
             Err(error) => {
-                let _ = sender.try_send(event(
-                    &task_request,
-                    ActionProgressKind::ActionFailed {
-                        phase: error.phase,
-                        message: error.message,
-                    },
-                ));
+                send_terminal(
+                    &sender,
+                    event(
+                        &task_request,
+                        ActionProgressKind::ActionFailed {
+                            phase: error.phase,
+                            message: error.message,
+                        },
+                    ),
+                    &action_cancel,
+                )
+                .await;
             }
         }
         // Staging, branch creation, a failed commit hook, and a failed push
@@ -147,9 +159,21 @@ pub(crate) fn start(
             }
         }
         forward_cancel.abort();
+        let _ = forward_cancel.await;
         drop(permit);
     });
     Ok((first, receiver))
+}
+
+async fn send_terminal(
+    sender: &Sender<ActionProgressEvent>,
+    message: ActionProgressEvent,
+    cancel: &CancellationToken,
+) {
+    tokio::select! {
+        _ = cancel.cancelled() => {}
+        _ = sender.send(message) => {}
+    }
 }
 
 async fn run(
@@ -401,12 +425,19 @@ fn ensure_active(cancel: &CancellationToken) -> Result<(), ActionError> {
 
 async fn execute_with_cancel<'a>(
     cancel: &CancellationToken,
-    input: Execute<'a>,
+    mut input: Execute<'a>,
 ) -> anyhow::Result<Executed> {
-    tokio::select! {
-        _ = cancel.cancelled() => Err(anyhow!("Git action cancelled.")),
-        result = execute(input) => result,
-    }
+    // Cancellation belongs to the process owner. Dropping `execute(input)`
+    // here would only drop the future and could leave its child and pipe
+    // readers detached from the action permit.
+    input.cancel = Some(cancel.clone());
+    execute(input).await.map_err(|error| {
+        if error.downcast_ref::<CommandCancelled>().is_some() {
+            anyhow!("Git action cancelled.")
+        } else {
+            error
+        }
+    })
 }
 
 async fn commit_message(
@@ -567,8 +598,11 @@ async fn commit(
 
 #[cfg(test)]
 mod tests {
-    use super::{feature_branch_base, run};
-    use agent_protocol::vcs::{RunStackedAction, StackedAction};
+    use super::{event, feature_branch_base, run, send_terminal};
+    use agent_protocol::vcs::{
+        ActionProgressEvent, ActionProgressKind, RunStackedAction, StackedAction,
+    };
+    use std::time::Duration;
     use tokio::sync::mpsc;
     use tokio_util::sync::CancellationToken;
 
@@ -614,6 +648,58 @@ mod tests {
         .await
         .expect_err("a canceled action must not run Git");
         assert_eq!(error.message, "Git action cancelled.");
+    }
+
+    #[tokio::test]
+    async fn terminal_event_waits_for_a_full_progress_queue() {
+        let request = RunStackedAction {
+            action_id: "action:test".into(),
+            cwd: "/tmp/worktree".into(),
+            action: StackedAction::Commit,
+            commit_message: None,
+            feature_branch: false,
+            file_paths: None,
+            thread_id: None,
+            project_id: None,
+        };
+        let (sender, mut receiver) = mpsc::channel(1);
+        sender
+            .send(event(
+                &request,
+                ActionProgressKind::PhaseStarted {
+                    phase: agent_protocol::vcs::ActionPhase::Commit,
+                    label: "busy".into(),
+                },
+            ))
+            .await
+            .unwrap();
+        let cancel = CancellationToken::new();
+        let terminal = event(
+            &request,
+            ActionProgressKind::ActionFailed {
+                phase: None,
+                message: "failed".into(),
+            },
+        );
+        let task_sender = sender.clone();
+        let task_cancel = cancel.clone();
+        let task = tokio::spawn(async move {
+            send_terminal(&task_sender, terminal, &task_cancel).await;
+        });
+        tokio::task::yield_now().await;
+        assert!(!task.is_finished());
+        let _ = receiver.recv().await;
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("terminal delivery stayed blocked after queue capacity returned")
+            .unwrap();
+        assert!(matches!(
+            receiver.recv().await,
+            Some(ActionProgressEvent {
+                kind: ActionProgressKind::ActionFailed { .. },
+                ..
+            })
+        ));
     }
 }
 
@@ -707,19 +793,16 @@ async fn pull_request(
     if upstream.is_none() {
         return Err(ActionError::at(ActionPhase::Pr, "Push the branch with an upstream before creating a pull request."));
     }
-    let default = tokio::select! {
-        _ = cancel.cancelled() => return Err(ActionError::plain("Git action cancelled.")),
-        default = github.default_branch(cwd) => default
-            .map_err(|error| ActionError::at(ActionPhase::Pr, error))?
-    }
+    let default = github
+        .default_branch_with_cancel(cwd, Some(cancel))
+        .await
+        .map_err(|error| ActionError::at(ActionPhase::Pr, error))?
         .or_else(|| default_branch(cwd, &primary_remote(cwd).unwrap_or_else(|| "origin".into())))
         .unwrap_or_else(|| "main".into());
     let context = branch_head_context(cwd, &branch, upstream.as_deref(), None);
-    let existing = tokio::select! {
-        _ = cancel.cancelled() => return Err(ActionError::plain("Git action cancelled.")),
-        existing = find_open_pr(github, cwd, &context) => existing
-            .map_err(|error| ActionError::at(ActionPhase::Pr, error))?
-    };
+    let existing = find_open_pr_with_cancel(github, cwd, &context, Some(cancel))
+        .await
+        .map_err(|error| ActionError::at(ActionPhase::Pr, error))?;
     if let Some(existing) = existing {
         return Ok(PrStep {
             status: PrStepStatus::OpenedExisting,
@@ -762,16 +845,20 @@ async fn pull_request(
         .map_err(|error| ActionError::at(ActionPhase::Pr, error))?;
     std::fs::write(body.path(), &content.body)
         .map_err(|error| ActionError::at(ActionPhase::Pr, error))?;
-    tokio::select! {
-        _ = cancel.cancelled() => return Err(ActionError::plain("Git action cancelled.")),
-        result = github.create_pull_request(cwd, &default, &branch, &content.title, body.path()) => result
-            .map_err(|error| ActionError::at(ActionPhase::Pr, error))?,
-    }
-    let created = tokio::select! {
-        _ = cancel.cancelled() => return Err(ActionError::plain("Git action cancelled.")),
-        created = find_open_pr(github, cwd, &context) => created
-            .map_err(|error| ActionError::at(ActionPhase::Pr, error))?
-    }
+    github
+        .create_pull_request_with_cancel(
+            cwd,
+            &default,
+            &branch,
+            &content.title,
+            body.path(),
+            Some(cancel),
+        )
+        .await
+        .map_err(|error| ActionError::at(ActionPhase::Pr, error))?;
+    let created = find_open_pr_with_cancel(github, cwd, &context, Some(cancel))
+        .await
+        .map_err(|error| ActionError::at(ActionPhase::Pr, error))?
         .ok_or_else(|| ActionError::at(ActionPhase::Pr, "GitHub did not return the created pull request."))?;
     Ok(PrStep {
         status: PrStepStatus::Created,

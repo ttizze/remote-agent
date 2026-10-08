@@ -2,11 +2,12 @@
 //! into sign-in, rate limit, not found and plain command failures without
 //! retaining the tool's output, which can carry tokens.
 use agent_protocol::vcs::{ChangeRequestState, RepositoryVisibility};
+use crate::vcs::process::{CommandCancelled, CommandTimedOut, execute_program};
 use serde::Deserialize;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::time::Duration;
+use tokio_util::sync::CancellationToken;
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_MAX_OUTPUT_BYTES: usize = 1_000_000;
@@ -50,6 +51,8 @@ pub(crate) enum GhError {
     Command { exit_code: Option<i32> },
     #[error("GitHub CLI timed out after {0:?}.")]
     Timeout(Duration),
+    #[error("GitHub CLI request cancelled.")]
+    Cancelled,
     #[error("{0}")]
     Decode(&'static str),
 }
@@ -555,44 +558,56 @@ impl GitHubCli {
         args: &[&str],
         budget: Budget,
     ) -> Result<Output, GhError> {
-        let mut command = tokio::process::Command::new(&self.program);
-        command
-            .args(args)
-            .env("GH_PROMPT_DISABLED", "1")
-            .env("GH_NO_UPDATE_NOTIFIER", "1")
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
-        if cwd.is_dir() {
-            command.current_dir(cwd);
-        }
-        let output = match tokio::time::timeout(budget.timeout, command.output()).await {
-            Err(_) => return Err(GhError::Timeout(budget.timeout)),
-            Ok(Err(error)) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Err(GhError::Unavailable);
+        self.run_with_cancel(cwd, args, budget, None).await
+    }
+
+    /// Runs `gh` while the caller owns a cancellation fact. The process
+    /// runner kills and waits for the child and joins its bounded pipe readers
+    /// before this future resolves.
+    pub(crate) async fn run_with_cancel(
+        &self,
+        cwd: &Path,
+        args: &[&str],
+        budget: Budget,
+        cancel: Option<&CancellationToken>,
+    ) -> Result<Output, GhError> {
+        let env = [("GH_PROMPT_DISABLED", "1"), ("GH_NO_UPDATE_NOTIFIER", "1")];
+        let output = execute_program(
+            &self.program,
+            cwd,
+            args,
+            &env,
+            Some(budget.timeout),
+            budget.max_output_bytes,
+            cancel.cloned(),
+        )
+        .await
+        .map_err(|error| {
+            if error.downcast_ref::<CommandCancelled>().is_some() {
+                GhError::Cancelled
+            } else if let Some(timeout) = error.downcast_ref::<CommandTimedOut>() {
+                GhError::Timeout(timeout.timeout)
+            } else if error
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+            {
+                GhError::Unavailable
+            } else {
+                GhError::Command { exit_code: None }
             }
-            Ok(Err(_)) => return Err(GhError::Command { exit_code: None }),
-            Ok(Ok(output)) => output,
-        };
-        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-        if !output.status.success() {
-            return Err(classify_failure(&stderr, output.status.code()));
+        })?;
+        let stderr = output.stderr;
+        if !output.ok() {
+            return Err(classify_failure(&stderr, Some(output.code)));
         }
-        let truncated = output.stdout.len() > budget.max_output_bytes;
-        let mut stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-        if truncated {
-            let mut end = budget.max_output_bytes;
-            while end > 0 && !stdout.is_char_boundary(end) {
-                end -= 1;
-            }
-            stdout.truncate(end);
+        let mut stdout = output.stdout;
+        if output.stdout_truncated {
             stdout.push_str(OUTPUT_TRUNCATED_MARKER);
         }
         Ok(Output {
             stdout,
             stderr,
-            stdout_truncated: truncated,
+            stdout_truncated: output.stdout_truncated,
         })
     }
 
@@ -613,22 +628,18 @@ impl GitHubCli {
 
     /// `gh auth status --json hosts`.
     pub(crate) async fn auth_status(&self, cwd: &Path) -> GitHubAuth {
-        let mut command = tokio::process::Command::new(&self.program);
-        command
-            .args(["auth", "status", "--json", "hosts"])
-            .env("GH_PROMPT_DISABLED", "1")
-            .env("GH_NO_UPDATE_NOTIFIER", "1")
-            .stdin(Stdio::null())
-            .kill_on_drop(true);
-        if cwd.is_dir() {
-            command.current_dir(cwd);
-        }
-        match tokio::time::timeout(Duration::from_secs(5), command.output()).await {
-            Ok(Ok(output)) => auth_from_probe(
-                &String::from_utf8_lossy(&output.stdout),
-                &String::from_utf8_lossy(&output.stderr),
-                output.status.code(),
-            ),
+        match execute_program(
+            &self.program,
+            cwd,
+            &["auth", "status", "--json", "hosts"],
+            &[("GH_PROMPT_DISABLED", "1"), ("GH_NO_UPDATE_NOTIFIER", "1")],
+            Some(Duration::from_secs(5)),
+            DEFAULT_MAX_OUTPUT_BYTES,
+            None,
+        )
+        .await
+        {
+            Ok(output) => auth_from_probe(&output.stdout, &output.stderr, Some(output.code)),
             _ => GitHubAuth {
                 status: AuthStatus::Unknown,
                 account: None,
@@ -647,9 +658,21 @@ impl GitHubCli {
         state: PullRequestListState,
         limit: u32,
     ) -> Result<Vec<PullRequestRecord>, GhError> {
+        self.list_pull_requests_by_head_with_cancel(cwd, head_selector, state, limit, None)
+            .await
+    }
+
+    pub(crate) async fn list_pull_requests_by_head_with_cancel(
+        &self,
+        cwd: &Path,
+        head_selector: &str,
+        state: PullRequestListState,
+        limit: u32,
+        cancel: Option<&CancellationToken>,
+    ) -> Result<Vec<PullRequestRecord>, GhError> {
         let limit = limit.clamp(1, 100).to_string();
         let output = self
-            .run(
+            .run_with_cancel(
                 cwd,
                 &[
                     "pr",
@@ -664,6 +687,7 @@ impl GitHubCli {
                     PULL_REQUEST_FIELDS,
                 ],
                 Budget::default(),
+                cancel,
             )
             .await?;
         decode_pull_request_list(&output.stdout)
@@ -693,7 +717,20 @@ impl GitHubCli {
         title: &str,
         body_file: &Path,
     ) -> Result<(), GhError> {
-        self.run(
+        self.create_pull_request_with_cancel(cwd, base_branch, head_selector, title, body_file, None)
+            .await
+    }
+
+    pub(crate) async fn create_pull_request_with_cancel(
+        &self,
+        cwd: &Path,
+        base_branch: &str,
+        head_selector: &str,
+        title: &str,
+        body_file: &Path,
+        cancel: Option<&CancellationToken>,
+    ) -> Result<(), GhError> {
+        self.run_with_cancel(
             cwd,
             &[
                 "pr",
@@ -708,6 +745,7 @@ impl GitHubCli {
                 &body_file.to_string_lossy(),
             ],
             Budget::default(),
+            cancel,
         )
         .await
         .map(|_| ())
@@ -715,8 +753,16 @@ impl GitHubCli {
 
     /// The repository's default branch as GitHub records it.
     pub(crate) async fn default_branch(&self, cwd: &Path) -> Result<Option<String>, GhError> {
+        self.default_branch_with_cancel(cwd, None).await
+    }
+
+    pub(crate) async fn default_branch_with_cancel(
+        &self,
+        cwd: &Path,
+        cancel: Option<&CancellationToken>,
+    ) -> Result<Option<String>, GhError> {
         let output = self
-            .run(
+            .run_with_cancel(
                 cwd,
                 &[
                     "repo",
@@ -727,6 +773,7 @@ impl GitHubCli {
                     ".defaultBranchRef.name",
                 ],
                 Budget::default(),
+                cancel,
             )
             .await?;
         Ok(trimmed(Some(&output.stdout)))
@@ -1055,5 +1102,32 @@ mod tests {
         assert!(output.stdout_truncated);
         assert!(output.stdout.ends_with(OUTPUT_TRUNCATED_MARKER));
         assert_eq!(output.stdout.len(), 128 + OUTPUT_TRUNCATED_MARKER.len());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancellation_owns_and_drains_a_running_gh_child() {
+        let gh = FakeGh::new(&[("api *", "while :; do sleep 1; done")]);
+        let directory = cwd();
+        let cancel = CancellationToken::new();
+        let mut running = Box::pin(gh.cli().run_with_cancel(
+            directory.path(),
+            &["api", "x"],
+            Budget {
+                timeout: Duration::from_secs(5),
+                max_output_bytes: 128,
+            },
+            Some(&cancel),
+        ));
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_millis(50)) => {}
+            result = &mut running => panic!("gh exited before cancellation: {result:?}"),
+        }
+        cancel.cancel();
+        let error = tokio::time::timeout(Duration::from_secs(2), &mut running)
+            .await
+            .expect("cancellation left gh running")
+            .expect_err("a cancelled gh command must return an error");
+        assert_eq!(error, GhError::Cancelled);
     }
 }
