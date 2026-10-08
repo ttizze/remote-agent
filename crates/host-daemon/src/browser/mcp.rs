@@ -5,19 +5,22 @@ use agent_transport::peer::{JsonlReader, JsonlWriter};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::{path::Path, sync::Arc};
+use std::{path::Path, sync::Arc, time::Duration};
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_util::sync::CancellationToken;
 
 const MAX_MESSAGE: usize = 6 * 1024 * 1024;
+const TOKEN_ENV: &str = "AGENT_TOOLS_TOKEN";
 
 pub(super) fn listen(browser: &Arc<Browser>) -> Result<(), String> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         let listener =
-            tokio::net::UnixListener::bind(browser.socket()).map_err(|e| e.to_string())?;
-        std::fs::set_permissions(browser.socket(), std::fs::Permissions::from_mode(0o600))
+            tokio::net::UnixListener::bind(browser.socket_path()).map_err(|e| e.to_string())?;
+        std::fs::set_permissions(browser.socket_path(), std::fs::Permissions::from_mode(0o600))
             .map_err(|e| e.to_string())?;
+        browser.set_bridge_endpoint(browser.socket_path().to_string_lossy().into_owned())?;
         let weak = Arc::downgrade(browser);
         let stop = browser.stop.clone();
         tokio::spawn(async move {
@@ -31,40 +34,7 @@ pub(super) fn listen(browser: &Arc<Browser>) -> Result<(), String> {
                         let Ok((socket, _)) = accepted else { break; };
                         let Ok(permit) = capacity.clone().try_acquire_owned() else { continue; };
                         let Some(browser) = weak.upgrade() else { break; };
-                        calls.spawn(async move {
-                            let _permit = permit;
-                            let (read, write) = socket.into_split();
-                            let mut input = JsonlReader::with_max_message_bytes(read, 64 * 1024);
-                            let mut output = JsonlWriter::with_max_message_bytes(write, MAX_MESSAGE);
-                            let Ok(Ok(Some(line))) = tokio::time::timeout(std::time::Duration::from_secs(5), input.read_line()).await else { return; };
-                            let Ok(request) = serde_json::from_str::<BridgeRequest>(&line) else { return; };
-                            let request_cancel = CancellationToken::new();
-                            let request_future = bridge_request(
-                                &browser,
-                                request,
-                                request_cancel.clone(),
-                            );
-                            tokio::pin!(request_future);
-                            let result = tokio::select! {
-                                result = &mut request_future => result,
-                                _ = input.read_line() => {
-                                    // MCP cancellation closes this bridge
-                                    // socket.  Drain the request after
-                                    // cancelling it so a recording start can
-                                    // detach CDP and clean its encoder before
-                                    // the Host task is dropped.
-                                    request_cancel.cancel();
-                                    let _ = request_future.await;
-                                    return;
-                                },
-                                _ = browser.stop.cancelled() => {
-                                    request_cancel.cancel();
-                                    let _ = request_future.await;
-                                    return;
-                                },
-                            };
-                            if let Ok(line) = serde_json::to_string(&result) { let _ = output.write_line(&line).await; }
-                        });
+                        calls.spawn(serve_connection(socket, browser, permit, false));
                     }
                 }
             }
@@ -75,8 +45,77 @@ pub(super) fn listen(browser: &Arc<Browser>) -> Result<(), String> {
     }
     #[cfg(not(unix))]
     {
-        let _ = browser;
-        Err("Shared BEX browser currently requires a Unix Host.".into())
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .map_err(|e| e.to_string())?;
+        let address = listener.local_addr().map_err(|e| e.to_string())?;
+        browser.set_bridge_endpoint(format!("tcp://{address}"))?;
+        let weak = Arc::downgrade(browser);
+        let stop = browser.stop.clone();
+        tokio::spawn(async move {
+            let capacity = Arc::new(tokio::sync::Semaphore::new(32));
+            let mut calls = tokio::task::JoinSet::new();
+            loop {
+                tokio::select! {
+                    _ = stop.cancelled() => break,
+                    Some(_) = calls.join_next(), if !calls.is_empty() => {},
+                    accepted = listener.accept() => {
+                        let Ok((socket, _)) = accepted else { break; };
+                        let Ok(permit) = capacity.clone().try_acquire_owned() else { continue; };
+                        let Some(browser) = weak.upgrade() else { break; };
+                        calls.spawn(serve_connection(socket, browser, permit, true));
+                    }
+                }
+            }
+            calls.abort_all();
+            while calls.join_next().await.is_some() {}
+        });
+        Ok(())
+    }
+}
+
+async fn serve_connection<S>(
+    socket: S,
+    browser: Arc<Browser>,
+    permit: tokio::sync::OwnedSemaphorePermit,
+    authenticated: bool,
+) where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let _permit = permit;
+    let (read, write) = tokio::io::split(socket);
+    let mut input = JsonlReader::with_max_message_bytes(read, 64 * 1024);
+    let mut output = JsonlWriter::with_max_message_bytes(write, MAX_MESSAGE);
+    let Ok(Ok(Some(line))) = tokio::time::timeout(Duration::from_secs(5), input.read_line()).await else { return; };
+    let request = if authenticated {
+        let Ok(envelope) = serde_json::from_str::<AuthenticatedBridgeRequest>(&line) else { return; };
+        if envelope.token != browser.bridge_token() {
+            return;
+        }
+        envelope.request
+    } else {
+        let Ok(request) = serde_json::from_str::<BridgeRequest>(&line) else { return; };
+        request
+    };
+    let request_cancel = CancellationToken::new();
+    let request_future = bridge_request(&browser, request, request_cancel.clone());
+    tokio::pin!(request_future);
+    let result = tokio::select! {
+        result = &mut request_future => result,
+        _ = input.read_line() => {
+            // MCP cancellation closes this bridge socket. Drain the request
+            // after cancelling it so recording cleanup can finish in the Host.
+            request_cancel.cancel();
+            let _ = request_future.await;
+            return;
+        },
+        _ = browser.stop.cancelled() => {
+            request_cancel.cancel();
+            let _ = request_future.await;
+            return;
+        },
+    };
+    if let Ok(line) = serde_json::to_string(&result) {
+        let _ = output.write_line(&line).await;
     }
 }
 
@@ -87,6 +126,12 @@ enum BridgeRequest {
     PreviewClose { thread: String, tab_id: Option<String> },
     PreviewRecordingStart { thread: String, tab_id: Option<String> },
     PreviewRecordingStop { thread: String, tab_id: Option<String> },
+}
+
+#[derive(Serialize, Deserialize)]
+struct AuthenticatedBridgeRequest {
+    token: String,
+    request: BridgeRequest,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -357,15 +402,23 @@ pub async fn serve(socket: &Path, thread: &str) -> Result<(), String> {
 }
 
 async fn bridge(socket: &Path, request: BridgeRequest) -> Result<BridgeResponse, String> {
-    #[cfg(unix)]
-    {
-        let socket = tokio::net::UnixStream::connect(socket)
+    let endpoint = socket.to_string_lossy();
+    if let Some(address) = endpoint.strip_prefix("tcp://") {
+        let address = address
+            .parse::<std::net::SocketAddr>()
+            .map_err(|_| "invalid browser bridge endpoint")?;
+        let token = std::env::var(TOKEN_ENV)
+            .map_err(|_| "browser bridge authentication is unavailable")?;
+        let socket = tokio::net::TcpStream::connect(address)
             .await
             .map_err(|_| "BEX Hostに接続できません。会話を開き直してください。")?;
         let (read, write) = socket.into_split();
         let mut output = JsonlWriter::with_max_message_bytes(write, 64 * 1024);
         output
-            .write_line(&serde_json::to_string(&request).map_err(|e| e.to_string())?)
+            .write_line(
+                &serde_json::to_string(&AuthenticatedBridgeRequest { token, request })
+                    .map_err(|e| e.to_string())?,
+            )
             .await
             .map_err(|e| e.to_string())?;
         let line = JsonlReader::with_max_message_bytes(read, MAX_MESSAGE)
@@ -374,11 +427,30 @@ async fn bridge(socket: &Path, request: BridgeRequest) -> Result<BridgeResponse,
             .map_err(|e| e.to_string())?
             .ok_or("BEX Hostとの接続が切れました。")?;
         serde_json::from_str(&line).map_err(|_| "invalid browser response")?
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (socket, request);
-        Err("Shared BEX browser currently requires a Unix Host.".into())
+    } else {
+        #[cfg(unix)]
+        {
+            let socket = tokio::net::UnixStream::connect(socket)
+                .await
+                .map_err(|_| "BEX Hostに接続できません。会話を開き直してください。")?;
+            let (read, write) = socket.into_split();
+            let mut output = JsonlWriter::with_max_message_bytes(write, 64 * 1024);
+            output
+                .write_line(&serde_json::to_string(&request).map_err(|e| e.to_string())?)
+                .await
+                .map_err(|e| e.to_string())?;
+            let line = JsonlReader::with_max_message_bytes(read, MAX_MESSAGE)
+                .read_line()
+                .await
+                .map_err(|e| e.to_string())?
+                .ok_or("BEX Hostとの接続が切れました。")?;
+            serde_json::from_str(&line).map_err(|_| "invalid browser response")?
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = request;
+            Err("invalid browser bridge endpoint".into())
+        }
     }
 }
 

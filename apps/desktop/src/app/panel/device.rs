@@ -3,7 +3,10 @@ mod device_decoder;
 
 use super::PanelTab;
 use crate::app::{Desktop, ui::{color, icon, tint}};
-use agent_core::state::{DeviceActionIntent, DeviceDuoCommandIntent, DeviceDuoPoseIntent, Intent};
+use agent_core::state::{
+    DeviceActionIntent, DeviceDuoCommandIntent, DeviceDuoOrientationIntent, DeviceDuoPhysicalIntent,
+    DeviceDuoPoseIntent, DeviceFoldPostureIntent, Intent,
+};
 use gpui_kit::{component::{Sizable, button::{Button, ButtonVariants}, h_flex, input::{Input, InputState}, v_flex}, prelude::FluentBuilder, *};
 use std::{collections::{BTreeMap, BTreeSet}, sync::Arc};
 
@@ -151,15 +154,14 @@ impl Desktop {
     }
 
     fn send_device_key(&mut self, host_id: String, device_id: String, keystroke: &Keystroke, down: bool) {
-        let key = device_key_value(&keystroke.key);
-        let code = device_key_code(&key);
+        let facts = agent_core::state::canonical_device_key("", &keystroke.key);
         let modifiers = keystroke.modifiers;
         self.perform(Intent::DeviceAction {
             host_id: Some(host_id),
             device_id,
             action: DeviceActionIntent::Key {
-                code,
-                key,
+                code: facts.code,
+                key: facts.key,
                 down,
                 meta: modifiers.platform,
                 ctrl: modifiers.control,
@@ -447,7 +449,7 @@ impl Desktop {
             .sessions
             .iter()
             .filter(|session| current_thread.as_deref() == Some(session.thread_id.as_str()))
-            .map(|session| (session.host_id.clone(), session.device_id.clone()))
+            .map(|session| (session.host_id.clone(), session.device_id.clone(), session.platform.clone()))
             .collect::<Vec<_>>();
         let current_thread_has_session = !action_targets.is_empty();
         let entries = view.devices.iter().map(|device| {
@@ -504,8 +506,10 @@ impl Desktop {
                     row.child(Button::new(SharedString::from(format!("remove-device-host-{id}"))).label("Remove").xsmall().on_click(cx.listener(move |view, _, _, _| view.remove_device_ssh_host(&id))))
                 })
         });
-        let device_controls = action_targets.into_iter().map(|(host_id, device_id)| {
+        let device_controls = action_targets.into_iter().map(|(host_id, device_id, platform)| {
             let target = format!("{host_id}:{device_id}");
+            let is_ios = platform == "ios";
+            let is_android = platform == "android";
             let duo_status = view
                 .duo_controls
                 .iter()
@@ -645,30 +649,58 @@ impl Desktop {
                         device_id: device_id.clone(),
                     })
                 })))
-                .child(Button::new(SharedString::from(format!("device-fold-book-{host_id}-{device_id}"))).label("Book fold").xsmall().on_click(cx.listener({
-                    let host_id = host_id.clone();
-                    let device_id = device_id.clone();
-                    move |view, _, _, _| view.perform(Intent::DeviceAction {
-                        host_id: Some(host_id.clone()),
-                        device_id: device_id.clone(),
-                        action: DeviceActionIntent::Duo {
-                            command: DeviceDuoCommandIntent::Pose {
-                                value: DeviceDuoPoseIntent::Book,
-                            },
-                        },
-                    })
-                })))
-                .child(Button::new(SharedString::from(format!("device-duo-table-{host_id}-{device_id}"))).label("Table mode").xsmall().on_click(cx.listener({
-                    let host_id = host_id.clone();
-                    let device_id = device_id.clone();
-                    move |view, _, _, _| view.perform(Intent::DeviceAction {
-                        host_id: Some(host_id.clone()),
-                        device_id: device_id.clone(),
-                        action: DeviceActionIntent::Duo {
-                            command: DeviceDuoCommandIntent::Table { value: true },
-                        },
-                    })
-                })))
+                .when(is_ios, |row| {
+                    let commands = [
+                        ("Book", DeviceDuoCommandIntent::Pose { value: DeviceDuoPoseIntent::Book }),
+                        ("Closed", DeviceDuoCommandIntent::Pose { value: DeviceDuoPoseIntent::Closed }),
+                        ("Open", DeviceDuoCommandIntent::Pose { value: DeviceDuoPoseIntent::Open }),
+                        ("Laptop", DeviceDuoCommandIntent::Pose { value: DeviceDuoPoseIntent::Laptop }),
+                        ("Tent", DeviceDuoCommandIntent::Pose { value: DeviceDuoPoseIntent::Tent }),
+                        ("Table on", DeviceDuoCommandIntent::Table { value: true }),
+                        ("Table off", DeviceDuoCommandIntent::Table { value: false }),
+                        ("Face up", DeviceDuoCommandIntent::Physical { value: DeviceDuoPhysicalIntent::Faceup }),
+                        ("Face down", DeviceDuoCommandIntent::Physical { value: DeviceDuoPhysicalIntent::Facedown }),
+                        ("0°", DeviceDuoCommandIntent::Angle { value: 0.0 }),
+                        ("45°", DeviceDuoCommandIntent::Angle { value: 45.0 }),
+                        ("90°", DeviceDuoCommandIntent::Angle { value: 90.0 }),
+                        ("135°", DeviceDuoCommandIntent::Angle { value: 135.0 }),
+                        ("180°", DeviceDuoCommandIntent::Angle { value: 180.0 }),
+                        ("Portrait", DeviceDuoCommandIntent::Orientation { value: DeviceDuoOrientationIntent::Portrait }),
+                        ("Landscape left", DeviceDuoCommandIntent::Orientation { value: DeviceDuoOrientationIntent::LandscapeLeft }),
+                        ("Upside down", DeviceDuoCommandIntent::Orientation { value: DeviceDuoOrientationIntent::PortraitUpsideDown }),
+                        ("Landscape right", DeviceDuoCommandIntent::Orientation { value: DeviceDuoOrientationIntent::LandscapeRight }),
+                    ];
+                    row.children(commands.into_iter().enumerate().map(|(index, (label, command))| {
+                        let host_id = host_id.clone();
+                        let device_id = device_id.clone();
+                        Button::new(SharedString::from(format!("device-duo-{index}-{host_id}-{device_id}")))
+                            .label(label)
+                            .xsmall()
+                            .on_click(cx.listener(move |view, _, _, _| view.perform(Intent::DeviceAction {
+                                host_id: Some(host_id.clone()),
+                                device_id: device_id.clone(),
+                                action: DeviceActionIntent::Duo { command: command.clone() },
+                            })))
+                    }))
+                })
+                .when(is_android, |row| {
+                    let commands = [
+                        ("Fold closed", DeviceFoldPostureIntent::Closed),
+                        ("Fold open", DeviceFoldPostureIntent::Opened),
+                    ];
+                    row.children(commands.into_iter().enumerate().map(|(index, (label, command))| {
+                        let host_id = host_id.clone();
+                        let device_id = device_id.clone();
+                        Button::new(SharedString::from(format!("device-fold-{index}-{host_id}-{device_id}")))
+                            .label(label)
+                            .xsmall()
+                            .on_click(cx.listener(move |view, _, _, _| view.perform(Intent::DeviceAction {
+                                host_id: Some(host_id.clone()),
+                                device_id: device_id.clone(),
+                                action: DeviceActionIntent::Fold { command },
+                            })))
+                    }))
+                })
                 .when_some(duo_status, |row, status| {
                     row.child(div().text_2xs().text_color(color("textMuted")).child(status))
                 })
@@ -728,7 +760,7 @@ impl Desktop {
                     agent_access_enabled: None,
                     onboarding_completed: Some(false),
                 });
-            })))
+            }))))
         })
         .when(enabled, |panel| {
             panel
@@ -749,7 +781,7 @@ impl Desktop {
                     .child(h_flex().gap_1()
                         .child(Input::new(&self.panels.device.ssh_identity_file).small().flex_1().aria_label("SSH identity file"))
                         .child(Input::new(&self.panels.device.ssh_port).small().w(px(64.)).aria_label("SSH port"))
-                        .child(Button::new("device-add-ssh").label("Save host").small().on_click(cx.listener(|view, _, _, cx| view.configure_device_ssh_host(cx)))))
+                        .child(Button::new("device-add-ssh").label("Save host").small().on_click(cx.listener(|view, _, _, cx| view.configure_device_ssh_host(cx))))))
                 .when(!view.agent_access_enabled, |panel| {
                     panel.child(Button::new("device-agent-enable").label("Enable agent device access").small().on_click(cx.listener(|view, _, _, _| {
                         view.perform(Intent::ConfigureDevices {
@@ -923,87 +955,15 @@ fn device_frame_point(
 ) -> Option<(f32, f32)> {
     let view_width = bounds.size.width.as_f32().max(1.0);
     let view_height = bounds.size.height.as_f32().max(1.0);
-    let point = agent_core::state::project_device_point(
+    let point = agent_core::view::device::project_touch_point(
+        position.x.as_f32() - bounds.left().as_f32(),
+        position.y.as_f32() - bounds.top().as_f32(),
         view_width,
         view_height,
         frame_width as f32,
         frame_height as f32,
-        position.x.as_f32() - bounds.left().as_f32(),
-        position.y.as_f32() - bounds.top().as_f32(),
     )?;
     Some((point.x, point.y))
-}
-
-fn device_key_code(key: &str) -> String {
-    let lower = key.to_ascii_lowercase();
-    if lower.len() == 1 {
-        let byte = lower.as_bytes()[0];
-        if byte.is_ascii_lowercase() {
-            return format!("Key{}", (byte as char).to_ascii_uppercase());
-        }
-        if byte.is_ascii_digit() {
-            return format!("Digit{}", byte as char);
-        }
-    }
-    match lower.as_str() {
-        "!" => "Digit1",
-        "@" => "Digit2",
-        "#" => "Digit3",
-        "$" => "Digit4",
-        "%" => "Digit5",
-        "^" => "Digit6",
-        "&" => "Digit7",
-        "*" => "Digit8",
-        "(" => "Digit9",
-        ")" => "Digit0",
-        "-" | "_" => "Minus",
-        "=" | "+" => "Equal",
-        "[" | "{" => "BracketLeft",
-        "]" | "}" => "BracketRight",
-        "\\" | "|" => "Backslash",
-        ";" | ":" => "Semicolon",
-        "'" | "\"" => "Quote",
-        "`" | "~" => "Backquote",
-        "," | "<" => "Comma",
-        "." | ">" => "Period",
-        "/" | "?" => "Slash",
-        "enter" | "return" => "Enter",
-        "tab" => "Tab",
-        "backspace" => "Backspace",
-        "delete" | "forwarddelete" => "Delete",
-        "escape" | "esc" => "Escape",
-        "up" | "arrowup" => "ArrowUp",
-        "down" | "arrowdown" => "ArrowDown",
-        "left" | "arrowleft" => "ArrowLeft",
-        "right" | "arrowright" => "ArrowRight",
-        "home" => "Home",
-        "end" => "End",
-        "pageup" => "PageUp",
-        "pagedown" => "PageDown",
-        "space" | " " => "Space",
-        value => value,
-    }
-    .into()
-}
-
-fn device_key_value(key: &str) -> String {
-    match key.to_ascii_lowercase().as_str() {
-        "enter" | "return" => "Enter".into(),
-        "tab" => "Tab".into(),
-        "backspace" => "Backspace".into(),
-        "delete" | "forwarddelete" => "Delete".into(),
-        "escape" | "esc" => "Escape".into(),
-        "up" | "arrowup" => "ArrowUp".into(),
-        "down" | "arrowdown" => "ArrowDown".into(),
-        "left" | "arrowleft" => "ArrowLeft".into(),
-        "right" | "arrowright" => "ArrowRight".into(),
-        "home" => "Home".into(),
-        "end" => "End".into(),
-        "pageup" => "PageUp".into(),
-        "pagedown" => "PageDown".into(),
-        "space" => " ".into(),
-        _ => key.into(),
-    }
 }
 
 fn recording_file_type(recording: &agent_core::view::device::DeviceRecordingView) -> Option<(&'static str, String)> {
@@ -1018,26 +978,4 @@ fn recording_file_type(recording: &agent_core::view::device::DeviceRecordingView
         return None;
     }
     Some(("mp4", recording.mime_type.clone()))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{device_key_code, device_key_value};
-
-    #[test]
-    fn gpui_keys_use_dom_physical_codes() {
-        assert_eq!(device_key_code("a"), "KeyA");
-        assert_eq!(device_key_code("1"), "Digit1");
-        assert_eq!(device_key_code("up"), "ArrowUp");
-        assert_eq!(device_key_code("enter"), "Enter");
-        assert_eq!(device_key_code("?"), "Slash");
-    }
-
-    #[test]
-    fn gpui_keys_carry_canonical_semantic_values() {
-        assert_eq!(device_key_value("up"), "ArrowUp");
-        assert_eq!(device_key_value("enter"), "Enter");
-        assert_eq!(device_key_value("a"), "a");
-        assert_eq!(device_key_value("1"), "1");
-    }
 }

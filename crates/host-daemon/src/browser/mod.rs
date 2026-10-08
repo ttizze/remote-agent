@@ -65,7 +65,26 @@ impl Page {
 #[derive(Default)]
 struct State {
     chrome: Option<cdp::Chrome>,
+    /// Dedicated Chromium processes for non-default Preview profiles. A CDP
+    /// BrowserContext is process-scoped and therefore cannot provide the
+    /// persistent partition semantics used by the client settings contract.
+    preview_chromes: HashMap<String, PreviewChrome>,
     pages: HashMap<String, Page>,
+}
+
+struct PreviewChrome {
+    chrome: cdp::Chrome,
+    profile_path: PathBuf,
+    ephemeral: bool,
+}
+
+impl PreviewChrome {
+    async fn shutdown(self) {
+        self.chrome.shutdown().await;
+        if self.ephemeral {
+            let _ = tokio::fs::remove_dir_all(self.profile_path).await;
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -100,6 +119,8 @@ pub struct Browser {
     recording_artifacts: Arc<Mutex<HashMap<RecordingKey, Vec<RecordingArtifact>>>>,
     stop: tokio_util::sync::CancellationToken,
     bridge_directory: tempfile::TempDir,
+    bridge_endpoint: OnceLock<String>,
+    bridge_token: String,
     preview: OnceLock<Arc<crate::preview::PreviewManager>>,
     preview_ports: OnceLock<Arc<crate::preview::PortScanner>>,
     terminals: OnceLock<Arc<crate::terminals::Terminals>>,
@@ -111,6 +132,88 @@ impl Drop for Browser {
 }
 
 impl Browser {
+    fn preview_profile_key(profile_id: Option<&str>) -> Option<&str> {
+        profile_id.filter(|id| *id != agent_protocol::preview::DEFAULT_PREVIEW_PROFILE_ID)
+    }
+
+    fn preview_profile_path(&self, profile_id: &str) -> (PathBuf, bool) {
+        let digest = ring::digest::digest(&ring::digest::SHA256, profile_id.as_bytes());
+        let suffix = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest.as_ref());
+        if profile_id == agent_protocol::preview::INCOGNITO_PREVIEW_PROFILE_ID {
+            (
+                self.profile
+                    .join("preview-profiles")
+                    .join(format!("incognito-{}", uuid::Uuid::new_v4().simple())),
+                true,
+            )
+        } else {
+            (
+                self.profile
+                    .join("preview-profiles")
+                    .join(format!("persistent-{suffix}")),
+                false,
+            )
+        }
+    }
+
+    async fn ensure_preview_chrome<'a>(
+        &'a self,
+        state: &'a mut State,
+        profile_id: &str,
+    ) -> Result<&'a mut PreviewChrome, String> {
+        agent_protocol::preview::validate_profile_id(profile_id)?;
+        if !state.preview_chromes.contains_key(profile_id) {
+            let (profile_path, ephemeral) = self.preview_profile_path(profile_id);
+            let chrome = cdp::Chrome::launch(&profile_path, &self.executable).await?;
+            state.preview_chromes.insert(
+                profile_id.to_owned(),
+                PreviewChrome {
+                    chrome,
+                    profile_path,
+                    ephemeral,
+                },
+            );
+        }
+        Ok(state
+            .preview_chromes
+            .get_mut(profile_id)
+            .expect("preview Chrome inserted above"))
+    }
+
+    fn tab_profile(page: &Page, tab_id: &str) -> Option<String> {
+        Self::preview_profile_key(page.preview_profiles.get(tab_id).and_then(Option::as_deref()))
+            .map(str::to_owned)
+    }
+
+    fn chrome_for_profile<'a>(
+        state: &'a mut State,
+        profile_id: Option<&str>,
+    ) -> Result<&'a mut cdp::Chrome, String> {
+        match Self::preview_profile_key(profile_id) {
+            None => state
+                .chrome
+                .as_mut()
+                .ok_or_else(|| "browser is unavailable".to_owned()),
+            Some(profile_id) => state
+                .preview_chromes
+                .get_mut(profile_id)
+                .map(|preview| &mut preview.chrome)
+                .ok_or_else(|| format!("browser profile {profile_id} is unavailable")),
+        }
+    }
+
+    async fn all_targets(state: &mut State) -> Result<Vec<cdp::Target>, String> {
+        let mut targets = if let Some(chrome) = state.chrome.as_mut() {
+            chrome.targets().await?
+        } else {
+            Vec::new()
+        };
+        for preview in state.preview_chromes.values_mut() {
+            targets.extend(preview.chrome.targets().await?);
+        }
+        Ok(targets)
+    }
+
     pub async fn start(profile: PathBuf) -> Result<Arc<Self>, String> {
         let executable = std::env::var_os("BEX_BROWSER_EXECUTABLE")
             .map(PathBuf::from)
@@ -121,12 +224,21 @@ impl Browser {
                     PathBuf::from("chromium")
                 }
             });
-        let bridge_directory = tempfile::Builder::new()
-            .prefix("bex-browser-")
-            // macOS Unix sockets have a 104-byte path limit. Nix's TMPDIR may
-            // be nested under a long checkout path; keep the socket root short.
-            .tempdir_in("/tmp")
-            .map_err(|e| e.to_string())?;
+        let bridge_directory = {
+            let builder = tempfile::Builder::new().prefix("bex-browser-");
+            #[cfg(unix)]
+            {
+                // macOS Unix sockets have a 104-byte path limit. Nix's TMPDIR
+                // may be nested under a long checkout path; keep the socket
+                // root short.
+                builder.tempdir_in("/tmp")
+            }
+            #[cfg(not(unix))]
+            {
+                builder.tempdir()
+            }
+        }
+        .map_err(|e| e.to_string())?;
         crate::platform::create_state_directory(bridge_directory.path())
             .map_err(|e| e.to_string())?;
         let browser = Arc::new(Self {
@@ -140,6 +252,8 @@ impl Browser {
             preview: OnceLock::new(),
             preview_ports: OnceLock::new(),
             terminals: OnceLock::new(),
+            bridge_endpoint: OnceLock::new(),
+            bridge_token: uuid::Uuid::new_v4().simple().to_string(),
         });
         mcp::listen(&browser)?;
         Ok(browser)
@@ -198,10 +312,11 @@ impl Browser {
                 return Err("preview tab was not found".into());
             }
             let dimensions = page.viewport_for(tab_id);
-            let endpoint = state
-                .chrome
-                .as_ref()
-                .ok_or_else(|| "browser is unavailable".to_owned())?
+            let profile_key = Self::preview_profile_key(
+                page.preview_profiles.get(tab_id).and_then(Option::as_deref),
+            )
+            .map(str::to_owned);
+            let endpoint = Self::chrome_for_profile(&mut state, profile_key.as_deref())?
                 .endpoint()
                 .to_owned();
             (endpoint, dimensions.0, dimensions.1)
@@ -668,12 +783,28 @@ impl Browser {
     }
 
     pub fn provider_config(&self, thread: &str) -> Result<serde_json::Value, String> {
+        let endpoint = self
+            .bridge_endpoint
+            .get()
+            .cloned()
+            .ok_or_else(|| "browser bridge is not listening".to_owned())?;
         Ok(
-            serde_json::json!({"command":std::env::current_exe().map_err(|e| e.to_string())?,
-            "args":["browser-mcp", "--socket", self.socket(), "--thread", thread]}),
+            serde_json::json!({
+                "command":std::env::current_exe().map_err(|e| e.to_string())?,
+                "args":["browser-mcp", "--socket", endpoint, "--thread", thread],
+                "env":{"AGENT_TOOLS_TOKEN":self.bridge_token.clone()},
+            }),
         )
     }
-    fn socket(&self) -> PathBuf {
+    pub(crate) fn bridge_token(&self) -> &str {
+        &self.bridge_token
+    }
+    pub(crate) fn set_bridge_endpoint(&self, endpoint: String) -> Result<(), String> {
+        self.bridge_endpoint
+            .set(endpoint)
+            .map_err(|_| "browser bridge endpoint already configured".to_owned())
+    }
+    fn socket_path(&self) -> PathBuf {
         self.bridge_directory.path().join("bridge.sock")
     }
     pub async fn shutdown(&self) {
@@ -713,8 +844,15 @@ impl Browser {
                 }
             }
         }
-        if let Some(chrome) = self.state.lock().await.chrome.take() {
+        let (chrome, preview_chromes) = {
+            let mut state = self.state.lock().await;
+            (state.chrome.take(), std::mem::take(&mut state.preview_chromes))
+        };
+        if let Some(chrome) = chrome {
             chrome.shutdown().await;
+        }
+        for (_, preview) in preview_chromes {
+            preview.shutdown().await;
         }
     }
 
@@ -727,23 +865,79 @@ impl Browser {
                 chrome.shutdown().await;
             }
             for page in state.pages.values_mut() {
-                page.tabs.clear();
-                page.active.clear();
-                page.viewports.clear();
-                page.preview_tabs.clear();
-                page.preview_profiles.clear();
-                page.preview_settings.clear();
+                let detached = page
+                    .tabs
+                    .iter()
+                    .filter(|tab_id| Self::tab_profile(page, tab_id).is_none())
+                    .cloned()
+                    .collect::<Vec<_>>();
+                for tab_id in detached {
+                    page.tabs.retain(|id| id != &tab_id);
+                    page.viewports.remove(&tab_id);
+                    page.preview_tabs.remove(&tab_id);
+                    page.preview_profiles.remove(&tab_id);
+                    page.preview_settings.remove(&tab_id);
+                }
+                if !page.tabs.contains(&page.active) {
+                    page.active = page.tabs.last().cloned().unwrap_or_default();
+                }
             }
         }
         if state.chrome.is_none() {
             state.chrome = Some(cdp::Chrome::launch(&self.profile, &self.executable).await?);
         }
+        let broken_profiles = state
+            .preview_chromes
+            .iter()
+            .filter(|(_, preview)| preview.chrome.broken)
+            .map(|(profile_id, _)| profile_id.clone())
+            .collect::<Vec<_>>();
+        for profile_id in &broken_profiles {
+            for page in state.pages.values_mut() {
+                let detached = page
+                    .preview_profiles
+                    .iter()
+                    .filter(|(_, profile)| profile.as_deref() == Some(profile_id.as_str()))
+                    .map(|(tab_id, _)| tab_id.clone())
+                    .collect::<Vec<_>>();
+                for tab_id in detached {
+                    page.tabs.retain(|id| id != &tab_id);
+                    page.viewports.remove(&tab_id);
+                    page.preview_tabs.remove(&tab_id);
+                    page.preview_profiles.remove(&tab_id);
+                    page.preview_settings.remove(&tab_id);
+                }
+                if !page.tabs.contains(&page.active) {
+                    page.active = page.tabs.last().cloned().unwrap_or_default();
+                }
+            }
+        }
+        for profile_id in broken_profiles {
+            if let Some(preview) = state.preview_chromes.remove(&profile_id) {
+                preview.shutdown().await;
+            }
+        }
         if !state.pages.contains_key(thread) && state.pages.len() >= 32 {
             return Err("ブラウザを開いている会話が上限に達しました。".into());
         }
+        let targets = Self::all_targets(state).await?;
+        let create_default_tab = state
+            .pages
+            .get(thread)
+            .is_none_or(|page| page.tabs.is_empty());
+        let default_tab = if create_default_tab {
+            Some(
+                state
+                    .chrome
+                    .as_mut()
+                    .expect("default browser was initialized above")
+                    .create()
+                    .await?,
+            )
+        } else {
+            None
+        };
         let page = state.pages.entry(thread.into()).or_default();
-        let chrome = state.chrome.as_mut().unwrap();
-        let targets = chrome.targets().await?;
         // Include transitive popups only from this conversation's known targets.
         loop {
             let added: Vec<_> = targets
@@ -756,13 +950,23 @@ impl Browser {
                             .as_ref()
                             .is_some_and(|id| page.tabs.contains(id))
                 })
-                .map(|target| target.target_id.clone())
+                .map(|target| {
+                    let profile = target
+                        .opener_id
+                        .as_ref()
+                        .and_then(|opener| page.preview_profiles.get(opener).cloned())
+                        .flatten();
+                    (target.target_id.clone(), profile)
+                })
                 .collect();
             if added.is_empty() {
                 break;
             }
-            page.active = added.last().unwrap().clone();
-            page.tabs.extend(added);
+            page.active = added.last().unwrap().0.clone();
+            for (tab_id, profile) in added {
+                page.preview_profiles.insert(tab_id.clone(), profile);
+                page.tabs.push(tab_id);
+            }
         }
         page.tabs
             .retain(|id| targets.iter().any(|target| &target.target_id == id));
@@ -774,11 +978,25 @@ impl Browser {
             .retain(|id, _| targets.iter().any(|target| &target.target_id == id));
         page.preview_settings
             .retain(|id, _| targets.iter().any(|target| &target.target_id == id));
-        if page.tabs.is_empty() {
-            let id = chrome.create(None).await?;
+        if let Some(id) = default_tab {
             page.tabs.push(id.clone());
             page.active = id;
             page.viewports.insert(page.active.clone(), (WIDTH, HEIGHT));
+        } else if page.tabs.is_empty() {
+            // A conversation can retain metadata after every tab was closed
+            // externally. Reconcile first, then create the one default page
+            // needed to keep the browser operation usable.
+            drop(page);
+            let id = state
+                .chrome
+                .as_mut()
+                .expect("default browser was initialized above")
+                .create()
+                .await?;
+            let page = state.pages.get_mut(thread).expect("browser page exists");
+            page.tabs.push(id.clone());
+            page.active = id.clone();
+            page.viewports.insert(id, (WIDTH, HEIGHT));
         } else if !page.tabs.contains(&page.active) {
             page.active = page.tabs.last().unwrap().clone();
         }
@@ -907,26 +1125,42 @@ impl Browser {
             .dimensions()
             .or_else(|| rendered_size.map(|size| (size.width, size.height)))
             .unwrap_or(resource_viewport);
+        let profile_key = Self::preview_profile_key(profile_id.as_deref()).map(str::to_owned);
         let id = {
-            let chrome = state.chrome.as_mut().unwrap();
-            chrome.create(profile_id.as_deref()).await?
+            match profile_key.as_deref() {
+                None => state
+                    .chrome
+                    .as_mut()
+                    .expect("default browser was initialized above")
+                    .create()
+                    .await?,
+                Some(profile_id) => {
+                    self.ensure_preview_chrome(&mut state, profile_id)
+                        .await?
+                        .chrome
+                        .create()
+                        .await?
+                }
+            }
         };
-        let page = state.pages.get_mut(thread).unwrap();
-        page.tabs.push(id.clone());
-        page.active = id.clone();
-        page.viewports.insert(id.clone(), (width, height));
-        page.preview_tabs.insert(page.active.clone());
-        page.preview_profiles.insert(page.active.clone(), profile_id.clone());
-        page.preview_settings.insert(
-            page.active.clone(),
-            (appearance, zoom),
-        );
+        {
+            let page = state.pages.get_mut(thread).unwrap();
+            page.tabs.push(id.clone());
+            page.active = id.clone();
+            page.viewports.insert(id.clone(), (width, height));
+            page.preview_tabs.insert(page.active.clone());
+            page.preview_profiles.insert(page.active.clone(), profile_id.clone());
+            page.preview_settings.insert(
+                page.active.clone(),
+                (appearance, zoom),
+            );
+        }
         let session = {
-            let chrome = state.chrome.as_mut().unwrap();
+            let chrome = Self::chrome_for_profile(&mut state, profile_key.as_deref())?;
             chrome.attach(&id, width, height).await?
         };
         {
-            let chrome = state.chrome.as_mut().unwrap();
+            let chrome = Self::chrome_for_profile(&mut state, profile_key.as_deref())?;
             chrome.set_appearance(&session, appearance).await?;
             chrome.set_zoom(&session, zoom).await?;
         }
@@ -935,6 +1169,54 @@ impl Browser {
             Self::action(&mut state, thread, &action).await?;
         }
         Self::frame(&mut state, thread).await
+    }
+
+    /// Clears the cookies, cache and origin storage for one browser profile
+    /// owned by this Host. The profile row remains the caller's responsibility
+    /// and must only be removed after this operation returns successfully.
+    pub async fn clear_preview_profile(&self, profile_id: &str) -> Result<(), String> {
+        agent_protocol::preview::validate_profile_id(profile_id)?;
+        let mut state = self.state.lock().await;
+        let result = match Self::preview_profile_key(Some(profile_id)) {
+            None => {
+                if state.chrome.is_none() {
+                    state.chrome = Some(cdp::Chrome::launch(&self.profile, &self.executable).await?);
+                }
+                state
+                    .chrome
+                    .as_mut()
+                    .expect("default browser was initialized above")
+                    .clear_profile_data()
+                    .await
+            }
+            Some(profile_id) => {
+                self.ensure_preview_chrome(&mut state, profile_id)
+                    .await?
+                    .chrome
+                    .clear_profile_data()
+                    .await
+            }
+        }
+        .map(|_| ());
+        let dispose_incognito = profile_id == agent_protocol::preview::INCOGNITO_PREVIEW_PROFILE_ID
+            && !state.pages.values().any(|page| {
+                page.preview_profiles.values().any(|profile| {
+                    profile.as_deref()
+                        == Some(agent_protocol::preview::INCOGNITO_PREVIEW_PROFILE_ID)
+                })
+            });
+        let incognito_chrome = if dispose_incognito {
+            state
+                .preview_chromes
+                .remove(agent_protocol::preview::INCOGNITO_PREVIEW_PROFILE_ID)
+        } else {
+            None
+        };
+        drop(state);
+        if let Some(chrome) = incognito_chrome {
+            chrome.shutdown().await;
+        }
+        result
     }
 
     pub async fn resize_preview_tab(
@@ -973,17 +1255,20 @@ impl Browser {
     ) -> Result<BrowserFrame, String> {
         let mut state = self.state.lock().await;
         self.ensure(&mut state, thread).await?;
-        let viewport = {
+        let (viewport, profile_key) = {
             let page = state.pages.get_mut(thread).unwrap();
             if !page.preview_tabs.contains(tab_id) {
                 return Err("preview tab was not found".into());
             }
             page.active = tab_id.to_owned();
-            page.viewport_for(tab_id)
+            (
+                page.viewport_for(tab_id),
+                Self::tab_profile(page, tab_id),
+            )
         };
         let active = tab_id.to_owned();
         {
-            let chrome = state.chrome.as_mut().unwrap();
+            let chrome = Self::chrome_for_profile(&mut state, profile_key.as_deref())?;
             let session = chrome.attach(&active, viewport.0, viewport.1).await?;
             chrome.set_appearance(&session, appearance).await?;
         }
@@ -1004,17 +1289,20 @@ impl Browser {
     ) -> Result<BrowserFrame, String> {
         let mut state = self.state.lock().await;
         self.ensure(&mut state, thread).await?;
-        let viewport = {
+        let (viewport, profile_key) = {
             let page = state.pages.get_mut(thread).unwrap();
             if !page.preview_tabs.contains(tab_id) {
                 return Err("preview tab was not found".into());
             }
             page.active = tab_id.to_owned();
-            page.viewport_for(tab_id)
+            (
+                page.viewport_for(tab_id),
+                Self::tab_profile(page, tab_id),
+            )
         };
         let active = tab_id.to_owned();
         {
-            let chrome = state.chrome.as_mut().unwrap();
+            let chrome = Self::chrome_for_profile(&mut state, profile_key.as_deref())?;
             let session = chrome.attach(&active, viewport.0, viewport.1).await?;
             chrome.set_zoom(&session, zoom).await?;
         }
@@ -1083,7 +1371,8 @@ impl Browser {
             .and_then(|page| page.preview_profiles.get(tab_id))
             .cloned()
             .flatten();
-        let chrome = state.chrome.as_mut().unwrap();
+        let profile_key = Self::preview_profile_key(profile_to_dispose.as_deref()).map(str::to_owned);
+        let chrome = Self::chrome_for_profile(&mut state, profile_key.as_deref())?;
         let close_result = tokio::select! {
             result = chrome.close_target(tab_id) => result,
             _ = request_cancel.cancelled() => {
@@ -1110,14 +1399,17 @@ impl Browser {
                         == Some(agent_protocol::preview::INCOGNITO_PREVIEW_PROFILE_ID)
                 })
             });
-        if dispose_incognito {
-            if let Some(chrome) = state.chrome.as_mut() {
-                chrome
-                    .dispose_profile_context(agent_protocol::preview::INCOGNITO_PREVIEW_PROFILE_ID)
-                    .await?;
-            }
-        }
+        let incognito_chrome = if dispose_incognito {
+            state
+                .preview_chromes
+                .remove(agent_protocol::preview::INCOGNITO_PREVIEW_PROFILE_ID)
+        } else {
+            None
+        };
         drop(state);
+        if let Some(chrome) = incognito_chrome {
+            chrome.shutdown().await;
+        }
         if stop_result.is_none() || stop_result.as_ref().is_some_and(|result| result.is_ok()) {
             self.clear_recording_artifacts(&key).await;
         }
@@ -1150,8 +1442,7 @@ impl Browser {
                 )
             };
             let profiles = state.pages[thread].preview_profiles.clone();
-            let chrome = state.chrome.as_mut().unwrap();
-            let targets = chrome.targets().await?;
+            let targets = Self::all_targets(&mut state).await?;
             let live_targets = targets
                 .iter()
                 .map(|target| target.target_id.as_str())
@@ -1172,11 +1463,16 @@ impl Browser {
                 if !live_targets.contains(page.active.as_str()) {
                     page.active = page.tabs.last().cloned().unwrap_or_default();
                 }
-                for tab_id in &detached {
-                    chrome.forget_target(tab_id);
-                }
                 detached
             };
+            for tab_id in &detached_preview_tabs {
+                if let Some(chrome) = state.chrome.as_mut() {
+                    chrome.forget_target(tab_id);
+                }
+                for preview in state.preview_chromes.values_mut() {
+                    preview.chrome.forget_target(tab_id);
+                }
+            }
             let sessions = targets
                 .into_iter()
                 .filter(|target| tabs.contains(&target.target_id))
@@ -1352,11 +1648,15 @@ impl Browser {
         if matches!(action, BrowserAction::Read) {
             return Ok(());
         }
-        let (active, viewport) = {
+        let (active, viewport, profile_key) = {
             let page = state.pages.get(thread).unwrap();
-            (page.active.clone(), page.viewport())
+            (
+                page.active.clone(),
+                page.viewport(),
+                Self::tab_profile(page, &page.active),
+            )
         };
-        let chrome = state.chrome.as_mut().unwrap();
+        let chrome = Self::chrome_for_profile(state, profile_key.as_deref())?;
         let session = chrome
             .attach(&active, viewport.0, viewport.1)
             .await?;
@@ -1400,18 +1700,27 @@ impl Browser {
     }
 
     async fn frame(state: &mut State, thread: &str) -> Result<BrowserFrame, String> {
-        let (active, viewport, tabs) = {
+        let (active, viewport, tabs, profile_key) = {
             let page = &state.pages[thread];
-            (page.active.clone(), page.viewport(), page.tabs.clone())
+            (
+                page.active.clone(),
+                page.viewport(),
+                page.tabs.clone(),
+                Self::tab_profile(page, &page.active),
+            )
         };
-        let chrome = state.chrome.as_mut().unwrap();
-        let session = chrome
-            .attach(&active, viewport.0, viewport.1)
-            .await?;
-        let image = chrome.screenshot(&session).await?;
+        let (image, dialog) = {
+            let chrome = Self::chrome_for_profile(state, profile_key.as_deref())?;
+            let session = chrome
+                .attach(&active, viewport.0, viewport.1)
+                .await?;
+            let image = chrome.screenshot(&session).await?;
+            let dialog = chrome.dialog(&session);
+            (image, dialog)
+        };
         let image_id = base64::engine::general_purpose::STANDARD
             .encode(ring::digest::digest(&ring::digest::SHA256, &image));
-        let targets = chrome.targets().await?;
+        let targets = Self::all_targets(state).await?;
         Ok(BrowserFrame {
             tabs: targets
                 .into_iter()
@@ -1427,7 +1736,7 @@ impl Browser {
             height: viewport.1,
             image,
             image_id,
-            dialog: chrome.dialog(&session),
+            dialog,
         })
     }
 }
@@ -1435,6 +1744,9 @@ impl Browser {
 fn forget_detached_preview_target(state: &mut State, thread: &str, tab_id: &str) -> bool {
     if let Some(chrome) = state.chrome.as_mut() {
         chrome.forget_target(tab_id);
+    }
+    for preview in state.preview_chromes.values_mut() {
+        preview.chrome.forget_target(tab_id);
     }
     let Some(page) = state.pages.get_mut(thread) else {
         return false;

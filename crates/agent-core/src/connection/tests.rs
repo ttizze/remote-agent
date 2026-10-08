@@ -932,6 +932,7 @@ fn job(
         result,
         complete: None,
         sent,
+        duo_request: None,
     }
 }
 
@@ -1002,6 +1003,7 @@ fn a_remote_pairing_receipt_observes_the_registered_host() {
         })),
         complete: Some(complete),
         sent: None,
+        duo_request: None,
     });
     assert_eq!(
         receipt.try_recv().unwrap().unwrap(),
@@ -1010,6 +1012,50 @@ fn a_remote_pairing_receipt_observes_the_registered_host() {
         }
     );
     assert_eq!(owner.state.remote_hosts[0].id, "remote");
+}
+
+#[test]
+fn duo_completion_uses_the_request_epoch_after_thread_selection_changes() {
+    let first_thread = ThreadId::new("first-thread").unwrap();
+    let second_thread = ThreadId::new("second-thread").unwrap();
+    let mut owner = owner(Snapshot {
+        selected_thread: Some(first_thread.clone()),
+        ..Snapshot::default()
+    });
+    owner.state.device.sessions = vec![agent_protocol::device::DeviceSession {
+        thread_id: first_thread.clone(),
+        host_id: "host".into(),
+        device_id: "device".into(),
+        platform: agent_protocol::device::DevicePlatform::Ios,
+        opened_at: "0".into(),
+        session_epoch: "epoch-a".into(),
+    }];
+    let request = owner
+        .state
+        .device
+        .enqueue_duo(
+            first_thread.clone(),
+            Some("host".into()),
+            "device".into(),
+            DeviceDuoCommandIntent::Angle { value: 30.0 },
+        )
+        .unwrap()
+        .unwrap();
+    owner.state.selected_thread = Some(second_thread);
+    owner.finished(JobResult {
+        call: Call::DeviceInput(agent_protocol::device::DeviceInput {
+            host_id: Some("host".into()),
+            device_id: "device".into(),
+            input: agent_protocol::device::DeviceInputKind::Duo {
+                command: agent_protocol::device::DeviceDuoCommand::Angle { value: 30.0 },
+            },
+        }),
+        result: Ok(CallReply::Done),
+        complete: None,
+        sent: None,
+        duo_request: Some(request),
+    });
+    assert!(owner.state.device.duo_controls.is_empty());
 }
 
 #[test]

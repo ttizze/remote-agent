@@ -29,10 +29,6 @@ pub(super) struct Chrome {
     endpoint: String,
     next_id: u64,
     sessions: HashMap<String, String>,
-    /// Preview profiles are isolated Chromium browser contexts. The default
-    /// profile uses the process' persistent context; named profiles receive
-    /// their own context before the first target is created.
-    contexts: HashMap<String, String>,
     dialogs: HashMap<String, BrowserDialog>,
     pub broken: bool,
 }
@@ -104,7 +100,6 @@ impl Chrome {
                     endpoint,
                     next_id: 0,
                     sessions: HashMap::new(),
-                    contexts: HashMap::new(),
                     dialogs: HashMap::new(),
                     broken: false,
                 })
@@ -209,15 +204,8 @@ impl Chrome {
         )
         .map_err(|_| "ブラウザのタブ一覧を取得できません。".into())
     }
-    pub async fn create(&mut self, profile_id: Option<&str>) -> Result<String, String> {
-        let browser_context_id = match profile_id {
-            None | Some(agent_protocol::preview::DEFAULT_PREVIEW_PROFILE_ID) => None,
-            Some(profile_id) => Some(self.context_for(profile_id).await?),
-        };
-        let mut params = json!({"url":"about:blank"});
-        if let Some(context) = browser_context_id {
-            params["browserContextId"] = context.into();
-        }
+    pub async fn create(&mut self) -> Result<String, String> {
+        let params = json!({"url":"about:blank"});
         self.call(None, "Target.createTarget", params)
             .await?["targetId"]
             .as_str()
@@ -225,19 +213,6 @@ impl Chrome {
             .ok_or_else(|| "ブラウザのタブを作成できません。".into())
     }
 
-    async fn context_for(&mut self, profile_id: &str) -> Result<String, String> {
-        if let Some(context) = self.contexts.get(profile_id) {
-            return Ok(context.clone());
-        }
-        let context = self
-            .call(None, "Target.createBrowserContext", json!({"disposeOnDetach":false}))
-            .await?["browserContextId"]
-            .as_str()
-            .ok_or_else(|| "ブラウザのプロファイルを作成できません。".to_owned())?
-            .to_owned();
-        self.contexts.insert(profile_id.to_owned(), context.clone());
-        Ok(context)
-    }
     pub async fn attach(&mut self, target: &str, width: u32, height: u32) -> Result<String, String> {
         if let Some(session) = self.sessions.get(target).cloned() {
             self.set_viewport(&session, width, height).await?;
@@ -258,6 +233,85 @@ impl Chrome {
         self.set_viewport(&session, width, height).await?;
         self.sessions.insert(target.into(), session.clone());
         Ok(session)
+    }
+
+    async fn attach_for_data_clear(&mut self, target: &str) -> Result<String, String> {
+        if let Some(session) = self.sessions.get(target).cloned() {
+            return Ok(session);
+        }
+        let response = self
+            .call(
+                None,
+                "Target.attachToTarget",
+                json!({"targetId":target,"flatten":true}),
+            )
+            .await?;
+        let session = response["sessionId"]
+            .as_str()
+            .ok_or("ブラウザのタブに接続できません。")?
+            .to_owned();
+        self.sessions.insert(target.into(), session.clone());
+        Ok(session)
+    }
+
+    /// Clears the storage owned by this Chromium process. The caller selects
+    /// the process from the client profile id, so a clear can never cross
+    /// persistent profile directories or the ephemeral Incognito process.
+    pub async fn clear_profile_data(&mut self) -> Result<(), String> {
+        let mut targets = self
+            .targets()
+            .await?
+            .into_iter()
+            .filter(|target| {
+                target.kind == "page"
+            })
+            .map(|target| (target.target_id, origin_for_storage_clear(&target.url)))
+            .collect::<Vec<_>>();
+        let temporary_target = if targets.is_empty() {
+            let target = self
+                .call(None, "Target.createTarget", json!({"url":"about:blank"}))
+                .await?["targetId"]
+                .as_str()
+                .ok_or_else(|| "ブラウザの一時プロファイルページを作成できません。".to_owned())?
+                .to_owned();
+            targets.push((target.clone(), None));
+            Some(target)
+        } else {
+            None
+        };
+
+        let mut first_error = None;
+        for (target, origin) in &targets {
+            let result = async {
+                let session = self.attach_for_data_clear(target).await?;
+                if let Some(origin) = origin.as_deref() {
+                    self.call(
+                        Some(&session),
+                        "Storage.clearDataForOrigin",
+                        json!({
+                            "origin": origin,
+                            "storageTypes": "appcache,cache_storage,cookies,file_systems,indexeddb,local_storage,service_workers,websql"
+                        }),
+                    )
+                    .await?;
+                }
+                self.call(Some(&session), "Network.clearBrowserCookies", json!({}))
+                    .await?;
+                self.call(Some(&session), "Network.clearBrowserCache", json!({}))
+                    .await?;
+                Ok::<(), String>(())
+            }
+            .await;
+            if let Err(error) = result {
+                first_error.get_or_insert(error);
+            }
+        }
+        if let Some(target) = temporary_target {
+            if let Err(error) = self.close_target(&target).await {
+                first_error.get_or_insert(error);
+            }
+        }
+        first_error.map_or(Ok(()), Err)
     }
     async fn set_viewport(&mut self, session: &str, width: u32, height: u32) -> Result<(), String> {
         self.call(
@@ -305,19 +359,6 @@ impl Chrome {
             .map(|_| {
                 self.forget_target(target);
             })
-    }
-
-    pub async fn dispose_profile_context(&mut self, profile_id: &str) -> Result<(), String> {
-        let Some(context) = self.contexts.remove(profile_id) else {
-            return Ok(());
-        };
-        self.call(
-            None,
-            "Target.disposeBrowserContext",
-            json!({"browserContextId": context}),
-        )
-        .await
-        .map(|_| ())
     }
 
     /// Forget a target after Chrome has detached it externally.  No CDP
@@ -448,5 +489,28 @@ impl Chrome {
             );
         }
         Ok(())
+    }
+}
+
+fn origin_for_storage_clear(url: &str) -> Option<String> {
+    let parsed = url::Url::parse(url).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+        return None;
+    }
+    Some(parsed.origin().ascii_serialization())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::origin_for_storage_clear;
+
+    #[test]
+    fn storage_clear_origin_excludes_non_web_pages() {
+        assert_eq!(
+            origin_for_storage_clear("https://example.test:8443/path"),
+            Some("https://example.test:8443".into())
+        );
+        assert_eq!(origin_for_storage_clear("about:blank"), None);
+        assert_eq!(origin_for_storage_clear("file:///tmp/page.html"), None);
     }
 }

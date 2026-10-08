@@ -890,6 +890,20 @@ impl HostRpcService {
                         .unwrap_or(session)
                         .into()
                 }
+                Call::PreviewClearProfileData(params) => {
+                    params
+                        .validate()
+                        .map_err(|error| Failure::new("invalid_params", error))?;
+                    let browser = resources
+                        .browser
+                        .get()
+                        .ok_or_else(|| Failure::new("browser_unavailable", "browser unavailable"))?;
+                    browser
+                        .clear_preview_profile(&params.profile_id)
+                        .await
+                        .map_err(|error| Failure::new("preview_profile_clear_failed", error))?;
+                    agent_protocol::models::Empty {}.into()
+                }
                 Call::PreviewNavigate(params) => {
                     params
                         .validate()

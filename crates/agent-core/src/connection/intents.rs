@@ -35,12 +35,20 @@ pub(super) enum Next {
     Commands(Vec<PendingCommand>),
     /// A request whose reply resolves the intent.
     Call(Box<Call>, Option<Box<(String, Draft)>>),
+    /// A Duo request carries the immutable session identity through the
+    /// asynchronous Host call. Completion must never look it up through the
+    /// currently selected thread or a mutable pending slot.
+    DuoCall(Box<Call>, DeviceDuoRequest, Option<Box<(String, Draft)>>),
     /// Applied at once with this outcome.
     Outcome(Outcome),
 }
 impl Next {
     pub(super) fn call(call: Call, sent: Option<(String, Draft)>) -> Self {
         Self::Call(Box::new(call), sent.map(Box::new))
+    }
+
+    pub(super) fn duo_call(call: Call, request: DeviceDuoRequest) -> Self {
+        Self::DuoCall(Box::new(call), request, None)
     }
 }
 
@@ -273,6 +281,12 @@ impl Owner {
                 }
             }
             Ok(Next::Call(call, sent)) => self.job(*call, Some(complete), sent.map(|sent| *sent)),
+            Ok(Next::DuoCall(call, request, sent)) => self.job_with_duo(
+                *call,
+                Some(complete),
+                sent.map(|sent| *sent),
+                Some(request),
+            ),
         }
     }
 
@@ -1660,15 +1674,15 @@ impl Owner {
                     let Some(request) = request else {
                         return Ok(Next::Done);
                     };
-                    return Ok(Next::call(
+                    return Ok(Next::duo_call(
                         Call::DeviceInput(d::DeviceInput {
-                            host_id: request.host_id,
-                            device_id: request.device_id,
+                            host_id: request.host_id.clone(),
+                            device_id: request.device_id.clone(),
                             input: d::DeviceInputKind::Duo {
-                                command: device_duo_command(request.command),
+                                command: device_duo_command(request.command.clone()),
                             },
                         }),
-                        None,
+                        request,
                     ));
                 }
                 let action = device_action(action)?;
@@ -1749,6 +1763,11 @@ impl Owner {
                 };
                 request.validate().map_err(invalid)?;
                 Next::call(Call::PreviewOpen(request), None)
+            }
+            Intent::PreviewClearProfileData { profile_id } => {
+                let request = agent_protocol::preview::PreviewClearProfileData { profile_id };
+                request.validate().map_err(invalid)?;
+                Next::call(Call::PreviewClearProfileData(request), None)
             }
             Intent::PreviewNavigate { tab_id, url } => {
                 let request = agent_protocol::preview::PreviewNavigate {

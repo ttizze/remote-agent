@@ -13,41 +13,125 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 const MAX_VIDEO_EVENTS_PER_STREAM: usize = 64;
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// The source facts needed to send one keyboard event to a device.  Native
+/// surfaces should provide the physical code and the platform's semantic key
+/// value; this pure normalization only fills in aliases and derives the
+/// conventional physical code when a surface (such as GPUI) supplies a key
+/// name without one.
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
-pub struct DeviceProjectedPoint {
-    pub x: f32,
-    pub y: f32,
+pub struct DeviceKeyFacts {
+    pub code: String,
+    pub key: String,
 }
 
-/// Project a point through the actual frame rectangle. Letterbox points are
-/// rejected so a gesture can end at its last valid device coordinate.
 #[cfg_attr(feature = "bindings", uniffi::export)]
-pub fn project_device_point(
-    view_width: f32,
-    view_height: f32,
-    frame_width: f32,
-    frame_height: f32,
-    point_x: f32,
-    point_y: f32,
-) -> Option<DeviceProjectedPoint> {
-    if ![view_width, view_height, frame_width, frame_height, point_x, point_y]
-        .iter()
-        .all(|value| value.is_finite() && *value > 0.0)
-    {
-        return None;
+pub fn canonical_device_key(code: &str, key: &str) -> DeviceKeyFacts {
+    let key = match key.to_ascii_lowercase().as_str() {
+        "enter" | "return" => "Enter".into(),
+        "tab" => "Tab".into(),
+        "backspace" => "Backspace".into(),
+        "delete" | "forwarddelete" => "Delete".into(),
+        "escape" | "esc" => "Escape".into(),
+        "up" | "arrowup" => "ArrowUp".into(),
+        "down" | "arrowdown" => "ArrowDown".into(),
+        "left" | "arrowleft" => "ArrowLeft".into(),
+        "right" | "arrowright" => "ArrowRight".into(),
+        "home" => "Home".into(),
+        "end" => "End".into(),
+        "pageup" => "PageUp".into(),
+        "pagedown" => "PageDown".into(),
+        "space" => " ".into(),
+        _ => key.to_owned(),
+    };
+    let code = canonical_device_code(code, &key);
+    DeviceKeyFacts { code, key }
+}
+
+fn canonical_device_code(code: &str, key: &str) -> String {
+    let code = code.trim();
+    if !code.is_empty() {
+        let lower_code = code.to_ascii_lowercase();
+        let looks_like_key_alias = lower_code.len() == 1
+            || matches!(
+                lower_code.as_str(),
+                "enter"
+                    | "return"
+                    | "tab"
+                    | "backspace"
+                    | "delete"
+                    | "forwarddelete"
+                    | "escape"
+                    | "esc"
+                    | "up"
+                    | "down"
+                    | "left"
+                    | "right"
+                    | "arrowup"
+                    | "arrowdown"
+                    | "arrowleft"
+                    | "arrowright"
+                    | "home"
+                    | "end"
+                    | "pageup"
+                    | "pagedown"
+                    | "space"
+            );
+        if !looks_like_key_alias {
+            return code.to_owned();
+        }
     }
-    let scale = (view_width / frame_width).min(view_height / frame_height);
-    let rendered_width = frame_width * scale;
-    let rendered_height = frame_height * scale;
-    let offset_x = (view_width - rendered_width) / 2.0;
-    let offset_y = (view_height - rendered_height) / 2.0;
-    let x = (point_x - offset_x) / rendered_width;
-    let y = (point_y - offset_y) / rendered_height;
-    if !(0.0..=1.0).contains(&x) || !(0.0..=1.0).contains(&y) {
-        return None;
+    let lower = key.to_ascii_lowercase();
+    if lower.chars().count() == 1 {
+        let character = lower.as_bytes()[0];
+        if character.is_ascii_lowercase() {
+            return format!("Key{}", (character as char).to_ascii_uppercase());
+        }
+        if character.is_ascii_digit() {
+            return format!("Digit{}", character as char);
+        }
     }
-    Some(DeviceProjectedPoint { x, y })
+    match lower.as_str() {
+        "!" => "Digit1",
+        "@" => "Digit2",
+        "#" => "Digit3",
+        "$" => "Digit4",
+        "%" => "Digit5",
+        "^" => "Digit6",
+        "&" => "Digit7",
+        "*" => "Digit8",
+        "(" => "Digit9",
+        ")" => "Digit0",
+        "-" | "_" => "Minus",
+        "=" | "+" => "Equal",
+        "[" | "{" => "BracketLeft",
+        "]" | "}" => "BracketRight",
+        "\\" | "|" => "Backslash",
+        ";" | ":" => "Semicolon",
+        "'" | "\"" => "Quote",
+        "`" | "~" => "Backquote",
+        "," | "<" => "Comma",
+        "." | ">" => "Period",
+        "/" | "?" => "Slash",
+        "enter" => "Enter",
+        "tab" => "Tab",
+        "backspace" => "Backspace",
+        "delete" => "Delete",
+        "escape" => "Escape",
+        "arrowup" => "ArrowUp",
+        "arrowdown" => "ArrowDown",
+        "arrowleft" => "ArrowLeft",
+        "arrowright" => "ArrowRight",
+        "home" => "Home",
+        "end" => "End",
+        "pageup" => "PageUp",
+        "pagedown" => "PageDown",
+        " " => "Space",
+        _ => {
+            if code.is_empty() { "Unidentified" } else { code }
+        }
+    }
+    .into()
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -289,72 +373,6 @@ impl DeviceState {
         None
     }
 
-    pub fn complete_duo_for_input(
-        &mut self,
-        thread_id: &ThreadId,
-        input: &agent_protocol::device::DeviceInput,
-    ) -> Option<DeviceDuoRequest> {
-        if !matches!(input.input, agent_protocol::device::DeviceInputKind::Duo { .. }) {
-            return None;
-        }
-        let effective_host = input
-            .host_id
-            .as_deref()
-            .unwrap_or(agent_protocol::device::LOCAL_DEVICE_HOST_ID);
-        let key = self.duo_controls.keys().find(|(thread, host, device, _)| {
-            thread == &thread_id.to_string() && host == effective_host && device == &input.device_id
-        })?.clone();
-        let (command, request_id) = {
-            let control = self.duo_controls.get(&key)?;
-            (control.requested.clone()?, control.active_request_id?)
-        };
-        self.complete_duo(
-            &DeviceDuoRequest {
-                thread_id: thread_id.clone(),
-                host_id: input.host_id.clone(),
-                device_id: input.device_id.clone(),
-                session_epoch: key.3,
-                request_id,
-                command,
-            },
-            true,
-            None,
-        )
-    }
-
-    pub fn fail_duo_for_input(
-        &mut self,
-        thread_id: &ThreadId,
-        input: &agent_protocol::device::DeviceInput,
-        error: impl Into<String>,
-    ) {
-        if !matches!(input.input, agent_protocol::device::DeviceInputKind::Duo { .. }) {
-            return;
-        }
-        let effective_host = input
-            .host_id
-            .as_deref()
-            .unwrap_or(agent_protocol::device::LOCAL_DEVICE_HOST_ID);
-        let Some(key) = self.duo_controls.keys().find(|(thread, host, device, _)| {
-            thread == &thread_id.to_string() && host == effective_host && device == &input.device_id
-        }).cloned() else {
-            return;
-        };
-        let Some(control) = self.duo_controls.get(&key).cloned() else { return };
-        let Some(request_id) = control.active_request_id else { return };
-        self.fail_duo(
-            &DeviceDuoRequest {
-                thread_id: thread_id.clone(),
-                host_id: input.host_id.clone(),
-                device_id: input.device_id.clone(),
-                session_epoch: key.3,
-                request_id,
-                command: control.requested.unwrap_or(crate::state::DeviceDuoCommandIntent::Table { value: false }),
-            },
-            error,
-        );
-    }
-
     pub fn fail_duo(&mut self, request: &DeviceDuoRequest, error: impl Into<String>) {
         let _ = self.complete_duo(request, false, Some(error.into()));
     }
@@ -384,6 +402,21 @@ impl DeviceState {
         self.sessions.iter().any(|session| {
             session.host_id == host_id && session.device_id == device_id && session.session_epoch == epoch
         })
+    }
+
+    /// A completion may arrive after the device was closed, so preserve it for
+    /// the attachment surface in that case. Once the same device is reopened,
+    /// however, an event from the prior epoch is stale and must not mutate the
+    /// new recording lifetime.
+    fn accepts_recording_completion(&self, status: &agent_protocol::device::DeviceRecordingStatus) -> bool {
+        self.sessions
+            .iter()
+            .find(|session| {
+                session.thread_id == status.thread_id
+                    && session.host_id == status.host_id
+                    && session.device_id == status.device_id
+            })
+            .is_none_or(|session| session.session_epoch == status.session_epoch)
     }
 
     pub fn apply_event(&mut self, event: DeviceEvent) {
@@ -617,15 +650,22 @@ impl DeviceState {
                     {
                         self.recordings.insert(key, status);
                     }
-                } else if self
+                } else if self.accepts_recording_completion(&status)
+                    && self
                     .recordings
                     .get(&key)
-                    .is_some_and(|current| current.recording_id == status.recording_id)
+                    .is_some_and(|current| {
+                        current.recording_id == status.recording_id
+                            && current.session_epoch == status.session_epoch
+                    })
                 {
                     self.recordings.remove(&key);
                 }
             }
             DeviceEvent::RecordingComplete(recording) => {
+                if !self.accepts_recording_completion(&recording.status) {
+                    return;
+                }
                 let key = (
                     recording.status.thread_id.to_string(),
                     recording.status.host_id.clone(),
@@ -644,7 +684,8 @@ impl DeviceState {
                     .is_none_or(|current| {
                         let same_lifetime_key = current.status.thread_id == recording.status.thread_id
                             && current.status.host_id == recording.status.host_id
-                            && current.status.device_id == recording.status.device_id;
+                            && current.status.device_id == recording.status.device_id
+                            && current.status.session_epoch == recording.status.session_epoch;
                         !same_lifetime_key || recording.status.recording_id >= current.status.recording_id
                     })
                 {
@@ -765,12 +806,27 @@ mod tests {
     }
 
     #[test]
-    fn projection_rejects_letterbox_points() {
+    fn canonical_keyboard_facts_preserve_source_semantics_and_physical_code() {
         assert_eq!(
-            project_device_point(100.0, 100.0, 100.0, 50.0, 50.0, 50.0),
-            Some(DeviceProjectedPoint { x: 0.5, y: 0.5 })
+            canonical_device_key("", "a"),
+            DeviceKeyFacts { code: "KeyA".into(), key: "a".into() }
         );
-        assert!(project_device_point(100.0, 100.0, 100.0, 50.0, 50.0, 10.0).is_none());
+        assert_eq!(
+            canonical_device_key("", "!"),
+            DeviceKeyFacts { code: "Digit1".into(), key: "!".into() }
+        );
+        assert_eq!(
+            canonical_device_key("KeyA", "ä"),
+            DeviceKeyFacts { code: "KeyA".into(), key: "ä".into() }
+        );
+        assert_eq!(
+            canonical_device_key("", "up"),
+            DeviceKeyFacts { code: "ArrowUp".into(), key: "ArrowUp".into() }
+        );
+        assert_eq!(
+            canonical_device_key("", "Space"),
+            DeviceKeyFacts { code: "Space".into(), key: " ".into() }
+        );
     }
 
     #[test]
@@ -801,6 +857,9 @@ mod tests {
             .is_none());
         let next = state.complete_duo(&first, true, None).unwrap();
         assert_eq!(next.command, crate::state::DeviceDuoCommandIntent::Angle { value: 60.0 });
+        // A late completion for the first request cannot settle the promoted
+        // request, even though both commands target the same device.
+        assert!(state.complete_duo(&first, true, None).is_none());
         state.fail_duo(&next, "Duo control failed");
         assert_eq!(state.duo_controls.values().next().and_then(|control| control.error.as_deref()), Some("Duo control failed"));
         state.apply_event(DeviceEvent::State(DeviceServiceState::default()));
@@ -997,7 +1056,7 @@ mod tests {
             bytes: vec![1],
         }));
         assert_eq!(state.recordings.get(&("thread".into(), "host".into(), "device".into())).map(|status| status.recording_id), Some(2));
-        assert_eq!(state.last_recording.as_ref().map(|recording| recording.bytes.clone()), Some(vec![1]));
+        assert!(state.last_recording.is_none());
 
         state.apply_event(DeviceEvent::RecordingComplete(DeviceRecording {
             status: DeviceRecordingStatus { active: false, ..new_status },

@@ -7,6 +7,7 @@ use super::{
 use crate::{peer::PeerError, protocol::Call, state::*};
 use agent_protocol::{conversation as c, device as d, models as m, operations as op, workspace as w};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
@@ -15,6 +16,7 @@ pub(super) struct JobResult {
     pub result: Result<Reply, PeerError>,
     pub complete: Option<Waiter>,
     pub sent: Option<(String, Draft)>,
+    pub duo_request: Option<DeviceDuoRequest>,
 }
 
 pub(super) enum Reply {
@@ -127,7 +129,10 @@ async fn execute(peer: &Peer, call: &Call) -> Result<Reply, PeerError> {
         Call::PreviewRecordingStop(_) => {
             Reply::PreviewRecordingArtifact(peer.request(call).await?)
         }
-        Call::PreviewReportStatus(_) | Call::PreviewClose(_) | Call::PreviewRefresh(_) => {
+        Call::PreviewReportStatus(_)
+        | Call::PreviewClose(_)
+        | Call::PreviewRefresh(_)
+        | Call::PreviewClearProfileData(_) => {
             let _: m::Empty = peer.request(call).await?;
             Reply::Done
         }
@@ -174,6 +179,16 @@ impl Owner {
         complete: Option<Waiter>,
         sent: Option<(String, Draft)>,
     ) {
+        self.job_with_duo(call, complete, sent, None);
+    }
+
+    pub(super) fn job_with_duo(
+        &mut self,
+        call: Call,
+        complete: Option<Waiter>,
+        sent: Option<(String, Draft)>,
+        duo_request: Option<DeviceDuoRequest>,
+    ) {
         let sender = self.sender.clone();
         let cancel = match &call {
             Call::Transcribe(params) => params
@@ -188,6 +203,9 @@ impl Owner {
             Ok(network) => network,
             Err(error) => {
                 self.preview_recording_failed(&call);
+                if let Some(request) = duo_request.as_ref() {
+                    self.state.device.fail_duo(request, error.to_string());
+                }
                 if let Some(complete) = complete {
                     self.state.error = Some(error.to_string());
                     let _ = complete.send(Err(error));
@@ -196,11 +214,25 @@ impl Owner {
             }
         };
         let (peer, epoch) = (network.peer.clone(), network.epoch);
+        let duo_call = duo_request.is_some();
         network.spawn(async move {
-            let result = tokio::select! {
-                biased;
-                _ = cancel.cancelled() => Err(invalid("Request cancelled")),
-                result = execute(&peer, &call) => result,
+            let result = if duo_call {
+                tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => Err(invalid("Request cancelled")),
+                    result = tokio::time::timeout(Duration::from_secs(5), execute(&peer, &call)) => {
+                        match result {
+                            Ok(result) => result,
+                            Err(_) => Err(invalid("Device Duo control timed out")),
+                        }
+                    }
+                }
+            } else {
+                tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => Err(invalid("Request cancelled")),
+                    result = execute(&peer, &call) => result,
+                }
             };
             let _ = sender
                 .send(Event::Finished(
@@ -210,6 +242,7 @@ impl Owner {
                         result,
                         complete,
                         sent,
+                        duo_request,
                     }),
                 ))
                 .await;
@@ -252,6 +285,7 @@ impl Owner {
                         result,
                         complete: Some(complete),
                         sent: None,
+                        duo_request: None,
                     }),
                 ))
                 .await;
@@ -351,6 +385,7 @@ impl Owner {
             result,
             complete,
             sent,
+            duo_request,
         } = result;
         let cancelled = match &call {
             Call::Transcribe(params) => params
@@ -416,12 +451,8 @@ impl Owner {
                         crate::presentation::error::error_message(&error.to_string()),
                     );
                 }
-                if let Call::DeviceInput(request) = &call
-                    && let Some(thread_id) = self.state.selected_thread.clone()
-                {
-                    self.state
-                        .device
-                        .fail_duo_for_input(&thread_id, request, error.to_string());
+                if let Some(request) = duo_request.as_ref() {
+                    self.state.device.fail_duo(request, error.to_string());
                 }
                 match &call {
                     Call::ProviderCommands(request) => {
@@ -460,10 +491,31 @@ impl Owner {
                 Err(error)
             }
             Ok(reply) => {
+                let next_duo = if matches!(&reply, Reply::Done) {
+                    duo_request
+                        .as_ref()
+                        .and_then(|request| self.state.device.complete_duo(request, true, None))
+                } else {
+                    None
+                };
                 if complete.is_some() {
                     self.state.error = None;
                 }
                 self.reply(&call, reply, sent);
+                if let Some(next) = next_duo {
+                    self.job_with_duo(
+                        Call::DeviceInput(d::DeviceInput {
+                            host_id: next.host_id.clone(),
+                            device_id: next.device_id.clone(),
+                            input: d::DeviceInputKind::Duo {
+                                command: super::intents::device_duo_command(next.command.clone()),
+                            },
+                        }),
+                        None,
+                        None,
+                        Some(next),
+                    );
+                }
                 Ok(paired.unwrap_or_default())
             }
         };
@@ -699,24 +751,7 @@ impl Owner {
                     self.setup_cancelled(&request.thread_id, cancelled.cancelled);
                 }
             }
-            Reply::Done => {
-                if let Call::DeviceInput(request) = call
-                    && let Some(thread_id) = self.state.selected_thread.clone()
-                    && let Some(next) = self.state.device.complete_duo_for_input(&thread_id, request)
-                {
-                    self.job(
-                        Call::DeviceInput(d::DeviceInput {
-                            host_id: next.host_id,
-                            device_id: next.device_id,
-                            input: d::DeviceInputKind::Duo {
-                                command: super::intents::device_duo_command(next.command),
-                            },
-                        }),
-                        None,
-                        None,
-                    );
-                }
-            }
+            Reply::Done => {}
         }
         match call {
             Call::RemoveRemote(params) => {

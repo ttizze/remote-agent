@@ -44,7 +44,7 @@ import dev.remoteagent.core.DeviceDuoPoseIntent
 import dev.remoteagent.core.DeviceFoldPostureIntent
 import dev.remoteagent.core.DeviceView
 import dev.remoteagent.core.Intent
-import dev.remoteagent.core.projectDevicePoint
+import dev.remoteagent.core.projectTouchPoint
 
 /** Native device picker, setup and live frame surface for a conversation. */
 @Composable
@@ -361,18 +361,19 @@ private fun Modifier.deviceTouchInput(
 ): Modifier = pointerInput(sequence) {
     awaitEachGesture {
         var lastPoint: Pair<Float, Float>? = null
+        var active = false
         var ended = false
         try {
             awaitPointerEventScope {
                 val down = awaitFirstDown()
             fun send(phase: String, position: androidx.compose.ui.geometry.Offset): Boolean {
-                val point = projectDevicePoint(
+                val point = projectTouchPoint(
+                    position.x,
+                    position.y,
                     size.width,
                     size.height,
                     frameWidth.toFloat(),
                     frameHeight.toFloat(),
-                    position.x,
-                    position.y,
                 ) ?: return false
                 val x = point.x
                 val y = point.y
@@ -386,13 +387,13 @@ private fun Modifier.deviceTouchInput(
                 )
                 return true
             }
-            send("begin", down.position)
+            active = send("begin", down.position)
             while (true) {
                 val event = awaitPointerEvent()
                 val change = event.changes.first()
                 when {
                     change.changedToUp() -> {
-                        if (!send("end", change.position)) {
+                        if (active && !send("end", change.position)) {
                             lastPoint?.let { (x, y) ->
                                 model.perform(
                                     Intent.DeviceAction(
@@ -404,19 +405,24 @@ private fun Modifier.deviceTouchInput(
                             }
                         }
                         ended = true
+                        active = false
                         lastPoint = null
                         break
                     }
                     change.positionChanged() -> {
                         change.consume()
-                        send("move", change.position)
+                        if (active) {
+                            send("move", change.position)
+                        } else {
+                            active = send("begin", change.position)
+                        }
                     }
                 }
             }
             }
         } finally {
             if (!ended) {
-                lastPoint?.let { (x, y) ->
+                if (active) lastPoint?.let { (x, y) ->
                     model.perform(
                         Intent.DeviceAction(
                             hostId,

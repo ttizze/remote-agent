@@ -1400,6 +1400,9 @@ pub enum Intent {
         zoom: agent_protocol::preview::PreviewZoom,
         profile_id: Option<String>,
     },
+    PreviewClearProfileData {
+        profile_id: String,
+    },
     PreviewNavigate {
         tab_id: String,
         url: String,
