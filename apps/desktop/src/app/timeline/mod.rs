@@ -18,10 +18,10 @@ use agent_core::{
         timeline::{
             desktop_layout::{
                 MinimapItemBounds, TIMELINE_MINIMAP_MIN_ITEMS, derive_timeline_minimap_items,
-                resolve_timeline_minimap_current_index,
+                resolve_timeline_minimap_content_width, resolve_timeline_minimap_current_index,
                 resolve_timeline_minimap_current_index_for_visible_range,
                 resolve_timeline_minimap_has_persistent_gutter, resolve_timeline_minimap_height,
-                resolve_timeline_minimap_hit_strip_width,
+                resolve_timeline_minimap_hit_strip_width, resolve_timeline_minimap_in_view,
                 resolve_timeline_minimap_index_from_pointer,
                 resolve_timeline_minimap_navigation_interactive, resolve_timeline_minimap_preview,
                 resolve_timeline_minimap_top_percent,
@@ -76,16 +76,36 @@ pub(crate) struct TimelineState {
     copied: Option<(String, Instant)>,
     /// The turn currently under the minimap pointer or keyboard focus.
     minimap_active: Option<usize>,
+    /// Whether the minimap or one of its controls owns keyboard focus.
+    minimap_focused: bool,
     /// The minimap rail's measured window bounds, used for pointer projection.
     minimap_bounds: Rc<Cell<Bounds<Pixels>>>,
+    /// The preview card's measured height, used to keep it inside the rail.
+    minimap_preview_bounds: Rc<Cell<Bounds<Pixels>>>,
     /// Focus target for keyboard minimap navigation.
     minimap_focus: FocusHandle,
 }
 
 impl TimelineState {
-    pub(crate) fn new(_: &mut Window, cx: &mut Context<Desktop>) -> Self {
+    pub(crate) fn new(window: &mut Window, cx: &mut Context<Desktop>) -> Self {
         let list = ListState::new(1, ListAlignment::Bottom, px(1000.));
         list.set_follow_mode(FollowMode::Tail);
+        let minimap_focus = cx.focus_handle();
+        cx.on_focus_in(&minimap_focus, window, |view, _, cx| {
+            if !view.timeline.minimap_focused {
+                view.timeline.minimap_focused = true;
+                cx.notify();
+            }
+        })
+        .detach();
+        cx.on_focus_out(&minimap_focus, window, |view, _, _, cx| {
+            if view.timeline.minimap_focused || view.timeline.minimap_active.is_some() {
+                view.timeline.minimap_focused = false;
+                view.timeline.minimap_active = None;
+                cx.notify();
+            }
+        })
+        .detach();
         Self {
             disclosure: TimelineDisclosure::default(),
             list,
@@ -97,8 +117,10 @@ impl TimelineState {
             changed_files_keys: HashMap::new(),
             copied: None,
             minimap_active: None,
+            minimap_focused: false,
             minimap_bounds: Rc::default(),
-            minimap_focus: cx.focus_handle(),
+            minimap_preview_bounds: Rc::default(),
+            minimap_focus,
         }
     }
 
@@ -113,6 +135,7 @@ impl TimelineState {
         self.list.reset(1);
         self.disclosure = TimelineDisclosure::default();
         self.minimap_active = None;
+        self.minimap_focused = false;
         self.forget_thread();
     }
 
@@ -122,17 +145,22 @@ impl TimelineState {
         self.setup_details = false;
         self.requested_details.clear();
         self.minimap_active = None;
+        self.minimap_focused = false;
     }
 
     /// Starts showing `thread` from its end.
     fn show(&mut self, thread: &ThreadView) {
-        if self.shown.as_deref() != Some(&thread.thread_id) {
+        let changed_thread = self.shown.as_deref() != Some(&thread.thread_id);
+        if changed_thread {
             self.forget_thread();
         }
         self.shown = Some(thread.thread_id.clone());
         self.list.reset(thread.rows.len() + 1);
         self.list.set_follow_mode(FollowMode::Tail);
         self.minimap_active = None;
+        if changed_thread {
+            self.minimap_focused = false;
+        }
     }
 
     fn copied(&self, key: &str) -> bool {
@@ -209,7 +237,11 @@ fn row_padding(row: &TimelineRow) -> f32 {
 }
 
 impl Desktop {
-    pub(crate) fn render_timeline(&mut self, _: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn render_timeline(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let views = self.views.clone();
         let Some(thread) = views.thread.as_ref() else {
             return div().flex_1().into_any_element();
@@ -261,7 +293,7 @@ impl Desktop {
             .w_full()
             .child(body)
             .child(self.render_timeline_banners(thread, cx))
-            .child(self.render_timeline_minimap(thread, cx))
+            .child(self.render_timeline_minimap(thread, window, cx))
             .when(show_pill, |timeline| {
                 timeline.child(
                     h_flex()
@@ -295,6 +327,7 @@ impl Desktop {
     fn render_timeline_minimap(
         &mut self,
         thread: &ThreadView,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let items = Rc::new(derive_timeline_minimap_items(&thread.rows));
@@ -332,23 +365,37 @@ impl Desktop {
             &measured_bounds,
         )
         .or(fallback_current_index);
+        let in_view = resolve_timeline_minimap_in_view(
+            f64::from(viewport.top()),
+            f64::from(viewport.bottom()),
+            &measured_bounds,
+        );
         let active_index = self
             .timeline
             .minimap_active
-            .filter(|index| *index < items.len());
+            .filter(|index| *index < items.len())
+            .or_else(|| {
+                self.timeline
+                    .minimap_focused
+                    .then_some(current_index.unwrap_or(0).min(items.len() - 1))
+            });
         let active_item = active_index.and_then(|index| items.get(index));
         let preview = resolve_timeline_minimap_preview(active_item);
 
         let viewport_width = f64::from(viewport.size.width);
-        let viewport_height = f64::from(viewport.size.height);
-        let content_width = f64::from(super::ui::metrics().chat_max_width);
+        let content_width = resolve_timeline_minimap_content_width(
+            viewport_width,
+            f64::from(super::ui::metrics().chat_max_width),
+            20.0,
+        );
         let persistent_gutter =
             resolve_timeline_minimap_has_persistent_gutter(viewport_width, content_width);
         let hit_strip_width =
             resolve_timeline_minimap_hit_strip_width(viewport_width, content_width);
         let navigation_interactive =
             resolve_timeline_minimap_navigation_interactive(hit_strip_width);
-        let rail_height = resolve_timeline_minimap_height(items.len(), viewport_height);
+        let rail_height =
+            resolve_timeline_minimap_height(items.len(), f64::from(window.viewport_size().height));
         let rail_width = if preview.is_some() { 352. } else { 24. };
         let interaction_width = if preview.is_some() {
             352.
@@ -393,21 +440,29 @@ impl Desktop {
                 Some(_) => 8.,
                 None => 8.,
             };
-            let marker_color = if current_index == Some(index) {
+            let marker_color = if active_index == Some(index) {
                 color("textMuted").opacity(0.75)
             } else {
                 color("textMuted").opacity(0.35)
             };
-            rail = rail.child(
-                div()
-                    .absolute()
-                    .left_0()
-                    .top(relative(top))
-                    .h(px(2.))
-                    .w(px(width))
-                    .rounded_full()
-                    .bg(marker_color),
-            );
+            let marker = div()
+                .absolute()
+                .left_0()
+                .top(relative(top))
+                .h(px(2.))
+                .w(px(width))
+                .rounded_full()
+                .bg(marker_color)
+                .when(in_view.get(index).copied().unwrap_or(false), |marker| {
+                    marker.child(
+                        div()
+                            .absolute()
+                            .inset_0()
+                            .rounded_full()
+                            .bg(color("text").opacity(0.9)),
+                    )
+                });
+            rail = rail.child(marker);
         }
 
         let focus_items = items.clone();
@@ -497,6 +552,9 @@ impl Desktop {
                 }
             }));
         if let Some(preview) = preview {
+            let preview_bounds = self.timeline.minimap_preview_bounds.clone();
+            let measured_preview_height = f64::from(preview_bounds.get().size.height);
+            let preview_height = measured_preview_height.max(72.0);
             let preview_top = active_index
                 .map(|index| {
                     let marker_top = rail_height
@@ -505,11 +563,11 @@ impl Desktop {
                     let adjustment = if index == 0 {
                         0.0
                     } else if index + 1 == item_count {
-                        72.0
+                        preview_height
                     } else {
-                        36.0
+                        preview_height / 2.0
                     };
-                    (marker_top - adjustment).clamp(0.0, (rail_height - 72.0).max(0.0))
+                    (marker_top - adjustment).clamp(0.0, (rail_height - preview_height).max(0.0))
                 })
                 .unwrap_or(0.0);
             let user_text = preview
@@ -531,6 +589,17 @@ impl Desktop {
                 .p(px(12.))
                 .on_mouse_move(|_, _, cx| cx.stop_propagation())
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .child({
+                    let preview_bounds = preview_bounds.clone();
+                    canvas(
+                        move |layout, _, _| {
+                            preview_bounds.set(layout);
+                        },
+                        |_, _, _, _| {},
+                    )
+                    .absolute()
+                    .inset_0()
+                })
                 .child(
                     div()
                         .w_full()
@@ -572,14 +641,17 @@ impl Desktop {
             .when(!navigation_interactive, |button| button.invisible())
             .opacity(0.)
             .hover(|style| style.opacity(1.))
-            .absolute()
-            .left(px(0.))
-            .top(px(-28.))
             .on_click(cx.listener(move |view, _, _, cx| {
                 if let Some(row) = previous_row {
                     view.scroll_to_timeline_minimap_row(row, cx);
                 }
             }));
+        let previous = div()
+            .track_focus(&focus)
+            .absolute()
+            .left(px(0.))
+            .top(px(-28.))
+            .child(previous);
         let next = Button::new("timeline-minimap-next")
             .icon(icon("chevron-down"))
             .ghost()
@@ -589,14 +661,17 @@ impl Desktop {
             .when(!navigation_interactive, |button| button.invisible())
             .opacity(0.)
             .hover(|style| style.opacity(1.))
-            .absolute()
-            .left(px(0.))
-            .bottom(px(-28.))
             .on_click(cx.listener(move |view, _, _, cx| {
                 if let Some(row) = next_row {
                     view.scroll_to_timeline_minimap_row(row, cx);
                 }
             }));
+        let next = div()
+            .track_focus(&focus)
+            .absolute()
+            .left(px(0.))
+            .bottom(px(-28.))
+            .child(next);
         rail = rail.child(previous).child(next);
 
         let mut root = div()
@@ -606,9 +681,10 @@ impl Desktop {
             .bottom_0()
             .left_0()
             .w(px(root_width as f32))
-            .when(!persistent_gutter, |root| {
-                root.opacity(0.).hover(|style| style.opacity(1.))
-            })
+            .when(
+                !persistent_gutter && !self.timeline.minimap_focused,
+                |root| root.opacity(0.).hover(|style| style.opacity(1.)),
+            )
             .child(
                 v_flex()
                     .size_full()

@@ -2,6 +2,7 @@
 //! expanded group's position, the follow band at the end, and the minimap.
 
 use super::rows::{TimelineRow, TimelineRowKind};
+use crate::js_text::collapse_js_spaces;
 use std::ops::Range;
 
 /// The visible call of an expanded group and how far into it the view was.
@@ -109,7 +110,7 @@ pub fn resolve_timeline_minimap_preview(
 }
 
 fn compact_timeline_minimap_text(text: Option<&str>) -> Option<String> {
-    let text = text?.split_whitespace().collect::<Vec<_>>().join(" ");
+    let text = collapse_js_spaces(text?);
     (!text.is_empty()).then_some(text)
 }
 
@@ -186,6 +187,45 @@ pub fn resolve_timeline_minimap_height(item_count: usize, viewport_height: f64) 
         natural
     };
     natural.min(available)
+}
+
+/// The centered message column is constrained by both the chat width and the
+/// horizontal list padding. This is the measured width used to decide whether
+/// the minimap has a persistent side gutter.
+pub fn resolve_timeline_minimap_content_width(
+    viewport_width: f64,
+    max_content_width: f64,
+    horizontal_padding: f64,
+) -> f64 {
+    if !viewport_width.is_finite()
+        || !max_content_width.is_finite()
+        || !horizontal_padding.is_finite()
+    {
+        return 0.0;
+    }
+    let available = (viewport_width - horizontal_padding.max(0.0) * 2.0).max(0.0);
+    available.min(max_content_width.max(0.0))
+}
+
+/// Mark every measured row whose bounds intersect the list viewport. The
+/// native overlay uses this alongside the current marker, matching the web
+/// minimap's in-view strip rather than treating only the current turn as in
+/// view.
+pub fn resolve_timeline_minimap_in_view(
+    scroll_top: f64,
+    scroll_bottom: f64,
+    item_bounds: &[MinimapItemBounds],
+) -> Vec<bool> {
+    item_bounds
+        .iter()
+        .map(|item| {
+            let Some(top) = item.top else {
+                return false;
+            };
+            let height = item.height.unwrap_or(1.0).max(1.0);
+            top < scroll_bottom && top + height > scroll_top
+        })
+        .collect()
 }
 
 pub fn resolve_timeline_minimap_top_percent(index: usize, item_count: usize) -> f64 {
@@ -444,6 +484,60 @@ mod tests {
             })
         );
         assert_eq!(resolve_timeline_minimap_preview(None), None);
+    }
+
+    #[test]
+    fn compacts_minimap_text_with_javascript_space_semantics() {
+        let item = TimelineMinimapItem {
+            id: "turn".into(),
+            row_index: 0,
+            user_text: Some("\u{feff} Inspect\n this\u{0085} now ".into()),
+            assistant_text: Some("\u{3000}Done\t now".into()),
+        };
+        assert_eq!(
+            resolve_timeline_minimap_preview(Some(&item)).and_then(|preview| preview.user_text),
+            Some("Inspect this\u{0085} now".into())
+        );
+        assert_eq!(
+            resolve_timeline_minimap_preview(Some(&item))
+                .and_then(|preview| preview.assistant_text),
+            Some("Done now".into())
+        );
+    }
+
+    #[test]
+    fn measures_the_centered_content_column_for_narrow_viewports() {
+        assert_eq!(
+            resolve_timeline_minimap_content_width(320.0, 720.0, 20.0),
+            280.0
+        );
+        assert_eq!(
+            resolve_timeline_minimap_content_width(1_000.0, 720.0, 20.0),
+            720.0
+        );
+    }
+
+    #[test]
+    fn projects_all_measured_minimap_rows_in_the_viewport() {
+        let bounds = |top, height| MinimapItemBounds {
+            top: Some(top),
+            height: Some(height),
+        };
+        assert_eq!(
+            resolve_timeline_minimap_in_view(
+                100.0,
+                200.0,
+                &[
+                    bounds(0.0, 20.0),
+                    bounds(190.0, 20.0),
+                    MinimapItemBounds {
+                        top: Some(200.0),
+                        height: None,
+                    },
+                ]
+            ),
+            vec![false, true, false]
+        );
     }
 
     #[test]
