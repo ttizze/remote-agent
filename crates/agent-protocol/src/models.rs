@@ -330,6 +330,9 @@ pub struct ConversationSettings {
     pub branch_naming_mode: agent_domain::BranchNamingMode,
     pub branch_name_prefix: String,
     pub branch_name_instructions: String,
+    /// How often the Git status fetches a subscribed checkout's upstream;
+    /// zero fetches once and then only on explicit refreshes.
+    pub source_control_auto_fetch_interval_seconds: u32,
     pub project_overrides: std::collections::BTreeMap<String, ProjectConversationSettings>,
 }
 impl Default for ConversationSettings {
@@ -344,6 +347,7 @@ impl Default for ConversationSettings {
             branch_naming_mode: naming.mode,
             branch_name_prefix: naming.prefix,
             branch_name_instructions: naming.instructions,
+            source_control_auto_fetch_interval_seconds: 30,
             project_overrides: Default::default(),
         }
     }
@@ -361,6 +365,7 @@ pub struct ConversationSettingsPatch {
     pub branch_naming_mode: Option<agent_domain::BranchNamingMode>,
     pub branch_name_prefix: Option<String>,
     pub branch_name_instructions: Option<String>,
+    pub source_control_auto_fetch_interval_seconds: Option<u32>,
     /// Each entry edits only the supplied project fields; `None` removes all overrides.
     pub project_overrides:
         std::collections::BTreeMap<String, Option<ProjectConversationSettingsPatch>>,
@@ -379,6 +384,7 @@ impl ConversationSettings {
             branch_naming_mode,
             branch_name_prefix,
             branch_name_instructions,
+            source_control_auto_fetch_interval_seconds,
             project_overrides,
         } = patch.clone();
         if let Some(value) = auto_settle {
@@ -404,6 +410,9 @@ impl ConversationSettings {
         }
         if let Some(value) = branch_name_instructions {
             next.branch_name_instructions = value;
+        }
+        if let Some(value) = source_control_auto_fetch_interval_seconds {
+            next.source_control_auto_fetch_interval_seconds = value;
         }
         for (project, overrides) in project_overrides {
             match overrides {
