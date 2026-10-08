@@ -17,6 +17,7 @@ pub mod models;
 pub mod new_thread;
 pub mod notifications;
 pub mod plan;
+pub mod provider_instances;
 pub mod projects;
 pub mod queue;
 pub mod rejection;

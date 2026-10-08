@@ -8,6 +8,7 @@ mod general;
 mod import;
 mod keybindings;
 mod projects;
+mod provider_instances;
 mod providers;
 mod scripts;
 

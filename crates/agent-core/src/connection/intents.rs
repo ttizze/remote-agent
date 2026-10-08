@@ -573,6 +573,21 @@ impl Owner {
                 self.state.default_draft.runtime_mode = mode;
                 Next::Done
             }
+            Intent::SetProviderInstances {
+                provider_instances_json,
+            } => {
+                let provider_instances = serde_json::from_str(&provider_instances_json)
+                    .map_err(|error| invalid(format!("Invalid provider instance settings: {error}")))?;
+                crate::view::provider_instances::validate_map(&provider_instances)
+                    .map_err(invalid)?;
+                Next::call(
+                    Call::UpdateSettings(Box::new(m::HostSettingsPatch {
+                        provider_instances: Some(provider_instances),
+                        ..Default::default()
+                    })),
+                    None,
+                )
+            }
             Intent::ToggleFavoriteModel { instance_id, model } => {
                 self.toggle_favorite_model(&instance_id, &model);
                 Next::Done
