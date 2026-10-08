@@ -44,6 +44,50 @@ impl Next {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn registration() -> PushDeviceRegistration {
+        PushDeviceRegistration {
+            device_id: "device".into(),
+            platform: "ios".into(),
+            token: "token".into(),
+            live_activity_token: Some("activity".into()),
+            push_to_start_token: Some("start".into()),
+            bundle_id: Some("dev.remoteagent.mobile".into()),
+            apns_environment: Some("sandbox".into()),
+            notifications_enabled: true,
+            notify_on_approval: true,
+            notify_on_input: true,
+            notify_on_completion: false,
+            notify_on_failure: true,
+            live_activities_enabled: true,
+        }
+    }
+
+    #[test]
+    fn push_registration_maps_native_values_to_host_contract() {
+        let value = push_registration(registration()).unwrap();
+        assert_eq!(value.platform, agent_protocol::push::PushPlatform::Ios);
+        assert_eq!(
+            value.apns_environment,
+            Some(agent_protocol::push::ApnsEnvironment::Sandbox)
+        );
+        assert!(!value.preferences.notify_on_completion);
+    }
+
+    #[test]
+    fn push_registration_rejects_unknown_provider_values() {
+        let mut value = registration();
+        value.platform = "web".into();
+        assert!(push_registration(value).is_err());
+        let mut value = registration();
+        value.apns_environment = Some("staging".into());
+        assert!(push_registration(value).is_err());
+    }
+}
+
 pub(super) fn invalid(error: impl std::fmt::Display) -> PeerError {
     super::invalid(error)
 }
@@ -62,6 +106,44 @@ fn approval_decision(value: &str) -> Result<ApprovalDecision, PeerError> {
         "cancel" => ApprovalDecision::Cancel,
         _ => return Err(invalid("Unknown approval decision")),
     })
+}
+
+fn push_registration(
+    registration: PushDeviceRegistration,
+) -> Result<agent_protocol::push::RegisterPushDevice, PeerError> {
+    let platform = match registration.platform.as_str() {
+        "ios" => agent_protocol::push::PushPlatform::Ios,
+        "android" => agent_protocol::push::PushPlatform::Android,
+        _ => return Err(invalid("Unknown push platform")),
+    };
+    let apns_environment = registration
+        .apns_environment
+        .as_deref()
+        .map(|value| match value {
+            "sandbox" => Ok(agent_protocol::push::ApnsEnvironment::Sandbox),
+            "production" => Ok(agent_protocol::push::ApnsEnvironment::Production),
+            _ => Err(invalid("Unknown APNs environment")),
+        })
+        .transpose()?;
+    let request = agent_protocol::push::RegisterPushDevice {
+        device_id: registration.device_id,
+        platform,
+        token: registration.token,
+        live_activity_token: registration.live_activity_token,
+        push_to_start_token: registration.push_to_start_token,
+        bundle_id: registration.bundle_id,
+        apns_environment,
+        preferences: agent_protocol::push::PushPreferences {
+            notifications_enabled: registration.notifications_enabled,
+            notify_on_approval: registration.notify_on_approval,
+            notify_on_input: registration.notify_on_input,
+            notify_on_completion: registration.notify_on_completion,
+            notify_on_failure: registration.notify_on_failure,
+            live_activities_enabled: registration.live_activities_enabled,
+        },
+    };
+    request.validate().map_err(invalid)?;
+    Ok(request)
 }
 
 /// The proposed plan the composer offers to implement or refine, by the
@@ -283,6 +365,20 @@ impl Owner {
                 Next::Done
             }
             Intent::SubmitAnswers { request_id } => self.submit_answers(request_id)?,
+            Intent::RegisterPushDevice { registration } => Next::call(
+                Call::RegisterPushDevice(push_registration(registration)?),
+                None,
+            ),
+            Intent::UnregisterPushDevice { device_id } => {
+                let params = agent_protocol::push::PushDeviceId { device_id };
+                params.validate().map_err(invalid)?;
+                Next::call(Call::UnregisterPushDevice(params), None)
+            }
+            Intent::SetPushDeviceActive { device_id, active } => {
+                let params = agent_protocol::push::SetPushDeviceActive { device_id, active };
+                params.validate().map_err(invalid)?;
+                Next::call(Call::SetPushDeviceActive(params), None)
+            }
             Intent::MoveThread {
                 thread_id: moved,
                 section,

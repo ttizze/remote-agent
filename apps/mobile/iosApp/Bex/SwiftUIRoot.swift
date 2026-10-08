@@ -36,6 +36,11 @@ struct BexSwiftUIRoot: View {
         .onReceive(NotificationCenter.default.publisher(for: .mobileAppearanceDidChange)) { _ in
             appearanceRevision += 1
         }
+        .onReceive(NotificationCenter.default.publisher(for: .agentPushDeepLink)) { notification in
+            guard let deepLink = notification.object as? String else { return }
+            openPushDeepLink(deepLink)
+        }
+        .onOpenURL { openPushDeepLink($0.absoluteString) }
         .sheet(isPresented: $model.isScanning) {
             QRScannerSheet { model.scanned($0) }
                 .interactiveDismissDisabled()
@@ -51,6 +56,15 @@ struct BexSwiftUIRoot: View {
                       transcriptionRecipient: model.pairingInvitation?.transcriptionRecipient,
                       prepare: model.preparePairing, confirm: model.confirmPairing,
                       change: model.openPairing, cancel: model.dismissPairing)
+    }
+
+    private func openPushDeepLink(_ value: String) {
+        if AgentPushCenter.isUsageDeepLink(value) {
+            model.openUsageDeepLink()
+            return
+        }
+        guard let target = AgentPushCenter.threadTarget(from: value) else { return }
+        model.openPushThread(hostId: target.hostId, threadId: target.threadId)
     }
 }
 

@@ -34,6 +34,10 @@ class MainActivity : ComponentActivity() {
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
             localNetworkGranted = granted
         }
+    private val requestNotifications =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) {
+            model.refreshPushRegistration()
+        }
 
     override fun onResume() {
         super.onResume()
@@ -49,10 +53,18 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         continueOverInternet = savedInstanceState?.getBoolean("continueOverInternet") ?: false
+        intent?.let(model::openPushDeepLink)
         setContent {
             if (localNetworkGranted || continueOverInternet) {
                 val requestQrScan = rememberAndroidQrScanner(this)
-                RemoteAgentApp(activity = this, model = model, requestQrScan = requestQrScan)
+                RemoteAgentApp(
+                    activity = this,
+                    model = model,
+                    requestQrScan = requestQrScan,
+                    requestNotifications = {
+                        requestNotifications.launch(Manifest.permission.POST_NOTIFICATIONS)
+                    },
+                )
             } else {
                 AppMaterialTheme {
                     Column(Modifier.safeDrawingPadding().padding(24.dp)) {
@@ -78,5 +90,11 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        intent.let(model::openPushDeepLink)
     }
 }

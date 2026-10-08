@@ -6,10 +6,27 @@ struct BexIOSApp: App {
     @Environment(\.scenePhase) private var scenePhase
     @State private var wasBackgrounded = false
     @StateObject private var model = BexAppViewModel()
+    @UIApplicationDelegateAdaptor(AgentPushCenter.self) private var pushCenter
 
     var body: some Scene {
         WindowGroup {
             BexSwiftUIRoot(model: model)
+                .onAppear {
+                    model.setActivityUpdater { [weak pushCenter] contentState in
+                        guard #available(iOS 16.1, *) else { return }
+                        Task { @MainActor in
+                            await pushCenter?.reconcileActivity(contentState: contentState)
+                        }
+                    }
+                    pushCenter.configure(
+                        register: { [weak model] registration in model?.registerPush(registration) },
+                        setActive: { [weak model] deviceId, active in
+                            model?.setPushActive(deviceId: deviceId, active: active)
+                        },
+                        visibleThread: { [weak model] in model?.visiblePushThreadDeepLink() },
+                        preferences: { [weak model] in model?.pushPreferences() ?? .default }
+                    )
+                }
                 .onChange(of: scenePhase) { _, phase in
                     model.recordScene(phase == .active ? 1 : phase == .inactive ? 2 : 3)
                     switch phase {

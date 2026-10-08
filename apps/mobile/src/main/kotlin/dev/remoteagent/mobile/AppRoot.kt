@@ -28,6 +28,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
@@ -44,6 +45,7 @@ internal fun RemoteAgentApp(
     activity: ComponentActivity,
     model: AndroidAppModel,
     requestQrScan: (onContents: (String) -> Unit) -> Unit,
+    requestNotifications: () -> Unit,
 ) {
     DisposableEffect(model, activity) {
         val observer = AndroidConnectionLifecycle(model::foreground, model::background)
@@ -51,6 +53,12 @@ internal fun RemoteAgentApp(
         onDispose { activity.lifecycle.removeObserver(observer) }
     }
     BackHandler(model.stack.size > 1) { model.back() }
+    LaunchedEffect(model.route, model.profileId) {
+        PushNotificationCenter.setVisibleThread(model.visibleThreadDeepLink())
+    }
+    LaunchedEffect(model.snapshot, model.profileId) {
+        model.requestPushPermissionIfNeeded(requestNotifications)
+    }
     AppMaterialTheme {
         val context = LocalContext.current
         val root = model.snapshot.currentDirectory()

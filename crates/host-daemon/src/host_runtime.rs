@@ -33,6 +33,11 @@ impl HostRuntime {
         invitation_lifetime: Duration,
     ) -> Self {
         let local_node = credentials.local_identity().await.node_id();
+        // Notifications route back through the mobile profile's Host ticket.
+        // The endpoint identity is the Host/environment id; local_node is the
+        // management device identity and would make notification deep links
+        // fail profile validation.
+        service.set_push_host_id(endpoint.node_id().to_string());
         Self {
             service,
             endpoint,
@@ -403,6 +408,10 @@ impl HostRuntime {
                 next.trust.allowed.remove(&node_id);
                 *record = self.credentials.persist(next).await?;
                 self.service.revoke_device(&node_id.to_string());
+                self.service
+                    .remove_push_principal(&node_id.to_string())
+                    .await
+                    .context("failed to remove revoked push registrations")?;
                 for connection in self.active.lock().unwrap().values() {
                     if connection.node_id() == node_id {
                         connection.close();

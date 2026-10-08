@@ -3,6 +3,7 @@ mod commands;
 pub(crate) mod connections;
 pub(crate) mod identity;
 pub(crate) mod permissions;
+mod push;
 mod resources;
 pub(crate) mod service;
 pub use connections::{HostSession, SessionId};

@@ -1,11 +1,13 @@
 package dev.remoteagent.mobile
 
 import android.content.Context
+import android.content.IntentFilter
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.ViewModel
+import com.google.firebase.messaging.FirebaseMessaging
 import dev.remoteagent.core.AgentStore
 import dev.remoteagent.core.ArtifactTemplate
 import dev.remoteagent.core.BrowserFrame
@@ -15,6 +17,7 @@ import dev.remoteagent.core.DictationPreparation
 import dev.remoteagent.core.Intent
 import dev.remoteagent.core.Invitation
 import dev.remoteagent.core.Outcome
+import dev.remoteagent.core.PushDeviceRegistration
 import dev.remoteagent.core.Snapshot
 import dev.remoteagent.core.appendArtifactTemplateUsePrompt
 import dev.remoteagent.core.generateIdentity
@@ -119,11 +122,21 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
     var composerText by mutableStateOf("")
         private set
 
+    /** Number of native Widget/notification requests waiting for Usage navigation. */
+    var usageDeepLinkRequests by mutableIntStateOf(0)
+        private set
+
+    var pushCapability by mutableStateOf(PushCapability.UnsupportedUnconfigured)
+        private set
+
     /** Counts requests to focus the composer with the cursor at the end of the draft. */
     var composerFocusRequests by mutableIntStateOf(0)
         private set
 
     private var followingFrom: String? = null
+    private var pendingPushThread: Pair<String, String>? = null
+    private var pushPermissionPrompted = false
+    private var detachedPushLifecycle: Job? = null
     private var owner: AgentStore? = null
     private var initialization: Job? = null
     private var connection: Job? = null
@@ -139,8 +152,18 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
                     .onFailure { error -> withContext(Dispatchers.Main) { notice = error.message } }
             }
         }
+    private val pushTokenReceiver = object : android.content.BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: android.content.Intent) {
+            if (intent.action == ACTION_PUSH_TOKEN_UPDATED) refreshPushRegistration()
+        }
+    }
 
     init {
+        context.registerReceiver(
+            pushTokenReceiver,
+            IntentFilter(ACTION_PUSH_TOKEN_UPDATED),
+            Context.RECEIVER_NOT_EXPORTED,
+        )
         runCatching { profiles = repository.profiles() }.onFailure { notice = it.message }
         if (profiles.isEmpty()) stack = listOf(Route.Pairing)
         repository.selected?.takeIf { id -> profiles.any { it.id == id } }?.let(::selectProfile)
@@ -265,6 +288,12 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
         navigate(Route.Thread(id))
     }
 
+    fun visibleThreadDeepLink(): String? {
+        val host = profileId ?: return null
+        val thread = route as? Route.Thread ?: return null
+        return "remoteagent://threads/${android.net.Uri.encode(host)}/${android.net.Uri.encode(thread.id)}"
+    }
+
     fun back() {
         val leaving = stack.lastOrNull() ?: return
         if (stack.size <= 1) return
@@ -297,11 +326,16 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
             return
         }
         val old = detach()
+        val oldPushLifecycle = detachedPushLifecycle
         profileId = id
         repository.selected = id
         publish(Snapshot.empty())
-        scope.launch { runCatching { old?.shutdown() } }
+        scope.launch {
+            oldPushLifecycle?.join()
+            runCatching { old?.shutdown() }
+        }
         initialization = scope.launch {
+            oldPushLifecycle?.join()
             try {
                 val store =
                     AgentStore.offline(
@@ -317,6 +351,8 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
                 owner = store
                 initialization = null
                 publish(store.snapshot())
+                refreshPushRegistration()
+                openPendingPushThreadIfReady()
                 while (pending.isNotEmpty()) {
                     val (intent, complete) = pending.removeFirst()
                     perform(intent, complete)
@@ -335,7 +371,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
         }
     }
 
-    private fun detach(): AgentStore? {
+    private fun detach(unregisterPush: Boolean = false): AgentStore? {
         persist()
         draftEdits.reset()
         initialization?.cancel()
@@ -345,6 +381,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
         busy = false
         while (pending.isNotEmpty()) pending.removeFirst().second(Result.failure(CancellationException()))
         val old = owner
+        detachedPushLifecycle = if (unregisterPush) null else old?.let(::deactivatePush)
         owner = null
         return old
     }
@@ -353,11 +390,17 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
         runCatching {
                 AndroidCredentialStore(context, id).remove()
                 if (profileId == id) {
-                    val old = detach()
+                    val unregistration = owner?.let(::unregisterPush)
+                    val old = detach(unregisterPush = true)
+                    val oldPushLifecycle = detachedPushLifecycle
                     profileId = null
                     repository.selected = null
                     publish(Snapshot.empty())
-                    scope.launch { old?.shutdown() }
+                    scope.launch {
+                        unregistration?.join()
+                        oldPushLifecycle?.join()
+                        old?.shutdown()
+                    }
                 }
                 profiles = profiles.filterNot { it.id == id }
                 repository.saveProfiles(profiles)
@@ -416,8 +459,10 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
                 initialization?.cancel()
                 observation?.cancel()
                 val old = owner
+                val oldPushLifecycle = old?.let(::deactivatePush)
                 owner = null
                 publish(Snapshot.empty())
+                oldPushLifecycle?.join()
                 profiles = profiles.filterNot { it.id == id } + HostProfile(id, target.hostName, target.endpoint)
                 repository.saveProfiles(profiles)
                 repository.selected = id
@@ -425,6 +470,8 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
                 owner = store
                 paired = null
                 publish(store.snapshot())
+                refreshPushRegistration()
+                openPendingPushThreadIfReady()
                 observe(store, id)
                 invitation = null
                 stack = listOf(Route.Home)
@@ -467,6 +514,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
                 if (profileId == profile.id && owner === store) {
                     publish(store.snapshot())
                     busy = false
+                    refreshPushRegistration()
                 }
             } catch (error: CancellationException) {
                 throw error
@@ -502,12 +550,15 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
     private fun publish(next: Snapshot) {
         if (!next.supersedes(snapshot)) return
         if (next === snapshot) return
+        val notificationModeChanged =
+            snapshot.preferences().notificationMode != next.preferences().notificationMode
         val name = next.hostName()
         if (name != null && profiles.any { it.id == profileId && it.name != name }) {
             profiles = profiles.map { if (it.id == profileId) it.copy(name = name) else it }
             repository.saveProfiles(profiles)
         }
         snapshot = next
+        if (notificationModeChanged) refreshPushRegistration()
         val selected = next.selectedThreadId()
         val from = followingFrom
         if (from != null && selected != null && selected != from) {
@@ -548,6 +599,191 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
         scope.launch { runCatching { store.flush() } }
     }
 
+    fun openPushDeepLink(intent: android.content.Intent) {
+        if (intent.getBooleanExtra(EXTRA_OPEN_USAGE, false)) {
+            openUsageDeepLink()
+            return
+        }
+        val value = intent.getStringExtra(EXTRA_PUSH_DEEP_LINK)
+            ?: intent.data?.takeIf { it.scheme == "remoteagent" }?.toString()
+            ?: return
+        val uri = runCatching { android.net.Uri.parse(value) }.getOrNull() ?: return
+        if (isUsageDeepLink(uri)) {
+            openUsageDeepLink()
+            return
+        }
+        if (uri.scheme != "remoteagent" || uri.host != "threads") return
+        if (uri.userInfo != null || uri.port != -1 || uri.fragment != null || uri.query != null) return
+        val parts = uri.encodedPath
+            ?.split('/')
+            ?.takeIf { values ->
+                values.size == 3 && values[0].isEmpty() && values[1].isNotEmpty() && values[2].isNotEmpty()
+            }
+            ?.drop(1)
+            ?.map { android.net.Uri.decode(it) }
+            ?.takeIf { values -> values.all(::validPushRouteSegment) }
+            ?: return
+        openPushThread(parts[0], parts[1])
+    }
+
+    private fun isUsageDeepLink(uri: android.net.Uri): Boolean =
+        uri.scheme == "remoteagent" &&
+            uri.host == "settings" &&
+            uri.encodedPath == "/usage" &&
+            uri.userInfo == null &&
+            uri.port == -1 &&
+            uri.fragment == null &&
+            uri.queryParameterNames == setOf("tab") &&
+            uri.getQueryParameter("tab") == "limits"
+
+    private fun validPushRouteSegment(value: String): Boolean =
+        value.isNotEmpty() && value != "." && value != ".." &&
+            value.none { it == '/' || it == '\\' || it.isISOControl() }
+
+    private fun openUsageDeepLink() {
+        usageDeepLinkRequests += 1
+    }
+
+    /** Usage navigation consumes one launch request after selecting the limits tab. */
+    fun consumeUsageDeepLinkRequest() {
+        if (usageDeepLinkRequests > 0) usageDeepLinkRequests -= 1
+    }
+
+    private fun openPushThread(hostId: String, threadId: String) {
+        if (profiles.none { it.id == hostId }) return
+        if (profileId != hostId || owner == null) {
+            pendingPushThread = hostId to threadId
+            if (profileId != hostId) selectProfile(hostId)
+            return
+        }
+        openThread(threadId)
+    }
+
+    private fun openPendingPushThreadIfReady() {
+        val pending = pendingPushThread ?: return
+        if (profileId != pending.first || owner == null) return
+        pendingPushThread = null
+        openThread(pending.second)
+    }
+
+    fun refreshPushRegistration() {
+        if (owner == null) return
+        val preferences = pushPreferences()
+        if (!preferences.notificationsEnabled) {
+            pushCapability = PushCapability.DisabledByPreference
+            deactivatePushIfAvailable()
+            return
+        }
+        if (!FirebasePushBootstrap.ensure(context)) {
+            pushCapability = PushCapability.UnsupportedUnconfigured
+            deactivatePushIfAvailable()
+            return
+        }
+        pushCapability = PushCapability.Ready
+        val token = PushRegistrationStore.token(context)
+        if (token == null) {
+            requestPushToken()
+            return
+        }
+        val registration = PushDeviceRegistration(
+            PushRegistrationStore.deviceId(context),
+            "android",
+            token,
+            null,
+            null,
+            null,
+            null,
+            preferences.notificationsEnabled,
+            preferences.notifyOnApproval,
+            preferences.notifyOnInput,
+            preferences.notifyOnCompletion,
+            preferences.notifyOnFailure,
+            preferences.liveActivitiesEnabled,
+        )
+        perform(Intent.RegisterPushDevice(registration)) {
+            if (it.isSuccess) {
+                perform(Intent.SetPushDeviceActive(PushRegistrationStore.deviceId(context), true))
+            }
+        }
+    }
+
+    private fun requestPushToken() {
+        if (!FirebasePushBootstrap.ensure(context)) {
+            pushCapability = PushCapability.UnsupportedUnconfigured
+            return
+        }
+        runCatching {
+            FirebaseMessaging.getInstance().token
+                .addOnSuccessListener { token ->
+                    if (token.isBlank()) {
+                        pushCapability = PushCapability.ProviderUnavailable
+                        return@addOnSuccessListener
+                    }
+                    PushRegistrationStore.saveToken(context, token)
+                    refreshPushRegistration()
+                }
+                .addOnFailureListener { pushCapability = PushCapability.ProviderUnavailable }
+        }.onFailure { pushCapability = PushCapability.ProviderUnavailable }
+    }
+
+    /** Core notification settings gate the OS prompt and provider registration. */
+    fun requestPushPermissionIfNeeded(request: () -> Unit) {
+        if (pushPermissionPrompted || !PushNotificationCenter.canRequestPermission(context)) return
+        if (!notificationsOptedIn()) return
+        if (!FirebasePushBootstrap.ensure(context)) {
+            pushCapability = PushCapability.UnsupportedUnconfigured
+            deactivatePushIfAvailable()
+            return
+        }
+        pushPermissionPrompted = true
+        request()
+    }
+
+    /** The settings branch maps this to Snapshot.preferences().notificationMode. */
+    private fun notificationsOptedIn(): Boolean =
+        when (snapshot.preferences().notificationMode) {
+            dev.remoteagent.core.NotificationMode.NOTIFICATIONS,
+            dev.remoteagent.core.NotificationMode.NOTIFICATIONS_AND_SOUND -> true
+            else -> false
+        }
+
+    private fun pushPreferences(): PushRegistrationPreferences {
+        val enabled = notificationsOptedIn() && PushNotificationCenter.notificationsEnabled(context)
+        return PushRegistrationPreferences(
+            notificationsEnabled = enabled,
+            notifyOnApproval = enabled,
+            notifyOnInput = enabled,
+            notifyOnCompletion = enabled,
+            notifyOnFailure = enabled,
+            // Android renders the same aggregate as an ongoing notification;
+            // it uses the ActivityKit flag as the shared awareness preference.
+            liveActivitiesEnabled = enabled,
+        )
+    }
+
+    private fun deactivatePush(store: AgentStore): Job? {
+        val receipt = runCatching {
+            store.dispatch(
+                Intent.SetPushDeviceActive(PushRegistrationStore.deviceId(context), false)
+            )
+        }.getOrNull() ?: return null
+        return scope.launch {
+            runCatching { receipt.wait() }
+        }
+    }
+
+    private fun unregisterPush(store: AgentStore): Job? {
+        val receipt = runCatching {
+            store.dispatch(Intent.UnregisterPushDevice(PushRegistrationStore.deviceId(context)))
+        }.getOrNull() ?: return null
+        return scope.launch { runCatching { receipt.wait() } }
+    }
+
+    private fun deactivatePushIfAvailable() {
+        val store = owner ?: return
+        deactivatePush(store)
+    }
+
     private suspend fun <T> withStore(block: suspend (AgentStore) -> T): T {
         val store = owner ?: error("Host not connected")
         val host = profileId
@@ -582,6 +818,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
     suspend fun browser(request: BrowserRequest): BrowserFrame = withStore { it.browser(request) }
 
     override fun onCleared() {
+        context.unregisterReceiver(pushTokenReceiver)
         observation?.cancel()
         connection?.cancel()
         initialization?.cancel()
