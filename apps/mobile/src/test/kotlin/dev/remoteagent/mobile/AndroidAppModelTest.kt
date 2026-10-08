@@ -34,10 +34,7 @@ class AndroidAppModelTest {
             preferences.edit().putString("orchestration-model-defaults", "%not-base64").commit()
             val failure = repository.modelPreferences().exceptionOrNull()
             assertNotNull(failure)
-            assertEquals(
-                "Saved model preferences could not be read; defaults were restored.",
-                failure?.message,
-            )
+            assertEquals("Saved model preferences could not be read; defaults were restored.", failure?.message)
         } finally {
             preferences.edit().remove("orchestration-model-defaults").commit()
         }
@@ -56,10 +53,7 @@ class AndroidAppModelTest {
             val persisted = repository.modelPreferences().getOrThrow()
             assertTrue(persisted.isNotEmpty())
             assertTrue(model.snapshot.serializeModelPreferences().contentEquals(persisted))
-            assertEquals(
-                "Saved model preferences could not be read; defaults were restored.",
-                model.notice,
-            )
+            assertEquals("Saved model preferences could not be read; defaults were restored.", model.notice)
         } finally {
             viewModels.clear()
             runCurrent()

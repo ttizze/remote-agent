@@ -880,7 +880,7 @@ mod tests {
             &[ActivityRecord {
                 phase: "waiting_for_input".into(),
                 updated_at_ms: 200,
-                ..left
+                ..left.clone()
             }],
             true,
             200,
@@ -896,7 +896,7 @@ mod tests {
             &[ActivityRecord {
                 phase: "waiting_for_input".into(),
                 updated_at_ms: 200,
-                ..right
+                ..right.clone()
             }],
             true,
             200,
@@ -1011,7 +1011,10 @@ mod tests {
             let text = text.into_iter().collect::<String>();
             let bounded = bounded_activity_text(&text, budget);
             prop_assert!(bounded.encode_utf16().count() <= budget);
-            prop_assert!(!bounded.contains('\u{fffd}') || text.contains('\u{fffd}'));
+            prop_assert!(
+                !bounded.contains('\u{fffd}') || text.contains('\u{fffd}'),
+                "bounded text must not introduce U+FFFD"
+            );
         }
     }
 }
