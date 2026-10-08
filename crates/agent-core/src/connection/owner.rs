@@ -29,27 +29,16 @@ use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 pub type Waiter = oneshot::Sender<Result<Outcome, PeerError>>;
 
 /// Admission order for native input plans.  A mutex around the wire call
-/// would serialize whichever spawned task gets scheduled first; this
-/// sequence assigns order in the owner before spawning and advances a
-/// per-connection watch cursor after each plan completes.
+/// would serialize whichever spawned task gets scheduled first; the owner
+/// assigns order before spawning and advances this per-connection watch
+/// cursor after each plan completes.
 pub(super) struct DeviceInputSequencer {
-    next_ticket: std::sync::Mutex<u64>,
     turn: watch::Sender<u64>,
 }
 impl DeviceInputSequencer {
     pub(super) fn new() -> Self {
         let (turn, _) = watch::channel(0);
-        Self {
-            next_ticket: std::sync::Mutex::new(0),
-            turn,
-        }
-    }
-
-    pub(super) fn ticket(&self) -> u64 {
-        let mut next = self.next_ticket.lock().unwrap_or_else(|error| error.into_inner());
-        let ticket = *next;
-        *next = (*next).saturating_add(1);
-        ticket
+        Self { turn }
     }
 
     pub(super) async fn wait_turn(&self, ticket: u64) {
@@ -65,7 +54,10 @@ impl DeviceInputSequencer {
     }
 
     pub(super) fn complete(&self, ticket: u64) {
-        let _ = self.turn.send(ticket.saturating_add(1));
+        // `send` does not update a watch channel when the last receiver has
+        // already returned.  Retain the cursor so a plan admitted after a
+        // completed plan can still take its turn.
+        self.turn.send_replace(ticket.saturating_add(1));
     }
 }
 
@@ -261,6 +253,9 @@ pub(super) struct Owner {
     /// ordinary key, and release cannot overtake one another across separate
     /// UI events.
     pub device_input_queue: Arc<DeviceInputSequencer>,
+    /// Ticket admission happens on the owner event loop, so no mutex is
+    /// needed around the monotonically increasing cursor.
+    next_device_input_ticket: u64,
     /// The shell, outbox and Working preference the list holds last saw.
     pub observed_list: Option<ObservedList>,
     /// The thread whose setup "Work locally" is cancelling.
@@ -321,6 +316,7 @@ impl Owner {
             waiters: BTreeMap::new(),
             dictations: BTreeMap::new(),
             device_input_queue: Arc::new(DeviceInputSequencer::new()),
+            next_device_input_ticket: 0,
             observed_list: None,
             work_locally: None,
         };
@@ -688,6 +684,7 @@ impl Owner {
         self.state.device.clear_duo_on_disconnect();
         self.state.device.clear_input_state_on_disconnect();
         self.device_input_queue = Arc::new(DeviceInputSequencer::new());
+        self.next_device_input_ticket = 0;
         self.state.connected = true;
         self.state.host_name = Some(host_name);
         self.state.error = None;
@@ -761,6 +758,7 @@ impl Owner {
         self.state.device.clear_duo_on_disconnect();
         self.state.device.clear_input_state_on_disconnect();
         self.device_input_queue = Arc::new(DeviceInputSequencer::new());
+        self.next_device_input_ticket = 0;
         Arc::make_mut(&mut self.state.shell).disconnected();
         if let Some(archived) = self.state.archived.as_mut() {
             Arc::make_mut(archived).disconnected();
@@ -885,5 +883,45 @@ impl Owner {
                 t.output_bytes -= t.output.pop_front().expect("nonempty output").data.len();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DeviceInputSequencer;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn completed_cursor_survives_when_the_next_plan_is_not_admitted_yet() {
+        let queue = DeviceInputSequencer::new();
+        queue.wait_turn(0).await;
+        queue.complete(0);
+
+        tokio::time::timeout(Duration::from_millis(100), queue.wait_turn(1))
+            .await
+            .expect("the retained cursor must admit the next plan");
+    }
+
+    #[tokio::test]
+    async fn concurrent_plan_error_still_advances_the_fifo() {
+        let queue = Arc::new(DeviceInputSequencer::new());
+        let first = queue.clone();
+        let second = queue.clone();
+        let first_task = tokio::spawn(async move {
+            first.wait_turn(0).await;
+            // An errored wire plan completes its ticket in the same way as a
+            // successful plan, so later input cannot remain blocked.
+            first.complete(0);
+        });
+        let second_task = tokio::spawn(async move {
+            second.wait_turn(1).await;
+            second.complete(1);
+        });
+        first_task.await.expect("first plan task must finish");
+        tokio::time::timeout(Duration::from_millis(100), second_task)
+            .await
+            .expect("second plan must be admitted after the first")
+            .expect("second plan task must finish");
     }
 }

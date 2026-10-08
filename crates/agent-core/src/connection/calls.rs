@@ -299,7 +299,8 @@ impl Owner {
         };
         let (peer, epoch) = (network.peer.clone(), network.epoch);
         let queue = self.device_input_queue.clone();
-        let ticket = queue.ticket();
+        let ticket = self.next_device_input_ticket;
+        self.next_device_input_ticket = self.next_device_input_ticket.saturating_add(1);
         network.spawn(async move {
             queue.wait_turn(ticket).await;
             let mut result = Ok(Reply::Done);
