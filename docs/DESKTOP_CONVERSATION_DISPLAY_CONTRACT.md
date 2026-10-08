@@ -69,6 +69,12 @@ hydration must not change this default.
   using the latest query. A reply for that query remains valid after task
   navigation; a reply for an older search or display limit must not replace it.
   List publication must preserve the selected task and draft.
+- Known tasks update running and unread state directly from activity notices.
+  Refresh the list when work becomes inactive to read current Git state and
+  metadata, and when discovering sessions or receiving user messages or renames.
+  Repeated activity notices, individual command completions, and updates to
+  already-known subagents must not trigger additional list reads. Turn updates
+  use the Host's global activity notice for the end-of-work list refresh.
 
 - Load the latest bounded page first; request older pages using the server's
   opaque cursor. A refresh must not fetch the entire conversation.
@@ -538,7 +544,7 @@ results after navigation.
 - 実行ディレクトリが linked worktree のセッションは、ローカル `main` との分岐点からブランチに残っているファイル差分、未コミットの編集、ステージ済み変更、未追跡ファイルがあれば、オレンジの Lucide `diff`（＋／−）アイコンを表示する。未マージのコミットがあっても、空コミットや変更の取り消しでファイル差分が残っていなければ表示しない。`main` 側だけにある更新は差分に数えない。変更がなく作業ブランチの先端が `main` に取り込まれていれば、紫の既存 Lucide `git-merge` アイコンを表示する（チェックの合成は行わない）。実行中のローディング／完了・未確認表示の右に並べ、両方の状態を保持する。PC・iOS・Android は共有 `ThreadSummary.worktree_status` を表示する。
 - 作成直後で変更のないブランチ、main 自体、detached HEAD、Git の確認失敗では表示しない。マージ済みの判定は、ブランチの reflog の最古のコミットと先端が異なることを作業履歴の条件にする。作成履歴が不明でも未反映の変更は表示できる。squash/rebase による別コミットへの置換は判定対象外。
 - Bex が管理する作業フォルダを削除したあとも、会話のネイティブ履歴に保存されたブランチと元リポジトリの対応から、残ったブランチの差分・マージ済みを判定する。作業フォルダがある場合は現在の Git 状態を優先する。保存ブランチや元リポジトリが不明、ブランチが削除済みの場合は表示しない。
-- 一覧の再取得時（既存の実行状態通知・画面復帰・手動更新）に再判定する。マージ済みのあとにファイル差分を追加すれば差分アイコンに切り替え、未コミットの編集を取り消すとマージ済みに戻る。Git の状態をプロジェクト設定のキャッシュに保存しない。
+- 一覧の再取得時（実行終了への状態遷移・新しいタスクの発見・画面復帰・手動更新など）に再判定する。同じ状態の反復通知や個々のコマンド完了では一覧を再取得せず、実行中・完了未確認の表示は状態通知から反映する。マージ済みのあとにファイル差分を追加すれば次の再取得で差分アイコンに切り替え、未コミットの編集を取り消すとマージ済みに戻る。Git の状態をプロジェクト設定のキャッシュに保存しない。
 - 受け入れ確認: core の `list_preserves_worktree_status_alongside_activity_after_serialization_and_refresh`、実 Git と Host/Store の `session_list_tracks_real_worktree_changes_and_merges_through_host_and_store`、iOS の `testSimulatorMarksMergedWorktreesToTheRightOfRunningStatus`、Android の `worktreeMarksCoexistWithRunningAndUnreadUsingTheCoreAdapter`。
 
 ## Immediate submission feedback

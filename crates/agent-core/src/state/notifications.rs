@@ -11,27 +11,34 @@ pub(super) fn notification(
         finished,
     } = message
     {
+        let activity_changed = previous.activity.active.get(&session) != Some(&active);
+        let was_unread = previous.activity.unread.contains(&session);
+        let unread = !active
+            && (was_unread
+                || (finished && previous.navigation.thread_id.as_ref() != Some(&session)));
         let mut next = previous.clone();
-        let id = session.clone();
-        let activity = Arc::make_mut(&mut next.activity);
-        activity.active.insert(id.clone(), active);
-        if active {
-            activity.unread.remove(&id);
-        } else if finished && previous.navigation.thread_id.as_ref() != Some(&id) {
-            activity.unread.insert(id);
+        if activity_changed || was_unread != unread {
+            let activity = Arc::make_mut(&mut next.activity);
+            activity.active.insert(session.clone(), active);
+            if unread {
+                activity.unread.insert(session.clone());
+            } else {
+                activity.unread.remove(&session);
+            }
         }
+        let listed = previous.threads.as_ref().is_some_and(|list| {
+            list.data
+                .iter()
+                .any(|thread| thread.id.as_ref() == Some(&session))
+        });
         return (
             next,
-            if active
-                && previous.threads.as_ref().is_some_and(|list| {
-                    list.data
-                        .iter()
-                        .any(|thread| thread.id.as_ref() == Some(&session))
-                })
-            {
-                Vec::new()
+            // Discover unseen sessions and check Git when work ends. Known
+            // running sessions and repeated idle notices need no list read.
+            if !listed || (!active && activity_changed) {
+                refresh_list(previous.connected, &previous.list_query)
             } else {
-                refresh_list(previous)
+                Vec::new()
             },
         );
     }
@@ -44,16 +51,17 @@ pub(super) fn notification(
         | Notification::Exited { .. }
         | Notification::TerminalRestored { .. }
         | Notification::TerminalDetached { .. }) => process(previous, event),
-        Notification::SessionRenamed { .. } => (previous.clone(), refresh_list(previous)),
+        Notification::SessionRenamed { .. } => (
+            previous.clone(),
+            refresh_list(previous.connected, &previous.list_query),
+        ),
         _ => (previous.clone(), Vec::new()),
     }
 }
 
-fn refresh_list(snapshot: &Snapshot) -> Vec<Effect> {
-    if snapshot.connected {
-        vec![Effect::execute(op::ListSessions::new(
-            (*snapshot.list_query).clone(),
-        ))]
+fn refresh_list(connected: bool, query: &ListQuery) -> Vec<Effect> {
+    if connected {
+        vec![Effect::execute(op::ListSessions::new(query.clone()))]
     } else {
         Vec::new()
     }
@@ -154,10 +162,28 @@ pub(super) fn session_update(
         && current.cwd.as_deref() == Some(&next.navigation.cwd);
     Arc::make_mut(&mut next.conversations).insert(id.clone(), Arc::new(thread));
     reconcile_pending(&mut next, id);
-    let changed_metadata = matches!(&update.change, SessionChange::Item { item, .. } if matches!(item.body(), crate::models::ItemBody::UserMessage { .. } | crate::models::ItemBody::Subagent { .. }) || (matches!(item.body(), crate::models::ItemBody::CommandExecution { .. }) && item.status == crate::models::ItemStatus::Completed));
+    let changed_metadata = match &update.change {
+        SessionChange::Item { item, .. } => match item.body() {
+            crate::models::ItemBody::UserMessage { .. } => true,
+            crate::models::ItemBody::Subagent { receivers, .. } => {
+                receivers.iter().any(|receiver| {
+                    !previous.threads.as_ref().is_some_and(|list| {
+                        list.data
+                            .iter()
+                            .any(|thread| thread.id.as_ref() == Some(receiver))
+                    })
+                })
+            }
+            _ => false,
+        },
+        _ => false,
+    };
     let mut effects = details;
-    if completed || changed_metadata {
-        effects.extend(refresh_list(previous));
+    // The Host broadcasts Activity for turn/status changes, including to
+    // clients without a conversation subscription. It owns the end-of-work
+    // list refresh; streamed commands and known agent updates stay local.
+    if changed_metadata {
+        effects.extend(refresh_list(previous.connected, &previous.list_query));
     }
     if next.connected
         && completed
@@ -179,17 +205,18 @@ pub(super) fn session_update(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::Notification;
     use crate::session::{ProviderKind, SessionRef};
+    use proptest::prelude::*;
+    use serde_json::json;
 
-    #[test]
-    fn running_subagents_refresh_the_list_without_waiting_for_completion() {
-        let parent = SessionRef::new(ProviderKind::Codex, "parent".into()).unwrap();
-        let child = SessionRef::new(ProviderKind::Codex, "child".into()).unwrap();
+    fn snapshot(provider: ProviderKind) -> Snapshot {
+        let parent = SessionRef::new(provider, "parent".into()).unwrap();
         let subscription = uuid::Uuid::new_v4();
-        let snapshot = Snapshot {
+        Snapshot {
             connected: true,
-            threads: Some(Arc::new(serde_json::from_value(serde_json::json!({
-                "data":[{"id":parent}],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false
+            threads: Some(Arc::new(serde_json::from_value(json!({
+                "data":[{"id":parent,"name":"Task","status":"idle","worktreeStatus":"unmerged"}],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false
             })).unwrap())),
             subscriptions: Arc::new([(parent.clone(), subscription)].into()),
             conversations: Arc::new([(parent.clone(), Arc::new(crate::models::Thread {
@@ -198,7 +225,189 @@ mod tests {
                 ..Default::default()
             }))].into()),
             ..Default::default()
-        };
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn activity_updates_refresh_once_per_run_and_preserve_cached_rows(
+            claude in any::<bool>(),
+            connected in any::<bool>(),
+            selected in any::<bool>(),
+            finished in any::<bool>(),
+            repetitions in 1usize..12,
+        ) {
+            let mut state = snapshot(if claude { ProviderKind::Claude } else { ProviderKind::Codex });
+            state.connected = connected;
+            let id = state.threads.as_ref().unwrap().data[0].id.clone().unwrap();
+            if selected {
+                Arc::make_mut(&mut state.navigation).thread_id = Some(id.clone());
+            }
+            Arc::make_mut(&mut state.activity).unread.insert(id.clone());
+            let cached_list = state.threads.clone().unwrap();
+            for _ in 0..2 {
+                let (running, effects) = notification(&state, Notification::Activity {
+                    session: id.clone(), active: true, finished: false,
+                });
+                prop_assert!(effects.is_empty());
+                prop_assert!(running.thread_list().unwrap().threads[0].active);
+                prop_assert!(!running.thread_list().unwrap().threads[0].unread);
+                state = running;
+                for _ in 0..repetitions {
+                    let (repeated, effects) = notification(&state, Notification::Activity {
+                        session: id.clone(), active: true, finished: false,
+                    });
+                    prop_assert!(effects.is_empty());
+                    prop_assert!(Arc::ptr_eq(&state.activity, &repeated.activity));
+                    state = repeated;
+                }
+                let (idle, effects) = notification(&state, Notification::Activity {
+                    session: id.clone(), active: false, finished: false,
+                });
+                prop_assert_eq!(effects.len(), usize::from(connected));
+                state = idle;
+                for _ in 0..repetitions {
+                    let (ended, effects) = notification(&state, Notification::Activity {
+                        session: id.clone(), active: false, finished,
+                    });
+                    prop_assert!(effects.is_empty());
+                    let row = &ended.thread_list().unwrap().threads[0];
+                    prop_assert!(!row.active);
+                    prop_assert_eq!(row.unread, finished && !selected);
+                    prop_assert_eq!(row.title.as_str(), "Task");
+                    prop_assert_eq!(row.worktree_status, Some(crate::models::WorktreeStatus::Unmerged));
+                    prop_assert_eq!(&state.navigation, &ended.navigation);
+                    state = ended;
+                }
+                prop_assert!(Arc::ptr_eq(state.threads.as_ref().unwrap(), &cached_list));
+                let (repeated, effects) = notification(&state, Notification::Activity {
+                    session: id.clone(), active: false, finished,
+                });
+                prop_assert!(effects.is_empty());
+                prop_assert!(Arc::ptr_eq(&state.activity, &repeated.activity));
+            }
+        }
+    }
+
+    #[rstest::rstest]
+    #[case::codex(ProviderKind::Codex)]
+    #[case::claude(ProviderKind::Claude)]
+    fn streamed_commands_and_known_agents_do_not_reload_titles(#[case] provider: ProviderKind) {
+        let mut state = snapshot(provider);
+        let id = state.threads.as_ref().unwrap().data[0].id.clone().unwrap();
+        let subscription = state.subscriptions[&id];
+        let child = SessionRef::new(provider, "child".into()).unwrap();
+        Arc::make_mut(state.threads.as_mut().unwrap())
+            .data
+            .push(crate::models::Thread {
+                id: Some(child.clone()),
+                parent_id: Some(id.clone()),
+                ..Default::default()
+            });
+        state = notification(
+            &state,
+            Notification::Activity {
+                session: id.clone(),
+                active: true,
+                finished: false,
+            },
+        )
+        .0;
+        for body in [
+            json!({"commandExecution":{"command":"git status","cwd":null,"output":"","exitCode":0}}),
+            json!({"subagent":{"tool":"wait","prompt":null,"model":null,"effort":null,"sender":id,"receivers":[child],"states":[],"agentId":null,"result":null}}),
+        ] {
+            for status in ["running", "completed"] {
+                let item = serde_json::from_value(json!({
+                    "id":"work","status":status,"clientInputId":null,
+                    "body":{"inline":{"body":body}}
+                }))
+                .unwrap();
+                let (next, effects) = session_update(
+                    &state,
+                    crate::session::SessionUpdate {
+                        subscription_id: subscription,
+                        change: crate::session::SessionChange::Item {
+                            turn_id: "turn".into(),
+                            item: Arc::new(item),
+                        },
+                    },
+                );
+                assert!(effects.is_empty());
+                assert!(next.thread_list().unwrap().threads[0].active);
+                state = next;
+            }
+        }
+        let (ended, effects) = session_update(
+            &state,
+            crate::session::SessionUpdate {
+                subscription_id: subscription,
+                change: crate::session::SessionChange::Turn {
+                    turn: crate::models::Turn {
+                        id: "turn".into(),
+                        status: crate::models::TurnStatus::Completed,
+                        ..Default::default()
+                    },
+                    completed: true,
+                },
+            },
+        );
+        assert!(
+            effects.is_empty(),
+            "the global Activity notice owns the completion refresh"
+        );
+        assert!(!ended.subscriptions.contains_key(&id));
+        let (ended, effects) = notification(
+            &ended,
+            Notification::Activity {
+                session: id.clone(),
+                active: false,
+                finished: true,
+            },
+        );
+        assert_eq!(
+            effects.len(),
+            1,
+            "completion still refreshes Git and metadata"
+        );
+        let row = &ended.thread_list().unwrap().threads[0];
+        assert!(!row.active);
+        assert!(row.unread);
+    }
+
+    #[test]
+    fn user_messages_and_renames_still_refresh_titles() {
+        let state = snapshot(ProviderKind::Codex);
+        let id = state.threads.as_ref().unwrap().data[0].id.clone().unwrap();
+        let item = serde_json::from_value(json!({
+            "id":"user","status":"completed","clientInputId":null,
+            "body":{"inline":{"body":{"userMessage":{"text":"New task title","content":[]}}}}
+        }))
+        .unwrap();
+        let (_, effects) = session_update(
+            &state,
+            crate::session::SessionUpdate {
+                subscription_id: state.subscriptions[&id],
+                change: crate::session::SessionChange::Item {
+                    turn_id: "turn".into(),
+                    item: Arc::new(item),
+                },
+            },
+        );
+        assert_eq!(effects.len(), 1);
+        let (_, effects) = notification(&state, Notification::SessionRenamed { session: id });
+        assert_eq!(effects.len(), 1);
+    }
+
+    #[test]
+    fn running_subagents_refresh_the_list_without_waiting_for_completion() {
+        let snapshot = snapshot(ProviderKind::Codex);
+        let parent = snapshot.threads.as_ref().unwrap().data[0]
+            .id
+            .clone()
+            .unwrap();
+        let child = SessionRef::new(ProviderKind::Codex, "child".into()).unwrap();
+        let subscription = snapshot.subscriptions[&parent];
         for (session, expected_refreshes) in [(parent.clone(), 0), (child.clone(), 1)] {
             let (next, effects) = notification(
                 &snapshot,
