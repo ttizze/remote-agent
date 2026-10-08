@@ -626,16 +626,27 @@ impl PreviewState {
         {
             return;
         }
-        if self
+        if status.recording {
+            if self
+                .recording_lifetimes
+                .get(&status.tab_id)
+                .is_some_and(|recording_id| {
+                    recording_id != &status.recording_id
+                        && self
+                            .recordings
+                            .get(&status.tab_id)
+                            .is_some_and(|current| current.recording)
+                })
+            {
+                return;
+            }
+            self.invalidated_recordings.remove(&status.tab_id);
+        } else if self
             .recording_lifetimes
             .get(&status.tab_id)
-            .is_some_and(|recording_id| recording_id != &status.recording_id)
-            || (!status.recording && !self.recording_lifetimes.contains_key(&status.tab_id))
+            .is_none_or(|recording_id| recording_id != &status.recording_id)
         {
             return;
-        }
-        if status.recording {
-            self.invalidated_recordings.remove(&status.tab_id);
         }
         self.recording_lifetimes
             .insert(status.tab_id.clone(), status.recording_id.clone());
@@ -958,6 +969,51 @@ mod preview_state_tests {
             Some("new-lifetime")
         );
         assert!(state.recording_for("tab").is_some_and(|status| status.recording));
+        assert!(state.last_recording_for("tab").is_none());
+    }
+
+    #[test]
+    fn a_completed_recording_can_start_and_stop_a_new_lifetime() {
+        let mut state = PreviewState::default();
+        state.apply_list(list("epoch", 1, "tab"));
+        state.apply_recording_status(agent_protocol::preview::PreviewRecordingStatus {
+            tab_id: "tab".into(),
+            recording_id: "old-lifetime".into(),
+            recording: true,
+            started_at: Some("old".into()),
+        });
+        state.apply_recording_artifact(agent_protocol::preview::PreviewRecordingArtifact {
+            id: "old-artifact".into(),
+            recording_id: "old-lifetime".into(),
+            tab_id: "tab".into(),
+            path: "/tmp/old.webm".into(),
+            mime_type: "video/webm".into(),
+            size_bytes: 1,
+            created_at: "old".into(),
+        });
+        assert!(state
+            .recording_for("tab")
+            .is_some_and(|status| !status.recording));
+
+        state.apply_recording_status(agent_protocol::preview::PreviewRecordingStatus {
+            tab_id: "tab".into(),
+            recording_id: "new-lifetime".into(),
+            recording: true,
+            started_at: Some("new".into()),
+        });
+        assert_eq!(
+            state.recording_for("tab").map(|status| status.recording_id.as_str()),
+            Some("new-lifetime")
+        );
+        state.apply_recording_status(agent_protocol::preview::PreviewRecordingStatus {
+            tab_id: "tab".into(),
+            recording_id: "new-lifetime".into(),
+            recording: false,
+            started_at: Some("new".into()),
+        });
+        assert!(state
+            .recording_for("tab")
+            .is_some_and(|status| !status.recording && status.recording_id == "new-lifetime"));
         assert!(state.last_recording_for("tab").is_none());
     }
 

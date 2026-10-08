@@ -441,6 +441,19 @@ impl DeviceState {
         ))
     }
 
+    /// Resolves the current session once for a generic device command.  The
+    /// returned target is copied into the wire request so a queued command
+    /// cannot be redirected to a replacement session with the same device id.
+    pub(crate) fn session_target(
+        &self,
+        thread_id: &ThreadId,
+        host_id: Option<&str>,
+        device_id: &str,
+    ) -> Result<DeviceInputTarget, String> {
+        self.input_target(thread_id, host_id, device_id, None)
+            .map(|(target, _)| target)
+    }
+
     fn input_key(target: &DeviceInputTarget) -> (String, String, String, String) {
         (
             target.thread_id.to_string(),
@@ -451,8 +464,7 @@ impl DeviceState {
     }
 
     fn key_input(
-        host_id: Option<String>,
-        device_id: &str,
+        target: &DeviceInputTarget,
         code: String,
         key: String,
         down: bool,
@@ -460,8 +472,10 @@ impl DeviceState {
         ctrl: bool,
     ) -> agent_protocol::device::DeviceInput {
         agent_protocol::device::DeviceInput {
-            host_id,
-            device_id: device_id.to_owned(),
+            thread_id: target.thread_id.clone(),
+            host_id: Some(target.host_id.clone()),
+            device_id: target.device_id.clone(),
+            session_epoch: target.session_epoch.clone(),
             input: agent_protocol::device::DeviceInputKind::Key {
                 code,
                 key,
@@ -506,8 +520,7 @@ impl DeviceState {
         if platform == agent_protocol::device::DevicePlatform::Ios {
             for transition in device_modifier_transitions(previous.modifiers, current_modifiers) {
                 inputs.push(Self::key_input(
-                    host_id.clone(),
-                    &device_id,
+                    &target,
                     transition.code.clone(),
                     transition.code,
                     transition.down,
@@ -518,8 +531,7 @@ impl DeviceState {
         }
         if !is_modifier_code(&facts.code) {
             inputs.push(Self::key_input(
-                host_id,
-                &device_id,
+                &target,
                 facts.code.clone(),
                 facts.key,
                 down,
@@ -564,8 +576,7 @@ impl DeviceState {
                 .into_iter()
                 .map(|transition| {
                     Self::key_input(
-                        host_id.clone(),
-                        &device_id,
+                        &target,
                         transition.code.clone(),
                         transition.code,
                         false,
@@ -579,8 +590,7 @@ impl DeviceState {
         };
         for code in previous.pressed {
             inputs.push(Self::key_input(
-                host_id.clone(),
-                &device_id,
+                &target,
                 code.clone(),
                 code,
                 false,
@@ -1419,6 +1429,12 @@ mod tests {
                 shifted,
             )
             .unwrap();
+        assert!(plan.inputs.iter().all(|input| {
+            input.thread_id == current.thread_id
+                && input.host_id.as_deref() == Some(current.host_id.as_str())
+                && input.device_id == current.device_id
+                && input.session_epoch == current.session_epoch
+        }));
         let codes = plan
             .inputs
             .iter()

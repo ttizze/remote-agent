@@ -1046,8 +1046,10 @@ fn duo_completion_uses_the_request_epoch_after_thread_selection_changes() {
     owner.state.selected_thread = Some(second_thread);
     owner.finished(JobResult {
         call: Call::DeviceInput(agent_protocol::device::DeviceInput {
+            thread_id: first_thread.clone(),
             host_id: Some("host".into()),
             device_id: "device".into(),
+            session_epoch: "epoch-a".into(),
             input: agent_protocol::device::DeviceInputKind::Duo {
                 command: agent_protocol::device::DeviceDuoCommand::Angle { value: 30.0 },
             },

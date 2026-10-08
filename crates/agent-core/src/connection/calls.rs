@@ -589,8 +589,10 @@ impl Owner {
                 if let Some(next) = next_duo {
                     self.job_with_duo(
                         Call::DeviceInput(d::DeviceInput {
+                            thread_id: next.thread_id.clone(),
                             host_id: next.host_id.clone(),
                             device_id: next.device_id.clone(),
+                            session_epoch: next.session_epoch.clone(),
                             input: d::DeviceInputKind::Duo {
                                 command: super::intents::device_duo_command(next.command.clone()),
                             },

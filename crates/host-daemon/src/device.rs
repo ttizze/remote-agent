@@ -3203,14 +3203,26 @@ impl DeviceService {
         input.validate()?;
         let _guard = self.inner.operation.lock().await;
         let host_id = input.host_id.clone().unwrap_or_else(|| LOCAL_DEVICE_HOST_ID.into());
+        self.require_session_target(&input.thread_id, &host_id, &input.device_id, &input.session_epoch)
+            .await?;
+        if let DeviceActionKind::Input(device_input) = &input.action {
+            self.input_inner(DeviceInput {
+                thread_id: input.thread_id.clone(),
+                host_id: input.host_id.clone(),
+                device_id: input.device_id.clone(),
+                session_epoch: input.session_epoch.clone(),
+                input: device_input.clone(),
+            })
+            .await?;
+            return self
+                .detail_inner(DeviceDetailInput {
+                    host_id: Some(host_id),
+                    device_id: input.device_id,
+                })
+                .await;
+        }
         let host = self.host(&host_id).await?;
         let device = self.find_device(&host_id, &input.device_id).await?;
-        if let DeviceActionKind::Input(device_input) = &input.action {
-            let port = self.hub_port(&host_id).await.ok_or_else(|| "device hub is not running".to_owned())?;
-            let request_id = self.next_control_request_id(device_input);
-            hub_input(port, device.platform, &device.id, device_input, request_id).await?;
-            return self.detail_inner(DeviceDetailInput { host_id: Some(host_id), device_id: device.id }).await;
-        }
         let push_payload = match &input.action {
             DeviceActionKind::SendPush { payload, .. } => {
                 let payload = if let Some(alert) = payload.as_str() {
@@ -3235,6 +3247,8 @@ impl DeviceService {
             ax_helper.as_deref(),
             cli_helper.as_deref(),
         )? {
+            self.require_session_target(&input.thread_id, &host_id, &input.device_id, &input.session_epoch)
+                .await?;
             if let Err(error) = run_device_command(host.as_ref(), &planned, push_payload.as_deref()).await
                 && !ignore_permission_failures
             {
@@ -3856,9 +3870,15 @@ impl DeviceService {
     }
 
     pub async fn input(&self, input: DeviceInput) -> Result<(), String> {
+        let _guard = self.inner.operation.lock().await;
+        self.input_inner(input).await
+    }
+
+    async fn input_inner(&self, input: DeviceInput) -> Result<(), String> {
         input.validate()?;
         let host_id = input.host_id.clone().unwrap_or_else(|| LOCAL_DEVICE_HOST_ID.into());
-        let _guard = self.inner.operation.lock().await;
+        self.require_session_target(&input.thread_id, &host_id, &input.device_id, &input.session_epoch)
+            .await?;
         let host = self.host(&host_id).await?;
         let device = self.find_device(&host_id, &input.device_id).await?;
         if let Some(port) = self.hub_port(&host_id).await {
@@ -3876,7 +3896,7 @@ impl DeviceService {
                     return Err("device does not expose physical Duo orientation".into());
                 }
             }
-            let input = match &input.input {
+            let transformed_input = match &input.input {
                 DeviceInputKind::Rotate => {
                     let orientation = next_orientation(screen.as_ref().map(|screen| screen.orientation).unwrap_or(DeviceOrientation::Portrait));
                     if device.platform == DevicePlatform::Ios && screen.as_ref().is_some_and(|screen| screen.supports_hinge_angle) {
@@ -3893,8 +3913,10 @@ impl DeviceService {
                 }
                 _ => input.input.clone(),
             };
-            let request_id = self.next_control_request_id(&input);
-            if hub_input(port, device.platform, &device.id, &input, request_id).await.is_ok() {
+            let request_id = self.next_control_request_id(&transformed_input);
+            self.require_session_target(&input.thread_id, &host_id, &input.device_id, &input.session_epoch)
+                .await?;
+            if hub_input(port, device.platform, &device.id, &transformed_input, request_id).await.is_ok() {
                 return Ok(());
             }
         }
@@ -4021,6 +4043,21 @@ impl DeviceService {
             let _ = stale.tunnel.wait().await;
         }
         None
+    }
+
+    async fn require_session_target(
+        &self,
+        thread_id: &ThreadId,
+        host_id: &str,
+        device_id: &str,
+        session_epoch: &str,
+    ) -> Result<(), String> {
+        let state = self.inner.state.read().await;
+        if session_matches_target(&state.sessions, thread_id, host_id, device_id, session_epoch) {
+            Ok(())
+        } else {
+            Err("device session changed before dispatch".into())
+        }
     }
 
     async fn host(&self, id: &str) -> Result<Arc<dyn DeviceHostRunner>, String> { self.inner.hosts.read().await.get(id).cloned().ok_or_else(|| format!("unknown device host {id}")) }
@@ -4708,6 +4745,21 @@ async fn abort_and_join(task: tokio::task::JoinHandle<()>) {
 
 fn session_matches_generation(generation: &BTreeMap<String, String>, session: &DeviceSession) -> bool {
     generation.get(session.thread_id.as_str()) == Some(&session.session_epoch)
+}
+
+fn session_matches_target(
+    sessions: &[DeviceSession],
+    thread_id: &ThreadId,
+    host_id: &str,
+    device_id: &str,
+    session_epoch: &str,
+) -> bool {
+    sessions.iter().any(|session| {
+        &session.thread_id == thread_id
+            && session.host_id == host_id
+            && session.device_id == device_id
+            && session.session_epoch == session_epoch
+    })
 }
 
 async fn send_source_message(sender: &mpsc::Sender<SourceMessage>, message: SourceMessage, cancel: &CancellationToken) -> bool {
@@ -6108,6 +6160,41 @@ mod tests {
         let reopened = DeviceSession { session_epoch: "epoch-3".into(), ..first.clone() };
         assert!(!session_matches_generation(&generation, &reopened));
         assert!(session_matches_generation(&generation, &second));
+    }
+
+    #[test]
+    fn input_target_requires_the_original_thread_and_session_epoch() {
+        let thread = ThreadId::new("input-target").unwrap();
+        let session = DeviceSession {
+            thread_id: thread.clone(),
+            host_id: "local".into(),
+            device_id: "sim".into(),
+            platform: DevicePlatform::Ios,
+            opened_at: "open".into(),
+            session_epoch: "epoch-new".into(),
+        };
+        let sessions = vec![session];
+        assert!(session_matches_target(
+            &sessions,
+            &thread,
+            "local",
+            "sim",
+            "epoch-new",
+        ));
+        assert!(!session_matches_target(
+            &sessions,
+            &thread,
+            "local",
+            "sim",
+            "epoch-old",
+        ));
+        assert!(!session_matches_target(
+            &sessions,
+            &ThreadId::new("other-thread").unwrap(),
+            "local",
+            "sim",
+            "epoch-new",
+        ));
     }
 
     #[tokio::test]

@@ -33,6 +33,7 @@ fn owner_frame_selection_does_not_follow_another_preview_owner() {
     let mut page = Page {
         tabs: vec!["shared".into(), "owner-a".into(), "owner-b".into()],
         active: "owner-b".into(),
+        active_by_owner: HashMap::new(),
         viewports: HashMap::new(),
         preview_tabs: HashSet::from(["owner-a".into(), "owner-b".into()]),
         preview_profiles: HashMap::new(),
@@ -62,6 +63,17 @@ fn owner_frame_selection_does_not_follow_another_preview_owner() {
         Browser::activate_tab_for_owner(&mut page, Some("local"), None).unwrap(),
         "shared"
     );
+    assert_eq!(
+        Browser::activate_tab_for_owner(&mut page, Some("local"), Some("owner-a")).unwrap(),
+        "owner-a"
+    );
+    assert_eq!(
+        Browser::activate_tab_for_owner(&mut page, Some("client-b"), None).unwrap(),
+        "owner-b"
+    );
+    assert_eq!(page.active_by_owner.get("client-a").map(String::as_str), Some("owner-a"));
+    assert_eq!(page.active_by_owner.get("client-b").map(String::as_str), Some("owner-b"));
+    assert_eq!(page.active_by_owner.get("local").map(String::as_str), Some("owner-a"));
 }
 
 #[tokio::test]
@@ -192,6 +204,7 @@ fn detached_preview_target_cleanup_removes_host_page_metadata() {
         Page {
             tabs: vec!["other".into(), "tab".into()],
             active: "tab".into(),
+            active_by_owner: HashMap::new(),
             viewports: [("tab".into(), (800, 600))].into_iter().collect(),
             preview_tabs: ["tab".into()].into_iter().collect(),
             preview_profiles: HashMap::new(),
