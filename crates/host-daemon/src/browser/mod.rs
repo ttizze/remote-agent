@@ -738,7 +738,7 @@ impl Browser {
             .lock()
             .await
             .iter()
-            .filter(|((scope, _), active)| scope == thread && !active.stopping)
+            .filter(|((scope, _), _)| scope == thread)
             .map(|((_, tab_id), active)| agent_protocol::preview::PreviewRecordingStatus {
                 tab_id: tab_id.clone(),
                 recording: true,
