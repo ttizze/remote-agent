@@ -80,10 +80,7 @@ internal fun parseActivityPresentation(value: String): ActivityPresentation? =
         val headline = (display?.get("headline") as? JsonPrimitive)?.content?.trim().orEmpty()
         val attention = (display?.get("attention") as? JsonPrimitive)?.content?.trim().orEmpty()
         val title =
-            listOf(headline, attention)
-                .filter(String::isNotEmpty)
-                .joinToString(" · ")
-                .takeIf(String::isNotEmpty)
+            listOf(headline, attention).filter(String::isNotEmpty).joinToString(" · ").takeIf(String::isNotEmpty)
         if (activeCount == null || display == null || title == null) {
             null
         } else {
