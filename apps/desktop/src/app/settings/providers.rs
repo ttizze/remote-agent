@@ -491,7 +491,7 @@ impl Desktop {
             .snapshot
             .usage_limits()
             .into_iter()
-            .find(|usage| usage.id == account.id);
+            .find(|usage| usage.source_account_ids.iter().any(|id| id == &account.id));
         if let Some(usage) = &limit {
             details.extend(usage.windows.iter().map(|window| {
                 format!("{} {}% left", window.label, window.remaining_percent)
@@ -506,7 +506,10 @@ impl Desktop {
         let provider = account.provider;
         let id = account.id.clone();
         let delete_id = account.id.clone();
-        let reset_id = account.id.clone();
+        let reset_id = limit
+            .as_ref()
+            .and_then(|usage| usage.reset_credit_account_id.clone())
+            .unwrap_or_else(|| account.id.clone());
         let reset_credit_id = limit.as_ref().and_then(|usage| usage.next_credit_id.clone());
         let can_reset = limit.as_ref().is_some_and(|usage| usage.reset_credit_count > 0);
         let external_url = limit.as_ref().and_then(|usage| usage.external_url.clone());

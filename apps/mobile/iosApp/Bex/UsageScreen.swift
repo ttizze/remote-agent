@@ -60,9 +60,15 @@ struct UsageScreen: View {
                 UsagePreferencesEditor(model: model) { load() }
             } else {
                 Section("Limits") {
-                    ForEach(model.snapshot.usageLimits(), id: \.id) { account in
-                        UsageLimitAccountView(account: account) {
-                            if let source = model.snapshot.accounts()?.accounts.first(where: { $0.id == account.id }) {
+                    let pools = model.snapshot.usageLimitPools(
+                        nowMs: Int64(Date().timeIntervalSince1970 * 1000)
+                    )
+                    let accounts = model.snapshot.usageLimits()
+                    let pooledIds = Set(pools.flatMap { $0.accounts }.map(\.id))
+                    ForEach(pools, id: \.provider) { pool in
+                        UsageLimitPoolView(pool: pool) { account in
+                            let sourceId = account.resetCreditAccountId ?? account.id
+                            if let source = model.snapshot.accounts()?.accounts.first(where: { $0.id == sourceId }) {
                                 model.perform(.consumeResetCredit(
                                     provider: source.provider,
                                     accountId: source.id,
@@ -72,7 +78,20 @@ struct UsageScreen: View {
                             }
                         }
                     }
-                    if model.snapshot.usageLimits().isEmpty {
+                    ForEach(accounts.filter { !pooledIds.contains($0.id) }, id: \.id) { account in
+                        UsageLimitAccountView(account: account, showWindows: false) {
+                            let sourceId = account.resetCreditAccountId ?? account.id
+                            if let source = model.snapshot.accounts()?.accounts.first(where: { $0.id == sourceId }) {
+                                model.perform(.consumeResetCredit(
+                                    provider: source.provider,
+                                    accountId: source.id,
+                                    creditId: account.nextCreditId
+                                ))
+                                model.perform(.loadAccounts)
+                            }
+                        }
+                    }
+                    if pools.isEmpty && accounts.isEmpty {
                         Text("Provider limits are unavailable until accounts are loaded.")
                             .foregroundStyle(AppTheme.muted)
                     }
@@ -243,15 +262,14 @@ private enum UsageTab: Hashable {
     case limits
 }
 
-private struct UsageLimitAccountView: View {
-    let account: UsageLimitAccount
-    let useReset: () -> Void
-    @State private var confirmingReset = false
+private struct UsageLimitPoolView: View {
+    let pool: UsageLimitPool
+    let useReset: (UsageLimitAccount) -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(account.email ?? account.id).font(.headline)
-            ForEach(account.windows, id: \.id) { window in
+        VStack(alignment: .leading, spacing: 10) {
+            Text(pool.provider).font(.headline)
+            ForEach(Array(pool.windows.enumerated()), id: \.offset) { _, window in
                 VStack(alignment: .leading, spacing: 4) {
                     HStack {
                         Text(window.label)
@@ -259,9 +277,76 @@ private struct UsageLimitAccountView: View {
                         Text("\(window.remainingPercent)% remaining").monospacedDigit()
                     }
                     ProgressView(value: Double(window.remainingPercent), total: 100)
-                    if let reset = window.resetsAt {
-                        Text("Resets \(Date(timeIntervalSince1970: Double(reset)).formatted(date: .abbreviated, time: .shortened))")
-                            .font(.caption).foregroundStyle(AppTheme.muted)
+                    if let pace = window.pace {
+                        Text("Pace: \(pace)")
+                            .font(.caption)
+                            .foregroundStyle(AppTheme.muted)
+                    }
+                    ForEach(window.resets, id: \.accountId) { reset in
+                        HStack {
+                            Text("Reset \(reset.label)")
+                                .font(.caption)
+                            Spacer()
+                            Text("+\(reset.restoresPercent)% at \(Date(timeIntervalSince1970: Double(reset.at) / 1000).formatted(date: .abbreviated, time: .shortened))")
+                                .font(.caption)
+                                .foregroundStyle(AppTheme.muted)
+                        }
+                    }
+                    ForEach(window.columns, id: \.accountId) { column in
+                        HStack {
+                            Text(column.label)
+                                .font(.caption)
+                            Spacer()
+                            Text(column.window.map { "\($0.remainingPercent)% left" } ?? "No limit reported")
+                                .font(.caption)
+                                .foregroundStyle(AppTheme.muted)
+                        }
+                    }
+                }
+            }
+            ForEach(pool.accounts.filter {
+                $0.resetCreditCount > 0 || $0.externalLabel != nil || $0.error != nil
+            }, id: \.id) { account in
+                UsageLimitAccountView(account: account, showWindows: false) {
+                    useReset(account)
+                }
+            }
+        }
+    }
+}
+
+private struct UsageLimitAccountView: View {
+    let account: UsageLimitAccount
+    let showWindows: Bool
+    let useReset: () -> Void
+    @State private var confirmingReset = false
+
+    init(
+        account: UsageLimitAccount,
+        showWindows: Bool = true,
+        useReset: @escaping () -> Void
+    ) {
+        self.account = account
+        self.showWindows = showWindows
+        self.useReset = useReset
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(account.email ?? account.id).font(.headline)
+            if showWindows {
+                ForEach(account.windows, id: \.id) { window in
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack {
+                            Text(window.label)
+                            Spacer()
+                            Text("\(window.remainingPercent)% remaining").monospacedDigit()
+                        }
+                        ProgressView(value: Double(window.remainingPercent), total: 100)
+                        if let reset = window.resetsAt {
+                            Text("Resets \(Date(timeIntervalSince1970: Double(reset)).formatted(date: .abbreviated, time: .shortened))")
+                                .font(.caption).foregroundStyle(AppTheme.muted)
+                        }
                     }
                 }
             }

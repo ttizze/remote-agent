@@ -8,7 +8,7 @@ use agent_core::{
     view::usage::{UsagePreferences, UsageSummaryInput},
 };
 use agent_protocol::usage::PriceOverride;
-use chrono::Local;
+use chrono::{Local, TimeZone};
 use gpui_kit::{
     component::{
         Sizable, StyledExt,
@@ -19,7 +19,7 @@ use gpui_kit::{
     prelude::FluentBuilder,
     *,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub(super) struct UsageState {
     aliases: Entity<InputState>,
@@ -258,29 +258,78 @@ impl Desktop {
             None,
             preference_rows,
         );
-        let limit_rows = self
+        let pools = self
             .snapshot
-            .usage_limits()
-            .into_iter()
-            .map(|account| {
-                let windows = account
-                    .windows
+            .usage_limit_pools(Local::now().timestamp_millis());
+        let accounts = self.snapshot.usage_limits();
+        let mut pooled_ids = BTreeSet::new();
+        let mut limit_rows = Vec::new();
+        for pool in pools {
+            pooled_ids.extend(pool.accounts.iter().map(|account| account.id.clone()));
+            for window in pool.windows {
+                let mut details = vec![format!("{}% left", window.remaining_percent)];
+                if let Some(pace) = window.pace {
+                    details.push(format!("{pace} pace"));
+                }
+                if window.members.len() > 1 {
+                    details.push(format!("{} accounts pooled", window.members.len()));
+                }
+                if let Some(reset) = window.resets.first() {
+                    let at = Local
+                        .timestamp_millis_opt(reset.at)
+                        .single()
+                        .map(|date| date.format("%Y-%m-%d %H:%M").to_string())
+                        .unwrap_or_else(|| reset.at.to_string());
+                    details.push(format!("next reset {at}"));
+                }
+                limit_rows.push(
+                    Row::new(format!("{} · {}", pool.provider, window.label))
+                        .description(details.join(" · "))
+                        .render(),
+                );
+            }
+            for account in pool.accounts {
+                if account.reset_credit_count == 0
+                    && account.external_label.is_none()
+                    && account.error.is_none()
+                {
+                    continue;
+                }
+                let details = (account.reset_credit_count > 0)
+                    .then(|| format!("{} reset credit(s)", account.reset_credit_count))
                     .into_iter()
-                    .map(|window| format!("{} {}% left", window.label, window.remaining_percent))
-                    .collect::<Vec<_>>();
-                let credits = (account.reset_credit_count > 0)
-                    .then(|| format!("{} reset credit(s)", account.reset_credit_count));
-                Row::new(account.email.unwrap_or(account.id)).description(
-                    windows
-                        .into_iter()
-                        .chain(credits)
-                        .chain(account.external_label)
-                        .collect::<Vec<_>>()
-                        .join(" · "),
-                )
-                .render()
-            })
-            .collect();
+                    .chain(account.external_label)
+                    .chain(account.error)
+                    .collect::<Vec<_>>()
+                    .join(" · ");
+                limit_rows.push(
+                    Row::new(account.email.unwrap_or(account.id))
+                        .description(details)
+                        .render(),
+                );
+            }
+        }
+        for account in accounts {
+            if pooled_ids.contains(&account.id) {
+                continue;
+            }
+            let details = (account.reset_credit_count > 0)
+                .then(|| format!("{} reset credit(s)", account.reset_credit_count))
+                .into_iter()
+                .chain(account.external_label)
+                .chain(account.error)
+                .collect::<Vec<_>>();
+            let description = if details.is_empty() {
+                "No limits reported".into()
+            } else {
+                details.join(" · ")
+            };
+            limit_rows.push(
+                Row::new(account.email.unwrap_or(account.id))
+                    .description(description)
+                    .render(),
+            );
+        }
         let limits = section(Some("Limits"), None, None, limit_rows);
         let notice = view.error.map(|error| {
             v_flex()

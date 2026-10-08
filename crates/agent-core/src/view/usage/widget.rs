@@ -1,6 +1,7 @@
+use super::limits::pooled_usage_limits;
 use agent_protocol::{operations::Account, provider::ProviderKind};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 const MAX_AGE_MS: i64 = 15 * 60_000;
 const MAX_STORED_WINDOWS: usize = 6;
@@ -45,32 +46,7 @@ pub fn subscription_widget(
     now_ms: i64,
     max_windows: usize,
 ) -> SubscriptionWidget {
-    let mut distinct = BTreeMap::new();
-    for account in accounts {
-        let Some(usage) = account.usage.as_ref() else {
-            continue;
-        };
-        if usage.error.is_some() || usage.windows.is_empty() {
-            continue;
-        }
-        let identity = account
-            .email
-            .as_deref()
-            .map(str::trim)
-            .filter(|v| !v.is_empty())
-            .map(str::to_lowercase)
-            .unwrap_or_else(|| account.id.clone());
-        let key = (format!("{:?}", account.provider), identity);
-        let previous: Option<&&Account> = distinct.get(&key);
-        if previous.is_none_or(|previous| {
-            previous
-                .usage
-                .as_ref()
-                .is_none_or(|old| usage.fetched_at > old.fetched_at)
-        }) {
-            distinct.insert(key, account);
-        }
-    }
+    let pools = pooled_usage_limits(accounts, now_ms);
     let mut providers = Vec::new();
     let mut checked = Vec::new();
     for (kind, name) in [
@@ -88,79 +64,53 @@ pub fn subscription_widget(
         {
             continue;
         }
-        let members: Vec<_> = distinct
-            .values()
-            .filter(|account| account.provider == kind)
-            .collect();
-        if members.is_empty() && !configured.contains(&kind) {
+        let pool = pools
+            .iter()
+            .find(|pool| pool.provider == format!("{kind:?}"));
+        if pool.is_none() && !configured.contains(&kind) {
             continue;
         }
-        let mut pooled: BTreeMap<(u8, String), Vec<_>> = BTreeMap::new();
+        let members = pool.map_or_else(Vec::new, |pool| pool.accounts.clone());
         let mut expires = i64::MAX;
         for account in &members {
-            let usage = account.usage.as_ref().expect("filtered usage");
-            let fetched = usage.fetched_at.saturating_mul(1000);
+            let fetched = account.fetched_at.saturating_mul(1000);
             checked.push(fetched);
             expires = expires.min(if fetched <= 0 {
                 0
             } else {
                 fetched.saturating_add(MAX_AGE_MS)
             });
-            for window in &usage.windows {
-                let kind = match window.kind {
-                    Some(agent_protocol::usage::WindowKind::Session) => 0,
-                    Some(agent_protocol::usage::WindowKind::Weekly) => 1,
-                    Some(agent_protocol::usage::WindowKind::Monthly) => 2,
-                    _ => 3,
-                };
+            for window in &account.windows {
                 if let Some(reset) = window.resets_at {
                     expires = expires.min(reset.saturating_mul(1000));
                 }
-                pooled
-                    .entry((
-                        kind,
-                        window.id.clone().unwrap_or_else(|| window.label.clone()),
-                    ))
-                    .or_default()
-                    .push(window);
             }
         }
-        let mut windows: Vec<_> = pooled
-            .into_iter()
-            .map(|((kind, id), members)| {
-                let used: u64 = members
+        let mut windows: Vec<_> = pool
+            .map(|pool| {
+                pool.windows
                     .iter()
                     .map(|window| {
-                        u64::from(
-                            window
-                                .used_percent
-                                .unwrap_or_else(|| 100u32.saturating_sub(window.remaining_percent))
-                                .min(100),
+                        let kind_rank = match window.kind.as_str() {
+                            "session" => 0,
+                            "weekly" => 1,
+                            "monthly" => 2,
+                            _ => 3,
+                        };
+                        (
+                            kind_rank,
+                            window.id.clone(),
+                            WidgetQuota {
+                                label: window.label.clone(),
+                                kind: window.kind.clone(),
+                                remaining: window.remaining_percent,
+                                reset_at: window.resets_at.map(|value| value.saturating_mul(1000)),
+                            },
                         )
                     })
-                    .sum();
-                let remaining = (100.0 - used as f64 / members.len() as f64).round() as u32;
-                (
-                    kind,
-                    id,
-                    WidgetQuota {
-                        label: members[0].label.clone(),
-                        kind: match kind {
-                            0 => "session",
-                            1 => "weekly",
-                            2 => "monthly",
-                            _ => "other",
-                        }
-                        .into(),
-                        remaining,
-                        reset_at: members
-                            .iter()
-                            .filter_map(|window| window.resets_at.map(|v| v.saturating_mul(1000)))
-                            .min(),
-                    },
-                )
+                    .collect()
             })
-            .collect();
+            .unwrap_or_default();
         windows.sort_by_key(|(kind, id, window)| (window.remaining, *kind, id.clone()));
         let total = windows.len() as u32;
         let mut selected = Vec::new();
@@ -327,6 +277,7 @@ mod tests {
             usage: Some(AccountUsage {
                 fetched_at: fetched / 1000,
                 error: None,
+                credential_fingerprint: None,
                 reset_credits: None,
                 external_usage: None,
                 windows: vec![UsageWindow {

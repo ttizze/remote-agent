@@ -104,6 +104,9 @@ pub struct AccountUsage {
     pub windows: Vec<UsageWindow>,
     pub fetched_at: i64,
     pub error: Option<String>,
+    /// A provider-supplied stable account identifier when it is safe to expose
+    /// as an identity key. This is never a credential or token.
+    pub credential_fingerprint: Option<String>,
     pub reset_credits: Option<crate::usage::ResetCredits>,
     pub external_usage: Option<crate::usage::ExternalUsage>,
 }

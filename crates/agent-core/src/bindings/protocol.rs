@@ -374,6 +374,7 @@ struct AccountUsage {
     pub windows: Vec<UsageWindow>,
     pub fetched_at: i64,
     pub error: Option<String>,
+    pub credential_fingerprint: Option<String>,
     pub reset_credits: Option<ResetCredits>,
     pub external_usage: Option<ExternalUsage>,
 }
