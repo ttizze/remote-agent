@@ -142,6 +142,7 @@ impl UsageService {
             .await
         {
             Ok(response) if response.status().is_success() => response.json::<Value>().await.ok(),
+            Ok(_) => None,
             Err(_) => None,
         };
         self.rates

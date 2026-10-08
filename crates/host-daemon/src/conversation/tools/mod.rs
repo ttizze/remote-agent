@@ -530,7 +530,10 @@ impl AgentTools {
     }
 
     async fn device_list(&self, scope: Scope<'_>, input: &Value) -> Outcome {
-        let host_id = input.get("hostId").and_then(Value::as_str).map(str::to_owned);
+        let host_id = input
+            .get("hostId")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
         let current = self.devices.state_async().await;
         if current.host_status == device_protocol::DeviceHostStatus::Disabled {
             return Err(failure(
@@ -602,7 +605,9 @@ impl AgentTools {
         if candidates.is_empty() {
             return Err(failure(
                 "device_unavailable",
-                format!("No matching device was found on host {host_id}. Call device_list for current ids."),
+                format!(
+                    "No matching device was found on host {host_id}. Call device_list for current ids."
+                ),
             ));
         }
         if requested_device.is_none() && platform.is_none() {
@@ -611,7 +616,9 @@ impl AgentTools {
                 .map(|device| device.platform)
                 .collect::<std::collections::BTreeSet<_>>();
             if platforms.len() > 1 {
-                return Err(invalid("Both iOS and Android devices are available; pass platform or deviceId."));
+                return Err(invalid(
+                    "Both iOS and Android devices are available; pass platform or deviceId.",
+                ));
             }
         }
         let target = candidates
@@ -631,7 +638,10 @@ impl AgentTools {
             Ok(None) => {
                 return Err(failure(
                     "device_agent_unavailable",
-                    format!("Agent device access is not bootstrapped for host {}.", target.host_id),
+                    format!(
+                        "Agent device access is not bootstrapped for host {}.",
+                        target.host_id
+                    ),
                 ));
             }
             Err(error) => return Err(failure("device_agent_unavailable", error)),
@@ -681,20 +691,30 @@ impl AgentTools {
         let host_id = input.get("hostId").and_then(Value::as_str);
         let device_id = input.get("deviceId").and_then(Value::as_str);
         let target = if let Some(device_id) = device_id {
-            (host_id.unwrap_or(device_protocol::LOCAL_DEVICE_HOST_ID), device_id.to_owned())
+            (
+                host_id
+                    .unwrap_or(device_protocol::LOCAL_DEVICE_HOST_ID)
+                    .to_owned(),
+                device_id.to_owned(),
+            )
         } else {
             let sessions = self.devices.sessions_for_thread(scope.thread).await;
             let session = sessions
                 .iter()
                 .rev()
                 .find(|session| host_id.is_none_or(|host| host == session.host_id))
-                .ok_or_else(|| failure("device_unavailable", "No device is open in this thread. Call device_open first."))?;
-            (session.host_id.as_str(), session.device_id.clone())
+                .ok_or_else(|| {
+                    failure(
+                        "device_unavailable",
+                        "No device is open in this thread. Call device_open first.",
+                    )
+                })?;
+            (session.host_id.clone(), session.device_id.clone())
         };
         let shot = self
             .devices
             .screenshot(device_protocol::DeviceScreenshotInput {
-                host_id: Some(target.0.to_owned()),
+                host_id: Some(target.0),
                 device_id: target.1,
             })
             .await
@@ -727,9 +747,18 @@ impl AgentTools {
         self.devices
             .close(device_protocol::DeviceCloseInput {
                 thread_id: scope.thread.clone(),
-                host_id: input.get("hostId").and_then(Value::as_str).map(str::to_owned),
-                device_id: input.get("deviceId").and_then(Value::as_str).map(str::to_owned),
-                shutdown: input.get("shutdown").and_then(Value::as_bool).unwrap_or(false),
+                host_id: input
+                    .get("hostId")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                device_id: input
+                    .get("deviceId")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                shutdown: input
+                    .get("shutdown")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
             })
             .await
             .map_err(|error| failure("device_close_failed", error))?;
@@ -835,7 +864,11 @@ fn device_tool_version_json(version: &device_protocol::DeviceToolVersion) -> Val
     })
 }
 
-fn device_quick_start(device: &device_protocol::DeviceSummary, target_args: &[String], command: &str) -> String {
+fn device_quick_start(
+    device: &device_protocol::DeviceSummary,
+    target_args: &[String],
+    command: &str,
+) -> String {
     let quote = |value: &str| {
         if value
             .bytes()
@@ -847,10 +880,18 @@ fn device_quick_start(device: &device_protocol::DeviceSummary, target_args: &[St
         }
     };
     let executable = quote(command);
-    let target = target_args.iter().map(|arg| quote(arg)).collect::<Vec<_>>().join(" ");
+    let target = target_args
+        .iter()
+        .map(|arg| quote(arg))
+        .collect::<Vec<_>>()
+        .join(" ");
     let platform_note = match device.platform {
-        device_protocol::DevicePlatform::Ios => "First use builds an XCTest runner and can take a couple of minutes; later commands are fast.",
-        device_protocol::DevicePlatform::Android => "The Android snapshot helper installs itself on first use.",
+        device_protocol::DevicePlatform::Ios => {
+            "First use builds an XCTest runner and can take a couple of minutes; later commands are fast."
+        }
+        device_protocol::DevicePlatform::Android => {
+            "The Android snapshot helper installs itself on first use."
+        }
     };
     format!(
         "The user is watching {} ({}).\nDrive it with {}. Use this exact executable path; login shells may reset PATH. Always pass {}.\nTypical loop:\n  {} open <bundle-or-package-id> {}     # or: open <app> <deep-link-url>\n  {} snapshot -i {}                     # accessibility tree with @eN refs\n  {} click @e3 {}\n  {} fill @e5 \"text\" {}\n  {} screenshot /tmp/shot.png {}        # or call device_screenshot\n  {} install <app> <path-to-.app-or-.apk> {}\nPrefer snapshot refs over coordinates. Run {} help for workflow guides and {} <command> --help for flags.\nPrefer agent-device for driving this device. simctl, adb, and xcrun remain available for anything it does not cover.\nFor remote hosts, arrange builds, app installation, and any Metro reverse forwarding yourself. The host provides discovery, streaming, and control only.\nKeep the returned --config and --session flags on every command. Other hosts can be used concurrently; opening one does not switch these commands.\n{}",

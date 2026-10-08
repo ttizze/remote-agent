@@ -20,18 +20,22 @@ use crate::view::{
         traits::{TraitsView, select_trait, toggle_trait, traits},
     },
     new_thread::{NewThreadView, new_thread_view},
+    preview::PreviewView,
     projects::{
         add::{AddProjectTarget, FolderBrowserView, add_project_target, folder_browser},
         import::{ImportToast, SessionImportView, session_import_view},
         picker::{ProjectPickerView, project_picker},
         scripts::{ProjectScriptsView, project_scripts},
     },
-    preview::PreviewView,
-    search::{SearchOptions, SearchView, search_view},
+    pull_requests::{
+        PullRequestDetailView, PullRequestDiffView, PullRequestListView, PullRequestPanelOptions,
+        pull_request_detail, pull_request_diff, pull_request_list,
+    },
     scheduled_tasks::{
         ScheduledTaskBranchView, ScheduledTaskListView, branch_view as scheduled_task_branch_view,
         draft as scheduled_task_draft, list as scheduled_task_list,
     },
+    search::{SearchOptions, SearchView, search_view},
     settings::{
         SettingId, SettingValue, SettingsRow, SettingsScope, SettingsView, default_model_picker,
         setting_intent, setting_reset_intent, settings_view,
@@ -45,10 +49,6 @@ use crate::view::{
     thread::{ThreadView, ThreadViewOptions, selected_thread_view, thread_view},
     thread_arrangement::{ArrangementDrop, ArrangementOptions},
     thread_list::{ThreadListHolds, ThreadListOptions, ThreadListView, thread_list},
-    pull_requests::{
-        PullRequestDetailView, PullRequestDiffView, PullRequestListView,
-        PullRequestPanelOptions, pull_request_detail, pull_request_diff, pull_request_list,
-    },
     thread_menu::{ThreadMenuOptions, ThreadMenuView, thread_menu},
     time::TimestampFormat,
     timeline::mobile_follow::{LiveFollowEvent, StreamHaptic, StreamingMessageMark},
@@ -87,6 +87,7 @@ pub struct PreferencesView {
     pub follow_up: FollowUpBehavior,
     pub notification_mode: crate::view::notifications::NotificationMode,
     pub in_app_notifications_enabled: bool,
+    pub load_balancing_enabled: bool,
 }
 
 impl Snapshot {
@@ -145,15 +146,25 @@ fn thread(id: String) -> Option<ThreadId> {
     ThreadId::new(id).ok()
 }
 
+fn scheduled_task_draft_as_composer(draft: &ScheduledTaskDraft) -> Draft {
+    Draft {
+        text: draft.prompt.clone(),
+        instance_id: draft.instance_id.clone(),
+        driver: draft.driver,
+        model: draft.model.clone(),
+        options: draft.options.clone(),
+        runtime_mode: draft.runtime_mode,
+        interaction_mode: draft.interaction_mode,
+        ..Draft::default()
+    }
+}
+
 #[cfg_attr(feature = "bindings", uniffi::export)]
 impl Snapshot {
     pub fn scheduled_tasks(&self) -> ScheduledTaskListView {
         scheduled_task_list(self)
     }
-    pub fn scheduled_task_draft(
-        &self,
-        id: Option<String>,
-    ) -> crate::state::ScheduledTaskDraft {
+    pub fn scheduled_task_draft(&self, id: Option<String>) -> crate::state::ScheduledTaskDraft {
         scheduled_task_draft(self, id.as_deref())
     }
     pub fn scheduled_task_branches(
@@ -337,21 +348,9 @@ impl Snapshot {
     ) -> crate::view::models::catalog_sheet::CatalogSheetView {
         crate::view::models::catalog_sheet::catalog_sheet(self, &options)
     }
-    fn scheduled_task_draft_as_composer(draft: &ScheduledTaskDraft) -> Draft {
-        Draft {
-            text: draft.prompt.clone(),
-            instance_id: draft.instance_id.clone(),
-            driver: draft.driver,
-            model: draft.model.clone(),
-            options: draft.options.clone(),
-            runtime_mode: draft.runtime_mode,
-            interaction_mode: draft.interaction_mode,
-            ..Draft::default()
-        }
-    }
     /// The model option controls for a scheduled task draft.
     pub fn scheduled_task_traits(&self, draft: ScheduledTaskDraft) -> TraitsView {
-        let composer = Self::scheduled_task_draft_as_composer(&draft);
+        let composer = scheduled_task_draft_as_composer(&draft);
         traits(self, &composer, false)
     }
     /// Applies a model select option in a scheduled task draft.
@@ -361,14 +360,10 @@ impl Snapshot {
         descriptor_id: String,
         choice: String,
     ) -> ScheduledTaskDraft {
-        let composer = Self::scheduled_task_draft_as_composer(&draft);
-        if let Some(change) = select_trait(
-            &catalog(self),
-            &composer,
-            false,
-            &descriptor_id,
-            &choice,
-        ) {
+        let composer = scheduled_task_draft_as_composer(&draft);
+        if let Some(change) =
+            select_trait(&catalog(self), &composer, false, &descriptor_id, &choice)
+        {
             if let Some(options) = change.options {
                 draft.options = options;
             }
@@ -385,7 +380,7 @@ impl Snapshot {
         descriptor_id: String,
         on: bool,
     ) -> ScheduledTaskDraft {
-        let composer = Self::scheduled_task_draft_as_composer(&draft);
+        let composer = scheduled_task_draft_as_composer(&draft);
         if let Some(change) = toggle_trait(&catalog(self), &composer, &descriptor_id, on) {
             if let Some(options) = change.options {
                 draft.options = options;
@@ -401,7 +396,9 @@ impl Snapshot {
         let catalog = catalog(self);
         let supported = catalog
             .instance(&draft.instance_id)
-            .map_or(&[][..], |instance| instance.supported_runtime_modes.as_slice());
+            .map_or(&[][..], |instance| {
+                instance.supported_runtime_modes.as_slice()
+            });
         runtime_mode_choices(supported)
     }
     pub fn traits(&self) -> TraitsView {
@@ -509,6 +506,7 @@ impl Snapshot {
             follow_up: self.follow_up,
             notification_mode: preferences.notification_mode,
             in_app_notifications_enabled: preferences.in_app_notifications_enabled,
+            load_balancing_enabled: preferences.load_balancing_enabled,
         }
     }
     /// The project's icon; `None` shows its initials. Clients cache the image

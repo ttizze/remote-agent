@@ -1,6 +1,6 @@
 mod account_usage;
 mod background;
-pub use background::{sample_desktop_power, sample_local_power};
+pub use background::{DesktopProcessMonitor, sample_desktop_power, sample_local_power};
 pub mod browser;
 mod checkpoints;
 mod claude;
@@ -17,6 +17,7 @@ mod host_runtime;
 mod keybindings;
 pub mod local_host;
 pub mod platform;
+mod power_events;
 mod projects;
 pub(crate) mod preview;
 mod repository;

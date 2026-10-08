@@ -383,6 +383,16 @@ impl HostRuntime {
             }
             .into());
         }
+        if self.service.handoff_is_draining()
+            && !matches!(
+                message,
+                Call::HostStatus(_) | Call::ReadUpdateStatus(_) | Call::ListRemotes(_)
+            )
+        {
+            return Err(anyhow::anyhow!(
+                "Host is waiting for its installed update to start"
+            ));
+        }
         if matches!(message, Call::Environment(_)) {
             return Ok(Response::Success {
                 result: Body::from(self.environment.clone()),
@@ -404,7 +414,10 @@ impl HostRuntime {
             .into());
         }
         if matches!(message, Call::Awareness(_)) {
-            let cancel = self.service.cancellation(session)?;
+            let cancel = self
+                .service
+                .cancellation(session)
+                .map_err(anyhow::Error::msg)?;
             return Ok(self.service.awareness(self.environment.clone(), cancel));
         }
         let management = matches!(
@@ -443,7 +456,7 @@ impl HostRuntime {
             .into());
         }
         self.service
-            .dispatch(session, message)
+            .dispatch_from_peer(session, message, node == self.local_node)
             .await
             .map_err(anyhow::Error::msg)
     }

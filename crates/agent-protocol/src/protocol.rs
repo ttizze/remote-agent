@@ -98,6 +98,10 @@ results! {
     PreviewRecordingStatus(crate::preview::PreviewRecordingStatus),
     PreviewRecordingArtifact(crate::preview::PreviewRecordingArtifact),
     Device(crate::device::DeviceEvent),
+    DeviceServiceState(crate::device::DeviceServiceState),
+    DeviceSession(crate::device::DeviceSession),
+    DeviceDetail(crate::device::DeviceDetail),
+    DeviceScreenshot(crate::device::DeviceScreenshot),
     PermissionSettings(crate::permissions::PermissionSettings),
     Providers(Vec<crate::models::ProviderInstance>), WorktreeSettings(crate::models::WorktreeSettings),
     HostSettings(crate::models::HostSettings),
@@ -144,6 +148,8 @@ results! {
     ScheduledTasks(crate::scheduled_tasks::ScheduledTaskList),
     ScheduledTask(crate::scheduled_tasks::ScheduledTask),
     ScheduledTaskRef(crate::scheduled_tasks::ScheduledTaskRef),
+    UpdateState(crate::models::UpdateState),
+    NativeUpdateState(crate::models::NativeUpdateState),
     Unit(()), Text(String)
 }
 #[derive(Debug, Serialize, Deserialize)]

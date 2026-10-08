@@ -1,9 +1,11 @@
 //! Shared scheduled-task list and editor values. All validation and protocol
 //! conversion lives here so desktop and mobile only render and dispatch
 //! intents.
+use super::models::default_model;
+use super::new_thread::{BranchChoice, branch_badge};
 use crate::state::{
-    ModelOption, ScheduledTaskDraft, ScheduledTaskScheduleDraft, ScheduledTaskWorkspaceDraft,
-    RefScope, Snapshot,
+    ModelOption, RefScope, ScheduledTaskDraft, ScheduledTaskScheduleDraft,
+    ScheduledTaskWorkspaceDraft, Snapshot,
 };
 use agent_domain::{
     CommandId, Driver, InteractionMode, MIN_SCHEDULED_TASK_INTERVAL_MS, ModelSelection,
@@ -13,8 +15,6 @@ use agent_protocol::{
     conversation::WorkspaceStrategy,
     scheduled_tasks::{ScheduledTask, UpsertScheduledTask},
 };
-use super::new_thread::{branch_badge, BranchChoice};
-use super::models::default_model;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
@@ -87,11 +87,9 @@ fn canonical_draft_weekdays(weekdays: &[u8]) -> Vec<u8> {
 
 fn workspace(workspace: &WorkspaceStrategy) -> ScheduledTaskWorkspaceDraft {
     match workspace {
-        WorkspaceStrategy::Root { branch } => {
-            ScheduledTaskWorkspaceDraft::Root {
-                branch: branch.clone(),
-            }
-        }
+        WorkspaceStrategy::Root { branch } => ScheduledTaskWorkspaceDraft::Root {
+            branch: branch.clone(),
+        },
         WorkspaceStrategy::ExistingWorktree {
             worktree_path,
             branch,
@@ -158,7 +156,7 @@ pub fn branch_view(
     let entry = root
         .as_deref()
         .and_then(|root| snapshot.sources.refs(root, RefScope::All));
-    let branches = entry
+    let branches: Vec<BranchChoice> = entry
         .and_then(|entry| entry.list.as_ref())
         .map(|list| {
             list.refs
@@ -226,7 +224,11 @@ fn selection(snapshot: &Snapshot, task: Option<&ScheduledTask>) -> ModelSelectio
         return selection;
     }
 
-    snapshot.providers.as_deref().and_then(default_model).map_or(
+    snapshot
+        .providers
+        .as_deref()
+        .and_then(default_model)
+        .map_or(
             ModelSelection {
                 instance: String::new(),
                 driver: Driver::Codex,
@@ -329,7 +331,9 @@ fn schedule_from_draft(draft: &ScheduledTaskDraft) -> Result<Schedule, String> {
             if *every_ms < MIN_SCHEDULED_TASK_INTERVAL_MS {
                 return Err("Interval must be at least one minute.".into());
             }
-            Ok(Schedule::Interval { every_ms: *every_ms })
+            Ok(Schedule::Interval {
+                every_ms: *every_ms,
+            })
         }
         ScheduledTaskScheduleDraft::FixedTime {
             time_of_day,
@@ -386,14 +390,12 @@ fn workspace_from_draft(
                 start_from_origin: *start_from_origin,
             }
         }
-        ScheduledTaskWorkspaceDraft::Root { .. } => {
-            return Err("Choose a valid branch.".into())
-        }
+        ScheduledTaskWorkspaceDraft::Root { .. } => return Err("Choose a valid branch.".into()),
         ScheduledTaskWorkspaceDraft::ExistingWorktree { .. } => {
-            return Err("Choose an existing worktree.".into())
+            return Err("Choose an existing worktree.".into());
         }
         ScheduledTaskWorkspaceDraft::Worktree { .. } => {
-            return Err("Choose a base branch for the worktree.".into())
+            return Err("Choose a base branch for the worktree.".into());
         }
     })
 }
@@ -580,11 +582,14 @@ mod tests {
                 weekdays: vec![],
             }
         );
-        assert_eq!(request.workspace, WorkspaceStrategy::Worktree {
-            base_ref: "release".into(),
-            branch: None,
-            start_from_origin: false,
-        });
+        assert_eq!(
+            request.workspace,
+            WorkspaceStrategy::Worktree {
+                base_ref: "release".into(),
+                branch: None,
+                start_from_origin: false,
+            }
+        );
         assert_eq!(request.selection.options["reasoning"], "high");
     }
 
@@ -662,11 +667,7 @@ mod tests {
         draft.prompt = "Review".into();
         draft.instance_id = "codex".into();
         draft.model = "model".into();
-        let task = upsert(
-            &draft,
-            CommandId::new("command:scheduled").unwrap(),
-        )
-        .unwrap();
+        let task = upsert(&draft, CommandId::new("command:scheduled").unwrap()).unwrap();
         assert_eq!(
             task.schedule,
             Schedule::FixedTime {

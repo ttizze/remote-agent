@@ -318,11 +318,13 @@ impl ProviderHost {
             self.tools.provider_config(&key.thread, &key.instance)?,
         )]);
         let project = if let Some(runtime) = self.runtime.get().and_then(Weak::upgrade) {
-            runtime
-                .state(&key.thread)
-                .await
-                .ok()
-                .and_then(|state| state.state.thread.map(|thread| thread.project))
+            runtime.state(&key.thread).await.ok().and_then(|state| {
+                state
+                    .state
+                    .thread
+                    .as_ref()
+                    .map(|thread| thread.project.clone())
+            })
         } else {
             None
         };

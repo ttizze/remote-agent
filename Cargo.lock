@@ -1080,6 +1080,7 @@ dependencies = [
  "host-daemon",
  "image",
  "lb-wry",
+ "libc",
  "objc2 0.6.4",
  "objc2-av-foundation",
  "objc2-foundation 0.3.2",
@@ -4762,6 +4763,8 @@ dependencies = [
  "tracing",
  "url",
  "uuid",
+ "windows-sys 0.61.2",
+ "zbus",
  "zeroize",
  "zip",
 ]
@@ -8847,6 +8850,7 @@ dependencies = [
  "rustls-platform-verifier",
  "serde",
  "serde_json",
+ "serde_urlencoded",
  "sync_wrapper",
  "tokio",
  "tokio-rustls",
@@ -10642,6 +10646,7 @@ dependencies = [
  "signal-hook-registry",
  "socket2",
  "tokio-macros",
+ "tracing",
  "windows-sys 0.61.2",
 ]
 
@@ -13426,6 +13431,7 @@ dependencies = [
  "rustix 1.1.4",
  "serde",
  "serde_repr",
+ "tokio",
  "tracing",
  "uds_windows",
  "uuid",

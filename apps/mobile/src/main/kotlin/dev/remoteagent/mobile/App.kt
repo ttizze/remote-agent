@@ -14,6 +14,8 @@ import dev.remoteagent.core.BrowserFrame
 import dev.remoteagent.core.BrowserRequest
 import dev.remoteagent.core.Connection
 import dev.remoteagent.core.DictationPreparation
+import dev.remoteagent.core.Draft
+import dev.remoteagent.core.EnvironmentLoadBalancingPreferenceView
 import dev.remoteagent.core.EnvironmentProjectRow
 import dev.remoteagent.core.EnvironmentSettingsEntryView
 import dev.remoteagent.core.EnvironmentThreadListView
@@ -65,6 +67,12 @@ internal data class EnvironmentRow(
     val capabilities: List<String>,
     val reconnectReason: String?,
     val activities: List<EnvironmentActivityRow>,
+)
+
+private data class PendingLoadBalancedNewThread(
+    val projectId: String,
+    val sourceEnvironmentId: String,
+    val startedAtMillis: Long,
 )
 
 private const val PERSISTENCE_QUEUE_CAPACITY = 8
@@ -191,6 +199,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
     private var connection: Job? = null
     private var observation: Job? = null
     private var persistence: Job? = null
+    private var pendingLoadBalancedNewThread: PendingLoadBalancedNewThread? = null
     private val pending = ArrayDeque<Pair<Intent, (Result<Outcome>) -> Unit>>()
     private val operations = mutableSetOf<Job>()
     private val writes = Channel<Snapshot>(PERSISTENCE_QUEUE_CAPACITY)
@@ -315,6 +324,38 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
     fun environmentSettings(): List<EnvironmentSettingsEntryView> =
         buildEnvironmentSettings(environmentSnapshotsForCore())
 
+    fun loadBalancingPreferences(): List<EnvironmentLoadBalancingPreferenceView> =
+        dev.remoteagent.core.environmentLoadBalancingPreferences(environmentSnapshotsForCore())
+
+    fun setLoadBalancingEnabled(enabled: Boolean) {
+        perform(Intent.SetLoadBalancingEnabled(enabled))
+        backgroundOwners.forEach { (profile, store) ->
+            scope.launch {
+                runCatching {
+                    store.dispatch(Intent.SetLoadBalancingEnabled(enabled)).wait()
+                    profiles.firstOrNull { it.id == profile }?.let { publishEnvironment(it, store.snapshot()) }
+                }
+            }
+        }
+    }
+
+    fun setLoadBalancingWeight(environmentId: String, weight: UByte) {
+        val intent = Intent.SetLoadBalancingWeight(environmentId, weight)
+        val profile = environments.firstOrNull { it.environmentId == environmentId }?.profileId
+        if (profile == profileId) perform(intent)
+        else {
+            val store = profile?.let { backgroundOwners[it] }
+            if (store != null) {
+                scope.launch {
+                    runCatching {
+                        store.dispatch(intent).wait()
+                        profiles.firstOrNull { it.id == profile }?.let { publishEnvironment(it, store.snapshot()) }
+                    }
+                }
+            } else perform(intent)
+        }
+    }
+
     fun environmentThreadList(
         nowMs: Long,
         options: ThreadListOptions,
@@ -354,8 +395,104 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
 
     fun newThreadFromShortcut() {
         draftEdits.reset()
-        perform(Intent.NewThread(snapshot.selectedProjectId()))
+        openNewThread(snapshot.selectedProjectId())
         stack = stack + Route.NewTask
+    }
+
+    /** Opens a fresh draft on the best matching environment selected by core. */
+    fun openNewThread(projectId: String?) {
+        val sourceEnvironmentId = snapshot.environmentId()
+        if (projectId == null || sourceEnvironmentId == null) {
+            pendingLoadBalancedNewThread = null
+            perform(Intent.NewThread(projectId))
+            return
+        }
+        // A project chosen from the aggregate picker already names its Host;
+        // automatic balancing is only for the selected Host's local project.
+        if (scopedValue(projectId).second != null) {
+            pendingLoadBalancedNewThread = null
+            perform(Intent.NewThread(projectId))
+            return
+        }
+        val evaluation = dev.remoteagent.core.environmentLoadBalancingRoute(
+            environmentSnapshotsForCore(),
+            sourceEnvironmentId,
+            projectId,
+            System.currentTimeMillis(),
+        )
+        if (evaluation.pendingResources) {
+            pendingLoadBalancedNewThread = PendingLoadBalancedNewThread(
+                projectId,
+                sourceEnvironmentId,
+                System.currentTimeMillis(),
+            )
+            requestLoadBalancingResources()
+            scope.launch {
+                delay(3_000L)
+                retryPendingLoadBalancedNewThread()
+            }
+            return
+        }
+        pendingLoadBalancedNewThread = null
+        val route = evaluation.route
+        if (route == null) {
+            perform(Intent.NewThread(projectId))
+            return
+        }
+        val sourceDraft = snapshot.newThreadDefaultsForProject(projectId)
+        startRoutedNewThread(route, sourceDraft, projectId)
+    }
+
+    private fun startRoutedNewThread(
+        route: dev.remoteagent.core.EnvironmentLoadBalancedRouteView,
+        sourceDraft: Draft,
+        fallbackProjectId: String,
+    ) {
+        perform(Intent.NewThread("${route.environmentId}:${route.projectId}")) { result ->
+            if (result.isFailure) {
+                perform(Intent.NewThread(fallbackProjectId))
+            } else {
+                perform(Intent.SetModel(route.providerInstance, route.driver, route.model, sourceDraft.options))
+                perform(Intent.SetRuntimeMode(sourceDraft.runtimeMode))
+                perform(Intent.SetInteractionMode(sourceDraft.interactionMode))
+            }
+        }
+    }
+
+    private fun retryPendingLoadBalancedNewThread() {
+        val pending = pendingLoadBalancedNewThread ?: return
+        if (snapshot.environmentId() != pending.sourceEnvironmentId ||
+            System.currentTimeMillis() - pending.startedAtMillis > 3_000L
+        ) {
+            pendingLoadBalancedNewThread = null
+            perform(Intent.NewThread(pending.projectId))
+            return
+        }
+        val evaluation = dev.remoteagent.core.environmentLoadBalancingRoute(
+            environmentSnapshotsForCore(),
+            pending.sourceEnvironmentId,
+            pending.projectId,
+            System.currentTimeMillis(),
+        )
+        if (evaluation.pendingResources) return
+        pendingLoadBalancedNewThread = null
+        val route = evaluation.route
+        if (route == null) {
+            perform(Intent.NewThread(pending.projectId))
+            return
+        }
+        startRoutedNewThread(
+            route,
+            snapshot.newThreadDefaultsForProject(pending.projectId),
+            pending.projectId,
+        )
+    }
+
+    private fun requestLoadBalancingResources() {
+        perform(Intent.RefreshLoadBalancingResources)
+        backgroundOwners.values.forEach { store ->
+            runCatching { store.dispatch(Intent.RefreshLoadBalancingResources) }
+        }
     }
 
     fun importShare(text: String, urls: List<String> = emptyList()) {
@@ -405,7 +542,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
             }
             Route.NewTask -> {
                 draftEdits.reset()
-                perform(selection ?: Intent.NewThread(snapshot.selectedProjectId()))
+                if (selection == null) openNewThread(snapshot.selectedProjectId()) else perform(selection)
             }
             is Route.Settings -> {
                 val (projectId, profile) = scopedValue(next.projectId)
@@ -426,10 +563,8 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
     fun chooseProject(projectId: String?) {
         draftEdits.reset()
         val below = stack.getOrNull(stack.size - 2)
-        perform(
-            if (below == Route.NewTask) Intent.SetNewThreadProject(projectId)
-            else Intent.NewThread(projectId)
-        )
+        if (below == Route.NewTask) perform(Intent.SetNewThreadProject(projectId))
+        else openNewThread(projectId)
         stack = if (below == Route.NewTask) stack.dropLast(1) else stack + Route.NewTask
     }
 
@@ -437,10 +572,8 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
     fun projectAdded(projectId: String) {
         val flow = setOf(Route.ChooseProject, Route.AddProject, Route.AddProjectLocal, Route.NewTask)
         draftEdits.reset()
-        perform(
-            if (Route.NewTask in stack) Intent.SetNewThreadProject(projectId)
-            else Intent.NewThread(projectId)
-        )
+        if (Route.NewTask in stack) perform(Intent.SetNewThreadProject(projectId))
+        else openNewThread(projectId)
         stack = stack.takeWhile { it !in flow } + Route.NewTask
     }
 
@@ -482,6 +615,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
 
     fun selectProfile(id: String) {
         if (profiles.none { it.id == id }) return
+        pendingLoadBalancedNewThread = null
         stack = listOf(Route.Home)
         if (profileId == id && owner != null) {
             startBackgroundProfiles(id)
@@ -534,6 +668,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
     }
 
     private fun detach(): AgentStore? {
+        pendingLoadBalancedNewThread = null
         persist()
         draftEdits.reset()
         initialization?.cancel()
@@ -636,6 +771,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
             .sortedBy { it.label.lowercase() }
         if (pushPreferencesChanged || pushRegistrations[profile.id] == null) registerPushForHost(profile.id)
         publishUsageWidget()
+        retryPendingLoadBalancedNewThread()
     }
 
     private fun publishUsageWidget() {

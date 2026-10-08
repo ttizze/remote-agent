@@ -29,6 +29,7 @@ base64.workspace = true
 futures-util = { workspace = true, features = ["io"] }
 tempfile = "3"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "tiff", "bmp", "ico", "pnm"] }
+libc = "0.2.189"
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 async-channel = "2"
 alacritty_terminal = "=0.26.0"

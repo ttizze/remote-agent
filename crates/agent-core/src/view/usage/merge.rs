@@ -272,7 +272,7 @@ pub fn merge(summaries: &[Summary]) -> MergedUsage {
     }
 
     let buckets: Vec<_> = buckets.into_values().collect();
-    let sources = owners.values().map(|owner| owner.source.clone()).collect();
+    let sources: Vec<_> = owners.values().map(|owner| owner.source.clone()).collect();
     let sessions = if sources.is_empty() {
         buckets.iter().map(|bucket| bucket.sessions).sum()
     } else {
@@ -291,7 +291,7 @@ pub fn merge(summaries: &[Summary]) -> MergedUsage {
 }
 
 pub fn provider_totals(usage: &MergedUsage) -> BTreeMap<Provider, (u64, f64)> {
-    let mut totals = BTreeMap::new();
+    let mut totals: BTreeMap<Provider, (u64, f64)> = BTreeMap::new();
     for bucket in &usage.buckets {
         let entry = totals.entry(bucket.provider).or_insert((0, 0.0));
         entry.0 = entry.0.saturating_add(bucket.totals.total());

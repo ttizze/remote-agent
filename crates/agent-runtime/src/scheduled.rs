@@ -612,6 +612,8 @@ impl ScheduledTasks {
                 // with the same id is not stamped.
                 let (id, completed_at, completion_error) =
                     (task.id.clone(), timestamp(&completed), error.clone());
+                let started_at_for_write = started_at.clone();
+                let next_for_write = next.clone();
                 let written = self
                     .executors
                     .store
@@ -619,9 +621,9 @@ impl ScheduledTasks {
                         store::mark_completed(
                             tx,
                             &id,
-                            &started_at,
+                            &started_at_for_write,
                             &completed_at,
-                            next.clone(),
+                            next_for_write,
                             status,
                             completion_error.as_deref(),
                         )

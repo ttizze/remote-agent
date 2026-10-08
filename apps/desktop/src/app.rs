@@ -57,6 +57,7 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
+use tokio_util::sync::CancellationToken;
 
 /// Runs once a dispatched intent resolves.
 type Done = Box<
@@ -64,7 +65,7 @@ type Done = Box<
 >;
 
 enum Update {
-    Connected(Result<(StoreSession, PathBuf), String>),
+    Connected(Result<(StoreSession, PathBuf, bool), String>),
     Snapshot(Arc<Snapshot>),
     EnvironmentConnected {
         profile_id: String,
@@ -84,6 +85,10 @@ enum Update {
     Attachments(attachments::Update),
     Recording(uuid::Uuid, platform::RecordingEvent),
     Transcribed(uuid::Uuid, Result<Outcome, String>),
+    HostPowerSample {
+        attempt: u64,
+        snapshot: agent_protocol::background::HostPowerSnapshot,
+    },
     Tick,
 }
 
@@ -99,6 +104,20 @@ pub(crate) enum Route {
 struct ViewInputs {
     sidebar: SidebarOptions,
     thread: ThreadViewOptions,
+}
+
+#[derive(Debug, Clone)]
+struct PendingLoadBalancedNewThread {
+    project_id: String,
+    source_environment_id: String,
+    started_at: Instant,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AutomaticNewThreadResult {
+    Started,
+    Waiting,
+    Unavailable,
 }
 
 /// The views of one snapshot, derived off the main thread.
@@ -169,6 +188,9 @@ pub(crate) struct Desktop {
     profile_environment_ids: BTreeMap<String, String>,
     pending_open: Option<(String, String)>,
     pending_new_thread: Option<(String, Option<String>)>,
+    local_host_supervised: bool,
+    pending_load_balanced_new_thread: Option<PendingLoadBalancedNewThread>,
+    load_balancing_refresh_requested: bool,
     pub(crate) hosts: Entity<Hosts>,
     pub(crate) route: Route,
     pub(crate) sidebar_hidden: bool,
@@ -195,6 +217,10 @@ pub(crate) struct Desktop {
     pub(crate) dictation: Option<dictation::Dictation>,
     last_host_power_report_ms: Option<i64>,
     last_host_power: Option<agent_protocol::background::HostPowerSnapshot>,
+    host_power_attempt: u64,
+    host_power_probe: Option<tokio_util::task::AbortOnDropHandle<()>>,
+    host_power_probe_stop: Option<CancellationToken>,
+    desktop_process_monitor: Arc<host_daemon::DesktopProcessMonitor>,
     /// Decoded project icons, by content hash.
     pub(crate) project_icons: std::cell::RefCell<std::collections::HashMap<String, Arc<Image>>>,
     tick: Option<tokio_util::task::AbortOnDropHandle<()>>,
@@ -312,6 +338,14 @@ fn cubic_bezier_derivative(parameter: f32, first_control: f32, second_control: f
     3. * inverse * inverse * first_control
         + 6. * inverse * parameter * (second_control - first_control)
         + 3. * parameter * parameter * (1. - second_control)
+}
+
+fn local_host_power_publish_allowed(
+    local_host_supervised: bool,
+    remote_selected: bool,
+    probe_in_flight: bool,
+) -> bool {
+    local_host_supervised && !remote_selected && !probe_in_flight
 }
 
 /// Keys every window binds; screens handle their own focus-specific keys.
@@ -436,6 +470,9 @@ impl Desktop {
             profile_environment_ids: BTreeMap::new(),
             pending_open: None,
             pending_new_thread: None,
+            local_host_supervised: false,
+            pending_load_balanced_new_thread: None,
+            load_balancing_refresh_requested: false,
             hosts,
             route: Route::Chat,
             sidebar_hidden: false,
@@ -459,6 +496,10 @@ impl Desktop {
             dictation: None,
             last_host_power_report_ms: None,
             last_host_power: None,
+            host_power_attempt: 0,
+            host_power_probe: None,
+            host_power_probe_stop: None,
+            desktop_process_monitor: Arc::new(host_daemon::DesktopProcessMonitor::new()),
             project_icons: Default::default(),
             tick: None,
             _subscriptions: subscriptions,
@@ -481,11 +522,19 @@ impl Desktop {
         self.attachments.clear();
         self.dictation = None;
         self.selected_retry_at = None;
+        if let Some(stop) = self.host_power_probe_stop.take() {
+            stop.cancel();
+        }
+        self.host_power_probe.take();
+        self.local_host_supervised = false;
         self.last_host_power_report_ms = None;
         self.last_host_power = None;
+        self.host_power_attempt = self.host_power_attempt.wrapping_add(1);
         self.epoch += 1;
         self.views_running = false;
         self.connecting = true;
+        self.pending_load_balanced_new_thread = None;
+        self.load_balancing_refresh_requested = false;
         self.remote = remote;
         self.session.take();
         if let Some(remote) = &remote {
@@ -522,14 +571,21 @@ impl Desktop {
                             }
                         }
                     });
+                    let connected = connections
+                        .connect(ticket.as_deref(), snapshot, options)
+                        .await;
+                    let local_host_supervised = connected
+                        .as_ref()
+                        .map(|connected| connected.local_host_supervised)
+                        .unwrap_or(false);
                     StoreSession::publish(
-                        connections
-                            .connect(ticket.as_deref(), snapshot, options)
-                            .await,
+                        connected.map(|connected| connected.store),
                         runtime.clone(),
                         tx,
                         move |result| {
-                            Update::Connected(result.map(|session| (session, path.clone())))
+                            Update::Connected(result.map(|session| {
+                                (session, path.clone(), local_host_supervised)
+                            }))
                         },
                         Update::Snapshot,
                     )
@@ -738,7 +794,7 @@ impl Desktop {
             if self.environment_registry.selected() == Some(environment_id.as_str()) {
                 self.pending_new_thread = None;
                 self.snapshot_changed(window, cx);
-                self.new_thread(project_id, cx);
+                self.begin_new_thread(project_id);
                 return;
             }
         }
@@ -760,6 +816,32 @@ impl Desktop {
     /// Sends an intent to the Host connection's owner.
     pub(crate) fn perform(&self, intent: Intent) {
         self.dispatch(intent, None);
+    }
+
+    /// Dispatches a device-owned preference to the Store for one environment.
+    /// Provider and Host mutations remain scoped to the owning Store even
+    /// while the settings page is showing a combined environment list.
+    pub(crate) fn perform_on_environment(&self, environment_id: &str, intent: Intent) {
+        if self.snapshot.environment.as_ref().map(|environment| environment.environment_id.as_str())
+            == Some(environment_id)
+        {
+            self.perform(intent);
+            return;
+        }
+        let Some(profile_id) = self
+            .profile_environment_ids
+            .iter()
+            .find_map(|(profile_id, id)| (id == environment_id).then_some(profile_id))
+        else {
+            return;
+        };
+        if let Some(session) = self.background_sessions.get(profile_id) {
+            let _ = session.store.dispatch(intent);
+        } else {
+            // Device preferences remain editable while a cached environment
+            // is disconnected; the selected Store persists the scoped key.
+            self.perform(intent);
+        }
     }
 
     /// Sends an intent and runs `done` once it resolves.
@@ -875,6 +957,7 @@ impl Desktop {
     fn receive(&mut self, update: Update, window: &mut Window, cx: &mut Context<Self>) {
         match update {
             Update::Tick => {
+                self.retry_pending_load_balanced_new_thread();
                 self.apply_pending_open(window, cx);
                 self.reconnect_selected_if_due(window, cx);
                 self.start_background_connections();
@@ -883,7 +966,7 @@ impl Desktop {
                 cx.notify();
                 return;
             }
-            Update::Connected(Ok((mut session, path))) => {
+            Update::Connected(Ok((mut session, path, local_host_supervised))) => {
                 let (tx, rx) = async_channel::bounded(4);
                 let updates = self.updates.clone();
                 let epoch = self.epoch;
@@ -902,6 +985,7 @@ impl Desktop {
                     .background_policy
                     .as_ref()
                     .map(|snapshot| snapshot.host_power.clone());
+                self.local_host_supervised = local_host_supervised;
                 self.session = Some(session);
                 let profile_id = self
                     .remote
@@ -1120,18 +1204,42 @@ impl Desktop {
                 }
                 self.snapshot_changed(window, cx);
             }
+            Update::HostPowerSample { attempt, snapshot } => {
+                if let Some(stop) = self.host_power_probe_stop.take() {
+                    stop.cancel();
+                }
+                self.host_power_probe.take();
+                if attempt != self.host_power_attempt || !self.local_host_supervised {
+                    return;
+                }
+                let Some(store) = self.session.as_ref().map(|session| session.store.clone()) else {
+                    return;
+                };
+                self.last_host_power = Some(snapshot.clone());
+                let receipt = store.report_host_power(snapshot);
+                self.runtime.handle.spawn(async move {
+                    let _ = receipt.await;
+                });
+            }
         }
         cx.notify();
     }
 
-    /// GPUI owns the desktop lifecycle, so its one-second app tick is the
-    /// publisher for local power state. The Host remains the receiver and
-    /// policy owner; this only supplies sampled observations at the policy
-    /// cadence and keeps heartbeat timestamps fresh.
+    /// GPUI owns the desktop lifecycle, so its one-second app tick schedules a
+    /// local-only power observation. The bounded native probe runs on the
+    /// runtime and returns through the epoch-tagged update channel; GPUI only
+    /// applies the result and reports it to the connected Host.
     fn publish_host_power(&mut self) {
-        let Some(store) = self.session.as_ref().map(|session| session.store.clone()) else {
+        if !local_host_power_publish_allowed(
+            self.local_host_supervised,
+            self.remote.is_some(),
+            self.host_power_probe.is_some(),
+        ) {
             return;
-        };
+        }
+        if self.session.is_none() {
+            return;
+        }
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -1170,13 +1278,28 @@ impl Desktop {
         {
             return;
         }
-        let next = host_daemon::sample_desktop_power(&power);
         self.last_host_power_report_ms = Some(now_ms);
-        self.last_host_power = Some(next.clone());
-        let receipt = store.report_host_power(next);
-        self.runtime.handle.spawn(async move {
-            let _ = receipt.await;
-        });
+        self.host_power_attempt = self.host_power_attempt.wrapping_add(1);
+        let attempt = self.host_power_attempt;
+        let updates = self.updates.clone();
+        let epoch = self.epoch;
+        let stop = CancellationToken::new();
+        let process_monitor = self.desktop_process_monitor.clone();
+        self.host_power_probe_stop = Some(stop.clone());
+        self.host_power_probe = Some(tokio_util::task::AbortOnDropHandle::new(
+            self.runtime.handle.spawn(async move {
+                let mut snapshot = host_daemon::sample_desktop_power(&stop).await;
+                let process_sample = tokio::task::spawn_blocking(move || process_monitor.sample());
+                let processes = tokio::select! {
+                    _ = stop.cancelled() => Vec::new(),
+                    result = process_sample => result.unwrap_or_default(),
+                };
+                snapshot.desktop_processes = processes;
+                let _ = updates
+                    .send((epoch, Update::HostPowerSample { attempt, snapshot }))
+                    .await;
+            }),
+        ));
     }
 
     fn outcome(&mut self, outcome: &Outcome, window: &mut Window, cx: &mut Context<Self>) {
@@ -1240,10 +1363,150 @@ impl Desktop {
         cx.notify();
     }
 
+    fn begin_new_thread(&self, project_id: Option<String>) {
+        self.perform(Intent::NewThread { project_id });
+    }
+
+    /// Requests one capacity sample from each live Store. This is called only
+    /// for an unresolved automatic draft; idle environments do not poll.
+    fn refresh_load_balancing_resources(&self) {
+        if let Some(session) = &self.session {
+            let _ = session
+                .store
+                .dispatch(Intent::RefreshLoadBalancingResources);
+        }
+        for session in self.background_sessions.values() {
+            let _ = session
+                .store
+                .dispatch(Intent::RefreshLoadBalancingResources);
+        }
+    }
+
+    fn automatic_new_thread(
+        &mut self,
+        project_id: &str,
+        allow_refresh: bool,
+    ) -> AutomaticNewThreadResult {
+        if !self.snapshot.preferences.load_balancing_enabled {
+            return AutomaticNewThreadResult::Unavailable;
+        }
+        let Some(source_environment_id) = self
+            .snapshot
+            .environment
+            .as_ref()
+            .map(|environment| environment.environment_id.clone())
+        else {
+            return AutomaticNewThreadResult::Unavailable;
+        };
+        let draft = self
+            .snapshot
+            .new_thread_default_draft_for_project(Some(project_id));
+        if draft.instance_id.is_empty() || draft.model.is_empty() {
+            return AutomaticNewThreadResult::Unavailable;
+        }
+        let evaluation = self.environment_registry.evaluate_load_balancing(
+            &source_environment_id,
+            project_id,
+            draft.driver,
+            (!draft.instance_id.is_empty()).then_some(draft.instance_id.as_str()),
+            &draft.model,
+            &self.snapshot.preferences.load_balancing_weights,
+            ui::now_ms(),
+        );
+        if evaluation.candidate_count < 2 {
+            return AutomaticNewThreadResult::Unavailable;
+        }
+        if evaluation.pending_resources {
+            if allow_refresh && !self.load_balancing_refresh_requested {
+                self.pending_load_balanced_new_thread = Some(PendingLoadBalancedNewThread {
+                    project_id: project_id.to_owned(),
+                    source_environment_id,
+                    started_at: Instant::now(),
+                });
+                self.load_balancing_refresh_requested = true;
+                self.refresh_load_balancing_resources();
+            }
+            return AutomaticNewThreadResult::Waiting;
+        }
+        let Some(route) = evaluation.route else {
+            return AutomaticNewThreadResult::Unavailable;
+        };
+        if self.environment_registry.selected() != Some(route.environment_id.as_str())
+            && !self.promote_environment(&route.environment_id)
+        {
+            return AutomaticNewThreadResult::Unavailable;
+        }
+        self.pending_load_balanced_new_thread = None;
+        self.load_balancing_refresh_requested = false;
+        let runtime_mode = draft.runtime_mode;
+        let interaction_mode = draft.interaction_mode;
+        let options = draft.options;
+        let selection = (route.provider_instance, route.driver, route.model);
+        let target_project = route.project_id;
+        let fallback_project = project_id.to_owned();
+        self.perform_then(
+            Intent::NewThread {
+                project_id: Some(target_project),
+            },
+            move |view, result, _, _| {
+                if result.is_err() {
+                    view.begin_new_thread(Some(fallback_project));
+                    return;
+                }
+                view.perform(Intent::SetModel {
+                    instance_id: selection.0.clone(),
+                    driver: selection.1,
+                    model: selection.2.clone(),
+                    options,
+                });
+                view.perform(Intent::SetRuntimeMode {
+                    mode: runtime_mode,
+                });
+                view.perform(Intent::SetInteractionMode {
+                    mode: interaction_mode,
+                });
+            },
+        );
+        AutomaticNewThreadResult::Started
+    }
+
+    fn retry_pending_load_balanced_new_thread(&mut self) {
+        let Some(pending) = self.pending_load_balanced_new_thread.clone() else {
+            return;
+        };
+        if pending.started_at.elapsed() > Duration::from_secs(3) {
+            self.pending_load_balanced_new_thread = None;
+            self.load_balancing_refresh_requested = false;
+            self.begin_new_thread(Some(pending.project_id));
+            return;
+        }
+        if self.environment_registry.selected() != Some(pending.source_environment_id.as_str()) {
+            self.pending_load_balanced_new_thread = None;
+            self.load_balancing_refresh_requested = false;
+            self.begin_new_thread(Some(pending.project_id));
+            return;
+        }
+        match self.automatic_new_thread(&pending.project_id, false) {
+            AutomaticNewThreadResult::Waiting => {}
+            AutomaticNewThreadResult::Started => {}
+            AutomaticNewThreadResult::Unavailable => {
+                self.pending_load_balanced_new_thread = None;
+                self.load_balancing_refresh_requested = false;
+                self.begin_new_thread(Some(pending.project_id));
+            }
+        }
+    }
+
     /// Starts a new-thread draft in `project_id`, leaving settings.
     pub(crate) fn new_thread(&mut self, project_id: Option<String>, cx: &mut Context<Self>) {
         self.route = Route::Chat;
-        self.perform(Intent::NewThread { project_id });
+        let automatic = project_id.as_deref().map_or(
+            AutomaticNewThreadResult::Unavailable,
+            |project_id| self.automatic_new_thread(project_id, true),
+        );
+        if matches!(automatic, AutomaticNewThreadResult::Unavailable) {
+            self.begin_new_thread(project_id);
+        }
         cx.notify();
     }
 
@@ -1513,6 +1776,19 @@ impl Desktop {
                 .into_any_element(),
             None => navigation.into_any_element(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::local_host_power_publish_allowed;
+
+    #[test]
+    fn desktop_power_requires_a_verified_local_host_without_remote_or_inflight_probe() {
+        assert!(local_host_power_publish_allowed(true, false, false));
+        assert!(!local_host_power_publish_allowed(false, false, false));
+        assert!(!local_host_power_publish_allowed(true, true, false));
+        assert!(!local_host_power_publish_allowed(true, false, true));
     }
 }
 

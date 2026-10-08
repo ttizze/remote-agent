@@ -813,7 +813,7 @@ fn select(
     pick: impl Fn(&mut Desktop, String, &mut Window, &mut Context<Desktop>) + 'static,
     cx: &mut Context<Desktop>,
 ) -> impl IntoElement {
-    select_sized(id, label, choices, 176., pick, cx)
+    select_with_disabled(id, label, choices, 176., false, pick, cx)
 }
 
 /// A select trigger `width` wide.
@@ -822,6 +822,18 @@ fn select_sized(
     label: impl Into<SharedString>,
     choices: Vec<Choice>,
     width: f32,
+    pick: impl Fn(&mut Desktop, String, &mut Window, &mut Context<Desktop>) + 'static,
+    cx: &mut Context<Desktop>,
+) -> impl IntoElement {
+    select_with_disabled(id, label, choices, width, false, pick, cx)
+}
+
+fn select_with_disabled(
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+    choices: Vec<Choice>,
+    width: f32,
+    disabled: bool,
     pick: impl Fn(&mut Desktop, String, &mut Window, &mut Context<Desktop>) + 'static,
     cx: &mut Context<Desktop>,
 ) -> impl IntoElement {
@@ -836,6 +848,7 @@ fn select_sized(
         .outline()
         .small()
         .w(px(width))
+        .disabled(disabled)
         .when_some(glyph, |button, glyph| button.icon(icon(glyph)))
         .label(label)
         .dropdown_caret(true)

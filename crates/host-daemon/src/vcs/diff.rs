@@ -1,7 +1,7 @@
 //! The diff panel's `Uncommitted` and `Changes` previews, read against a copy
 //! of the index that lists untracked files as intent-to-add.
 use super::{
-    DIFF_ARGS, METADATA_MAX_BYTES, Options, Run, TRUNCATED_MARKER, git, merge_base, repository,
+    DIFF_ARGS, METADATA_MAX_BYTES, Options, TRUNCATED_MARKER, git, merge_base, repository, stdout,
     unborn_head,
 };
 use agent_protocol::workspace::{

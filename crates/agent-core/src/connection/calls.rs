@@ -470,6 +470,9 @@ impl Owner {
         } else {
             result
         };
+        if matches!(&call, Call::ReadHostResources(_)) {
+            self.load_balancing_resources_in_flight = false;
+        }
         let paired = match &result {
             Ok(Reply::Remote(host)) => Some(Outcome::RemoteHostPaired {
                 id: host.id.clone(),
@@ -824,12 +827,13 @@ impl Owner {
             }
             Reply::AwarenessRegistration(_) => {}
             Reply::HostSettings(settings) => {
-                self.state.default_draft.runtime_mode = settings.default_runtime_mode;
+                let mut defaults = self.state.default_draft.user_defaults();
+                defaults.runtime_mode = settings.default_runtime_mode;
                 if let Some(selection) = &settings.default_model_selection {
-                    self.state.default_draft.instance_id = selection.instance.clone();
-                    self.state.default_draft.driver = selection.driver;
-                    self.state.default_draft.model = selection.model.clone();
-                    self.state.default_draft.options = selection
+                    defaults.instance_id = selection.instance.clone();
+                    defaults.driver = selection.driver;
+                    defaults.model = selection.model.clone();
+                    defaults.options = selection
                         .options
                         .iter()
                         .map(|(key, value)| ModelOption {
@@ -838,6 +842,7 @@ impl Owner {
                         })
                         .collect();
                 }
+                self.state.default_draft = defaults;
                 self.state.host_settings = Some(settings);
                 if matches!(call, Call::UpdateSettings(_)) {
                     self.job(Call::ListProviders(m::Empty {}), None, None);
@@ -845,7 +850,11 @@ impl Owner {
             }
             Reply::Keybindings(config) => self.state.keybindings = Some(Arc::new(config)),
             Reply::Background(snapshot) => self.state.background_policy = Some(snapshot),
-            Reply::HostResources(resources) => self.state.host_resources = Some(resources),
+            Reply::HostResources(resources) => {
+                self.state.host_resources = Some(resources);
+                self.state.host_resources_received_at_ms = Some(super::owner::now_ms() as i64);
+                self.load_balancing_resources_in_flight = false;
+            }
             Reply::ProcessDiagnostics(processes) => {
                 self.state.process_diagnostics = Some(processes)
             }
