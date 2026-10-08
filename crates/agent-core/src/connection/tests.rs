@@ -712,11 +712,12 @@ fn search_respects_server_limits_and_clear_remains_local() {
 
 // web queries.ts useThreadSearch: a query is asked once typing settles, is
 // pending until its own answer arrives, and a stale answer is dropped.
-#[test]
-fn a_message_search_is_pending_until_its_own_answer_arrives() {
+#[tokio::test]
+async fn a_message_search_is_pending_until_its_own_answer_arrives() {
     use crate::state::SearchRequest;
-    let mut owner = owner(Snapshot::default());
-    owner.state.connected = true;
+    let mut loopback =
+        Loopback::connect(std::time::Duration::from_secs(5), options(), |_| {}).await;
+    let owner = &mut loopback.owner;
     owner.state.search = "needle".into();
     owner.state.search_request = Some(SearchRequest {
         query: "needle".into(),
@@ -2369,7 +2370,7 @@ fn initial_new_thread_dictation_uses_the_draft_identity() {
         .unwrap();
     let key = owner.state.open_new_thread_draft.clone().unwrap();
     match next {
-        Next::Call(_, Some(sent)) => assert_eq!(sent.as_ref().0, &key),
+        Next::Call(_, Some(sent)) => assert_eq!(sent.as_ref().0, key),
         _ => panic!("dictation should retain the draft it will update"),
     }
     assert_eq!(owner.state.drafts[&key].project_id.as_deref(), Some("chats"));

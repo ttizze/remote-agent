@@ -526,7 +526,7 @@ impl Snapshot {
         let due: Vec<String> = self
             .drafts
             .iter()
-            .filter(|(key, draft)| {
+            .filter(|(_key, draft)| {
                 draft.project_id.is_some() && draft.created_at_ms.is_none() != draft.is_empty()
             })
             .map(|(key, _)| key.clone())

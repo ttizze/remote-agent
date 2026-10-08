@@ -390,7 +390,7 @@ impl Owner {
                 if complete.is_some() {
                     self.state.error = None;
                 }
-                self.reply(&call, reply, sent);
+                self.reply(&call, reply, sent, diff_generation);
                 Ok(paired.unwrap_or_default())
             }
         };
@@ -399,7 +399,13 @@ impl Owner {
         }
     }
 
-    fn reply(&mut self, call: &Call, reply: Reply, sent: Option<(String, Draft)>) {
+    fn reply(
+        &mut self,
+        call: &Call,
+        reply: Reply,
+        sent: Option<(String, Draft)>,
+        diff_generation: Option<u64>,
+    ) {
         let workspace = &mut self.state.workspace;
         match reply {
             Reply::Providers(providers) => {
