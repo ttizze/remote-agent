@@ -28,7 +28,6 @@ pub const MAX_FONT_FAMILY_CHARS: usize = 200;
 /// The stock palette's card in the theme library.
 pub const STANDARD_THEME_LABEL: &str = "Bex";
 const MATERIAL_YOU_THEME_ID: &str = "material-you";
-const MATERIAL_YOU_THEME_LABEL: &str = "Material You";
 
 /// The color scheme choices exposed by the mobile Appearance screen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -63,7 +62,6 @@ pub struct MobileAppearance {
 }
 
 /// A theme name a mobile client can present for selection.
-#[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct MobileThemeChoice {
     /// `None` selects the stock palette.
@@ -148,7 +146,7 @@ pub fn mobile_theme_choices(include_material_you: bool) -> Vec<MobileThemeChoice
     if include_material_you {
         choices.push(MobileThemeChoice {
             id: Some(MATERIAL_YOU_THEME_ID.into()),
-            label: MATERIAL_YOU_THEME_LABEL.into(),
+            label: "Material You".into(),
         });
     }
     choices
