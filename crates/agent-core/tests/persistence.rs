@@ -8,12 +8,22 @@ use std::sync::Arc;
 #[test]
 fn device_model_defaults_apply_across_hosts_without_replacing_their_user_work() {
     let defaults = agent_core::state::ModelDefaults {
-        model: Some(agent_protocol::models::ModelRef {
+        new_chat_model: Some(agent_protocol::models::ModelRef {
             provider: agent_protocol::session::ProviderKind::Claude,
             id: "sonnet".into(),
         }),
-        effort: Some("high".into()),
-        service_tier: Some("fast".into()),
+        providers: [(
+            agent_protocol::session::ProviderKind::Claude,
+            agent_core::state::ProviderModelDefaults {
+                model: Some(agent_protocol::models::ModelRef {
+                    provider: agent_protocol::session::ProviderKind::Claude,
+                    id: "opus".into(),
+                }),
+                effort: Some("high".into()),
+                service_tier: Some("fast".into()),
+            },
+        )]
+        .into(),
     };
     let scoped = [(
         agent_core::state::ModelDefaultsScope::Environment { id: "first".into() },
