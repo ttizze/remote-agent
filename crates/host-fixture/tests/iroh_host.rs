@@ -1599,7 +1599,7 @@ async fn title_lists_are_recent_scoped_small_and_expand_without_loading_bodies()
         assert_eq!(body_json(&item["item"])["assistantText"]["text"], "History for Project 05 conversation 01");
         assert!(agent_protocol::protocol::json_boundary::call("host/thread/watch", json!({"watchId":1,"threadId":{"provider":"codex","id":"p5-1"},"path":rollout})).is_err(), "external rollout following is retired");
         threads.extend([
-            json!({"id":"older-child","cwd":directory.path(),"parentThreadId":"worktree","name":null,"agentNickname":"Curie","canAcceptDirectInput":false,"updatedAt":-1}),
+            json!({"id":"older-child","parentThreadId":"worktree","cwd":directory.path().join("worktree"),"name":null,"agentNickname":"Curie","canAcceptDirectInput":false,"updatedAt":-1}),
             json!({"id":"older-grandchild","parentThreadId":"older-child","name":null,"agentRole":"reviewer","updatedAt":-2}),
             json!({"id":"hidden-child","parentThreadId":"p1-1","updatedAt":-3}),
         ]);

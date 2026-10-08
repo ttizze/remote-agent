@@ -204,8 +204,13 @@ struct ThreadScreen: View {
                         }
                     }
                 } else if model.isNewThread {
-                    Color.clear.frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .accessibilityIdentifier("task.empty")
+                    ScrollView {
+                        newThreadContext
+                            .padding(24)
+                    }
+                    .defaultScrollAnchor(.center, for: .alignment)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .accessibilityIdentifier("task.empty")
                 } else if let id = model.selectedThreadId, model.notice != nil {
                     Button("再試行") { model.openThread(id) }
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -292,9 +297,36 @@ extension ThreadScreen {
         .buttonStyle(.plain)
     }
 
-    var newThreadContext: some View {
+    private var newThreadContext: some View {
         let directory = model.selectedDirectory
-        return VStack(alignment: .leading, spacing: 4) {
+        return VStack(spacing: 24) {
+            VStack(spacing: 8) {
+                Text("何を作りましょうか？")
+                    .accessibilityIdentifier("task.prompt")
+                Menu {
+                    Button { model.openNewThread(cwd: "") } label: {
+                        Label("チャット", systemImage: "bubble.left.and.bubble.right")
+                    }
+                    ForEach(model.list?.projects ?? [], id: \.id) { project in
+                        ForEach(project.roots, id: \.path) { root in
+                            Button { model.openNewThread(cwd: root.path) } label: {
+                                Label(project.roots.count == 1 ? project.name : root.path,
+                                      systemImage: root.path == directory ? "checkmark" : "folder")
+                            }
+                        }
+                    }
+                } label: {
+                    Text(project?
+                        .name ?? (directory.isEmpty ? "チャット" : URL(fileURLWithPath: directory).lastPathComponent))
+                        .underline()
+                        .lineLimit(2)
+                        .truncationMode(.middle)
+                        .frame(minWidth: 44, minHeight: 44)
+                }
+                .accessibilityLabel("フォルダ: \(project?.name ?? (directory.isEmpty ? "チャット" : directory))")
+                .accessibilityIdentifier("task.folder")
+            }
+            .font(.largeTitle.weight(.medium))
             Menu {
                 ForEach(model.profiles, id: \.id) { profile in
                     Button { model.openNewThread(on: profile.id) } label: {
@@ -306,50 +338,25 @@ extension ThreadScreen {
                     }
                 }
             } label: {
-                contextLabel(model.selectedProfileName ?? "環境を選択", icon: "laptopcomputer")
-                if model.isConnecting {
-                    ProgressView().controlSize(.small)
-                        .tint(.red)
-                }
-            }
-            .accessibilityLabel("環境: \(model.selectedProfileName ?? "未選択")")
-            .accessibilityIdentifier("task.environment")
-            Menu {
-                Button { model.openNewThread(cwd: "") } label: {
-                    Label("チャット", systemImage: "bubble.left.and.bubble.right")
-                }
-                ForEach(model.list?.projects ?? [], id: \.id) { project in
-                    ForEach(project.roots, id: \.path) { root in
-                        Button { model.openNewThread(cwd: root.path) } label: {
-                            Label(project.roots.count == 1 ? project.name : root.path,
-                                  systemImage: root.path == directory ? "checkmark" : "folder")
-                        }
+                HStack(spacing: 8) {
+                    Image(systemName: "laptopcomputer")
+                    Text(model.selectedProfileName ?? "環境を選択")
+                        .lineLimit(1).truncationMode(.middle)
+                    if model.isConnecting {
+                        ProgressView().controlSize(.small).tint(.red)
                     }
                 }
-            } label: {
-                contextLabel(
-                    project?.name ?? (directory.isEmpty ? "チャット" : URL(fileURLWithPath: directory).lastPathComponent),
-                    icon: directory.isEmpty ? "bubble.left.and.bubble.right" : "folder"
-                )
+                .frame(minHeight: 44)
             }
-            .accessibilityLabel("フォルダ: \(project?.name ?? (directory.isEmpty ? "チャット" : directory))")
-            .accessibilityIdentifier("task.folder")
+            .font(.subheadline)
+            .foregroundColor(.secondary)
+            .accessibilityLabel("環境: \(model.selectedProfileName ?? "未選択")")
+            .accessibilityIdentifier("task.environment")
         }
-        .font(.title3)
-        .foregroundColor(.secondary)
+        .multilineTextAlignment(.center)
         .buttonStyle(.plain)
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(maxWidth: .infinity)
         .disabled(model.transferring || preparingMedia || model.sending || dictation.isRecording || dictation
             .requestingPermission || model.transcribing)
-    }
-
-    func contextLabel(_ title: String, icon: String) -> some View {
-        HStack(spacing: 12) {
-            Image(systemName: icon).frame(width: 28)
-            Text(title).lineLimit(1).truncationMode(.middle)
-            Image(systemName: "chevron.up.chevron.down").font(.caption.weight(.semibold))
-        }
-        .frame(minHeight: 44)
-        .padding(.horizontal, 8)
     }
 }

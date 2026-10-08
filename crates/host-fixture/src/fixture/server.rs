@@ -83,15 +83,15 @@ impl Context {
         self.write(&Reply { id, result })
     }
 
-    fn respond_history(&self, id: &Value, result: &impl Serialize) -> Result<()> {
-        let gate = self.home.join("hold-history-reads");
+    fn respond_read(&self, id: &Value, result: &impl Serialize, resource: &str) -> Result<()> {
+        let gate = self.home.join(format!("hold-{resource}-reads"));
         if !gate.exists() {
             return self.respond(id, result);
         }
         let response = serde_json::to_string(&json!({"id":id,"result":result}))?;
         let id = id.clone();
         let output = self.output.clone();
-        fs::write(self.home.join("history-read-held"), [])?;
+        fs::write(self.home.join(format!("{resource}-read-held")), [])?;
         tokio::spawn(async move {
             let released = tokio::time::timeout(std::time::Duration::from_secs(25), async {
                 while gate.exists() {
@@ -102,7 +102,7 @@ impl Context {
             let response = if released.is_ok() {
                 response
             } else {
-                json!({"id":id,"error":{"code":-32000,"message":"fixture history gate timed out"}})
+                json!({"id":id,"error":{"code":-32000,"message":"fixture read gate timed out"}})
                     .to_string()
             };
             let _ = output.send(Output::Message(response));
@@ -401,7 +401,12 @@ pub(super) async fn run(home: PathBuf, config: Config) -> Result<()> {
                     let next_cursor = if context.home.join("repeat-list-cursor").exists() {
                         Some(offset.to_string())
                     } else { (end < ordered.len()).then(|| end.to_string()) };
-                    context.respond(id, &Page { data: &page, next_cursor })?;
+                    let response = Page { data: &page, next_cursor };
+                    if params["ancestorThreadId"].is_string() {
+                        context.respond_read(id, &response, "list")?;
+                    } else {
+                        context.respond(id, &response)?;
+                    }
                 }
                 "thread/start" => {
                     let failure = context.home.join("fail-next-thread-start");
@@ -599,7 +604,7 @@ pub(super) async fn run(home: PathBuf, config: Config) -> Result<()> {
                         } else {
                             let response = Read { thread: &ThreadView { metadata: &thread.metadata,
                                 turns: if method == "thread/read" { &[] } else { &thread.turns } } };
-                            if method == "thread/read" { context.respond_history(id, &response)?; }
+                            if method == "thread/read" { context.respond_read(id, &response, "history")?; }
                             else { context.respond(id, &response)?; }
                         }
                     }

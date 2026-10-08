@@ -16,6 +16,7 @@ concurrency:
   group: native-${{ github.ref }}
   # A newer main push waits, so every pushed change finishes verification.
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  queue: ${{ github.event_name == 'pull_request' && 'single' || 'max' }}
 env:
   CARGO_BUILD_JOBS: 4
   CARGO_INCREMENTAL: 0

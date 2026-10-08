@@ -1560,14 +1560,16 @@ async fn next_title(
     threads: &mut futures_util::stream::BoxStream<'_, Result<SessionSummary, Failure>>,
     deadline: tokio::time::Instant,
 ) -> Result<Option<SessionSummary>, Failure> {
-    tokio::time::timeout_at(deadline, threads.try_next())
-        .await
-        .unwrap_or_else(|_| {
-            Err(Failure::new(
-                "provider_timeout",
-                "session listing timed out; results are partial",
-            ))
-        })
+    // Poll the deadline before a queued read, including when both are ready,
+    // so expired admissions cannot start another native request.
+    tokio::select! {
+        biased;
+        _ = tokio::time::sleep_until(deadline) => Err(Failure::new(
+            "provider_timeout",
+            "session listing timed out; results are partial",
+        )),
+        result = threads.try_next() => result,
+    }
 }
 
 fn describe_thread(
@@ -1695,6 +1697,36 @@ mod tests {
     }
 
     use agent_protocol::session::ProviderKind;
+
+    #[tokio::test(start_paused = true)]
+    async fn expired_title_deadlines_do_not_poll_the_provider() {
+        use super::*;
+        let now = tokio::time::Instant::now();
+        for deadline in [
+            now,
+            now - std::time::Duration::from_secs(1),
+            now + std::time::Duration::from_secs(1),
+        ] {
+            let polls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let observed = polls.clone();
+            let mut threads = futures_util::stream::once(async move {
+                if deadline > now {
+                    tokio::time::sleep_until(deadline).await;
+                }
+                observed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(SessionSummary {
+                    thread: Thread::default(),
+                    branch: None,
+                })
+            })
+            .boxed();
+            assert_eq!(
+                next_title(&mut threads, deadline).await.err().unwrap().code,
+                "provider_timeout"
+            );
+            assert_eq!(polls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        }
+    }
 
     #[tokio::test(start_paused = true)]
     async fn title_reads_share_one_deadline_across_pages() {
