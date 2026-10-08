@@ -4,19 +4,25 @@
 //! `Changes` compares the working tree, untracked files included, with the
 //! merge base of HEAD and the base branch.
 mod broadcaster;
+mod actions;
 mod diff;
 mod process;
 mod pull;
 mod pull_requests;
+mod pr_checkout;
 mod refs;
 mod status;
 mod worktree_ops;
 
+pub(crate) use actions::start as start_action;
 pub(crate) use broadcaster::VcsStatusBroadcaster;
+pub(crate) use pr_checkout::{prepare as prepare_pull_request_thread, publish, resolve as resolve_pull_request};
 pub(crate) use pull::pull_current_branch;
 pub(crate) use refs::{create_ref, refs, switch_ref};
-pub(crate) use status::{BranchHead, branch_head};
-pub(crate) use worktree_ops::{create_worktree, init_repository, remove_worktree};
+pub(crate) use status::{BranchHead, branch_head, local_status};
+pub(crate) use worktree_ops::{
+    create_worktree, delete_local_branch, init_repository, origin_start, remove_worktree,
+};
 
 use diff::preview;
 

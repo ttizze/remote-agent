@@ -41,6 +41,11 @@ pub(super) enum Reply {
     VcsStatus(w::VcsStatus),
     Refs(w::RefList),
     DiffPreview(w::DiffPreviewResult),
+    PullResult(agent_protocol::vcs::PullResult),
+    CreatedWorktree(agent_protocol::vcs::CreatedWorktree),
+    ResolvedPullRequest(agent_protocol::vcs::ResolvedPullRequestResult),
+    PreparedPullRequestThread(agent_protocol::vcs::PreparedPullRequestThread),
+    PublishedRepository(agent_protocol::vcs::PublishedRepository),
     SetupCancelled(c::SetupCancelled),
     ProjectIcon(Option<m::ProjectFavicon>),
     SwitchedRef(w::SwitchedRef),
@@ -68,6 +73,19 @@ async fn execute(peer: &Peer, call: &Call) -> Result<Reply, PeerError> {
         Call::ProviderCommands(_) => Reply::ProviderCommands(peer.request(call).await?),
         Call::SearchEntries(_) => Reply::EntrySearch(peer.request(call).await?),
         Call::VcsStatus(_) => Reply::VcsStatus(peer.request(call).await?),
+        Call::RefreshVcsStatus(_) => Reply::VcsStatus(peer.request(call).await?),
+        Call::Pull(_) => Reply::PullResult(peer.request(call).await?),
+        Call::InitRepository(_) | Call::RemoveWorktreeCheckout(_) => {
+            let _: m::Empty = peer.request(call).await?;
+            Reply::Done
+        }
+        Call::CreateWorktree(_) => Reply::CreatedWorktree(peer.request(call).await?),
+        Call::ResolvePullRequest(_) => Reply::ResolvedPullRequest(peer.request(call).await?),
+        Call::PreparePullRequestThread(_) => {
+            Reply::PreparedPullRequestThread(peer.request(call).await?)
+        }
+        Call::PublishRepository(_) => Reply::PublishedRepository(peer.request(call).await?),
+        Call::RunStackedAction(_) | Call::SubscribeVcsStatus(_) => Reply::Done,
         Call::ListRefs(_) => Reply::Refs(peer.request(call).await?),
         Call::DiffPreview(_) => Reply::DiffPreview(peer.request(call).await?),
         Call::ProjectFavicon(_) => Reply::ProjectIcon(peer.request(call).await?),
@@ -317,6 +335,65 @@ impl Owner {
             Ok(Reply::Remote(host)) => Some(Outcome::RemoteHostPaired {
                 id: host.id.clone(),
             }),
+            Ok(Reply::PullResult(result)) => Some(Outcome::GitPulled {
+                result: GitPullOutcome {
+                    status: match result.status {
+                        agent_protocol::vcs::PullStatus::Pulled => "pulled".into(),
+                        agent_protocol::vcs::PullStatus::SkippedUpToDate => "skipped_up_to_date".into(),
+                    },
+                    ref_name: result.ref_name.clone(),
+                    upstream_ref: result.upstream_ref.clone(),
+                },
+            }),
+            Ok(Reply::CreatedWorktree(result)) => Some(Outcome::GitWorktreeCreated {
+                result: GitWorktreeOutcome {
+                    path: result.worktree.path.clone(),
+                    ref_name: result.worktree.ref_name.clone(),
+                },
+            }),
+            Ok(Reply::ResolvedPullRequest(result)) => Some(Outcome::GitPullRequestResolved {
+                result: GitPullRequestOutcome {
+                    number: result.pull_request.number,
+                    title: result.pull_request.title.clone(),
+                    url: result.pull_request.url.clone(),
+                    base_branch: result.pull_request.base_branch.clone(),
+                    head_branch: result.pull_request.head_branch.clone(),
+                    state: format!("{:?}", result.pull_request.state).to_lowercase(),
+                },
+            }),
+            Ok(Reply::PreparedPullRequestThread(result)) => {
+                let pull_request = &result.pull_request;
+                Some(Outcome::GitPullRequestThreadPrepared {
+                    result: GitPullRequestThreadOutcome {
+                        pull_request: GitPullRequestOutcome {
+                            number: pull_request.number,
+                            title: pull_request.title.clone(),
+                            url: pull_request.url.clone(),
+                            base_branch: pull_request.base_branch.clone(),
+                            head_branch: pull_request.head_branch.clone(),
+                            state: format!("{:?}", pull_request.state).to_lowercase(),
+                        },
+                        branch: result.branch.clone(),
+                        worktree_path: result.worktree_path.clone(),
+                        is_on_pull_request_head: result.is_on_pull_request_head,
+                    },
+                })
+            }
+            Ok(Reply::PublishedRepository(result)) => Some(Outcome::GitRepositoryPublished {
+                result: GitPublishOutcome {
+                    name_with_owner: result.repository.name_with_owner.clone(),
+                    url: result.repository.url.clone(),
+                    ssh_url: result.repository.ssh_url.clone(),
+                    remote_name: result.remote_name.clone(),
+                    remote_url: result.remote_url.clone(),
+                    branch: result.branch.clone(),
+                    upstream_branch: result.upstream_branch.clone(),
+                    status: match result.status {
+                        agent_protocol::vcs::PublishStatus::Pushed => "pushed".into(),
+                        agent_protocol::vcs::PublishStatus::RemoteAdded => "remote_added".into(),
+                    },
+                },
+            }),
             Ok(_) => match &call {
                 Call::StartTerminal(params) => {
                     self.state.terminals.get(&params.handle()).map(|terminal| {
@@ -514,13 +591,22 @@ impl Owner {
                 }
             }
             Reply::VcsStatus(status) => {
-                if let Call::VcsStatus(request) = call {
+                if let Some(cwd) = match call {
+                    Call::VcsStatus(request) => Some(request.cwd.clone()),
+                    Call::RefreshVcsStatus(request) => Some(request.cwd.clone()),
+                    _ => None,
+                } {
                     self.state
-                        .sources
-                        .vcs_status
-                        .insert(request.cwd.clone(), status);
+                        .git
+                        .status
+                        .insert(cwd, status);
                 }
             }
+            Reply::PullResult(_)
+            | Reply::CreatedWorktree(_)
+            | Reply::ResolvedPullRequest(_)
+            | Reply::PreparedPullRequestThread(_)
+            | Reply::PublishedRepository(_) => {}
             Reply::Refs(list) => {
                 if let Call::ListRefs(request) = call {
                     self.refs_finished(request, Ok(list));
@@ -537,14 +623,20 @@ impl Owner {
                 }
             }
             Reply::SwitchedRef(switched) => match call {
-                Call::SwitchRef(request) => self.switched_ref(request, switched),
-                Call::CreateRef(request) => self.switched_ref(
-                    &w::SwitchRef {
-                        cwd: request.cwd.clone(),
-                        ref_name: request.ref_name.clone(),
-                    },
-                    switched,
-                ),
+                Call::SwitchRef(request) => {
+                    self.switched_ref(request, switched);
+                    self.load_refs(request.cwd.clone(), RefScope::All, String::new());
+                }
+                Call::CreateRef(request) => {
+                    self.switched_ref(
+                        &w::SwitchRef {
+                            cwd: request.cwd.clone(),
+                            ref_name: request.ref_name.clone(),
+                        },
+                        switched,
+                    );
+                    self.load_refs(request.cwd.clone(), RefScope::All, String::new());
+                }
                 _ => {}
             },
             Reply::ProjectIcon(favicon) => {

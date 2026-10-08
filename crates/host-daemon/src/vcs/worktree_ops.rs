@@ -286,6 +286,38 @@ pub(crate) async fn fetch_pull_request_branch(
     })
 }
 
+/// Fetches a same-repository branch into its normal remote-tracking ref.
+/// Pull request materialization may have created only a local branch, so this
+/// is kept separate from the PR ref fetch used for fork heads.
+pub(crate) async fn fetch_remote_branch(cwd: &Path, remote: &str, branch: &str) -> Result<()> {
+    fetch(
+        cwd,
+        remote,
+        Some(&format!(
+            "+refs/heads/{branch}:refs/remotes/{remote}/{branch}"
+        )),
+    )
+    .await
+}
+
+/// Fetches the primary origin before an explicit-path worktree is created and
+/// returns its remote-tracking commit when that branch exists. Keeping the
+/// fallback local preserves the managed-worktree behavior for repositories
+/// whose origin does not publish the requested base ref.
+pub(crate) async fn origin_start(cwd: &Path, base_ref: &str) -> Result<String> {
+    if config_value(cwd, "remote.origin.url").is_none() {
+        return Ok(base_ref.to_owned());
+    }
+    fetch(cwd, "origin", None).await?;
+    let remote = format!("refs/remotes/origin/{base_ref}");
+    Ok(stdout(
+        cwd,
+        &["rev-parse", "--verify", &format!("{remote}^{{commit}}")],
+    )
+    .filter(|commit| !commit.is_empty())
+    .unwrap_or_else(|| base_ref.to_owned()))
+}
+
 /// Fetches a pull request's head into `FETCH_HEAD` and names its commit, for
 /// a head whose branch is checked out somewhere.
 pub(crate) async fn fetch_pull_request_head_commit(cwd: &Path, number: u64) -> Result<String> {

@@ -12,6 +12,7 @@ mod subscriptions;
 mod terminals;
 mod undo;
 mod workspace;
+mod vcs;
 
 use crate::{peer::PeerError, protocol::Call, state::Snapshot, transport};
 use agent_protocol::{models as m, operations as op};
@@ -50,6 +51,21 @@ pub enum Outcome {
     },
     TerminalOpened {
         terminal_id: String,
+    },
+    GitPulled {
+        result: crate::state::GitPullOutcome,
+    },
+    GitWorktreeCreated {
+        result: crate::state::GitWorktreeOutcome,
+    },
+    GitPullRequestResolved {
+        result: crate::state::GitPullRequestOutcome,
+    },
+    GitPullRequestThreadPrepared {
+        result: crate::state::GitPullRequestThreadOutcome,
+    },
+    GitRepositoryPublished {
+        result: crate::state::GitPublishOutcome,
     },
 }
 pub type Receipt = oneshot::Receiver<Result<Outcome, PeerError>>;

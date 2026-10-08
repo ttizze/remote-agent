@@ -131,6 +131,7 @@ pub(crate) fn detect_provider(remote_url: &str) -> Option<SourceControlProviderI
 fn hosting_provider(cwd: &Path, branch: Option<&str>) -> Option<SourceControlProviderInfo> {
     let preferred = branch
         .and_then(|branch| config_value(cwd, &format!("branch.{branch}.remote")))
+        .or_else(|| primary_remote(cwd))
         .unwrap_or_else(|| "origin".into());
     let url = config_value(cwd, &format!("remote.{preferred}.url"))
         .or_else(|| config_value(cwd, "remote.origin.url"))?;
@@ -241,7 +242,10 @@ pub(crate) fn local_status(cwd: &Path, include_branch_changes: bool) -> Result<V
             deletions,
         })
         .collect();
-    let default = default_branch(cwd, "origin");
+    let primary = primary_remote(cwd);
+    let default = primary
+        .as_deref()
+        .and_then(|remote| default_branch(cwd, remote));
     let root = repository(cwd).map(|repository| repository.root);
     let branch_changes = include_branch_changes
         .then(|| diff::branch_changes(root.as_deref().unwrap_or(cwd), ref_name.as_deref()).ok())
@@ -249,7 +253,7 @@ pub(crate) fn local_status(cwd: &Path, include_branch_changes: bool) -> Result<V
     Ok(VcsStatusLocal {
         is_repo: true,
         source_control_provider: hosting_provider(cwd, ref_name.as_deref()),
-        has_primary_remote: stdout(cwd, &["remote", "get-url", "origin"]).is_some(),
+        has_primary_remote: primary.is_some(),
         is_default_ref: is_default(ref_name.as_deref(), default.as_deref()),
         has_working_tree_changes: text
             .lines()
@@ -355,7 +359,9 @@ pub(crate) fn remote_details(cwd: &Path) -> Result<Option<RemoteDetails>> {
     } else if let Some(branch) = &branch {
         ahead_count = ahead_count_against_base(cwd, branch);
     }
-    let default = default_branch(cwd, "origin");
+    let default = primary_remote(cwd)
+        .as_deref()
+        .and_then(|remote| default_branch(cwd, remote));
     let is_default_branch = is_default(branch.as_deref(), default.as_deref());
     let ahead_of_default_count = match &branch {
         Some(branch) if !is_default_branch => {
@@ -488,4 +494,3 @@ pub(crate) async fn remote_status(
     let cwd = cwd.to_owned();
     tokio::task::spawn_blocking(move || remote_details(&cwd)).await?
 }
-

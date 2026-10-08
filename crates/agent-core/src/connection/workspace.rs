@@ -361,7 +361,7 @@ impl Owner {
         if cwd.is_empty() || !self.connected() {
             return;
         }
-        self.job(Call::VcsStatus(w::ReadVcsStatus { cwd }), None, None);
+        self.subscribe_vcs_status(cwd);
     }
 
     /// Loads both diffs of a checkout; the panel shows the one its scope picks.

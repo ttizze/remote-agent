@@ -1,6 +1,6 @@
 //! What the Host reported about workspaces for the composer menu, the diff
-//! panel and the new-task branch picker: provider commands, path search, Git
-//! status, refs and diff previews.
+//! panel and the new-task branch picker: provider commands, path search, refs
+//! and diff previews.
 use agent_protocol::workspace as w;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -145,8 +145,6 @@ pub struct WorkspaceSources {
     /// By provider instance and directory.
     pub provider_commands: BTreeMap<(String, String), ProviderCommandsEntry>,
     pub entries: EntrySearchState,
-    /// By checkout directory.
-    pub vcs_status: BTreeMap<String, w::VcsStatus>,
     pub refs: BTreeMap<(String, RefScope), RefsEntry>,
     pub diff_preview: Option<DiffPreviewEntry>,
     pub diff_files: Option<DiffFilesEntry>,

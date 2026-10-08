@@ -83,6 +83,12 @@ pub(crate) struct Subscription {
     pub receiver: broadcast::Receiver<Change>,
 }
 
+impl Subscription {
+    pub(crate) fn cwd(&self) -> &str {
+        &self.cwd
+    }
+}
+
 impl Drop for Subscription {
     fn drop(&mut self) {
         let mut pollers = self.inner.pollers.lock().unwrap_or_else(|e| e.into_inner());
@@ -294,6 +300,10 @@ impl VcsStatusBroadcaster {
     pub(crate) fn invalidate_status(&self, cwd: &str) {
         self.invalidate_local(cwd);
         self.invalidate_remote(cwd);
+        // The merged cache is consulted before either recent-read cache. Drop
+        // it as well or a subsequent get_status call could return the stale
+        // pre-invalidation halves without doing any reads.
+        lock(&self.inner.cache).remove(cwd);
         self.inner.lookups.bump_epoch(cwd);
     }
 

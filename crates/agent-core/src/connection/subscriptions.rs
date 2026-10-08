@@ -49,6 +49,10 @@ impl Owner {
                 tokio::spawn(follow(target, call, Payload::TerminalMetadata))
             }
             StreamKey::Keybindings => tokio::spawn(follow(target, call, Payload::Keybindings)),
+            StreamKey::VcsStatus(_) => tokio::spawn(follow(target, call, Payload::VcsStatus)),
+            StreamKey::GitAction(_) => {
+                tokio::spawn(follow(target, call, Payload::ActionProgress))
+            }
         };
         let failures = network
             .streams
@@ -143,6 +147,48 @@ impl Owner {
         );
     }
 
+    /// Subscribes to one checkout's local and remote Git status.
+    pub(super) fn subscribe_vcs_status(&mut self, cwd: String) {
+        if !self.connected() || cwd.is_empty() {
+            return;
+        }
+        self.open_stream(
+            StreamKey::VcsStatus(cwd.clone()),
+            Call::SubscribeVcsStatus(agent_protocol::vcs::SubscribeVcsStatus { cwd }),
+        );
+    }
+
+    /// Starts one checkout stream without replacing a healthy subscription.
+    pub(super) fn ensure_vcs_status(&mut self, cwd: String) {
+        if !self.connected() || cwd.is_empty() {
+            return;
+        }
+        let key = StreamKey::VcsStatus(cwd.clone());
+        if self
+            .network
+            .as_ref()
+            .is_some_and(|network| network.streams.contains_key(&key))
+        {
+            return;
+        }
+        self.subscribe_vcs_status(cwd);
+    }
+
+    pub(super) fn ensure_selected_vcs_status(&mut self) {
+        let Some(thread) = self.state.selected_thread.clone() else {
+            return;
+        };
+        self.ensure_vcs_status(self.state.thread_cwd(&thread));
+    }
+
+    pub(super) fn start_git_action(&mut self, request: agent_protocol::vcs::RunStackedAction) {
+        if !self.connected() {
+            return;
+        }
+        let key = StreamKey::GitAction(request.action_id.clone());
+        self.open_stream(key, Call::RunStackedAction(request));
+    }
+
     fn terminal_metadata(&mut self, event: agent_protocol::operations::TerminalMetadataEvent) {
         use agent_protocol::operations::TerminalMetadataEvent as Metadata;
         let terminals = &mut self.state.terminal_metadata;
@@ -222,6 +268,7 @@ impl Owner {
                 && !self.state.threads.contains_key(thread)
             {
                 self.open_thread(thread);
+                self.ensure_selected_vcs_status();
             }
             return;
         }
@@ -243,6 +290,7 @@ impl Owner {
         if let Some(thread) = thread {
             self.visited.remove(&thread);
             self.open_thread(&thread);
+            self.ensure_selected_vcs_status();
             self.visit_selected();
         }
     }
@@ -258,6 +306,18 @@ impl Owner {
         if let Some(thread) = self.state.selected_thread.clone() {
             self.subscribe_thread(&thread);
         }
+        self.subscribe_git_statuses();
+    }
+
+    pub(super) fn subscribe_git_statuses(&mut self) {
+        let checkouts: Vec<String> = self.state.git.status_events.keys().cloned().collect();
+        for cwd in checkouts {
+            self.subscribe_vcs_status(cwd);
+        }
+        // A restored device has no persisted Git status events. The selected
+        // checkout still needs its first snapshot so the desktop toolbar and
+        // native controls can render immediately after reconnecting.
+        self.ensure_selected_vcs_status();
     }
 
     fn current(&self, key: &StreamKey, generation: u64) -> bool {
@@ -322,6 +382,8 @@ impl Owner {
             }
             StreamKey::TerminalMetadata => self.subscribe_terminal_metadata(),
             StreamKey::Keybindings => self.subscribe_keybindings(),
+            StreamKey::VcsStatus(cwd) => self.subscribe_vcs_status(cwd),
+            StreamKey::GitAction(_) => {}
         }
     }
 
@@ -364,6 +426,23 @@ impl Owner {
                 self.healthy(&StreamKey::Keybindings);
                 self.state.keybindings = Some(Arc::new(config));
             }
+            (StreamKey::VcsStatus(cwd), Payload::VcsStatus(event)) => {
+                self.healthy(&StreamKey::VcsStatus(cwd.clone()));
+                self.state.git.apply_status(cwd, event);
+            }
+            (StreamKey::GitAction(action_id), Payload::ActionProgress(event)) => {
+                let key = StreamKey::GitAction(action_id);
+                let terminal = matches!(
+                    &event.kind,
+                    agent_protocol::vcs::ActionProgressKind::ActionFinished { .. }
+                        | agent_protocol::vcs::ActionProgressKind::ActionFailed { .. }
+                );
+                self.healthy(&key);
+                self.state.git.apply_action(event);
+                if terminal {
+                    self.close_stream(&key);
+                }
+            }
             _ => {}
         }
     }
@@ -389,7 +468,11 @@ impl Owner {
                         shell.stream_error();
                     }
                 }
-                StreamKey::Setup(_) | StreamKey::TerminalMetadata | StreamKey::Keybindings => {}
+                StreamKey::Setup(_)
+                | StreamKey::TerminalMetadata
+                | StreamKey::Keybindings
+                | StreamKey::VcsStatus(_)
+                | StreamKey::GitAction(_) => {}
             }
             self.schedule_resubscribe(key);
             return;
@@ -438,6 +521,7 @@ impl Owner {
         self.drain();
         if location == ShellLocation::Active {
             self.refresh_project_icons();
+            self.ensure_selected_vcs_status();
         }
     }
 
@@ -471,6 +555,9 @@ impl Owner {
         if applied.deleted {
             self.thread_deleted(thread);
             return;
+        }
+        if self.state.selected_thread.as_ref() == Some(thread) {
+            self.ensure_selected_vcs_status();
         }
         if !applied.changed {
             return;

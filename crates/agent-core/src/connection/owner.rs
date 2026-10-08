@@ -75,6 +75,8 @@ pub(super) enum StreamKey {
     Setup(ThreadId),
     TerminalMetadata,
     Keybindings,
+    VcsStatus(String),
+    GitAction(String),
 }
 impl StreamKey {
     pub fn location(&self) -> Option<ShellLocation> {
@@ -666,6 +668,7 @@ impl Owner {
         if let Some(thread) = self.state.selected_thread.clone() {
             self.subscribe_thread(&thread);
         }
+        self.subscribe_git_statuses();
         self.subscribe_terminal_metadata();
         self.subscribe_keybindings();
         self.refresh();

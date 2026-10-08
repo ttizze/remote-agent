@@ -17,8 +17,10 @@ use std::{
 };
 
 mod device;
+mod git;
 mod sources;
 pub use device::*;
+pub use git::*;
 pub use sources::*;
 
 /// The project a new thread uses when none is chosen.
@@ -390,8 +392,10 @@ pub struct Snapshot {
     pub providers: Option<Vec<crate::models::ProviderInstance>>,
     pub workspace: Workspace,
     pub terminals: BTreeMap<String, Terminal>,
-    /// Provider commands, path search, Git status, refs and diff previews.
+    /// Provider commands, path search, refs and diff previews.
     pub sources: WorkspaceSources,
+    /// Git status subscriptions and action progress.
+    pub git: GitState,
     /// By project id.
     pub project_icons: BTreeMap<String, ProjectIconEntry>,
     /// What the Host's terminal metadata stream reports for every thread's
@@ -869,6 +873,56 @@ pub struct LocalFile {
     pub mime_type: String,
 }
 
+/// Results of Host-owned Git operations that native clients can continue
+/// from without re-reading or re-deriving the checkout state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct GitPullOutcome {
+    pub status: String,
+    pub ref_name: String,
+    pub upstream_ref: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct GitWorktreeOutcome {
+    pub path: String,
+    pub ref_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct GitPullRequestOutcome {
+    pub number: u64,
+    pub title: String,
+    pub url: String,
+    pub base_branch: String,
+    pub head_branch: String,
+    pub state: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct GitPullRequestThreadOutcome {
+    pub pull_request: GitPullRequestOutcome,
+    pub branch: String,
+    pub worktree_path: Option<String>,
+    pub is_on_pull_request_head: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct GitPublishOutcome {
+    pub name_with_owner: String,
+    pub url: String,
+    pub ssh_url: String,
+    pub remote_name: String,
+    pub remote_url: String,
+    pub branch: String,
+    pub upstream_branch: Option<String>,
+    pub status: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum AnswerEdit {
@@ -1110,6 +1164,73 @@ pub enum Intent {
     },
     ReviewWorkspace {
         cwd: String,
+    },
+    // Git status and stacked actions.
+    SubscribeVcsStatus {
+        cwd: String,
+    },
+    RefreshVcsStatus {
+        cwd: String,
+    },
+    /// Loads local and remote refs for the Git controls branch picker.
+    LoadVcsRefs {
+        cwd: String,
+        query: String,
+    },
+    /// Checks out an existing local or remote ref in this checkout.
+    SwitchVcsRef {
+        cwd: String,
+        ref_name: String,
+    },
+    /// Creates and checks out a branch at the checkout's current HEAD.
+    CreateVcsRef {
+        cwd: String,
+        ref_name: String,
+    },
+    PullVcs {
+        cwd: String,
+    },
+    RunVcsAction {
+        action_id: String,
+        cwd: String,
+        action: String,
+        commit_message: Option<String>,
+        feature_branch: bool,
+        file_paths: Option<Vec<String>>,
+        thread_id: Option<String>,
+        project_id: Option<String>,
+    },
+    InitRepository {
+        cwd: String,
+    },
+    CreateVcsWorktree {
+        cwd: String,
+        ref_name: String,
+        new_ref_name: Option<String>,
+        base_ref_name: Option<String>,
+        path: Option<String>,
+    },
+    RemoveVcsWorktree {
+        cwd: String,
+        path: String,
+        force: bool,
+    },
+    ResolvePullRequest {
+        cwd: String,
+        reference: String,
+    },
+    PreparePullRequestThread {
+        cwd: String,
+        reference: String,
+        mode: String,
+        thread_id: Option<String>,
+    },
+    PublishRepository {
+        cwd: String,
+        repository: String,
+        visibility: String,
+        remote_name: Option<String>,
+        protocol: Option<String>,
     },
     ReadTurnDiff {
         from_run_ordinal: u64,
