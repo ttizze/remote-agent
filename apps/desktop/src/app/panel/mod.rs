@@ -753,7 +753,13 @@ impl Desktop {
                 self.panels.next_browser += 1;
                 let id = self.panels.next_browser;
                 if let (Some(store), Some(thread)) = (self.store(), self.thread_id()) {
-                    let browser = crate::browser::HostBrowser::new(store, thread, window, cx);
+                    let browser = crate::browser::HostBrowser::new(
+                        store,
+                        thread,
+                        crate::browser::PreviewDefaults::default(),
+                        window,
+                        cx,
+                    );
                     self.panels.preview_browsers.insert(id, browser);
                 } else {
                     match crate::browser::Browser::new(

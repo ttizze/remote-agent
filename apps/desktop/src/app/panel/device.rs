@@ -3,7 +3,7 @@ mod device_decoder;
 
 use super::PanelTab;
 use crate::app::{Desktop, ui::{color, icon, tint}};
-use agent_core::state::{DeviceActionIntent, Intent};
+use agent_core::state::{DeviceActionIntent, DeviceDuoCommandIntent, DeviceDuoPoseIntent, Intent};
 use gpui_kit::{component::{Sizable, button::{Button, ButtonVariants}, h_flex, input::{Input, InputState}, v_flex}, prelude::FluentBuilder, *};
 use std::{collections::{BTreeMap, BTreeSet}, sync::Arc};
 
@@ -23,6 +23,7 @@ pub(super) struct DeviceState {
     accessibility_requests: BTreeSet<String>,
     event_log_requests: BTreeSet<String>,
     frames: BTreeMap<(String, String, u8), (u64, Arc<Image>)>,
+    frame_epochs: BTreeMap<(String, String, u8), String>,
     frame_bounds: BTreeMap<(String, String, u8), Bounds<Pixels>>,
     active_touch: Option<ActiveDeviceTouch>,
     decoder: device_decoder::DeviceVideoDecoder,
@@ -43,6 +44,7 @@ impl DeviceState {
             accessibility_requests: BTreeSet::new(),
             event_log_requests: BTreeSet::new(),
             frames: BTreeMap::new(),
+            frame_epochs: BTreeMap::new(),
             frame_bounds: BTreeMap::new(),
             active_touch: None,
             decoder: device_decoder::DeviceVideoDecoder::default(),
@@ -62,6 +64,7 @@ impl DeviceState {
         self.accessibility_requests.clear();
         self.event_log_requests.clear();
         self.frames.clear();
+        self.frame_epochs.clear();
         self.frame_bounds.clear();
         self.active_touch = None;
         self.decoder.reset();
@@ -88,7 +91,14 @@ impl Desktop {
             .get(&key)
             .cloned()
             .unwrap_or_default();
-        let (x, y) = device_frame_point(bounds, position, frame_width, frame_height);
+        let Some(point) = device_frame_point(bounds, position, frame_width, frame_height) else {
+            if phase == "end" {
+                self.send_device_touch_end();
+            }
+            cx.stop_propagation();
+            return;
+        };
+        let (x, y) = point;
         self.perform(Intent::DeviceAction {
             host_id: Some(host_id.clone()),
             device_id: Some(device_id.clone()),
@@ -268,6 +278,7 @@ impl Desktop {
             self.panels.device.accessibility_requests.clear();
             self.panels.device.event_log_requests.clear();
             self.panels.device.frames.clear();
+            self.panels.device.frame_epochs.clear();
             self.panels.device.frame_bounds.clear();
             self.panels.device.active_touch = None;
             self.panels.device.decoder.reset();
@@ -305,6 +316,17 @@ impl Desktop {
             }
         }
         let view = self.snapshot.device();
+        let live_epochs = view
+            .sessions
+            .iter()
+            .filter(|session| session.thread_id == thread)
+            .map(|session| ((session.host_id.clone(), session.device_id.clone()), session.opened_at.clone()))
+            .collect::<BTreeMap<_, _>>();
+        self.panels.device.frame_epochs.retain(|(host_id, device_id, _), epoch| {
+            live_epochs.get(&(host_id.clone(), device_id.clone())) == Some(epoch)
+        });
+        let live_frame_keys = self.panels.device.frame_epochs.keys().cloned().collect::<BTreeSet<_>>();
+        self.panels.device.frames.retain(|key, _| live_frame_keys.contains(key));
         let mut newest_frames = BTreeMap::new();
         for frame in view.frames.iter().filter(|frame| frame.thread_id == thread) {
             let entry = newest_frames
@@ -330,6 +352,10 @@ impl Desktop {
                         Arc::new(Image::from_bytes(ImageFormat::Png, frame.png.clone())),
                     ),
                 );
+                self.panels.device.frame_epochs.insert(
+                    (frame.host_id.clone(), frame.device_id.clone(), 0),
+                    frame.session_epoch.clone(),
+                );
                 cx.notify();
             }
         }
@@ -350,6 +376,10 @@ impl Desktop {
                     image.sequence,
                     Arc::new(Image::from_bytes(format, image.bytes)),
                 ),
+            );
+            self.panels.device.frame_epochs.insert(
+                (image.host_id.clone(), image.device_id.clone(), image.screen_id),
+                image.session_epoch.clone(),
             );
             cx.notify();
         }
@@ -459,6 +489,20 @@ impl Desktop {
         });
         let device_controls = action_targets.into_iter().map(|(host_id, device_id)| {
             let target = format!("{host_id}:{device_id}");
+            let duo_status = view
+                .duo_controls
+                .iter()
+                .find(|control| {
+                    current_thread.as_deref() == Some(control.thread_id.as_str())
+                        && control.host_id == host_id
+                        && control.device_id == device_id
+                })
+                .and_then(|control| {
+                    control
+                        .error
+                        .clone()
+                        .or_else(|| control.pending.then_some("Duo control pending".into()))
+                });
             h_flex()
                 .id(SharedString::from(format!("device-controls-{target}")))
                 .gap_1()
@@ -590,7 +634,11 @@ impl Desktop {
                     move |view, _, _, _| view.perform(Intent::DeviceAction {
                         host_id: Some(host_id.clone()),
                         device_id: device_id.clone(),
-                        action: DeviceActionIntent::Fold { command: "book".into() },
+                        action: DeviceActionIntent::Duo {
+                            command: DeviceDuoCommandIntent::Pose {
+                                value: DeviceDuoPoseIntent::Book,
+                            },
+                        },
                     })
                 })))
                 .child(Button::new(SharedString::from(format!("device-duo-table-{host_id}-{device_id}"))).label("Table mode").xsmall().on_click(cx.listener({
@@ -599,9 +647,14 @@ impl Desktop {
                     move |view, _, _, _| view.perform(Intent::DeviceAction {
                         host_id: Some(host_id.clone()),
                         device_id: device_id.clone(),
-                        action: DeviceActionIntent::Duo { command: "table".into() },
+                        action: DeviceActionIntent::Duo {
+                            command: DeviceDuoCommandIntent::Table { value: true },
+                        },
                     })
                 })))
+                .when_some(duo_status, |row, status| {
+                    row.child(div().text_2xs().text_color(color("textMuted")).child(status))
+                })
                 .child(Button::new(SharedString::from(format!("device-record-{host_id}-{device_id}"))).label("Record").xsmall().on_click(cx.listener({
                     let host_id = host_id.clone();
                     let device_id = device_id.clone();
@@ -834,37 +887,67 @@ fn device_frame_point(
     position: Point<Pixels>,
     frame_width: u32,
     frame_height: u32,
-) -> (f32, f32) {
+) -> Option<(f32, f32)> {
     let view_width = bounds.size.width.as_f32().max(1.0);
     let view_height = bounds.size.height.as_f32().max(1.0);
-    let source_width = (frame_width as f32).max(1.0);
-    let source_height = (frame_height as f32).max(1.0);
-    let scale = (view_width / source_width).min(view_height / source_height);
-    let rendered_width = source_width * scale;
-    let rendered_height = source_height * scale;
-    let offset_x = (view_width - rendered_width) / 2.0;
-    let offset_y = (view_height - rendered_height) / 2.0;
-    let x = (position.x.as_f32() - bounds.left().as_f32() - offset_x) / rendered_width;
-    let y = (position.y.as_f32() - bounds.top().as_f32() - offset_y) / rendered_height;
-    (x.clamp(0.0, 1.0), y.clamp(0.0, 1.0))
+    let point = agent_core::state::project_device_point(
+        view_width,
+        view_height,
+        frame_width as f32,
+        frame_height as f32,
+        position.x.as_f32() - bounds.left().as_f32(),
+        position.y.as_f32() - bounds.top().as_f32(),
+    )?;
+    Some((point.x, point.y))
 }
 
 fn device_key_code(key: &str) -> String {
-    match key {
-        "enter" => "Enter",
+    let lower = key.to_ascii_lowercase();
+    if lower.len() == 1 {
+        let byte = lower.as_bytes()[0];
+        if byte.is_ascii_lowercase() {
+            return format!("Key{}", (byte as char).to_ascii_uppercase());
+        }
+        if byte.is_ascii_digit() {
+            return format!("Digit{}", byte as char);
+        }
+    }
+    match lower.as_str() {
+        "!" => "Digit1",
+        "@" => "Digit2",
+        "#" => "Digit3",
+        "$" => "Digit4",
+        "%" => "Digit5",
+        "^" => "Digit6",
+        "&" => "Digit7",
+        "*" => "Digit8",
+        "(" => "Digit9",
+        ")" => "Digit0",
+        "-" | "_" => "Minus",
+        "=" | "+" => "Equal",
+        "[" | "{" => "BracketLeft",
+        "]" | "}" => "BracketRight",
+        "\\" | "|" => "Backslash",
+        ";" | ":" => "Semicolon",
+        "'" | "\"" => "Quote",
+        "`" | "~" => "Backquote",
+        "," | "<" => "Comma",
+        "." | ">" => "Period",
+        "/" | "?" => "Slash",
+        "enter" | "return" => "Enter",
         "tab" => "Tab",
         "backspace" => "Backspace",
-        "delete" => "Delete",
-        "escape" => "Escape",
-        "up" => "ArrowUp",
-        "down" => "ArrowDown",
-        "left" => "ArrowLeft",
-        "right" => "ArrowRight",
+        "delete" | "forwarddelete" => "Delete",
+        "escape" | "esc" => "Escape",
+        "up" | "arrowup" => "ArrowUp",
+        "down" | "arrowdown" => "ArrowDown",
+        "left" | "arrowleft" => "ArrowLeft",
+        "right" | "arrowright" => "ArrowRight",
         "home" => "Home",
         "end" => "End",
         "pageup" => "PageUp",
         "pagedown" => "PageDown",
-        "space" => "Space",
+        "space" | " " => "Space",
         value => value,
     }
     .into()
@@ -881,4 +964,18 @@ fn recording_file_type(format: &str, bytes: &[u8]) -> Option<(&'static str, &'st
         return Some(("mjpeg", "video/x-motion-jpeg"));
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::device_key_code;
+
+    #[test]
+    fn gpui_keys_use_dom_physical_codes() {
+        assert_eq!(device_key_code("a"), "KeyA");
+        assert_eq!(device_key_code("1"), "Digit1");
+        assert_eq!(device_key_code("up"), "ArrowUp");
+        assert_eq!(device_key_code("enter"), "Enter");
+        assert_eq!(device_key_code("?"), "Slash");
+    }
 }

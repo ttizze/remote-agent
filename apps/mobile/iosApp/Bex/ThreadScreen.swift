@@ -310,7 +310,7 @@ struct DeviceScreen: View {
     var body: some View {
         let view = model.snapshot.device()
         let threadSessions = view.sessions.filter { $0.threadId == threadId }
-        let threadSessionKey = threadSessions.map { "\($0.hostId):\($0.deviceId)" }.joined(separator: ",")
+        let threadSessionKey = threadSessions.map { "\($0.hostId):\($0.deviceId):\($0.openedAt)" }.joined(separator: ",")
         let decodedFrames = deviceFrames.frames(for: threadId)
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
@@ -451,14 +451,14 @@ struct DeviceScreen: View {
                                 model.perform(.deviceAction(
                                     hostId: session.hostId,
                                     deviceId: session.deviceId,
-                                    action: .fold(command: "book")
+                                    action: .duo(command: .pose(value: .book))
                                 ))
                             }
                             Button("Table") {
                                 model.perform(.deviceAction(
                                     hostId: session.hostId,
                                     deviceId: session.deviceId,
-                                    action: .duo(command: "table")
+                                    action: .duo(command: .table(value: true))
                                 ))
                             }
                             Button("Record") {
@@ -473,6 +473,13 @@ struct DeviceScreen: View {
                         }
                         if let app = detail?.foregroundApp {
                             Text("Foreground: \(app)").font(AppTheme.font(13)).foregroundStyle(AppTheme.muted)
+                        }
+                        if let duo = view.duoControls.first(where: {
+                            $0.threadId == threadId && $0.hostId == session.hostId && $0.deviceId == session.deviceId
+                        }), duo.pending || duo.error != nil {
+                            Text(duo.error ?? "Duo control pending")
+                                .font(AppTheme.font(12))
+                                .foregroundStyle(AppTheme.muted)
                         }
                         ForEach(Array(view.screens.filter {
                             $0.threadId == threadId && $0.hostId == session.hostId && $0.deviceId == session.deviceId
@@ -623,7 +630,9 @@ struct DeviceScreen: View {
         DragGesture(minimumDistance: 0)
             .onChanged { value in
                 let phase = touchingHostId == hostId && touchingDeviceId == deviceId ? "move" : "begin"
-                let point = projectDevicePoint(value.location, viewSize: size, frameSize: frameSize)
+                guard let point = projectDevicePoint(value.location, viewSize: size, frameSize: frameSize) else {
+                    return
+                }
                 touchingHostId = hostId
                 touchingDeviceId = deviceId
                 touchingPoint = point
@@ -634,7 +643,10 @@ struct DeviceScreen: View {
                 ))
             }
             .onEnded { value in
-                let point = projectDevicePoint(value.location, viewSize: size, frameSize: frameSize)
+                guard let point = projectDevicePoint(value.location, viewSize: size, frameSize: frameSize) else {
+                    finishActiveTouch()
+                    return
+                }
                 model.perform(.deviceAction(
                     hostId: hostId,
                     deviceId: deviceId,
@@ -663,20 +675,18 @@ struct DeviceScreen: View {
 
 /// Maps a panel point into the resource-owned device frame, preserving the
 /// frame's aspect ratio and letterbox margins before clamping to [0, 1].
-private func projectDevicePoint(_ point: CGPoint, viewSize: CGSize, frameSize: CGSize) -> CGPoint {
-    guard viewSize.width > 0, viewSize.height > 0, frameSize.width > 0, frameSize.height > 0 else {
-        return CGPoint(x: 0.5, y: 0.5)
+private func projectDevicePoint(_ point: CGPoint, viewSize: CGSize, frameSize: CGSize) -> CGPoint? {
+    guard let projected = AgentCore.projectDevicePoint(
+        viewWidth: Float(viewSize.width),
+        viewHeight: Float(viewSize.height),
+        frameWidth: Float(frameSize.width),
+        frameHeight: Float(frameSize.height),
+        pointX: Float(point.x),
+        pointY: Float(point.y)
+    ) else {
+        return nil
     }
-    let scale = min(viewSize.width / frameSize.width, viewSize.height / frameSize.height)
-    let contentSize = CGSize(width: frameSize.width * scale, height: frameSize.height * scale)
-    let origin = CGPoint(
-        x: (viewSize.width - contentSize.width) / 2,
-        y: (viewSize.height - contentSize.height) / 2
-    )
-    return CGPoint(
-        x: ((point.x - origin.x) / contentSize.width).clamped(to: 0...1),
-        y: ((point.y - origin.y) / contentSize.height).clamped(to: 0...1)
-    )
+    return CGPoint(x: CGFloat(projected.x), y: CGFloat(projected.y))
 }
 
 private struct DeviceRecordingDocument: FileDocument {
@@ -705,12 +715,6 @@ private func deviceRecordingFileType(_ format: String, _ bytes: [UInt8]) -> (ext
         return ("mjpeg", "video/x-motion-jpeg", UTType.data)
     }
     return nil
-}
-
-private extension CGFloat {
-    func clamped(to range: ClosedRange<CGFloat>) -> CGFloat {
-        min(max(self, range.lowerBound), range.upperBound)
-    }
 }
 
 private struct DeviceAccessibilityOverlay: View {

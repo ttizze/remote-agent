@@ -490,8 +490,10 @@ impl DeviceActionInput {
                 Err("device push payload is invalid".into())
             }
             DeviceActionKind::Input(input) => DeviceInput {
+                thread_id: None,
                 host_id: None,
                 device_id: self.device_id.clone(),
+                request_id: None,
                 input: input.clone(),
             }
             .validate(),
@@ -524,6 +526,9 @@ pub struct DeviceScreenshot {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeviceFrame {
     pub thread_id: ThreadId,
+    /// Session generation that produced this event. The client rejects late
+    /// helper data after a close/reopen of the same device identity.
+    pub session_epoch: String,
     pub device: DeviceSummary,
     #[serde(with = "crate::protocol::bytes")]
     pub png: Vec<u8>,
@@ -549,6 +554,7 @@ pub enum DeviceFrameEncoding {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeviceVideoFrame {
     pub thread_id: ThreadId,
+    pub session_epoch: String,
     pub device: DeviceSummary,
     #[serde(with = "crate::protocol::bytes")]
     pub payload: Vec<u8>,
@@ -566,6 +572,7 @@ pub struct DeviceScreenConfig {
     pub thread_id: Option<ThreadId>,
     pub host_id: Option<String>,
     pub device_id: Option<String>,
+    pub session_epoch: Option<String>,
     pub width: u32,
     pub height: u32,
     pub orientation: DeviceOrientation,
@@ -593,6 +600,7 @@ pub struct DeviceAccessibilityElement {
 pub struct DeviceAccessibilityTree {
     pub host_id: String,
     pub device_id: String,
+    pub session_epoch: String,
     pub elements: Vec<DeviceAccessibilityElement>,
     pub errors: Vec<String>,
     pub read_at: String,
@@ -602,6 +610,7 @@ pub struct DeviceAccessibilityTree {
 pub struct DeviceForegroundUpdate {
     pub host_id: String,
     pub device_id: String,
+    pub session_epoch: String,
     pub app: Option<DeviceForegroundApp>,
     pub received_at: String,
 }
@@ -610,6 +619,7 @@ pub struct DeviceForegroundUpdate {
 pub struct DeviceEventLogEntry {
     pub host_id: String,
     pub device_id: String,
+    pub session_epoch: String,
     pub id: u64,
     pub timestamp: String,
     pub kind: String,
@@ -654,8 +664,15 @@ pub enum DeviceHardwareButton {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DeviceInput {
+    /// The conversation that owns this input. Host-side transports ignore the
+    /// value, while the core uses it to reject a late control reply after a
+    /// thread/session has changed.
+    pub thread_id: Option<ThreadId>,
     pub host_id: Option<String>,
     pub device_id: String,
+    /// Client-owned id for queued Duo/Fold controls. Ordinary inputs leave it
+    /// unset and the Host does not wait for a control acknowledgement.
+    pub request_id: Option<u64>,
     pub input: DeviceInputKind,
 }
 
@@ -680,13 +697,22 @@ impl DeviceInput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceControlResult {
+    pub request_id: Option<u64>,
+    pub accepted: bool,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeviceAccessibilityInput {
+    pub thread_id: ThreadId,
     pub host_id: Option<String>,
     pub device_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeviceEventLogInput {
+    pub thread_id: ThreadId,
     pub host_id: Option<String>,
     pub device_id: String,
     pub limit: u16,
@@ -720,6 +746,7 @@ pub struct DeviceRecordingStatus {
     pub thread_id: ThreadId,
     pub host_id: String,
     pub device_id: String,
+    pub session_epoch: String,
     pub format: DeviceRecordingFormat,
     pub active: bool,
     pub started_at: String,
@@ -899,8 +926,10 @@ mod tests {
     #[test]
     fn keyboard_input_validates_both_physical_code_and_actual_key_value() {
         let valid = DeviceInput {
+            thread_id: None,
             host_id: None,
             device_id: "emulator-1".into(),
+            request_id: None,
             input: DeviceInputKind::Key {
                 code: "KeyA".into(),
                 key: "A".into(),
@@ -925,8 +954,10 @@ mod tests {
     #[test]
     fn duo_input_validates_a_bounded_angle_without_string_commands() {
         let input = DeviceInput {
+            thread_id: None,
             host_id: None,
             device_id: "simulator".into(),
+            request_id: None,
             input: DeviceInputKind::Duo {
                 command: DeviceDuoCommand::Angle { value: 90.0 },
             },

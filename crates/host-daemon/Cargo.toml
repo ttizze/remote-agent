@@ -43,6 +43,7 @@ alacritty_terminal = "=0.26.0"
 icu_collator = "1.5"
 icu_normalizer = "1.5"
 ignore = "0.4.33"
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

@@ -132,7 +132,7 @@ contracts! {
     DeviceDetail, "host/device/detail" => (d::DeviceDetailInput, d::DeviceDetail) [clone],
     DeviceAction, "host/device/action" => (d::DeviceActionInput, d::DeviceDetail) [clone],
     DeviceScreenshot, "host/device/screenshot" => (d::DeviceScreenshotInput, d::DeviceScreenshot) [clone],
-    DeviceInput, "host/device/input" => (d::DeviceInput, m::Empty) [clone],
+    DeviceInput, "host/device/input" => (d::DeviceInput, d::DeviceControlResult) [clone],
     DeviceAccessibility, "host/device/accessibility" => (d::DeviceAccessibilityInput, d::DeviceAccessibilityTree) [clone],
     DeviceEventLog, "host/device/event-log" => (d::DeviceEventLogInput, Vec<d::DeviceEventLogEntry>) [clone],
     DeviceRecordingStart, "host/device/recording/start" => (d::DeviceRecordingStartInput, d::DeviceRecordingStatus) [clone],

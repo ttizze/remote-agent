@@ -43,6 +43,7 @@ pub struct DeviceSessionView {
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct DeviceFrameView {
     pub thread_id: String,
+    pub session_epoch: String,
     pub host_id: String,
     pub device_id: String,
     pub platform: String,
@@ -56,6 +57,7 @@ pub struct DeviceFrameView {
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct DeviceVideoFrameView {
     pub thread_id: String,
+    pub session_epoch: String,
     pub host_id: String,
     pub device_id: String,
     pub platform: String,
@@ -115,6 +117,7 @@ pub struct DeviceEventLogView {
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct DeviceScreenView {
     pub thread_id: Option<String>,
+    pub session_epoch: Option<String>,
     pub host_id: Option<String>,
     pub device_id: Option<String>,
     pub width: u32,
@@ -139,6 +142,18 @@ pub struct DeviceRecordingView {
     pub byte_count: u64,
     pub error: Option<String>,
     pub bytes: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct DeviceDuoControlView {
+    pub thread_id: String,
+    pub host_id: String,
+    pub device_id: String,
+    pub session_epoch: String,
+    pub pending: bool,
+    pub requested: Option<String>,
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -189,6 +204,7 @@ pub struct DeviceView {
     pub screens: Vec<DeviceScreenView>,
     pub recordings: Vec<DeviceRecordingView>,
     pub last_recording: Option<DeviceRecordingView>,
+    pub duo_controls: Vec<DeviceDuoControlView>,
     pub error: Option<String>,
 }
 
@@ -293,6 +309,7 @@ pub fn device_view(snapshot: &Snapshot) -> DeviceView {
             .values()
             .map(|frame| DeviceFrameView {
                 thread_id: frame.thread_id.to_string(),
+                session_epoch: frame.session_epoch.clone(),
                 host_id: frame.device.host_id.clone(),
                 device_id: frame.device.id.clone(),
                 platform: platform_name(frame.device.platform).into(),
@@ -359,6 +376,7 @@ pub fn device_view(snapshot: &Snapshot) -> DeviceView {
             .values()
             .map(|screen| DeviceScreenView {
                 thread_id: screen.thread_id.as_ref().map(ToString::to_string),
+                session_epoch: screen.session_epoch.clone(),
                 host_id: screen.host_id.clone(),
                 device_id: screen.device_id.clone(),
                 width: screen.width,
@@ -397,6 +415,19 @@ pub fn device_view(snapshot: &Snapshot) -> DeviceView {
             error: recording.status.error.clone(),
             bytes: recording.bytes.clone(),
         }),
+        duo_controls: state
+            .duo_controls
+            .iter()
+            .map(|((thread_id, host_id, device_id, session_epoch), control)| DeviceDuoControlView {
+                thread_id: thread_id.clone(),
+                host_id: host_id.clone(),
+                device_id: device_id.clone(),
+                session_epoch: session_epoch.clone(),
+                pending: control.pending,
+                requested: control.requested.as_ref().map(device_duo_command_name),
+                error: control.error.clone(),
+            })
+            .collect(),
         error: state.error.clone(),
     }
 }
@@ -438,6 +469,7 @@ fn video_encoding_name(encoding: agent_protocol::device::DeviceFrameEncoding) ->
 fn video_frame_view(frame: &agent_protocol::device::DeviceVideoFrame) -> DeviceVideoFrameView {
     DeviceVideoFrameView {
         thread_id: frame.thread_id.to_string(),
+        session_epoch: frame.session_epoch.clone(),
         host_id: frame.device.host_id.clone(),
         device_id: frame.device.id.clone(),
         platform: platform_name(frame.device.platform).into(),
@@ -466,6 +498,16 @@ fn recording_format_name(format: agent_protocol::device::DeviceRecordingFormat) 
         agent_protocol::device::DeviceRecordingFormat::RawFrames => "raw",
         agent_protocol::device::DeviceRecordingFormat::Mjpeg => "mjpeg",
         agent_protocol::device::DeviceRecordingFormat::Avcc => "avcc",
+    }
+}
+
+fn device_duo_command_name(command: &crate::state::DeviceDuoCommandIntent) -> String {
+    match command {
+        crate::state::DeviceDuoCommandIntent::Angle { value } => format!("angle:{value:.1}"),
+        crate::state::DeviceDuoCommandIntent::Pose { value } => format!("pose:{value:?}"),
+        crate::state::DeviceDuoCommandIntent::Table { value } => format!("table:{value}"),
+        crate::state::DeviceDuoCommandIntent::Physical { value } => format!("physical:{value:?}"),
+        crate::state::DeviceDuoCommandIntent::Orientation { value } => format!("orientation:{value:?}"),
     }
 }
 

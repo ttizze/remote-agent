@@ -651,6 +651,7 @@ mod preview_state_tests {
                 viewport: PreviewViewportSetting::Fill,
                 zoom: agent_protocol::preview::PreviewZoom::X100,
                 appearance: agent_protocol::preview::PreviewAppearance::System,
+                profile_id: None,
                 updated_at: String::new(),
             }],
             recordings: vec![],
@@ -756,6 +757,7 @@ mod preview_state_tests {
             viewport: PreviewViewportSetting::Fill,
             zoom: agent_protocol::preview::PreviewZoom::X100,
             appearance: agent_protocol::preview::PreviewAppearance::System,
+            profile_id: None,
             updated_at: String::new(),
         });
         result.recordings = vec![
@@ -1396,6 +1398,7 @@ pub enum Intent {
         viewport: agent_protocol::preview::PreviewViewportSetting,
         appearance: agent_protocol::preview::PreviewAppearance,
         zoom: agent_protocol::preview::PreviewZoom,
+        profile_id: Option<String>,
     },
     PreviewNavigate {
         tab_id: String,
@@ -1426,6 +1429,7 @@ pub enum Intent {
     },
     PreviewRecordingStart {
         tab_id: String,
+        options: agent_protocol::preview::PreviewRecordingOptions,
     },
     PreviewRecordingStop {
         tab_id: String,

@@ -18,7 +18,6 @@ final class DeviceVideoDecoder {
     private var latestPixelBuffer: CVPixelBuffer?
     private let lock = NSLock()
     private let context = CIContext()
-    private var accessUnitBytes = 0
 
     deinit {
         session.map(VTDecompressionSessionInvalidate)
@@ -31,7 +30,6 @@ final class DeviceVideoDecoder {
         session = nil
         formatDescription = nil
         awaitingKeyframe = true
-        accessUnitBytes = 0
         clearLatestPixelBuffer()
     }
 
@@ -41,7 +39,6 @@ final class DeviceVideoDecoder {
         session.map(VTDecompressionSessionInvalidate)
         session = nil
         awaitingKeyframe = true
-        accessUnitBytes = 0
         clearLatestPixelBuffer()
     }
 
@@ -55,12 +52,10 @@ final class DeviceVideoDecoder {
                 return nil
             }
             awaitingKeyframe = true
-            accessUnitBytes = 0
             return nil
         case "h264", "semu":
             guard frame.keyframe || !awaitingKeyframe else { return nil }
             if frame.keyframe {
-                accessUnitBytes = 0
                 if session == nil {
                     if let formatDescription {
                         guard createSession(formatDescription: formatDescription) else { return nil }
@@ -72,11 +67,6 @@ final class DeviceVideoDecoder {
             guard session != nil, formatDescription != nil else { return nil }
             let accessUnit = annexBToAvcc(frame.payload)
             guard !accessUnit.isEmpty, accessUnit.count <= 8 * 1024 * 1024 else {
-                resync()
-                return nil
-            }
-            accessUnitBytes = accessUnitBytes.saturatingAdd(accessUnit.count)
-            guard accessUnitBytes <= 8 * 1024 * 1024 else {
                 resync()
                 return nil
             }
@@ -256,6 +246,7 @@ final class DeviceVideoDecoder {
 private struct DecodedDeviceFrame {
     let key: String
     let threadId: String
+    let sessionEpoch: String
     let hostId: String
     let deviceId: String
     let screenId: Int
@@ -278,6 +269,7 @@ private actor DeviceFrameDecoderWorker {
             .sorted { lhs, rhs in
                 if lhs.hostId != rhs.hostId { return lhs.hostId < rhs.hostId }
                 if lhs.deviceId != rhs.deviceId { return lhs.deviceId < rhs.deviceId }
+                if lhs.sessionEpoch != rhs.sessionEpoch { return lhs.sessionEpoch < rhs.sessionEpoch }
                 let lhsScreen = lhs.screenId ?? 0
                 let rhsScreen = rhs.screenId ?? 0
                 if lhsScreen != rhsScreen { return lhsScreen < rhsScreen }
@@ -286,7 +278,7 @@ private actor DeviceFrameDecoderWorker {
         for frame in ordered {
             if Task.isCancelled { return output }
             let screenId = Int(frame.screenId ?? 0)
-            let key = "\(threadId):\(frame.hostId):\(frame.deviceId):\(screenId)"
+            let key = "\(threadId):\(frame.hostId):\(frame.deviceId):\(frame.sessionEpoch):\(screenId)"
             if sequences[key].map({ frame.sequence <= $0 }) == true { continue }
             if let previous = sequences[key], previous < UInt64.max, frame.sequence > previous + 1 {
                 decoders[key]?.resync()
@@ -301,6 +293,7 @@ private actor DeviceFrameDecoderWorker {
             output.append(DecodedDeviceFrame(
                 key: key,
                 threadId: threadId,
+                sessionEpoch: frame.sessionEpoch,
                 hostId: frame.hostId,
                 deviceId: frame.deviceId,
                 screenId: screenId,
@@ -332,6 +325,7 @@ final class DeviceFrameStore: ObservableObject {
     struct RenderedFrame: Identifiable {
         let id: String
         let threadId: String
+        let sessionEpoch: String
         let image: UIImage
         let screenId: Int
         let hostId: String
@@ -358,6 +352,7 @@ final class DeviceFrameStore: ObservableObject {
                 self.frames[frame.key] = RenderedFrame(
                     id: frame.key,
                     threadId: frame.threadId,
+                    sessionEpoch: frame.sessionEpoch,
                     image: image,
                     screenId: frame.screenId,
                     hostId: frame.hostId,

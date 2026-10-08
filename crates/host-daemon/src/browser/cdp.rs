@@ -29,6 +29,10 @@ pub(super) struct Chrome {
     endpoint: String,
     next_id: u64,
     sessions: HashMap<String, String>,
+    /// Preview profiles are isolated Chromium browser contexts. The default
+    /// profile uses the process' persistent context; named profiles receive
+    /// their own context before the first target is created.
+    contexts: HashMap<String, String>,
     dialogs: HashMap<String, BrowserDialog>,
     pub broken: bool,
 }
@@ -100,6 +104,7 @@ impl Chrome {
                     endpoint,
                     next_id: 0,
                     sessions: HashMap::new(),
+                    contexts: HashMap::new(),
                     dialogs: HashMap::new(),
                     broken: false,
                 })
@@ -204,12 +209,34 @@ impl Chrome {
         )
         .map_err(|_| "ブラウザのタブ一覧を取得できません。".into())
     }
-    pub async fn create(&mut self) -> Result<String, String> {
-        self.call(None, "Target.createTarget", json!({"url":"about:blank"}))
+    pub async fn create(&mut self, profile_id: Option<&str>) -> Result<String, String> {
+        let browser_context_id = match profile_id {
+            None | Some(agent_protocol::preview::DEFAULT_PREVIEW_PROFILE_ID) => None,
+            Some(profile_id) => Some(self.context_for(profile_id).await?),
+        };
+        let mut params = json!({"url":"about:blank"});
+        if let Some(context) = browser_context_id {
+            params["browserContextId"] = context.into();
+        }
+        self.call(None, "Target.createTarget", params)
             .await?["targetId"]
             .as_str()
             .map(str::to_owned)
             .ok_or_else(|| "ブラウザのタブを作成できません。".into())
+    }
+
+    async fn context_for(&mut self, profile_id: &str) -> Result<String, String> {
+        if let Some(context) = self.contexts.get(profile_id) {
+            return Ok(context.clone());
+        }
+        let context = self
+            .call(None, "Target.createBrowserContext", json!({"disposeOnDetach":false}))
+            .await?["browserContextId"]
+            .as_str()
+            .ok_or_else(|| "ブラウザのプロファイルを作成できません。".to_owned())?
+            .to_owned();
+        self.contexts.insert(profile_id.to_owned(), context.clone());
+        Ok(context)
     }
     pub async fn attach(&mut self, target: &str, width: u32, height: u32) -> Result<String, String> {
         if let Some(session) = self.sessions.get(target).cloned() {
@@ -278,6 +305,19 @@ impl Chrome {
             .map(|_| {
                 self.forget_target(target);
             })
+    }
+
+    pub async fn dispose_profile_context(&mut self, profile_id: &str) -> Result<(), String> {
+        let Some(context) = self.contexts.remove(profile_id) else {
+            return Ok(());
+        };
+        self.call(
+            None,
+            "Target.disposeBrowserContext",
+            json!({"browserContextId": context}),
+        )
+        .await
+        .map(|_| ())
     }
 
     /// Forget a target after Chrome has detached it externally.  No CDP

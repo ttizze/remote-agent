@@ -52,6 +52,7 @@ pub(super) enum Reply {
     DeviceScreenshot(d::DeviceScreenshot),
     DeviceAccessibility(d::DeviceAccessibilityTree),
     DeviceEventLog(Vec<d::DeviceEventLogEntry>),
+    DeviceControl(d::DeviceControlResult),
     DeviceRecordingStatus(d::DeviceRecordingStatus),
     DeviceRecording(d::DeviceRecording),
     SetupCancelled(c::SetupCancelled),
@@ -91,7 +92,7 @@ async fn execute(peer: &Peer, call: &Call) -> Result<Reply, PeerError> {
             Reply::DeviceDetail(peer.request(call).await?)
         }
         Call::DeviceScreenshot(_) => Reply::DeviceScreenshot(peer.request(call).await?),
-        Call::DeviceInput(_) => { let _: m::Empty = peer.request(call).await?; Reply::Done }
+        Call::DeviceInput(_) => Reply::DeviceControl(peer.request(call).await?),
         Call::DeviceAccessibility(_) => Reply::DeviceAccessibility(peer.request(call).await?),
         Call::DeviceEventLog(_) => Reply::DeviceEventLog(peer.request(call).await?),
         Call::DeviceRecordingStart(_) => Reply::DeviceRecordingStatus(peer.request(call).await?),
@@ -413,6 +414,11 @@ impl Owner {
                         crate::presentation::error::error_message(&error.to_string()),
                     );
                 }
+                if let Call::DeviceInput(request) = &call {
+                    self.state
+                        .device
+                        .fail_duo_input(request, error.to_string());
+                }
                 match &call {
                     Call::ProviderCommands(request) => {
                         self.provider_commands_finished(request, Err(&error))
@@ -660,6 +666,25 @@ impl Owner {
             Reply::DeviceEventLog(entries) => {
                 for entry in entries {
                     self.state.device.apply_event(d::DeviceEvent::EventLog(entry));
+                }
+            }
+            Reply::DeviceControl(result) => {
+                if let Call::DeviceInput(request) = call {
+                    if let Some(next) = self.state.device.complete_duo_input(request, &result) {
+                        self.job(
+                            Call::DeviceInput(d::DeviceInput {
+                                thread_id: Some(next.thread_id),
+                                host_id: next.host_id,
+                                device_id: next.device_id,
+                                request_id: Some(next.request_id),
+                                input: d::DeviceInputKind::Duo {
+                                    command: super::intents::device_duo_command(next.command),
+                                },
+                            }),
+                            None,
+                            None,
+                        );
+                    }
                 }
             }
             Reply::DeviceRecordingStatus(status) => {

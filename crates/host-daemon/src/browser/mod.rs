@@ -24,6 +24,7 @@ struct Page {
     active: String,
     viewports: HashMap<String, (u32, u32)>,
     preview_tabs: HashSet<String>,
+    preview_profiles: HashMap<String, Option<String>>,
     preview_settings: HashMap<
         String,
         (
@@ -39,6 +40,7 @@ impl Default for Page {
             active: String::new(),
             viewports: HashMap::new(),
             preview_tabs: HashSet::new(),
+            preview_profiles: HashMap::new(),
             preview_settings: HashMap::new(),
         }
     }
@@ -83,6 +85,7 @@ struct ActiveRecording {
     >,
     started_at: String,
     stopping: bool,
+    overlay: recording::OverlayHandle,
 }
 
 type RecordingKey = (String, String);
@@ -162,8 +165,14 @@ impl Browser {
         &self,
         thread: &str,
         tab_id: &str,
+        options: agent_protocol::preview::PreviewRecordingOptions,
     ) -> Result<agent_protocol::preview::PreviewRecordingStatus, String> {
-        self.start_preview_recording_with_cancel(thread, tab_id, CancellationToken::new())
+        self.start_preview_recording_with_cancel(
+            thread,
+            tab_id,
+            options,
+            CancellationToken::new(),
+        )
             .await
     }
 
@@ -171,11 +180,13 @@ impl Browser {
         &self,
         thread: &str,
         tab_id: &str,
+        options: agent_protocol::preview::PreviewRecordingOptions,
         request_cancel: CancellationToken,
     ) -> Result<agent_protocol::preview::PreviewRecordingStatus, String> {
         if request_cancel.is_cancelled() {
             return Err("recording start was cancelled".to_owned());
         }
+        options.validate()?;
         let (endpoint, width, height) = {
             let mut state = self.state.lock().await;
             self.ensure(&mut state, thread).await?;
@@ -231,6 +242,7 @@ impl Browser {
             width,
             height,
             &protected_paths,
+            options,
             cancel.clone(),
             self.stop.clone(),
         )?;
@@ -240,6 +252,7 @@ impl Browser {
             externally_detached,
             startup,
             task,
+            overlay,
         } = started;
         let artifact_path_for_failure = artifact_path.clone();
         let abort = task.abort_handle();
@@ -258,6 +271,7 @@ impl Browser {
                 done: done.clone(),
                 started_at: started_at.clone(),
                 stopping: false,
+                overlay,
             },
         );
         drop(recordings);
@@ -382,6 +396,7 @@ impl Browser {
                     PreviewViewportSetting::Fill,
                     PreviewAppearance::System,
                     PreviewZoom::X100,
+                    None,
                 );
             }
             if let Err(error) = preview.recording_started(thread_id, status.clone()) {
@@ -716,6 +731,7 @@ impl Browser {
                 page.active.clear();
                 page.viewports.clear();
                 page.preview_tabs.clear();
+                page.preview_profiles.clear();
                 page.preview_settings.clear();
             }
         }
@@ -754,10 +770,12 @@ impl Browser {
             .retain(|id, _| targets.iter().any(|target| &target.target_id == id));
         page.preview_tabs
             .retain(|id| targets.iter().any(|target| &target.target_id == id));
+        page.preview_profiles
+            .retain(|id, _| targets.iter().any(|target| &target.target_id == id));
         page.preview_settings
             .retain(|id, _| targets.iter().any(|target| &target.target_id == id));
         if page.tabs.is_empty() {
-            let id = chrome.create().await?;
+            let id = chrome.create(None).await?;
             page.tabs.push(id.clone());
             page.active = id;
             page.viewports.insert(page.active.clone(), (WIDTH, HEIGHT));
@@ -779,11 +797,20 @@ impl Browser {
             &request.action,
         )?;
         Self::action(&mut state, &thread, &request.action).await?;
+        let viewport = state.pages[&thread].viewport();
+        drop(state);
+        self.publish_recording_input(
+            &thread,
+            &request.tab_id,
+            &request.action,
+            viewport,
+        )
+        .await;
+        let mut state = self.state.lock().await;
         let mut frame = Self::frame(&mut state, &thread).await?;
         if frame.image_id == request.image_id {
             frame.image.clear();
         }
-        drop(state);
         self.report_preview_frame(&thread, &frame);
         Ok(frame)
     }
@@ -798,10 +825,59 @@ impl Browser {
         let viewport = state.pages[thread].viewport();
         action.validate_for_viewport(viewport.0, viewport.1)?;
         Self::action(&mut state, thread, &action).await?;
+        let viewport = state.pages[thread].viewport();
+        let tab_id = state.pages[thread].active.clone();
+        drop(state);
+        self.publish_recording_input(thread, &tab_id, &action, viewport)
+            .await;
+        let mut state = self.state.lock().await;
         let frame = Self::frame(&mut state, thread).await?;
         drop(state);
         self.report_preview_frame(thread, &frame);
         Ok(frame)
+    }
+
+    async fn publish_recording_input(
+        &self,
+        thread: &str,
+        tab_id: &str,
+        action: &BrowserAction,
+        viewport: (u32, u32),
+    ) {
+        let overlay = self
+            .recordings
+            .lock()
+            .await
+            .get(&(thread.to_owned(), tab_id.to_owned()))
+            .map(|recording| recording.overlay.clone());
+        let Some(overlay) = overlay else { return };
+        match action {
+            BrowserAction::Click { x, y } => recording::apply_input(
+                &overlay,
+                recording::InputEvent::Pointer {
+                    phase: recording::PointerPhase::Click,
+                    x: *x,
+                    y: *y,
+                    width: viewport.0,
+                    height: viewport.1,
+                },
+            ),
+            BrowserAction::Key { key } => {
+                let label = browser_key_label(*key).to_owned();
+                recording::apply_input(
+                    &overlay,
+                    recording::InputEvent::Key {
+                        label: label.clone(),
+                        down: true,
+                    },
+                );
+                recording::apply_input(
+                    &overlay,
+                    recording::InputEvent::Key { label, down: false },
+                );
+            }
+            _ => {}
+        }
     }
 
     /// Creates a Host browser tab for the Preview surface and returns its
@@ -815,10 +891,14 @@ impl Browser {
         appearance: PreviewAppearance,
         zoom: PreviewZoom,
         rendered_size: Option<PreviewRenderedViewportSize>,
+        profile_id: Option<String>,
     ) -> Result<BrowserFrame, String> {
         viewport.validate()?;
         if let Some(size) = rendered_size {
             size.validate()?;
+        }
+        if let Some(profile_id) = &profile_id {
+            agent_protocol::preview::validate_profile_id(profile_id)?;
         }
         let mut state = self.state.lock().await;
         self.ensure(&mut state, thread).await?;
@@ -829,13 +909,14 @@ impl Browser {
             .unwrap_or(resource_viewport);
         let id = {
             let chrome = state.chrome.as_mut().unwrap();
-            chrome.create().await?
+            chrome.create(profile_id.as_deref()).await?
         };
         let page = state.pages.get_mut(thread).unwrap();
         page.tabs.push(id.clone());
         page.active = id.clone();
         page.viewports.insert(id.clone(), (width, height));
         page.preview_tabs.insert(page.active.clone());
+        page.preview_profiles.insert(page.active.clone(), profile_id.clone());
         page.preview_settings.insert(
             page.active.clone(),
             (appearance, zoom),
@@ -996,6 +1077,12 @@ impl Browser {
                 return Err("preview tab was not found".into());
             }
         }
+        let profile_to_dispose = state
+            .pages
+            .get(thread)
+            .and_then(|page| page.preview_profiles.get(tab_id))
+            .cloned()
+            .flatten();
         let chrome = state.chrome.as_mut().unwrap();
         let close_result = tokio::select! {
             result = chrome.close_target(tab_id) => result,
@@ -1010,9 +1097,25 @@ impl Browser {
         page.tabs.retain(|id| id != tab_id);
         page.viewports.remove(tab_id);
         page.preview_tabs.remove(tab_id);
+        page.preview_profiles.remove(tab_id);
         page.preview_settings.remove(tab_id);
         if page.active == tab_id {
             page.active = page.tabs.last().cloned().unwrap_or_default();
+        }
+        let dispose_incognito = profile_to_dispose.as_deref()
+            == Some(agent_protocol::preview::INCOGNITO_PREVIEW_PROFILE_ID)
+            && !state.pages.values().any(|page| {
+                page.preview_profiles.values().any(|profile| {
+                    profile.as_deref()
+                        == Some(agent_protocol::preview::INCOGNITO_PREVIEW_PROFILE_ID)
+                })
+            });
+        if dispose_incognito {
+            if let Some(chrome) = state.chrome.as_mut() {
+                chrome
+                    .dispose_profile_context(agent_protocol::preview::INCOGNITO_PREVIEW_PROFILE_ID)
+                    .await?;
+            }
         }
         drop(state);
         if stop_result.is_none() || stop_result.as_ref().is_some_and(|result| result.is_ok()) {
@@ -1046,6 +1149,7 @@ impl Browser {
                     page.preview_settings.clone(),
                 )
             };
+            let profiles = state.pages[thread].preview_profiles.clone();
             let chrome = state.chrome.as_mut().unwrap();
             let targets = chrome.targets().await?;
             let live_targets = targets
@@ -1063,6 +1167,7 @@ impl Browser {
                 page.tabs.retain(|tab_id| live_targets.contains(tab_id.as_str()));
                 page.viewports.retain(|tab_id, _| live_targets.contains(tab_id.as_str()));
                 page.preview_tabs.retain(|tab_id| live_targets.contains(tab_id.as_str()));
+                page.preview_profiles.retain(|tab_id, _| live_targets.contains(tab_id.as_str()));
                 page.preview_settings.retain(|tab_id, _| live_targets.contains(tab_id.as_str()));
                 if !live_targets.contains(page.active.as_str()) {
                     page.active = page.tabs.last().cloned().unwrap_or_default();
@@ -1106,6 +1211,7 @@ impl Browser {
                         },
                         zoom,
                         appearance,
+                        profile_id: profiles.get(&target.target_id).cloned().flatten(),
                         updated_at: String::new(),
                     }
                 })
@@ -1199,6 +1305,7 @@ impl Browser {
                     session.viewport,
                     session.appearance,
                     session.zoom,
+                    session.profile_id.clone(),
                 )
                 .is_ok()
             {
@@ -1337,6 +1444,7 @@ fn forget_detached_preview_target(state: &mut State, thread: &str, tab_id: &str)
     page.tabs.retain(|id| id != tab_id);
     page.viewports.remove(tab_id);
     page.preview_tabs.remove(tab_id);
+    page.preview_profiles.remove(tab_id);
     page.preview_settings.remove(tab_id);
     if page.active == tab_id {
         page.active = page.tabs.last().cloned().unwrap_or_default();
@@ -1427,6 +1535,21 @@ fn validate_tab(active: &str, displayed: &str, action: &BrowserAction) -> Result
         return Err("表示中のタブが変わりました。最新の画面で再試行してください。".into());
     }
     Ok(())
+}
+
+fn browser_key_label(key: agent_protocol::browser::BrowserKey) -> &'static str {
+    use agent_protocol::browser::BrowserKey;
+    match key {
+        BrowserKey::Enter => "Enter",
+        BrowserKey::Tab => "Tab",
+        BrowserKey::Backspace => "Backspace",
+        BrowserKey::Escape => "Escape",
+        BrowserKey::ArrowUp => "ArrowUp",
+        BrowserKey::ArrowDown => "ArrowDown",
+        BrowserKey::ArrowLeft => "ArrowLeft",
+        BrowserKey::ArrowRight => "ArrowRight",
+        BrowserKey::SelectAll => "SelectAll",
+    }
 }
 
 #[cfg(test)]
