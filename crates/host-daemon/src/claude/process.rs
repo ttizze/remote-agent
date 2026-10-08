@@ -36,12 +36,27 @@ pub(super) fn runtime() -> Result<(std::path::PathBuf, std::path::PathBuf), Stri
     let node = std::env::var_os("BEX_NODE").unwrap_or_else(|| "node".into());
     let node = executable(Path::new(&node), path.as_deref())?;
     let host = std::env::current_exe().map_err(|error| error.to_string())?;
-    let bridge = bex_process::companion_path(&host, "bex-claude-sdk.mjs")
-        .map_err(|error| error.to_string())?;
+    let bridge = sdk_path(&host)?;
     if !bridge.is_file() {
-        return Err("bex-claude-sdk.mjs must be installed beside the Host".into());
+        return Err("bex-claude-sdk.mjs must be installed with the Host".into());
     }
     Ok((node, bridge))
+}
+
+fn sdk_path(host: &Path) -> Result<std::path::PathBuf, String> {
+    let companion = bex_process::companion_path(host, "bex-claude-sdk.mjs")
+        .map_err(|error| error.to_string())?;
+    let directory = companion.parent().expect("companion has a parent");
+    // macOS treats Contents/MacOS as nested code. JavaScript belongs in the
+    // sealed Resources directory, rather than alongside its Mach-O executables.
+    if directory.ends_with("Contents/MacOS") {
+        Ok(directory
+            .parent()
+            .expect("Contents exists")
+            .join("Resources/bex-claude-sdk.mjs"))
+    } else {
+        Ok(companion)
+    }
 }
 
 pub(super) struct Process {
@@ -50,6 +65,34 @@ pub(super) struct Process {
     input: JsonlWriter<ChildStdin>,
     output: JsonlReader<ChildStdout>,
     stderr: tokio::task::JoinHandle<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sdk_runtime_uses_the_signed_bundle_resources_and_standalone_companion() {
+        for (host, sdk) in [
+            (
+                "Bex Dev.app/Contents/MacOS/host-daemon",
+                "Bex Dev.app/Contents/Resources/bex-claude-sdk.mjs",
+            ),
+            (
+                "target/release/host-daemon",
+                "target/release/bex-claude-sdk.mjs",
+            ),
+            (
+                "target/debug/deps/claude-test",
+                "target/debug/bex-claude-sdk.mjs",
+            ),
+        ] {
+            assert_eq!(
+                sdk_path(Path::new(host)).unwrap(),
+                std::path::PathBuf::from(sdk)
+            );
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]

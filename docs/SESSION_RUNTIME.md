@@ -72,7 +72,8 @@ Claude execution uses the official Node Agent SDK and existing subscription
 authentication. The SDK owns CLI transport, session resume, streaming,
 interrupts, approvals and MCP elicitation. A supervised Node process exchanges
 typed Host operations and SDK events; Rust does not implement Claude control
-requests. Its npm-locked runtime ships beside the Host and requires Node 22
+requests. Its npm-locked runtime ships beside a standalone Host or in a Mac
+app's sealed Resources and requires Node 22
 or newer (`BEX_NODE` can select the executable). Consecutive turns reuse one
 persistent SDK query and CLI process. SDK 0.3.293 hides host-only session state
 from its iterator; a small filter in its custom spawn hook exposes those SDK

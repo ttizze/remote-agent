@@ -50,7 +50,7 @@ The session architecture, limits, local data and verification matrix are documen
 
 The Host needs Git and at least one available agent for conversations. Codex is optional; the Host prefers Codex bundled with ChatGPT Desktop on macOS, then `codex` on PATH; `--codex <path>` is authoritative.
 
-Claude conversations run through the official Agent SDK on Node.js 22 or newer. Put Node on the Host's PATH or select its executable with `BEX_NODE`. The Nix development environment includes Node. The SDK is pinned in an npm lockfile and shipped as `bex-claude-sdk.mjs` beside the Host, so no npm installation is needed at runtime.
+Claude conversations run through the official Agent SDK on Node.js 22 or newer. Put Node on the Host's PATH or select its executable with `BEX_NODE`. The Nix development environment includes Node. The SDK is pinned in an npm lockfile and shipped as `bex-claude-sdk.mjs` beside a standalone Host or in a Mac app's sealed Resources, so no npm installation is needed at runtime.
 
 ```sh
 scripts/dev-env.sh cargo build --locked -p bex-process --bin bex-provider-supervisor
