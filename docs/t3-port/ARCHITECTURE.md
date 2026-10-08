@@ -88,7 +88,7 @@ T3 と同じ契約にする。snapshot、`afterSequence` からの再送、synch
 
 ## 決定事項
 
-この節の箇条書きは日付時点の設計履歴である。旧 SDK 制御、旧 ALPN、途中 checkpoint の未実装・未接続記録は監査用に保持しているが、現行の正本は末尾の「現行統合の正本（2026-10-08 checkpoint）」である。
+この節の箇条書きは日付時点の設計履歴である。旧 SDK 制御、旧 ALPN、途中 checkpoint の未実装・未接続記録は監査用に保持しているが、現行の正本は末尾の「現行統合の正本（2026-10-09 checkpoint）」である。
 
 1. **他スレッドにまたがる操作**（fork、merge back、委任、subagent の子スレッド）は、親 actor が effect で子 actor へコマンドを送る saga にする。調整役の actor は置かない。書き込み役が 1 スレッドに 1 つという前提を崩さないため。
 2. **事実は細かくする**。エンティティ丸ごとの upsert にはしない。
@@ -278,10 +278,17 @@ T3 と同じ契約にする。snapshot、`afterSequence` からの再送、synch
 
 - 2026-10-08: Android usage widget は再起動・時計変更・タイムゾーン変更で、保存した display timeline を共通 core に投影し直して描画と次の失効通知を復元する。別の期限 state は保存せず、core が検証して返した provider の期限だけを使う。OS が再起動時に alarm を取消すため `RECEIVE_BOOT_COMPLETED` を登録する（[Android alarm documentation](https://developer.android.com/develop/background-work/services/alarms)）。tap は usage URL と既存の `open_usage` を渡し、通知と共通の navigation owner が処理する。最終 Android build の確認は統合担当で行う。
 
-## 現行統合の正本（2026-10-08 checkpoint）
+## 現行統合の正本（2026-10-09 checkpoint）
 
-現行の会話 wire は `remote-agent/streams/14` だけを扱う。上の dated decision log に残る `streams/10`、`streams/11`、`streams/12`、旧 SDK 制御の説明、段階途中の未実装記録は履歴であり、この checkpoint の current behavior を表さない。現行 M3 の production consumers は Git/VCS と GitHub PR、scheduler、worktree、browser/preview、device、push/activity、usage、settings/platform、updater/release で、最終 QA は未完了である。
+現行の会話 wire は `remote-agent/streams/14` だけを扱う。上の dated decision log に残る `streams/10`、`streams/11`、`streams/12`、旧 SDK 制御の説明、段階途中の未実装記録は履歴であり、この checkpoint の current behavior を表さない。現行 M3 の production consumers は Git/VCS と GitHub PR、scheduler、worktree、browser/preview、device、push/activity、usage、settings/platform、updater/release で、各 owner の production path に接続済みである。最終 QA は、文書更新後の同一 revision でまだ行っていない。
 
 Native consumers は、Android の Git (`GitControls.kt`・`GitSheets.kt`)、Material You (`AppTheme.kt`)、thread drag arrangement (`ThreadArrangement.kt`)、device (`DeviceScreen.kt`)、artifact/citation の共通 core、ならびに desktop の minimap (`crates/agent-core/src/view/timeline/desktop_layout.rs`) と assistant citations (`apps/desktop/src/app/timeline/markdown.rs`) に接続している。個別の source row の翻訳完了や同一 revision の native build 完了を、この静的な対応記録から推論しない。
 
-M3 Settings は現行の core/desktop/iOS/Android settings owners に実装されているが、同一 head の最終 unit test・clippy・fmt・Host/GPUI・UniFFI・iOS/Android build は root QA 待ちである。現在の作業範囲は PR55 の review 用 branch への push と PR 更新までで、main の変更、CI の結果待ちまたは dispatch、live provider、実機・実端末、signing、signed launch は含めない。ここより前の日付を持つ記録は、当時の判断と検証結果を保つために残している。
+M3 Settings と現行の core/desktop/iOS/Android consumers は、現行の preference、notification、provider、capture、usage、activity、device、preview の owner に接続されている。実装接続を確認した checkpoint は次の通りである。
+
+- `abcad5d107e215bcd08d05bc98feb9521fb83aea`: unit 3,976/3,976 pass、3 skip、SDK Node 10件と agent-peer 5群 pass。
+- `319491ad312a68bf626f199cc98ae30eb6e652e2`: lint checkpoint pass。
+- `170c255effd25da4f5c3a1e37de6a99cb816d543`: scoped/native/Host/GPUI の中間検証 pass。iOS artifact stamp はこの checkpoint を参照している。
+- `d0713f9411c9d524dbdf39f92d237ca7f4ef16ec`: Xcode 11 で unsigned main app、Activity/Usage widget objects、Share extension executable/plist を確認し、Android candidate 9 で XML 39/39 pass、両 JNI release ABI、unsigned APK、両 ZIP の JNI `.so` revision を確認した。iOS core library stamp は `170c255effd25da4f5c3a1e37de6a99cb816d543` であるため、いずれも文書更新後の同一 head の最終証明ではない。
+
+Root はこの文書変更後の一つの revision で unit test、workspace clippy (`-D warnings`)、fmt、Host/GPUI、UniFFI、iOS の共有/Activity/Share Extension、Android の同一 revision build と artifact stamp を再実行し、結果を PR に記録する。現在の作業範囲は PR55 の review 用 branch への push と PR 更新までで、main の変更、CI の結果待ちまたは dispatch、live provider、実機・実端末、signing、signed launch は含めない。ここより前の日付を持つ記録は、当時の判断と検証結果を保つために残している。
