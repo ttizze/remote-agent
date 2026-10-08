@@ -1581,6 +1581,23 @@ async fn title_lists_are_recent_scoped_small_and_expand_without_loading_bodies()
         let item = mobile.peer.call(&serde_json::from_value::<rpc::ReadItem>(json!({"threadId":{"provider":"codex","id":"p5-1"},"turnId":"turn-p5-1","itemId":"answer-p5-1"})).unwrap()).await.map(|output| serde_json::to_value(output).unwrap()).unwrap();
         assert_eq!(body_json(&item["item"])["assistantText"]["text"], "History for Project 05 conversation 01");
         assert!(agent_protocol::protocol::json_boundary::call("host/thread/watch", json!({"watchId":1,"threadId":{"provider":"codex","id":"p5-1"},"path":rollout})).is_err(), "external rollout following is retired");
+        threads.extend([
+            json!({"id":"older-child","parentThreadId":"worktree","name":null,"agentNickname":"Curie","canAcceptDirectInput":false,"updatedAt":-1}),
+            json!({"id":"older-grandchild","parentThreadId":"older-child","name":null,"agentRole":"reviewer","updatedAt":-2}),
+            json!({"id":"hidden-child","parentThreadId":"p1-1","updatedAt":-3}),
+        ]);
+        std::fs::write(directory.path().join("list-fixture.json"), serde_json::to_vec(&threads).unwrap()).unwrap();
+        let nested = mobile.peer.request::<models::ThreadList>(&agent_protocol::protocol::Call::ListSessions(agent_protocol::operations::ListSessions { query: models::ListQuery::default() })).await.unwrap();
+        assert_eq!(nested.data.len(), 32, "older descendants accompany visible roots only");
+        assert_eq!(nested.has_more_chats, true);
+        assert_eq!(nested.more_project_ids.len(), 5);
+        let child = nested.data.iter().find(|thread| thread.id.as_ref().is_some_and(|id| id.id == "older-child")).unwrap();
+        assert_eq!(child.parent_id.as_ref().unwrap().id, "worktree");
+        assert_eq!(child.name.as_deref(), Some("Curie"));
+        assert_eq!(child.can_accept_direct_input, Some(false));
+        assert!(nested.data.iter().all(|thread| thread.turns.is_none() && thread.preview.is_none()));
+        let descendants: Vec<_> = nested.data.iter().filter(|thread| thread.parent_id.is_some()).map(|thread| thread.id.as_ref().unwrap().id.as_str()).collect();
+        assert_eq!(descendants, ["older-child", "older-grandchild"]);
         mobile.close().await;
         fixture.close().await.unwrap();
     }).await.expect("title list loop exceeded deadline");

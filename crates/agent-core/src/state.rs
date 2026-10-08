@@ -1053,6 +1053,28 @@ fn submission(
 ) -> (Snapshot, Vec<Effect>) {
     let mut next = previous.clone();
     next.error = None;
+    if let Some(reason) = thread_id
+        .as_ref()
+        .and_then(|id| {
+            previous
+                .conversations
+                .get(id)
+                .map(|thread| thread.can_accept_direct_input)
+                .or_else(|| {
+                    previous
+                        .threads
+                        .as_ref()?
+                        .data
+                        .iter()
+                        .find(|thread| thread.id.as_ref() == Some(id))
+                        .map(|thread| thread.can_accept_direct_input)
+                })
+        })
+        .and_then(crate::session::direct_input_unavailable_reason)
+    {
+        next.error = Some(reason);
+        return (next, Vec::new());
+    }
     let cleared = clear_draft.as_ref().unwrap_or(&draft);
     if let Some(current) = shared_mut(&mut next.drafts, &draft_key) {
         if current.text == cleared.text {
@@ -1111,6 +1133,70 @@ fn submission(
         }),
     };
     (next, vec![effect])
+}
+
+#[cfg(test)]
+mod submission_tests {
+    use super::*;
+
+    #[rstest::rstest]
+    fn read_only_subagents_keep_drafts_without_dispatching_input(
+        #[values(None, Some(false), Some(true))] can_accept_direct_input: Option<bool>,
+        #[values(false, true)] loaded: bool,
+    ) {
+        let id =
+            crate::session::SessionRef::new(crate::session::ProviderKind::Codex, "child".into())
+                .unwrap();
+        let key = DraftKey::from(id.clone());
+        let thread = crate::models::Thread {
+            id: Some(id.clone()),
+            can_accept_direct_input,
+            ..Default::default()
+        };
+        let snapshot = Snapshot {
+            conversations: Arc::new(if loaded {
+                [(id.clone(), Arc::new(thread.clone()))].into()
+            } else {
+                Default::default()
+            }),
+            threads: Some(Arc::new(crate::models::ThreadList {
+                data: vec![thread],
+                projects: vec![],
+                more_project_ids: vec![],
+                has_more_chats: false,
+                has_more_projects: false,
+                provider_errors: None,
+            })),
+            drafts: Arc::new(
+                [(
+                    key.clone(),
+                    Arc::new(Draft {
+                        text: "Keep my draft".into(),
+                        ..Default::default()
+                    }),
+                )]
+                .into(),
+            ),
+            ..Default::default()
+        };
+        let (next, effects) = reduce_intent(
+            &snapshot,
+            Intent::Submit {
+                thread_id: Some(id),
+                client_user_message_id: "input".into(),
+            },
+        );
+        if can_accept_direct_input == Some(false) {
+            assert_eq!(next.drafts[&key].text, "Keep my draft");
+            assert!(next.pending_submissions.is_empty());
+            assert!(effects.is_empty());
+            assert!(next.error.unwrap().contains("閲覧専用"));
+        } else {
+            assert!(next.drafts[&key].text.is_empty());
+            assert_eq!(next.pending_submissions.len(), 1);
+            assert_eq!(effects.len(), 1);
+        }
+    }
 }
 
 fn append_transcript(text: &mut String, transcript: &str) {

@@ -90,6 +90,8 @@ pub struct Thread {
     #[serde(default)]
     pub submissions: BTreeMap<crate::ids::ClientInputId, crate::session::SubmissionDelivery>,
     pub id: Option<crate::session::SessionRef>,
+    pub parent_id: Option<crate::session::SessionRef>,
+    pub can_accept_direct_input: Option<bool>,
     pub name: Option<String>,
     pub cwd: Option<String>,
     pub worktree_status: Option<WorktreeStatus>,

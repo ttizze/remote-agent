@@ -35,6 +35,7 @@ pub(crate) struct SubmissionState {
 pub(crate) fn session_pages<'a>(
     agent: &'a dyn Agent,
     search: &'a str,
+    ancestor: Option<&'a str>,
 ) -> impl Stream<Item = Result<Vec<SessionSummary>, Failure>> + 'a {
     futures_util::stream::try_unfold(
         Some((None, std::collections::HashSet::new())),
@@ -42,7 +43,7 @@ pub(crate) fn session_pages<'a>(
             let Some((cursor, mut seen)) = state else {
                 return Ok(None);
             };
-            let page = Agent::list(agent, search, cursor).await?;
+            let page = Agent::list(agent, search, cursor, ancestor).await?;
             let next = page.next_cursor.filter(|cursor| !cursor.is_empty());
             if let Some(cursor) = &next
                 && !seen.insert(cursor.clone())
@@ -112,7 +113,12 @@ pub(crate) trait Agent: Identity {
     /// create a conversation locally and defer starting an executable.
     fn validate_create(&self) -> Result<(), Failure>;
     fn storage_directory(&self) -> &Path;
-    async fn list(&self, search: &str, cursor: Option<String>) -> Result<SessionPage, Failure>;
+    async fn list(
+        &self,
+        search: &str,
+        cursor: Option<String>,
+        ancestor: Option<&str>,
+    ) -> Result<SessionPage, Failure>;
     async fn open(
         &self,
         id: &str,

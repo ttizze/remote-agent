@@ -120,6 +120,23 @@ complete retrieval and reopening.
 
 ## Conversation navigation
 
+- The sidebar nests Codex subagent conversations below their direct parent,
+  including deeper descendants. Native parent IDs determine lineage; forked
+  side chats remain independent conversations. Agent nicknames label untitled
+  children. Children share their root's project section and do not consume the
+  root conversation display limits. Each child retains its own running/unread
+  indicator and opens its own native history on click. Parent disclosures open
+  initially and allow hiding children without opening a different conversation.
+  List refreshes discover running children without requiring the parent turn to
+  finish. Search matches remain reachable when their parent is outside the page.
+  Native read-only conversations display the shared input restriction and keep
+  Send disabled.
+  Claude child transcripts continue to use the originating activity detail;
+  they do not yet have independent native session identities.
+  Acceptance: `subagents_keep_direct_lineage_provider_identity_and_parent_project`,
+  `children_follow_visible_roots_without_consuming_title_limits`, and desktop
+  `pending_operations_do_not_block_task_navigation`.
+
 - Desktop, iPhone and Android show a down-arrow button at the bottom center of
   the conversation when the reader is away from the latest content. Activating it
   reaches the bottom of the last message, including a message taller than the
