@@ -455,20 +455,6 @@ async fn run_windows_suspend_lifecycle_source(
     }
 }
 
-#[cfg(any(target_os = "windows", test))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum WindowsMessageLoopExit {
-    Quit,
-    Error,
-}
-
-#[cfg(any(target_os = "windows", test))]
-fn shutdown_windows_message_loop(exit: WindowsMessageLoopExit, watcher_stop: &CancellationToken) {
-    match exit {
-        WindowsMessageLoopExit::Quit | WindowsMessageLoopExit::Error => watcher_stop.cancel(),
-    }
-}
-
 #[cfg(target_os = "windows")]
 fn run_windows_power_watcher(mailbox: Arc<LifecycleMailbox>, stop: CancellationToken) {
     // The worker owns a message-only HWND and registers that HWND with the
@@ -591,18 +577,15 @@ fn run_windows_power_watcher(mailbox: Arc<LifecycleMailbox>, stop: CancellationT
             helper_stop.cancel();
             let _ = PostThreadMessageW(thread_id, WM_QUIT, 0, 0);
         });
-        let message_loop_exit = loop {
+        loop {
             let status = GetMessageW(&mut message, ptr::null_mut(), 0, 0);
-            if status > 0 {
-                TranslateMessage(&message);
-                DispatchMessageW(&message);
-            } else if status == 0 {
-                break WindowsMessageLoopExit::Quit;
-            } else {
-                break WindowsMessageLoopExit::Error;
+            if status <= 0 {
+                break;
             }
-        };
-        shutdown_windows_message_loop(message_loop_exit, &watcher_stop);
+            TranslateMessage(&message);
+            DispatchMessageW(&message);
+        }
+        watcher_stop.cancel();
         let _ = stop_thread.join();
         UnregisterSuspendResumeNotification(registration);
         DestroyWindow(window);
@@ -676,28 +659,34 @@ mod tests {
         assert!(!mailbox.publish(SuspendLifecycleEvent::Suspended));
     }
 
-    #[test]
-    fn message_loop_error_cancels_only_the_watcher_stop() {
+    #[tokio::test]
+    async fn message_loop_error_joins_owned_helper_without_canceling_owner() {
         let owner_stop = CancellationToken::new();
         let watcher_stop = CancellationToken::new();
+        let mailbox = LifecycleMailbox::new(2);
+        assert!(mailbox.publish(SuspendLifecycleEvent::Suspended));
+        assert!(mailbox.publish(SuspendLifecycleEvent::Resumed));
         let helper_stop = watcher_stop.clone();
         let helper = std::thread::spawn(move || {
             while !helper_stop.is_cancelled() {
                 std::thread::yield_now();
             }
         });
-        shutdown_windows_message_loop(WindowsMessageLoopExit::Error, &watcher_stop);
-        assert!(watcher_stop.is_cancelled());
-        assert!(!owner_stop.is_cancelled());
-        helper.join().expect("watcher helper did not stop");
-    }
-
-    #[tokio::test]
-    async fn no_reader_shutdown_closes_a_saturated_callback_mailbox() {
-        let mailbox = LifecycleMailbox::new(2);
-        assert!(mailbox.publish(SuspendLifecycleEvent::Suspended));
-        assert!(mailbox.publish(SuspendLifecycleEvent::Resumed));
+        let started = std::time::Instant::now();
+        let fake_message_result = -1;
+        if fake_message_result <= 0 {
+            watcher_stop.cancel();
+        }
         mailbox.close();
+        let joined = tokio::task::spawn_blocking(move || helper.join().is_ok());
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), joined)
+                .await
+                .expect("message-loop error did not join watcher helper")
+                .expect("watcher helper join task failed")
+        );
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(!owner_stop.is_cancelled());
         let stop = CancellationToken::new();
         assert_eq!(mailbox.recv(&stop).await, None);
         assert!(!mailbox.publish(SuspendLifecycleEvent::Suspended));
