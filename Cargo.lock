@@ -1084,6 +1084,7 @@ dependencies = [
  "lb-wry",
  "libc",
  "objc2 0.6.4",
+ "objc2-app-kit 0.3.2",
  "objc2-av-foundation",
  "objc2-foundation 0.3.2",
  "objc2-web-kit",
@@ -1103,8 +1104,9 @@ dependencies = [
  "tracing",
  "url",
  "uuid",
- "zeroize",
+ "windows 0.62.2",
  "zbus",
+ "zeroize",
 ]
 
 [[package]]
