@@ -6,10 +6,6 @@ pub const TASK_ACTIVITY_PUSH_FRESHNESS_SECONDS: u32 = 10 * 60;
 pub const TASK_ACTIVITY_BACKGROUND_FRESHNESS_SECONDS: u32 = 30;
 pub const TASK_ACTIVITY_DISMISS_SECONDS: u32 = 60;
 
-pub fn task_activity_update_is_urgent(urgent: bool, total: u32, previous_total: u32) -> bool {
-    urgent || total < previous_total
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum PushEnvironment {
@@ -215,13 +211,6 @@ pub fn task_phase(
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn finishing_one_task_is_immediate_while_stable_and_growing_counts_are_regular() {
-        assert!(task_activity_update_is_urgent(false, 3, 4));
-        assert!(!task_activity_update_is_urgent(false, 3, 3));
-        assert!(!task_activity_update_is_urgent(false, 4, 3));
-        assert!(task_activity_update_is_urgent(true, 4, 3));
-    }
     #[test]
     fn fresh_unknown_tasks_do_not_hide_running_or_waiting_tasks() {
         let display = TaskActivitySummary {

@@ -3,8 +3,7 @@ use crate::models::task_active;
 use crate::{models::SessionStatus, session::SessionRef, state::Snapshot};
 use agent_protocol::live_activity::{
     TASK_ACTIVITY_BACKGROUND_FRESHNESS_SECONDS, TASK_ACTIVITY_DISMISS_SECONDS,
-    TASK_ACTIVITY_PUSH_FRESHNESS_SECONDS, TaskActivityDisplay, TaskActivitySummary,
-    task_activity_update_is_urgent, task_phase,
+    TASK_ACTIVITY_PUSH_FRESHNESS_SECONDS, TaskActivityDisplay, TaskActivitySummary, task_phase,
 };
 use std::collections::BTreeSet;
 
@@ -49,7 +48,6 @@ impl Snapshot {
         previous_sessions: Vec<SessionRef>,
     ) -> TaskActivityOverview {
         let tasks = self.task_activities();
-        let previous_total = previous_sessions.len() as u32;
         let mut statuses = Vec::new();
         let mut sessions = BTreeSet::new();
         for task in &tasks {
@@ -66,11 +64,8 @@ impl Snapshot {
                 sessions.insert(previous);
             }
         }
-        let mut display = TaskActivitySummary::from_statuses(statuses).display();
-        display.urgent =
-            task_activity_update_is_urgent(display.urgent, display.current.total, previous_total);
         TaskActivityOverview {
-            display,
+            display: TaskActivitySummary::from_statuses(statuses).display(),
             sessions: sessions.into_iter().collect(),
         }
     }
@@ -161,7 +156,7 @@ mod tests {
     }
 
     #[test]
-    fn a_completed_task_makes_the_remaining_running_task_update_immediate() {
+    fn a_completed_task_leaves_the_remaining_running_task_visible() {
         let mut state = snapshot("running", "running");
         let running = state.task_activities()[0].session.clone();
         let completed = crate::session::SessionRef::new(
@@ -180,7 +175,7 @@ mod tests {
         Arc::make_mut(&mut state.subscriptions).insert(completed.clone(), uuid::Uuid::nil());
         let overview = state.task_activity_overview(vec![running.clone(), completed]);
         assert_eq!(overview.display.current.label, "実行中 1件");
-        assert!(overview.display.urgent && overview.display.ongoing);
+        assert!(overview.display.ongoing);
         assert_eq!(overview.sessions, vec![running]);
     }
 

@@ -3,7 +3,7 @@ use super::client::ResultKind;
 use agent_protocol::{
     live_activity::{
         RegisterLiveActivity, TASK_ACTIVITY_DISMISS_SECONDS, TASK_ACTIVITY_PUSH_FRESHNESS_SECONDS,
-        TaskActivityDisplay, TaskActivitySummary, task_activity_update_is_urgent,
+        TaskActivityDisplay, TaskActivitySummary,
     },
     session::SessionRef,
 };
@@ -146,11 +146,8 @@ impl Registry {
             if entry.content.display == display {
                 continue;
             }
-            entry.urgent |= task_activity_update_is_urgent(
-                display.urgent,
-                display.current.total,
-                entry.content.display.current.total,
-            );
+            // Actual state changes are immediate; unchanged heartbeats use low priority.
+            entry.urgent = true;
             entry.content.display = display.clone();
             self.generation += 1;
             entry.generation = self.generation;
