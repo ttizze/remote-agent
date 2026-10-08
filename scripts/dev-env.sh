@@ -82,15 +82,6 @@ if [[ -n $bex_original_build_top ]]; then
 else
     unset NIX_BUILD_TOP
 fi
-if ! bex_target_dir=$(realpath "$bex_root/target"); then
-    printf 'Build target cannot be canonicalized: %s\n' "$bex_root/target" >&2
-    exit 1
-fi
-if [[ $bex_target_dir != /* || ! -d $bex_target_dir ]]; then
-    printf 'Canonical build target is unavailable: %s\n' "$bex_target_dir" >&2
-    exit 1
-fi
-export XDG_CACHE_HOME="$bex_target_dir/tool-cache"
 export CARGO_TARGET_DIR="$bex_target_dir"
 export CARGO_HOME="$bex_target_dir/cargo-home"
 bex_seed_key=$(git hash-object Cargo.lock tools/agent-peer/Cargo.lock | git hash-object --stdin)
