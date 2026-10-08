@@ -140,6 +140,9 @@ internal fun DeviceScreen(model: AndroidAppModel, threadId: String) {
                 val detail = view.details.firstOrNull {
                     it.hostId == session.hostId && it.deviceId == session.deviceId
                 }
+                val foreground = view.foreground.firstOrNull {
+                    it.hostId == session.hostId && it.deviceId == session.deviceId
+                }?.appId ?: detail?.foregroundApp
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Button(onClick = {
                         model.perform(
@@ -227,7 +230,7 @@ internal fun DeviceScreen(model: AndroidAppModel, threadId: String) {
                         model.perform(Intent.CloseDevice(session.hostId, session.deviceId, true))
                     }) { Text("Power off") }
                 }
-                detail?.foregroundApp?.let { app -> Text("Foreground: " + app) }
+                foreground?.let { app -> Text("Foreground: " + app) }
             }
             view.screens
                 .filter { it.threadId == threadId }
@@ -287,6 +290,7 @@ internal fun DeviceScreen(model: AndroidAppModel, threadId: String) {
                     item(key = "accessibility-${tree.hostId}-${tree.deviceId}") {
                         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                             Text("Accessibility overlay")
+                            tree.errors.forEach { error -> Text("Accessibility error: $error") }
                             tree.elements.filter { it.label.isNotEmpty() }.take(20).forEach { element ->
                                 Text("${element.role} · ${element.label}")
                             }
