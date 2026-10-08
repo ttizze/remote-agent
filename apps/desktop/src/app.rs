@@ -36,7 +36,14 @@ use agent_core::{
 };
 use agent_protocol::models::RemoteHost;
 use gpui_kit::{
-    component::{WindowExt, h_flex, menu::PopupMenuItem, notification::Notification, v_flex},
+    component::{
+        Sizable, WindowExt,
+        h_flex,
+        input::{Input, InputEvent, InputState},
+        menu::PopupMenuItem,
+        notification::Notification,
+        v_flex,
+    },
     prelude::FluentBuilder,
     *,
 };
@@ -124,6 +131,8 @@ pub(crate) struct Desktop {
     pub(crate) panels: panel::PanelState,
     pub(crate) settings: settings::SettingsState,
     pub(crate) menus: menus::MenuState,
+    command_palette_query: Entity<InputState>,
+    command_palette_open: bool,
     pub(crate) attachments: attachments::AttachmentCache,
     pub(crate) dictation: Option<dictation::Dictation>,
     /// Decoded project icons, by content hash.
@@ -192,6 +201,17 @@ impl Desktop {
         let panels = panel::PanelState::new(window, cx);
         let settings = settings::SettingsState::new(window, cx);
         let menus = menus::MenuState::new(window, cx);
+        let command_palette_query =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Search commands and threads"));
+        subscriptions.push(cx.subscribe_in(
+            &command_palette_query,
+            window,
+            |view, _, event: &InputEvent, window, cx| {
+                if matches!(event, InputEvent::Change) && view.command_palette_open {
+                    view.reopen_command_palette(window, cx);
+                }
+            },
+        ));
         let mut view = Self {
             session: None,
             snapshot: Arc::default(),
@@ -222,6 +242,8 @@ impl Desktop {
             panels,
             settings,
             menus,
+            command_palette_query,
+            command_palette_open: false,
             attachments: attachments::AttachmentCache::new(),
             dictation: None,
             project_icons: Default::default(),
@@ -606,6 +628,69 @@ impl Desktop {
     }
 
     fn open_command_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.command_palette_open = false;
+        self.command_palette_query
+            .update(cx, |query, cx| query.set_value("", window, cx));
+        self.open_command_palette_menu(window, cx);
+    }
+
+    fn reopen_command_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_menu(cx);
+        self.open_command_palette_menu(window, cx);
+    }
+
+    fn open_command_palette_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let items = self.command_palette_items();
+        let query = self.command_palette_query.read(cx).value().to_string();
+        let items = command_palette::filter(&items, &query, &Default::default());
+        let input = self.command_palette_query.clone();
+        let owner = cx.entity().downgrade();
+        self.open_menu(
+            point(px(240.), px(72.)),
+            window,
+            cx,
+            move |mut menu, _, _| {
+                menu = menu
+                    .label("Command palette")
+                    .item(PopupMenuItem::element(move |_, _| {
+                        Input::new(&input)
+                            .appearance(false)
+                            .small()
+                            .aria_label("Command palette search")
+                    }))
+                    .min_w(px(320.));
+                for item in items {
+                    let key = item.key;
+                    let title = item.title;
+                    let owner = owner.clone();
+                    menu = menu.item(PopupMenuItem::new(title).on_click(move |_, window, cx| {
+                        let key = key.clone();
+                        let _ = owner.update(cx, |view, cx| {
+                            view.close_menu(cx);
+                            match key.strip_prefix("thread:") {
+                                Some(thread) => view.open_thread(thread.to_owned(), cx),
+                                None if key == "action:new" => view.new_thread(None, cx),
+                                None if key == "action:settings" => {
+                                    view.open_settings(settings::SettingsPage::General, window, cx)
+                                }
+                                None if key == "action:sidebar" => {
+                                    view.sidebar_hidden = !view.sidebar_hidden;
+                                    cx.notify();
+                                }
+                                _ => {}
+                            }
+                        });
+                    }));
+                }
+                menu
+            },
+        );
+        self.command_palette_open = true;
+        self.command_palette_query
+            .update(cx, |query, cx| query.focus(window, cx));
+    }
+
+    fn command_palette_items(&self) -> Vec<CommandPaletteItem> {
         let mut items = vec![
             CommandPaletteItem {
                 key: "action:new".into(),
@@ -636,40 +721,7 @@ impl Desktop {
             detail: row.project_name.clone(),
             search_terms: vec![row.branch.clone().unwrap_or_default()],
         }));
-        let items = command_palette::filter(&items, "", &Default::default());
-        let owner = cx.entity().downgrade();
-        self.open_menu(
-            point(px(240.), px(72.)),
-            window,
-            cx,
-            move |mut menu, _, _| {
-                menu = menu.label("Command palette").min_w(px(320.));
-                for item in items {
-                    let key = item.key;
-                    let title = item.title;
-                    let owner = owner.clone();
-                    menu = menu.item(PopupMenuItem::new(title).on_click(move |_, window, cx| {
-                        let key = key.clone();
-                        let _ = owner.update(cx, |view, cx| {
-                            view.close_menu(cx);
-                            match key.strip_prefix("thread:") {
-                                Some(thread) => view.open_thread(thread.to_owned(), cx),
-                                None if key == "action:new" => view.new_thread(None, cx),
-                                None if key == "action:settings" => {
-                                    view.open_settings(settings::SettingsPage::General, window, cx)
-                                }
-                                None if key == "action:sidebar" => {
-                                    view.sidebar_hidden = !view.sidebar_hidden;
-                                    cx.notify();
-                                }
-                                _ => {}
-                            }
-                        });
-                    }));
-                }
-                menu
-            },
-        );
+        items
     }
 
     /// Where focus is, as the keymap's `when` clauses read it.

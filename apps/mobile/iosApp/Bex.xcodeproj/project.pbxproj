@@ -57,6 +57,8 @@
 		5A78A6A3E6A09CE733F83B47 /* ComposerMenu.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A71C19295E5E80AA6E3D427 /* ComposerMenu.swift */; };
 		5AFC0570AD7136B42551A29F /* FeedDividers.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A22A9A7CFE0FC491FA1F865 /* FeedDividers.swift */; };
 		5A75EFF73501B288889439CD /* ThreadListHeader.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A0CD55A0BBF9DC36773FC9A /* ThreadListHeader.swift */; };
+		D55000000000000000000001 /* ShareViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = D55000000000000000000010 /* ShareViewController.swift */; };
+		D55000000000000000000002 /* RemoteAgentShareExtension.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = D55000000000000000000013 /* RemoteAgentShareExtension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -112,6 +114,11 @@
 		5A71C19295E5E80AA6E3D427 /* ComposerMenu.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposerMenu.swift; sourceTree = "<group>"; };
 		5A22A9A7CFE0FC491FA1F865 /* FeedDividers.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FeedDividers.swift; sourceTree = "<group>"; };
 		5A0CD55A0BBF9DC36773FC9A /* ThreadListHeader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThreadListHeader.swift; sourceTree = "<group>"; };
+		A10000000000000000000019 /* RemoteAgent.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = RemoteAgent.entitlements; sourceTree = "<group>"; };
+		D55000000000000000000010 /* ShareViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShareViewController.swift; sourceTree = "<group>"; };
+		D55000000000000000000011 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		D55000000000000000000012 /* ShareExtension.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = ShareExtension.entitlements; sourceTree = "<group>"; };
+		D55000000000000000000013 /* RemoteAgentShareExtension.appex */ = {isa = PBXFileReference; explicitFileType = wrapper.app-extension; includeInIndex = 0; path = RemoteAgentShareExtension.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -123,11 +130,24 @@
 		};
 /* End PBXFrameworksBuildPhase section */
 
+/* Begin PBXCopyFilesBuildPhase section */
+		D55000000000000000000033 /* Embed App Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (D55000000000000000000002 /* RemoteAgentShareExtension.appex in Embed App Extensions */, );
+			name = "Embed App Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
 /* Begin PBXGroup section */
 		A10000000000000000000030 = {
 			isa = PBXGroup;
 			children = (
 				A10000000000000000000031 /* Bex */,
+				D55000000000000000000020 /* ShareExtension */,
 				A10000000000000000000032 /* Frameworks */,
 				A10000000000000000000033 /* Products */,
 			);
@@ -182,10 +202,21 @@
 				5A22A9A7CFE0FC491FA1F865 /* FeedDividers.swift */,
 				5A0CD55A0BBF9DC36773FC9A /* ThreadListHeader.swift */,
 				A10000000000000000000016 /* Info.plist */,
+				A10000000000000000000019 /* RemoteAgent.entitlements */,
 				E50000000000000000000002 /* PrivacyInfo.xcprivacy */,
 				A10000000000000000000018 /* Assets.xcassets */,
 			);
 			path = Bex;
+			sourceTree = "<group>";
+		};
+		D55000000000000000000020 /* ShareExtension */ = {
+			isa = PBXGroup;
+			children = (
+				D55000000000000000000010 /* ShareViewController.swift */,
+				D55000000000000000000011 /* Info.plist */,
+				D55000000000000000000012 /* ShareExtension.entitlements */,
+			);
+			path = ShareExtension;
 			sourceTree = "<group>";
 		};
 		A10000000000000000000032 /* Frameworks */ = {
@@ -196,7 +227,7 @@
 		};
 		A10000000000000000000033 /* Products */ = {
 			isa = PBXGroup;
-			children = (A10000000000000000000010 /* Bex.app */,);
+			children = (A10000000000000000000010 /* Bex.app */, D55000000000000000000013 /* RemoteAgentShareExtension.appex */,);
 			name = Products;
 			sourceTree = "<group>";
 		};
@@ -210,14 +241,30 @@
 				A10000000000000000000020 /* Sources */,
 				A10000000000000000000021 /* Frameworks */,
 				A10000000000000000000022 /* Resources */,
+				D55000000000000000000033 /* Embed App Extensions */,
 			);
 			buildRules = ();
-			dependencies = ();
+			dependencies = (D55000000000000000000051 /* PBXTargetDependency */,);
 			packageProductDependencies = (C30000000000000000000002, );
             name = Bex;
 			productName = Bex;
 			productReference = A10000000000000000000010 /* Bex.app */;
 			productType = "com.apple.product-type.application";
+		};
+		D55000000000000000000040 /* RemoteAgentShareExtension */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = D55000000000000000000041 /* Build configuration list for PBXNativeTarget "RemoteAgentShareExtension" */;
+			buildPhases = (
+				D55000000000000000000030 /* Share Extension Sources */,
+				D55000000000000000000031 /* Share Extension Frameworks */,
+				D55000000000000000000032 /* Share Extension Resources */,
+			);
+			buildRules = ();
+			dependencies = ();
+			name = RemoteAgentShareExtension;
+			productName = RemoteAgentShareExtension;
+			productReference = D55000000000000000000013 /* RemoteAgentShareExtension.appex */;
+			productType = "com.apple.product-type.app-extension";
 		};
 /* End PBXNativeTarget section */
 
@@ -235,6 +282,7 @@
 				LastUpgradeCheck = 2600;
 				TargetAttributes = {
 					A10000000000000000000040 = { CreatedOnToolsVersion = 26.0; };
+					D55000000000000000000040 = { CreatedOnToolsVersion = 26.0; };
 				};
 			};
 			buildConfigurationList = A10000000000000000000051 /* Build configuration list for PBXProject "Bex" */;
@@ -247,19 +295,45 @@
 			projectDirPath = "";
 			projectRoot = "";
             packageReferences = (C30000000000000000000005, );
-			targets = (A10000000000000000000040 /* Bex */,);
+			targets = (A10000000000000000000040 /* Bex */, D55000000000000000000040 /* RemoteAgentShareExtension */,);
 		};
 /* End PBXProject section */
 
 /* Begin PBXContainerItemProxy section */
+		D55000000000000000000050 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = A10000000000000000000050 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = D55000000000000000000040;
+			remoteInfo = RemoteAgentShareExtension;
+		};
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXTargetDependency section */
+		D55000000000000000000051 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = D55000000000000000000040 /* RemoteAgentShareExtension */;
+			targetProxy = D55000000000000000000050 /* PBXContainerItemProxy */;
+		};
 /* End PBXTargetDependency section */
 
 /* Begin PBXResourcesBuildPhase section */
 		A10000000000000000000022 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (F300000000000000000000012 /* dmsans_regular.ttf in Resources */, F300000000000000000000022 /* dmsans_medium.ttf in Resources */, F300000000000000000000032 /* dmsans_bold.ttf in Resources */, A10000000000000000000007 /* Assets.xcassets in Resources */, E50000000000000000000001 /* PrivacyInfo.xcprivacy in Resources */,); runOnlyForDeploymentPostprocessing = 0; };
+		D55000000000000000000032 /* Share Extension Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXResourcesBuildPhase section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		D55000000000000000000031 /* Share Extension Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		D55000000000000000000030 /* Share Extension Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (D55000000000000000000001 /* ShareViewController.swift in Sources */,);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
 		A10000000000000000000020 /* Sources */ = {
@@ -347,6 +421,7 @@
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 70;
 				DEVELOPMENT_TEAM = K65K9J8686;
+				CODE_SIGN_ENTITLEMENTS = Bex/RemoteAgent.entitlements;
 				"SWIFT_INCLUDE_PATHS[sdk=iphoneos*]" = "$(inherited) $(BEX_CARGO_TARGET_DIR)/aarch64-apple-ios/release $(SRCROOT)/../../../target/agent-bindings";
 				"SWIFT_INCLUDE_PATHS[sdk=iphonesimulator*]" = "$(inherited) $(BEX_CARGO_TARGET_DIR)/aarch64-apple-ios-sim/release $(SRCROOT)/../../../target/agent-bindings";
 				"LIBRARY_SEARCH_PATHS[sdk=iphoneos*]" = "$(inherited) $(BEX_CARGO_TARGET_DIR)/aarch64-apple-ios/release";
@@ -375,6 +450,7 @@
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 70;
 				DEVELOPMENT_TEAM = K65K9J8686;
+				CODE_SIGN_ENTITLEMENTS = Bex/RemoteAgent.entitlements;
 				"SWIFT_INCLUDE_PATHS[sdk=iphoneos*]" = "$(inherited) $(BEX_CARGO_TARGET_DIR)/aarch64-apple-ios/release $(SRCROOT)/../../../target/agent-bindings";
 				"SWIFT_INCLUDE_PATHS[sdk=iphonesimulator*]" = "$(inherited) $(BEX_CARGO_TARGET_DIR)/aarch64-apple-ios-sim/release $(SRCROOT)/../../../target/agent-bindings";
 				"LIBRARY_SEARCH_PATHS[sdk=iphoneos*]" = "$(inherited) $(BEX_CARGO_TARGET_DIR)/aarch64-apple-ios/release";
@@ -395,12 +471,60 @@
 			};
 			name = Release;
 		};
+		D55000000000000000000060 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_ENTITLEMENTS = ShareExtension/ShareExtension.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 70;
+				DEVELOPMENT_TEAM = K65K9J8686;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = ShareExtension/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.ttizze.b-codex.share;
+				PRODUCT_NAME = RemoteAgentShareExtension;
+				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = "iphonesimulator iphoneos";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		D55000000000000000000061 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_ENTITLEMENTS = ShareExtension/ShareExtension.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 70;
+				DEVELOPMENT_TEAM = K65K9J8686;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = ShareExtension/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.ttizze.b-codex.share;
+				PRODUCT_NAME = RemoteAgentShareExtension;
+				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = "iphonesimulator iphoneos";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
 		A10000000000000000000041 /* Build configuration list for PBXNativeTarget "Bex" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (A10000000000000000000062 /* Debug */, A10000000000000000000063 /* Release */);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		D55000000000000000000041 /* Build configuration list for PBXNativeTarget "RemoteAgentShareExtension" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (D55000000000000000000060 /* Debug */, D55000000000000000000061 /* Release */);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Debug;
 		};

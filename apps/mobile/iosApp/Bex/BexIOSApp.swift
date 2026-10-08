@@ -19,6 +19,7 @@ struct BexIOSApp: App {
                     }
                 }
                 .onAppear {
+                    model.ingestIncomingShareHandoffs()
                     if RemoteAgentApplicationDelegate.takePendingShortcut() == "new-thread" {
                         model.handleShortcut()
                     }
@@ -45,7 +46,10 @@ struct BexIOSApp: App {
                         }
                     case .active where wasBackgrounded:
                         wasBackgrounded = false
+                        model.ingestIncomingShareHandoffs()
                         model.connect(afterForeground: true)
+                    case .active:
+                        model.ingestIncomingShareHandoffs()
                     default:
                         break
                     }

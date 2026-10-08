@@ -79,6 +79,72 @@ fn opened(state: agent_domain::State) -> Owner {
     owner.thread_update(&thread_id(), ThreadUpdate::Synchronized);
     owner
 }
+
+#[test]
+fn an_incoming_share_appends_to_the_draft_being_edited() {
+    let mut owner = opened(thread_state("Thread"));
+    owner.state.drafts.insert(
+        thread_id().to_string(),
+        Draft {
+            text: "typed before handoff".into(),
+            ..draft()
+        },
+    );
+
+    owner.intent(
+        Intent::ImportShare {
+            content: crate::view::share::ShareContent {
+                text: "shared context".into(),
+                urls: vec!["https://example.test/context".into()],
+            },
+        },
+        oneshot::channel().0,
+    );
+
+    assert_eq!(
+        owner.state.current_draft().text,
+        "typed before handoff\n\nshared context\nhttps://example.test/context"
+    );
+}
+
+#[test]
+fn an_incoming_share_targets_the_thread_selected_at_arrival() {
+    let mut owner = opened(thread_state("Thread"));
+    let selected = thread_id();
+    let other = ThreadId::new("other").unwrap();
+    owner.state.drafts.insert(
+        selected.to_string(),
+        Draft {
+            text: "selected draft".into(),
+            ..draft()
+        },
+    );
+    owner.state.drafts.insert(
+        other.to_string(),
+        Draft {
+            text: "other draft".into(),
+            ..draft()
+        },
+    );
+
+    owner.select_thread(Some(other.clone()));
+    owner.intent(
+        Intent::ImportShare {
+            content: crate::view::share::ShareContent {
+                text: "incoming text".into(),
+                urls: vec![],
+            },
+        },
+        oneshot::channel().0,
+    );
+
+    assert_eq!(
+        owner.state.drafts.get(selected.as_str()).unwrap().text,
+        "selected draft"
+    );
+    assert_eq!(owner.state.current_draft().text, "other draft\n\nincoming text");
+}
+
 fn committed(sequence: u64, reply: Reply) -> Delivered {
     Delivered::Committed(Committed {
         reply,

@@ -46,6 +46,7 @@ final class BexAppViewModel: ObservableObject {
     var connection: Task<Void, Never>?
     private var pending: [(Intent, (Result<Outcome, Error>) -> Void)] = []
     private var operations: [UUID: Task<Void, Never>] = [:]
+    private var incomingShareHandoffsInFlight: Set<URL> = []
 
     init() {
         do { profiles = try HostProfile.load() } catch { notice = error.localizedDescription }
@@ -91,6 +92,21 @@ final class BexAppViewModel: ObservableObject {
         let urls = query.filter { $0.name == "url" }.compactMap(\.value)
         perform(.importShare(content: ShareContent(text: text, urls: urls)))
         screen = .threads
+    }
+
+    func ingestIncomingShareHandoffs() {
+        let pending = RemoteAgentShareInbox.pending()
+        guard !pending.isEmpty else { return }
+        screen = .threads
+        for handoff in pending {
+            guard incomingShareHandoffsInFlight.insert(handoff.file).inserted else { continue }
+            perform(.importShare(content: handoff.content)) { [weak self] result in
+                self?.incomingShareHandoffsInFlight.remove(handoff.file)
+                if case .success = result {
+                    RemoteAgentShareInbox.remove(handoff.file)
+                }
+            }
+        }
     }
 
     func removeProfile(_ id: String) {
@@ -170,6 +186,7 @@ final class BexAppViewModel: ObservableObject {
             }
             observe(owner, host: id)
             connect()
+            ingestIncomingShareHandoffs()
         } catch {
             guard !Task.isCancelled, selectedProfileId == id else { return }
             initialization = nil
@@ -232,6 +249,7 @@ final class BexAppViewModel: ObservableObject {
                     pairingInvitation = nil
                     isConnecting = false
                     observe(owner, host: id)
+                    ingestIncomingShareHandoffs()
                     try? await old?.shutdown()
                 } catch {
                     guard !Task.isCancelled else { return }
