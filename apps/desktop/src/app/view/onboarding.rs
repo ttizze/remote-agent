@@ -13,7 +13,7 @@ impl Desktop {
         let mut body = v_flex().gap_2().child(
             div()
                 .text_xs()
-                .text_color(rgb(0x949494))
+                .text_color(rgb(appearance::MUTED))
                 .child("この環境で使えるAI"),
         );
         for agent in agents {
@@ -34,7 +34,7 @@ impl Desktop {
                         .text_color(if agent.availability == AgentAvailability::Ready {
                             rgb(0x88c9a0)
                         } else {
-                            rgb(0x949494)
+                            rgb(appearance::MUTED)
                         })
                         .child(if pending {
                             "接続中…".into()
@@ -123,7 +123,7 @@ impl Desktop {
                     )
                     .child(
                         div()
-                            .text_color(rgb(0x949494))
+                            .text_color(rgb(appearance::MUTED))
                             .child("手元のPCでも、クラウドでも。いつもの環境でAIを使えます。"),
                     ),
             )
@@ -151,13 +151,13 @@ impl Desktop {
             .px_6()
             .py_4()
             .border_t_1()
-            .border_color(rgb(0x292929))
+            .border_color(rgb(appearance::BORDER))
             .child(
                 div()
                     .flex_1()
                     .min_w_0()
                     .text_xs()
-                    .text_color(rgb(0x949494))
+                    .text_color(rgb(appearance::MUTED))
                     .child("既存の会話とプロジェクトは自動で表示されます。"),
             )
             .child(
@@ -175,8 +175,8 @@ impl Desktop {
             .justify_center()
             .px_6()
             .py_8()
-            .bg(rgb(0x101010))
-            .text_color(rgb(0xececec))
+            .bg(rgb(appearance::BACKGROUND))
+            .text_color(rgb(appearance::FOREGROUND))
             .text_size(px(14.))
             .child(
                 v_flex()
@@ -187,8 +187,8 @@ impl Desktop {
                     .overflow_y_scroll()
                     .rounded(px(18.))
                     .border_1()
-                    .border_color(rgb(0x292929))
-                    .bg(rgb(0x141414))
+                    .border_color(rgb(appearance::BORDER))
+                    .bg(rgb(appearance::RAISED))
                     .child(
                         h_flex()
                             .flex_shrink_0()
@@ -206,7 +206,7 @@ impl Desktop {
                             .child(
                                 div()
                                     .flex_1()
-                                    .text_color(rgb(0x949494))
+                                    .text_color(rgb(appearance::MUTED))
                                     .child("セットアップ"),
                             )
                             .child(
@@ -280,7 +280,7 @@ mod tests {
             receive.recv().await.unwrap().unwrap().unwrap()
         });
         cx.update(|cx| {
-            gpui_kit::init(cx);
+            crate::appearance::init(cx);
             cx.set_global(app_runtime);
         });
         let (view, window) = cx.add_window_view(|window, cx| {
