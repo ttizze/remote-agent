@@ -35,7 +35,7 @@ struct FileEditorSheet: View {
                 if busy {
                     ProgressView().padding()
                 }
-                BufferedTextInput(value: $text, edit: { value, acknowledged in
+                let editor = BufferedTextInput(value: $text, edit: { value, acknowledged in
                     perform(.editFile(path: entry.path, text: value)) { _, result in
                         acknowledged((try? result.get()) != nil)
                     }
@@ -43,6 +43,14 @@ struct FileEditorSheet: View {
                     .textInputAutocapitalization(.never).disableAutocorrection(true)
                     .accessibilityIdentifier("file.editor")
                     .disabled(revision.isEmpty)
+                if AppTheme.codeWordWrap {
+                    editor.frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    ScrollView(.horizontal) {
+                        editor.fixedSize(horizontal: true, vertical: false)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+                }
                 HStack {
                     Button("再読込") {
                         if text != savedText {

@@ -60,14 +60,14 @@ internal fun RemoteAgentApp(
                 { href ->
                     when (val target = dev.remoteagent.core.markdownLinkAction(href, root)) {
                         is dev.remoteagent.core.MarkdownLinkAction.WorkspaceFile ->
-                            if (target.path.lowercase().endsWith(".pdf"))
+                            if (dev.remoteagent.core.isPdfFile(target.path))
                                 model.navigate(Route.Pdf(java.io.File(root, target.path).path))
                             else
                                 model.navigate(
                                     Route.Workspace(WorkspaceTab.Files, java.io.File(root, target.path).path, target.line)
                                 )
                         is dev.remoteagent.core.MarkdownLinkAction.HostFile ->
-                            if (target.path.lowercase().endsWith(".pdf")) model.navigate(Route.Pdf(target.path))
+                            if (dev.remoteagent.core.isPdfFile(target.path)) model.navigate(Route.Pdf(target.path))
                             else model.navigate(Route.Workspace(WorkspaceTab.Files, target.path, target.line))
                         is dev.remoteagent.core.MarkdownLinkAction.External ->
                             runCatching {

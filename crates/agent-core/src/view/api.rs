@@ -578,6 +578,12 @@ pub fn markdown_line_target(line: u64, line_count: u64) -> Option<u64> {
     crate::presentation::markdown::links::markdown_line_target(line, line_count)
 }
 
+/// Whether a Host resource path should open in the PDF viewer.
+#[cfg_attr(feature = "bindings", uniffi::export)]
+pub fn is_pdf_file(path: String) -> bool {
+    crate::presentation::markdown::links::is_pdf_file(&path)
+}
+
 /// Defaults for the mobile-only appearance controls.
 #[cfg_attr(feature = "bindings", uniffi::export)]
 pub fn mobile_appearance_default() -> crate::view::appearance::MobileAppearance {
