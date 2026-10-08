@@ -103,7 +103,8 @@ impl HostRpcService {
             futures_util::future::join_all(agents.into_iter().map(|(_, agent)| async move {
                 tokio::time::timeout(
                     std::time::Duration::from_secs(5),
-                    session_pages(agent.as_ref(), "", None).try_collect::<Vec<_>>(),
+                    session_pages(agent.as_ref(), "", SessionListScope::All, 100)
+                        .try_collect::<Vec<_>>(),
                 )
                 .await
             }))
