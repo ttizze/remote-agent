@@ -63,6 +63,8 @@ import dev.remoteagent.core.SettingsScope
 import dev.remoteagent.core.ThreadMenuConfirmation
 import dev.remoteagent.core.UpdateChannel
 import dev.remoteagent.core.accountErrorMessage
+import dev.remoteagent.core.mobileThemeChoices
+import dev.remoteagent.core.mobileTypography
 import dev.remoteagent.core.privacyPolicy
 import java.util.Locale
 import java.util.UUID
@@ -254,6 +256,7 @@ internal fun AppearanceScreen(model: AndroidAppModel) {
     val context = LocalContext.current
     var appearance by remember { mutableStateOf(AppTheme.appearance) }
     var themeTarget by remember { mutableStateOf("both") }
+    val resolvedTypography = mobileTypography(appearance.toCore())
     fun update(next: MobileAppearanceSettings) {
         appearance = next.normalized()
         AppTheme.update(context, appearance)
@@ -296,16 +299,9 @@ internal fun AppearanceScreen(model: AndroidAppModel) {
                             }
                         }
                     }
-                    listOf(
-                            null to "Bex",
-                            "chat" to "Chat",
-                            "grove" to "Grove",
-                            "ocean" to "Ocean",
-                            "ember" to "Ember",
-                            "iris" to "Iris",
-                            "material-you" to "Material You",
-                        )
-                        .forEach { (id, label) ->
+                    mobileThemeChoices(true).forEach { choice ->
+                            val id = choice.id
+                            val label = choice.label
                             val selected =
                                 when (themeTarget) {
                                     "light" -> appearance.lightTheme == id
@@ -344,7 +340,7 @@ internal fun AppearanceScreen(model: AndroidAppModel) {
             item {
                 SectionCard("Code") {
                     ToggleRow("Custom size", appearance.codeFontSize != null) {
-                        update(appearance.copy(codeFontSize = if (it) appearance.codeFontSize ?: 12 else null))
+                        update(appearance.copy(codeFontSize = if (it) resolvedTypography.codeFontSize.toInt() else null))
                     }
                     appearance.codeFontSize?.let { size ->
                         SizeRow("Code size", size, 8, 18) { update(appearance.copy(codeFontSize = it)) }
@@ -356,7 +352,7 @@ internal fun AppearanceScreen(model: AndroidAppModel) {
                 SectionCard("Terminal") {
                     ToggleRow("Custom size", appearance.terminalFontSize != null) {
                         update(
-                            appearance.copy(terminalFontSize = if (it) appearance.terminalFontSize ?: 10.5 else null)
+                            appearance.copy(terminalFontSize = if (it) resolvedTypography.terminalFontSize else null)
                         )
                     }
                     appearance.terminalFontSize?.let { size ->

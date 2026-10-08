@@ -263,19 +263,14 @@ struct MobileAppearanceState: Equatable {
         }
     }
 
-    var colorScheme: ColorScheme = .system
+    var colorScheme: ColorScheme
     var theme: String?
     var lightTheme: String?
     var darkTheme: String?
-    var baseFontSize = 16
+    var baseFontSize: Int
     var codeFontSize: Int?
     var terminalFontSize: Double?
-    var codeWordWrap = false
-
-    static let themes: [(id: String?, label: String)] = [
-        (nil, "Bex"), ("chat", "Chat"), ("grove", "Grove"), ("ocean", "Ocean"),
-        ("ember", "Ember"), ("iris", "Iris")
-    ]
+    var codeWordWrap: Bool
     private static let key = "mobile.appearance"
 
     static func load() -> Self {

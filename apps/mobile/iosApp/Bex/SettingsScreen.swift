@@ -166,7 +166,7 @@ private struct MobileAppearancePage: View {
                             HStack {
                                 Text("Terminal size").font(AppTheme.font(18)).foregroundStyle(AppTheme.text)
                                 Spacer()
-                                Text(String(format: "%.1f", appearance.terminalFontSize ?? 10.5))
+                                Text(String(format: "%.1f", appearance.resolvedTerminalFontSize))
                                     .font(AppTheme.mono(14)).foregroundStyle(AppTheme.muted)
                             }
                         }
@@ -189,7 +189,7 @@ private struct MobileAppearancePage: View {
                 AppTheme.update(appearance)
             }
         )) {
-            ForEach(MobileAppearanceState.themes, id: \.label) { theme in
+            ForEach(mobileThemeChoices(includeMaterialYou: false), id: \.label) { theme in
                 Text(theme.label).tag(theme.id ?? "")
             }
         }
@@ -208,7 +208,7 @@ private struct MobileAppearancePage: View {
                 }
             }
         )) {
-            ForEach(MobileAppearanceState.themes, id: \.label) { theme in
+            ForEach(mobileThemeChoices(includeMaterialYou: false), id: \.label) { theme in
                 Text(theme.label).tag(theme.id ?? "")
             }
         }
@@ -221,22 +221,22 @@ private struct MobileAppearancePage: View {
     }
 
     private var codeBinding: Binding<Int> {
-        Binding(get: { appearance.codeFontSize ?? 12 }, set: { value in update { $0.codeFontSize = value } })
+        Binding(get: { appearance.resolvedCodeFontSize }, set: { value in update { $0.codeFontSize = value } })
     }
 
     private var terminalBinding: Binding<Double> {
-        Binding(get: { appearance.terminalFontSize ?? 10.5 }, set: { value in update { $0.terminalFontSize = value } })
+        Binding(get: { appearance.resolvedTerminalFontSize }, set: { value in update { $0.terminalFontSize = value } })
     }
 
     private var codeCustomBinding: Binding<Bool> {
         Binding(get: { appearance.codeFontSize != nil }, set: { enabled in
-            update { $0.codeFontSize = enabled ? ($0.codeFontSize ?? 12) : nil }
+            update { $0.codeFontSize = enabled ? $0.resolvedCodeFontSize : nil }
         })
     }
 
     private var terminalCustomBinding: Binding<Bool> {
         Binding(get: { appearance.terminalFontSize != nil }, set: { enabled in
-            update { $0.terminalFontSize = enabled ? ($0.terminalFontSize ?? 10.5) : nil }
+            update { $0.terminalFontSize = enabled ? $0.resolvedTerminalFontSize : nil }
         })
     }
 
