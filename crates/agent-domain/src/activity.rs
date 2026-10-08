@@ -217,7 +217,10 @@ fn activity_priority(phase: &str) -> u8 {
     }
 }
 
-fn activity_status(phase: &str) -> &'static str {
+/// Returns the canonical short status shared by push notifications and
+/// native activity surfaces. Callers pass the wire phase so they cannot
+/// silently invent a second presentation mapping.
+pub fn activity_status(phase: &str) -> &'static str {
     match phase {
         "starting" => "Connecting",
         "running" => "Working",

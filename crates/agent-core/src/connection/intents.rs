@@ -59,11 +59,8 @@ mod tests {
             push_to_start_token: Some("start".into()),
             bundle_id: Some("dev.remoteagent.mobile".into()),
             apns_environment: Some("sandbox".into()),
-            notifications_enabled: true,
-            notify_on_approval: true,
-            notify_on_input: true,
-            notify_on_completion: false,
-            notify_on_failure: true,
+            push_available: true,
+            notifications_authorized: true,
             live_activities_enabled: true,
         }
     }
@@ -76,7 +73,39 @@ mod tests {
             value.apns_environment,
             Some(agent_protocol::push::ApnsEnvironment::Sandbox)
         );
-        assert!(!value.preferences.notify_on_completion);
+        assert!(value.preferences.notifications_enabled);
+        assert!(value.preferences.notify_on_approval);
+        assert!(value.preferences.notify_on_input);
+        assert!(value.preferences.notify_on_completion);
+        assert!(value.preferences.notify_on_failure);
+        assert!(value.preferences.live_activities_enabled);
+    }
+
+    #[test]
+    fn push_registration_combines_provider_and_os_facts_once() {
+        let mut value = registration();
+        value.notifications_authorized = false;
+        let request = push_registration(value).unwrap();
+        assert!(!request.preferences.notifications_enabled);
+        assert!(request.preferences.live_activities_enabled);
+        assert!(request.preferences.notify_on_approval);
+        assert!(request.preferences.notify_on_input);
+        assert!(request.preferences.notify_on_completion);
+        assert!(request.preferences.notify_on_failure);
+
+        let mut value = registration();
+        value.push_available = false;
+        value.notifications_authorized = true;
+        value.live_activities_enabled = true;
+        let request = push_registration(value).unwrap();
+        assert!(!request.preferences.notifications_enabled);
+        assert!(!request.preferences.live_activities_enabled);
+
+        let mut value = registration();
+        value.live_activities_enabled = false;
+        let request = push_registration(value).unwrap();
+        assert!(request.preferences.notifications_enabled);
+        assert!(!request.preferences.live_activities_enabled);
     }
 
     #[test]
@@ -244,12 +273,19 @@ fn push_registration(
         bundle_id: registration.bundle_id,
         apns_environment,
         preferences: agent_protocol::push::PushPreferences {
-            notifications_enabled: registration.notifications_enabled,
-            notify_on_approval: registration.notify_on_approval,
-            notify_on_input: registration.notify_on_input,
-            notify_on_completion: registration.notify_on_completion,
-            notify_on_failure: registration.notify_on_failure,
-            live_activities_enabled: registration.live_activities_enabled,
+            // The source registration contract has four event notifications
+            // enabled. Core owns this fixed policy; native clients pass only
+            // provider capability and OS authorization facts.
+            notifications_enabled: registration.push_available
+                && registration.notifications_authorized,
+            notify_on_approval: true,
+            notify_on_input: true,
+            notify_on_completion: true,
+            notify_on_failure: true,
+            // Live Activities do not require alert authorization, but still
+            // require the configured push provider.
+            live_activities_enabled: registration.push_available
+                && registration.live_activities_enabled,
         },
     };
     request.validate().map_err(invalid)?;

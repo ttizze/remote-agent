@@ -21,15 +21,6 @@ internal const val ACTION_OPEN_PUSH = "dev.remoteagent.mobile.OPEN_PUSH"
 internal const val EXTRA_PUSH_DEEP_LINK = "push_deep_link"
 internal const val EXTRA_OPEN_USAGE = "open_usage"
 
-internal data class PushRegistrationPreferences(
-    val notificationsEnabled: Boolean,
-    val notifyOnApproval: Boolean,
-    val notifyOnInput: Boolean,
-    val notifyOnCompletion: Boolean,
-    val notifyOnFailure: Boolean,
-    val liveActivitiesEnabled: Boolean,
-)
-
 internal enum class PushCapability {
     DisabledByPreference,
     UnsupportedUnconfigured,
@@ -68,6 +59,20 @@ internal object FirebasePushBootstrap {
 
 private const val CHANNEL_ID = "agent_awareness"
 private const val CHANNEL_NAME = "Agent activity"
+internal const val AWARENESS_NOTIFICATION_ID = 1_000
+internal const val ONGOING_ACTIVITY_TAG = "agent-activity"
+internal const val LOCAL_ATTENTION_TAG = "local-attention"
+
+/** NotificationManager tags provide the event identity; the integer slot is
+ * deliberately fixed so we do not persist an unbounded key-to-id table. */
+internal fun notificationTag(key: String, ongoing: Boolean): String =
+    if (ongoing) ONGOING_ACTIVITY_TAG else "agent-event:$key"
+
+/** PendingIntent identity includes Intent.data, so each event gets a stable
+ * unique identity even though the request code is fixed. The actual route is
+ * carried separately in EXTRA_PUSH_DEEP_LINK and is validated by the model. */
+internal fun notificationIntentData(key: String): Uri =
+    Uri.parse("remoteagent://notifications/${Uri.encode(key)}")
 
 internal object PushRegistrationStore {
     private const val PREFERENCES = "push-registration"
@@ -162,7 +167,7 @@ internal object PushNotificationCenter {
 
     fun cancelActivity(context: Context) {
         context.getSystemService(NotificationManager::class.java)
-            ?.cancel(NotificationIds.id(context, "agent-activity"))
+            ?.cancel(ONGOING_ACTIVITY_TAG, AWARENESS_NOTIFICATION_ID)
     }
 
     private fun post(
@@ -181,16 +186,15 @@ internal object PushNotificationCenter {
         val intent = Intent(context, MainActivity::class.java).apply {
             action = ACTION_OPEN_PUSH
             putExtra(EXTRA_PUSH_DEEP_LINK, deepLink)
-            data = deepLink?.let(Uri::parse)
+            data = notificationIntentData(key)
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
         }
         val pending = PendingIntent.getActivity(
             context,
-            NotificationIds.id(context, key),
+            AWARENESS_NOTIFICATION_ID,
             intent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
-        val notificationId = NotificationIds.id(context, key)
         val notification = NotificationCompat.Builder(context, CHANNEL_ID)
             .setSmallIcon(R.drawable.bex_icon)
             .setContentTitle(title)
@@ -202,7 +206,7 @@ internal object PushNotificationCenter {
             .setContentIntent(pending)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .build()
-        manager.notify(notificationId, notification)
+        manager.notify(notificationTag(key, ongoing), AWARENESS_NOTIFICATION_ID, notification)
     }
 
     private fun ensureChannel(manager: NotificationManager) {
@@ -211,27 +215,5 @@ internal object PushNotificationCenter {
                 NotificationChannel(CHANNEL_ID, CHANNEL_NAME, NotificationManager.IMPORTANCE_HIGH)
             )
         }
-    }
-}
-
-/** Allocates stable, collision-free notification ids without deriving them
- * from untrusted deep-link hash codes. */
-internal object NotificationIds {
-    private const val PREFERENCES = "push-notification-ids"
-    private const val NEXT_ID = "next-id"
-    private const val FIRST_ID = 1_000
-
-    @Synchronized
-    fun id(context: Context, key: String): Int {
-        val preferences = context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE)
-        val stored = preferences.getInt("id:$key", 0)
-        if (stored > 0) return stored
-        val used = preferences.all.values.filterIsInstance<Int>().toMutableSet()
-        var next = preferences.getInt(NEXT_ID, FIRST_ID).coerceAtLeast(FIRST_ID)
-        while (next <= 0 || used.contains(next)) {
-            next = if (next == Int.MAX_VALUE) FIRST_ID else next + 1
-        }
-        preferences.edit().putInt("id:$key", next).putInt(NEXT_ID, if (next == Int.MAX_VALUE) FIRST_ID else next + 1).apply()
-        return next
     }
 }

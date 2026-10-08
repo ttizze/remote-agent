@@ -25,8 +25,10 @@ pub enum ApnsEnvironment {
     Production,
 }
 
-/// Presentation choices copied from the device's notification settings at
-/// registration time.  The Host never infers a user's choice from a token.
+/// Presentation choices stored with a Host-side device registration. Native
+/// clients pass provider capability and OS authorization facts; core combines
+/// those facts with the persisted Live Activities preference and the source's
+/// fixed per-event notification policy before constructing this contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct PushPreferences {
@@ -146,21 +148,6 @@ pub enum PushActivityPhase {
 }
 
 impl PushActivityPhase {
-    /// The short status shown by native widgets and notification extensions.
-    /// Keep this mapping in the wire crate so each client presents the same
-    /// awareness state without re-deriving Host decisions.
-    pub fn status(self) -> &'static str {
-        match self {
-            Self::Starting => "Connecting",
-            Self::Running => "Working",
-            Self::WaitingForApproval => "Approval",
-            Self::WaitingForInput => "Input",
-            Self::Completed => "Done",
-            Self::Failed => "Failed",
-            Self::Stale => "Waiting",
-        }
-    }
-
     pub fn is_terminal(self) -> bool {
         matches!(self, Self::Completed | Self::Failed | Self::Stale)
     }

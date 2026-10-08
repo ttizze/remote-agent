@@ -36,7 +36,9 @@ struct BexIOSApp: App {
                         },
                         hostIds: { [weak model] in model?.pushHostIds() ?? [] },
                         visibleThread: { [weak model] in model?.visiblePushThreadDeepLink() },
-                        preferences: { [weak model] hostId in model?.pushPreferences(hostId: hostId) ?? .default },
+                        liveActivitiesEnabled: { [weak model] hostId in
+                            model?.liveActivitiesEnabled(hostId: hostId) ?? true
+                        },
                     )
                 }
                 .onChange(of: scenePhase) { _, phase in

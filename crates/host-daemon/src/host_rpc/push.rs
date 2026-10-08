@@ -1666,7 +1666,10 @@ fn notification_alert(event: &PushActivityEvent) -> (String, String) {
     let title = bounded_activity_text(&event.thread_title, ACTIVITY_SUMMARY_LIMIT);
     let project = bounded_activity_text(&event.project_title, ACTIVITY_SUMMARY_LIMIT);
     let body = bounded_activity_text(
-        &format!("{}: {project}", event.phase.status()),
+        &format!(
+            "{}: {project}",
+            agent_domain::activity_status(event.phase.wire_name())
+        ),
         ACTIVITY_SUMMARY_LIMIT,
     );
     (title, body)
@@ -2090,7 +2093,7 @@ mod tests {
             thread_title: "Thread".into(),
             model_title: "Model".into(),
             phase,
-            status: phase.status().into(),
+            status: agent_domain::activity_status(phase.wire_name()).into(),
             updated_at: "2026-10-08T00:00:00.000Z".into(),
             deep_link: format!("remoteagent://threads/environment-{id}/thread-{id}"),
         };

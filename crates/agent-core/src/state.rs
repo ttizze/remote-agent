@@ -1495,7 +1495,7 @@ pub enum AnswerEdit {
 
 /// Device push registration data supplied by a native client. Provider
 /// credentials stay on the Host; this record contains only device tokens and
-/// presentation choices needed by the Host's direct delivery resource.
+/// platform capability facts needed by the Host's direct delivery resource.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct PushDeviceRegistration {
@@ -1506,11 +1506,12 @@ pub struct PushDeviceRegistration {
     pub push_to_start_token: Option<String>,
     pub bundle_id: Option<String>,
     pub apns_environment: Option<String>,
-    pub notifications_enabled: bool,
-    pub notify_on_approval: bool,
-    pub notify_on_input: bool,
-    pub notify_on_completion: bool,
-    pub notify_on_failure: bool,
+    /// Whether the client can reach its configured push provider. This is a
+    /// platform/provider capability fact, not a persisted user preference.
+    pub push_available: bool,
+    /// The operating system's notification authorization state. Core combines
+    /// this with `push_available` and the persisted Live Activities setting.
+    pub notifications_authorized: bool,
     pub live_activities_enabled: bool,
 }
 

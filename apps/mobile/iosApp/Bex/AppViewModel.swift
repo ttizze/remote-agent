@@ -637,17 +637,9 @@ final class BexAppViewModel: ObservableObject {
 
     /// Core owns the Live Activity preference for each retained Host; APNs
     /// authorization and the device token remain native facts.
-    func pushPreferences(hostId: String) -> AgentPushPreferences {
+    func liveActivitiesEnabled(hostId: String) -> Bool {
         let source = hostId == selectedProfileId ? snapshot : environmentSnapshots[hostId]
-        let liveActivitiesEnabled = source?.preferences().liveActivitiesEnabled ?? true
-        return AgentPushPreferences(
-            notificationsEnabled: true,
-            notifyOnApproval: true,
-            notifyOnInput: true,
-            notifyOnCompletion: true,
-            notifyOnFailure: true,
-            liveActivitiesEnabled: liveActivitiesEnabled
-        )
+        return source?.preferences().liveActivitiesEnabled ?? true
     }
 
     func pushHostIds() -> [String] { profiles.map(\.id).sorted() }
@@ -711,7 +703,6 @@ final class BexAppViewModel: ObservableObject {
             applyPendingPushActiveIfReady(hostId)
             return
         }
-        let preferences = pushPreferences(hostId: hostId)
         let native = PushDeviceRegistration(
             deviceId: registration.deviceId,
             platform: "ios",
@@ -720,12 +711,9 @@ final class BexAppViewModel: ObservableObject {
             pushToStartToken: registration.pushToStartToken,
             bundleId: registration.bundleId,
             apnsEnvironment: registration.apnsEnvironment,
-            notificationsEnabled: registration.notificationsEnabled && preferences.notificationsEnabled,
-            notifyOnApproval: preferences.notifyOnApproval,
-            notifyOnInput: preferences.notifyOnInput,
-            notifyOnCompletion: preferences.notifyOnCompletion,
-            notifyOnFailure: preferences.notifyOnFailure,
-            liveActivitiesEnabled: registration.liveActivitiesEnabled && preferences.liveActivitiesEnabled
+            pushAvailable: registration.pushAvailable,
+            notificationsAuthorized: registration.notificationsAuthorized,
+            liveActivitiesEnabled: liveActivitiesEnabled(hostId: hostId)
         )
         if registeredPushOwners[hostId] === owner, registeredPushConfigurations[hostId] == native {
             applyPendingPushActiveIfReady(hostId)
@@ -744,7 +732,8 @@ final class BexAppViewModel: ObservableObject {
             self.setPushActive(
                 hostId: hostId,
                 deviceId: registration.deviceId,
-                active: native.notificationsEnabled || native.liveActivitiesEnabled
+                active: native.pushAvailable &&
+                    (native.notificationsAuthorized || native.liveActivitiesEnabled)
             )
         }
     }

@@ -1095,15 +1095,13 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
     }
 
     fun refreshPushRegistration() {
-        val selectedPreferences = pushPreferences(profileId ?: "")
         reconcileActivityNotificationPreferences()
-        if (!selectedPreferences.notificationsEnabled) pushCapability = PushCapability.DisabledByPreference
         if (!FirebasePushBootstrap.ensure(context)) {
             pushCapability = PushCapability.UnsupportedUnconfigured
             deactivateRegisteredPush()
             return
         }
-        pushCapability = if (selectedPreferences.notificationsEnabled) PushCapability.Ready
+        pushCapability = if (PushNotificationCenter.notificationsEnabled(context)) PushCapability.Ready
         else PushCapability.DisabledByPreference
         val token = PushRegistrationStore.token(context)
         if (token == null) {
@@ -1117,7 +1115,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
         var changed = false
         var aggregate: String? = null
         profiles.forEach { profile ->
-            if (!pushPreferences(profile.id).liveActivitiesEnabled) {
+            if (!liveActivitiesEnabled(profile.id)) {
                 changed = true
                 aggregate = removeActivityState(context, profile.id)
             }
@@ -1147,8 +1145,8 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
     private fun registerPushForHost(hostId: String) {
         if (profiles.none { it.id == hostId }) return
         val token = PushRegistrationStore.token(context) ?: return
-        if (!FirebasePushBootstrap.ensure(context)) return
-        val preferences = pushPreferences(hostId)
+        val pushAvailable = FirebasePushBootstrap.ensure(context)
+        if (!pushAvailable) return
         val registration = PushDeviceRegistration(
             PushRegistrationStore.deviceId(context, hostId),
             "android",
@@ -1157,12 +1155,9 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
             null,
             null,
             null,
-            preferences.notificationsEnabled,
-            preferences.notifyOnApproval,
-            preferences.notifyOnInput,
-            preferences.notifyOnCompletion,
-            preferences.notifyOnFailure,
-            preferences.liveActivitiesEnabled,
+            pushAvailable,
+            PushNotificationCenter.notificationsEnabled(context),
+            liveActivitiesEnabled(hostId),
         )
         val changed = pushRegistrations[hostId] != registration
         if (changed) {
@@ -1190,7 +1185,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
     }
 
     private fun PushDeviceRegistration.preferencesActive(): Boolean =
-        notificationsEnabled || liveActivitiesEnabled
+        pushAvailable && (notificationsAuthorized || liveActivitiesEnabled)
 
     private fun dispatchPush(
         hostId: String,
@@ -1267,20 +1262,11 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
         request()
     }
 
-    private fun pushPreferences(hostId: String): PushRegistrationPreferences {
-        val pushAvailable = FirebasePushBootstrap.ensure(context)
+    private fun liveActivitiesEnabled(hostId: String): Boolean {
         val source = if (hostId == profileId) snapshot else environmentSnapshots[hostId] ?: Snapshot.empty()
-        val liveActivitiesEnabled = source.preferences().liveActivitiesEnabled
-        return PushRegistrationPreferences(
-            notificationsEnabled = pushAvailable && PushNotificationCenter.notificationsEnabled(context),
-            notifyOnApproval = true,
-            notifyOnInput = true,
-            notifyOnCompletion = true,
-            notifyOnFailure = true,
-            // Android has no ActivityKit token; core owns this persistent
-            // ongoing activity preference for the FCM presentation.
-            liveActivitiesEnabled = pushAvailable && liveActivitiesEnabled,
-        )
+        // Android has no ActivityKit token; core owns this persistent ongoing
+        // activity preference for the FCM presentation.
+        return source.preferences().liveActivitiesEnabled
     }
 
     private fun unregisterPush(hostId: String): Job? {
