@@ -28,6 +28,7 @@ internal class DeviceVideoDecoder : TextureView.SurfaceTextureListener {
     private var height = 0
     private var codecDescription: ByteArray? = null
     private var needsKeyframe = true
+    private var lastSequence: ULong? = null
     private val pending = ArrayDeque<Frame>()
 
     fun attach(textureView: TextureView) {
@@ -58,6 +59,11 @@ internal class DeviceVideoDecoder : TextureView.SurfaceTextureListener {
         timestampUs: ULong?,
         keyframe: Boolean,
     ) {
+        if (lastSequence == sequence && encoding != "avcc-description") {
+            drainPending()
+            return
+        }
+        lastSequence = sequence
         if (encoding == "avcc-description") {
             codecDescription = payload.copyOf()
             if (codec != null) closeCodec()
@@ -103,6 +109,7 @@ internal class DeviceVideoDecoder : TextureView.SurfaceTextureListener {
         pending.clear()
         codecDescription = null
         streamKey = null
+        lastSequence = null
     }
 
     private fun configureCodecIfPossible() {
@@ -197,6 +204,7 @@ internal class DeviceVideoDecoder : TextureView.SurfaceTextureListener {
         runCatching { decoder.stop() }
         runCatching { decoder.release() }
         needsKeyframe = true
+        lastSequence = null
     }
 
     private companion object {
