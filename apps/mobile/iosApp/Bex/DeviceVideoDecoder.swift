@@ -56,7 +56,7 @@ final class DeviceVideoDecoder {
 
     private func consumeImage(_ frame: DeviceVideoFrameView) -> Data? {
         guard frame.payload.count <= Self.maxImageBytes else { return nil }
-        return Data(frame.payload)
+        return frame.payload
     }
 
     private func consumeDescription(_ frame: DeviceVideoFrameView) -> Data? {
@@ -100,12 +100,12 @@ final class DeviceVideoDecoder {
         lock.unlock()
     }
 
-    private func configure(description bytes: [UInt8]) -> Bool {
+    private func configure(description bytes: Data) -> Bool {
         guard let parameterSets = avcParameterSets(from: bytes) else { return false }
         return configure(parameterSets: parameterSets)
     }
 
-    private func configureFromAccessUnit(_ bytes: [UInt8]) {
+    private func configureFromAccessUnit(_ bytes: Data) {
         let nals = annexBNALUnits(bytes)
         let parameterSets = nals.filter {
             guard let first = $0.first else { return false }
@@ -115,7 +115,7 @@ final class DeviceVideoDecoder {
         _ = configure(parameterSets: [parameterSets[0], parameterSets[1]])
     }
 
-    private func configure(parameterSets: [[UInt8]]) -> Bool {
+    private func configure(parameterSets: [Data]) -> Bool {
         guard parameterSets.count >= 2 else { return false }
         var description: CMVideoFormatDescription?
         let sps = parameterSets[0]
@@ -170,7 +170,7 @@ final class DeviceVideoDecoder {
         return true
     }
 
-    private func decode(_ bytes: [UInt8], timestampUs: UInt64) -> Bool {
+    private func decode(_ bytes: Data, timestampUs: UInt64) -> Bool {
         guard let session, let formatDescription,
               let sampleBuffer = makeSampleBuffer(bytes, formatDescription: formatDescription,
                                                   timestampUs: timestampUs) else {
@@ -190,7 +190,7 @@ final class DeviceVideoDecoder {
     }
 
     private func makeSampleBuffer(
-        _ bytes: [UInt8],
+        _ bytes: Data,
         formatDescription: CMVideoFormatDescription,
         timestampUs: UInt64
     ) -> CMSampleBuffer? {

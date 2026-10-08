@@ -94,6 +94,7 @@ private const val BACKGROUND_RETRY_MAX_MILLIS = 300_000L
 private const val LOAD_BALANCING_RETRY_DELAY_MILLIS = 3_000L
 private const val LOAD_BALANCING_POLL_DELAY_MILLIS = 50L
 private const val URI_WITHOUT_PORT = -1
+private const val PUSH_THREAD_ROUTE_PARTS = 3
 private const val HANDOFF_REVISION_INCREMENT = 1UL
 private const val HANDOFF_TOKEN_INCREMENT = 1L
 private const val BACKGROUND_RETRY_BACKOFF = 2L
@@ -444,8 +445,10 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
                     val result = runCatching { receipt.wait() }
                     if (host == profileId && owner === store) {
                         val afterPreferences = runCatching { store.snapshot().serializeModelPreferences() }.getOrNull()
-                        if (clientPreferencesChanged(result, beforePreferences, afterPreferences)) {
-                            synchronizeClientPreferences(store.snapshot(), allowPendingSelected = true)
+                        if (result.isSuccess && beforePreferences != null && afterPreferences != null) {
+                            if (!beforePreferences.contentEquals(afterPreferences)) {
+                                synchronizeClientPreferences(store.snapshot(), allowPendingSelected = true)
+                            }
                         }
                         publish(store.snapshot())
                         result.exceptionOrNull()?.let { notice = it.message }
@@ -458,11 +461,6 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
             }
         operations.add(operation)
         operation.start()
-    }
-
-    private fun clientPreferencesChanged(result: Result<Outcome>, before: ByteArray?, after: ByteArray?): Boolean {
-        if (!result.isSuccess || before == null || after == null) return false
-        return !before.contentEquals(after)
     }
 
     private fun routeIntent(intent: Intent): Pair<Intent, String?> {
@@ -560,9 +558,12 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
         val beforeStorePreferences = runCatching { store.snapshot().serializeModelPreferences() }.getOrNull()
         scope.launch {
             val result = runCatching { store.dispatch(intent).wait() }
-            if (!backgroundPreferenceReceiptIsCurrent(profile, store, generation, preferencesGeneration, result)) {
-                return@launch
-            }
+            if (!result.isSuccess) return@launch
+            if (profileId == profile) return@launch
+            if (backgroundJobGenerations[profile] != generation) return@launch
+            if (backgroundOwners[profile] !== store) return@launch
+            if (clientPreferencesGeneration != preferencesGeneration) return@launch
+            if (profiles.none { it.id == profile }) return@launch
             val updated = store.snapshot()
             val afterStorePreferences = runCatching { updated.serializeModelPreferences() }.getOrNull()
             if (
@@ -574,19 +575,6 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
             synchronizeClientPreferences(updated, includeSelected = true, allowPendingSelected = true)
             profiles.firstOrNull { it.id == profile }?.let { publishEnvironment(it, updated) }
         }
-    }
-
-    private fun backgroundPreferenceReceiptIsCurrent(
-        profile: String,
-        store: AgentStore,
-        generation: Long,
-        preferencesGeneration: Long,
-        result: Result<Outcome>,
-    ): Boolean {
-        if (!result.isSuccess || profileId == profile) return false
-        if (backgroundJobGenerations[profile] != generation || backgroundOwners[profile] !== store) return false
-        if (clientPreferencesGeneration != preferencesGeneration) return false
-        return profiles.any { it.id == profile }
     }
 
     fun environmentThreadList(
@@ -990,7 +978,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
         job = scope.launch {
             var delayMillis = BACKGROUND_RETRY_INITIAL_MILLIS
             try {
-                while (backgroundShouldContinue(profile)) {
+                while (backgroundShouldContinue(profile.id, isActive)) {
                     try {
                         runBackgroundAttempt(profile, generation)
                         delayMillis = BACKGROUND_RETRY_INITIAL_MILLIS
@@ -1002,7 +990,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
                     } catch (_: Exception) {
                         // runBackgroundAttempt reports only failures for its current Store owner.
                     }
-                    if (backgroundShouldContinue(profile)) {
+                    if (backgroundShouldContinue(profile.id, isActive)) {
                         delay(delayMillis)
                         delayMillis = (delayMillis * BACKGROUND_RETRY_BACKOFF).coerceAtMost(BACKGROUND_RETRY_MAX_MILLIS)
                     }
@@ -1017,6 +1005,11 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
         backgroundJobs[profile.id] = job
     }
 
+    /**
+     * Owns one background Store attempt: every suspend boundary rechecks the child job and Store generation before
+     * publishing data or reporting an error.
+     */
+    @Suppress("CyclomaticComplexMethod", "ThrowsCount")
     private suspend fun runBackgroundAttempt(profile: HostProfile, generation: Long) {
         var createdStore: AgentStore? = null
         var activeStore: AgentStore? = null
@@ -1035,7 +1028,9 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
                 }
             activeStore = store
             applyCurrentClientPreferences(store)
-            ensureBackgroundOwnership(profile, store, generation)
+            if (!ownsBackground(profile.id, store, generation)) {
+                throw CancellationException("background owner changed")
+            }
             registerPushForHost(profile.id)
             val identity =
                 withContext(Dispatchers.IO) {
@@ -1047,28 +1042,36 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
             } finally {
                 identity.fill(0)
             }
-            ensureBackgroundOwnership(profile, store, generation)
+            if (!ownsBackground(profile.id, store, generation)) {
+                throw CancellationException("background owner changed")
+            }
             publishEnvironment(profile, store.snapshot())
             var previous = store.snapshot()
-            while (isActive && ownsBackground(profile, store, generation)) {
+            while (
+                kotlinx.coroutines.currentCoroutineContext().isActive && ownsBackground(profile.id, store, generation)
+            ) {
                 store.nextSnapshot(previous)
-                ensureBackgroundOwnership(profile, store, generation)
+                if (!ownsBackground(profile.id, store, generation)) {
+                    throw CancellationException("background owner changed")
+                }
                 val latest = store.snapshot()
                 publishEnvironment(profile, latest)
                 if (!latest.connected()) break
                 previous = latest
             }
-        } catch (error: Exception) {
-            if (
-                error is CancellationException && createdStore != null && backgroundOwners[profile.id] === createdStore
-            ) {
+        } catch (error: CancellationException) {
+            if (createdStore != null && backgroundOwners[profile.id] === createdStore) {
                 backgroundOwners.remove(profile.id)
                 createdStore?.shutdown()
             }
+            throw error
+        } catch (error: ClientPreferencesSyncException) {
+            throw error
+        } catch (error: Exception) {
             if (
-                error !is CancellationException &&
-                    error !is ClientPreferencesSyncException &&
-                    backgroundFailureIsCurrent(profile, generation, activeStore)
+                backgroundShouldContinue(profile.id, kotlinx.coroutines.currentCoroutineContext().isActive) &&
+                    backgroundJobGenerations[profile.id] == generation &&
+                    backgroundOwners[profile.id] === activeStore
             ) {
                 notice = notice ?: "${profile.name}: ${error.message}"
             }
@@ -1076,27 +1079,15 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
         }
     }
 
-    private fun ensureBackgroundOwnership(profile: HostProfile, store: AgentStore, generation: Long) {
-        if (!ownsBackground(profile, store, generation)) {
-            throw CancellationException("background owner changed")
-        }
+    private fun backgroundShouldContinue(profileId: String, active: Boolean): Boolean {
+        if (!active || profileId == this.profileId) return false
+        return profiles.any { it.id == profileId }
     }
 
-    private fun backgroundShouldContinue(profile: HostProfile): Boolean {
-        if (!isActive || profile.id == profileId) return false
-        return profiles.any { it.id == profile.id }
-    }
-
-    private fun backgroundFailureIsCurrent(profile: HostProfile, generation: Long, store: AgentStore?): Boolean {
-        if (!backgroundShouldContinue(profile)) return false
-        if (backgroundJobGenerations[profile.id] != generation) return false
-        return backgroundOwners[profile.id] === store
-    }
-
-    private fun ownsBackground(profile: HostProfile, store: AgentStore, generation: Long): Boolean {
-        if (profile.id == profileId || !profiles.any { it.id == profile.id }) return false
-        if (backgroundJobGenerations[profile.id] != generation) return false
-        return backgroundOwners[profile.id] === store
+    private fun ownsBackground(profileId: String, store: AgentStore, generation: Long): Boolean {
+        if (profileId == this.profileId || !profiles.any { it.id == profileId }) return false
+        if (backgroundJobGenerations[profileId] != generation) return false
+        return backgroundOwners[profileId] === store
     }
 
     private fun publishEnvironment(profile: HostProfile, next: Snapshot) {
@@ -1464,9 +1455,12 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
             while (isActive) {
                 delay(delayMillis)
                 val pending = pendingSelectedClientPreferences
-                if (selectedPreferenceRetryIsStale(pending, owner, token, bytes)) {
-                    return@launch
-                }
+                if (pending == null) return@launch
+                if (pending.owner !== owner) return@launch
+                if (pending.token != token) return@launch
+                if (!pending.bytes.contentEquals(bytes)) return@launch
+                if (this@AndroidAppModel.owner !== owner) return@launch
+                if (!clientPreferences.contentEquals(bytes)) return@launch
                 val result = runCatching { owner.applyClientPreferences(bytes.copyOf()).wait() }
                 if (result.isSuccess) {
                     return@launch
@@ -1474,18 +1468,6 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
                 delayMillis = minOf(delayMillis * BACKGROUND_RETRY_BACKOFF, BACKGROUND_RETRY_MAX_MILLIS)
             }
         }
-    }
-
-    private fun selectedPreferenceRetryIsStale(
-        pending: PendingClientPreferencesHandoff?,
-        owner: AgentStore,
-        token: Long,
-        bytes: ByteArray,
-    ): Boolean {
-        if (pending == null || pending.owner !== owner || pending.token != token) return true
-        if (!pending.bytes.contentEquals(bytes)) return true
-        if (this@AndroidAppModel.owner !== owner) return true
-        return !clientPreferences.contentEquals(bytes)
     }
 
     private fun synchronizeClientPreferences(
@@ -1514,17 +1496,24 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
         includeSelected: Boolean,
         allowPendingSelected: Boolean,
     ): Boolean {
-        if (!includeSelected) {
-            val pending = pendingSelectedClientPreferences
-            if (pending != null && owner === pending.owner) {
-                if (bytes.contentEquals(pending.bytes)) {
-                    if (source.revision < pending.minimumRevision) return true
-                    clearSelectedClientPreferencesHandoff()
-                } else if (!allowPendingSelected) {
-                    return true
-                }
-            }
+        if (includeSelected) {
+            if (allowPendingSelected) clearSelectedClientPreferencesHandoff()
+            return false
         }
+
+        val pending =
+            pendingSelectedClientPreferences
+                ?: run {
+                    if (allowPendingSelected) clearSelectedClientPreferencesHandoff()
+                    return false
+                }
+        if (owner !== pending.owner) {
+            if (allowPendingSelected) clearSelectedClientPreferencesHandoff()
+            return false
+        }
+        val matchesPending = bytes.contentEquals(pending.bytes)
+        if (matchesPending && source.revision < pending.minimumRevision) return true
+        if (!matchesPending && !allowPendingSelected) return true
         if (allowPendingSelected) clearSelectedClientPreferencesHandoff()
         return false
     }
@@ -1578,20 +1567,15 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
             var delayMillis = BACKGROUND_RETRY_INITIAL_MILLIS
             while (isActive) {
                 delay(delayMillis)
-                if (backgroundPreferencesRetryIsStale(profile, owner, bytes)) {
-                    return@launch
-                }
+                if (backgroundOwners[profile] !== owner) return@launch
+                if (profileId == profile) return@launch
+                if (!clientPreferences.contentEquals(bytes)) return@launch
+                if (profiles.none { it.id == profile }) return@launch
                 val result = runCatching { owner.applyClientPreferences(bytes.copyOf()).wait() }
                 if (result.isSuccess) return@launch
                 delayMillis = minOf(delayMillis * BACKGROUND_RETRY_BACKOFF, BACKGROUND_RETRY_MAX_MILLIS)
             }
         }
-    }
-
-    private fun backgroundPreferencesRetryIsStale(profile: String, owner: AgentStore, bytes: ByteArray): Boolean {
-        if (backgroundOwners[profile] !== owner || profileId == profile) return true
-        if (!clientPreferences.contentEquals(bytes)) return true
-        return profiles.none { it.id == profile }
     }
 
     /** Counts the app's moves to the background, which end a dictation. */
@@ -1636,7 +1620,9 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
         if (uri.userInfo != null || uri.port != URI_WITHOUT_PORT) return null
         if (uri.fragment != null || uri.query != null) return null
         val values = uri.encodedPath?.split('/') ?: return null
-        if (values.size != 3 || values[0].isNotEmpty() || values[1].isEmpty() || values[2].isEmpty()) return null
+        if (values.size != PUSH_THREAD_ROUTE_PARTS) return null
+        if (values[0].isNotEmpty()) return null
+        if (values[1].isEmpty() || values[2].isEmpty()) return null
         val parts = values.drop(1).map { android.net.Uri.decode(it) }
         return parts.takeIf { it.all(::validPushRouteSegment) }?.let { it[0] to it[1] }
     }
@@ -1730,6 +1716,8 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
 
     private fun pushOwner(hostId: String): AgentStore? = if (hostId == profileId) owner else backgroundOwners[hostId]
 
+    /** Keeps device registration tied to the current Host Store and registration generation. */
+    @Suppress("CyclomaticComplexMethod")
     private fun registerPushForHost(hostId: String, force: Boolean = false) {
         val registration = pushRegistration(hostId) ?: return
         val changed = pushRegistrations[hostId] != registration
@@ -1740,18 +1728,23 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
             registeredPushConfigurations.remove(hostId)
         }
         val store = pushOwner(hostId) ?: return
-        if (force) clearPushRegistration(hostId)
-        if (pushRegistrationAlreadySent(hostId, store, registration, force)) {
+        if (force) {
+            registeredPushOwners.remove(hostId)
+            registeredPushConfigurations.remove(hostId)
+        }
+        if (!force && registeredPushOwners[hostId] === store && registeredPushConfigurations[hostId] == registration) {
             pendingPushActive[hostId]?.let { setPushActive(hostId, it.first, it.second) }
             return
         }
         pushGenerations[hostId] = (pushGenerations[hostId] ?: 0L) + 1L
         val generation = pushGenerations[hostId] ?: 0L
         dispatchPush(hostId, store, generation, Intent.RegisterPushDevice(registration)) { result ->
-            if (pushRegistrationIsCurrent(hostId, store, registration, generation, result)) {
-                registeredPushOwners[hostId] = store
-                registeredPushConfigurations[hostId] = registration
-            }
+            if (!result.isSuccess) return@dispatchPush
+            if (pushRegistrations[hostId] != registration) return@dispatchPush
+            if (pushGenerations[hostId] != generation) return@dispatchPush
+            if (pushOwner(hostId) !== store) return@dispatchPush
+            registeredPushOwners[hostId] = store
+            registeredPushConfigurations[hostId] = registration
         }
     }
 
@@ -1772,31 +1765,6 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
             notificationsAuthorized,
             notificationsAuthorized,
         )
-    }
-
-    private fun clearPushRegistration(hostId: String) {
-        registeredPushOwners.remove(hostId)
-        registeredPushConfigurations.remove(hostId)
-    }
-
-    private fun pushRegistrationAlreadySent(
-        hostId: String,
-        store: AgentStore,
-        registration: PushDeviceRegistration,
-        force: Boolean,
-    ): Boolean =
-        !force && registeredPushOwners[hostId] === store && registeredPushConfigurations[hostId] == registration
-
-    private fun pushRegistrationIsCurrent(
-        hostId: String,
-        store: AgentStore,
-        registration: PushDeviceRegistration,
-        generation: Long,
-        result: Result<Outcome>,
-    ): Boolean {
-        if (!result.isSuccess) return false
-        if (pushRegistrations[hostId] != registration || pushGenerations[hostId] != generation) return false
-        return pushOwner(hostId) === store
     }
 
     private fun dispatchPush(

@@ -30,12 +30,12 @@ struct DeviceRecordingFileType {
 func deviceRecordingFileType(
     _ fileName: String,
     _ mimeType: String,
-    _ bytes: [UInt8]
+    _ bytes: Data
 ) -> DeviceRecordingFileType? {
     guard fileName.lowercased().hasSuffix(".mp4"),
           mimeType.lowercased() == "video/mp4",
           bytes.count >= 12,
-          Array(bytes[4 ..< 8]) == Array("ftyp".utf8) else { return nil }
+          bytes[4 ..< 8].elementsEqual("ftyp".utf8) else { return nil }
     return DeviceRecordingFileType(
         mime: mimeType,
         type: UTType(filenameExtension: "mp4") ?? .movie
@@ -66,7 +66,7 @@ struct DeviceRecordingCard: View {
             model.notice = "The Host did not return a playable device recording."
             return
         }
-        document = DeviceRecordingDocument(data: Data(recording.bytes))
+        document = DeviceRecordingDocument(data: recording.bytes)
         fileName = recording.fileName
         contentType = file.type
         exporting = true
@@ -80,7 +80,7 @@ struct DeviceRecordingCard: View {
                 return
             }
             let url = directory.appendingPathComponent(recording.fileName)
-            try Data(recording.bytes).write(to: url, options: .atomic)
+            try recording.bytes.write(to: url, options: .atomic)
             model.perform(.attachFiles(
                 draftKey: model.snapshot.currentDraftKey(),
                 files: [LocalFile(path: url.path, name: url.lastPathComponent, mimeType: file.mime)]

@@ -128,6 +128,7 @@ private fun AppSurface(model: AndroidAppModel, requestQrScan: (onContents: (Stri
     }
 }
 
+@Suppress("CyclomaticComplexMethod") // Exhaustive native route dispatcher; each route owns its screen.
 @Composable
 private fun AppRoute(model: AndroidAppModel, requestQrScan: (onContents: (String) -> Unit) -> Unit) {
     when (val route = model.route) {

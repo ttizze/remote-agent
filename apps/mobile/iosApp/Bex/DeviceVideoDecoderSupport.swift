@@ -228,7 +228,7 @@ final class DeviceFrameStore: ObservableObject {
     }
 }
 
-func annexBNALUnits(_ bytes: [UInt8]) -> [[UInt8]] {
+func annexBNALUnits(_ bytes: Data) -> [Data] {
     var starts: [(nal: Int, code: Int)] = []
     var index = 0
     while index + 3 < bytes.count {
@@ -245,20 +245,20 @@ func annexBNALUnits(_ bytes: [UInt8]) -> [[UInt8]] {
     return starts.enumerated().compactMap { offset, start in
         let end = offset + 1 < starts.count ? starts[offset + 1].code : bytes.count
         guard start.nal < end else { return nil }
-        return Array(bytes[start.nal ..< end])
+        return Data(bytes[start.nal ..< end])
     }
 }
 
-func annexBToAvcc(_ bytes: [UInt8]) -> [UInt8] {
+func annexBToAvcc(_ bytes: Data) -> Data {
     let nals = annexBNALUnits(bytes)
     if !nals.isEmpty {
-        return nals.reduce(into: []) { result, nal in
+        return nals.reduce(into: Data()) { result, nal in
             var length = UInt32(nal.count).bigEndian
             withUnsafeBytes(of: &length) { result.append(contentsOf: $0) }
-            result.append(contentsOf: nal)
+            result.append(nal)
         }
     }
-    var result: [UInt8] = []
+    var result = Data()
     var index = 0
     while index + 4 <= bytes.count {
         let length = Int(bytes[index]) << 24 | Int(bytes[index + 1]) << 16 | Int(bytes[index + 2]) << 8 |
@@ -268,21 +268,21 @@ func annexBToAvcc(_ bytes: [UInt8]) -> [UInt8] {
         result.append(contentsOf: bytes[index - 4 ..< index + length])
         index += length
     }
-    return index == bytes.count ? result : []
+    return index == bytes.count ? result : Data()
 }
 
-func avcParameterSets(from bytes: [UInt8]) -> [[UInt8]]? {
+func avcParameterSets(from bytes: Data) -> [Data]? {
     if bytes.first == 1, bytes.count >= 7 {
         var index = 5
         let spsCount = Int(bytes[index] & 0x1F)
         index += 1
-        var sets: [[UInt8]] = []
+        var sets: [Data] = []
         for _ in 0 ..< spsCount {
             guard index + 2 <= bytes.count else { return nil }
             let length = Int(bytes[index]) << 8 | Int(bytes[index + 1])
             index += 2
             guard length > 0, index + length <= bytes.count else { return nil }
-            sets.append(Array(bytes[index ..< index + length]))
+            sets.append(Data(bytes[index ..< index + length]))
             index += length
         }
         guard index < bytes.count else { return nil }
@@ -292,7 +292,7 @@ func avcParameterSets(from bytes: [UInt8]) -> [[UInt8]]? {
             let length = Int(bytes[index]) << 8 | Int(bytes[index + 1])
             index += 2
             guard length > 0, index + length <= bytes.count else { return nil }
-            sets.append(Array(bytes[index ..< index + length]))
+            sets.append(Data(bytes[index ..< index + length]))
             index += length
         }
         return sets.count >= 2 ? sets : nil
