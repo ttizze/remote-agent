@@ -531,6 +531,21 @@ impl PreviewOpen {
         Ok(())
     }
 }
+
+/// Clears cookies, cache, and origin storage for one Host-owned browser
+/// profile. The device removes its durable profile row only after every
+/// connected Host acknowledges this request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewClearProfileData {
+    pub profile_id: String,
+}
+impl PreviewClearProfileData {
+    pub fn validate(&self) -> Result<(), String> {
+        validate_profile_id(&self.profile_id)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PreviewNavigate {
@@ -778,6 +793,20 @@ mod tests {
         assert!(PreviewRecordingStop { thread_id, tab_id: String::new() }
             .validate()
             .is_err());
+    }
+
+    #[test]
+    fn profile_clear_requests_validate_the_profile_id() {
+        assert!(PreviewClearProfileData {
+            profile_id: "profile-work".into()
+        }
+        .validate()
+        .is_ok());
+        assert!(PreviewClearProfileData {
+            profile_id: "bad\nprofile".into()
+        }
+        .validate()
+        .is_err());
     }
 
     #[test]

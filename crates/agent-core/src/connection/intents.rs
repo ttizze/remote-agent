@@ -2695,6 +2695,11 @@ impl Owner {
                 request.validate().map_err(invalid)?;
                 Next::call(Call::PreviewOpen(request), None)
             }
+            Intent::PreviewClearProfileData { profile_id } => {
+                let request = agent_protocol::preview::PreviewClearProfileData { profile_id };
+                request.validate().map_err(invalid)?;
+                Next::call(Call::PreviewClearProfileData(request), None)
+            }
             Intent::PreviewNavigate { tab_id, url } => {
                 let request = agent_protocol::preview::PreviewNavigate {
                     thread_id: self.selected()?,

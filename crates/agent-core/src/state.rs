@@ -1875,6 +1875,11 @@ pub enum Intent {
         zoom: agent_protocol::preview::PreviewZoom,
         profile_id: Option<String>,
     },
+    /// Clears one browser profile's Host-owned data before the device removes
+    /// its durable profile row.
+    PreviewClearProfileData {
+        profile_id: String,
+    },
     PreviewNavigate {
         tab_id: String,
         url: String,

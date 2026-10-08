@@ -216,7 +216,10 @@ async fn execute(peer: &Peer, call: &Call) -> Result<Reply, PeerError> {
         Call::PreviewRecordingStop(_) => {
             Reply::PreviewRecordingArtifact(peer.request(call).await?)
         }
-        Call::PreviewReportStatus(_) | Call::PreviewClose(_) | Call::PreviewRefresh(_) => {
+        Call::PreviewClearProfileData(_)
+        | Call::PreviewReportStatus(_)
+        | Call::PreviewClose(_)
+        | Call::PreviewRefresh(_) => {
             let _: m::Empty = peer.request(call).await?;
             Reply::Done
         }

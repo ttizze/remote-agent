@@ -89,6 +89,7 @@ final class BexAppViewModel: ObservableObject {
     private var incomingShareHandoffsInFlight: Set<URL> = []
     private var pendingLoadBalancedNewThread: PendingLoadBalancedNewThread?
     private var loadBalancingAttemptGeneration: UInt64 = 0
+    private var browserProfileRemovalGeneration: UInt64 = 0
     private var automaticRouteProfileId: String?
     private let usageWidget = UsageWidgetPublisher()
 
@@ -622,6 +623,72 @@ final class BexAppViewModel: ObservableObject {
             return
         }
         performOnCurrent(routed, completion: completion)
+    }
+
+    /// Clears a browser profile in every connected Host before removing its
+    /// device-owned row. Core validates the target set and folds receipts;
+    /// this owner only maps each environment to its Store.
+    func removeBrowserProfile(_ profileId: String) {
+        browserProfileRemovalGeneration &+= 1
+        let generation = browserProfileRemovalGeneration
+        var snapshots = environmentSnapshots
+        if let selectedProfileId { snapshots[selectedProfileId] = snapshot }
+        let connected = snapshots.filter { $0.value.connected() }
+        let environmentIds = Array(Set(connected.values.compactMap { $0.environmentId() })).sorted()
+        let plan: AgentCore.BrowserProfileRemovalPlan
+        do {
+            plan = try AgentCore.beginBrowserProfileRemoval(
+                profiles: snapshot.browserDefaults().profiles,
+                profileId: profileId,
+                environmentIds: environmentIds,
+                generation: generation
+            )
+        } catch {
+            notice = error.localizedDescription
+            return
+        }
+        var stores: [String: AgentStore] = [:]
+        for (profile, current) in connected {
+            guard let environmentId = current.environmentId() else { continue }
+            if profile == selectedProfileId, let store {
+                stores[environmentId] = store
+            } else if let owner = backgroundOwners[profile] {
+                stores[environmentId] = owner
+            }
+        }
+        let missing = plan.environmentIds.contains { stores[$0] == nil }
+        Task { [weak self] in
+            var cleared: [String] = []
+            var failed = missing
+            for environmentId in plan.environmentIds {
+                guard let owner = stores[environmentId] else { continue }
+                do {
+                    let receipt = try owner.dispatch(
+                        intent: .previewClearProfileData(profileId: plan.profileId)
+                    )
+                    _ = try await receipt.wait()
+                    cleared.append(environmentId)
+                } catch is CancellationError {
+                    return
+                } catch {
+                    failed = true
+                }
+            }
+            guard let self, self.browserProfileRemovalGeneration == generation else { return }
+            switch AgentCore.browserProfileRemovalDecision(
+                plan: plan,
+                callbackGeneration: generation,
+                clearedEnvironmentIds: cleared,
+                failed: failed
+            ) {
+            case .ready:
+                self.perform(.removeBrowserProfile(profileId: plan.profileId))
+            case .failed:
+                self.notice = "Browser profile data could not be cleared on every connected Host; the profile was kept."
+            case .pending, .stale:
+                break
+            }
+        }
     }
 
     private func performOnCurrent(_ intent: Intent,

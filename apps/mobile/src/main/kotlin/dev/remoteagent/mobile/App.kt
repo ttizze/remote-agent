@@ -212,6 +212,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
     private var pendingLoadBalancedNewThread: PendingLoadBalancedNewThread? = null
     private var loadBalancingAttemptGeneration = 0L
     private var automaticRouteProfileId: String? = null
+    private var browserProfileRemovalGeneration = 0UL
     private val pending = ArrayDeque<Pair<Intent, (Result<Outcome>) -> Unit>>()
     private val operations = mutableSetOf<Job>()
     private val writes = Channel<Snapshot>(PERSISTENCE_QUEUE_CAPACITY)
@@ -248,6 +249,72 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
             return
         }
         performOnCurrent(routed, complete)
+    }
+
+    /** Clears a browser profile in every connected Host before removing its
+     * device-owned row. Core validates the target set and folds receipts;
+     * this owner only maps each environment to its Store. */
+    fun removeBrowserProfile(profileId: String) {
+        browserProfileRemovalGeneration += 1UL
+        val generation = browserProfileRemovalGeneration
+        val snapshots = (environmentSnapshots.values + snapshot)
+            .filter { it.connected() }
+            .distinctBy { it.environmentId() }
+        val environmentIds = snapshots.mapNotNull { it.environmentId() }.distinct().sorted()
+        val defaults = snapshot.browserDefaults()
+        val plan = runCatching {
+            dev.remoteagent.core.beginBrowserProfileRemoval(
+                defaults.profiles,
+                profileId,
+                environmentIds,
+                generation,
+            )
+        }.getOrElse {
+            notice = it.message
+            return
+        }
+        val stores = mutableMapOf<String, AgentStore>()
+        if (snapshot.connected()) {
+            snapshot.environmentId()?.let { id -> owner?.let { stores[id] = it } }
+        }
+        backgroundOwners.forEach { (profile, store) ->
+            val current = store.snapshot()
+            if (current.connected()) {
+                current.environmentId()?.let { id -> stores[id] = store }
+            }
+        }
+        val missing = plan.environmentIds.any { it !in stores }
+        scope.launch {
+            val cleared = mutableListOf<String>()
+            var failed = missing
+            for (environmentId in plan.environmentIds) {
+                val store = stores[environmentId] ?: continue
+                try {
+                    store.dispatch(Intent.PreviewClearProfileData(plan.profileId)).wait()
+                    cleared += environmentId
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (_: Exception) {
+                    failed = true
+                }
+            }
+            if (generation != browserProfileRemovalGeneration) return@launch
+            when (
+                dev.remoteagent.core.browserProfileRemovalDecision(
+                    plan,
+                    generation,
+                    cleared,
+                    failed,
+                )
+            ) {
+                dev.remoteagent.core.BrowserProfileRemovalDecision.READY ->
+                    perform(Intent.RemoveBrowserProfile(plan.profileId))
+                dev.remoteagent.core.BrowserProfileRemovalDecision.FAILED ->
+                    notice = "Browser profile data could not be cleared on every connected Host; the profile was kept."
+                dev.remoteagent.core.BrowserProfileRemovalDecision.PENDING,
+                dev.remoteagent.core.BrowserProfileRemovalDecision.STALE -> Unit
+            }
+        }
     }
 
     private fun performOnCurrent(intent: Intent, complete: (Result<Outcome>) -> Unit = {}) {

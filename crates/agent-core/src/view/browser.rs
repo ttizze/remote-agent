@@ -330,6 +330,88 @@ pub fn remove_browser_profile(
         .ok_or_else(|| "browser profile was not found".to_owned())
 }
 
+/// The native owner uses this plan while it clears one profile on every
+/// connected Host.  Keeping the target set and generation here prevents a
+/// late receipt from an earlier removal from deleting a newly edited profile.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct BrowserProfileRemovalPlan {
+    pub profile_id: String,
+    pub environment_ids: Vec<String>,
+    pub generation: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
+pub enum BrowserProfileRemovalDecision {
+    Pending,
+    Ready,
+    Failed,
+    Stale,
+}
+
+/// Starts the shared profile-data removal workflow. Built-ins cannot be
+/// removed and at least one connected environment is required because the
+/// profile's durable row is only safe to delete after every Host has cleared
+/// its own browser context.
+pub fn begin_browser_profile_removal(
+    profiles: &[BrowserProfile],
+    profile_id: String,
+    environment_ids: Vec<String>,
+    generation: u64,
+) -> Result<BrowserProfileRemovalPlan, String> {
+    if is_built_in_browser_profile_id(&profile_id) {
+        return Err("built-in browser profiles cannot be removed".into());
+    }
+    let profile = profiles
+        .iter()
+        .find(|profile| profile.id == profile_id)
+        .ok_or_else(|| "browser profile was not found".to_owned())?;
+    if profile.kind != BrowserProfileKind::Persistent {
+        return Err("only persistent browser profiles can be removed".into());
+    }
+    let mut environment_ids = environment_ids;
+    if environment_ids.iter().any(|id| id.trim().is_empty()) {
+        return Err("browser profile removal requires valid environments".into());
+    }
+    environment_ids.sort();
+    environment_ids.dedup();
+    if environment_ids.is_empty() {
+        return Err("connect to an environment before removing a browser profile".into());
+    }
+    Ok(BrowserProfileRemovalPlan {
+        profile_id,
+        environment_ids,
+        generation,
+    })
+}
+
+/// Folds one native completion into the shared removal decision. Callers keep
+/// the cleared environment ids and pass them back on each completion; a stale
+/// generation can never become ready.
+pub fn browser_profile_removal_decision(
+    plan: &BrowserProfileRemovalPlan,
+    callback_generation: u64,
+    cleared_environment_ids: &[String],
+    failed: bool,
+) -> BrowserProfileRemovalDecision {
+    if callback_generation != plan.generation {
+        return BrowserProfileRemovalDecision::Stale;
+    }
+    if failed {
+        return BrowserProfileRemovalDecision::Failed;
+    }
+    if plan
+        .environment_ids
+        .iter()
+        .all(|environment_id| cleared_environment_ids.contains(environment_id))
+    {
+        BrowserProfileRemovalDecision::Ready
+    } else {
+        BrowserProfileRemovalDecision::Pending
+    }
+}
+
 pub fn validate_browser_viewport(viewport: &PreviewViewportSetting) -> Result<(), String> {
     let (width, height) = match viewport {
         PreviewViewportSetting::Fill => return Ok(()),
@@ -502,5 +584,58 @@ mod tests {
         let removed = remove_browser_profile(&renamed, &second.id).expect("remove");
         assert_eq!(removed, vec![first]);
         assert!(remove_browser_profile(&removed, INCOGNITO_BROWSER_PROFILE_ID).is_err());
+    }
+
+    #[test]
+    fn profile_removal_waits_for_every_host_and_preserves_failure_for_retry() {
+        let plan = begin_browser_profile_removal(
+            &[work()],
+            "profile-work".into(),
+            vec!["host-b".into(), "host-a".into()],
+            7,
+        )
+        .expect("removal plan");
+        assert_eq!(
+            plan.environment_ids,
+            vec!["host-a".to_owned(), "host-b".to_owned()]
+        );
+        assert_eq!(
+            browser_profile_removal_decision(&plan, 7, &["host-a".into()], false),
+            BrowserProfileRemovalDecision::Pending
+        );
+        assert_eq!(
+            browser_profile_removal_decision(&plan, 7, &["host-a".into()], true),
+            BrowserProfileRemovalDecision::Failed
+        );
+    }
+
+    #[test]
+    fn profile_removal_becomes_ready_only_after_all_hosts_succeed() {
+        let plan = begin_browser_profile_removal(
+            &[work()],
+            "profile-work".into(),
+            vec!["host-a".into()],
+            8,
+        )
+        .expect("removal plan");
+        assert_eq!(
+            browser_profile_removal_decision(&plan, 8, &["host-a".into()], false),
+            BrowserProfileRemovalDecision::Ready
+        );
+    }
+
+    #[test]
+    fn stale_profile_removal_completion_cannot_commit() {
+        let plan = begin_browser_profile_removal(
+            &[work()],
+            "profile-work".into(),
+            vec!["host-a".into()],
+            9,
+        )
+        .expect("removal plan");
+        assert_eq!(
+            browser_profile_removal_decision(&plan, 10, &["host-a".into()], false),
+            BrowserProfileRemovalDecision::Stale
+        );
     }
 }

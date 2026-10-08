@@ -160,6 +160,7 @@ internal fun SettingsScreen(model: AndroidAppModel, projectId: String?) {
                                 row,
                                 onReset = { model.snapshot.settingReset(scope, row)?.let(model::perform) },
                                 onIntent = model::perform,
+                                onRemoveBrowserProfile = model::removeBrowserProfile,
                             ) { value ->
                                 model.snapshot.settingIntent(scope, row.id, value)?.let(model::perform)
                             }
@@ -514,6 +515,7 @@ private fun SettingRow(
     row: SettingsRow,
     onReset: () -> Unit,
     onIntent: (Intent) -> Unit,
+    onRemoveBrowserProfile: (String) -> Unit,
     onEdit: (SettingValue) -> Unit,
 ) {
     val colors = AppTheme.colors
@@ -583,7 +585,7 @@ private fun SettingRow(
                     )
                 }
                 is SettingControl.BrowserProfiles ->
-                    BrowserProfilesControl(control, onEdit, onIntent)
+                    BrowserProfilesControl(control, onEdit, onIntent, onRemoveBrowserProfile)
             }
         }
         val choice = row.control as? SettingControl.Choice
@@ -611,26 +613,29 @@ private fun BrowserProfilesControl(
     control: SettingControl.BrowserProfiles,
     onDefault: (SettingValue) -> Unit,
     onIntent: (Intent) -> Unit,
+    onRemove: (String) -> Unit,
 ) {
     val colors = AppTheme.colors
     var editingId by remember { mutableStateOf<String?>(null) }
     var editingName by remember { mutableStateOf("") }
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         control.profiles.forEach { profile ->
-            val builtIn = profile.id == "default"
+            val builtIn = profile.id == "default" || profile.id == "incognito"
             Row(
                 Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(4.dp),
             ) {
                 Text(profile.name, Modifier.weight(1f), style = AppTheme.body, color = colors.foreground)
-                TextButton(onClick = {
-                    onDefault(SettingValue.Choice(profile.id))
-                }) {
-                    Text(
-                        if (profile.id == control.defaultProfileId) "Default" else "Use",
-                        color = colors.primaryText,
-                    )
+                if (profile.id != "incognito") {
+                    TextButton(onClick = {
+                        onDefault(SettingValue.Choice(profile.id))
+                    }) {
+                        Text(
+                            if (profile.id == control.defaultProfileId) "Default" else "Use",
+                            color = colors.primaryText,
+                        )
+                    }
                 }
                 if (!builtIn) {
                     TextButton(onClick = {
@@ -640,7 +645,7 @@ private fun BrowserProfilesControl(
                         Text("Rename", color = colors.primaryText)
                     }
                     TextButton(onClick = {
-                        onIntent(Intent.RemoveBrowserProfile(profile.id))
+                        onRemove(profile.id)
                     }) {
                         Text("Remove", color = colors.dangerForeground)
                     }
@@ -668,7 +673,9 @@ private fun BrowserProfilesControl(
             }
         }
         TextButton(
-            enabled = control.profiles.count { it.id != "default" } < 24,
+            enabled = control.profiles.count {
+                it.id != "default" && it.id != "incognito"
+            } < 24,
             onClick = {
                 onIntent(Intent.CreateBrowserProfile(UUID.randomUUID().toString(), null))
             },

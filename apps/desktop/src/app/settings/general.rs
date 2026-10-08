@@ -857,7 +857,7 @@ impl Desktop {
         let mut rows = v_flex().gap(px(4.)).children(profiles.iter().map(|profile| {
             let profile_id = profile.id.clone();
             let is_default = profile.id == default_profile_id;
-            let built_in = profile.id == "default";
+            let built_in = matches!(profile.id.as_str(), "default" | "incognito");
             let mut row = h_flex()
                 .gap(px(8.))
                 .child(
@@ -902,10 +902,8 @@ impl Desktop {
                             .outline()
                             .small()
                             .label("Remove")
-                            .on_click(cx.listener(move |view, _, _, _| {
-                                view.perform(Intent::RemoveBrowserProfile {
-                                    profile_id: remove_id.clone(),
-                                });
+                            .on_click(cx.listener(move |view, _, window, cx| {
+                                view.remove_browser_profile(remove_id.clone(), window, cx);
                             })),
                     );
             }
@@ -914,7 +912,13 @@ impl Desktop {
         let create = Button::new("browser-profile-create")
             .outline()
             .small()
-            .disabled(profiles.len().saturating_sub(1) >= 24)
+            .disabled(
+                profiles
+                    .iter()
+                    .filter(|profile| !matches!(profile.id.as_str(), "default" | "incognito"))
+                    .count()
+                    >= 24,
+            )
             .label("New profile")
             .on_click(cx.listener(|view, _, _, _| {
                 view.perform(Intent::CreateBrowserProfile {
