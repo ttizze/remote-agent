@@ -121,7 +121,14 @@ extension BexAppViewModel {
                     delayNanoseconds = 250_000_000
                 } catch is CancellationError {
                     return
+                } catch is ClientPreferencesSyncError {
+                    // A live Store rejected the current shared payload. Keep
+                    // this owner supervised so the next pass retries it.
                 } catch {
+                    guard !Task.isCancelled,
+                          backgroundTaskGenerations[profile.id] == generation,
+                          profiles.contains(where: { $0.id == profile.id }),
+                          selectedProfileId != profile.id else { return }
                     if notice == nil {
                         notice = "\(profile.name): \(error.localizedDescription)"
                     }
@@ -212,8 +219,14 @@ extension BexAppViewModel {
             if data.isEmpty {
                 return
             }
-            let receipt = try owner.applyClientPreferences(preferences: data)
-            _ = try await receipt.wait()
+            do {
+                let receipt = try owner.applyClientPreferences(preferences: data)
+                _ = try await receipt.wait()
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                throw ClientPreferencesSyncError(underlying: error)
+            }
             try Task.checkCancellation()
             if generation == clientPreferencesGeneration {
                 return

@@ -85,6 +85,8 @@ private data class PendingClientPreferencesHandoff(
     val minimumRevision: ULong,
 )
 
+private class ClientPreferencesSyncException(cause: Throwable) : Exception(cause)
+
 private const val PERSISTENCE_QUEUE_CAPACITY = 8
 private const val MILLIS_PER_SECOND = 1000L
 private const val PERSISTENCE_DEBOUNCE_MILLIS = 250L
@@ -215,7 +217,6 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
     private val backgroundOwners = mutableMapOf<String, AgentStore>()
     private val backgroundJobs = mutableMapOf<String, Job>()
     private val backgroundJobGenerations = mutableMapOf<String, Long>()
-    private val clientPreferenceSyncFailures = mutableMapOf<String, String>()
     private var pendingSelectedClientPreferences: PendingClientPreferencesHandoff? = null
     private var nextClientPreferencesHandoffToken = 0L
     private var selectedClientPreferencesRetry: Job? = null
@@ -250,9 +251,21 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
             Context.RECEIVER_NOT_EXPORTED,
         )
         runCatching { profiles = repository.profiles() }.onFailure { notice = it.message }
+        val recoveryNotice = snapshot.error()
+        if (clientPreferences.isNotEmpty()) {
+            runCatching { snapshot.serializeModelPreferences() }
+                .onSuccess { canonical ->
+                    if (!clientPreferences.contentEquals(canonical)) {
+                        clientPreferences = canonical
+                        repository.saveModelPreferences(canonical)
+                    }
+                }
+                .onFailure { error -> notice = error.message }
+        }
         if (profiles.isEmpty()) stack = listOf(Route.Pairing)
         repository.selected?.takeIf { id -> profiles.any { it.id == id } }?.let(::selectProfile)
             ?: startBackgroundProfiles(null)
+        if (recoveryNotice != null) notice = recoveryNotice
     }
 
     fun perform(intent: Intent, complete: (Result<Outcome>) -> Unit = {}) {
@@ -329,6 +342,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
                         }
                         if (!browserProfileStoresAreCurrent(stores)) return@launch
                     }
+                    if (generation != browserProfileRemovalGeneration) return@launch
                     if (!removalFailed && browserProfileStoresAreCurrent(stores)) {
                         val current = connectedBrowserProfileStores()
                         val canonicalStore = owner?.takeIf { selectedOwner ->
@@ -862,6 +876,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
 
     fun selectProfile(id: String) {
         if (profiles.none { it.id == id }) return
+        notice = null
         browserProfileRemovalGeneration += 1UL
         if (automaticRouteProfileId != null && automaticRouteProfileId != id) {
             invalidatePendingLoadBalancedNewThread()
@@ -1013,10 +1028,11 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
                             createdStore?.shutdown()
                         }
                         throw error
+                    } catch (_: ClientPreferencesSyncException) {
+                        // The supervision loop retries the current canonical
+                        // payload for this still-owned Store.
                     } catch (error: Exception) {
-                        if (clientPreferenceSyncFailures[profile.id] == null) {
-                            notice = notice ?: "${profile.name}: ${error.message}"
-                        }
+                        notice = notice ?: "${profile.name}: ${error.message}"
                     }
                     if (isActive && profile.id != profileId) {
                         delay(delayMillis)
@@ -1099,7 +1115,6 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
             browserProfileRemovalGeneration += 1UL
             backgroundJobGenerations[id] = (backgroundJobGenerations[id] ?: 0L) + 1L
             backgroundJobs.remove(id)?.cancel()
-            clientPreferenceSyncFailures.remove(id)
             AndroidCredentialStore(context, id).remove()
             var old: AgentStore? = null
             if (profileId == id) {
@@ -1366,17 +1381,11 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
             if (bytes.isEmpty()) return
             try {
                 store.applyClientPreferences(bytes).wait()
-            } catch (error: Exception) {
-                val key = if (owner === store) profileId ?: "selected" else {
-                    backgroundOwners.entries.firstOrNull { it.value === store }?.key ?: "unknown"
-                }
-                clientPreferenceSyncFailures[key] = error.message ?: "client preferences sync failed"
+            } catch (error: CancellationException) {
                 throw error
+            } catch (error: Exception) {
+                throw ClientPreferencesSyncException(error)
             }
-            backgroundOwners.entries.firstOrNull { it.value === store }?.key?.let {
-                clientPreferenceSyncFailures.remove(it)
-            }
-            if (owner === store) clientPreferenceSyncFailures.remove(profileId ?: "selected")
             if (generation == clientPreferencesGeneration) return
         }
     }
@@ -1417,7 +1426,6 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
                 }
                 val result = runCatching { owner.applyClientPreferences(bytes.copyOf()).wait() }
                 if (result.isSuccess) {
-                    clientPreferenceSyncFailures.remove(profileId ?: "selected")
                     return@launch
                 }
                 delayMillis = minOf(delayMillis * 2L, 300_000L)
@@ -1465,18 +1473,12 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
             owners[profileId ?: "selected"] = it
             val receipt = runCatching { it.applyClientPreferences(bytes.copyOf()) }.getOrNull()
             if (receipt == null) {
-                clientPreferenceSyncFailures[profileId ?: "selected"] =
-                    "client preferences sync failed"
                 retrySelectedClientPreferences(it, bytes, token)
             } else {
                 scope.launch {
                     val result = runCatching { receipt.wait() }
                     if (result.isFailure) {
-                        clientPreferenceSyncFailures[profileId ?: "selected"] =
-                            result.exceptionOrNull()?.message ?: "client preferences sync failed"
                         retrySelectedClientPreferences(it, bytes, token)
-                    } else {
-                        clientPreferenceSyncFailures.remove(profileId ?: "selected")
                     }
                 }
             }
@@ -1484,18 +1486,38 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
         if (changed) backgroundOwners.forEach { (profile, store) -> owners[profile] = store }
         owners.filterValues { store -> !(includeSelected && store === owner) }.forEach { (profile, store) ->
             val receipt = runCatching { store.applyClientPreferences(bytes) }
-                .onFailure { error ->
-                    clientPreferenceSyncFailures[profile] =
-                        error.message ?: "client preferences sync failed"
+                .getOrElse {
+                    retryBackgroundClientPreferences(profile, store, bytes)
+                    return@forEach
                 }
-                .getOrNull() ?: return@forEach
             scope.launch {
                 val result = runCatching { receipt.wait() }
-                result
-                    .onSuccess { clientPreferenceSyncFailures.remove(profile) }
-                    .onFailure { error ->
-                        clientPreferenceSyncFailures[profile] = error.message ?: "client preferences sync failed"
-                    }
+                if (result.isFailure) {
+                    retryBackgroundClientPreferences(profile, store, bytes)
+                }
+            }
+        }
+    }
+
+    private fun retryBackgroundClientPreferences(
+        profile: String,
+        owner: AgentStore,
+        bytes: ByteArray,
+    ) {
+        scope.launch {
+            var delayMillis = 250L
+            while (isActive) {
+                delay(delayMillis)
+                if (backgroundOwners[profile] !== owner ||
+                    profileId == profile ||
+                    !clientPreferences.contentEquals(bytes) ||
+                    profiles.none { it.id == profile }
+                ) {
+                    return@launch
+                }
+                val result = runCatching { owner.applyClientPreferences(bytes.copyOf()).wait() }
+                if (result.isSuccess) return@launch
+                delayMillis = minOf(delayMillis * 2L, 300_000L)
             }
         }
     }

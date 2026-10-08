@@ -3016,7 +3016,7 @@ impl DeviceService {
         };
         for (_, source) in capture_sources {
             source.cancel.cancel();
-            let task = source.task;
+            let mut task = source.task;
             if tokio::time::timeout(Duration::from_secs(2), &mut task)
                 .await
                 .is_err()
@@ -9413,7 +9413,7 @@ mod tests {
         assert_eq!(first.load(Ordering::Acquire), 0);
         if let Some(source) = service.inner.capture_sources.lock().await.remove(&key) {
             source.cancel.cancel();
-            let mut task = source.task;
+            let task = source.task;
             task.abort();
             let _ = task.await;
         }

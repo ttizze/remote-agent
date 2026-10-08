@@ -81,7 +81,22 @@ enum Update {
         snapshot: Arc<Snapshot>,
     },
     Views(Box<Views>),
-    Completed(Option<Done>, Result<Outcome, String>, bool, bool),
+    EnvironmentCompleted {
+        store: Arc<Store>,
+        done: Done,
+        result: Result<Outcome, String>,
+    },
+    Completed(
+        Option<Done>,
+        Result<Outcome, String>,
+        bool,
+        bool,
+        Option<Arc<Store>>,
+    ),
+    RetryClientPreferences {
+        store: Arc<Store>,
+        bytes: Vec<u8>,
+    },
     PersistenceError(String),
     Attachments(attachments::Update),
     Recording(uuid::Uuid, platform::RecordingEvent),
@@ -406,7 +421,9 @@ impl Desktop {
             while let Ok((epoch, update)) = incoming.recv().await {
                 let environment_update = matches!(
                     &update,
-                    Update::EnvironmentConnected { .. } | Update::EnvironmentSnapshot { .. }
+                    Update::EnvironmentConnected { .. }
+                        | Update::EnvironmentSnapshot { .. }
+                        | Update::EnvironmentCompleted { .. }
                 );
                 if view
                     .update_in(cx, |view, window, cx| {
@@ -470,9 +487,14 @@ impl Desktop {
             },
         ));
         let client_preferences = ClientPreferences::from_disk();
-        let initial_snapshot = Arc::new(Snapshot::with_client_preferences(
-            &client_preferences.current(),
-        ));
+        let raw_client_preferences = client_preferences.current();
+        let initial_snapshot = Arc::new(Snapshot::with_client_preferences(&raw_client_preferences));
+        if !raw_client_preferences.is_empty() {
+            client_preferences.replace(agent_core::persistence::canonical_model_preferences(
+                &raw_client_preferences,
+            ));
+        }
+        let recovery_error = initial_snapshot.error.clone();
         let mut view = Self {
             session: None,
             snapshot: initial_snapshot.clone(),
@@ -544,6 +566,9 @@ impl Desktop {
             _subscriptions: subscriptions,
         };
         if let Some(error) = view.runtime.logging_error.clone() {
+            view.show_error(&error, window, cx);
+        }
+        if let Some(error) = recovery_error {
             view.show_error(&error, window, cx);
         }
         view.connect(None, window, cx);
@@ -920,18 +945,16 @@ impl Desktop {
             let receipt = store.dispatch(intent);
             let updates = self.updates.clone();
             let epoch = self.epoch;
+            let completion_store = store.clone();
             let done: Done = Box::new(move |view, result, _window, cx| {
-                let snapshot = store.snapshot();
+                let snapshot = completion_store.snapshot();
                 let after_store_preferences =
                     agent_core::persistence::encode_model_preferences(&snapshot).ok();
                 let updates_client_preferences = result.is_ok()
                     && before_store_preferences.as_ref() == Some(&before_preferences)
                     && before_store_preferences.as_ref() != after_store_preferences.as_ref();
                 if updates_client_preferences
-                    && view
-                        .background_sessions
-                        .values()
-                        .any(|session| Arc::ptr_eq(&session.store, &store))
+                    && view.is_current_preference_store(&completion_store)
                     && view.client_preferences.current() == before_preferences
                 {
                     view.synchronize_client_preferences_from(&snapshot, true);
@@ -946,7 +969,14 @@ impl Desktop {
                     .map_err(|error| error.to_string())
                     .and_then(|result| result.map_err(|error| error.to_string()));
                 let _ = updates
-                    .send((epoch, Update::Completed(Some(done), result, false, false)))
+                    .send((
+                        epoch,
+                        Update::EnvironmentCompleted {
+                            store,
+                            done,
+                            result,
+                        },
+                    ))
                     .await;
             });
         } else {
@@ -1229,7 +1259,7 @@ impl Desktop {
             let _ = updates
                 .send((
                     epoch,
-                    Update::Completed(done, result, allow_selected_preferences, true),
+                    Update::Completed(done, result, allow_selected_preferences, true, Some(store)),
                 ))
                 .await;
         });
@@ -1255,7 +1285,7 @@ impl Desktop {
             let _ = updates
                 .send((
                     epoch,
-                    Update::Completed(Some(done), Ok(Outcome::Applied), false, false),
+                    Update::Completed(Some(done), Ok(Outcome::Applied), false, false, None),
                 ))
                 .await;
         });
@@ -1602,7 +1632,31 @@ impl Desktop {
                 }
                 self.schedule_views(cx);
             }
-            Update::Completed(done, result, allow_selected_preferences, sync_selected_snapshot) => {
+            Update::EnvironmentCompleted {
+                store,
+                done,
+                result,
+            } => {
+                if !self.is_current_preference_store(&store) {
+                    return;
+                }
+                done(self, &result, window, cx);
+            }
+            Update::Completed(
+                done,
+                result,
+                allow_selected_preferences,
+                sync_selected_snapshot,
+                selected_store,
+            ) => {
+                if let Some(selected_store) = selected_store
+                    && !self
+                        .session
+                        .as_ref()
+                        .is_some_and(|session| Arc::ptr_eq(&session.store, &selected_store))
+                {
+                    return;
+                }
                 if let Some(session) = &self.session {
                     let snapshot = session.store.snapshot();
                     if snapshot.accepts_after(&self.snapshot) {
@@ -1629,6 +1683,25 @@ impl Desktop {
                     done(self, &result, window, cx);
                 }
                 self.snapshot_changed(window, cx);
+            }
+            Update::RetryClientPreferences { store, bytes } => {
+                if self.client_preferences.current() != bytes
+                    || !self.is_current_preference_store(&store)
+                {
+                    return;
+                }
+                let receipt = store.apply_client_preferences(bytes.clone());
+                let updates = self.updates.clone();
+                let epoch = self.epoch;
+                self.runtime.handle.spawn(async move {
+                    if matches!(receipt.await, Ok(Ok(_))) {
+                        return;
+                    }
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                    let _ = updates
+                        .send((epoch, Update::RetryClientPreferences { store, bytes }))
+                        .await;
+                });
             }
             Update::PersistenceError(error) => self.show_error(&error, window, cx),
             Update::Attachments(update) => self.attachments_update(update, window, cx),
@@ -1859,6 +1932,8 @@ impl Desktop {
         for store in stores {
             let receipt = store.apply_client_preferences(bytes.clone());
             let client_preferences = self.client_preferences.clone();
+            let updates = self.updates.clone();
+            let epoch = self.epoch;
             let is_selected = selected
                 .as_ref()
                 .is_some_and(|selected| Arc::ptr_eq(selected, &store));
@@ -1869,7 +1944,20 @@ impl Desktop {
                 let mut receipt = receipt;
                 let mut delay = Duration::from_millis(250);
                 loop {
-                    if matches!(receipt.await, Ok(Ok(_))) || !is_selected {
+                    if matches!(receipt.await, Ok(Ok(_))) {
+                        return;
+                    }
+                    if !is_selected {
+                        tokio::time::sleep(delay).await;
+                        let _ = updates
+                            .send((
+                                epoch,
+                                Update::RetryClientPreferences {
+                                    store: retry_store,
+                                    bytes: retry_bytes,
+                                },
+                            ))
+                            .await;
                         return;
                     }
                     tokio::time::sleep(delay).await;
@@ -1890,6 +1978,16 @@ impl Desktop {
         current.is_empty()
             || agent_core::persistence::encode_model_preferences(&store.snapshot())
                 .is_ok_and(|bytes| bytes == current)
+    }
+
+    fn is_current_preference_store(&self, store: &Arc<Store>) -> bool {
+        self.session
+            .as_ref()
+            .is_some_and(|session| Arc::ptr_eq(&session.store, store))
+            || self
+                .background_sessions
+                .values()
+                .any(|session| Arc::ptr_eq(&session.store, store))
     }
 
     fn deliver_snapshot_notifications(&mut self, window: &mut Window, cx: &mut Context<Self>) {

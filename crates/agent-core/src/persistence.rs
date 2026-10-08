@@ -101,6 +101,15 @@ pub fn encode_model_preferences(snapshot: &Snapshot) -> Result<Vec<u8>, serde_js
     })
 }
 
+/// Returns the current canonical client-preferences payload for bytes loaded
+/// from device storage. A damaged payload becomes the fresh default payload;
+/// the seeded snapshot still carries `MODEL_PREFERENCES_RECOVERY_ERROR` for
+/// the owner to show before it replaces the stored bytes.
+pub fn canonical_model_preferences(bytes: &[u8]) -> Vec<u8> {
+    let snapshot = Snapshot::with_client_preferences(bytes);
+    encode_model_preferences(&snapshot).unwrap_or_default()
+}
+
 /// Applies an explicit client-global preference payload while retaining the
 /// local Host/project values already held by `snapshot`.
 pub fn apply_model_preferences(
@@ -400,6 +409,15 @@ mod tests {
             seeded.error.as_deref(),
             Some(MODEL_PREFERENCES_RECOVERY_ERROR)
         );
+    }
+
+    #[test]
+    fn malformed_client_preferences_are_replaced_by_canonical_defaults() {
+        let bytes = canonical_model_preferences(b"malformed preferences");
+        let mut restored = Snapshot::default();
+        apply_model_preferences(&mut restored, &bytes).unwrap();
+        assert_eq!(restored.default_draft, Snapshot::default().default_draft);
+        assert!(restored.error.is_none());
     }
 
     #[test]

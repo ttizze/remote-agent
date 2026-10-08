@@ -231,6 +231,7 @@ extension BexAppViewModel {
     func removeProfile(_ id: String) {
         guard profiles.contains(where: { $0.id == id }) else { return }
         browserProfileRemovalGeneration &+= 1
+        let removalGeneration = browserProfileRemovalGeneration
         do {
             let environmentId = environmentSnapshots[id]?.environmentId() ?? id
             LocalNotifications.removeEnvironment(environmentId)
@@ -255,14 +256,27 @@ extension BexAppViewModel {
                 )
                 Task { [weak self] in
                     await unregistration?.value
-                    do { try await old?.shutdown() } catch { self?.notice = error.localizedDescription }
+                    do {
+                        try await old?.shutdown()
+                    } catch {
+                        guard let self,
+                              backgroundTaskGenerations[id] == removalGeneration,
+                              !profiles.contains(where: { $0.id == id }),
+                              selectedProfileId == nil else { return }
+                        notice = error.localizedDescription
+                    }
                 }
             }
             Task { [weak self] in
                 do {
                     await unregistration?.value
                     try await background?.shutdown()
-                } catch { self?.notice = error.localizedDescription }
+                } catch {
+                    guard let self,
+                          backgroundTaskGenerations[id] == removalGeneration,
+                          !profiles.contains(where: { $0.id == id }) else { return }
+                    notice = error.localizedDescription
+                }
             }
             profiles = remaining
             // Removing a Host also removes its ActivityKit card and token

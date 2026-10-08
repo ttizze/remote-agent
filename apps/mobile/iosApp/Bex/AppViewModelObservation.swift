@@ -339,9 +339,55 @@ extension BexAppViewModel {
     }
 
     private func applyClientPreferencesToBackground(_ data: Data) {
-        for owner in backgroundOwners.values {
-            guard let receipt = try? owner.applyClientPreferences(preferences: data) else { continue }
-            Task { _ = try? await receipt.wait() }
+        for (profile, owner) in backgroundOwners {
+            guard let receipt = try? owner.applyClientPreferences(preferences: data) else {
+                retryBackgroundClientPreferences(profile: profile, owner: owner, data: data)
+                continue
+            }
+            Task { [weak self, owner] in
+                do {
+                    _ = try await receipt.wait()
+                } catch is CancellationError {
+                    return
+                } catch {
+                    self?.retryBackgroundClientPreferences(
+                        profile: profile,
+                        owner: owner,
+                        data: data
+                    )
+                }
+            }
+        }
+    }
+
+    private func retryBackgroundClientPreferences(
+        profile: String,
+        owner: AgentStore,
+        data: Data
+    ) {
+        Task { [weak self, owner] in
+            var delayNanoseconds: UInt64 = 250_000_000
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(nanoseconds: delayNanoseconds)
+                } catch {
+                    return
+                }
+                guard let self,
+                      backgroundOwners[profile] === owner,
+                      selectedProfileId != profile,
+                      profiles.contains(where: { $0.id == profile }),
+                      clientPreferencesData == data else { return }
+                do {
+                    let receipt = try owner.applyClientPreferences(preferences: data)
+                    _ = try await receipt.wait()
+                    return
+                } catch is CancellationError {
+                    return
+                } catch {
+                    delayNanoseconds = min(delayNanoseconds * 2, 300_000_000_000)
+                }
+            }
         }
     }
 

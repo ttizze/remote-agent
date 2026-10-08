@@ -5,6 +5,10 @@ import UIKit
 
 @MainActor
 final class BexAppViewModel: ObservableObject {
+    struct ClientPreferencesSyncError: Error {
+        let underlying: Error
+    }
+
     struct PendingClientPreferencesHandoff {
         let owner: AgentStore
         let data: Data
@@ -108,11 +112,27 @@ final class BexAppViewModel: ObservableObject {
 
     init() {
         do { profiles = try HostProfile.load() } catch { notice = error.localizedDescription }
+        let recoveryNotice = snapshot.error()
+        if !clientPreferencesData.isEmpty,
+           let canonical = try? snapshot.serializeModelPreferences(),
+           canonical != clientPreferencesData {
+            clientPreferencesData = canonical
+            Task { [weak self] in
+                do {
+                    try await SnapshotFiles.saveModelPreferences(canonical)
+                } catch {
+                    self?.notice = error.localizedDescription
+                }
+            }
+        }
         if let id = UserDefaults.standard.string(forKey: "bex.selected-host"),
            profiles.contains(where: { $0.id == id }) {
             selectProfile(id)
         } else {
             startBackgroundProfiles(nil)
+        }
+        if let recoveryNotice {
+            notice = recoveryNotice
         }
     }
 }
