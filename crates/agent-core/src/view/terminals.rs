@@ -94,6 +94,21 @@ pub fn running_terminal_ids(snapshot: &Snapshot, thread: &ThreadId) -> Vec<Strin
         .collect()
 }
 
+/// Chooses a terminal action target from the ids currently available to the client.
+pub fn terminal_navigation_target(
+    available_terminal_ids: &[String],
+    requested_terminal_id: Option<&str>,
+) -> Option<String> {
+    requested_terminal_id
+        .and_then(|requested| {
+            available_terminal_ids
+                .iter()
+                .find(|terminal_id| terminal_id.as_str() == requested)
+                .cloned()
+        })
+        .or_else(|| available_terminal_ids.first().cloned())
+}
+
 /// "1 terminal process running", "2 terminal processes running".
 pub fn terminal_process_label(count: usize) -> String {
     format!(
@@ -371,5 +386,35 @@ mod tests {
         assert_eq!(next_terminal_id(&snapshot, &thread), "term-1");
         assert_eq!(terminal_process_label(1), "1 terminal process running");
         assert_eq!(terminal_process_label(2), "2 terminal processes running");
+    }
+
+    #[test]
+    fn terminal_navigation_target_prefers_requested_available_id() {
+        let available = vec!["term-1".into(), "term-2".into()];
+
+        assert_eq!(
+            terminal_navigation_target(&available, Some("term-2")),
+            Some("term-2".into())
+        );
+    }
+
+    #[test]
+    fn terminal_navigation_target_falls_back_to_first_available_id() {
+        let available = vec!["term-1".into(), "term-2".into()];
+
+        assert_eq!(
+            terminal_navigation_target(&available, Some("missing")),
+            Some("term-1".into())
+        );
+        assert_eq!(
+            terminal_navigation_target(&available, None),
+            Some("term-1".into())
+        );
+    }
+
+    #[test]
+    fn terminal_navigation_target_returns_none_without_available_ids() {
+        assert_eq!(terminal_navigation_target(&[], Some("term-1")), None);
+        assert_eq!(terminal_navigation_target(&[], None), None);
     }
 }

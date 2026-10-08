@@ -813,6 +813,18 @@ pub fn terminal_font_size_step(current: f64, larger: bool) -> f64 {
     crate::view::terminals::text_size::step_terminal_font_size(current, larger)
 }
 
+/// Selects the requested terminal when available, otherwise the first terminal.
+#[cfg_attr(feature = "bindings", uniffi::export)]
+pub fn terminal_navigation_target(
+    available_terminal_ids: Vec<String>,
+    requested_terminal_id: Option<String>,
+) -> Option<String> {
+    crate::view::terminals::terminal_navigation_target(
+        &available_terminal_ids,
+        requested_terminal_id.as_deref(),
+    )
+}
+
 /// The file screen's subtitle for `path` in the project `project_name`.
 #[cfg_attr(feature = "bindings", uniffi::export)]
 pub fn file_header_subtitle(project_name: String, path: String) -> String {
