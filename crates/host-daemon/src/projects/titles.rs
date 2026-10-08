@@ -10,6 +10,7 @@ pub(crate) struct TitleList<'a> {
     recent_projects: Vec<&'a str>,
     threads: HashMap<&'a str, Vec<Thread>>,
     chats: Vec<Thread>,
+    children: Vec<Thread>,
     project_limit: usize,
     chat_limit: usize,
     thread_limits: &'a BTreeMap<String, u32>,
@@ -25,6 +26,7 @@ impl<'a> TitleList<'a> {
             recent_projects: Vec::new(),
             threads: HashMap::new(),
             chats: Vec::new(),
+            children: Vec::new(),
             project_limit: params.project_limit.max(1) as usize,
             chat_limit: params.chat_limit.max(1) as usize,
             thread_limits: &params.project_thread_limits,
@@ -40,12 +42,15 @@ impl<'a> TitleList<'a> {
             .max(1) as usize
     }
 
-    pub(crate) fn push(&mut self, mut thread: Thread) {
+    pub(crate) fn push(&mut self, thread: Thread) {
         let project_id = thread
             .project_id
             .as_deref()
             .and_then(|id| self.known_projects.get(id).copied());
-        let target = if let Some(project_id) = project_id {
+        let target = if thread.parent_id.is_some() && !self.searching {
+            // Children accompany visible roots without consuming their limits.
+            &mut self.children
+        } else if let Some(project_id) = project_id {
             let position = match self.recent_projects.iter().position(|id| *id == project_id) {
                 Some(position) => position,
                 None => {
@@ -72,31 +77,7 @@ impl<'a> TitleList<'a> {
             }
             &mut self.chats
         };
-        // Untitled threads use a short first-message title, not its payload.
-        if !thread
-            .name
-            .as_deref()
-            .is_some_and(|name| !name.trim().is_empty())
-        {
-            let title: String = thread
-                .preview
-                .as_deref()
-                .unwrap_or("")
-                .lines()
-                .find(|line| !line.trim().is_empty())
-                .unwrap_or("")
-                .trim()
-                .chars()
-                .take(120)
-                .collect();
-            thread.name = (!title.is_empty()).then_some(title);
-        }
-        thread.turns = None;
-        thread.preview = None;
-        thread.history_has_more = None;
-        thread.history_limit = None;
-        thread.agent_id = None;
-        target.push(thread);
+        target.push(summary(thread));
     }
 
     pub(crate) fn complete(&self) -> bool {
@@ -149,7 +130,7 @@ impl<'a> TitleList<'a> {
         data.extend(self.chats);
         ThreadList {
             provider_errors: None,
-            data,
+            data: append_descendants(data, self.children),
             projects: projects.into_iter().cloned().collect(),
             more_project_ids,
             has_more_projects: more_projects,
@@ -158,10 +139,155 @@ impl<'a> TitleList<'a> {
     }
 }
 
+pub(crate) fn summary(mut thread: Thread) -> Thread {
+    // Untitled threads use a short first-message title, not its payload.
+    if !thread
+        .name
+        .as_deref()
+        .is_some_and(|name| !name.trim().is_empty())
+    {
+        let title: String = thread
+            .preview
+            .as_deref()
+            .unwrap_or("")
+            .lines()
+            .find(|line| !line.trim().is_empty())
+            .unwrap_or("")
+            .trim()
+            .chars()
+            .take(120)
+            .collect();
+        thread.name = (!title.is_empty()).then_some(title);
+    }
+    thread.turns = None;
+    thread.preview = None;
+    thread.history_has_more = None;
+    thread.history_limit = None;
+    thread.agent_id = None;
+    thread
+}
+
+pub(crate) fn append_descendants(mut roots: Vec<Thread>, children: Vec<Thread>) -> Vec<Thread> {
+    let mut visible: HashSet<_> = roots
+        .iter()
+        .filter_map(|thread| thread.id.clone())
+        .collect();
+    let mut included = visible.clone();
+    loop {
+        let before = visible.len();
+        for child in &children {
+            if child
+                .parent_id
+                .as_ref()
+                .is_some_and(|id| visible.contains(id))
+                && let Some(id) = &child.id
+            {
+                visible.insert(id.clone());
+            }
+        }
+        if visible.len() == before {
+            break;
+        }
+    }
+    roots.extend(children.into_iter().filter(|thread| {
+        thread
+            .id
+            .as_ref()
+            .is_some_and(|id| visible.contains(id) && included.insert(id.clone()))
+    }));
+    roots
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::{Value, json};
+    #[test]
+    fn older_descendants_survive_root_pagination_without_duplicate_rows() {
+        let query = ListQuery {
+            chat_limit: 1,
+            ..Default::default()
+        };
+        let mut list = TitleList::new(&[], &query);
+        for (id, updated_at) in [("root", 100), ("hidden", 90)] {
+            list.push(thread(
+                json!({"id":{"provider":"codex","id":id},"updatedAt":updated_at}),
+            ));
+        }
+        let mut page = list.finish();
+        let children = [
+            ("grandchild", "child"),
+            ("child", "root"),
+            ("child", "root"),
+            ("hidden-child", "hidden"),
+            ("orphan", "missing"),
+        ]
+        .into_iter()
+        .map(|(id, parent)| {
+            summary(thread(json!({
+                "id":{"provider":"codex","id":id},
+                "parentId":{"provider":"codex","id":parent},
+                "updatedAt":10,
+                "preview":format!("Title {id}\nBody"),
+                "turns":[{"id":"turn"}]
+            })))
+        })
+        .collect();
+        page.data = append_descendants(page.data, children);
+        assert!(page.has_more_chats);
+        let ids: Vec<_> = page
+            .data
+            .iter()
+            .map(|thread| thread.id.as_ref().unwrap().id.as_str())
+            .collect();
+        assert_eq!(ids, ["root", "grandchild", "child"]);
+        assert_eq!(page.data[1].name.as_deref(), Some("Title grandchild"));
+        assert!(
+            page.data
+                .iter()
+                .all(|thread| thread.preview.is_none() && thread.turns.is_none())
+        );
+    }
+
+    #[test]
+    fn children_follow_visible_roots_without_consuming_title_limits() {
+        let query = ListQuery {
+            chat_limit: 1,
+            ..Default::default()
+        };
+        let mut list = TitleList::new(&[], &query);
+        for (id, parent) in [
+            ("grandchild", Some("child")),
+            ("hidden-child", Some("hidden")),
+            ("child", Some("root")),
+            ("root", None),
+            ("hidden", None),
+        ] {
+            list.push(thread(json!({"id":{"provider":"codex","id":id}, "parentId":parent.map(|id| json!({"provider":"codex","id":id})), "preview":format!("Title {id}")})));
+        }
+        let result = list.finish();
+        assert!(result.has_more_chats);
+        let ids: Vec<_> = result
+            .data
+            .iter()
+            .map(|thread| thread.id.as_ref().unwrap().id.as_str())
+            .collect();
+        assert_eq!(ids, ["root", "grandchild", "child"]);
+        assert!(result.data.iter().all(|thread| thread.name.is_some()
+            && thread.preview.is_none()
+            && thread.turns.is_none()));
+        let search = ListQuery {
+            search_term: "child".into(),
+            ..Default::default()
+        };
+        let mut list = TitleList::new(&[], &search);
+        list.push(thread(json!({"id":{"provider":"codex","id":"child"},"parentId":{"provider":"codex","id":"root"},"name":"Matches"})));
+        assert_eq!(
+            list.finish().data.len(),
+            1,
+            "search matches remain visible without their parent"
+        );
+    }
     fn thread(value: Value) -> Thread {
         serde_json::from_value(value).unwrap()
     }

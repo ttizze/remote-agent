@@ -251,18 +251,14 @@ impl Desktop {
                 desktop: cx.entity().downgrade(),
             });
             if expanded {
-                for thread in list
-                    .as_ref()
-                    .map(|page| page.threads.as_slice())
-                    .unwrap_or_default()
-                    .iter()
-                    .filter(|thread| thread.project_id.as_deref() == Some(&project.id))
-                {
-                    projects.push(
-                        self.thread_button(thread, cx)
-                            .icon(Icon::empty().size_4())
-                            .into(),
-                    );
+                for button in self.thread_buttons(
+                    list.as_ref()
+                        .map(|page| page.threads.as_slice())
+                        .unwrap_or_default(),
+                    Some(&project.id),
+                    cx,
+                ) {
+                    projects.push(button.into());
                 }
                 if list
                     .as_ref()
@@ -297,14 +293,14 @@ impl Desktop {
             );
         }
         let mut chats = Vec::new();
-        for thread in list
-            .as_ref()
-            .map(|page| page.threads.as_slice())
-            .unwrap_or_default()
-            .iter()
-            .filter(|thread| thread.project_id.is_none())
-        {
-            chats.push(self.thread_button(thread, cx).into());
+        for button in self.thread_buttons(
+            list.as_ref()
+                .map(|page| page.threads.as_slice())
+                .unwrap_or_default(),
+            None,
+            cx,
+        ) {
+            chats.push(button.into());
         }
         if list.as_ref().is_some_and(|page| page.has_more_chats) {
             chats.push(
@@ -398,7 +394,42 @@ impl Desktop {
                     )),
             )
     }
-    pub(super) fn thread_button(
+    fn thread_buttons(
+        &self,
+        threads: &[agent_core::presentation::list::ThreadSummary],
+        project_id: Option<&str>,
+        cx: &Context<Self>,
+    ) -> Vec<SidebarMenuItem> {
+        let mut buttons: Vec<(u32, SidebarMenuItem)> = Vec::new();
+        for thread in threads
+            .iter()
+            .rev()
+            .filter(|thread| thread.project_id.as_deref() == project_id)
+        {
+            let mut children = Vec::new();
+            while buttons
+                .last()
+                .is_some_and(|(depth, _)| *depth > thread.depth)
+            {
+                children.push(buttons.pop().unwrap().1);
+            }
+            let button = self
+                .thread_button(thread, cx)
+                .children(children)
+                .default_open(true)
+                .when(project_id.is_some() && thread.depth == 0, |button| {
+                    button.icon(Icon::empty().size_4())
+                });
+            buttons.push((thread.depth, button));
+        }
+        buttons
+            .into_iter()
+            .rev()
+            .map(|(_, button)| button)
+            .collect()
+    }
+
+    fn thread_button(
         &self,
         thread: &agent_core::presentation::list::ThreadSummary,
         cx: &Context<Self>,
@@ -421,6 +452,7 @@ impl Desktop {
             ),
         });
         SidebarMenuItem::new(thread.title.clone())
+            .when(thread.depth > 0, |button| button.icon(IconName::Bot))
             .active(self.selected() == Some(&id) && self.tab != Tab::Settings)
             .suffix(move |_, _| {
                 div()
@@ -472,17 +504,17 @@ mod tests {
         fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             self.0.update(cx, |desktop, cx| {
                 let page = desktop.snapshot.thread_list().unwrap();
-                v_flex()
-                    .w(px(272.))
-                    .children(page.threads.iter().enumerate().map(|(index, thread)| {
-                        div().debug_selector(move || format!("task-{index}")).child(
-                            desktop.thread_button(thread, cx).render(
-                                format!("task-button-{index}"),
-                                window,
-                                cx,
-                            ),
-                        )
-                    }))
+                v_flex().w(px(272.)).children(
+                    desktop
+                        .thread_buttons(&page.threads, None, cx)
+                        .into_iter()
+                        .enumerate()
+                        .map(|(index, button)| {
+                            div()
+                                .debug_selector(move || format!("task-{index}"))
+                                .child(button.render(format!("task-button-{index}"), window, cx))
+                        }),
+                )
             })
         }
     }
@@ -601,7 +633,8 @@ mod tests {
         let snapshot = Snapshot {
             threads: Some(Arc::new(
                 serde_json::from_value(serde_json::json!({
-                    "data":[{"id":{"provider":"codex","id":"first"},"name":"First task","worktreeStatus":"unmerged"},
+                    "data":[{"id":{"provider":"codex","id":"child"},"parentId":{"provider":"codex","id":"first"},"name":"Child task","status":"running"},
+                            {"id":{"provider":"codex","id":"first"},"name":"First task","worktreeStatus":"unmerged"},
                             {"id":{"provider":"codex","id":"second"},"name":"Second task","worktreeStatus":"merged"}],
                     "projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false
                 }))
@@ -653,7 +686,8 @@ mod tests {
         assert!(window.debug_bounds("bex/diff.svg").is_some());
         assert!(window.debug_bounds("bex/merge.svg").is_some());
         for (id, selector) in [("first", "task-0"), ("second", "task-1")] {
-            let button = window.debug_bounds(selector).unwrap().center();
+            let bounds = window.debug_bounds(selector).unwrap();
+            let button = gpui::point(bounds.left() + gpui::px(70.), bounds.top() + gpui::px(14.));
             window.simulate_click(button, Modifiers::default());
             window.run_until_parked();
             assert_eq!(
@@ -668,5 +702,19 @@ mod tests {
                 );
             });
         }
+        let root = window.debug_bounds("task-0").unwrap();
+        assert!(
+            root.size.height > gpui::px(56.),
+            "the child is rendered below its parent"
+        );
+        window.simulate_click(
+            gpui::point(root.left() + gpui::px(70.), root.bottom() - gpui::px(16.)),
+            Modifiers::default(),
+        );
+        window.run_until_parked();
+        assert_eq!(
+            store.snapshot().navigation.thread_id.as_ref().unwrap().id,
+            "child"
+        );
     }
 }

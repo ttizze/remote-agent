@@ -6,7 +6,12 @@ use serde::Serialize;
 use serde_json::{Map, Value, json};
 use std::fs;
 use std::{
-    cell::RefCell, collections::HashMap, fs::OpenOptions, io::Write, path::PathBuf, rc::Rc,
+    cell::RefCell,
+    collections::{HashMap, HashSet},
+    fs::OpenOptions,
+    io::Write,
+    path::PathBuf,
+    rc::Rc,
     sync::Arc,
 };
 use tokio::sync::{mpsc, oneshot};
@@ -368,6 +373,16 @@ pub(super) async fn run(home: PathBuf, config: Config) -> Result<()> {
                     }).filter(|thread| {
                         term.is_empty() || thread.metadata.get("name").and_then(Value::as_str).filter(|name| !name.is_empty())
                             .or_else(|| thread.metadata.get("preview").and_then(Value::as_str)).unwrap_or("").to_lowercase().contains(&term)
+                    }).filter(|thread| {
+                        let Some(ancestor) = params["ancestorThreadId"].as_str() else { return true; };
+                        let mut parent = thread.metadata.get("parentThreadId").and_then(Value::as_str).map(str::to_owned);
+                        let mut visited = HashSet::new();
+                        while let Some(id) = parent {
+                            if id == ancestor { return true; }
+                            if !visited.insert(id.clone()) { break; }
+                            parent = threads.get(&id).and_then(|thread| thread.borrow().metadata.get("parentThreadId").and_then(Value::as_str).map(str::to_owned));
+                        }
+                        false
                     }).collect();
                     ordered.sort_by_key(|thread| std::cmp::Reverse(thread.metadata["updatedAt"].as_i64().unwrap_or(0)));
                     let offset = offset(params);

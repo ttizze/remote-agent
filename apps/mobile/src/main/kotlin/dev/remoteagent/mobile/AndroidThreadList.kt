@@ -100,7 +100,7 @@ private fun SummaryRow(thread: ThreadSummary, openConversation: (Intent) -> Unit
     Row(
         Modifier.fillMaxWidth()
             .clickable { openConversation(Intent.ReadThread(ReadThread(thread.id, open = true))) }
-            .padding(vertical = 8.dp)
+            .padding(start = (thread.depth.toInt() * 20).dp, top = 8.dp, bottom = 8.dp)
     ) {
         Text(thread.title, Modifier.weight(1f))
         if (thread.active) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
