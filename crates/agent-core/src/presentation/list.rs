@@ -1,6 +1,6 @@
 //! The visible list combines wire summaries with locally observed activity.
 use crate::{
-    models::{Project, ProjectRoot},
+    models::{Project, ProjectRoot, task_active, task_title},
     state::Snapshot,
 };
 use base64::Engine;
@@ -111,47 +111,33 @@ impl Snapshot {
         if !self.archived_scopes.is_empty() {
             notices.push("保存領域が変更されています。以前の下書き・未保存編集は保持しています。Hostの保存先設定を元に戻すと再び表示できます。".into());
         }
-        let summaries =
-            list.data
-                .iter()
-                .filter_map(|thread| {
-                    let id = thread.id.clone()?;
-                    let active =
-                        self.activity.active.get(&id).copied().unwrap_or_else(|| {
-                            thread.status == crate::models::SessionStatus::Running
-                        });
-                    let unread = self.activity.unread.contains(&id);
-                    Some(ThreadSummary {
-                        id,
-                        title: thread
-                            .name
-                            .as_deref()
-                            .filter(|name| !name.is_empty())
-                            .or_else(|| {
-                                thread
-                                    .preview
-                                    .as_deref()
-                                    .filter(|preview| !preview.is_empty())
-                            })
-                            .unwrap_or("無題のタスク")
-                            .to_owned()
-                            + if thread.list_stale == Some(true) {
-                                "（保存済み・未確認）"
-                            } else {
-                                ""
-                            },
-                        project_id: thread
-                            .project_id
-                            .as_ref()
-                            .filter(|id| project_ids.contains(id.as_str()))
-                            .cloned(),
-                        active,
-                        unread,
-                        worktree_status: thread.worktree_status,
-                        depth: 0,
-                    })
+        let summaries = list
+            .data
+            .iter()
+            .filter_map(|thread| {
+                let id = thread.id.clone()?;
+                let active = task_active(self.activity.active.get(&id).copied(), thread.status);
+                let unread = self.activity.unread.contains(&id);
+                Some(ThreadSummary {
+                    id,
+                    title: task_title(thread.name.as_deref(), thread.preview.as_deref()).to_owned()
+                        + if thread.list_stale == Some(true) {
+                            "（保存済み・未確認）"
+                        } else {
+                            ""
+                        },
+                    project_id: thread
+                        .project_id
+                        .as_ref()
+                        .filter(|id| project_ids.contains(id.as_str()))
+                        .cloned(),
+                    active,
+                    unread,
+                    worktree_status: thread.worktree_status,
+                    depth: 0,
                 })
-                .collect();
+            })
+            .collect();
         Some(ThreadList {
             notice: (!notices.is_empty()).then(|| notices.join("\n")),
             threads: nest_threads(

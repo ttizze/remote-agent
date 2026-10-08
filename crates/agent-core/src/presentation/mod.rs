@@ -18,6 +18,7 @@ pub mod body;
 pub mod conversation;
 pub mod list;
 pub mod markdown;
+pub mod task_activity;
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 pub enum GroupKind {

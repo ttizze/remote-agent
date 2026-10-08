@@ -1,4 +1,30 @@
 use super::*;
+pub use agent_protocol::live_activity::{RegisterLiveActivity, UnregisterLiveActivity};
+
+impl Operation for RegisterLiveActivity {
+    rpc_operation!();
+    fn key(&self) -> Option<OperationKey> {
+        Some(OperationKey::LiveActivity {
+            activity_id: self.activity_id.clone(),
+        })
+    }
+    fn prepare(&mut self, _: &mut Snapshot) -> Result<(), String> {
+        self.validate().map_err(str::to_owned)
+    }
+    fn outcome(output: &mut Self::Output) -> Outcome {
+        Outcome::LiveActivityRegistered {
+            enabled: output.enabled,
+        }
+    }
+}
+impl Operation for UnregisterLiveActivity {
+    rpc_operation!();
+    fn key(&self) -> Option<OperationKey> {
+        Some(OperationKey::LiveActivity {
+            activity_id: self.activity_id.clone(),
+        })
+    }
+}
 
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 #[derive(Debug, Clone, Serialize, Deserialize)]

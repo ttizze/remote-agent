@@ -68,6 +68,10 @@ pub(crate) async fn run(config: StartupConfig) -> Result<()> {
     }
     let account_directory = config.account_state_dir.as_deref().unwrap_or(&directory);
     let service = HostRpcService::new(app_server.clone(), projects);
+    service
+        .enable_apns(&directory.join("bex-apns.json"), &config.name)
+        .await
+        .context("cannot initialize Live Activity notifications")?;
     #[cfg(unix)]
     service
         .enable_browser(directory.join("browser"))

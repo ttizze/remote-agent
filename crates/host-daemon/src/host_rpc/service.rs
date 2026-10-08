@@ -96,6 +96,12 @@ struct ServiceInner {
 }
 
 impl HostRpcService {
+    pub async fn enable_apns(&self, path: &std::path::Path, host_name: &str) -> anyhow::Result<()> {
+        self.inner
+            .router
+            .set_apns(crate::apns::Apns::load(path, host_name).await?);
+        Ok(())
+    }
     pub fn new(codex: Result<Arc<CodexAppServer>, String>, projects: ProjectStore) -> Self {
         let files = crate::workspace_files::WorkspaceFiles::new(
             projects.path().with_file_name("bex-attachments"),
@@ -283,6 +289,7 @@ impl HostRpcService {
 
     pub(crate) fn revoke_device(&self, principal: &str) {
         self.inner.terminals.revoke_device(principal);
+        self.inner.router.revoke_device(principal);
     }
     pub fn open_session(&self) -> HostSession {
         self.start_event_pumps();
@@ -690,6 +697,44 @@ impl HostRpcService {
             }
         }
         let response = match request {
+            Call::RegisterLiveActivity(params) => {
+                params
+                    .validate()
+                    .map_err(|error| Failure::new("invalid_params", error))?;
+                let enabled = self
+                    .inner
+                    .router
+                    .apns()
+                    .is_some_and(|apns| apns.environment() == params.environment);
+                if enabled {
+                    let _lease = self
+                        .inner
+                        .router
+                        .retain_execution(params.session.clone())
+                        .map_err(|error| Failure::new("invalid_params", error))?;
+                    let thread = self
+                        .agent(params.session.provider)?
+                        .open(&params.session.id, 1, false)
+                        .await?
+                        .thread;
+                    self.inner
+                        .router
+                        .register_live_activity(session, params, thread)
+                        .map_err(|error| Failure::new("live_activity_failed", error))?;
+                }
+                agent_protocol::live_activity::LiveActivityRegistration { enabled }.into()
+            }
+            Call::UnregisterLiveActivity(params) => {
+                let principal = self
+                    .inner
+                    .router
+                    .principal(session)
+                    .map_err(|error| Failure::new("connection_closed", error))?;
+                if let Some(apns) = self.inner.router.apns() {
+                    apns.unregister(&principal, &params.activity_id);
+                }
+                agent_protocol::models::Empty {}.into()
+            }
             Call::ReadTurnItems(params) => {
                 let read = self
                     .inner
@@ -983,10 +1028,14 @@ impl HostRpcService {
             }
             Call::RenameSession(params) => {
                 let target = target_session.expect("session-scoped rename");
-                self.agent(target.provider)?
+                let result = self
+                    .agent(target.provider)?
                     .rename(&target.id, &params.name)
-                    .await?
-                    .into()
+                    .await?;
+                if let Some(apns) = self.inner.router.apns() {
+                    apns.rename(target, &params.name);
+                }
+                result.into()
             }
             _ => {
                 return Err(Failure::new(
@@ -1560,6 +1609,7 @@ fn session_target(request: &Call) -> (Option<&agent_protocol::session::SessionRe
         Call::ReadItem(p) => (Some(&p.thread_id), None),
         Call::ReadTurnItems(p) => (Some(&p.session), None),
         Call::RenameSession(p) => (Some(&p.thread_id), None),
+        Call::RegisterLiveActivity(p) => (Some(&p.session), None),
         _ => (None, None),
     }
 }
@@ -1597,6 +1647,61 @@ fn describe_thread(
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn live_activity_registration_falls_back_without_apns_and_rejects_malformed_tokens() {
+        use super::*;
+        use agent_protocol::{
+            live_activity::{LiveActivityRegistration, PushEnvironment, RegisterLiveActivity},
+            session::SessionRef,
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let service = HostRpcService::new(
+            Err("provider is offline".into()),
+            ProjectStore::new(directory.path().join("projects.json")),
+        );
+        let connection = service.open_session();
+        let mut params = RegisterLiveActivity {
+            session: SessionRef {
+                provider: ProviderKind::Codex,
+                id: "task".into(),
+            },
+            activity_id: "activity".into(),
+            token: vec![1; 32],
+            environment: PushEnvironment::Sandbox,
+        };
+        for configured in [false, true] {
+            if configured {
+                service
+                    .inner
+                    .router
+                    .set_apns(Some(crate::apns::Apns::testing()));
+                params.environment = PushEnvironment::Production;
+            }
+            let response = service
+                .dispatch(connection.id(), &Call::RegisterLiveActivity(params.clone()))
+                .await
+                .unwrap();
+            let Response::Success { result } = agent_protocol::protocol::decode::<
+                Response<LiveActivityRegistration>,
+            >(&response.initial)
+            .unwrap() else {
+                panic!("unconfigured or mismatched APNs must keep local updates available");
+            };
+            assert!(!result.enabled);
+        }
+        params.token.clear();
+        let response = service
+            .dispatch(connection.id(), &Call::RegisterLiveActivity(params))
+            .await
+            .unwrap();
+        assert!(matches!(
+            agent_protocol::protocol::decode::<Response<LiveActivityRegistration>>(
+                &response.initial
+            )
+            .unwrap(),
+            Response::Failure { .. }
+        ));
+    }
     #[test]
     fn worktree_activity_requires_finished_delivery_and_no_other_live_work() {
         use super::worktree_active;

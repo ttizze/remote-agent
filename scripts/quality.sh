@@ -30,7 +30,7 @@ if [[ $language == kotlin ]]; then
 fi
 # Every shard runs acceptance; shared Swift checks run on the first shard only.
 if [[ ( $language == apple || $language == swift ) && ${BEX_IOS_TEST_SHARD:-0} == 0 ]]; then
-    swiftformat --lint apps/mobile/iosApp/Bex apps/mobile/iosApp/BexUITests || failed=1
+    swiftformat --lint apps/mobile/iosApp/Bex apps/mobile/iosApp/BexUITests apps/mobile/iosApp/TaskActivity || failed=1
     swiftlint lint --strict || failed=1
     if [[ $language == swift ]]; then
         just ios-markdown || failed=1

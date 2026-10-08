@@ -39,6 +39,8 @@ macro_rules! rpc_operation {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum Intent {
+    RegisterLiveActivity(RegisterLiveActivity),
+    UnregisterLiveActivity(UnregisterLiveActivity),
     ReadPermissionSettings(ReadPermissionSettings),
     UpdatePermissionSettings(UpdatePermissionSettings),
     ListAccounts(ListAccounts),
@@ -185,6 +187,9 @@ pub enum StalePolicy {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum OperationKey {
+    LiveActivity {
+        activity_id: String,
+    },
     TurnItems {
         session: crate::session::SessionRef,
         turn: agent_protocol::ids::TurnId,

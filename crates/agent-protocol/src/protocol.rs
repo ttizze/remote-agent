@@ -92,6 +92,7 @@ macro_rules! results {
     }
 }
 results! {
+    LiveActivity(crate::live_activity::LiveActivityRegistration),
     Browser(crate::browser::BrowserFrame),
     Opened(crate::session::OpenedSession), Item(crate::operations::ItemResponse),
     History(crate::session::HistoryPage),

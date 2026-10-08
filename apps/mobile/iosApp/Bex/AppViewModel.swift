@@ -32,8 +32,10 @@ final class BexAppViewModel: ObservableObject {
     private var connection: Task<Void, Never>?
     private var pending: [(Intent, (Result<Outcome, Error>) -> Void)] = []
     private var operations: [UUID: Task<Void, Never>] = [:]
+    let liveActivities = TaskLiveActivities()
 
     init() {
+        observeLiveActivityRequests()
         do { profiles = try HostProfile.load() } catch { notice = error.localizedDescription }
         if let id = UserDefaults.standard.string(forKey: "bex.selected-host"),
            profiles.contains(where: { $0.id == id }) {
@@ -271,6 +273,7 @@ extension BexAppViewModel {
                 let elapsed = (ProcessInfo.processInfo.systemUptime - started) * 1_000_000
                 owner.recordConnectionEvent(phase: .uiConnectReady, value: UInt64(elapsed))
                 publish(owner.snapshot())
+                liveActivities.resendTokens(hostID: profile.id)
                 perform(.loadHostName(LoadHostName()))
                 notice = snapshot.error()
                 isConnecting = false
@@ -329,6 +332,7 @@ extension BexAppViewModel {
         let changed = !next.conversationUnchanged(other: snapshot)
         let source = next.conversationSource()
         snapshot = next
+        synchronizeLiveActivities(foreground: UIApplication.shared.applicationState == .active)
         if changed {
             projectConversation(source)
         }
@@ -386,5 +390,6 @@ extension BexAppViewModel {
         }
         persist()
         await persistenceWrite?.value
+        await liveActivities.flush()
     }
 }

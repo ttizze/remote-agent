@@ -10,7 +10,9 @@ struct BexIOSApp: App {
     var body: some Scene {
         WindowGroup {
             BexSwiftUIRoot(model: model)
+                .onOpenURL { model.openTaskActivity($0) }
                 .onChange(of: scenePhase) { phase in
+                    model.synchronizeLiveActivities(foreground: phase == .active)
                     model.recordScene(phase == .active ? 1 : phase == .inactive ? 2 : 3)
                     switch phase {
                     case .background:
