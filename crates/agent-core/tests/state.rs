@@ -894,12 +894,30 @@ fn incomplete_model_catalog_preserves_restored_choices_and_defaults_only_new_dra
             }),
         )
         .0;
+        let automatic = state.navigation.draft_key.clone();
+        assert_eq!(state.drafts[&automatic].model, None);
+        let claude = agent_protocol::models::ModelRef {
+            provider: agent_protocol::session::ProviderKind::Claude,
+            id: "default".into(),
+        };
+        state = reduce(
+            &state,
+            Event::Intent(Intent::SelectNewChatModel {
+                scope: agent_core::state::ModelDefaultsScope::Global,
+                model: Some(claude.clone()),
+            }),
+        )
+        .0;
+        state = reduce(
+            &state,
+            Event::Intent(Intent::NewChat {
+                cwd: "/explicit".into(),
+            }),
+        )
+        .0;
         assert_eq!(
             state.drafts[&state.navigation.draft_key].model.as_ref(),
-            Some(&agent_protocol::models::ModelRef {
-                provider: agent_protocol::session::ProviderKind::Claude,
-                id: "default".into()
-            })
+            Some(&claude)
         );
         state = reduce(
             &state,
@@ -917,6 +935,11 @@ fn incomplete_model_catalog_preserves_restored_choices_and_defaults_only_new_dra
         }]})).unwrap();
         op::LoadModels {}.apply(&mut state, catalog);
         assert_eq!(*state.drafts[&DraftKey::from("saved")], draft);
+        assert_eq!(state.drafts[&automatic].model, draft.model);
+        assert_eq!(
+            state.drafts[&state.navigation.draft_key].model.as_ref(),
+            Some(&claude)
+        );
         assert!(state.model_errors.is_empty());
     }
 }
