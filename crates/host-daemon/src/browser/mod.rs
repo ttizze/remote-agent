@@ -239,7 +239,11 @@ impl Browser {
         if let Some(preview) = self.preview.get()
             && let Ok(thread_id) = agent_domain::ThreadId::new(thread.to_owned())
         {
-            preview.recording_started(thread_id, status.clone())?;
+            if let Err(error) = preview.recording_started(thread_id, status.clone()) {
+                self.cancel_recording(&key, &mut done_receiver, Duration::from_secs(5))
+                    .await;
+                return Err(error);
+            }
             if !self.recordings.lock().await.contains_key(&key) {
                 if let Ok(thread_id) = agent_domain::ThreadId::new(thread.to_owned()) {
                     preview.recording_finished(&thread_id, tab_id);
