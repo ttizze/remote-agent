@@ -78,6 +78,8 @@ pub(crate) struct TimelineState {
     minimap_active: Option<usize>,
     /// Whether the minimap or one of its controls owns keyboard focus.
     minimap_focused: bool,
+    /// The last current marker calculated from the measured list bounds.
+    minimap_current_index: Option<usize>,
     /// The minimap rail's measured window bounds, used for pointer projection.
     minimap_bounds: Rc<Cell<Bounds<Pixels>>>,
     /// The preview card's measured height, used to keep it inside the rail.
@@ -94,6 +96,10 @@ impl TimelineState {
         cx.on_focus_in(&minimap_focus, window, |view, _, cx| {
             if !view.timeline.minimap_focused {
                 view.timeline.minimap_focused = true;
+                if view.timeline.minimap_active.is_none() {
+                    view.timeline.minimap_active =
+                        Some(view.timeline.minimap_current_index.unwrap_or(0));
+                }
                 cx.notify();
             }
         })
@@ -118,6 +124,7 @@ impl TimelineState {
             copied: None,
             minimap_active: None,
             minimap_focused: false,
+            minimap_current_index: None,
             minimap_bounds: Rc::default(),
             minimap_preview_bounds: Rc::default(),
             minimap_focus,
@@ -136,6 +143,7 @@ impl TimelineState {
         self.disclosure = TimelineDisclosure::default();
         self.minimap_active = None;
         self.minimap_focused = false;
+        self.minimap_current_index = None;
         self.forget_thread();
     }
 
@@ -146,6 +154,7 @@ impl TimelineState {
         self.requested_details.clear();
         self.minimap_active = None;
         self.minimap_focused = false;
+        self.minimap_current_index = None;
     }
 
     /// Starts showing `thread` from its end.
@@ -157,9 +166,10 @@ impl TimelineState {
         self.shown = Some(thread.thread_id.clone());
         self.list.reset(thread.rows.len() + 1);
         self.list.set_follow_mode(FollowMode::Tail);
-        self.minimap_active = None;
         if changed_thread {
+            self.minimap_active = None;
             self.minimap_focused = false;
+            self.minimap_current_index = None;
         }
     }
 
@@ -332,6 +342,7 @@ impl Desktop {
     ) -> AnyElement {
         let items = Rc::new(derive_timeline_minimap_items(&thread.rows));
         if items.len() < TIMELINE_MINIMAP_MIN_ITEMS {
+            self.timeline.minimap_current_index = None;
             return div().into_any_element();
         }
 
@@ -365,6 +376,7 @@ impl Desktop {
             &measured_bounds,
         )
         .or(fallback_current_index);
+        self.timeline.minimap_current_index = current_index;
         let in_view = resolve_timeline_minimap_in_view(
             f64::from(viewport.top()),
             f64::from(viewport.bottom()),
@@ -373,12 +385,7 @@ impl Desktop {
         let active_index = self
             .timeline
             .minimap_active
-            .filter(|index| *index < items.len())
-            .or_else(|| {
-                self.timeline
-                    .minimap_focused
-                    .then_some(current_index.unwrap_or(0).min(items.len() - 1))
-            });
+            .filter(|index| *index < items.len());
         let active_item = active_index.and_then(|index| items.get(index));
         let preview = resolve_timeline_minimap_preview(active_item);
 
@@ -413,7 +420,6 @@ impl Desktop {
         let focus = self.timeline.minimap_focus.clone();
         let item_count = items.len();
         let pointer_items = items.clone();
-        let current_for_key = current_index;
 
         let mut rail = div()
             .id("timeline-minimap-rail")
@@ -466,12 +472,10 @@ impl Desktop {
         }
 
         let focus_items = items.clone();
-        let focus_current = current_for_key;
         let move_bounds = rail_bounds.clone();
         let click_bounds = rail_bounds.clone();
         let mut pointer_surface = div()
             .id("timeline-minimap-pointer-surface")
-            .track_focus(&focus)
             .cursor_pointer()
             .h_full()
             .w(px(interaction_width as f32))
@@ -508,7 +512,7 @@ impl Desktop {
             }))
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(move |view, event: &MouseDownEvent, _, cx| {
+                cx.listener(move |view, event: &MouseDownEvent, window, cx| {
                     let bounds = click_bounds.get();
                     let Some(index) = resolve_timeline_minimap_index_from_pointer(
                         item_count,
@@ -522,35 +526,11 @@ impl Desktop {
                         return;
                     };
                     view.scroll_to_timeline_minimap_row(item.row_index, cx);
+                    view.timeline.minimap_active = None;
+                    window.prevent_default();
+                    window.blur(cx);
                 }),
-            )
-            .on_key_down(cx.listener(move |view, event: &KeyDownEvent, _, cx| {
-                let key = event.keystroke.key.as_str();
-                let current = view
-                    .timeline
-                    .minimap_active
-                    .or(focus_current)
-                    .unwrap_or(0)
-                    .min(focus_items.len().saturating_sub(1));
-                let next = match key {
-                    "up" => Some(current.saturating_sub(1)),
-                    "down" => Some((current + 1).min(focus_items.len().saturating_sub(1))),
-                    "home" => Some(0),
-                    "end" => Some(focus_items.len().saturating_sub(1)),
-                    "enter" | "space" => {
-                        if let Some(item) = focus_items.get(current) {
-                            view.scroll_to_timeline_minimap_row(item.row_index, cx);
-                        }
-                        None
-                    }
-                    _ => return,
-                };
-                cx.stop_propagation();
-                if let Some(next) = next {
-                    view.timeline.minimap_active = Some(next);
-                    cx.notify();
-                }
-            }));
+            );
         if let Some(preview) = preview {
             let preview_bounds = self.timeline.minimap_preview_bounds.clone();
             let measured_preview_height = f64::from(preview_bounds.get().size.height);
@@ -641,17 +621,13 @@ impl Desktop {
             .when(!navigation_interactive, |button| button.invisible())
             .opacity(0.)
             .hover(|style| style.opacity(1.))
+            .focus(|style| style.opacity(1.))
             .on_click(cx.listener(move |view, _, _, cx| {
                 if let Some(row) = previous_row {
                     view.scroll_to_timeline_minimap_row(row, cx);
                 }
             }));
-        let previous = div()
-            .track_focus(&focus)
-            .absolute()
-            .left(px(0.))
-            .top(px(-28.))
-            .child(previous);
+        let previous = previous.absolute().left(px(0.)).top(px(-28.));
         let next = Button::new("timeline-minimap-next")
             .icon(icon("chevron-down"))
             .ghost()
@@ -661,18 +637,43 @@ impl Desktop {
             .when(!navigation_interactive, |button| button.invisible())
             .opacity(0.)
             .hover(|style| style.opacity(1.))
+            .focus(|style| style.opacity(1.))
             .on_click(cx.listener(move |view, _, _, cx| {
                 if let Some(row) = next_row {
                     view.scroll_to_timeline_minimap_row(row, cx);
                 }
             }));
-        let next = div()
-            .track_focus(&focus)
-            .absolute()
-            .left(px(0.))
-            .bottom(px(-28.))
-            .child(next);
+        let next = next.absolute().left(px(0.)).bottom(px(-28.));
         rail = rail.child(previous).child(next);
+        rail = rail
+            .track_focus(&focus)
+            .tab_stop(true)
+            .on_key_down(cx.listener(move |view, event: &KeyDownEvent, _, cx| {
+                let key = event.keystroke.key.as_str();
+                let current = view
+                    .timeline
+                    .minimap_active
+                    .unwrap_or(0)
+                    .min(focus_items.len().saturating_sub(1));
+                let next = match key {
+                    "up" => Some(current.saturating_sub(1)),
+                    "down" => Some((current + 1).min(focus_items.len().saturating_sub(1))),
+                    "home" => Some(0),
+                    "end" => Some(focus_items.len().saturating_sub(1)),
+                    "enter" | "space" => {
+                        if let Some(item) = focus_items.get(current) {
+                            view.scroll_to_timeline_minimap_row(item.row_index, cx);
+                        }
+                        None
+                    }
+                    _ => return,
+                };
+                cx.stop_propagation();
+                if let Some(next) = next {
+                    view.timeline.minimap_active = Some(next);
+                    cx.notify();
+                }
+            }));
 
         let mut root = div()
             .id("timeline-minimap")
@@ -709,7 +710,6 @@ impl Desktop {
                 offset_in_item: px(0.),
             });
         }
-        self.timeline.minimap_active = None;
         cx.notify();
     }
 

@@ -650,16 +650,12 @@ pub(crate) fn clone_urls_from_create_output(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PullRequestListState {
     Open,
-    Closed,
-    Merged,
     All,
 }
 impl PullRequestListState {
     fn as_str(self) -> &'static str {
         match self {
             Self::Open => "open",
-            Self::Closed => "closed",
-            Self::Merged => "merged",
             Self::All => "all",
         }
     }
@@ -923,29 +919,6 @@ impl GitHubCli {
         decode_pull_request(&output.stdout)
     }
 
-    pub(crate) async fn create_pull_request(
-        &self,
-        cwd: &Path,
-        base_branch: &str,
-        head_selector: &str,
-        title: &str,
-        body_file: &Path,
-        repository: Option<&str>,
-        host: Option<&str>,
-    ) -> Result<(), GhError> {
-        self.create_pull_request_with_cancel(
-            cwd,
-            base_branch,
-            head_selector,
-            title,
-            body_file,
-            repository,
-            host,
-            None,
-        )
-        .await
-    }
-
     pub(crate) async fn create_pull_request_with_cancel(
         &self,
         cwd: &Path,
@@ -1055,27 +1028,6 @@ impl GitHubCli {
             repository,
             host,
         ))
-    }
-
-    pub(crate) async fn checkout_pull_request(
-        &self,
-        cwd: &Path,
-        reference: &str,
-        force: bool,
-        repository: Option<&str>,
-        host: Option<&str>,
-    ) -> Result<(), GhError> {
-        let repository_arg = repository.map(|repository| scoped_repository(host, repository));
-        let mut args = vec!["pr", "checkout", reference];
-        if let Some(repository) = repository_arg.as_deref() {
-            args.extend(["--repo", repository]);
-        }
-        if force {
-            args.push("--force");
-        }
-        self.run_with_host(cwd, &args, Budget::default(), host)
-            .await
-            .map(|_| ())
     }
 }
 
@@ -1422,7 +1374,7 @@ mod tests {
             .unwrap();
         assert_eq!(record.number, 7);
         gh.cli()
-            .create_pull_request(
+            .create_pull_request_with_cancel(
                 directory.path(),
                 "main",
                 "feature",
@@ -1430,6 +1382,7 @@ mod tests {
                 &body,
                 Some("acme/tool"),
                 Some("ghe.example"),
+                None,
             )
             .await
             .unwrap();
@@ -1444,12 +1397,20 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(urls.url, "https://ghe.example/acme/tool");
+        let repository = scoped_repository(Some("ghe.example"), "acme/tool");
+        let checkout_args = [
+            "pr",
+            "checkout",
+            "7",
+            "--repo",
+            repository.as_str(),
+            "--force",
+        ];
         gh.cli()
-            .checkout_pull_request(
+            .run_with_host(
                 directory.path(),
-                "7",
-                true,
-                Some("acme/tool"),
+                &checkout_args,
+                Budget::default(),
                 Some("ghe.example"),
             )
             .await

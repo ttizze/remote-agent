@@ -6,7 +6,9 @@ use super::{
 use agent_protocol::usage::{
     Bucket, CategoryCost, CostSource, Provider, Resolution, SummaryInput, TokenTotals,
 };
-use chrono::{DateTime, FixedOffset, Offset, TimeZone, Utc};
+#[cfg(test)]
+use chrono::Offset;
+use chrono::{DateTime, FixedOffset, TimeZone, Utc};
 use chrono_tz::Tz;
 use std::collections::{HashMap, HashSet};
 
@@ -38,6 +40,7 @@ pub(crate) enum Zone {
 }
 
 impl Zone {
+    #[cfg(test)]
     fn offset_seconds(&self, timestamp_ms: i64) -> Option<i32> {
         let utc = Utc.timestamp_millis_opt(timestamp_ms).single()?;
         Some(match self {

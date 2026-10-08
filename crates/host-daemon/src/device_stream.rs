@@ -87,10 +87,6 @@ impl AvccDemuxer {
         }
         Ok(chunks)
     }
-
-    pub fn reset(&mut self) {
-        self.buffer.clear();
-    }
 }
 
 /// Split Android's `SEMU` header from the Annex-B H.264 access unit.
@@ -237,9 +233,6 @@ impl Mp4Recorder {
     }
     pub fn finish_error(&self) -> Option<&str> {
         self.finish_error.as_deref()
-    }
-    pub fn bytes(&self) -> &[u8] {
-        &self.bytes
     }
 
     pub fn into_bytes(mut self) -> Vec<u8> {
@@ -1409,7 +1402,7 @@ mod tests {
             .unwrap();
         invalid.finish();
         assert!(invalid.finish_error().is_some());
-        assert!(invalid.bytes().is_empty());
+        assert!(invalid.into_bytes().is_empty());
     }
 
     #[test]

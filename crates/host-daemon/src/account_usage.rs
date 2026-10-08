@@ -16,16 +16,6 @@ pub(crate) struct UsageSnapshot {
     pub external_usage: Option<agent_protocol::usage::ExternalUsage>,
 }
 
-impl UsageSnapshot {
-    pub(crate) fn windows(windows: Vec<UsageWindow>) -> Self {
-        Self {
-            windows,
-            credential_fingerprint: None,
-            ..Self::default()
-        }
-    }
-}
-
 #[derive(Default)]
 pub(crate) struct UsageEntry(tokio::sync::Mutex<Option<(Instant, AccountUsage)>>);
 
@@ -298,9 +288,10 @@ mod tests {
         let a = cache.entry("a".into()).or_default().clone();
         let usage = a
             .read(async {
-                Ok(UsageSnapshot::windows(vec![
-                    UsageWindow::from_used("5時間枠".into(), 20., None).unwrap(),
-                ]))
+                Ok(UsageSnapshot {
+                    windows: vec![UsageWindow::from_used("5時間枠".into(), 20., None).unwrap()],
+                    ..Default::default()
+                })
             })
             .await;
         let fetched_at = usage.fetched_at;
@@ -322,9 +313,10 @@ mod tests {
         assert!(expired.error.is_none());
         let retried = a
             .read(async {
-                Ok(UsageSnapshot::windows(vec![
-                    UsageWindow::from_used("5時間枠".into(), 32., None).unwrap(),
-                ]))
+                Ok(UsageSnapshot {
+                    windows: vec![UsageWindow::from_used("5時間枠".into(), 32., None).unwrap()],
+                    ..Default::default()
+                })
             })
             .await;
         assert_eq!(retried.windows[0].used_percent, Some(32.));
@@ -372,9 +364,10 @@ mod tests {
         let entry = Arc::new(UsageEntry::default());
         let first = entry
             .read(async {
-                Ok(UsageSnapshot::windows(vec![
-                    UsageWindow::from_used("5時間枠".into(), 35.9, None).unwrap(),
-                ]))
+                Ok(UsageSnapshot {
+                    windows: vec![UsageWindow::from_used("5時間枠".into(), 35.9, None).unwrap()],
+                    ..Default::default()
+                })
             })
             .await;
         assert_eq!(first.windows[0].used_percent, Some(35.9));
@@ -388,9 +381,10 @@ mod tests {
 
         let refreshed = entry
             .read(async {
-                Ok(UsageSnapshot::windows(vec![
-                    UsageWindow::from_used("5時間枠".into(), 82.4, None).unwrap(),
-                ]))
+                Ok(UsageSnapshot {
+                    windows: vec![UsageWindow::from_used("5時間枠".into(), 82.4, None).unwrap()],
+                    ..Default::default()
+                })
             })
             .await;
         assert_eq!(refreshed.windows[0].used_percent, Some(82.4));

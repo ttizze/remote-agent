@@ -288,30 +288,6 @@ pub(crate) async fn create_ref(request: CreateRef) -> Result<SwitchedRef> {
     tokio::task::spawn_blocking(move || create(&request)).await?
 }
 
-/// The local branch names, as `git branch --list` prints them.
-pub(crate) fn list_local_branch_names(cwd: &Path) -> Result<Vec<String>> {
-    let run = git(
-        cwd,
-        &[
-            "branch",
-            "--list",
-            "--no-column",
-            "--format=%(refname:short)",
-        ],
-        Options::default(),
-    )?;
-    if !run.ok() {
-        return Err(anyhow!("Could not list the local branches."));
-    }
-    Ok(run
-        .text()
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .map(str::to_owned)
-        .collect())
-}
-
 pub(crate) async fn refs(request: ListRefs) -> Result<RefList> {
     if request
         .limit

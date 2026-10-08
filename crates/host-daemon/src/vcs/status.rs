@@ -5,7 +5,6 @@ use super::{
     primary_remote, remote_names, repository, split_remote_ref, stdout, unborn_head,
 };
 use crate::vcs::process::{Execute, NON_INTERACTIVE_ENV, execute};
-use agent_protocol::models::RepositoryIdentity;
 use agent_protocol::vcs::{SourceControlProviderInfo, SourceControlProviderKind, VcsStatusLocal};
 use agent_protocol::workspace::{FileChangeTotals, WorkingTreeChanges};
 use anyhow::{Result, anyhow};
@@ -19,48 +18,6 @@ const UPSTREAM_REFRESH_INTERVAL: Duration = Duration::from_secs(15);
 const UPSTREAM_REFRESH_TIMEOUT: Duration = Duration::from_secs(5);
 const UPSTREAM_REFRESH_FAILURE_BASE_COOLDOWN: Duration = Duration::from_secs(30);
 const UPSTREAM_REFRESH_FAILURE_MAX_COOLDOWN: Duration = Duration::from_secs(15 * 60);
-
-/// The checked-out branch, its upstream and the repository they belong to.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct BranchHead {
-    /// `None` on a detached HEAD.
-    pub branch: Option<String>,
-    /// `remote/branch`.
-    pub upstream: Option<String>,
-    /// The branch's remote, else `origin`.
-    pub remote: Option<String>,
-    pub repository_identity: Option<RepositoryIdentity>,
-}
-
-/// The checkout's head and the repository its remote points at.
-pub(crate) fn branch_head(cwd: &Path) -> Option<BranchHead> {
-    let repository = repository(cwd)?;
-    let upstream = current_upstream(cwd);
-    let remote = upstream
-        .as_ref()
-        .map(|upstream| upstream.remote.clone())
-        .or_else(|| {
-            repository
-                .branch
-                .as_deref()
-                .and_then(|branch| config_value(cwd, &format!("branch.{branch}.remote")))
-        })
-        .or_else(|| primary_remote(cwd));
-    let repository_identity = remote.as_deref().and_then(|remote| {
-        let url = config_value(cwd, &format!("remote.{remote}.url"))?;
-        Some(crate::repository::identity(
-            remote,
-            &url,
-            &repository.root.to_string_lossy(),
-        ))
-    });
-    Some(BranchHead {
-        branch: repository.branch,
-        upstream: upstream.map(|upstream| upstream.reference),
-        remote,
-        repository_identity,
-    })
-}
 
 /// The hosting provider a remote URL points at.
 pub(crate) fn detect_provider(remote_url: &str) -> Option<SourceControlProviderInfo> {

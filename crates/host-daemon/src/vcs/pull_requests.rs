@@ -391,16 +391,6 @@ pub(crate) fn provider_error(operation: &str, error: &GhError) -> anyhow::Error 
     anyhow!("Source control provider github failed in {operation}: {error}")
 }
 
-/// The open PR of the head, probing each selector in order.
-pub(crate) async fn find_open_pr(
-    github: &GitHubCli,
-    cwd: &Path,
-    context: &HeadContext,
-    host: Option<&str>,
-) -> Result<Option<PullRequestRecord>> {
-    find_open_pr_with_cancel(github, cwd, context, host, None).await
-}
-
 pub(crate) async fn find_open_pr_with_cancel(
     github: &GitHubCli,
     cwd: &Path,

@@ -234,10 +234,6 @@ impl VcsStatusBroadcaster {
         self.inner.lookups.github()
     }
 
-    pub(crate) fn lookups(&self) -> &PullRequestLookup {
-        &self.inner.lookups
-    }
-
     fn write_lock(&self, cwd: &str) -> Arc<tokio::sync::Mutex<()>> {
         lock(&self.inner.write_locks)
             .entry(cwd.to_owned())
@@ -444,12 +440,6 @@ impl VcsStatusBroadcaster {
         Ok(local)
     }
 
-    /// Reads the local half again and tells subscribers.
-    pub(crate) async fn refresh_local_status(&self, cwd: &str) -> Result<VcsStatusLocal> {
-        let cwd = canonical(cwd).await;
-        self.refresh_local(&cwd).await
-    }
-
     /// Reads the remote half again; a fetch that moved the divergence re-reads
     /// the local totals too, which compare against remote refs.
     async fn refresh_remote(
@@ -487,23 +477,6 @@ impl VcsStatusBroadcaster {
         let remote = self.read_remote(&cwd, true, false).await?;
         let local = self.read_local(&cwd).await?;
         Ok(self.store_both(&cwd, local, remote, true))
-    }
-
-    /// After a turn: asks for a missing PR again without fetching, when the
-    /// checkout is loaded. Known PRs and failed lookups' backoff stay cached.
-    pub(crate) async fn refresh_pull_request_status(
-        &self,
-        cwd: &str,
-    ) -> Result<Option<VcsStatusRemote>> {
-        let cwd = canonical(cwd).await;
-        let guard = self.write_lock(&cwd);
-        let _permit = guard.lock().await;
-        if self.cached(&cwd).remote.flatten().is_none() {
-            return Ok(None);
-        }
-        let remote = self.read_remote(&cwd, false, true).await?;
-        self.store_remote(&cwd, remote.clone(), true);
-        Ok(remote)
     }
 
     /// Refreshes in the background after one of our own Git operations.

@@ -814,14 +814,17 @@ mod tests {
         let entry = accounts.usage.entry("missing".into()).or_default().clone();
         entry
             .read(async {
-                Ok(crate::account_usage::UsageSnapshot::windows(vec![
-                    agent_protocol::operations::UsageWindow::from_used(
-                        "5時間枠".into(),
-                        35.9,
-                        None,
-                    )
-                    .unwrap(),
-                ]))
+                Ok(crate::account_usage::UsageSnapshot {
+                    windows: vec![
+                        agent_protocol::operations::UsageWindow::from_used(
+                            "5時間枠".into(),
+                            35.9,
+                            None,
+                        )
+                        .unwrap(),
+                    ],
+                    ..Default::default()
+                })
             })
             .await;
 
@@ -834,14 +837,17 @@ mod tests {
         );
         let refreshed = entry
             .read(async {
-                Ok(crate::account_usage::UsageSnapshot::windows(vec![
-                    agent_protocol::operations::UsageWindow::from_used(
-                        "5時間枠".into(),
-                        82.4,
-                        None,
-                    )
-                    .unwrap(),
-                ]))
+                Ok(crate::account_usage::UsageSnapshot {
+                    windows: vec![
+                        agent_protocol::operations::UsageWindow::from_used(
+                            "5時間枠".into(),
+                            82.4,
+                            None,
+                        )
+                        .unwrap(),
+                    ],
+                    ..Default::default()
+                })
             })
             .await;
         assert_eq!(refreshed.windows[0].used_percent, Some(82.4));
