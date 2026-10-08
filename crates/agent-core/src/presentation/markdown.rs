@@ -195,6 +195,7 @@ pub fn markdown_without_images(source: &str) -> (Cow<'_, str>, Vec<String>) {
 /// cards, and the Markdown around them reads file citations as links.
 #[cfg_attr(feature = "bindings", uniffi::export)]
 pub fn markdown_blocks(source: String) -> Vec<MarkdownBlock> {
+    let source = assistant_citations::render_assistant_citations_as_text(&source);
     let mut blocks = Vec::new();
     for segment in split_artifact_template_markdown(&source) {
         match segment {
@@ -441,6 +442,47 @@ mod tests {
             }
         );
         assert_eq!(paragraph_text(&blocks[2]), "After");
+    }
+
+    #[test]
+    fn markdown_blocks_render_assistant_citations_as_quoted_markdown() {
+        let citation = assistant_citations::AssistantCitation {
+            environment_id: "environment".into(),
+            thread_id: "thread".into(),
+            message_id: "message".into(),
+            text: "Use `cache[key]` and *keep* this.".into(),
+            comment: Some("Please preserve the spacing.".into()),
+            start: 0,
+            end: 32,
+            prefix: String::new(),
+            suffix: String::new(),
+        };
+        let marker = assistant_citations::serialize_assistant_citation(&citation);
+        let blocks = markdown_blocks(format!("Before {marker} after"));
+
+        assert_eq!(paragraph_text(&blocks[0]), "Before");
+        let quoted: Vec<_> = blocks
+            .iter()
+            .filter_map(|block| match block {
+                MarkdownBlock::Paragraph { runs, style } if style.quoted => {
+                    Some(runs.iter().map(|run| run.text.as_str()).collect::<String>())
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(quoted.iter().any(|text| text.contains("Assistant quote:")));
+        assert!(quoted
+            .iter()
+            .any(|text| text.contains("Use `cache[key]` and *keep* this.")));
+        assert!(blocks.iter().any(|block| {
+            match block {
+                MarkdownBlock::Paragraph { style, .. } if !style.quoted => {
+                    paragraph_text(block) == "Comment: Please preserve the spacing."
+                }
+                _ => false,
+            }
+        }));
+        assert_eq!(paragraph_text(blocks.last().unwrap()), "after");
     }
 
     #[test]

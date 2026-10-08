@@ -10,6 +10,7 @@ use agent_core::{
         artifact_templates::{
             append_artifact_template_use_prompt, artifact_template_presentation_label,
         },
+        assistant_citations::render_assistant_citations_as_text,
         directives::{
             ArtifactTemplateMarkdownSegment, render_file_citations_as_markdown,
             split_artifact_template_markdown,
@@ -73,6 +74,7 @@ pub(super) fn chat_markdown(
 ) -> Stateful<Div> {
     let id = id.into();
     let text = text.into();
+    let text = SharedString::from(render_assistant_citations_as_text(text.as_ref()));
     let mut body = div().id(id.clone());
     for (index, segment) in split_artifact_template_markdown(&text)
         .into_iter()
