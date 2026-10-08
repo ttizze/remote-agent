@@ -2,7 +2,7 @@
 use super::{
     ProjectOverridesHeader, ProjectSettingKey, ResolvedSettings, SettingId, SettingSource,
     SettingValue, SettingsRow, SettingsScope, SettingsSection, SettingsView, agent, auto_settle,
-    behavior, beta, capture, follow_ups, maintenance, new_threads, notifications, patch,
+    behavior, beta, browser, capture, follow_ups, maintenance, new_threads, notifications, patch,
     source_control, storage, update, usage_limits,
 };
 use crate::{
@@ -39,7 +39,7 @@ pub(super) struct Section {
     pub inherit: fn(SettingId) -> Option<ProjectSettingKey>,
 }
 
-static SECTIONS: [Section; 12] = [
+static SECTIONS: [Section; 13] = [
     usage_limits::SECTION,
     auto_settle::SECTION,
     follow_ups::SECTION,
@@ -49,6 +49,7 @@ static SECTIONS: [Section; 12] = [
     source_control::SECTION,
     storage::SECTION,
     beta::SECTION,
+    browser::SECTION,
     capture::SECTION,
     new_threads::SECTION,
     notifications::SECTION,
@@ -190,6 +191,20 @@ mod tests {
                 ("behavior".into(), vec![SettingId::TimeFormat]),
                 ("beta".into(), vec![SettingId::WorkingSection]),
                 (
+                    "browser".into(),
+                    vec![
+                        SettingId::BrowserDefaultViewport,
+                        SettingId::BrowserDefaultZoom,
+                        SettingId::BrowserDefaultAppearance,
+                        SettingId::BrowserRecordingFrameRate,
+                        SettingId::BrowserRecordingShowKeyPresses,
+                        SettingId::BrowserRecordingShowMousePresses,
+                        SettingId::BrowserLinkTarget,
+                        SettingId::BrowserAutoShowFloatingPreview,
+                        SettingId::BrowserDefaultProfile,
+                    ]
+                ),
+                (
                     "capture".into(),
                     vec![
                         SettingId::LoadBalancing,
@@ -298,6 +313,20 @@ mod tests {
                     ]
                 ),
                 ("beta".into(), vec![SettingId::WorkingSection]),
+                (
+                    "browser".into(),
+                    vec![
+                        SettingId::BrowserDefaultViewport,
+                        SettingId::BrowserDefaultZoom,
+                        SettingId::BrowserDefaultAppearance,
+                        SettingId::BrowserRecordingFrameRate,
+                        SettingId::BrowserRecordingShowKeyPresses,
+                        SettingId::BrowserRecordingShowMousePresses,
+                        SettingId::BrowserLinkTarget,
+                        SettingId::BrowserAutoShowFloatingPreview,
+                        SettingId::BrowserDefaultProfile,
+                    ]
+                ),
                 (
                     "capture".into(),
                     vec![

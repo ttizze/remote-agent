@@ -39,6 +39,9 @@ struct SettingsScreen: View {
                         SettingsLink(symbol: "bell", label: "Notifications") {
                             HostSettingsPage(model: model, title: "Notifications", sections: ["notifications"])
                         }
+                        SettingsLink(symbol: "globe", label: "Browser") {
+                            HostSettingsPage(model: model, title: "Browser", sections: ["browser"])
+                        }
                         SettingsLink(symbol: "arrow.turn.left.up", label: "Follow-ups") {
                             HostSettingsPage(model: model, title: "Follow-ups", sections: ["follow-ups"])
                         }

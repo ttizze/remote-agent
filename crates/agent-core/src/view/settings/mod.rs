@@ -12,6 +12,7 @@ mod agent;
 mod auto_settle;
 mod behavior;
 mod beta;
+mod browser;
 mod capture;
 #[cfg(test)]
 mod fixtures;
@@ -91,6 +92,15 @@ pub enum SettingId {
     SnapshotSound,
     SnapshotFlash,
     SnapshotAnimations,
+    BrowserDefaultViewport,
+    BrowserDefaultZoom,
+    BrowserDefaultAppearance,
+    BrowserRecordingFrameRate,
+    BrowserRecordingShowKeyPresses,
+    BrowserRecordingShowMousePresses,
+    BrowserLinkTarget,
+    BrowserAutoShowFloatingPreview,
+    BrowserDefaultProfile,
 }
 
 /// Where a project page's value comes from.
