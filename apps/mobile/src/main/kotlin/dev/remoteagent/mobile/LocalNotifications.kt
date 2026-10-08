@@ -148,7 +148,7 @@ internal object LocalNotifications {
     }
 
     private fun post(context: Context, request: LocalNotificationRequest, alert: Boolean) {
-        val tag = notificationTag(request)
+        val tag = notificationTag(request.deepLink ?: request.threadId ?: "local")
         val manager = context.getSystemService(NotificationManager::class.java)
         if (alert) {
             // A replacement is a new event for the same route. Dismiss the
@@ -203,9 +203,6 @@ internal object LocalNotifications {
 
     private const val LOCAL_NOTIFICATION_ID = 1
     private const val LOCAL_ATTENTION_PREFIX = "$LOCAL_ATTENTION_TAG:"
-
-    private fun notificationTag(request: LocalNotificationRequest): String =
-        notificationTag(request.deepLink ?: request.threadId ?: "local")
 
     private fun notificationTag(route: String): String = "$LOCAL_ATTENTION_TAG:$route"
 

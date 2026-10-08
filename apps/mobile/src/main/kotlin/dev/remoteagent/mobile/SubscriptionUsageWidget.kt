@@ -20,7 +20,8 @@ private const val WIDGET_EXPIRY = "dev.remoteagent.mobile.SUBSCRIPTION_EXPIRY"
 private const val WIDGET_MAX_BYTES = 256 * 1024
 private const val PROGRESS_MAX_PERCENT = 100
 private const val LOW_REMAINING_PERCENT = 10
-private val LOW_REMAINING_COLOR = Color.rgb(185, 28, 28)
+// These fixed RGB components match the reference low-remaining warning color.
+@Suppress("MagicNumber") private val LOW_REMAINING_COLOR = Color.rgb(185, 28, 28)
 
 internal class UsageWidgetPublisher(private val context: Context) {
     private var published: String? = null

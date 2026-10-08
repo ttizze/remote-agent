@@ -1,3 +1,7 @@
+// The decoder file owns ingress gates, lifecycle, and codec format parsing together;
+// splitting these private operations would obscure their shared ownership.
+@file:Suppress("TooManyFunctions")
+
 package dev.remoteagent.mobile
 
 import android.content.Context
@@ -17,7 +21,6 @@ import java.nio.ByteBuffer
 import java.util.ArrayDeque
 
 private const val DEVICE_VIDEO_MAX_PENDING_FRAMES = 8
-private const val DEVICE_VIDEO_MAX_INGRESS_FRAMES = DEVICE_VIDEO_MAX_PENDING_FRAMES
 private const val DEVICE_VIDEO_MAX_INGRESS_BYTES = 16 * 1024 * 1024
 // This is the native accessibility overlay's fixed accent, shared with the Compose surface.
 @Suppress("MagicNumber") private val DEVICE_ACCESSIBILITY_COLOR = android.graphics.Color.rgb(79, 140, 255)
@@ -32,8 +35,9 @@ private const val AVC_SPS_NAL_TYPE = 7
 private const val AVC_PPS_NAL_TYPE = 8
 private const val BYTE_MASK = 0xff
 private const val BITS_PER_BYTE = 8
+private const val U32_LAST_BYTE_OFFSET = 3
 private const val U16_HIGH_BYTE_SHIFT = BITS_PER_BYTE
-private const val U32_FIRST_BYTE_SHIFT = BITS_PER_BYTE * 3
+private const val U32_FIRST_BYTE_SHIFT = BITS_PER_BYTE * U32_LAST_BYTE_OFFSET
 private const val U32_SECOND_BYTE_SHIFT = BITS_PER_BYTE * 2
 private const val U32_THIRD_BYTE_SHIFT = BITS_PER_BYTE
 private const val ANNEX_B_SHORT_START_CODE_BYTES = 3
@@ -43,7 +47,7 @@ private const val NAL_LENGTH_BUFFER_SLACK = 16
 
 /** Bounds UI-to-worker handoff before payload copies and Handler posts occur. */
 internal class DeviceVideoIngressGate(
-    private val maxFrames: Int = DEVICE_VIDEO_MAX_INGRESS_FRAMES,
+    private val maxFrames: Int = DEVICE_VIDEO_MAX_PENDING_FRAMES,
     private val maxBytes: Int = DEVICE_VIDEO_MAX_INGRESS_BYTES,
 ) {
     data class Admission(val generation: Long, val bytes: Int)
@@ -629,7 +633,7 @@ private fun readUInt32(payload: ByteArray, offset: Int): Int =
     ((payload[offset].toInt() and BYTE_MASK) shl U32_FIRST_BYTE_SHIFT) or
         ((payload[offset + 1].toInt() and BYTE_MASK) shl U32_SECOND_BYTE_SHIFT) or
         ((payload[offset + 2].toInt() and BYTE_MASK) shl U32_THIRD_BYTE_SHIFT) or
-        (payload[offset + 3].toInt() and BYTE_MASK)
+        (payload[offset + U32_LAST_BYTE_OFFSET].toInt() and BYTE_MASK)
 
 private fun annexBNalUnits(payload: ByteArray): List<ByteArray> {
     val starts = mutableListOf<Pair<Int, Int>>()
@@ -644,7 +648,8 @@ private fun annexBNalUnits(payload: ByteArray): List<ByteArray> {
                     payload[index] == 0.toByte() &&
                     payload[index + 1] == 0.toByte() &&
                     payload[index + 2] == 0.toByte() &&
-                    payload[index + 3] == ANNEX_B_START_CODE_ONE_BYTE.toByte() -> ANNEX_B_LONG_START_CODE_BYTES
+                    payload[index + ANNEX_B_LONG_START_CODE_BYTES - ANNEX_B_START_CODE_ONE_BYTE] ==
+                        ANNEX_B_START_CODE_ONE_BYTE.toByte() -> ANNEX_B_LONG_START_CODE_BYTES
                 else -> 0
             }
         if (length > 0) {
@@ -669,6 +674,7 @@ private fun ByteArray.startsWithAnnexB(): Boolean =
                 this[0] == 0.toByte() &&
                 this[1] == 0.toByte() &&
                 this[2] == 0.toByte() &&
-                this[3] == ANNEX_B_START_CODE_ONE_BYTE.toByte()))
+                this[ANNEX_B_LONG_START_CODE_BYTES - ANNEX_B_START_CODE_ONE_BYTE] ==
+                    ANNEX_B_START_CODE_ONE_BYTE.toByte()))
 
 private val ANNEX_B_START_CODE = byteArrayOf(0, 0, 0, 1)

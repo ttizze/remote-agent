@@ -74,6 +74,22 @@ private const val DEVICE_EVENT_LOG_PREVIEW_LIMIT = 20
 private const val DEVICE_ACCESSIBILITY_STROKE_WIDTH = 2f
 // This is the native overlay's fixed accessibility accent, matching the Host UI token.
 @Suppress("MagicNumber") private val DEVICE_ACCESSIBILITY_COLOR = Color(0xFF4F8CFF)
+private val ANDROID_SPECIAL_KEYS =
+    mapOf(
+        AndroidKeyEvent.KEYCODE_DPAD_UP to "ArrowUp",
+        AndroidKeyEvent.KEYCODE_DPAD_DOWN to "ArrowDown",
+        AndroidKeyEvent.KEYCODE_DPAD_LEFT to "ArrowLeft",
+        AndroidKeyEvent.KEYCODE_DPAD_RIGHT to "ArrowRight",
+        AndroidKeyEvent.KEYCODE_ENTER to "Enter",
+        AndroidKeyEvent.KEYCODE_DEL to "Backspace",
+        AndroidKeyEvent.KEYCODE_FORWARD_DEL to "Delete",
+        AndroidKeyEvent.KEYCODE_TAB to "Tab",
+        AndroidKeyEvent.KEYCODE_ESCAPE to "Escape",
+        AndroidKeyEvent.KEYCODE_MOVE_HOME to "Home",
+        AndroidKeyEvent.KEYCODE_MOVE_END to "End",
+        AndroidKeyEvent.KEYCODE_PAGE_UP to "PageUp",
+        AndroidKeyEvent.KEYCODE_PAGE_DOWN to "PageDown",
+    )
 
 /** Native device picker, setup and live frame surface for a conversation. */
 @Composable
@@ -386,6 +402,9 @@ private object DeviceOverviewSections {
 }
 
 private object DeviceStreamSections {
+    // A screen row owns its optional metadata/readback branches so frame identity and
+    // Duo state remain rendered together.
+    @Suppress("CyclomaticComplexMethod")
     fun LazyListScope.screenItems(view: DeviceView, threadId: String, threadSessions: List<DeviceSessionView>) {
         view.screens
             .filter { screen ->
@@ -789,27 +808,9 @@ private fun Modifier.deviceKeyInput(model: AndroidAppModel, hostId: String, devi
         true
     }
 
-private fun androidSpecialKey(keyCode: Int): String? =
-    when (keyCode) {
-        AndroidKeyEvent.KEYCODE_DPAD_UP -> "ArrowUp"
-        AndroidKeyEvent.KEYCODE_DPAD_DOWN -> "ArrowDown"
-        AndroidKeyEvent.KEYCODE_DPAD_LEFT -> "ArrowLeft"
-        AndroidKeyEvent.KEYCODE_DPAD_RIGHT -> "ArrowRight"
-        AndroidKeyEvent.KEYCODE_ENTER -> "Enter"
-        AndroidKeyEvent.KEYCODE_DEL -> "Backspace"
-        AndroidKeyEvent.KEYCODE_FORWARD_DEL -> "Delete"
-        AndroidKeyEvent.KEYCODE_TAB -> "Tab"
-        AndroidKeyEvent.KEYCODE_ESCAPE -> "Escape"
-        AndroidKeyEvent.KEYCODE_MOVE_HOME -> "Home"
-        AndroidKeyEvent.KEYCODE_MOVE_END -> "End"
-        AndroidKeyEvent.KEYCODE_PAGE_UP -> "PageUp"
-        AndroidKeyEvent.KEYCODE_PAGE_DOWN -> "PageDown"
-        else -> null
-    }
-
 private fun deviceKeyFacts(event: AndroidKeyEvent): DeviceKeyFacts? {
     val key =
-        androidSpecialKey(event.keyCode)
+        ANDROID_SPECIAL_KEYS[event.keyCode]
             ?: run {
                 val unicode = event.unicodeChar
                 // The Android transport accepts the same UTF-16 single-unit key

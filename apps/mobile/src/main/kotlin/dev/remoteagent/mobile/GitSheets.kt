@@ -1,4 +1,6 @@
-@file:Suppress("LongMethod", "CyclomaticComplexMethod", "MagicNumber")
+// Keep the overview's cohesive status, selection, branch, action, progress,
+// and checkout surfaces together; each section has a distinct UI contract.
+@file:Suppress("LongMethod", "CyclomaticComplexMethod", "MagicNumber", "TooManyFunctions")
 
 package dev.remoteagent.mobile
 

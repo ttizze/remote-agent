@@ -1,3 +1,6 @@
+// Scheduled-task list and editor sections each own an independent UI responsibility.
+@file:Suppress("TooManyFunctions")
+
 package dev.remoteagent.mobile
 
 import androidx.compose.foundation.layout.Arrangement
@@ -34,6 +37,7 @@ import dev.remoteagent.core.TraitControl
 
 private val CATALOG_OPTIONS = CatalogSheetOptions(CatalogFilter.All, false, "", emptyList(), null)
 
+@Suppress("LongMethod") // The screen owns selection, draft, save-error, and owner callback wiring.
 @Composable
 internal fun ScheduledTasksScreen(model: AndroidAppModel) {
     var selected by remember { mutableStateOf<String?>(null) }

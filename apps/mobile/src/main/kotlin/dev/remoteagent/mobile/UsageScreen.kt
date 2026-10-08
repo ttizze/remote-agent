@@ -1,3 +1,8 @@
+// This file owns the complete usage surface: tabs, preferences, pooled limits, and account actions.
+// Its cohesive sections remain here after removing one-use forwarding helpers; splitting for the
+// function-count threshold would add indirection without separating an independent responsibility.
+@file:Suppress("TooManyFunctions")
+
 package dev.remoteagent.mobile
 
 import android.net.Uri
