@@ -4,6 +4,7 @@ use super::{ScheduledTask, ScheduledTaskRunStatus};
 use crate::{Store, StoreError, WorkspaceStrategy};
 use agent_domain::{
     InteractionMode, MessageAuthor, ModelSelection, RuntimeMode, Schedule, ThreadId, Timestamp,
+    parse_time_of_day,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
@@ -29,7 +30,7 @@ const COLUMNS: &str = "task_id, enabled, definition, updated_at, next_run_at, la
     last_run_status, last_run_error, run_count";
 
 type Raw = (
-    String,
+    Option<String>,
     bool,
     String,
     String,
@@ -58,14 +59,74 @@ fn corrupt(error: impl std::fmt::Display) -> StoreError {
     StoreError::Corrupt(error.to_string())
 }
 
+fn task_id(id: Option<String>) -> Result<String, StoreError> {
+    let id = id.ok_or_else(|| corrupt("missing scheduled task id"))?;
+    if id.is_empty() || id.trim() != id {
+        return Err(corrupt("invalid scheduled task id"));
+    }
+    Ok(id)
+}
+
 fn stamp(value: &str) -> Result<Timestamp, StoreError> {
     Timestamp::parse(value).map_err(corrupt)
+}
+
+fn validate_schedule(schedule: &Schedule) -> Result<(), StoreError> {
+    match schedule {
+        Schedule::Interval { every_ms: 0 } => Err(corrupt("scheduled task interval is zero")),
+        Schedule::Interval { .. } => Ok(()),
+        Schedule::FixedTime {
+            time_of_day,
+            weekdays,
+        } => {
+            if time_of_day.trim() != time_of_day || parse_time_of_day(time_of_day).is_none() {
+                return Err(corrupt("scheduled task time of day is invalid"));
+            }
+            if weekdays.iter().any(|day| *day > 6) {
+                return Err(corrupt("scheduled task weekday is invalid"));
+            }
+            Ok(())
+        }
+    }
+}
+
+fn validate_definition(definition: &Definition) -> Result<(), StoreError> {
+    for (field, value) in [
+        ("title", definition.title.as_str()),
+        ("prompt", definition.prompt.as_str()),
+        ("project", definition.project.as_str()),
+    ] {
+        if value.is_empty() || value.trim() != value {
+            return Err(corrupt(format!("scheduled task {field} is empty or padded")));
+        }
+    }
+    let valid_optional_ref = |value: &Option<String>| {
+        value
+            .as_deref()
+            .is_none_or(|value| !value.is_empty() && value.trim() == value)
+    };
+    match &definition.workspace {
+        WorkspaceStrategy::Root { branch } if valid_optional_ref(branch) => {}
+        WorkspaceStrategy::ExistingWorktree {
+            path,
+            branch,
+        } if !path.is_empty() && path.trim() == path && valid_optional_ref(branch) => {}
+        WorkspaceStrategy::Worktree {
+            base_ref,
+            branch,
+            ..
+        } if !base_ref.is_empty() && base_ref.trim() == base_ref && valid_optional_ref(branch) => {}
+        _ => return Err(corrupt("scheduled task workspace is invalid")),
+    }
+    validate_schedule(&definition.schedule)
 }
 
 fn decode(
     (id, enabled, definition, updated_at, next_run_at, last_run_at, status, error, run_count): Raw,
 ) -> Result<ScheduledTask, StoreError> {
+    let id = task_id(id)?;
     let definition: Definition = serde_json::from_str(&definition)?;
+    validate_definition(&definition)?;
     Ok(ScheduledTask {
         id,
         title: definition.title,
@@ -87,29 +148,48 @@ fn decode(
         last_run_status: ScheduledTaskRunStatus::parse(&status)
             .ok_or_else(|| corrupt(format!("unknown scheduled task run status {status}")))?,
         last_run_error: error,
-        run_count: u64::try_from(run_count).unwrap_or_default(),
+        run_count: u64::try_from(run_count).map_err(|_| corrupt("negative run count"))?,
     })
 }
 
-fn query(
+fn query_lenient(
     c: &Connection,
     sql: &str,
     params: impl rusqlite::Params,
 ) -> Result<Vec<ScheduledTask>, StoreError> {
     let mut statement = c.prepare_cached(sql)?;
     let rows = statement.query_map(params, raw)?;
-    rows.map(|row| decode(row?)).collect()
+    Ok(rows
+        .filter_map(|row| match row {
+            Ok(row) => match decode(row) {
+                Ok(task) => Some(task),
+                Err(error) => {
+                    tracing::warn!(%error, "Skipping undecodable scheduled task row");
+                    None
+                }
+            },
+            Err(error) => {
+                tracing::warn!(%error, "Skipping unreadable scheduled task row");
+                None
+            }
+        })
+        .collect())
+}
+
+pub(crate) struct InterruptedTask {
+    pub id: Option<String>,
+    pub task: Result<ScheduledTask, StoreError>,
 }
 
 impl Store {
     /// Every task, most recently changed first.
     pub fn scheduled_tasks(&self) -> Result<Vec<ScheduledTask>, StoreError> {
         self.read(|c| {
-            query(
-                c,
-                &format!("SELECT {COLUMNS} FROM scheduled_tasks ORDER BY updated_at DESC, task_id"),
-                [],
-            )
+            let mut statement = c.prepare_cached(&format!(
+                "SELECT {COLUMNS} FROM scheduled_tasks ORDER BY updated_at DESC, task_id"
+            ))?;
+            let rows = statement.query_map([], raw)?;
+            rows.map(|row| decode(row?)).collect()
         })
     }
 
@@ -132,7 +212,7 @@ impl Store {
         at: &Timestamp,
     ) -> Result<Vec<ScheduledTask>, StoreError> {
         self.read(|c| {
-            query(
+            query_lenient(
                 c,
                 &format!(
                     "SELECT {COLUMNS} FROM scheduled_tasks
@@ -146,16 +226,28 @@ impl Store {
     }
 
     /// Tasks a previous process left mid-run.
-    pub(crate) fn running_scheduled_tasks(&self) -> Result<Vec<ScheduledTask>, StoreError> {
+    pub(crate) fn running_scheduled_tasks(&self) -> Result<Vec<InterruptedTask>, StoreError> {
         self.read(|c| {
-            query(
-                c,
-                &format!(
-                    "SELECT {COLUMNS} FROM scheduled_tasks WHERE last_run_status = 'running'
-                     ORDER BY task_id"
-                ),
-                [],
-            )
+            let mut statement = c.prepare_cached(&format!(
+                "SELECT {COLUMNS} FROM scheduled_tasks WHERE last_run_status = 'running'
+                 ORDER BY task_id"
+            ))?;
+            let rows = statement.query_map([], raw)?;
+            Ok(rows
+                .filter_map(|row| match row {
+                    Ok(raw) => {
+                        let id = raw.0.clone();
+                        Some(InterruptedTask {
+                            id,
+                            task: decode(raw),
+                        })
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "Skipping unreadable interrupted scheduled task row");
+                        None
+                    }
+                })
+                .collect())
         })
     }
 }
@@ -249,14 +341,13 @@ pub(super) fn mark_running(
     tx: &Transaction<'_>,
     id: &str,
     started_at: &Timestamp,
-) -> Result<(), StoreError> {
-    tx.execute(
+) -> Result<bool, StoreError> {
+    Ok(tx.execute(
         "UPDATE scheduled_tasks
          SET updated_at = ?2, last_run_at = ?2, last_run_status = 'running', last_run_error = NULL
          WHERE task_id = ?1",
         params![id, started_at.as_str()],
-    )?;
-    Ok(())
+    )? == 1)
 }
 
 /// Records the end of the run that started at `started_at`; a row another run
@@ -269,8 +360,8 @@ pub(super) fn mark_completed(
     next_run_at: Option<Timestamp>,
     status: ScheduledTaskRunStatus,
     error: Option<&str>,
-) -> Result<(), StoreError> {
-    tx.execute(
+) -> Result<bool, StoreError> {
+    Ok(tx.execute(
         "UPDATE scheduled_tasks
          SET updated_at = ?3, next_run_at = ?4, last_run_status = ?5, last_run_error = ?6,
              run_count = run_count + 1
@@ -283,14 +374,13 @@ pub(super) fn mark_completed(
             status.as_str(),
             error,
         ],
-    )?;
-    Ok(())
+    )? == 1)
 }
 
 /// Ends a run the process did not finish as failed with `error`.
 pub(super) fn release(
     tx: &Transaction<'_>,
-    id: &str,
+    id: Option<&str>,
     error: &str,
     next_run_at: Option<Timestamp>,
     updated_at: &Timestamp,
@@ -299,7 +389,7 @@ pub(super) fn release(
         "UPDATE scheduled_tasks
          SET last_run_status = 'failed', last_run_error = ?2, next_run_at = ?3, updated_at = ?4,
              run_count = run_count + 1
-         WHERE task_id = ?1 AND last_run_status = 'running'",
+         WHERE task_id IS ?1 AND last_run_status = 'running'",
         params![
             id,
             error,

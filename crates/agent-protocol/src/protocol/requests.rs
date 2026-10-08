@@ -114,6 +114,7 @@ contracts! {
     Browser, "host/browser" => (crate::browser::BrowserRequest, crate::browser::BrowserFrame) [clone],
     ConnectionPerformance, "host/diagnostics/connection" => (crate::diagnostics::ConnectionPerformance, m::Empty) [clone],
     // Scheduled tasks
+    ListScheduledTasks, "host/scheduledTasks/list" => (m::Empty, st::ScheduledTaskList),
     SubscribeScheduledTasks, "host/scheduledTasks/subscribe" => (m::Empty, st::ScheduledTaskList),
     UpsertScheduledTask, "host/scheduledTasks/upsert" => (st::UpsertScheduledTask, st::ScheduledTask) [clone],
     SetScheduledTaskEnabled, "host/scheduledTasks/setEnabled" => (st::SetScheduledTaskEnabled, st::ScheduledTask) [clone],

@@ -8,7 +8,10 @@ use agent_domain::{
     Attachment, Command, CommandId, Driver, OptionDescriptor, Reply, State, ThreadId, ThreadShell,
 };
 use agent_protocol::models::{ProjectScript, ProviderStatus};
-use agent_runtime::{HostProject, LaunchThread, Runtime, SearchMatch};
+use agent_runtime::{
+    HostProject, LaunchThread, Runtime, ScheduledTask, ScheduledTaskError, ScheduledTaskInput,
+    SearchMatch,
+};
 use futures_util::future::BoxFuture;
 use serde_json::{Value, json};
 use std::{path::PathBuf, sync::Arc};
@@ -119,6 +122,46 @@ pub(crate) trait Orchestration: Send + Sync {
         &self,
         title: String,
     ) -> BoxFuture<'_, Result<(HostProject, Option<String>), NamedProjectFailure>>;
+    /// The durable scheduled-task rows. Backends that do not expose the Host
+    /// scheduler keep the MCP surface unavailable; tests can therefore focus
+    /// on the ordinary orchestration methods without a scheduler fixture.
+    fn scheduled_tasks(&self) -> BoxFuture<'_, Result<Vec<ScheduledTask>, String>> {
+        Box::pin(async { Err("scheduled tasks are unavailable".into()) })
+    }
+    fn upsert_scheduled_task(
+        &self,
+        input: ScheduledTaskInput,
+    ) -> BoxFuture<'_, Result<ScheduledTask, String>> {
+        Box::pin(async move {
+            let _ = input;
+            Err("scheduled tasks are unavailable".into())
+        })
+    }
+    fn set_scheduled_task_enabled(
+        &self,
+        id: String,
+        enabled: bool,
+    ) -> BoxFuture<'_, Result<ScheduledTask, String>> {
+        Box::pin(async move {
+            let _ = (id, enabled);
+            Err("scheduled tasks are unavailable".into())
+        })
+    }
+    fn delete_scheduled_task(&self, id: String) -> BoxFuture<'_, Result<(), String>> {
+        Box::pin(async move {
+            let _ = id;
+            Err("scheduled tasks are unavailable".into())
+        })
+    }
+    fn run_scheduled_task_now(
+        &self,
+        id: String,
+    ) -> BoxFuture<'_, Result<ScheduledTask, String>> {
+        Box::pin(async move {
+            let _ = id;
+            Err("scheduled tasks are unavailable".into())
+        })
+    }
 }
 
 /// The runtime, project catalog and model catalog this Host serves.
@@ -138,6 +181,72 @@ impl Orchestration for HostOrchestration {
                 .await
                 .map(|view| view.state)
                 .map_err(|error| error.to_string())
+        })
+    }
+
+    fn scheduled_tasks(&self) -> BoxFuture<'_, Result<Vec<ScheduledTask>, String>> {
+        Box::pin(async move {
+            self.runtime
+                .scheduled_tasks()
+                .list()
+                .await
+                .map_err(|error| error.to_string())
+        })
+    }
+
+    fn upsert_scheduled_task(
+        &self,
+        input: ScheduledTaskInput,
+    ) -> BoxFuture<'_, Result<ScheduledTask, String>> {
+        Box::pin(async move {
+            self.runtime
+                .scheduled_tasks()
+                .upsert(input)
+                .await
+                .map_err(|error| error.to_string())
+        })
+    }
+
+    fn set_scheduled_task_enabled(
+        &self,
+        id: String,
+        enabled: bool,
+    ) -> BoxFuture<'_, Result<ScheduledTask, String>> {
+        Box::pin(async move {
+            self.runtime
+                .scheduled_tasks()
+                .set_enabled(&id, enabled)
+                .await
+                .map_err(|error| error.to_string())
+        })
+    }
+
+    fn delete_scheduled_task(&self, id: String) -> BoxFuture<'_, Result<(), String>> {
+        Box::pin(async move {
+            self.runtime
+                .scheduled_tasks()
+                .delete(&id)
+                .await
+                .map_err(|error| error.to_string())
+        })
+    }
+
+    fn run_scheduled_task_now(
+        &self,
+        id: String,
+    ) -> BoxFuture<'_, Result<ScheduledTask, String>> {
+        Box::pin(async move {
+            self.runtime
+                .scheduled_tasks()
+                .run_now(&id)
+                .await
+                .map_err(|error| match error {
+                    ScheduledTaskError::NotFound(id) => format!("Schedule task {id} not found."),
+                    ScheduledTaskError::AlreadyRunning(id) => {
+                        format!("Schedule task {id} is already running.")
+                    }
+                    ScheduledTaskError::Store(error) => error.to_string(),
+                })
         })
     }
 

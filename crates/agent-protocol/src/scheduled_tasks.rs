@@ -2,8 +2,8 @@
 //! time, each run as a new thread or a message into an existing one.
 use crate::conversation::WorkspaceStrategy;
 use agent_domain::{
-    InteractionMode, MIN_SCHEDULED_TASK_INTERVAL_MS, MessageAuthor, ModelSelection, RuntimeMode,
-    Schedule, ThreadId, Timestamp, parse_time_of_day,
+    CommandId, InteractionMode, MIN_SCHEDULED_TASK_INTERVAL_MS, MessageAuthor, ModelSelection,
+    RuntimeMode, Schedule, ThreadId, Timestamp, parse_time_of_day,
 };
 use serde::{Deserialize, Serialize};
 
@@ -73,6 +73,9 @@ pub struct UpsertScheduledTask {
     pub id: Option<String>,
     /// Reject the save if the task no longer exists, for edits from a client form.
     pub require_existing: bool,
+    /// Stable id for an idempotent create retry. The Host derives the task id
+    /// from it when `id` is omitted.
+    pub command_id: Option<CommandId>,
     pub title: String,
     pub prompt: String,
     pub enabled: bool,
@@ -88,11 +91,48 @@ pub struct UpsertScheduledTask {
 impl UpsertScheduledTask {
     /// Why the Host refuses the save, if it does.
     pub fn validate(&self) -> Result<(), String> {
-        if self.title.trim().is_empty() {
+        if self
+            .id
+            .as_deref()
+            .is_some_and(|id| id.is_empty() || id.trim() != id)
+        {
+            return Err("Scheduled task id must not be empty or padded.".into());
+        }
+        if self.project_id.is_empty() || self.project_id.trim() != self.project_id {
+            return Err("Scheduled task project id must not be empty or padded.".into());
+        }
+        if self.title.trim().is_empty() || self.title.trim() != self.title {
             return Err("Schedule task title must not be empty.".into());
         }
-        if self.prompt.trim().is_empty() {
+        if self.prompt.trim().is_empty() || self.prompt.trim() != self.prompt {
             return Err("Schedule task prompt must not be empty.".into());
+        }
+        let valid_ref = |field: &str, value: Option<&str>, required: bool| {
+            if required && value.is_none_or(str::is_empty) {
+                return Err(format!("Scheduled task {field} must not be empty."));
+            }
+            if value.is_some_and(|value| value.trim() != value || value.is_empty()) {
+                return Err(format!("Scheduled task {field} must not be empty or padded."));
+            }
+            Ok(())
+        };
+        match &self.workspace {
+            WorkspaceStrategy::Root { branch } => valid_ref("branch", branch.as_deref(), false)?,
+            WorkspaceStrategy::ExistingWorktree {
+                worktree_path,
+                branch,
+            } => {
+                valid_ref("worktree path", Some(worktree_path), true)?;
+                valid_ref("branch", branch.as_deref(), false)?;
+            }
+            WorkspaceStrategy::Worktree {
+                base_ref,
+                branch,
+                ..
+            } => {
+                valid_ref("base ref", Some(base_ref), true)?;
+                valid_ref("branch", branch.as_deref(), false)?;
+            }
         }
         match &self.schedule {
             Schedule::Interval { every_ms } if *every_ms < MIN_SCHEDULED_TASK_INTERVAL_MS => {
@@ -103,7 +143,7 @@ impl UpsertScheduledTask {
                 time_of_day,
                 weekdays,
             } => {
-                if parse_time_of_day(time_of_day).is_none() {
+                if time_of_day.trim() != time_of_day || parse_time_of_day(time_of_day).is_none() {
                     return Err("Time of day must be a 24-hour HH:MM time.".into());
                 }
                 if weekdays.iter().any(|day| *day > 6) {
@@ -139,6 +179,7 @@ mod tests {
         UpsertScheduledTask {
             id: None,
             require_existing: false,
+            command_id: None,
             title: "Review".into(),
             prompt: "Review the open pull requests.".into(),
             enabled: true,
@@ -194,5 +235,30 @@ mod tests {
         let mut blank_prompt = input(Schedule::Interval { every_ms: 60_000 });
         blank_prompt.prompt = String::new();
         assert!(blank_prompt.validate().is_err());
+    }
+
+    #[test]
+    fn an_empty_or_padded_id_is_refused() {
+        for id in [Some(String::new()), Some(" task ".into())] {
+            let mut value = input(Schedule::Interval { every_ms: 60_000 });
+            value.id = id;
+            assert!(value.validate().is_err());
+        }
+    }
+
+    #[test]
+    fn a_workspace_path_or_base_ref_must_be_trimmed_and_non_empty() {
+        let mut value = input(Schedule::Interval { every_ms: 60_000 });
+        value.workspace = WorkspaceStrategy::ExistingWorktree {
+            worktree_path: " /tmp/worktree".into(),
+            branch: None,
+        };
+        assert!(value.validate().is_err());
+        value.workspace = WorkspaceStrategy::Worktree {
+            base_ref: String::new(),
+            branch: None,
+            start_from_origin: true,
+        };
+        assert!(value.validate().is_err());
     }
 }

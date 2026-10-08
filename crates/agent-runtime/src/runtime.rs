@@ -248,7 +248,12 @@ impl Runtime {
                 .reconcile_after_process_loss(&self.handlers)
                 .await?;
             self.recover(RecoveryTrigger::Startup).await?;
-            self.scheduled.release_interrupted().await?;
+            if let Err(error) = self.scheduled.release_interrupted().await {
+                // A malformed schedule row must not prevent the Host from
+                // starting. The recovery routine releases rows independently;
+                // this warning is for a store-wide failure while doing so.
+                tracing::warn!(%error, "Could not reset interrupted schedule task runs");
+            }
             Ok::<_, RuntimeError>(
                 self.store()
                     .blocking(|store| store.unprepared_launches())

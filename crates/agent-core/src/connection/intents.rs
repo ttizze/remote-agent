@@ -397,6 +397,14 @@ impl Owner {
                 self.load_more_new_thread_branches();
                 Next::Done
             }
+            Intent::SearchScheduledTaskBranches { project_id, query } => {
+                self.load_scheduled_task_branches(project_id, query);
+                Next::Done
+            }
+            Intent::LoadMoreScheduledTaskBranches { project_id } => {
+                self.load_more_scheduled_task_branches(project_id);
+                Next::Done
+            }
             Intent::SetNewThreadWorkspace { mode } => self.set_new_thread_workspace(mode)?,
             Intent::SelectNewThreadBranch {
                 branch,
@@ -1370,6 +1378,27 @@ impl Owner {
             Intent::RemoveWorktree { path } => {
                 Next::call(Call::RemoveWorktree(op::RemoveWorktree { path }), None)
             }
+            Intent::SaveScheduledTask { draft } => {
+                let request = crate::view::scheduled_tasks::upsert(&draft, self.new_command_id())
+                    .map_err(invalid)?;
+                Next::call(Call::UpsertScheduledTask(request), None)
+            }
+            Intent::SetScheduledTaskEnabled { id, enabled } => Next::call(
+                Call::SetScheduledTaskEnabled(
+                    agent_protocol::scheduled_tasks::SetScheduledTaskEnabled { id, enabled },
+                ),
+                None,
+            ),
+            Intent::DeleteScheduledTask { id } => Next::call(
+                Call::DeleteScheduledTask(agent_protocol::scheduled_tasks::ScheduledTaskRef { id }),
+                None,
+            ),
+            Intent::RunScheduledTaskNow { id } => Next::call(
+                Call::RunScheduledTaskNow(
+                    agent_protocol::scheduled_tasks::ScheduledTaskRef { id },
+                ),
+                None,
+            ),
             Intent::LoadAccounts => Next::call(Call::ListAccounts(m::Empty {}), None),
             Intent::SelectAccount { provider, id } => Next::call(
                 Call::SelectAccount(op::SelectAccount { provider, id }),

@@ -26,6 +26,10 @@ use crate::view::{
         scripts::{ProjectScriptsView, project_scripts},
     },
     search::{SearchOptions, SearchView, search_view},
+    scheduled_tasks::{
+        ScheduledTaskBranchView, ScheduledTaskListView, branch_view as scheduled_task_branch_view,
+        draft as scheduled_task_draft, list as scheduled_task_list,
+    },
     settings::{
         SettingId, SettingValue, SettingsRow, SettingsScope, SettingsView, default_model_picker,
         setting_intent, setting_reset_intent, settings_view,
@@ -110,6 +114,22 @@ fn thread(id: String) -> Option<ThreadId> {
 
 #[cfg_attr(feature = "bindings", uniffi::export)]
 impl Snapshot {
+    pub fn scheduled_tasks(&self) -> ScheduledTaskListView {
+        scheduled_task_list(self)
+    }
+    pub fn scheduled_task_draft(
+        &self,
+        id: Option<String>,
+    ) -> crate::state::ScheduledTaskDraft {
+        scheduled_task_draft(self, id.as_deref())
+    }
+    pub fn scheduled_task_branches(
+        &self,
+        project_id: String,
+        selected_branch: String,
+    ) -> ScheduledTaskBranchView {
+        scheduled_task_branch_view(self, &project_id, &selected_branch)
+    }
     pub fn sidebar(&self, now_ms: i64, options: SidebarOptions) -> SidebarView {
         sidebar(
             self,

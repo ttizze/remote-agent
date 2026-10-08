@@ -49,6 +49,9 @@ impl Owner {
                 tokio::spawn(follow(target, call, Payload::TerminalMetadata))
             }
             StreamKey::Keybindings => tokio::spawn(follow(target, call, Payload::Keybindings)),
+            StreamKey::ScheduledTasks => {
+                tokio::spawn(follow(target, call, Payload::ScheduledTasks))
+            }
         };
         let failures = network
             .streams
@@ -140,6 +143,17 @@ impl Owner {
         self.open_stream(
             StreamKey::Keybindings,
             Call::Keybindings(agent_protocol::models::Empty {}),
+        );
+    }
+
+    /// The Host's complete scheduled-task list and every later change.
+    pub(super) fn subscribe_scheduled_tasks(&mut self) {
+        if !self.connected() {
+            return;
+        }
+        self.open_stream(
+            StreamKey::ScheduledTasks,
+            Call::SubscribeScheduledTasks(agent_protocol::models::Empty {}),
         );
     }
 
@@ -258,6 +272,7 @@ impl Owner {
         if let Some(thread) = self.state.selected_thread.clone() {
             self.subscribe_thread(&thread);
         }
+        self.subscribe_scheduled_tasks();
     }
 
     fn current(&self, key: &StreamKey, generation: u64) -> bool {
@@ -322,6 +337,7 @@ impl Owner {
             }
             StreamKey::TerminalMetadata => self.subscribe_terminal_metadata(),
             StreamKey::Keybindings => self.subscribe_keybindings(),
+            StreamKey::ScheduledTasks => self.subscribe_scheduled_tasks(),
         }
     }
 
@@ -364,6 +380,10 @@ impl Owner {
                 self.healthy(&StreamKey::Keybindings);
                 self.state.keybindings = Some(Arc::new(config));
             }
+            (StreamKey::ScheduledTasks, Payload::ScheduledTasks(list)) => {
+                self.healthy(&StreamKey::ScheduledTasks);
+                self.state.scheduled_tasks = list.tasks;
+            }
             _ => {}
         }
     }
@@ -389,7 +409,10 @@ impl Owner {
                         shell.stream_error();
                     }
                 }
-                StreamKey::Setup(_) | StreamKey::TerminalMetadata | StreamKey::Keybindings => {}
+                StreamKey::Setup(_)
+                | StreamKey::TerminalMetadata
+                | StreamKey::Keybindings
+                | StreamKey::ScheduledTasks => {}
             }
             self.schedule_resubscribe(key);
             return;

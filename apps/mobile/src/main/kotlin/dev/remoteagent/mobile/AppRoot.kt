@@ -104,6 +104,7 @@ private fun AppSurface(model: AndroidAppModel, requestQrScan: (onContents: (Stri
                         TerminalScreen(model, route.threadId, route.terminalId, route.project, route.cwd)
                     is Route.Workspace -> WorkspaceScreen(model, route.tab, route.file, route.line)
                     is Route.Settings -> SettingsScreen(model, route.projectId)
+                    Route.ScheduledTasks -> ScheduledTasksScreen(model)
                     Route.Archived -> ArchivedScreen(model)
                 }
             }

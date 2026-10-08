@@ -1385,6 +1385,35 @@ fn orchestrator_tool_descriptions_separate_delegation_from_threads() {
 }
 
 #[test]
+fn scheduled_tools_publish_the_reference_contract() {
+    let tools = super::tools();
+    let find = |name: &str| {
+        tools
+            .iter()
+            .find(|tool| tool["name"] == name)
+            .unwrap_or_else(|| panic!("missing tool {name}"))
+    };
+    let schedule = find("schedule_task");
+    assert_eq!(schedule["inputSchema"]["required"], json!(["prompt", "schedule"]));
+    let schedule_variants = schedule["inputSchema"]["properties"]["schedule"]["anyOf"]
+        .as_array()
+        .unwrap();
+    assert_eq!(schedule_variants.len(), 2);
+    assert_eq!(
+        schedule_variants[0]["properties"]["everyMs"]["minimum"],
+        json!(60_000)
+    );
+    assert_eq!(
+        schedule_variants[1]["properties"]["timeOfDay"]["pattern"],
+        "^([01]?\\d|2[0-3]):([0-5]\\d)$"
+    );
+    assert_eq!(find("list_scheduled_tasks")["annotations"]["readOnlyHint"], true);
+    assert_eq!(find("update_scheduled_task")["annotations"]["readOnlyHint"], false);
+    assert_eq!(find("delete_scheduled_task")["annotations"]["destructiveHint"], true);
+    assert_eq!(find("run_scheduled_task_now")["inputSchema"]["required"], json!(["taskId"]));
+}
+
+#[test]
 fn a_read_only_claude_sandbox_pre_approves_only_read_only_served_tools() {
     let read_only = read_only_tools();
     for tool in ["orchestrator_capabilities", "thread_list", "queue_read"] {

@@ -74,6 +74,9 @@ pub struct ScheduledTaskInput {
     pub id: Option<String>,
     /// Refuse the save when the task no longer exists (an edit from a form).
     pub require_existing: bool,
+    /// Stable id for an idempotent create retry. When `id` is omitted the
+    /// scheduler derives the task id from this command id.
+    pub command_id: Option<CommandId>,
     pub title: String,
     pub prompt: String,
     pub enabled: bool,
@@ -224,7 +227,12 @@ impl ScheduledTasks {
         let id = input
             .id
             .clone()
-            .unwrap_or_else(|| format!("scheduled-task:{}", uuid::Uuid::new_v4()));
+            .unwrap_or_else(|| {
+                input.command_id.as_ref().map_or_else(
+                    || format!("scheduled-task:{}", uuid::Uuid::new_v4()),
+                    |command| format!("scheduled-task:{command}"),
+                )
+            });
         let existing = self.find(&id).await?;
         if input.require_existing && existing.is_none() {
             return Err(ScheduledTaskError::NotFound(id));
@@ -395,24 +403,78 @@ impl ScheduledTasks {
             return Ok(());
         }
         let now = self.now();
-        for task in stuck {
-            let next = next_run(task.enabled, &task.schedule, &now);
-            let (id, updated_at) = (task.id.clone(), timestamp(&now));
-            self.executors
+        let mut first_error = None;
+        let mut changed = false;
+        for interrupted in stuck {
+            let next = interrupted
+                .task
+                .as_ref()
+                .ok()
+                .and_then(|task| next_run(task.enabled, &task.schedule, &now));
+            let (id, updated_at) = (interrupted.id, timestamp(&now));
+            let result = self
+                .executors
                 .store
                 .write(move |tx| {
                     store::release(
                         tx,
-                        &id,
+                        id.as_deref(),
                         "Run was interrupted by a server restart.",
                         next,
                         &updated_at,
                     )
                 })
-                .await?;
+                .await;
+            match result {
+                Ok(()) => changed = true,
+                Err(error) => {
+                    tracing::warn!(%error, "Could not release an interrupted scheduled task run");
+                    first_error.get_or_insert(error);
+                }
+            }
         }
-        self.notify();
+        if changed {
+            self.notify();
+        }
+        if let Some(error) = first_error {
+            return Err(error);
+        }
         Ok(())
+    }
+
+    /// Best-effort escape hatch for failures after a run is marked `running`.
+    /// A dispatch may already have reached the conversation runtime, so the
+    /// attempt is counted and the next occurrence is advanced before the
+    /// scheduler can poll the row again.
+    async fn release_stuck_run(&self, task: &ScheduledTask, error: &str) {
+        let now = self.now();
+        let source = match self.find(&task.id).await {
+            Ok(Some(current)) => current,
+            Ok(None) => return,
+            Err(find_error) => {
+                tracing::warn!(
+                    task = %task.id,
+                    %find_error,
+                    "Could not reread a failed scheduled task run"
+                );
+                task.clone()
+            }
+        };
+        let next = next_run(source.enabled, &source.schedule, &now);
+        let (id, error, updated_at) = (task.id.clone(), error.to_owned(), timestamp(&now));
+        match self
+            .executors
+            .store
+            .write(move |tx| store::release(tx, Some(&id), &error, next, &updated_at))
+            .await
+        {
+            Ok(()) => self.notify(),
+            Err(store_error) => tracing::warn!(
+                task = %task.id,
+                %store_error,
+                "Could not release a failed scheduled task run"
+            ),
+        }
     }
 
     async fn run(
@@ -455,59 +517,81 @@ impl ScheduledTasks {
             return Ok(active);
         }
         let (id, at) = (active.id.clone(), started_at.clone());
-        self.executors
+        let marked = self
+            .executors
             .store
             .write(move |tx| store::mark_running(tx, &id, &at))
             .await?;
+        if !marked {
+            return match trigger {
+                Trigger::Manual => Err(ScheduledTaskError::NotFound(task.id)),
+                Trigger::Scheduled => Ok(task),
+            };
+        }
         self.notify();
 
-        let fire_key = format!(
-            "{}:{}:{}",
-            active.id,
-            started.timestamp_millis(),
-            trigger.as_str()
-        );
-        let error = self.dispatch(&active, &fire_key).await.err();
-        let completed = self.now();
-        let status = match error {
-            None => ScheduledTaskRunStatus::Succeeded,
-            Some(_) => ScheduledTaskRunStatus::Failed,
-        };
-        // The next run follows the schedule as it is now: the task may have
-        // been edited or deleted while the run was dispatched.
-        let current = self.find(&task.id).await?;
-        let source = current.clone().unwrap_or_else(|| active.clone());
-        let next = next_run(source.enabled, &source.schedule, &completed);
-        let finished = ScheduledTask {
-            updated_at: timestamp(&completed),
-            last_run_at: Some(started_at.clone()),
-            next_run_at: next.clone(),
-            last_run_status: status,
-            last_run_error: error.clone(),
-            run_count: source.run_count + 1,
-            ..source
-        };
-        if current.is_some() {
-            // Guarded by the start time, so a task deleted mid-run and recreated
-            // with the same id is not stamped.
-            let (id, completed_at) = (task.id.clone(), timestamp(&completed));
-            self.executors
-                .store
-                .write(move |tx| {
-                    store::mark_completed(
-                        tx,
-                        &id,
-                        &started_at,
-                        &completed_at,
-                        next,
-                        status,
-                        error.as_deref(),
-                    )
-                })
-                .await?;
-            self.notify();
+        let finished = async {
+            let fire_key = format!(
+                "{}:{}:{}",
+                active.id,
+                started.timestamp_millis(),
+                trigger.as_str()
+            );
+            let error = self.dispatch(&active, &fire_key).await.err();
+            let completed = self.now();
+            let status = if error.is_none() {
+                ScheduledTaskRunStatus::Succeeded
+            } else {
+                ScheduledTaskRunStatus::Failed
+            };
+            // The next run follows the schedule as it is now: the task may have
+            // been edited or deleted while the run was dispatched.
+            let current = self.find(&task.id).await?;
+            let source = current.clone().unwrap_or_else(|| active.clone());
+            let next = next_run(source.enabled, &source.schedule, &completed);
+            if current.is_some() {
+                // Guarded by the start time, so a task deleted mid-run and recreated
+                // with the same id is not stamped.
+                let (id, completed_at, completion_error) =
+                    (task.id.clone(), timestamp(&completed), error.clone());
+                let written = self
+                    .executors
+                    .store
+                    .write(move |tx| {
+                        store::mark_completed(
+                            tx,
+                            &id,
+                            &started_at,
+                            &completed_at,
+                            next.clone(),
+                            status,
+                            completion_error.as_deref(),
+                        )
+                    })
+                    .await?;
+                if !written {
+                    // The row was deleted or replaced while this run was in
+                    // flight. Return the current row without attributing the
+                    // stale completion to it.
+                    return Ok(source);
+                }
+                self.notify();
+            }
+            Ok(ScheduledTask {
+                updated_at: timestamp(&completed),
+                last_run_at: Some(started_at.clone()),
+                next_run_at: next,
+                last_run_status: status,
+                last_run_error: error.clone(),
+                run_count: source.run_count + 1,
+                ..source
+            })
         }
-        Ok(finished)
+        .await;
+        if let Err(error) = &finished {
+            self.release_stuck_run(&active, &error.to_string()).await;
+        }
+        finished
     }
 
     /// Sends the prompt: a new thread, or a message into the bound thread.

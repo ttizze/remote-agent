@@ -8,9 +8,11 @@ use super::{
 use agent_domain::{
     BackgroundKind, Command, CompletionWake, DeliveryState, DispatchMode, Driver, InputIntent,
     InteractionMode, ItemStatus, LinkedPullRequest, MessageAuthor, MessageId, ModelSelection,
-    NodeId, NotificationSource, Run, RunId, RunStatus, RuntimeMode, SendMessage, State, Task,
-    ThreadId, delegated_result, delegated_task_status,
+    MIN_SCHEDULED_TASK_INTERVAL_MS, NodeId, NotificationSource, Run, RunId, RunStatus,
+    RuntimeMode, Schedule, SendMessage, State, Task, ThreadId, delegated_result,
+    delegated_task_status, parse_time_of_day,
 };
+use agent_runtime::{ScheduledTask, ScheduledTaskInput, WorkspaceStrategy};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
@@ -130,6 +132,40 @@ pub(crate) struct Target {
     driver_kind: Option<String>,
     model: Option<String>,
     options: Option<Value>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ScheduleTaskInput {
+    prompt: String,
+    schedule: Schedule,
+    title: Option<String>,
+    enabled: Option<bool>,
+    bind_to_current_thread: Option<bool>,
+    client_request_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateScheduledTaskInput {
+    scheduled_task_id: String,
+    prompt: Option<String>,
+    title: Option<String>,
+    schedule: Option<Schedule>,
+    enabled: Option<bool>,
+    bind_to_current_thread: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ScheduledTaskRefInput {
+    scheduled_task_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RunScheduledTaskInput {
+    task_id: String,
 }
 
 /// Provider option selection values in request order.
@@ -558,6 +594,55 @@ fn iso(value: &agent_domain::Timestamp) -> Value {
     json!(value)
 }
 
+fn validate_scheduled_schedule(schedule: &Schedule) -> Result<(), ToolError> {
+    match schedule {
+        Schedule::Interval { every_ms } if *every_ms < MIN_SCHEDULED_TASK_INTERVAL_MS => Err(
+            invalid("Interval must be at least 60000 milliseconds (one minute)."),
+        ),
+        Schedule::Interval { .. } => Ok(()),
+        Schedule::FixedTime {
+            time_of_day,
+            weekdays,
+        } => {
+            if time_of_day.trim() != time_of_day || parse_time_of_day(time_of_day).is_none() {
+                return Err(invalid("Time of day must be a 24-hour HH:MM time."));
+            }
+            if weekdays.iter().any(|day| *day > 6) {
+                return Err(invalid(
+                    "Weekdays must be numbers from 0 (Sunday) to 6 (Saturday).",
+                ));
+            }
+            Ok(())
+        }
+    }
+}
+
+fn scheduled_workspace(bound: bool) -> WorkspaceStrategy {
+    if bound {
+        WorkspaceStrategy::Root { branch: None }
+    } else {
+        WorkspaceStrategy::Worktree {
+            base_ref: "main".into(),
+            branch: None,
+            start_from_origin: true,
+        }
+    }
+}
+
+fn scheduled_task_summary(task: &ScheduledTask) -> Value {
+    json!({
+        "scheduledTaskId": task.id,
+        "title": task.title,
+        "prompt": task.prompt,
+        "enabled": task.enabled,
+        "projectId": task.project,
+        "boundThreadId": task.thread,
+        "schedule": task.schedule,
+        "nextRunAt": task.next_run_at.as_ref().map(iso),
+        "lastRunStatus": task.last_run_status.as_str(),
+    })
+}
+
 impl AgentTools {
     /// The caller's full projection.
     pub(crate) async fn load_caller(&self, scope: Scope<'_>) -> Result<Arc<State>, ToolError> {
@@ -651,9 +736,209 @@ impl AgentTools {
                 "batchThreadCreation": true,
                 "threadManagement": true,
                 "incrementalThreadRead": true,
-                "scheduledTasks": false,
+                "scheduledTasks": true,
                 "maxBatchThreads": 20,
             },
+        }))
+    }
+
+    async fn scoped_scheduled_task(
+        &self,
+        project: &str,
+        id: &str,
+    ) -> Result<ScheduledTask, ToolError> {
+        let tasks = self
+            .backend
+            .scheduled_tasks()
+            .await
+            .map_err(|error| failure("orchestration_error", error))?;
+        tasks
+            .into_iter()
+            .find(|task| task.id == id && task.project == project)
+            .ok_or_else(|| {
+                failure(
+                    "task_not_found",
+                    format!("Scheduled task {id} was not found in the calling project."),
+                )
+            })
+    }
+
+    pub(crate) async fn schedule_task(&self, scope: Scope<'_>, input: &Value) -> Outcome {
+        let input: ScheduleTaskInput = decode(input)?;
+        let parent = self.load_caller(scope).await?;
+        let thread = parent.thread.as_ref().expect("loaded");
+        let prompt = trimmed("prompt", &input.prompt, Some(120_000))?;
+        validate_scheduled_schedule(&input.schedule)?;
+        let title = match input.title.as_deref() {
+            Some(title) => trimmed("title", title, Some(512))?,
+            None => prompt
+                .lines()
+                .next()
+                .map(str::trim)
+                .filter(|title| !title.is_empty())
+                .map(|title| title.chars().take(80).collect())
+                .unwrap_or_else(|| "Scheduled task".into()),
+        };
+        let bound = input.bind_to_current_thread.unwrap_or(true);
+        let command_id = client_key(input.client_request_id.as_ref())?
+            .map(|key| stable_command(scope, "schedule-task", &key, None));
+        let task = self
+            .backend
+            .upsert_scheduled_task(ScheduledTaskInput {
+                id: None,
+                require_existing: false,
+                command_id,
+                title,
+                prompt,
+                enabled: input.enabled.unwrap_or(true),
+                schedule: input.schedule,
+                project: thread.project.clone(),
+                thread: bound.then(|| scope.thread.clone()),
+                workspace: scheduled_workspace(bound),
+                selection: thread.selection.clone(),
+                runtime_mode: thread.runtime_mode,
+                interaction_mode: thread.interaction_mode,
+                created_by: MessageAuthor::Agent,
+                creation_source: "mcp".into(),
+            })
+            .await
+            .map_err(|error| failure("orchestration_error", error))?;
+        Ok(scheduled_task_summary(&task))
+    }
+
+    pub(crate) async fn list_scheduled_tasks(&self, scope: Scope<'_>) -> Outcome {
+        let parent = self.load_caller(scope).await?;
+        let project = parent.thread.as_ref().expect("loaded").project.clone();
+        let tasks = self
+            .backend
+            .scheduled_tasks()
+            .await
+            .map_err(|error| failure("orchestration_error", error))?;
+        Ok(json!({
+            "tasks": tasks
+                .iter()
+                .filter(|task| task.project == project)
+                .map(scheduled_task_summary)
+                .collect::<Vec<_>>(),
+        }))
+    }
+
+    pub(crate) async fn update_scheduled_task(
+        &self,
+        scope: Scope<'_>,
+        input: &Value,
+    ) -> Outcome {
+        let input: UpdateScheduledTaskInput = decode(input)?;
+        let parent = self.load_caller(scope).await?;
+        let thread = parent.thread.as_ref().expect("loaded");
+        let id = trimmed("scheduledTaskId", &input.scheduled_task_id, Some(256))?;
+        let existing = self.scoped_scheduled_task(&thread.project, &id).await?;
+        let title = input
+            .title
+            .as_deref()
+            .map(|title| trimmed("title", title, Some(512)))
+            .transpose()?
+            .unwrap_or_else(|| existing.title.clone());
+        let prompt = input
+            .prompt
+            .as_deref()
+            .map(|prompt| trimmed("prompt", prompt, Some(120_000)))
+            .transpose()?
+            .unwrap_or_else(|| existing.prompt.clone());
+        let schedule = input.schedule.unwrap_or_else(|| existing.schedule.clone());
+        validate_scheduled_schedule(&schedule)?;
+        let thread_id = input
+            .bind_to_current_thread
+            .map(|bound| bound.then(|| scope.thread.clone()))
+            .unwrap_or_else(|| existing.thread.clone());
+        let workspace = input
+            .bind_to_current_thread
+            .map(scheduled_workspace)
+            .unwrap_or_else(|| existing.workspace.clone());
+        let task = self
+            .backend
+            .upsert_scheduled_task(ScheduledTaskInput {
+                id: Some(existing.id.clone()),
+                require_existing: true,
+                command_id: None,
+                title,
+                prompt,
+                enabled: input.enabled.unwrap_or(existing.enabled),
+                schedule,
+                project: existing.project.clone(),
+                thread: thread_id,
+                workspace,
+                selection: existing.selection.clone(),
+                runtime_mode: existing.runtime_mode,
+                interaction_mode: existing.interaction_mode,
+                created_by: existing.created_by,
+                creation_source: existing.creation_source.clone(),
+            })
+            .await
+            .map_err(|error| failure("orchestration_error", error))?;
+        Ok(scheduled_task_summary(&task))
+    }
+
+    pub(crate) async fn delete_scheduled_task(
+        &self,
+        scope: Scope<'_>,
+        input: &Value,
+    ) -> Outcome {
+        let input: ScheduledTaskRefInput = decode(input)?;
+        let parent = self.load_caller(scope).await?;
+        let project = parent.thread.as_ref().expect("loaded").project.clone();
+        let id = trimmed("scheduledTaskId", &input.scheduled_task_id, Some(256))?;
+        let existing = self.scoped_scheduled_task(&project, &id).await?;
+        self.backend
+            .delete_scheduled_task(existing.id.clone())
+            .await
+            .map_err(|error| failure("orchestration_error", error))?;
+        Ok(json!({"scheduledTaskId": existing.id, "deleted": true}))
+    }
+
+    pub(crate) async fn run_scheduled_task_now(
+        &self,
+        scope: Scope<'_>,
+        input: &Value,
+    ) -> Outcome {
+        let input: RunScheduledTaskInput = decode(input)?;
+        let parent = self.load_caller(scope).await?;
+        let thread = parent.thread.as_ref().expect("loaded");
+        if thread.archived_at.is_some()
+            || thread.deleted_at.is_some()
+            || thread.runtime_mode != RuntimeMode::FullAccess
+            || thread.interaction_mode != InteractionMode::Default
+        {
+            return Err(failure(
+                "capability_denied",
+                "Running a scheduled task requires a live full-access/default thread.",
+            ));
+        }
+        let id = trimmed("taskId", &input.task_id, Some(256))?;
+        let existing = self
+            .backend
+            .scheduled_tasks()
+            .await
+            .map_err(|error| failure("orchestration_error", error))?
+            .into_iter()
+            .find(|task| task.id == id && task.project == thread.project)
+            .ok_or_else(|| {
+                failure(
+                    "invalid_request",
+                    "The task was not found in the calling project.",
+                )
+            })?;
+        let task = self
+            .backend
+            .run_scheduled_task_now(existing.id)
+            .await
+            .map_err(|error| failure("orchestration_error", error))?;
+        Ok(json!({
+            "taskId": task.id,
+            "threadId": task.thread,
+            "lastRunStatus": task.last_run_status.as_str(),
+            "runCount": task.run_count,
+            "nextRunAt": task.next_run_at.as_ref().map(iso),
         }))
     }
 

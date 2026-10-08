@@ -28,6 +28,26 @@ pub struct AgentAttribution {
     pub open_label: String,
 }
 
+/// A prompt sent by a durable Host automation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct AutomationBadge {
+    pub label: String,
+    pub accessibility_label: String,
+    pub task_id: String,
+}
+
+pub fn user_message_automation_badge(message: &Message) -> Option<AutomationBadge> {
+    message
+        .scheduled_task
+        .as_ref()
+        .map(|task_id| AutomationBadge {
+            label: "Sent by automation".into(),
+            accessibility_label: "Sent by automation".into(),
+            task_id: task_id.clone(),
+        })
+}
+
 /// A delegated thread knows its parent sent the delegated prompt.
 pub fn user_message_attribution(state: &State, message: &Message) -> Option<AgentAttribution> {
     (message.created_by == MessageAuthor::Agent).then(|| AgentAttribution {
@@ -196,6 +216,7 @@ pub fn user_status_chip(item: Option<&Item>) -> Option<String> {
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct UserMessageDecorations {
     pub attribution: Option<AgentAttribution>,
+    pub automation: Option<AutomationBadge>,
     pub intent: Option<IntentMarker>,
     pub collapsible: bool,
     pub status_chip: Option<String>,
@@ -213,6 +234,7 @@ pub fn user_message_decorations(
 ) -> UserMessageDecorations {
     UserMessageDecorations {
         attribution: user_message_attribution(state, message),
+        automation: user_message_automation_badge(message),
         intent: user_message_intent_marker(message.intent),
         collapsible: user_message_collapsible(&message.text),
         status_chip: user_status_chip(item),
@@ -451,6 +473,15 @@ mod tests {
             user_message_decorations(&State::default(), None, &long, None, false, false);
         assert!(decorations.collapsible);
         assert_eq!(decorations.copy.unwrap().text, long_text());
+    }
+
+    #[test]
+    fn labels_a_message_sent_by_a_scheduled_task() {
+        let mut message = message("Review this area");
+        message.scheduled_task = Some("scheduled-task:morning".into());
+        let badge = user_message_automation_badge(&message).unwrap();
+        assert_eq!(badge.label, "Sent by automation");
+        assert_eq!(badge.task_id, "scheduled-task:morning");
     }
 
     #[test]

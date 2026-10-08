@@ -1,7 +1,7 @@
 //! Scheduled task schedules: when the next run is due, whether two schedules
 //! fire at the same times, and whether a due fixed-time run arrived too late
 //! to fire. Wall-clock times are read in the zone the caller supplies.
-use chrono::{DateTime, Datelike, Duration, TimeZone};
+use chrono::{DateTime, Datelike, Duration, NaiveDate, TimeZone};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
@@ -25,6 +25,7 @@ pub enum Schedule {
     /// (0 is Sunday); an empty list runs every day.
     FixedTime {
         time_of_day: String,
+        #[serde(default)]
         weekdays: Vec<u8>,
     },
 }
@@ -44,13 +45,13 @@ pub fn parse_time_of_day(value: &str) -> Option<(u32, u32)> {
 
 /// A local wall-clock time, moved past a daylight-saving gap the way a
 /// calendar does.
-fn at_time<Tz: TimeZone>(day: &DateTime<Tz>, hour: u32, minute: u32) -> Option<DateTime<Tz>> {
-    let local = day.date_naive().and_hms_opt(hour, minute, 0)?;
-    day.timezone()
+fn at_time<Tz: TimeZone>(timezone: &Tz, date: NaiveDate, hour: u32, minute: u32) -> Option<DateTime<Tz>> {
+    let local = date.and_hms_opt(hour, minute, 0)?;
+    timezone
         .from_local_datetime(&local)
         .earliest()
         .or_else(|| {
-            day.timezone()
+            timezone
                 .from_local_datetime(&(local + Duration::hours(1)))
                 .earliest()
         })
@@ -74,8 +75,10 @@ pub fn next_run_at<Tz: TimeZone>(schedule: &Schedule, from: &DateTime<Tz>) -> Op
             let (hour, minute) = parse_time_of_day(time_of_day)?;
             let weekdays: BTreeSet<u8> = weekdays.iter().copied().collect();
             (0..=7).find_map(|offset| {
-                let day = from.clone().checked_add_signed(Duration::days(offset))?;
-                let candidate = at_time(&day, hour, minute)?;
+                let date = from
+                    .date_naive()
+                    .checked_add_signed(Duration::days(offset))?;
+                let candidate = at_time(from.timezone(), date, hour, minute)?;
                 if candidate <= *from {
                     return None;
                 }
@@ -122,7 +125,42 @@ pub fn same_schedule(a: &Schedule, b: &Schedule) -> bool {
 /// single run is wanted.
 pub fn missed_fixed_time_run(schedule: &Schedule, due_at_ms: i64, now_ms: i64) -> bool {
     matches!(schedule, Schedule::FixedTime { .. })
-        && now_ms - due_at_ms > MISSED_FIXED_TIME_GRACE_MS
+        && now_ms.saturating_sub(due_at_ms) > MISSED_FIXED_TIME_GRACE_MS
+}
+
+/// A compact human-readable label shared by settings rows and native editors.
+pub fn describe_schedule(schedule: &Schedule) -> String {
+    match schedule {
+        Schedule::Interval { every_ms } => {
+            if every_ms % 60_000 == 0 {
+                let minutes = every_ms / 60_000;
+                format!(
+                    "Every {}",
+                    if minutes == 1 {
+                        "minute".to_owned()
+                    } else {
+                        format!("{minutes} minutes")
+                    }
+                )
+            } else {
+                let seconds = every_ms / 1_000 + u64::from(every_ms % 1_000 >= 500);
+                format!("Every {seconds} seconds")
+            }
+        }
+        Schedule::FixedTime {
+            time_of_day,
+            weekdays,
+        } => {
+            let days = if weekdays.is_empty() {
+                "day"
+            } else if weekdays.len() == 5 && weekdays.iter().all(|day| (1..=5).contains(day)) {
+                "weekday"
+            } else {
+                "selected day"
+            };
+            format!("At {time_of_day} every {days}")
+        }
+    }
 }
 
 #[cfg(test)]
@@ -245,6 +283,27 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&fixed("09:00", &[1, 5])).unwrap(),
             r#"{"type":"fixed_time","timeOfDay":"09:00","weekdays":[1,5]}"#
+        );
+    }
+
+    #[test]
+    fn describes_interval_and_daily_schedules() {
+        assert_eq!(
+            describe_schedule(&interval(60_000)),
+            "Every minute"
+        );
+        assert_eq!(
+            describe_schedule(&interval(90_000)),
+            "Every 90 seconds"
+        );
+        assert_eq!(describe_schedule(&fixed("09:00", &[])), "At 09:00 every day");
+        assert_eq!(
+            describe_schedule(&fixed("09:00", &[1, 2, 3, 4, 5])),
+            "At 09:00 every weekday"
+        );
+        assert_eq!(
+            describe_schedule(&fixed("09:00", &[1, 4])),
+            "At 09:00 every selected day"
         );
     }
 }

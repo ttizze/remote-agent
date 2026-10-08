@@ -39,13 +39,14 @@ struct FeedRowView: View, Equatable {
         case let .userMessage(message):
             UserBubble(
                 text: message.text, attachments: message.attachments, createdAt: row.createdAt,
-                badge: message.badge, attribution: message.decorations.attribution, actions: actions
+                badge: message.badge, attribution: message.decorations.attribution,
+                automation: message.decorations.automation, actions: actions
             )
             .modifier(EntryFade(createdAt: row.createdAt, rises: true))
         case let .pendingMessage(message):
             UserBubble(
                 text: message.text, attachments: message.attachments, createdAt: nil,
-                badge: nil, attribution: nil, actions: actions
+                badge: nil, attribution: nil, automation: nil, actions: actions
             )
             .modifier(EntryFade(createdAt: row.createdAt, rises: true))
         case let .assistantMessage(message):
@@ -128,10 +129,17 @@ struct UserBubble: View {
     let createdAt: Int64?
     let badge: IntentBadge?
     let attribution: AgentAttribution?
+    let automation: AutomationBadge?
     let actions: FeedActions
 
     var body: some View {
         VStack(alignment: .trailing, spacing: 3.5) {
+            if let automation {
+                Text(automation.label)
+                    .font(AppTheme.font(12, weight: .medium))
+                    .foregroundStyle(AppTheme.muted.opacity(0.6))
+                    .accessibilityLabel(automation.accessibilityLabel)
+            }
             if let attribution {
                 Button(attribution.label) {
                     if let thread = attribution.senderThread {

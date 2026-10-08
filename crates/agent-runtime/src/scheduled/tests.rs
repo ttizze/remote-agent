@@ -3,7 +3,7 @@
 use super::*;
 use crate::executor::tests::{Rig, codex, rig, root_workspace, tid};
 use crate::session::tests::fake::Gate;
-use agent_domain::{MessageAuthor, Role};
+use agent_domain::{CommandId, MessageAuthor, Role};
 use chrono::{Local, TimeZone};
 use rusqlite::params;
 use std::sync::Arc;
@@ -18,6 +18,7 @@ fn input(id: Option<&str>, project: &str, schedule: Schedule) -> ScheduledTaskIn
     ScheduledTaskInput {
         id: id.map(str::to_owned),
         require_existing: false,
+        command_id: None,
         title: "Review".into(),
         prompt: "Review the open pull requests.".into(),
         enabled: true,
@@ -112,6 +113,18 @@ async fn rejects_a_stale_form_save_after_deletion_while_preserving_explicit_id_c
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_create_retry_with_the_same_command_id_keeps_one_task_and_history() {
+    let h = harness();
+    let mut create = input(None, "project", minutely());
+    create.command_id = Some(CommandId::new("command:scheduled-create").unwrap());
+    let first = h.tasks.upsert(create.clone()).await.unwrap();
+    let second = h.tasks.upsert(create).await.unwrap();
+    assert_eq!(first.id, "scheduled-task:command:scheduled-create");
+    assert_eq!(second.id, first.id);
+    assert_eq!(h.tasks.list().await.unwrap().len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn preserves_a_due_run_when_a_save_only_pads_the_scheduled_hour() {
     let h = harness();
     let due = Local.with_ymd_and_hms(2026, 7, 1, 9, 0, 0).unwrap();
@@ -192,6 +205,46 @@ async fn lists_only_due_tasks_earliest_first_without_settled_ones() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn due_poll_skips_a_corrupt_schedule_without_defecting_healthy_tasks() {
+    let h = harness();
+    for id in ["due-healthy", "due-corrupt"] {
+        h.tasks
+            .upsert(input(Some(id), "project", minutely()))
+            .await
+            .unwrap();
+        h.set_run_state(id, Some(NOW), "never").await;
+    }
+    h.rig
+        .store
+        .write(|tx| {
+            let mut definition: serde_json::Value = tx.query_row(
+                "SELECT definition FROM scheduled_tasks WHERE task_id = 'due-corrupt'",
+                [],
+                |row| row.get(0),
+            )?;
+            definition["schedule"] = serde_json::json!({
+                "type": "fixed_time",
+                "timeOfDay": "25:00",
+                "weekdays": [],
+            });
+            tx.execute(
+                "UPDATE scheduled_tasks SET definition = ?1 WHERE task_id = 'due-corrupt'",
+                [serde_json::to_string(&definition)?],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+    let due = h
+        .rig
+        .store
+        .due_scheduled_tasks(&at(NOW))
+        .unwrap();
+    assert_eq!(due.into_iter().map(|task| task.id).collect::<Vec<_>>(), ["due-healthy"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn releases_interrupted_runs_on_startup_and_still_executes_due_tasks() {
     let h = harness();
     let huge = Schedule::Interval {
@@ -215,6 +268,22 @@ async fn releases_interrupted_runs_on_startup_and_still_executes_due_tasks() {
         .await
         .unwrap();
     h.set_run_state("due-failing", Some(NOW), "never").await;
+    h.tasks
+        .upsert(input(Some("stuck-corrupt"), "project", minutely()))
+        .await
+        .unwrap();
+    h.rig
+        .store
+        .write(|tx| {
+            tx.execute(
+                "UPDATE scheduled_tasks SET definition = '{' , last_run_status = 'running'
+                 WHERE task_id = 'stuck-corrupt'",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
 
     h.rig.clock.advance(1_000);
     h.tasks.release_interrupted().await.unwrap();
@@ -228,6 +297,32 @@ async fn releases_interrupted_runs_on_startup_and_still_executes_due_tasks() {
     let stuck_huge = h.task("stuck-huge").await;
     assert_eq!(stuck_huge.last_run_status, ScheduledTaskRunStatus::Failed);
     assert_eq!(stuck_huge.next_run_at, None);
+    let corrupt = h
+        .rig
+        .store
+        .read(|c| {
+            c.query_row(
+                "SELECT last_run_status, last_run_error, run_count
+                 FROM scheduled_tasks WHERE task_id = 'stuck-corrupt'",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                },
+            )
+        })
+        .unwrap();
+    assert_eq!(
+        corrupt,
+        (
+            "failed".into(),
+            Some("Run was interrupted by a server restart.".into()),
+            1
+        )
+    );
     for id in ["stuck-valid", "stuck-huge"] {
         let task = h.task(id).await;
         assert_eq!(
@@ -344,6 +439,44 @@ async fn a_manual_run_of_a_task_already_running_is_refused() {
         first.await.unwrap().unwrap().last_run_status,
         ScheduledTaskRunStatus::Succeeded
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_deleted_and_recreated_task_is_not_stamped_by_the_old_run() {
+    let h = harness();
+    let gate = Arc::new(Gate::default());
+    let hook_gate = gate.clone();
+    *h.rig.ops.folder.lock().unwrap() = Some(Arc::new(move |_| {
+        let gate = hook_gate.clone();
+        Box::pin(async move {
+            gate.pass().await;
+            Ok(None)
+        })
+    }));
+    let task = h
+        .tasks
+        .upsert(input(Some("replace"), "project", minutely()))
+        .await
+        .unwrap();
+    let tasks = h.tasks.clone();
+    let first = tokio::spawn(async move { tasks.run_now(&task.id).await });
+    gate.until_arrived(1).await;
+    assert_eq!(h.task("replace").await.last_run_status, ScheduledTaskRunStatus::Running);
+
+    h.tasks.delete("replace").await.unwrap();
+    let replacement = h
+        .tasks
+        .upsert(ScheduledTaskInput {
+            title: "Replacement".into(),
+            ..input(Some("replace"), "project", minutely())
+        })
+        .await
+        .unwrap();
+    gate.release();
+
+    let result = first.await.unwrap().unwrap();
+    assert_eq!(result, replacement);
+    assert_eq!(h.task("replace").await, replacement);
 }
 
 #[tokio::test(flavor = "multi_thread")]
