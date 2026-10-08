@@ -203,8 +203,8 @@ private fun PdfPage(file: File, index: Int, cache: LruCache<Int, Bitmap>) {
             Image(
                 rendered!!.getOrThrow().asImageBitmap(),
                 "PDF page ${index + 1}",
-                Modifier.fillMaxWidth().padding(bottom = 12.dp),
-                contentScale = androidx.compose.ui.layout.ContentScale.FillWidth,
+                Modifier.fillMaxWidth().heightIn(max = PDF_PAGE_HEIGHT.dp).padding(bottom = 12.dp),
+                contentScale = androidx.compose.ui.layout.ContentScale.Fit,
             )
     }
 }
