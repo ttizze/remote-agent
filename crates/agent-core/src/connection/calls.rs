@@ -483,7 +483,23 @@ impl Owner {
                 self.state.remote_hosts.push(host);
             }
             Reply::Invitation(invitation) => self.state.invitation = Some(invitation),
-            Reply::HostSettings(settings) => self.state.host_settings = Some(settings),
+            Reply::HostSettings(settings) => {
+                self.state.default_draft.runtime_mode = settings.default_runtime_mode;
+                if let Some(selection) = &settings.default_model_selection {
+                    self.state.default_draft.instance_id = selection.instance.clone();
+                    self.state.default_draft.driver = selection.driver;
+                    self.state.default_draft.model = selection.model.clone();
+                    self.state.default_draft.options = selection
+                        .options
+                        .iter()
+                        .map(|(key, value)| ModelOption {
+                            key: key.clone(),
+                            value: value.clone(),
+                        })
+                        .collect();
+                }
+                self.state.host_settings = Some(settings)
+            }
             Reply::Keybindings(config) => self.state.keybindings = Some(Arc::new(config)),
             Reply::SessionScan(scan) => {
                 let import = &mut self.state.session_import;

@@ -22,7 +22,7 @@ use codex_app_server::CodexAppServer;
 use futures_util::future::BoxFuture;
 use serde::Serialize;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::{
         Arc, OnceLock, Weak,
@@ -288,6 +288,14 @@ impl HostRpcService {
                 spawner: Arc::new(SupervisedSpawner),
                 browser: Arc::new(move |thread| {
                     let resources = browser.upgrade()?;
+                    if !resources
+                        .shared
+                        .worktrees
+                        .latest_host_settings()
+                        .enable_agent_browser_access
+                    {
+                        return None;
+                    }
                     let browser = resources.browser.get()?;
                     Some(browser.provider_config(thread.as_str()))
                 }),
@@ -645,6 +653,7 @@ impl HostRpcService {
                         .host_settings(update)
                         .await
                         .map_err(|error| Failure::new("settings_update_failed", error))?;
+                    let _ = self.cleanup_storage().await;
                     if changed && let Ok(conversation) = self.conversation() {
                         conversation.settings_changed();
                     }
@@ -820,12 +829,40 @@ impl HostRpcService {
         })
     }
 
+    async fn cleanup_storage(&self) -> anyhow::Result<()> {
+        let entries = self.worktree_list().await?;
+        let protected: HashSet<String> = entries
+            .iter()
+            .filter(|entry| entry.blocked_reason.is_some())
+            .map(|entry| entry.path.clone())
+            .collect();
+        let live_threads = self.conversation().ok().map(|_| {
+            entries
+                .iter()
+                .flat_map(|entry| entry.threads.iter())
+                .map(|thread| thread.id.as_str().to_owned())
+                .collect::<HashSet<_>>()
+        });
+        let removed = self
+            .inner
+            .resources
+            .shared
+            .worktrees
+            .cleanup_storage(&protected, live_threads.as_ref())
+            .await?;
+        if removed > 0 {
+            tracing::info!(removed, "cleaned stored worktrees");
+        }
+        Ok(())
+    }
+
     pub(crate) async fn cleanup_merged_worktrees(&self) -> anyhow::Result<()> {
         let worktrees = &self.inner.resources.shared.worktrees;
+        let _exclusive = self.inner.resources.worktree_access.write().await;
+        self.cleanup_storage().await?;
         if !worktrees.settings(None).await?.delete_merged {
             return Ok(());
         }
-        let _exclusive = self.inner.resources.worktree_access.write().await;
         let entries = self.worktree_list().await?;
         let statuses = crate::worktrees::directory_statuses(
             entries
@@ -937,6 +974,11 @@ impl HostRpcService {
     async fn providers(&self) -> Vec<agent_protocol::models::ProviderInstance> {
         use agent_protocol::models::{ProviderInstance, ProviderStatus};
         let resources = &self.inner.resources;
+        let check_provider_updates = resources
+            .shared
+            .worktrees
+            .latest_host_settings()
+            .enable_provider_update_checks;
         let instance = |driver: Driver, name: &str| ProviderInstance {
             instance: name.to_lowercase(),
             driver,
@@ -972,7 +1014,10 @@ impl HostRpcService {
         match resources.claude.get() {
             Some(resources) => {
                 claude.version = resources.version().await;
-                claude.message = agent_providers::claude_upgrade_message(claude.version.as_deref());
+                if check_provider_updates {
+                    claude.message =
+                        agent_providers::claude_upgrade_message(claude.version.as_deref());
+                }
             }
             None => {
                 claude.installed = false;

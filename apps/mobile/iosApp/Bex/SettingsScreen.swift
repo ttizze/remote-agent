@@ -23,7 +23,10 @@ struct SettingsScreen: View {
                     SettingsGroup(title: "Projects & threads") {
                         SettingsLink(symbol: "text.bubble", label: "Thread behavior") {
                             HostSettingsPage(model: model, title: "Thread behavior",
-                                                     sections: ["usage-limits", "auto-settle", "behavior"])
+                                                     sections: ["usage-limits", "auto-settle", "behavior", "maintenance"])
+                        }
+                        SettingsLink(symbol: "bell", label: "Notifications") {
+                            HostSettingsPage(model: model, title: "Notifications", sections: ["notifications"])
                         }
                         SettingsLink(symbol: "arrow.turn.left.up", label: "Follow-ups") {
                             HostSettingsPage(model: model, title: "Follow-ups", sections: ["follow-ups"])
@@ -39,8 +42,17 @@ struct SettingsScreen: View {
                         SettingsLink(symbol: "plus.bubble", label: "New threads") {
                             HostSettingsPage(model: model, title: "New threads", sections: ["new-threads"])
                         }
+                        SettingsLink(symbol: "gearshape.2", label: "Agent") {
+                            HostSettingsPage(model: model, title: "Agent", sections: ["agent"])
+                        }
+                        SettingsLink(symbol: "arrow.triangle.branch", label: "Source control") {
+                            HostSettingsPage(model: model, title: "Source control", sections: ["source-control"])
+                        }
                         SettingsLink(symbol: "arrow.triangle.branch", label: "Worktrees") {
                             WorktreeSettingsScreen(model: model).id(model.selectedProfileId)
+                        }
+                        SettingsLink(symbol: "internaldrive", label: "Storage") {
+                            HostSettingsPage(model: model, title: "Storage", sections: ["storage"])
                         }
                     }
                     SettingsGroup(title: "App") {

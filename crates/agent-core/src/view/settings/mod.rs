@@ -8,15 +8,20 @@
 //!
 //! Each section lives in its own file and registers itself in `registry`,
 //! which assembles the page and routes a row's edits and resets to its owner.
+mod agent;
 mod auto_settle;
 mod behavior;
 mod beta;
 #[cfg(test)]
 mod fixtures;
 mod follow_ups;
+mod maintenance;
 mod new_threads;
+mod notifications;
 mod patch;
 mod registry;
+mod source_control;
+mod storage;
 mod usage_limits;
 
 pub use auto_settle::{
@@ -55,7 +60,24 @@ pub enum SettingId {
     DefaultModel,
     DefaultPermissions,
     DefaultWorkspace,
+    WorktreeSubmodules,
     StartFromOrigin,
+    NotificationMode,
+    InAppNotifications,
+    ProviderUpdateChecks,
+    AgentBrowserAccess,
+    ResponseStreaming,
+    AutoSettleOnMerge,
+    BackgroundActivity,
+    DefaultAutoPull,
+    BranchNaming,
+    SourceControlWritingStyle,
+    FollowChangeRequestTemplates,
+    PullRequestMergeMethod,
+    StorageWorktreeAfterDays,
+    StorageWorktreeOnMerge,
+    StorageWorktreeOnDelete,
+    StorageWorktreeUnchanged,
 }
 
 /// Where a project page's value comes from.

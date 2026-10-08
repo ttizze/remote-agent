@@ -36,6 +36,8 @@ pub(super) struct GeneralState {
     days: Entity<InputState>,
     /// The scope and value the days field last showed.
     days_value: Option<(SettingsScope, u32)>,
+    storage_days: Entity<InputState>,
+    storage_days_value: Option<(SettingsScope, u32)>,
     folder: Entity<InputState>,
     folder_value: Option<String>,
     copy_paths: Entity<InputState>,
@@ -46,6 +48,7 @@ pub(super) struct GeneralState {
 impl GeneralState {
     pub(super) fn new(window: &mut Window, cx: &mut Context<Desktop>) -> Self {
         let days = cx.new(|cx| InputState::new(window, cx));
+        let storage_days = cx.new(|cx| InputState::new(window, cx));
         let folder = cx.new(|cx| InputState::new(window, cx));
         let copy_paths = cx.new(|cx| InputState::new(window, cx).placeholder(".env, .env.local"));
         let subscriptions = vec![
@@ -85,6 +88,39 @@ impl GeneralState {
                     }
                 },
             ),
+            cx.subscribe_in(
+                &storage_days,
+                window,
+                |view, input, event: &InputEvent, window, cx| {
+                    let Some(scope) = view.settings_scope() else {
+                        return;
+                    };
+                    match event {
+                        InputEvent::Change => {
+                            let text = input.read(cx).value();
+                            if let Ok(days) = text.trim().parse::<u32>()
+                                && (agent_protocol::models::MIN_RETENTION_DAYS
+                                    ..=agent_protocol::models::MAX_RETENTION_DAYS)
+                                    .contains(&days)
+                            {
+                                view.apply_setting(
+                                    &scope,
+                                    SettingId::StorageWorktreeAfterDays,
+                                    SettingValue::Number { value: days },
+                                );
+                            }
+                        }
+                        InputEvent::Blur => {
+                            if let Some((_, days)) = &view.settings.general.storage_days_value {
+                                input.update(cx, |input, cx| {
+                                    input.set_value(days.to_string(), window, cx)
+                                });
+                            }
+                        }
+                        _ => {}
+                    }
+                },
+            ),
             cx.subscribe_in(&folder, window, |view, input, event: &InputEvent, _, cx| {
                 if matches!(event, InputEvent::Blur | InputEvent::PressEnter { .. }) {
                     let directory = input.read(cx).value().trim().to_owned();
@@ -112,6 +148,8 @@ impl GeneralState {
         Self {
             days,
             days_value: None,
+            storage_days,
+            storage_days_value: None,
             folder,
             folder_value: None,
             copy_paths,
@@ -196,6 +234,7 @@ impl Desktop {
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
         self.sync_days_field(scope, sections, window, cx);
+        self.sync_storage_days_field(scope, sections, window, cx);
         sections
             .iter()
             .map(|settings_section| {
@@ -248,6 +287,37 @@ impl Desktop {
         if self.settings.general.days_value != shown {
             self.settings.general.days_value = shown;
             self.settings.general.days.update(cx, |input, cx| {
+                input.set_value(days.to_string(), window, cx)
+            });
+        }
+    }
+
+    fn sync_storage_days_field(
+        &mut self,
+        scope: &SettingsScope,
+        sections: &[SettingsSection],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(days) =
+            sections
+                .iter()
+                .flat_map(|section| &section.rows)
+                .find_map(|row| match row.control {
+                    SettingControl::Number { value, .. }
+                        if row.id == SettingId::StorageWorktreeAfterDays =>
+                    {
+                        Some(value)
+                    }
+                    _ => None,
+                })
+        else {
+            return;
+        };
+        let shown = Some((scope.clone(), days));
+        if self.settings.general.storage_days_value != shown {
+            self.settings.general.storage_days_value = shown;
+            self.settings.general.storage_days.update(cx, |input, cx| {
                 input.set_value(days.to_string(), window, cx)
             });
         }
@@ -313,11 +383,18 @@ impl Desktop {
                 )
                 .into_any_element()
             }
-            SettingControl::Number { .. } => Input::new(&self.settings.general.days)
-                .small()
-                .w(px(96.))
-                .aria_label(row.title.clone())
-                .into_any_element(),
+            SettingControl::Number { .. } => {
+                let input = if id == SettingId::StorageWorktreeAfterDays {
+                    &self.settings.general.storage_days
+                } else {
+                    &self.settings.general.days
+                };
+                Input::new(input)
+                    .small()
+                    .w(px(96.))
+                    .aria_label(row.title.clone())
+                    .into_any_element()
+            }
             SettingControl::Model {
                 model_label,
                 traits_label,

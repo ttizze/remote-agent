@@ -456,6 +456,27 @@ impl Owner {
                 self.state.preferences.working_section = enabled;
                 Next::Done
             }
+            Intent::SetNotificationMode { mode } => {
+                self.state.preferences.notification_mode = mode;
+                Next::Done
+            }
+            Intent::SetInAppNotificationsEnabled { enabled } => {
+                self.state.preferences.in_app_notifications_enabled = enabled;
+                Next::Done
+            }
+            Intent::ImportShare { content } => {
+                let incoming = crate::view::share::compose(&content);
+                if !incoming.is_empty() {
+                    let key = self.state.draft_key();
+                    let mut draft = self.state.current_draft();
+                    if !draft.text.is_empty() {
+                        draft.text.push_str("\n\n");
+                    }
+                    draft.text.push_str(&incoming);
+                    self.state.drafts.insert(key, draft);
+                }
+                Next::Done
+            }
             Intent::SetDefaultModel {
                 instance_id,
                 driver,
@@ -469,9 +490,15 @@ impl Owner {
                     options,
                     ..self.state.default_draft.clone()
                 };
-                draft.selection().map_err(invalid)?;
+                let selection = draft.selection().map_err(invalid)?;
                 self.state.default_draft = draft;
-                Next::Done
+                Next::call(
+                    Call::UpdateSettings(Box::new(m::HostSettingsPatch {
+                        default_model_selection: Some(m::Nullable::Value(selection)),
+                        ..Default::default()
+                    })),
+                    None,
+                )
             }
             Intent::SetDefaultRuntimeMode { mode } => {
                 self.state.default_draft.runtime_mode = mode;
@@ -518,7 +545,16 @@ impl Owner {
                     &[
                         ProjectSettingKey::AutoSettle,
                         ProjectSettingKey::ContinueAfterRestart,
+                        ProjectSettingKey::DefaultRuntimeMode,
+                        ProjectSettingKey::DefaultThreadEnvMode,
+                        ProjectSettingKey::WorktreeSubmodules,
                         ProjectSettingKey::NewWorktreesStartFromOrigin,
+                        ProjectSettingKey::AgentBrowserAccess,
+                        ProjectSettingKey::DefaultAutoPull,
+                        ProjectSettingKey::AutoSettleOnMerge,
+                        ProjectSettingKey::ResponseStreamingMode,
+                        ProjectSettingKey::BranchNamingMode,
+                        ProjectSettingKey::PullRequestMergeMethod,
                     ],
                 ))),
                 None,

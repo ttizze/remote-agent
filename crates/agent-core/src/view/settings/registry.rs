@@ -1,8 +1,9 @@
 //! The settings page assembled from its sections, in display order.
 use super::{
     ProjectOverridesHeader, ProjectSettingKey, ResolvedSettings, SettingId, SettingSource,
-    SettingValue, SettingsRow, SettingsScope, SettingsSection, SettingsView, auto_settle, behavior,
-    beta, follow_ups, new_threads, patch, update, usage_limits,
+    SettingValue, SettingsRow, SettingsScope, SettingsSection, SettingsView, agent, auto_settle,
+    behavior, beta, follow_ups, maintenance, new_threads, notifications, patch, source_control,
+    storage, update, usage_limits,
 };
 use crate::{
     models::HostSettings,
@@ -38,13 +39,18 @@ pub(super) struct Section {
     pub inherit: fn(SettingId) -> Option<ProjectSettingKey>,
 }
 
-static SECTIONS: [Section; 6] = [
+static SECTIONS: [Section; 11] = [
     usage_limits::SECTION,
     auto_settle::SECTION,
     follow_ups::SECTION,
     behavior::SECTION,
+    agent::SECTION,
+    maintenance::SECTION,
+    source_control::SECTION,
+    storage::SECTION,
     beta::SECTION,
     new_threads::SECTION,
+    notifications::SECTION,
 ];
 
 fn owner(id: SettingId) -> &'static Section {
@@ -144,13 +150,12 @@ mod tests {
     use super::*;
     use crate::{
         commands::build::FollowUpBehavior,
-        models::{AutoSettle, WorktreeSettings},
+        models::AutoSettle,
         view::settings::{
             SettingChange, SettingControl,
             fixtures::{find, host_with, ids, project, same},
         },
     };
-    use agent_domain::RuntimeMode;
 
     #[test]
     fn each_row_belongs_to_exactly_one_section() {
@@ -186,6 +191,10 @@ mod tests {
                 (
                     "new-threads".into(),
                     vec![SettingId::DefaultModel, SettingId::DefaultPermissions]
+                ),
+                (
+                    "notifications".into(),
+                    vec![SettingId::NotificationMode, SettingId::InAppNotifications]
                 ),
             ]
         );
@@ -233,6 +242,40 @@ mod tests {
                     "behavior".into(),
                     vec![SettingId::TimeFormat, SettingId::ContinueAfterRestart]
                 ),
+                (
+                    "agent".into(),
+                    vec![
+                        SettingId::ProviderUpdateChecks,
+                        SettingId::AgentBrowserAccess
+                    ]
+                ),
+                (
+                    "maintenance".into(),
+                    vec![
+                        SettingId::ResponseStreaming,
+                        SettingId::AutoSettleOnMerge,
+                        SettingId::BackgroundActivity
+                    ]
+                ),
+                (
+                    "source-control".into(),
+                    vec![
+                        SettingId::DefaultAutoPull,
+                        SettingId::BranchNaming,
+                        SettingId::SourceControlWritingStyle,
+                        SettingId::FollowChangeRequestTemplates,
+                        SettingId::PullRequestMergeMethod
+                    ]
+                ),
+                (
+                    "storage".into(),
+                    vec![
+                        SettingId::StorageWorktreeAfterDays,
+                        SettingId::StorageWorktreeOnMerge,
+                        SettingId::StorageWorktreeOnDelete,
+                        SettingId::StorageWorktreeUnchanged
+                    ]
+                ),
                 ("beta".into(), vec![SettingId::WorkingSection]),
                 (
                     "new-threads".into(),
@@ -240,8 +283,13 @@ mod tests {
                         SettingId::DefaultModel,
                         SettingId::DefaultPermissions,
                         SettingId::DefaultWorkspace,
+                        SettingId::WorktreeSubmodules,
                         SettingId::StartFromOrigin
                     ]
+                ),
+                (
+                    "notifications".into(),
+                    vec![SettingId::NotificationMode, SettingId::InAppNotifications]
                 ),
             ]
         );
@@ -272,7 +320,7 @@ mod tests {
 
     #[test]
     fn each_control_value_becomes_its_intent() {
-        let mut snapshot = Snapshot::default();
+        let snapshot = Snapshot::default();
         let host = SettingsScope::Host;
         let on = SettingValue::Switch { on: true };
         same(
@@ -332,8 +380,11 @@ mod tests {
                 SettingId::DefaultPermissions,
                 &choice("auto"),
             ),
-            Some(Intent::SetDefaultRuntimeMode {
-                mode: RuntimeMode::Auto,
+            Some(Intent::UpdateSettings {
+                scope: SettingsScope::Host,
+                change: SettingChange::DefaultRuntimeMode {
+                    mode: agent_domain::RuntimeMode::Auto,
+                },
             }),
         );
         same(
@@ -343,24 +394,10 @@ mod tests {
                 SettingId::DefaultWorkspace,
                 &choice("worktree"),
             ),
-            None,
-        );
-        snapshot.workspace.worktree_settings = Some(WorktreeSettings {
-            worktree_directory: "/tmp/trees".into(),
-            ..Default::default()
-        });
-        same(
-            setting_intent(
-                &snapshot,
-                &host,
-                SettingId::DefaultWorkspace,
-                &choice("worktree"),
-            ),
-            Some(Intent::SaveWorktreeSettings {
-                settings: WorktreeSettings {
-                    create_on_new_session: true,
-                    worktree_directory: "/tmp/trees".into(),
-                    ..Default::default()
+            Some(Intent::UpdateSettings {
+                scope: SettingsScope::Host,
+                change: SettingChange::DefaultThreadEnvMode {
+                    mode: Some(agent_protocol::models::ThreadEnvMode::Worktree),
                 },
             }),
         );
@@ -471,7 +508,28 @@ mod tests {
                     vec![SettingId::AutoSettleInactiveThreads]
                 ),
                 ("behavior".into(), vec![SettingId::ContinueAfterRestart]),
-                ("new-threads".into(), vec![SettingId::StartFromOrigin]),
+                ("agent".into(), vec![SettingId::AgentBrowserAccess]),
+                (
+                    "maintenance".into(),
+                    vec![SettingId::ResponseStreaming, SettingId::AutoSettleOnMerge]
+                ),
+                (
+                    "source-control".into(),
+                    vec![
+                        SettingId::DefaultAutoPull,
+                        SettingId::BranchNaming,
+                        SettingId::PullRequestMergeMethod
+                    ]
+                ),
+                (
+                    "new-threads".into(),
+                    vec![
+                        SettingId::DefaultWorkspace,
+                        SettingId::WorktreeSubmodules,
+                        SettingId::DefaultPermissions,
+                        SettingId::StartFromOrigin
+                    ]
+                ),
             ]
         );
         assert_eq!(

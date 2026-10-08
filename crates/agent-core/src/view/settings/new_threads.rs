@@ -16,6 +16,7 @@ use crate::{
     },
 };
 use agent_domain::RuntimeMode;
+use agent_protocol::models::{ThreadEnvMode, WorktreeSubmodules};
 
 pub fn runtime_mode_id(mode: RuntimeMode) -> &'static str {
     match mode {
@@ -76,10 +77,100 @@ fn start_from_origin_row(on: bool, source: Option<SettingSource>) -> SettingsRow
     }
 }
 
+fn workspace_id(mode: Option<ThreadEnvMode>) -> &'static str {
+    match mode {
+        None => "automatic",
+        Some(ThreadEnvMode::Local) => "local",
+        Some(ThreadEnvMode::Worktree) => "worktree",
+    }
+}
+
+fn workspace_choices() -> Vec<SettingChoice> {
+    vec![
+        choice(
+            "automatic",
+            "Automatic",
+            Some("Use the project's checkout preference."),
+        ),
+        choice("local", "Current checkout", None),
+        choice("worktree", "New worktree", None),
+    ]
+}
+
+fn workspace_row(
+    mode: Option<ThreadEnvMode>,
+    source: Option<SettingSource>,
+    resettable: bool,
+) -> SettingsRow {
+    SettingsRow {
+        resettable,
+        source,
+        ..row(
+            SettingId::DefaultWorkspace,
+            "Workspace",
+            Some("Where new threads start."),
+            SettingControl::Choice {
+                choices: workspace_choices(),
+                selected: Some(workspace_id(mode).into()),
+            },
+        )
+    }
+}
+
+fn submodules_id(mode: Option<WorktreeSubmodules>) -> &'static str {
+    match mode {
+        None => "automatic",
+        Some(WorktreeSubmodules::Recursive) => "recursive",
+        Some(WorktreeSubmodules::TopLevel) => "top-level",
+        Some(WorktreeSubmodules::None) => "none",
+    }
+}
+
+fn submodules_choices() -> Vec<SettingChoice> {
+    vec![
+        choice(
+            "automatic",
+            "Automatic",
+            Some("Use the repository or Host's submodule preference."),
+        ),
+        choice(
+            "recursive",
+            "Recursive",
+            Some("Initialize nested submodules as well."),
+        ),
+        choice(
+            "top-level",
+            "Top level",
+            Some("Initialize only submodules declared by this repository."),
+        ),
+        choice("none", "Skip", Some("Leave submodules for a setup script.")),
+    ]
+}
+
+fn submodules_row(
+    mode: Option<WorktreeSubmodules>,
+    source: Option<SettingSource>,
+    resettable: bool,
+) -> SettingsRow {
+    SettingsRow {
+        resettable,
+        source,
+        ..row(
+            SettingId::WorktreeSubmodules,
+            "Submodules",
+            Some("How new worktrees initialize Git submodules."),
+            SettingControl::Choice {
+                choices: submodules_choices(),
+                selected: Some(submodules_id(mode).into()),
+            },
+        )
+    }
+}
+
 /// The picker the Model row opens: the new-thread default, which no open
 /// thread locks or limits.
 pub fn default_model_picker(snapshot: &Snapshot, options: &ModelPickerOptions) -> ModelPickerView {
-    let draft = &snapshot.default_draft;
+    let draft = snapshot.new_thread_default_draft();
     build_model_picker(
         &catalog(snapshot),
         &draft.instance_id,
@@ -95,10 +186,12 @@ pub(super) const SECTION: Section = Section {
         SettingId::DefaultModel,
         SettingId::DefaultPermissions,
         SettingId::DefaultWorkspace,
+        SettingId::WorktreeSubmodules,
         SettingId::StartFromOrigin,
     ],
     host: |context: &Context| {
         let snapshot = context.snapshot;
+        let host = context.host;
         let draft = &snapshot.default_draft;
         let models = catalog(snapshot);
         let traits = build_traits(&models, draft, false);
@@ -113,40 +206,53 @@ pub(super) const SECTION: Section = Section {
                 },
             ),
             SettingsRow {
-                resettable: draft.runtime_mode != RuntimeMode::FullAccess,
+                resettable: host.map_or(draft.runtime_mode != RuntimeMode::FullAccess, |host| {
+                    host.default_runtime_mode != HostSettings::default().default_runtime_mode
+                }),
                 ..row(
                     SettingId::DefaultPermissions,
                     "Permissions",
                     Some("Default permissions for new threads."),
                     SettingControl::Choice {
                         choices: runtime_mode_choices(),
-                        selected: Some(runtime_mode_id(draft.runtime_mode).into()),
+                        selected: Some(
+                            runtime_mode_id(
+                                context
+                                    .host
+                                    .map_or(draft.runtime_mode, |host| host.default_runtime_mode),
+                            )
+                            .into(),
+                        ),
                     },
                 )
             },
         ];
-        if let Some(worktrees) = &snapshot.workspace.worktree_settings {
-            rows.push(row(
-                SettingId::DefaultWorkspace,
-                "Workspace",
-                Some("Where new threads start."),
-                SettingControl::Choice {
-                    choices: vec![
-                        choice("local", "Current checkout", None),
-                        choice("worktree", "New worktree", None),
-                    ],
-                    selected: Some(
-                        if worktrees.create_on_new_session {
-                            "worktree"
-                        } else {
-                            "local"
-                        }
-                        .into(),
-                    ),
-                },
-            ));
-        }
         if let Some(host) = context.host {
+            let mode = host.default_thread_env_mode.or_else(|| {
+                snapshot
+                    .workspace
+                    .worktree_settings
+                    .as_ref()
+                    .map(|settings| {
+                        if settings.create_on_new_session {
+                            ThreadEnvMode::Worktree
+                        } else {
+                            ThreadEnvMode::Local
+                        }
+                    })
+            });
+            rows.insert(
+                2,
+                workspace_row(mode, None, host.default_thread_env_mode.is_some()),
+            );
+            rows.insert(
+                3,
+                submodules_row(
+                    host.worktree_submodules,
+                    None,
+                    host.worktree_submodules.is_some(),
+                ),
+            );
             rows.push(start_from_origin_row(
                 host.new_worktrees_start_from_origin,
                 None,
@@ -158,14 +264,39 @@ pub(super) const SECTION: Section = Section {
         Some(section(
             "new-threads",
             "New threads",
-            vec![start_from_origin_row(
-                resolved.new_worktrees_start_from_origin.0,
-                Some(resolved.new_worktrees_start_from_origin.1),
-            )],
+            vec![
+                workspace_row(
+                    resolved.default_thread_env_mode.0,
+                    Some(resolved.default_thread_env_mode.1),
+                    resolved.default_thread_env_mode.1 == SettingSource::Project,
+                ),
+                submodules_row(
+                    resolved.worktree_submodules.0,
+                    Some(resolved.worktree_submodules.1),
+                    resolved.worktree_submodules.1 == SettingSource::Project,
+                ),
+                SettingsRow {
+                    resettable: resolved.default_runtime_mode.1 == SettingSource::Project,
+                    source: Some(resolved.default_runtime_mode.1),
+                    ..row(
+                        SettingId::DefaultPermissions,
+                        "Permissions",
+                        Some("Default permissions for new threads."),
+                        SettingControl::Choice {
+                            choices: runtime_mode_choices(),
+                            selected: Some(runtime_mode_id(resolved.default_runtime_mode.0).into()),
+                        },
+                    )
+                },
+                start_from_origin_row(
+                    resolved.new_worktrees_start_from_origin.0,
+                    Some(resolved.new_worktrees_start_from_origin.1),
+                ),
+            ],
             None,
         ))
     },
-    intent: |snapshot, scope, id, value| match (id, value) {
+    intent: |_, scope, id, value| match (id, value) {
         (SettingId::StartFromOrigin, SettingValue::Switch { on }) => Some(update(
             scope,
             SettingChange::NewWorktreesStartFromOrigin { on: *on },
@@ -173,20 +304,25 @@ pub(super) const SECTION: Section = Section {
         (SettingId::DefaultPermissions, SettingValue::Choice { id }) => RUNTIME_MODES
             .into_iter()
             .find(|mode| runtime_mode_id(*mode) == id)
-            .map(|mode| Intent::SetDefaultRuntimeMode { mode }),
+            .map(|mode| update(scope, SettingChange::DefaultRuntimeMode { mode })),
         (SettingId::DefaultWorkspace, SettingValue::Choice { id }) => {
-            let create_on_new_session = match id.as_str() {
-                "local" => false,
-                "worktree" => true,
+            let mode = match id.as_str() {
+                "automatic" => None,
+                "local" => Some(ThreadEnvMode::Local),
+                "worktree" => Some(ThreadEnvMode::Worktree),
                 _ => return None,
             };
-            let settings = snapshot.workspace.worktree_settings.clone()?;
-            Some(Intent::SaveWorktreeSettings {
-                settings: crate::models::WorktreeSettings {
-                    create_on_new_session,
-                    ..settings
-                },
-            })
+            Some(update(scope, SettingChange::DefaultThreadEnvMode { mode }))
+        }
+        (SettingId::WorktreeSubmodules, SettingValue::Choice { id }) => {
+            let mode = match id.as_str() {
+                "automatic" => None,
+                "recursive" => Some(WorktreeSubmodules::Recursive),
+                "top-level" => Some(WorktreeSubmodules::TopLevel),
+                "none" => Some(WorktreeSubmodules::None),
+                _ => return None,
+            };
+            Some(update(scope, SettingChange::WorktreeSubmodules { mode }))
         }
         _ => None,
     },
@@ -197,13 +333,27 @@ pub(super) const SECTION: Section = Section {
                 on: HostSettings::default().new_worktrees_start_from_origin,
             },
         )),
-        SettingId::DefaultPermissions => Some(Intent::SetDefaultRuntimeMode {
-            mode: Draft::default().runtime_mode,
-        }),
+        SettingId::DefaultPermissions => Some(update(
+            &SettingsScope::Host,
+            SettingChange::DefaultRuntimeMode {
+                mode: Draft::default().runtime_mode,
+            },
+        )),
+        SettingId::DefaultWorkspace => Some(update(
+            &SettingsScope::Host,
+            SettingChange::DefaultThreadEnvMode { mode: None },
+        )),
+        SettingId::WorktreeSubmodules => Some(update(
+            &SettingsScope::Host,
+            SettingChange::WorktreeSubmodules { mode: None },
+        )),
         _ => None,
     },
     inherit: |id| match id {
         SettingId::StartFromOrigin => Some(ProjectSettingKey::NewWorktreesStartFromOrigin),
+        SettingId::DefaultPermissions => Some(ProjectSettingKey::DefaultRuntimeMode),
+        SettingId::DefaultWorkspace => Some(ProjectSettingKey::DefaultThreadEnvMode),
+        SettingId::WorktreeSubmodules => Some(ProjectSettingKey::WorktreeSubmodules),
         _ => None,
     },
 };

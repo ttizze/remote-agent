@@ -6,7 +6,7 @@ use crate::{
     ProjectStore, terminals::Terminals, workspace_files::WorkspaceFiles, worktrees::Worktrees,
 };
 use agent_domain::{AttachmentKind, BranchNaming, CheckpointFile, ThreadId};
-use agent_protocol::models::{AutoSettle, Project, ProjectRoot, ProjectScript};
+use agent_protocol::models::{AutoSettle, Project, ProjectRoot, ProjectScript, WorktreeSubmodules};
 use agent_runtime::{
     ConversationSettings, CreatedWorktree, HostOperations, HostProject, PreparedRestore,
     SetupRequest, SetupRun, TextGenerationRequest, WorktreeRequest,
@@ -401,6 +401,28 @@ fn resolve_branch_naming(
     }
 }
 
+/// The submodule depth for a new worktree: project override, Host preference,
+/// then recursive initialization.
+fn resolve_worktree_submodules(
+    saved: &agent_protocol::models::HostSettings,
+    project: &str,
+) -> WorktreeSubmodules {
+    saved
+        .project_overrides
+        .get(project)
+        .and_then(|project| project.worktree_submodules)
+        .or(saved.worktree_submodules)
+        .unwrap_or(WorktreeSubmodules::Recursive)
+}
+
+fn resolve_default_auto_pull(saved: &agent_protocol::models::HostSettings, project: &str) -> bool {
+    saved
+        .project_overrides
+        .get(project)
+        .and_then(|project| project.default_auto_pull)
+        .unwrap_or(saved.default_auto_pull)
+}
+
 #[cfg(test)]
 mod settings_tests {
     use super::*;
@@ -453,6 +475,46 @@ mod settings_tests {
             resolve_branch_naming(&Default::default(), "any"),
             BranchNaming::default()
         );
+    }
+
+    #[test]
+    fn worktree_submodules_resolve_project_then_host_then_recursive() {
+        let mut saved = agent_protocol::models::HostSettings::default();
+        assert_eq!(
+            resolve_worktree_submodules(&saved, "project"),
+            WorktreeSubmodules::Recursive
+        );
+        saved.worktree_submodules = Some(WorktreeSubmodules::TopLevel);
+        assert_eq!(
+            resolve_worktree_submodules(&saved, "project"),
+            WorktreeSubmodules::TopLevel
+        );
+        saved.project_overrides.insert(
+            "project".into(),
+            ProjectSettingsOverrides {
+                worktree_submodules: Some(WorktreeSubmodules::None),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            resolve_worktree_submodules(&saved, "project"),
+            WorktreeSubmodules::None
+        );
+    }
+
+    #[test]
+    fn automatic_pull_resolves_a_project_override() {
+        let mut saved = agent_protocol::models::HostSettings::default();
+        saved.default_auto_pull = true;
+        assert!(resolve_default_auto_pull(&saved, "other"));
+        saved.project_overrides.insert(
+            "project".into(),
+            ProjectSettingsOverrides {
+                default_auto_pull: Some(false),
+                ..Default::default()
+            },
+        );
+        assert!(!resolve_default_auto_pull(&saved, "project"));
     }
 }
 
@@ -575,14 +637,19 @@ impl HostOperations for HostIo {
         request: WorktreeRequest,
     ) -> BoxFuture<'_, Result<CreatedWorktree, String>> {
         Box::pin(async move {
+            let saved = self.worktrees.latest_host_settings();
+            let auto_pull = resolve_default_auto_pull(&saved, &request.project);
+            let submodules = resolve_worktree_submodules(&saved, &request.project);
             let (path, branch) = self
                 .worktrees
-                .create(
+                .create_with_submodules(
                     request.thread.as_str(),
                     &request.project_root,
                     &request.base_ref,
                     request.branch,
                     request.start_from_origin,
+                    auto_pull,
+                    submodules,
                     request.progress,
                     request.cancel,
                 )

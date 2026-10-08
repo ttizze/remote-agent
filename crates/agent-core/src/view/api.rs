@@ -74,6 +74,8 @@ pub struct PreferencesView {
     pub working_section: bool,
     pub diff_ignore_whitespace: bool,
     pub follow_up: FollowUpBehavior,
+    pub notification_mode: crate::view::notifications::NotificationMode,
+    pub in_app_notifications_enabled: bool,
 }
 
 impl Snapshot {
@@ -359,6 +361,8 @@ impl Snapshot {
             working_section: preferences.working_section,
             diff_ignore_whitespace: preferences.diff_ignore_whitespace,
             follow_up: self.follow_up,
+            notification_mode: preferences.notification_mode,
+            in_app_notifications_enabled: preferences.in_app_notifications_enabled,
         }
     }
     /// The project's icon; `None` shows its initials. Clients cache the image

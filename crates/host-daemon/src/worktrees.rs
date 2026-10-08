@@ -1,5 +1,7 @@
 use agent_domain::{WorktreeSetupStageId, WorktreeSetupStageStatus};
-use agent_protocol::models::{HostSettings, HostSettingsPatch, Worktree, WorktreeSettings};
+use agent_protocol::models::{
+    HostSettings, HostSettingsPatch, Worktree, WorktreeSettings, WorktreeSubmodules,
+};
 use agent_runtime::{SetupEvent, SetupProgress};
 use anyhow::{Context as _, Result, anyhow};
 use serde::{Deserialize, Serialize};
@@ -142,6 +144,72 @@ impl Worktrees {
         .await
     }
 
+    /// Applies the safe storage cleanup rules to managed worktrees. The caller
+    /// supplies paths with active runs or terminals so those checkouts remain
+    /// protected while clean, inactive checkouts are evaluated.
+    pub(crate) async fn cleanup_storage(
+        &self,
+        protected: &HashSet<String>,
+        live_threads: Option<&HashSet<String>>,
+    ) -> Result<usize> {
+        let protected = protected.clone();
+        let live_threads = live_threads.cloned();
+        self.locked(move |path| {
+            let mut state = read(path)?;
+            let rules = match &state.host.worktree_cleanup {
+                Some(agent_protocol::models::WorktreeCleanup::Off) => return Ok(0),
+                Some(agent_protocol::models::WorktreeCleanup::Custom { rules }) => rules.clone(),
+                None => state.host.storage_cleanup.worktree_rules(),
+            };
+            if !rules.worktree_on_merge
+                && !rules.worktree_on_delete
+                && !rules.worktree_unchanged
+                && rules.worktree_after_days.is_none()
+            {
+                return Ok(0);
+            }
+            let candidates = state
+                .workspace_roots
+                .iter()
+                .filter(|(target, _)| !protected.contains(*target))
+                .map(|(target, project)| (target.clone(), project.clone()))
+                .collect::<Vec<_>>();
+            let mut removed = 0;
+            for (target, project) in candidates {
+                let status = directory_status(Path::new(&target), None, None, None)?;
+                let old = rules
+                    .worktree_after_days
+                    .is_some_and(|days| older_than(Path::new(&target), days));
+                let deleted = live_threads.as_ref().is_some_and(|live| {
+                    state
+                        .threads
+                        .iter()
+                        .any(|(thread, checkout)| checkout.path == target && !live.contains(thread))
+                });
+                if !storage_eligible(status, rules.worktree_on_merge, rules.worktree_unchanged)
+                    && !(old && status != Some(agent_protocol::models::WorktreeStatus::Unmerged))
+                    && !deleted_storage_eligible(status, rules.worktree_on_delete && deleted)
+                {
+                    continue;
+                }
+                if !already_removed(&target, &project)? {
+                    crate::git::text(
+                        Path::new(&project),
+                        &["worktree", "remove", "--", target.as_str()],
+                    )?;
+                }
+                remove_session_folder(&target, &project);
+                state.workspace_roots.remove(&target);
+                removed += 1;
+            }
+            if removed > 0 {
+                save(path, &state)?;
+            }
+            Ok(removed)
+        })
+        .await
+    }
+
     /// Removes a checkout a launch gives up, with whatever its setup changed,
     /// and keeps its branch.
     pub(crate) async fn abandon(&self, target: String) -> Result<()> {
@@ -241,6 +309,10 @@ impl Worktrees {
                 } else {
                     &[]
                 },
+                state
+                    .host
+                    .worktree_submodules
+                    .unwrap_or(WorktreeSubmodules::Recursive),
                 &CancellationToken::new(),
             )?;
             if !cwd.is_dir() {
@@ -295,6 +367,35 @@ impl Worktrees {
         progress: SetupProgress,
         cancel: CancellationToken,
     ) -> Result<(PathBuf, String)> {
+        let auto_pull = self.latest_host_settings().default_auto_pull;
+        self.create_with_submodules(
+            thread,
+            cwd,
+            base_ref,
+            branch,
+            start_from_origin,
+            auto_pull,
+            WorktreeSubmodules::Recursive,
+            progress,
+            cancel,
+        )
+        .await
+    }
+
+    /// Creates a checkout using the resolved project submodule preference.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn create_with_submodules(
+        &self,
+        thread: &str,
+        cwd: &str,
+        base_ref: &str,
+        branch: Option<String>,
+        start_from_origin: bool,
+        auto_pull: bool,
+        submodules: WorktreeSubmodules,
+        progress: SetupProgress,
+        cancel: CancellationToken,
+    ) -> Result<(PathBuf, String)> {
         let (thread, cwd, base_ref) = (thread.to_owned(), PathBuf::from(cwd), base_ref.to_owned());
         let stop = cancel.child_token();
         let dropped = stop.clone().drop_guard();
@@ -303,18 +404,29 @@ impl Worktrees {
                 let cancel = stop;
                 let mut state = read(path)?;
                 let stage = |id, status| progress.report(SetupEvent::Stage(id, status));
+                let auto_pulled = auto_pull && !start_from_origin && automatic_pull(&cwd, &cancel)?;
+                if auto_pulled {
+                    stage(
+                        WorktreeSetupStageId::Fetch,
+                        WorktreeSetupStageStatus::Running,
+                    );
+                    stage(WorktreeSetupStageId::Fetch, WorktreeSetupStageStatus::Done);
+                }
                 let base = || {
                     // "Start from origin" applies only when the repository has an origin.
                     let from_origin = start_from_origin
                         && crate::git::output(&cwd, &["remote", "get-url", "origin"]).is_ok();
-                    stage(
-                        WorktreeSetupStageId::Fetch,
-                        if from_origin {
-                            WorktreeSetupStageStatus::Running
-                        } else {
-                            WorktreeSetupStageStatus::Skipped
-                        },
-                    );
+                    if from_origin {
+                        stage(
+                            WorktreeSetupStageId::Fetch,
+                            WorktreeSetupStageStatus::Running,
+                        );
+                    } else if !auto_pulled {
+                        stage(
+                            WorktreeSetupStageId::Fetch,
+                            WorktreeSetupStageStatus::Skipped,
+                        );
+                    }
                     let start = if from_origin {
                         origin_start(&cwd, &base_ref, &cancel)?
                     } else {
@@ -329,12 +441,68 @@ impl Worktrees {
                     );
                     Ok(start)
                 };
-                checkout(path, &mut state, &thread, &cwd, base, branch, &cancel)
+                checkout(
+                    path, &mut state, &thread, &cwd, base, branch, submodules, &cancel,
+                )
             })
             .await;
         dropped.disarm();
         created
     }
+}
+
+/// Pulls only a clean checkout that tracks a remote and has no local commits.
+/// A user's dirty or unpublished branch is left alone when a new thread starts.
+fn automatic_pull(cwd: &Path, cancel: &CancellationToken) -> Result<bool> {
+    let clean = crate::git::output(
+        cwd,
+        &["status", "--porcelain=v1", "--untracked-files=normal"],
+    )
+    .is_ok_and(|output| output.stdout.is_empty());
+    if !clean
+        || crate::git::output(
+            cwd,
+            &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+        )
+        .is_err()
+    {
+        return Ok(false);
+    }
+    let ahead = crate::git::text(cwd, &["rev-list", "--count", "@{u}..HEAD"])
+        .ok()
+        .and_then(|value| value.trim().parse::<u32>().ok())
+        .unwrap_or(1);
+    if ahead != 0 {
+        return Ok(false);
+    }
+    crate::git::cancellable(cwd, &["pull", "--ff-only"], cancel)
+        .context("automatic pull before creating a worktree failed")?;
+    Ok(true)
+}
+
+fn storage_eligible(
+    status: Option<agent_protocol::models::WorktreeStatus>,
+    remove_merged: bool,
+    remove_unchanged: bool,
+) -> bool {
+    (remove_merged && status == Some(agent_protocol::models::WorktreeStatus::Merged))
+        || (remove_unchanged && status.is_none())
+}
+
+fn deleted_storage_eligible(
+    status: Option<agent_protocol::models::WorktreeStatus>,
+    thread_deleted: bool,
+) -> bool {
+    thread_deleted && status != Some(agent_protocol::models::WorktreeStatus::Unmerged)
+}
+
+fn older_than(path: &Path, days: u32) -> bool {
+    let Ok(modified) = fs::metadata(path).and_then(|metadata| metadata.modified()) else {
+        return false;
+    };
+    std::time::SystemTime::now()
+        .duration_since(modified)
+        .is_ok_and(|age| age >= std::time::Duration::from_secs(u64::from(days) * 86_400))
 }
 
 /// Removes the empty session folder of the named-checkout layout. Old worktrees
@@ -542,6 +710,7 @@ fn checkout(
     cwd: &Path,
     base: impl FnOnce() -> Result<String>,
     branch: Option<String>,
+    submodules: WorktreeSubmodules,
     cancel: &CancellationToken,
 ) -> Result<(PathBuf, String)> {
     // Branch names reach Git as arguments; reject what Git would not accept as
@@ -631,6 +800,7 @@ fn checkout(
             } else {
                 &[]
             },
+            submodules,
             cancel,
         )?;
         Ok::<_, anyhow::Error>(base.is_some())
@@ -952,6 +1122,7 @@ fn create_checkout(
     branch: &str,
     base: Option<&str>,
     copy_paths: &[String],
+    submodules: WorktreeSubmodules,
     cancel: &CancellationToken,
 ) -> Result<()> {
     let destination_text = destination.to_str().context("worktree path is not UTF-8")?;
@@ -992,7 +1163,7 @@ fn create_checkout(
         );
     }
     let prepared = (|| {
-        update_submodules(destination, cancel)?;
+        update_submodules(destination, submodules, cancel)?;
         for entry in copy_paths {
             let relative = relative_path(entry)?;
             let path = source.join(relative);
@@ -1015,15 +1186,25 @@ fn create_checkout(
 /// `git worktree add` leaves submodules empty. Like the reference, a checkout
 /// with `.gitmodules` initializes them recursively, best effort: a failure
 /// leaves them empty without failing the checkout. Only cancellation fails it.
-fn update_submodules(destination: &Path, cancel: &CancellationToken) -> Result<()> {
+fn update_submodules(
+    destination: &Path,
+    submodules: WorktreeSubmodules,
+    cancel: &CancellationToken,
+) -> Result<()> {
+    if submodules == WorktreeSubmodules::None {
+        return Ok(());
+    }
     if !destination.join(".gitmodules").exists() {
         return Ok(());
     }
-    match crate::git::cancellable(
-        destination,
-        &["submodule", "update", "--init", "--recursive"],
-        cancel,
-    ) {
+    let args = match submodules {
+        WorktreeSubmodules::Recursive => {
+            ["submodule", "update", "--init", "--recursive"].as_slice()
+        }
+        WorktreeSubmodules::TopLevel => ["submodule", "update", "--init"].as_slice(),
+        WorktreeSubmodules::None => unreachable!(),
+    };
+    match crate::git::cancellable(destination, args, cancel) {
         Err(error) if error.is::<crate::git::Cancelled>() => Err(error),
         Err(error) => {
             tracing::warn!(
@@ -1150,6 +1331,28 @@ fn copy(source: &Path, target: &Path) -> Result<()> {
 mod tests {
     use super::*;
     use serde_json::Value;
+
+    #[test]
+    fn storage_cleanup_only_selects_enabled_safe_states() {
+        use agent_protocol::models::WorktreeStatus;
+
+        assert!(storage_eligible(Some(WorktreeStatus::Merged), true, false));
+        assert!(!storage_eligible(
+            Some(WorktreeStatus::Unmerged),
+            true,
+            true
+        ));
+        assert!(storage_eligible(None, false, true));
+        assert!(!storage_eligible(None, false, false));
+        assert!(deleted_storage_eligible(None, true));
+        assert!(deleted_storage_eligible(Some(WorktreeStatus::Merged), true));
+        assert!(!deleted_storage_eligible(
+            Some(WorktreeStatus::Unmerged),
+            true
+        ));
+        assert!(!deleted_storage_eligible(None, false));
+    }
+
     impl Worktrees {
         async fn configure(&self, update: Option<Value>) -> Result<Value> {
             let update = update.map(serde_json::from_value).transpose()?;
