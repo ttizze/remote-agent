@@ -207,6 +207,18 @@ Acceptance: `adding_a_chat_folder_registers_a_project_before_submission` and
 duplicate selections, and navigation races. Host registration and workspace
 matching are covered by `projects` tests.
 
+## Project icons in task lists
+
+Project headings in the task list use the Host's discovered favicon or app icon.
+The Host probes common local icon paths and HTML/route metadata, then sends a
+small PNG thumbnail so desktop and mobile render the same asset. A refresh
+rechecks changed or deleted icons. Missing or unreadable branding falls back to
+the shared core's stable colored monogram. Desktop uses a separate chevron for
+project disclosure and preserves the heading's new-chat action.
+
+Acceptance: `projects::icons` covers discovery, format normalization, refresh,
+and bounded local reads; `presentation::list` covers the shared fallback.
+
 ## Workspace folder labels
 
 Desktop shows the selected folder, execution Host and current Git branch in one

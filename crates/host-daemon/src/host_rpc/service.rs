@@ -1292,6 +1292,17 @@ impl HostRpcService {
             ));
         }
         let mut page = titles.finish();
+        page.projects = tokio::task::spawn_blocking(move || {
+            let mut projects = page.projects;
+            for project in &mut projects {
+                project.favicon_png = project.roots.iter().find_map(|root| {
+                    crate::projects::icons::resolve(std::path::Path::new(&root.path))
+                });
+            }
+            projects
+        })
+        .await
+        .map_err(|error| Failure::new("project_icons_unavailable", error))?;
         let sources: Vec<_> = page
             .data
             .iter()
@@ -1990,6 +2001,62 @@ mod tests {
                     .into_value();
                 assert_eq!(response["error"]["code"], "provider_unavailable");
                 assert_eq!(response["error"]["delivery"], "notSent");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn task_list_delivers_project_branding_to_core_and_refreshes_removed_icons() {
+        use super::*;
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("remote-agent");
+        let native = root.path().join("native");
+        std::fs::create_dir(&workspace).unwrap();
+        std::fs::create_dir_all(native.join("projects")).unwrap();
+        std::fs::write(workspace.join("favicon.svg"),
+            r##"<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32"><rect width="32" height="32" fill="#ff0000"/></svg>"##).unwrap();
+        let projects = ProjectStore::new(root.path().join("bex-worktrees.json"));
+        projects.register(&workspace).await.unwrap();
+        let service = HostRpcService::new(Err("unavailable".into()), projects);
+        service
+            .enable_claude(
+                root.path().join("does-not-exist"),
+                root.path().join("state"),
+                Some(native),
+            )
+            .await
+            .unwrap();
+        let session = service.open_session();
+        let call = agent_protocol::protocol::Call::ListSessions(
+            agent_protocol::operations::ListSessions {
+                query: Default::default(),
+            },
+        );
+        for has_icon in [true, false] {
+            if !has_icon {
+                std::fs::remove_file(workspace.join("favicon.svg")).unwrap();
+            }
+            let response = service.dispatch(session.id(), &call).await.unwrap();
+            let reply = agent_protocol::protocol::decode::<
+                Response<agent_protocol::models::ThreadList>,
+            >(&response.initial)
+            .unwrap();
+            let Response::Success { result } = reply else {
+                panic!("task list failed: {reply:?}")
+            };
+            let snapshot = agent_core::state::Snapshot {
+                threads: Some(Arc::new(result)),
+                ..Default::default()
+            };
+            let list = snapshot.thread_list().unwrap();
+            assert_eq!(list.projects.len(), 1);
+            let project = &list.projects[0];
+            assert_eq!(project.monogram, "RA");
+            assert_eq!(project.icon_png.is_some(), has_icon);
+            if let Some(png) = &project.icon_png {
+                let image = image::load_from_memory(png).unwrap().into_rgba8();
+                assert_eq!(image.dimensions(), (64, 64));
+                assert_eq!(image.get_pixel(32, 32).0, [255, 0, 0, 255]);
             }
         }
     }

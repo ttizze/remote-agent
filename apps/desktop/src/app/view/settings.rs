@@ -16,27 +16,29 @@ impl Desktop {
     }
 
     pub(super) fn settings_sidebar(&self, cx: &Context<Self>) -> Sidebar<SidebarSection> {
-        let mut navigation = SidebarMenu::new().gap_1();
+        let mut navigation = Vec::new();
         for (label, icon, page) in [
             ("モデル", IconName::Settings, SettingsPage::Models),
             ("エージェント", IconName::User, SettingsPage::Agents),
             ("端末と接続", IconName::Network, SettingsPage::Connections),
             ("ワークツリー", IconName::Folder, SettingsPage::Worktrees),
         ] {
-            navigation = navigation.child(
+            navigation.push(
                 SidebarMenuItem::new(label)
                     .icon(icon)
                     .active(self.settings_page == page)
                     .on_click(cx.listener(move |s, _, _, cx| {
                         s.settings_page = page;
                         cx.notify();
-                    })),
+                    }))
+                    .into(),
             );
         }
         Sidebar::new("settings-sidebar")
             .child(SidebarSection {
                 label: "設定",
                 menu: navigation,
+                collapsed: false,
                 add_project: None,
             })
             .footer(

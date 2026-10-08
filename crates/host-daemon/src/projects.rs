@@ -6,6 +6,7 @@ use std::{
     sync::Arc,
 };
 
+pub(crate) mod icons;
 pub(crate) mod state;
 pub(crate) mod titles;
 /// The Host owns project registration independently of native provider catalogs.
@@ -63,6 +64,7 @@ impl ProjectStore {
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_else(|| path.into()),
             roots: vec![agent_protocol::models::ProjectRoot { path: path.into() }],
+            favicon_png: None,
         });
         let file = self.path.with_file_name("bex-projects.json");
         let bytes = serde_json::to_vec(&projects)?;

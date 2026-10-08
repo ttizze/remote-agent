@@ -1,6 +1,61 @@
 //! The visible list combines wire summaries with locally observed activity.
-use crate::{models::Project, state::Snapshot};
+use crate::{
+    models::{Project, ProjectRoot},
+    state::Snapshot,
+};
+use base64::Engine;
 use std::collections::HashSet;
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct ProjectSummary {
+    pub id: String,
+    pub name: String,
+    pub roots: Vec<ProjectRoot>,
+    pub icon_png: Option<Vec<u8>>,
+    pub monogram: String,
+    pub icon_color: u32,
+}
+
+fn project_summary(project: &Project) -> ProjectSummary {
+    let name = project.name.trim();
+    let mut words = name
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|word| !word.is_empty());
+    let monogram = words
+        .next()
+        .map(|word| {
+            let first = word.chars().next().unwrap();
+            let second = word
+                .chars()
+                .skip(1)
+                .find(|c| c.is_numeric())
+                .or_else(|| words.next_back().and_then(|last| last.chars().next()))
+                .unwrap_or_else(|| word.chars().next_back().unwrap());
+            format!("{first}{second}")
+                .to_uppercase()
+                .chars()
+                .take(2)
+                .collect()
+        })
+        .unwrap_or_else(|| "PR".into());
+    const COLORS: [u32; 8] = [
+        0x60a5fa, 0xa78bfa, 0xf472b6, 0xfb923c, 0xfbbf24, 0x4ade80, 0x2dd4bf, 0x38bdf8,
+    ];
+    let index = name
+        .to_lowercase()
+        .chars()
+        .fold(0, |index, c| (index * 31 + c as usize) % COLORS.len());
+    ProjectSummary {
+        id: project.id.clone(),
+        name: project.name.clone(),
+        roots: project.roots.clone(),
+        icon_png: project
+            .favicon_png
+            .as_ref()
+            .and_then(|png| base64::engine::general_purpose::STANDARD.decode(png).ok()),
+        monogram,
+        icon_color: COLORS[index],
+    }
+}
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct ThreadSummary {
     pub id: crate::session::SessionRef,
@@ -14,7 +69,7 @@ pub struct ThreadSummary {
 pub struct ThreadList {
     pub notice: Option<String>,
     pub threads: Vec<ThreadSummary>,
-    pub projects: Vec<Project>,
+    pub projects: Vec<ProjectSummary>,
     pub more_project_ids: Vec<String>,
     pub has_more_chats: bool,
     pub has_more_projects: bool,
@@ -97,7 +152,7 @@ impl Snapshot {
                     })
                 })
                 .collect(),
-            projects: list.projects.clone(),
+            projects: list.projects.iter().map(project_summary).collect(),
             more_project_ids: list.more_project_ids.clone(),
             has_more_chats: list.has_more_chats,
             has_more_projects: list.has_more_projects,
@@ -112,6 +167,35 @@ mod tests {
     use crate::state::operations::Operation;
     use agent_protocol::models;
     use serde_json::json;
+
+    #[rstest::rstest]
+    #[case("remote-agent", "RA")]
+    #[case("t3code", "T3")]
+    #[case("Bex", "BX")]
+    #[case("日本語プロジェクト", "日ト")]
+    #[case("", "PR")]
+    #[case(" !!! ", "PR")]
+    fn project_names_receive_shared_monograms(#[case] name: &str, #[case] monogram: &str) {
+        let project = Project {
+            name: name.into(),
+            ..Default::default()
+        };
+        let summary = project_summary(&project);
+        assert_eq!(summary.monogram, monogram);
+        assert!(summary.icon_png.is_none());
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn project_identity_is_bounded_and_ignores_surrounding_whitespace(name in ".{0,80}") {
+            let project = |name| Project { name, ..Default::default() };
+            let plain = project_summary(&project(name.clone()));
+            let padded = project_summary(&project(format!(" \t{name}\n ")));
+            proptest::prop_assert_eq!(plain.monogram.chars().count(), 2);
+            proptest::prop_assert_eq!(plain.monogram, padded.monogram);
+            proptest::prop_assert_eq!(plain.icon_color, padded.icon_color);
+        }
+    }
 
     #[test]
     fn list_preserves_order_and_only_exposes_known_project_membership() {

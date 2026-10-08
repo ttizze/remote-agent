@@ -20,12 +20,6 @@ struct Invitation {
     pub transcription_recipient: Option<String>,
 }
 #[uniffi::remote(Record)]
-struct Project {
-    pub id: String,
-    pub name: String,
-    pub roots: Vec<ProjectRoot>,
-}
-#[uniffi::remote(Record)]
 struct ProjectRoot {
     pub path: String,
 }

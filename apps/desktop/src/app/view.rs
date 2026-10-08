@@ -12,7 +12,7 @@ use agent_core::{presentation::error::error_message, state::operations as op};
 use base64::Engine;
 use gpui_kit::component::{
     resizable::{h_resizable, resizable_panel},
-    sidebar::{Sidebar, SidebarItem, SidebarMenu, SidebarMenuItem},
+    sidebar::{Sidebar, SidebarItem, SidebarMenuItem},
     tab::{Tab as UiTab, TabBar},
 };
 use std::path::PathBuf;
