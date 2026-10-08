@@ -1,7 +1,6 @@
 package dev.remoteagent.mobile
 
 import android.Manifest
-import android.app.Application
 import android.app.NotificationManager
 import android.content.Context
 import org.junit.Assert.assertEquals
@@ -18,7 +17,7 @@ import org.robolectric.annotation.Config
 @Config(manifest = Config.NONE, sdk = [35])
 class LocalNotificationsTest {
     private fun context(): Context {
-        val context = RuntimeEnvironment.getApplication<Application>()
+        val context = RuntimeEnvironment.getApplication()
         shadowOf(context).grantPermissions(Manifest.permission.POST_NOTIFICATIONS)
         LocalNotifications.clearDelivered(context)
         return context
