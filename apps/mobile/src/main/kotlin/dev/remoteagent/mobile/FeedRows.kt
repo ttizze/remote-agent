@@ -281,7 +281,7 @@ private fun AssistantMessage(model: AndroidAppModel, row: AssistantMessageRow, c
     Column(
         Modifier.fillMaxWidth().padding(horizontal = 3.5.dp).padding(bottom = if (row.meta == null) 3.5.dp else 0.dp)
     ) {
-        MarkdownText(row.text)
+        MarkdownText(row.text, onUseArtifactTemplate = model::useArtifactTemplate)
         MessageAttachments(model, row.attachments, alignEnd = false)
         row.changedFiles?.let { ChangedFiles(it, actions) }
         row.meta?.let { MetaRow(it, createdAt, actions) }

@@ -52,6 +52,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -103,9 +105,16 @@ internal fun Composer(model: AndroidAppModel, composer: ComposerView, onOpenSett
     val colors = AppTheme.colors
     var value by remember(composer.draftKey) { mutableStateOf(TextFieldValue(model.composerText)) }
     var focused by remember { mutableStateOf(false) }
+    val focusRequester = remember { FocusRequester() }
     LaunchedEffect(model.composerText) {
         if (value.text != model.composerText)
             value = TextFieldValue(model.composerText, TextRange(model.composerText.length))
+    }
+    LaunchedEffect(model.composerFocusRequests) {
+        if (model.composerFocusRequests > 0) {
+            value = TextFieldValue(model.composerText, TextRange(model.composerText.length))
+            focusRequester.requestFocus()
+        }
     }
     val expanded = focused || value.text.isNotEmpty() || composer.attachments.isNotEmpty()
     LaunchedEffect(composer.draftKey, value.text, value.selection) {
@@ -171,7 +180,7 @@ internal fun Composer(model: AndroidAppModel, composer: ComposerView, onOpenSett
                         value = next
                         if (changed) model.editDraft(next.text)
                     },
-                    modifier.onFocusChanged { focused = it.isFocused },
+                    modifier.focusRequester(focusRequester).onFocusChanged { focused = it.isFocused },
                     enabled = !composer.editor.disabled,
                     readOnly = voice.blocksSubmission,
                     textStyle = AppTheme.body.copy(color = colors.foreground),

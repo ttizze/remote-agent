@@ -4,6 +4,8 @@ import UIKit
 
 struct ConversationMarkdown: View {
     let source: String
+    /// Set where a card's "Use template" can reach the composer; plans and reasoning show cards without it.
+    var useArtifactTemplate: ((ArtifactTemplate) -> Void)?
     @State private var blocks: [MarkdownBlock] = []
     @Environment(\.markdownLinks) private var links
     var body: some View {
@@ -63,6 +65,8 @@ struct ConversationMarkdown: View {
                 case let .visualization(path):
                     Text(path).font(AppTheme.font(12)).foregroundStyle(AppTheme.tertiary)
                         .textSelection(.enabled)
+                case let .artifactTemplate(template):
+                    ArtifactTemplateCard(template: template, onUse: useArtifactTemplate)
                 }
             }
         }.tint(AppTheme.color("mobileMarkdownLink"))
@@ -95,5 +99,63 @@ struct ConversationMarkdown: View {
             result += text
         }
         return result
+    }
+}
+
+/// A `::artifact-template` card: the template's icon with a sparkle badge, its name and kind,
+/// and "Use template" when the card can reach the composer.
+struct ArtifactTemplateCard: View {
+    let template: ArtifactTemplate
+    let onUse: ((ArtifactTemplate) -> Void)?
+    private static let badge = Color(red: 0.851, green: 0.275, blue: 0.937)
+
+    var body: some View {
+        HStack(spacing: 12) {
+            ZStack(alignment: .bottomTrailing) {
+                Image(systemName: symbolName)
+                    .font(.system(size: 20))
+                    .foregroundStyle(AppTheme.muted)
+                    .frame(width: 40, height: 40)
+                    .background(AppTheme.subtle, in: RoundedRectangle(cornerRadius: 12))
+                    .overlay(RoundedRectangle(cornerRadius: 12).stroke(AppTheme.border))
+                Image(systemName: "sparkles")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.white)
+                    .frame(width: 16, height: 16)
+                    .background(Self.badge, in: Circle())
+                    .offset(x: 4, y: 4)
+            }
+            VStack(alignment: .leading, spacing: 2) {
+                Text(template.displayName).font(AppTheme.font(14, weight: .bold)).foregroundStyle(AppTheme.text)
+                    .lineLimit(1)
+                Text(artifactTemplatePresentationLabel(kind: template.artifactKind))
+                    .font(AppTheme.font(12)).foregroundStyle(AppTheme.muted)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            if let onUse {
+                Button { onUse(template) } label: {
+                    Text("Use template").font(AppTheme.font(12, weight: .bold)).foregroundStyle(AppTheme.text)
+                        .padding(.horizontal, 12).frame(minHeight: 36)
+                        .background(AppTheme.subtle, in: RoundedRectangle(cornerRadius: 8))
+                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(AppTheme.border))
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Use \(template.displayName) template")
+            }
+        }
+        .padding(12)
+        .background(AppTheme.card, in: RoundedRectangle(cornerRadius: 16))
+        .overlay(RoundedRectangle(cornerRadius: 16).stroke(AppTheme.border))
+        .padding(.vertical, 8)
+    }
+
+    private var symbolName: String {
+        switch artifactTemplateSymbol(kind: template.artifactKind) {
+        case .document: "doc.text"
+        case .chart: "chart.bar.xaxis"
+        case .browser: "safari"
+        case .camera: "camera"
+        case .message: "text.bubble"
+        }
     }
 }

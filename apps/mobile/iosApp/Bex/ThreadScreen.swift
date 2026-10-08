@@ -192,7 +192,8 @@ struct ThreadScreen: View {
                 }
             },
             openThread: { model.openThread($0) },
-            download: model.downloadAttachment
+            download: model.downloadAttachment,
+            useArtifactTemplate: { model.useArtifactTemplate($0) }
         )
     }
 

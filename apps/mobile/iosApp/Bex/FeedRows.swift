@@ -8,6 +8,8 @@ struct FeedActions {
     let fork: (String) -> Void
     let openThread: (String) -> Void
     let download: (String, String) async throws -> URL
+    /// "Use template" on an artifact card adds its prompt to the draft.
+    let useArtifactTemplate: (ArtifactTemplate) -> Void
 }
 
 struct FeedRowView: View, Equatable {
@@ -51,7 +53,8 @@ struct FeedRowView: View, Equatable {
         case let .assistantMessage(message):
             VStack(alignment: .leading, spacing: 3.5) {
                 if !message.text.isEmpty {
-                    ConversationMarkdown(source: message.text).padding(.horizontal, 3.5)
+                    ConversationMarkdown(source: message.text, useArtifactTemplate: actions.useArtifactTemplate)
+                        .padding(.horizontal, 3.5)
                 }
                 if !message.attachments.isEmpty {
                     MessageAttachments(attachments: message.attachments, download: actions.download)

@@ -15,6 +15,8 @@ final class BexAppViewModel: ObservableObject {
     @Published var profiles: [HostProfile] = []
     @Published private(set) var selectedProfileId: String?
     @Published var composerText = ""
+    /// Counts requests to focus the composer with the cursor at the end of the draft.
+    @Published var composerFocusRequests = 0
     var draftEdits = DraftRevision()
     private var composerKey = ""
     @Published var timelineRows: [TimelineRow] = []

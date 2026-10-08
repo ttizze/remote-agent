@@ -112,7 +112,7 @@ const PROMPT: &str = "Create a document using this $artifact-template-hello-worl
 #[test]
 fn adds_the_prompt_to_an_empty_draft() {
     assert_eq!(
-        append_artifact_template_use_prompt("", &hello_world()),
+        append_artifact_template_use_prompt(String::new(), hello_world()),
         PROMPT
     );
 }
@@ -120,7 +120,7 @@ fn adds_the_prompt_to_an_empty_draft() {
 #[test]
 fn preserves_existing_draft_text() {
     assert_eq!(
-        append_artifact_template_use_prompt("Write about otters", &hello_world()),
+        append_artifact_template_use_prompt("Write about otters".into(), hello_world()),
         format!("Write about otters {PROMPT}")
     );
 }
@@ -133,7 +133,7 @@ fn does_not_append_the_same_final_prompt_twice() {
         format!("Notes\n\n{PROMPT}"),
     ] {
         assert_eq!(
-            append_artifact_template_use_prompt(&draft, &hello_world()),
+            append_artifact_template_use_prompt(draft.clone(), hello_world()),
             draft
         );
     }
@@ -143,7 +143,7 @@ fn does_not_append_the_same_final_prompt_twice() {
 fn does_not_mistake_text_containing_the_prompt_for_a_final_prompt() {
     let draft = format!("{PROMPT}\nAdditional instructions");
     assert_eq!(
-        append_artifact_template_use_prompt(&draft, &hello_world()),
+        append_artifact_template_use_prompt(draft.clone(), hello_world()),
         format!("{draft} {PROMPT}")
     );
 }

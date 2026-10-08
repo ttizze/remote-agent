@@ -18,12 +18,24 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.Message
+import androidx.compose.material.icons.automirrored.outlined.OpenInNew
+import androidx.compose.material.icons.outlined.AutoAwesome
+import androidx.compose.material.icons.outlined.BarChart
+import androidx.compose.material.icons.outlined.Description
+import androidx.compose.material.icons.outlined.PhotoCamera
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -32,12 +44,15 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.LinkAnnotation
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextLinkStyles
@@ -46,24 +61,37 @@ import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withLink
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
+import dev.remoteagent.core.ArtifactTemplate
+import dev.remoteagent.core.ArtifactTemplateSymbol
 import dev.remoteagent.core.MarkdownAlignment
 import dev.remoteagent.core.MarkdownBlock
 import dev.remoteagent.core.MarkdownImageSource
 import dev.remoteagent.core.MarkdownRun
+import dev.remoteagent.core.artifactTemplatePresentationLabel
+import dev.remoteagent.core.artifactTemplateSymbol
 import dev.remoteagent.core.markdownBlocks
 import dev.remoteagent.core.markdownImageDisplaySize
 import dev.remoteagent.core.markdownImageSource
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
-/** Core markdown blocks at the mobile sizes: body 16/23, headings 21/19/17/15, code 13/19. */
+/**
+ * Core markdown blocks at the mobile sizes: body 16/23, headings 21/19/17/15, code 13/19. `onUseArtifactTemplate` is
+ * set where a card's "Use template" can reach the composer; plans and reasoning show cards without it.
+ */
 @Composable
-internal fun MarkdownText(source: String, modifier: Modifier = Modifier, color: Color = AppTheme.colors.foreground) {
+internal fun MarkdownText(
+    source: String,
+    modifier: Modifier = Modifier,
+    color: Color = AppTheme.colors.foreground,
+    onUseArtifactTemplate: ((ArtifactTemplate) -> Unit)? = null,
+) {
     val blocks by
         produceState(emptyList<MarkdownBlock>(), source) {
             value = withContext(Dispatchers.Default) { markdownBlocks(source) }
@@ -77,7 +105,96 @@ internal fun MarkdownText(source: String, modifier: Modifier = Modifier, color: 
                 is MarkdownBlock.Visualization ->
                     Text(block.path, style = AppTheme.caption, color = AppTheme.colors.foregroundMuted)
                 is MarkdownBlock.Table -> MarkdownTable(block, index)
+                is MarkdownBlock.ArtifactTemplate -> ArtifactTemplateCard(block.template, onUseArtifactTemplate)
             }
+        }
+    }
+}
+
+private val ArtifactBadge = Color(0xFFD946EF)
+
+/**
+ * A `::artifact-template` card: the template's icon with a sparkle badge, its name and kind, and "Use template" when
+ * the card can reach the composer.
+ */
+@Composable
+private fun ArtifactTemplateCard(template: ArtifactTemplate, onUse: ((ArtifactTemplate) -> Unit)?) {
+    val colors = AppTheme.colors
+    val icon =
+        when (artifactTemplateSymbol(template.artifactKind)) {
+            ArtifactTemplateSymbol.DOCUMENT -> Icons.Outlined.Description
+            ArtifactTemplateSymbol.CHART -> Icons.Outlined.BarChart
+            ArtifactTemplateSymbol.BROWSER -> Icons.AutoMirrored.Outlined.OpenInNew
+            ArtifactTemplateSymbol.CAMERA -> Icons.Outlined.PhotoCamera
+            ArtifactTemplateSymbol.MESSAGE -> Icons.AutoMirrored.Outlined.Message
+        }
+    Surface(
+        Modifier.fillMaxWidth().padding(vertical = 8.dp),
+        color = colors.card,
+        shape = RoundedCornerShape(16.dp),
+        border = BorderStroke(1.dp, colors.border),
+    ) {
+        Row(
+            Modifier.padding(12.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Box(Modifier.size(40.dp)) {
+                Surface(
+                    Modifier.size(40.dp),
+                    color = colors.subtle,
+                    shape = RoundedCornerShape(12.dp),
+                    border = BorderStroke(1.dp, colors.border),
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Icon(icon, null, Modifier.size(20.dp), tint = colors.foregroundMuted)
+                    }
+                }
+                Box(
+                    Modifier.align(Alignment.BottomEnd)
+                        .offset(4.dp, 4.dp)
+                        .size(16.dp)
+                        .background(ArtifactBadge, CircleShape),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(Icons.Outlined.AutoAwesome, null, Modifier.size(9.dp), tint = Color.White)
+                }
+            }
+            Column(Modifier.weight(1f)) {
+                Text(
+                    template.displayName,
+                    style = AppTheme.footnote,
+                    fontWeight = FontWeight.Bold,
+                    color = colors.foreground,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    artifactTemplatePresentationLabel(template.artifactKind),
+                    style = AppTheme.caption,
+                    color = colors.foregroundMuted,
+                )
+            }
+            if (onUse != null)
+                Surface(
+                    onClick = { onUse(template) },
+                    color = colors.subtle,
+                    shape = RoundedCornerShape(8.dp),
+                    border = BorderStroke(1.dp, colors.border),
+                ) {
+                    Box(
+                        Modifier.heightIn(min = 36.dp).padding(horizontal = 12.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text(
+                            "Use template",
+                            Modifier.semantics { contentDescription = "Use ${template.displayName} template" },
+                            style = AppTheme.caption,
+                            fontWeight = FontWeight.Bold,
+                            color = colors.foreground,
+                        )
+                    }
+                }
         }
     }
 }
