@@ -8,7 +8,9 @@ struct BexSwiftUIRoot: View {
     @State private var showingUsage = false
 
     var body: some View {
-        _ = appearanceRevision
+        // Read the revision in the builder so appearance notifications redraw the root view.
+        // swiftlint:disable:next redundant_discardable_let
+        let _ = appearanceRevision
         Group {
             if model.profiles.isEmpty {
                 NavigationStack { pairingScreen }
