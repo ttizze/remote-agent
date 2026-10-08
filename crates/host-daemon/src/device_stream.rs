@@ -880,8 +880,10 @@ mod tests {
     use super::*;
 
     fn valid_description() -> Vec<u8> {
-        let sps = [0x67, 0x42, 0x00, 0x1f, 0x95, 0xa8, 0x14, 0x01, 0x6e, 0x40];
-        let pps = [0x68, 0xce, 0x3c, 0x80];
+        // SPS/PPS from WebRTC's checked-in H264BitstreamChunk fixture:
+        // https://webrtc.googlesource.com/src/+/839b657b184b1afa563f6456b6caeac7c25dcb23/common_video/h264/h264_bitstream_parser_unittest.cc
+        let sps = [0x67, 0x42, 0x80, 0x20, 0xda, 0x01, 0x40, 0x16, 0xe8, 0x06, 0xd0, 0xa1, 0x35, 0x00];
+        let pps = [0x68, 0xce, 0x06, 0xe2];
         let mut description = vec![1, sps[1], sps[2], sps[3], 0xff, 0xe1];
         description.extend_from_slice(&(sps.len() as u16).to_be_bytes());
         description.extend_from_slice(&sps);
@@ -892,15 +894,13 @@ mod tests {
     }
 
     fn keyframe() -> Vec<u8> {
-        // A small Annex-B IDR access unit from the fixed H.264 fixture used
-        // by the stream tests.  It contains a complete slice header and
-        // residual bits, rather than only the three-byte NAL prefix.
-        vec![0, 0, 0, 1, 0x65, 0x88, 0x84, 0x00, 0x04, 0x3f]
+        // kH264BitstreamChunk's IDR NAL from the same WebRTC fixture.
+        vec![0, 0, 0, 1, 0x65, 0xb8, 0x40, 0xf0, 0x8c, 0x03, 0xf2, 0x75, 0x67, 0xad, 0x41, 0x64, 0x24, 0x0e, 0xa0, 0xb2, 0x12, 0x1e, 0xf8]
     }
 
     fn delta() -> Vec<u8> {
-        // A fixed P-slice access unit paired with the fixture above.
-        vec![0, 0, 0, 1, 0x41, 0x9a, 0x23, 0x6c, 0x41, 0x97, 0x6d, 0x7a, 0x0d, 0x74, 0xa1, 0x76]
+        // kH264BitstreamNextImageSliceChunk's P NAL from the same fixture.
+        vec![0, 0, 0, 1, 0x41, 0xe2, 0x01, 0x16, 0x0e, 0x3e, 0x2b, 0x86]
     }
 
     #[derive(Debug)]
@@ -1098,7 +1098,7 @@ mod tests {
         let mdat_payload = &bytes[mdat.start + 8..mdat.start + mdat.size];
         assert_eq!(samples.iter().map(|sample| sample.size as usize).sum::<usize>(), mdat_payload.len());
         assert_eq!(sample_nal_types(mdat_payload, 0, &samples).unwrap(), [vec![6, 5], vec![6, 1]]);
-        assert_eq!(sps_dimensions(&valid_description()[8..18]), Some((1280, 720)));
+        assert_eq!(sps_dimensions(&valid_description()[8..22]), Some((1280, 720)));
     }
 
     #[test]
